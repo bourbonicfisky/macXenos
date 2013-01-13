@@ -10,6 +10,12 @@
 #ifndef XENIA_H_
 #define XENIA_H_
 
+#include <xenia/common.h>
+#include <xenia/cpu.h>
+#include <xenia/core.h>
+#include <xenia/gpu.h>
+#include <xenia/kernel.h>
+
 int some_function(int x);
 
 #endif  // XENIA_H_
