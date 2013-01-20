@@ -13,14 +13,24 @@
 #include <xenia/kernel/export.h>
 
 
+namespace xe {
+namespace kernel {
+namespace xbdm {
+
+
 #define FLAG(t)             kXEKernelExportFlag##t
 
 
-static xe_kernel_export_t xe_xbdm_export_table[] = {
+static KernelExport xbdm_export_table[] = {
 };
 
 
 #undef FLAG
+
+
+}  // namespace xbdm
+}  // namespace kernel
+}  // namespace xe
 
 
 #endif  // XENIA_KERNEL_MODULES_XBDM_TABLE_H_

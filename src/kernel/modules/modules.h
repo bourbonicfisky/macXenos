@@ -10,8 +10,8 @@
 #ifndef XENIA_KERNEL_MODULES_H_
 #define XENIA_KERNEL_MODULES_H_
 
-#include "kernel/modules/xam/xam.h"
-#include "kernel/modules/xbdm/xbdm.h"
-#include "kernel/modules/xboxkrnl/xboxkrnl.h"
+#include "kernel/modules/xam/xam_module.h"
+#include "kernel/modules/xbdm/xbdm_module.h"
+#include "kernel/modules/xboxkrnl/xboxkrnl_module.h"
 
 #endif  // XENIA_KERNEL_MODULES_H_
