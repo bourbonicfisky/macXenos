@@ -10,6 +10,7 @@
 #include "kernel/modules/xboxkrnl/xboxkrnl_hal.h"
 
 #include "kernel/shim_utils.h"
+#include "kernel/modules/xboxkrnl/xboxkrnl.h"
 
 
 using namespace xe;
