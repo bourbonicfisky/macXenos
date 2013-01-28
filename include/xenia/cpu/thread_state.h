@@ -33,6 +33,7 @@ public:
 private:
   uint32_t stack_address_;
   uint32_t stack_size_;
+  xe_memory_ref memory_;
 
   xe_ppc_state_t  ppc_state_;
 };
