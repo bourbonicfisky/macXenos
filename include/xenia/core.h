@@ -15,6 +15,7 @@
 #include <xenia/core/file.h>
 #include <xenia/core/memory.h>
 #include <xenia/core/mmap.h>
+#include <xenia/core/mutex.h>
 #include <xenia/core/pal.h>
 #include <xenia/core/ref.h>
 
