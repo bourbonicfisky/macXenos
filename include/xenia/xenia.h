@@ -15,7 +15,6 @@
 #include <xenia/core.h>
 #include <xenia/gpu.h>
 #include <xenia/kernel.h>
-
-int some_function(int x);
+#include <xenia/dbg/debugger.h>
 
 #endif  // XENIA_H_
