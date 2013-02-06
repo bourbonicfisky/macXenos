@@ -18,5 +18,6 @@
 #include <xenia/core/mutex.h>
 #include <xenia/core/pal.h>
 #include <xenia/core/ref.h>
+#include <xenia/core/thread.h>
 
 #endif  // XENIA_CORE_H_
