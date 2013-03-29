@@ -14,11 +14,9 @@ using namespace xe;
 using namespace xe::dbg;
 
 
-Listener::Listener(Debugger* debugger, xe_pal_ref pal) :
+Listener::Listener(Debugger* debugger) :
     debugger_(debugger) {
-  pal_ = xe_pal_retain(pal);
 }
 
 Listener::~Listener() {
-  xe_pal_release(pal_);
 }
