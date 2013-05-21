@@ -19,22 +19,21 @@ namespace xe {
 namespace cpu {
 
 
-class CodeUnitBuilder;
-class FunctionTable;
 class JIT;
-class LibraryLinker;
 class LibraryLoader;
+
+namespace sdb {
+class SymbolTable;
+}  // namespace sdb
 
 
 class Backend {
 public:
   virtual ~Backend() {}
 
-  virtual CodeUnitBuilder* CreateCodeUnitBuilder() = 0;
-  virtual LibraryLinker* CreateLibraryLinker() = 0;
   virtual LibraryLoader* CreateLibraryLoader() = 0;
 
-  virtual JIT* CreateJIT(xe_memory_ref memory, FunctionTable* fn_table) = 0;
+  virtual JIT* CreateJIT(xe_memory_ref memory, sdb::SymbolTable* sym_table) = 0;
 
 protected:
   Backend() {}

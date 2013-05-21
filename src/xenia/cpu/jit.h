@@ -12,7 +12,6 @@
 
 #include <xenia/core.h>
 
-#include <xenia/cpu/function_table.h>
 #include <xenia/cpu/ppc.h>
 #include <xenia/cpu/sdb.h>
 
@@ -35,16 +34,17 @@ public:
   virtual int InitModule(ExecModule* module) = 0;
   virtual int UninitModule(ExecModule* module) = 0;
 
-  virtual FunctionPointer GenerateFunction(sdb::FunctionSymbol* symbol) = 0;
+  virtual int Execute(xe_ppc_state_t* ppc_state,
+                      sdb::FunctionSymbol* fn_symbol) = 0;
 
 protected:
-  JIT(xe_memory_ref memory, FunctionTable* fn_table) {
+  JIT(xe_memory_ref memory, sdb::SymbolTable* sym_table) {
     memory_ = xe_memory_retain(memory);
-    fn_table_ = fn_table;
+    sym_table_ = sym_table;
   }
 
-  xe_memory_ref   memory_;
-  FunctionTable*  fn_table_;
+  xe_memory_ref     memory_;
+  sdb::SymbolTable* sym_table_;
 };
 
 

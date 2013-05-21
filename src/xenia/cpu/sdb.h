@@ -13,6 +13,7 @@
 #include <xenia/cpu/sdb/raw_symbol_database.h>
 #include <xenia/cpu/sdb/symbol.h>
 #include <xenia/cpu/sdb/symbol_database.h>
+#include <xenia/cpu/sdb/symbol_table.h>
 #include <xenia/cpu/sdb/xex_symbol_database.h>
 
 #endif  // XENIA_CPU_SDB_H_
