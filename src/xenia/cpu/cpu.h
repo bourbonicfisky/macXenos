@@ -13,6 +13,6 @@
 #include <xenia/cpu/processor.h>
 
 // TODO(benvanik): conditionally include?
-//#include <xenia/cpu/libjit/libjit_backend.h>
+#include <xenia/cpu/x64/x64_backend.h>
 
 #endif  // XENIA_CPU_CPU_H_
