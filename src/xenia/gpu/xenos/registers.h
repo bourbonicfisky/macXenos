@@ -18,15 +18,28 @@ namespace gpu {
 namespace xenos {
 
 
+static const uint32_t kXEGpuRegisterCount = 0x3000;
+
+
+enum Registers {
+#define XE_GPU_REGISTER(index, type, name) \
+    XE_GPU_REG_##name = index,
+#include <xenia/gpu/xenos/register_table.inc>
+#undef XE_GPU_REGISTER
+};
+
+
+const char* GetRegisterName(uint32_t index);
+
+
 union RegisterValue {
-  uint32_t  uint_value;
+  uint32_t  dword_value;
   float     float_value;
 };
 
 
 struct RegisterFile {
-  // TODO(benvanik): figure out the actual number.
-  RegisterValue   registers[0xFFFF];
+  RegisterValue   registers[kXEGpuRegisterCount];
 };
 
 
