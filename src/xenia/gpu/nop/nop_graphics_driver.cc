@@ -76,6 +76,13 @@ void NopGraphicsDriver::SetShader(
 void NopGraphicsDriver::DrawIndexed(
     XE_GPU_PRIMITIVE_TYPE prim_type,
     uint32_t index_count) {
- XELOGGPU("NOP: draw indexed %d (%d indicies)",
-          prim_type, index_count);
+  XELOGGPU("NOP: draw indexed %d (%d indicies)",
+           prim_type, index_count);
+
+  // TODO(benvanik):
+  // program control
+  // context misc
+  // interpolator control
+  // shader constants / bools / integers
+  // fetch constants
 }
