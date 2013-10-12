@@ -26,7 +26,10 @@ public:
   NopGraphicsSystem(const CreationParams* params);
   virtual ~NopGraphicsSystem();
 
+protected:
   virtual void Initialize();
+  virtual void Pump();
+  virtual void Shutdown();
 
 private:
   HANDLE timer_queue_;

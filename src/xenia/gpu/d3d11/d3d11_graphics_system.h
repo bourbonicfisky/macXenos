@@ -15,10 +15,14 @@
 #include <xenia/gpu/graphics_system.h>
 #include <xenia/gpu/d3d11/d3d11-private.h>
 
+#include <d3d11.h>
+
 
 namespace xe {
 namespace gpu {
 namespace d3d11 {
+
+class D3D11Window;
 
 
 GraphicsSystem* Create(const CreationParams* params);
@@ -29,7 +33,15 @@ public:
   D3D11GraphicsSystem(const CreationParams* params);
   virtual ~D3D11GraphicsSystem();
 
+protected:
   virtual void Initialize();
+  virtual void Pump();
+  virtual void Shutdown();
+
+private:
+  IDXGIFactory1*  dxgi_factory_;
+  ID3D11Device*   device_;
+  D3D11Window*    window_;
 };
 
 
