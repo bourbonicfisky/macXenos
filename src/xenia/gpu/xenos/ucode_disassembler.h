@@ -21,7 +21,7 @@ namespace gpu {
 namespace xenos {
 
 
-const char* DisassembleShader(
+char* DisassembleShader(
     XE_GPU_SHADER_TYPE type,
     const uint32_t* dwords, size_t dword_count);
 
