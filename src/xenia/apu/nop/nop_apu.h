@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_GPU_NOP_NOP_H_
-#define XENIA_GPU_NOP_NOP_H_
+#ifndef XENIA_APU_NOP_NOP_APU_H_
+#define XENIA_APU_NOP_NOP_APU_H_
 
 #include <xenia/core.h>
 
@@ -30,4 +30,4 @@ AudioSystem* Create(Emulator* emulator);
 }  // namespace xe
 
 
-#endif  // XENIA_GPU_NOP_NOP_H_
+#endif  // XENIA_APU_NOP_NOP_APU_H_
