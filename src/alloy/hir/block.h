@@ -16,6 +16,7 @@
 namespace alloy {
 namespace hir {
 
+class FunctionBuilder;
 class Instr;
 class Label;
 
