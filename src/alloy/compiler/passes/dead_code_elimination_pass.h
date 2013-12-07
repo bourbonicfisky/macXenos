@@ -26,7 +26,7 @@ public:
   virtual int Run(hir::FunctionBuilder* builder);
 
 private:
-  void MakeNopRecursive(const hir::OpcodeInfo* nop, hir::Instr* i);
+  void MakeNopRecursive(hir::Instr* i);
 };
 
 

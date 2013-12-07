@@ -9,12 +9,21 @@
 
 #include <alloy/compiler/pass.h>
 
+#include <alloy/compiler/compiler.h>
+
 using namespace alloy;
 using namespace alloy::compiler;
 
 
-Pass::Pass() {
+Pass::Pass() :
+    runtime_(0), compiler_(0) {
 }
 
 Pass::~Pass() {
+}
+
+int Pass::Initialize(Compiler* compiler) {
+  runtime_ = compiler->runtime();
+  compiler_ = compiler;
+  return 0;
 }
