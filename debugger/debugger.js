@@ -7,41 +7,7 @@
  ******************************************************************************
  */
 
-// TODO(benvanik): closure or something fancy
-
-
-var DebugClient = function(endpoint) {
-  /**
-   * Target websocket endpoint.
-   * @type {string}
-   * @private
-   */
-  this.endpoint_ = endpoint;
-
-  /**
-   * Connected socket.
-   * @type {!WebSocket}
-   * @private
-   */
-  this.socket_ = new WebSocket(endpoint, []);
-
-  this.socket_.onopen = (function() {
-    console.log('opened');
-  }).bind(this);
-
-  this.socket_.onerror = (function(e) {
-    console.log('error', e);
-  }).bind(this);
-
-  this.socket_.onmessage = (function(e) {
-    console.log('message', e.data);
-  }).bind(this);
-}
-
-
-var client = new DebugClient('ws://127.0.0.1:6200');
-
-
+/*
 var myTextArea = document.querySelector('.debugger-fnview-textarea');
 var myCodeMirror = CodeMirror.fromTextArea(myTextArea, {
   mode: 'javascript',
@@ -58,3 +24,4 @@ var myCodeMirror = CodeMirror.fromTextArea(myTextArea, {
 
   //readOnly: true,
 });
+*/
