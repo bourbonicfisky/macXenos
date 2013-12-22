@@ -12,6 +12,11 @@
 
 #include <alloy/core.h>
 
+#include <gflags/gflags.h>
+
+
+DECLARE_bool(debug);
+
 
 namespace alloy {
 
