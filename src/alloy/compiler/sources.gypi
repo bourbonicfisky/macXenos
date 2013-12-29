@@ -3,9 +3,9 @@
   'sources': [
     'compiler.cc',
     'compiler.h',
-    'pass.cc',
-    'pass.h',
-    'passes.h',
+    'compiler_pass.cc',
+    'compiler_pass.h',
+    'compiler_passes.h',
     'tracing.h',
   ],
 
