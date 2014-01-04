@@ -12,5 +12,6 @@
 
 #include <alloy/backend/x64/optimizer/passes/reachability_pass.h>
 #include <alloy/backend/x64/optimizer/passes/redundant_mov_pass.h>
+#include <alloy/backend/x64/optimizer/passes/register_allocation_pass.h>
 
 #endif  // ALLOY_BACKEND_X64_OPTIMIZER_PASSES_H_
