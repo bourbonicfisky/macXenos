@@ -21,6 +21,9 @@ XEvent::XEvent(KernelState* kernel_state) :
 }
 
 XEvent::~XEvent() {
+  if (handle_) {
+    CloseHandle(handle_);
+  }
 }
 
 void XEvent::Initialize(bool manual_reset, bool initial_state) {
