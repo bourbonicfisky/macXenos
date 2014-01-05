@@ -16,6 +16,7 @@
 
 XEDECLARECLASS1(xe, Emulator);
 XEDECLARECLASS1(xe, ExportResolver);
+XEDECLARECLASS2(xe, kernel, KernelState);
 
 
 namespace xe {
@@ -24,11 +25,15 @@ namespace kernel {
 
 class KernelModule {
 public:
-  KernelModule(Emulator* emulator);
+  KernelModule(Emulator* emulator, KernelState* kernel_state);
   virtual ~KernelModule();
+
+  Emulator* emulator() const { return emulator_; }
+  KernelState* kernel_state() const { return kernel_state_; }
 
 protected:
   Emulator*         emulator_;
+  KernelState*      kernel_state_;
   Memory*           memory_;
   ExportResolver*   export_resolver_;
 };
