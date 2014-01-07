@@ -30,6 +30,9 @@ public:
 
   virtual int Initialize();
 
+  virtual void* AllocThreadData();
+  virtual void FreeThreadData(void* thread_data);
+
   virtual Assembler* CreateAssembler();
 };
 
