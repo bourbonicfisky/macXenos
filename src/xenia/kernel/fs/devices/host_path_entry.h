@@ -32,6 +32,7 @@ public:
   virtual X_STATUS QueryInfo(XFileInfo* out_info);
   virtual X_STATUS QueryDirectory(XDirectoryInfo* out_info, size_t length, bool restart);
 
+  virtual bool can_map() { return true; }
   virtual MemoryMapping* CreateMemoryMapping(
       xe_file_mode file_mode, const size_t offset, const size_t length);
 
