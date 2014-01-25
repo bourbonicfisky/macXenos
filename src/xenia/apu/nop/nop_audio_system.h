@@ -26,15 +26,8 @@ public:
   NopAudioSystem(Emulator* emulator);
   virtual ~NopAudioSystem();
 
-  virtual void Shutdown();
-
-  virtual void SubmitFrame(uint32_t frame_ptr);
-
-protected:
-  virtual void Initialize();
-  virtual void Pump();
-
-private:
+  virtual X_STATUS CreateDriver(size_t index, HANDLE wait_handle, AudioDriver** out_driver);
+  virtual void DestroyDriver(AudioDriver* driver);
 };
 
 

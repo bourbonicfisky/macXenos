@@ -24,18 +24,10 @@ NopAudioSystem::NopAudioSystem(Emulator* emulator) :
 NopAudioSystem::~NopAudioSystem() {
 }
 
-void NopAudioSystem::Initialize() {
-  AudioSystem::Initialize();
+X_STATUS NopAudioSystem::CreateDriver(size_t index, HANDLE wait_handle, AudioDriver** out_driver) {
+  return X_STATUS_NOT_IMPLEMENTED;
 }
 
-void NopAudioSystem::Pump() {
-  //
-}
-
-void NopAudioSystem::SubmitFrame(uint32_t frame_ptr) {
-  // Process samples! They are big-endian floats.
-}
-
-void NopAudioSystem::Shutdown() {
-  AudioSystem::Shutdown();
+void NopAudioSystem::DestroyDriver(AudioDriver* driver) {
+  XEASSERTALWAYS();
 }
