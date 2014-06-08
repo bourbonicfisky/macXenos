@@ -10,8 +10,21 @@
 #include <xenia/gpu/register_file.h>
 
 
-using namespace std;
 using namespace xe;
 using namespace xe::gpu;
-using namespace xe::gpu::xenos;
 
+
+RegisterFile::RegisterFile() {
+  xe_zero_struct(values, sizeof(values));
+}
+
+const char* RegisterFile::GetRegisterName(uint32_t index) {
+  switch (index) {
+#define XE_GPU_REGISTER(index, type, name) \
+    case index: return #name;
+#include <xenia/gpu/xenos/register_table.inc>
+#undef XE_GPU_REGISTER
+    default:
+      return NULL;
+  }
+}
