@@ -19,10 +19,6 @@
 #include <alloy/tracing/tracing.h>
 
 
-// TODO(benvanik): based on platform/config/etc.
-#include <alloy/backend/ivm/ivm_backend.h>
-
-
 namespace alloy {
 
 }  // namespace alloy
