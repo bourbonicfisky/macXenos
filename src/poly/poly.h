@@ -10,6 +10,9 @@
 #ifndef POLY_POLY_H_
 #define POLY_POLY_H_
 
+#include <poly/cxx_compat.h>
+#include <poly/math.h>
+
 namespace poly {}  // namespace poly
 
 #endif  // POLY_POLY_H_
