@@ -12,6 +12,7 @@
 
 #include <poly/cxx_compat.h>
 #include <poly/math.h>
+#include <poly/threading.h>
 
 namespace poly {}  // namespace poly
 
