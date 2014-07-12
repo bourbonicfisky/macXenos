@@ -10,8 +10,10 @@
 #ifndef POLY_POLY_H_
 #define POLY_POLY_H_
 
+#include <poly/config.h>
 #include <poly/cxx_compat.h>
 #include <poly/math.h>
+#include <poly/platform.h>
 #include <poly/threading.h>
 
 namespace poly {}  // namespace poly
