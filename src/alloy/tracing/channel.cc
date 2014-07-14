@@ -12,9 +12,9 @@
 namespace alloy {
 namespace tracing {
 
-Channel::Channel() {}
+Channel::Channel() = default;
 
-Channel::~Channel() {}
+Channel::~Channel() = default;
 
 }  // namespace tracing
 }  // namespace alloy
