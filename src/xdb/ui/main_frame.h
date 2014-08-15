@@ -23,10 +23,11 @@ class MainFrame : public MainFrameBase {
   MainFrame(std::unique_ptr<DebugTarget> debug_target);
 
  protected:
-  //
+  void OnIdle(wxIdleEvent& event) override;
 
  private:
-   std::unique_ptr<DebugTarget> debug_target_;
+  std::unique_ptr<DebugTarget> debug_target_;
+  std::unique_ptr<Cursor> cursor_;
 };
 
 }  // namespace ui
