@@ -10,8 +10,9 @@
 #ifndef XDB_UI_MAIN_FRAME_H_
 #define XDB_UI_MAIN_FRAME_H_
 
-#include <cstdint>
+#include <memory>
 
+#include <xdb/debug_target.h>
 #include <xdb/ui/xdb_ui.h>
 
 namespace xdb {
@@ -19,9 +20,13 @@ namespace ui {
 
 class MainFrame : public MainFrameBase {
  public:
-   MainFrame();
+  MainFrame(std::unique_ptr<DebugTarget> debug_target);
+
  protected:
   //
+
+ private:
+   std::unique_ptr<DebugTarget> debug_target_;
 };
 
 }  // namespace ui

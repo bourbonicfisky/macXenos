@@ -12,7 +12,8 @@
 namespace xdb {
 namespace ui {
 
-MainFrame::MainFrame() : MainFrameBase(nullptr) {}
+MainFrame::MainFrame(std::unique_ptr<DebugTarget> debug_target)
+    : MainFrameBase(nullptr), debug_target_(std::move(debug_target)) {}
 
 }  // namespace ui
 }  // namespace xdb
