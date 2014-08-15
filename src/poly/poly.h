@@ -19,6 +19,7 @@
 #include <poly/math.h>
 #include <poly/memory.h>
 #include <poly/platform.h>
+#include <poly/string.h>
 #include <poly/threading.h>
 
 namespace poly {}  // namespace poly
