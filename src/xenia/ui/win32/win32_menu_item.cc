@@ -9,15 +9,14 @@
 
 #include <xenia/ui/win32/win32_menu_item.h>
 
+namespace xe {
+namespace ui {
+namespace win32 {
 
-using namespace xe;
-using namespace xe::ui;
-using namespace xe::ui::win32;
+Win32MenuItem::Win32MenuItem(Window* window) : MenuItem(window) {}
 
+Win32MenuItem::~Win32MenuItem() {}
 
-Win32MenuItem::Win32MenuItem(Window* window, MenuItem* parent_item) :
-    MenuItem(window, parent_item) {
-}
-
-Win32MenuItem::~Win32MenuItem() {
-}
+}  // namespace win32
+}  // namespace ui
+}  // namespace xe
