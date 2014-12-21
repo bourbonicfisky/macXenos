@@ -23,11 +23,7 @@ namespace gpu {
 
 std::unique_ptr<GraphicsSystem> Create(Emulator* emulator);
 
-std::unique_ptr<GraphicsSystem> CreateNop(Emulator* emulator);
-
-#if XE_PLATFORM_WIN32
-std::unique_ptr<GraphicsSystem> CreateD3D11(Emulator* emulator);
-#endif  // WIN32
+std::unique_ptr<GraphicsSystem> CreateGL4(Emulator* emulator);
 
 }  // namespace gpu
 }  // namespace xe

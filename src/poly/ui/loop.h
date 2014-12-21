@@ -23,6 +23,7 @@ class Loop {
   virtual void Post(std::function<void()> fn) = 0;
 
   virtual void Quit() = 0;
+  virtual void AwaitQuit() = 0;
 };
 
 }  // namespace ui
