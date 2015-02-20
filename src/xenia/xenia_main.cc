@@ -30,9 +30,9 @@ int xenia_main(std::vector<std::wstring>& args) {
   }
 
   // Grab path from the flag or unnamed argument.
-  if (FLAGS_target.size() || args.size() >= 2) {
+  if (!FLAGS_target.empty() || args.size() >= 2) {
     std::wstring path;
-    if (FLAGS_target.size()) {
+    if (!FLAGS_target.empty()) {
       // Passed as a named argument.
       // TODO(benvanik): find something better than gflags that supports
       // unicode.
@@ -49,10 +49,10 @@ int xenia_main(std::vector<std::wstring>& args) {
       XELOGE("Failed to launch target: %.8X", result);
       return 1;
     }
-  }
 
-  // Wait until we are exited.
-  emulator->main_window()->loop()->AwaitQuit();
+    // Wait until we are exited.
+    emulator->main_window()->loop()->AwaitQuit();
+  }
 
   emulator.reset();
   Profiler::Dump();
