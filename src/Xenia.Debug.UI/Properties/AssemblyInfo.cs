@@ -5,12 +5,12 @@ using System.Runtime.InteropServices;
 // General Information about an assembly is controlled through the following 
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("Xenia.Debugger")]
+[assembly: AssemblyTitle("Xenia.Debug.UI")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("Xenia.Debugger")]
-[assembly: AssemblyCopyright("Copyright © Ben Vanik 2015")]
+[assembly: AssemblyProduct("Xenia.Debug.UI")]
+[assembly: AssemblyCopyright("Copyright ©  2015")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -20,7 +20,7 @@ using System.Runtime.InteropServices;
 [assembly: ComVisible(false)]
 
 // The following GUID is for the ID of the typelib if this project is exposed to COM
-[assembly: Guid("f3714614-7970-4dd3-acb7-ca0c122dd073")]
+[assembly: Guid("75a94ceb-442c-45b6-aeec-a5f16d4543f3")]
 
 // Version information for an assembly consists of the following four values:
 //

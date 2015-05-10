@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_DEBUG_TRACE_DATA_H_
-#define XENIA_DEBUG_TRACE_DATA_H_
+#ifndef XENIA_DEBUG_FUNCTION_TRACE_DATA_H_
+#define XENIA_DEBUG_FUNCTION_TRACE_DATA_H_
 
 #include <cstdint>
 
@@ -89,4 +89,4 @@ class FunctionTraceData {
 }  // namespace debug
 }  // namespace xe
 
-#endif  // XENIA_DEBUG_TRACE_DATA_H_
+#endif  // XENIA_DEBUG_FUNCTION_TRACE_DATA_H_

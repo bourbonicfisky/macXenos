@@ -1,4 +1,4 @@
-﻿namespace Xenia.Debugger {
+﻿namespace Xenia.Debug.UI {
   partial class Form1 {
     /// <summary>
     /// Required designer variable.
