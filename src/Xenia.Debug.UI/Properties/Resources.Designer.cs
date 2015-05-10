@@ -8,7 +8,9 @@
 // </auto-generated>
 //------------------------------------------------------------------------------
 
-namespace Xenia.Debugger.Properties {
+namespace Xenia.Debug.UI.Properties {
+
+
   /// <summary>
   ///   A strongly-typed resource class, for looking up localized strings, etc.
   /// </summary>
@@ -36,7 +38,7 @@ namespace Xenia.Debugger.Properties {
     internal static global::System.Resources.ResourceManager ResourceManager {
       get {
         if ((resourceMan == null)) {
-          global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("Xenia.Debugger.Properties.Resources", typeof(Resources).Assembly);
+          global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("Xenia.Debug.UI.Properties.Resources", typeof(Resources).Assembly);
           resourceMan = temp;
         }
         return resourceMan;
