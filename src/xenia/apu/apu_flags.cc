@@ -7,13 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_APU_APU_PRIVATE_H_
-#define XENIA_APU_APU_PRIVATE_H_
+#include "xenia/apu/apu_flags.h"
 
-#include <gflags/gflags.h>
+DEFINE_string(apu, "any", "Audio system. Use: [any, nop, xaudio2]");
 
-DECLARE_string(apu);
-
-DECLARE_bool(mute);
-
-#endif  // XENIA_APU_APU_PRIVATE_H_
+DEFINE_bool(mute, false, "Mutes all audio output.");

@@ -7,19 +7,13 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_HID_NOP_NOP_HID_PRIVATE_H_
-#define XENIA_HID_NOP_NOP_HID_PRIVATE_H_
+#ifndef XENIA_APU_APU_FLAGS_H_
+#define XENIA_APU_APU_FLAGS_H_
 
-#include "xenia/hid/nop/nop_hid.h"
+#include <gflags/gflags.h>
 
-namespace xe {
-namespace hid {
-namespace nop {
+DECLARE_string(apu);
 
-//
+DECLARE_bool(mute);
 
-}  // namespace nop
-}  // namespace hid
-}  // namespace xe
-
-#endif  // XENIA_HID_NOP_NOP_HID_PRIVATE_H_
+#endif  // XENIA_APU_APU_FLAGS_H_

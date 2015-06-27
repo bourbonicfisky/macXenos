@@ -7,11 +7,18 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_HID_HID_PRIVATE_H_
-#define XENIA_HID_HID_PRIVATE_H_
+#ifndef XENIA_GPU_GPU_FLAGS_H_
+#define XENIA_GPU_GPU_FLAGS_H_
 
 #include <gflags/gflags.h>
 
-DECLARE_string(hid);
+DECLARE_string(gpu);
 
-#endif  // XENIA_HID_HID_PRIVATE_H_
+DECLARE_string(trace_gpu_prefix);
+DECLARE_bool(trace_gpu_stream);
+
+DECLARE_string(dump_shaders);
+
+DECLARE_bool(vsync);
+
+#endif  // XENIA_GPU_GPU_FLAGS_H_

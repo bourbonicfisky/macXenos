@@ -7,7 +7,7 @@
  ******************************************************************************
  */
 
-#include "xenia/gpu/gpu-private.h"
+#include "xenia/gpu/gpu_flags.h"
 
 DEFINE_string(gpu, "any", "Graphics system. Use: [any, gl4]");
 

@@ -7,18 +7,6 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_GPU_GPU_PRIVATE_H_
-#define XENIA_GPU_GPU_PRIVATE_H_
+#include "xenia/hid/hid_flags.h"
 
-#include <gflags/gflags.h>
-
-DECLARE_string(gpu);
-
-DECLARE_string(trace_gpu_prefix);
-DECLARE_bool(trace_gpu_stream);
-
-DECLARE_string(dump_shaders);
-
-DECLARE_bool(vsync);
-
-#endif  // XENIA_GPU_GPU_PRIVATE_H_
+DEFINE_string(hid, "any", "Input system. Use: [any, nop, winkey, xinput]");
