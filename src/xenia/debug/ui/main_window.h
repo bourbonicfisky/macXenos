@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include "xenia/debug/ui/application.h"
 #include "xenia/ui/gl/wgl_control.h"
 #include "xenia/ui/platform.h"
 #include "xenia/ui/window.h"
@@ -22,19 +23,18 @@ namespace ui {
 
 class MainWindow : public xe::ui::PlatformWindow {
  public:
+  MainWindow(Application* app);
   ~MainWindow() override;
 
-  static std::unique_ptr<MainWindow> Create();
-
- private:
-  explicit MainWindow();
+  Application* app() const { return app_; }
 
   bool Initialize();
 
+ private:
   void OnClose() override;
   void OnCommand(int id) override;
 
-  xe::ui::PlatformLoop loop_;
+  Application* app_ = nullptr;
   xe::ui::PlatformMenu main_menu_;
   std::unique_ptr<xe::ui::gl::WGLControl> control_;
 };
