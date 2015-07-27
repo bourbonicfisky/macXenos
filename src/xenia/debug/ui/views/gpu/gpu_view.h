@@ -28,6 +28,8 @@ class GpuView : public View {
 
   el::Element* BuildUI() override;
 
+  void Setup(xe::debug::client::xdp::XdpClient* client) override;
+
  protected:
 };
 
