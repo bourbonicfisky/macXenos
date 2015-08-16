@@ -14,6 +14,7 @@
 #include <string>
 
 #include "xenia/debug/ui/view.h"
+#include "xenia/debug/ui/views/cpu/call_stack_control.h"
 
 namespace xe {
 namespace debug {
@@ -35,10 +36,13 @@ class CpuView : public View {
   void UpdateModuleList();
   void UpdateFunctionList();
   void UpdateThreadList();
-  void UpdateThreadCallStack(model::Thread* thread);
+
+  void SwitchCurrentThread(model::Thread* thread);
 
   // TODO(benvanik): better state machine.
   model::Thread* current_thread_ = nullptr;
+
+  CallStackControl call_stack_control_;
 };
 
 }  // namespace cpu
