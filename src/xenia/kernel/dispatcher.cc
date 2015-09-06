@@ -22,9 +22,5 @@ Dispatcher::Dispatcher(KernelState* kernel_state)
 
 Dispatcher::~Dispatcher() { delete dpc_list_; }
 
-void Dispatcher::Lock() { lock_.lock(); }
-
-void Dispatcher::Unlock() { lock_.unlock(); }
-
 }  // namespace kernel
 }  // namespace xe
