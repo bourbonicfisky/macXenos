@@ -9,11 +9,14 @@
 
 #include "xenia/ui/graphics_context.h"
 
+#include "xenia/ui/graphics_provider.h"
+
 namespace xe {
 namespace ui {
 
-GraphicsContext::GraphicsContext(Window* target_window)
-    : target_window_(target_window) {}
+GraphicsContext::GraphicsContext(GraphicsProvider* provider,
+                                 Window* target_window)
+    : provider_(provider), target_window_(target_window) {}
 
 GraphicsContext::~GraphicsContext() = default;
 
