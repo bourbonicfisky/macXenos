@@ -7,8 +7,9 @@ project("xenia-apu-sdl")
   kind("StaticLib")
   language("C++")
   links({
-    "xenia-base",
     "xenia-apu",
+    "xenia-base",
+    "xenia-helper-sdl",
     "SDL2",
   })
   defines({
