@@ -871,6 +871,16 @@ dword_result_t XamLookupCommonStringByIndex_entry(dword_t string_index) {
 }
 DECLARE_XAM_EXPORT1(XamLookupCommonStringByIndex, kNone, kImplemented);
 
+dword_result_t XamUpdateGetBaseSystemVersion_entry() {
+  return kBaseKernelBuildVersion;
+}
+DECLARE_XAM_EXPORT1(XamUpdateGetBaseSystemVersion, kNone, kStub);
+
+dword_result_t XamUpdateGetCurrentSystemVersion_entry() {
+  return kBaseKernelBuildVersion;
+}
+DECLARE_XAM_EXPORT1(XamUpdateGetCurrentSystemVersion, kNone, kStub);
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe
