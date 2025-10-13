@@ -66,6 +66,9 @@ filter("configurations:Checked")
   editandcontinue("Off")
   staticruntime("Off")
   optimize("Off")
+  removedefines({
+    "IMGUI_USE_STB_SPRINTF",
+  })
   defines({
     "DEBUG",
   })

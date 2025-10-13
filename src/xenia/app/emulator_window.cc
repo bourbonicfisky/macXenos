@@ -1459,7 +1459,11 @@ void EmulatorWindow::ToggleProfilesConfigDialog() {
   } else {
     disable_hotkeys_ = false;
     emulator_->kernel_state()->BroadcastNotification(kXNotificationSystemUI, 0);
-    profile_config_dialog_.reset();
+    if (profile_config_dialog_->IsClosing()) {
+      profile_config_dialog_.release();
+    } else {
+      profile_config_dialog_.reset();
+    }
     emulator_->kernel_state()->xam_state()->xam_dialogs_shown_--;
   }
 }
