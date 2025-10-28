@@ -215,7 +215,9 @@ class EmulatorWindow {
                     EmulatorWindow& emulator_window)
         : ui::ImGuiDialog(imgui_drawer), emulator_window_(emulator_window) {
       if (emulator_window_.emulator_->audio_media_player()) {
-        volume_ = emulator_window_.emulator_->audio_media_player()->GetVolume();
+        volume_ = emulator_window_.emulator_->audio_media_player()
+                      ->GetVolume()
+                      ->load();
       }
     }
 

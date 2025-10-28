@@ -688,6 +688,9 @@ void EmulatorWindow::XMPConfigDialog::OnDraw(ImGuiIO& io) {
       }
     }
 
+    volume_ =
+        emulator_window_.emulator_->audio_media_player()->GetVolume()->load();
+
     if (ImGui::SliderFloat("Audio player volume", &volume_, 0.0f, 1.0f)) {
       audio_player->SetVolume(volume_);
     }
