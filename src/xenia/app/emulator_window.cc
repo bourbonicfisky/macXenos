@@ -645,6 +645,62 @@ void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
   ImGui::End();
 }
 
+void EmulatorWindow::XMPConfigDialog::OnDraw(ImGuiIO& io) {
+  ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+
+  bool dialog_open = true;
+  if (!ImGui::Begin("Audio Player Menu", &dialog_open,
+                    ImGuiWindowFlags_NoCollapse |
+                        ImGuiWindowFlags_AlwaysAutoResize |
+                        ImGuiWindowFlags_HorizontalScrollbar)) {
+    Close();
+    ImGui::End();
+    return;
+  }
+
+  auto audio_player = emulator_window_.emulator_->audio_media_player();
+  using xmp_state = kernel::xam::apps::XmpApp::State;
+  if (audio_player) {
+    ImGui::Text("Audio player status:");
+    ImGui::SameLine();
+    switch (audio_player->GetState()) {
+      case xmp_state::kIdle:
+        ImGui::Text("Idle");
+        break;
+      case xmp_state::kPaused:
+        ImGui::Text("Paused");
+        break;
+      case xmp_state::kPlaying:
+        ImGui::Text("Playing");
+        break;
+      default:
+        break;
+    }
+
+    if (audio_player->IsPlaying()) {
+      if (ImGui::Button("Pause")) {
+        audio_player->Pause();
+      }
+    } else if (audio_player->IsPaused()) {
+      if (ImGui::Button("Resume")) {
+        audio_player->Continue();
+      }
+    }
+
+    if (ImGui::SliderFloat("Audio player volume", &volume_, 0.0f, 1.0f)) {
+      audio_player->SetVolume(volume_);
+    }
+  }
+
+  ImGui::End();
+
+  if (!dialog_open) {
+    emulator_window_.ToggleXMPConfigDialog();
+    return;
+  }
+}
+
 bool EmulatorWindow::Initialize() {
   window_->AddListener(&window_listener_);
   window_->AddInputListener(&window_listener_, kZOrderEmulatorWindowInput);
@@ -776,6 +832,11 @@ bool EmulatorWindow::Initialize() {
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
   }
   main_menu->AddChild(std::move(hid_menu));
+
+  // XMP menu
+  main_menu->AddChild(MenuItem::Create(
+      MenuItem::Type::kString, "&XMP", "",
+      std::bind(&EmulatorWindow::ToggleXMPConfigDialog, this)));
 
   // Help menu.
   auto help_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Help");
@@ -1465,6 +1526,15 @@ void EmulatorWindow::ToggleProfilesConfigDialog() {
       profile_config_dialog_.reset();
     }
     emulator_->kernel_state()->xam_state()->xam_dialogs_shown_--;
+  }
+}
+
+void EmulatorWindow::ToggleXMPConfigDialog() {
+  if (!xmp_config_dialog_) {
+    xmp_config_dialog_ = std::unique_ptr<XMPConfigDialog>(
+        new XMPConfigDialog(imgui_drawer_.get(), *this));
+  } else {
+    xmp_config_dialog_.reset();
   }
 }
 
