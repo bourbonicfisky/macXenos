@@ -38,12 +38,7 @@ enum class LogLevel {
 
 // bitmasks!
 namespace LogSrc {
-enum : uint32_t {
-  Uncategorized = 0,
-  Kernel = 1,
-  Apu = 2,
-  Cpu = 4,
-};
+enum : uint32_t { Uncategorized = 0, Kernel = 1, Apu = 2, Cpu = 4, Gpu = 8 };
 }
 
 class LogSink {
@@ -214,8 +209,8 @@ void XELOGAPU(std::string_view format, const Args&... args) {
 
 template <typename... Args>
 void XELOGGPU(std::string_view format, const Args&... args) {
-  xe::logging::AppendLogLineFormat(xe::LogSrc::Uncategorized,
-                                   xe::LogLevel::Debug, 'G', format, args...);
+  xe::logging::AppendLogLineFormat(xe::LogSrc::Gpu, xe::LogLevel::Debug, 'G',
+                                   format, args...);
 }
 
 template <typename... Args>
