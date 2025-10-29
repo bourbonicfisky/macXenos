@@ -837,9 +837,13 @@ bool EmulatorWindow::Initialize() {
   main_menu->AddChild(std::move(hid_menu));
 
   // XMP menu
-  main_menu->AddChild(MenuItem::Create(
-      MenuItem::Type::kString, "&XMP", "",
-      std::bind(&EmulatorWindow::ToggleXMPConfigDialog, this)));
+  auto xmp_menu = MenuItem::Create(MenuItem::Type::kPopup, "&XMP");
+  {
+    xmp_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Show XMP Menu", "",
+        std::bind(&EmulatorWindow::ToggleXMPConfigDialog, this)));
+  }
+  main_menu->AddChild(std::move(xmp_menu));
 
   // Help menu.
   auto help_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Help");
