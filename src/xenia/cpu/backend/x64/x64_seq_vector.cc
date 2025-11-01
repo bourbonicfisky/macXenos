@@ -2867,13 +2867,18 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       if (IsPackOutUnsigned(flags)) {
         if (IsPackOutSaturate(flags)) {
           // unsigned -> unsigned + saturate
+          if (i.src1.is_constant) {
+            e.lea(e.GetNativeParam(0),
+                  e.StashConstantXmm(0, i.src1.constant()));
+          } else {
+            e.lea(e.GetNativeParam(0), e.StashXmm(0, i.src1));
+          }
           if (i.src2.is_constant) {
             e.lea(e.GetNativeParam(1),
                   e.StashConstantXmm(1, i.src2.constant()));
           } else {
             e.lea(e.GetNativeParam(1), e.StashXmm(1, i.src2));
           }
-          e.lea(e.GetNativeParam(0), e.StashXmm(0, i.src1));
           e.CallNativeSafe(
               reinterpret_cast<void*>(EmulatePack8_IN_16_UN_UN_SAT));
           e.vmovaps(i.dest, e.xmm0);
