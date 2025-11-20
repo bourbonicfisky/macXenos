@@ -55,6 +55,10 @@ jobs:
       POWERSHELL_TELEMETRY_OPTOUT: 1
     steps:
       - uses: actions/checkout@main
+      # TODO: Remove this once the default Python is upgraded from 3.9: https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md#language-and-runtime
+      - uses: actions/setup-python@main
+        with:
+          python-version: '3.x'
       - name: Lint
         run: python xenia-build.py lint --all
 
@@ -70,6 +74,10 @@ jobs:
           fetch-depth: 0
       - name: Setup
         run: git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS (Select-String -CaseSensitive '(?<=path = )(?!third_party\/(FidelityFX-(CAS|FSR)|premake-(androidndk|cmake|export-compile-commands))).+' .gitmodules).Matches.Value
+      # TODO: Remove this once the default Python is upgraded from 3.9: https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md#language-and-runtime
+      - uses: actions/setup-python@main
+        with:
+          python-version: '3.x'
       - name: Build
         run: python xenia-build.py build --config=Release --target=src\xenia-app
       - name: Prepare artifacts
