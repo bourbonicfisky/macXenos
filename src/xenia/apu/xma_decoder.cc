@@ -54,13 +54,15 @@ extern "C" {
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
             "APU");
 
-DEFINE_bool(use_new_decoder, false,
+DEFINE_bool(use_new_decoder, true,
             "Enables usage of new experimental XMA audio decoder.", "APU");
 
 DEFINE_bool(use_dedicated_xma_thread, true,
             "Enables XMA decoding on separate thread. Disabled should produce "
             "better results, but decrease performance a bit.",
             "APU");
+
+UPDATE_from_bool(use_new_decoder, 2025, 12, 01, 23, false);
 
 namespace xe {
 namespace apu {
