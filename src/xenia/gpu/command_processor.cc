@@ -49,12 +49,15 @@ DEFINE_bool(clear_memory_page_state, false,
             "GPU");
 
 DEFINE_string(
-    readback_resolve, "fast",
+    readback_resolve, "none",
     "Controls CPU readback of render-to-texture resolve results.\n"
-    " fast: Read from previous frame (1 frame delay, no GPU stall - default)\n"
+    " fast: Read from previous frame (1 frame delay, no GPU stall, slight "
+    "performance hit)\n"
     " full: Wait for GPU to finish (accurate but slow, GPU-CPU sync stall)\n"
     " none: Disable readback completely (some games render better without it)",
     "GPU");
+
+UPDATE_from_string(readback_resolve, 2025, 12, 4, 21, "fast");
 
 DEFINE_bool(
     readback_memexport, false,

@@ -511,7 +511,7 @@ class IConfigVarUpdate {
   // If you're reviewing a pull request with a change here, check if 1) has been
   // done by the submitter before merging.
   static constexpr uint32_t kLastCommittedUpdateDate =
-      MakeConfigVarUpdateDate(2025, 12, 1, 23);
+      MakeConfigVarUpdateDate(2025, 12, 4, 21);
 
   virtual ~IConfigVarUpdate() = default;
 
