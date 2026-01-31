@@ -465,6 +465,8 @@ class XThread : public XObject, public cpu::Thread {
   bool running_ = false;
 
   int32_t priority_ = 0;
+
+  std::mutex thread_lock_;
 };
 
 class XHostThread : public XThread {
