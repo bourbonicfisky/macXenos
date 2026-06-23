@@ -154,15 +154,36 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 #endif  // XE_PLATFORM_MAC
     case SIGSEGV: {
       Exception::AccessViolationOperation access_violation_operation;
+#if XE_PLATFORM_MAC
+      // Fault address for macOS, refined below for x86_64 page faults. Defaults
+      // to the (less reliable) BSD si_addr, which the ARM64 path still uses.
+      uint64_t mac_fault_address =
+          reinterpret_cast<uint64_t>(signal_info->si_addr);
+#endif  // XE_PLATFORM_MAC
 #if XE_ARCH_AMD64
       // x86_pf_error_code::X86_PF_WRITE
       constexpr uint64_t kX86PageFaultErrorCodeWrite = UINT64_C(1) << 1;
 #if XE_PLATFORM_MAC
-      // macOS exposes the page-fault error code in the exception state.
-      access_violation_operation =
-          (uint64_t(mcontext.__es.__err) & kX86PageFaultErrorCodeWrite)
-              ? Exception::AccessViolationOperation::kWrite
-              : Exception::AccessViolationOperation::kRead;
+      // macOS x86_64 records the trap number, page-fault error code, and the
+      // faulting linear address (CR2) in the exception state. The BSD signal's
+      // si_addr is unreliable for Mach-translated SIGSEGV/SIGBUS (often 0), and
+      // __err is a page-fault error code only when the trap is actually a page
+      // fault (#PF == 14). For other traps (e.g. #GP == 13 from a non-canonical
+      // address) the CPU records no fault address and __err is not a page-fault
+      // code, so reporting a page-fault "read at 0x0" is wrong. Decode by trap:
+      // for #PF use __faultvaddr + the error-code write bit; otherwise report an
+      // unknown access rather than fabricating a read at a bogus address.
+      constexpr uint16_t kX86TrapPageFault = 14;
+      if (mcontext.__es.__trapno == kX86TrapPageFault) {
+        mac_fault_address = uint64_t(mcontext.__es.__faultvaddr);
+        access_violation_operation =
+            (uint64_t(mcontext.__es.__err) & kX86PageFaultErrorCodeWrite)
+                ? Exception::AccessViolationOperation::kWrite
+                : Exception::AccessViolationOperation::kRead;
+      } else {
+        access_violation_operation =
+            Exception::AccessViolationOperation::kUnknown;
+      }
 #else
       access_violation_operation =
           (uint64_t(mcontext.gregs[REG_ERR]) & kX86PageFaultErrorCodeWrite)
@@ -209,7 +230,12 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
           Exception::AccessViolationOperation::kUnknown;
 #endif  // XE_ARCH
       ex.InitializeAccessViolation(
-          &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr),
+          &thread_context,
+#if XE_PLATFORM_MAC
+          mac_fault_address,
+#else
+          reinterpret_cast<uint64_t>(signal_info->si_addr),
+#endif  // XE_PLATFORM_MAC
           access_violation_operation);
     } break;
     default:
