@@ -90,11 +90,16 @@ endif()
 # Non-Android specific (always true for Windows/Linux)
 target_link_libraries(xenia-app PRIVATE
   xenia-app-discord
-  xenia-apu-sdl
   xenia-debug-ui
-  xenia-helper-sdl
-  xenia-hid-sdl
 )
+# SDL audio/input — skipped on the macOS PoC (uses nop apu/hid instead).
+if(NOT APPLE)
+  target_link_libraries(xenia-app PRIVATE
+    xenia-apu-sdl
+    xenia-helper-sdl
+    xenia-hid-sdl
+  )
+endif()
 
 # Architecture-specific backend
 if(XE_TARGET_X86_64)

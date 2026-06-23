@@ -39,9 +39,9 @@
 #if XE_PLATFORM_LINUX
 #include "xenia/apu/alsa/alsa_audio_system.h"
 #endif  // XE_PLATFORM_LINUX
-#if !XE_PLATFORM_ANDROID
+#if !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
 #include "xenia/apu/sdl/sdl_audio_system.h"
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
 #if XE_PLATFORM_WIN32
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
 #endif  // XE_PLATFORM_WIN32
@@ -57,9 +57,9 @@
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
-#if !XE_PLATFORM_ANDROID
+#if !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
 #include "xenia/hid/sdl/sdl_hid.h"
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
 #if XE_PLATFORM_WIN32
 #include "xenia/hid/winkey/winkey_hid.h"
 #include "xenia/hid/xinput/xinput_hid.h"
@@ -321,9 +321,9 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
 #if XE_PLATFORM_LINUX
   factory.Add<apu::alsa::ALSAAudioSystem>("alsa");
 #endif  // XE_PLATFORM_LINUX
-#if !XE_PLATFORM_ANDROID
+#if !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
   factory.Add<apu::nop::NopAudioSystem>("nop");
   return factory.Create(cvars::apu, processor);
 }
@@ -451,9 +451,9 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
 #if XE_PLATFORM_WIN32
     factory.Add("xinput", xe::hid::xinput::Create);
 #endif  // XE_PLATFORM_WIN32
-#if !XE_PLATFORM_ANDROID
+#if !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
     factory.Add("sdl", xe::hid::sdl::Create);
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // !XE_PLATFORM_ANDROID && !XE_PLATFORM_MAC
 #if XE_PLATFORM_WIN32
     // WinKey input driver should always be the last input driver added!
     factory.Add("winkey", xe::hid::winkey::Create);
