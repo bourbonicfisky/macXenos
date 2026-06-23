@@ -10,6 +10,8 @@
 #include "xenia/apu/nop/nop_audio_system.h"
 
 #include "xenia/apu/apu_flags.h"
+#include "xenia/apu/nop/nop_audio_driver.h"
+#include "xenia/base/assert.h"
 
 namespace xe {
 namespace apu {
@@ -27,7 +29,17 @@ NopAudioSystem::~NopAudioSystem() = default;
 X_STATUS NopAudioSystem::CreateDriver(size_t index,
                                       xe::threading::Semaphore* semaphore,
                                       AudioDriver** out_driver) {
-  return X_STATUS_NOT_IMPLEMENTED;
+  assert_not_null(out_driver);
+  // Provide a silent driver that still paces the audio worker, so titles that
+  // register an audio render driver get a valid handle instead of a failed
+  // registration they may dereference as null.
+  auto driver = std::make_unique<NopAudioDriver>(semaphore);
+  if (!driver->Initialize()) {
+    driver->Shutdown();
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  *out_driver = driver.release();
+  return X_STATUS_SUCCESS;
 }
 
 AudioDriver* NopAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
@@ -36,7 +48,13 @@ AudioDriver* NopAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
   return nullptr;
 }
 
-void NopAudioSystem::DestroyDriver(AudioDriver* driver) { assert_always(); }
+void NopAudioSystem::DestroyDriver(AudioDriver* driver) {
+  if (!driver) {
+    return;
+  }
+  driver->Shutdown();
+  delete driver;
+}
 
 }  // namespace nop
 }  // namespace apu
