@@ -237,7 +237,9 @@ else()
     add_compile_options(
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-shorten-64-to-32>
       -Wno-deprecated-declarations
-      -Wno-character-conversion
+      # -Wno-character-conversion is not recognized by all Apple clang versions
+      # (e.g. clang-1700); guard it so -Werror -Wunknown-warning-option doesn't fail.
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-unknown-warning-option>
     )
     add_link_options(-Wl,-no_warn_duplicate_libraries)
     link_libraries(
