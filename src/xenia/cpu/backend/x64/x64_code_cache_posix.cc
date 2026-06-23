@@ -94,9 +94,12 @@ class PosixX64CodeCache : public X64CodeCache {
                  const EmitFunctionInfo& func_info, void* code_execute_address,
                  UnwindReservation unwind_reservation) override;
 
-  void InitializeUnwindEntry(uint8_t* unwind_entry_address,
-                             void* code_execute_address,
-                             const EmitFunctionInfo& func_info);
+  // Writes the CIE+FDE+terminator and returns the byte offset of the FDE within
+  // the buffer (needed because macOS's libunwind __register_frame takes a single
+  // FDE pointer rather than a .eh_frame section start like libgcc).
+  size_t InitializeUnwindEntry(uint8_t* unwind_entry_address,
+                               void* code_execute_address,
+                               const EmitFunctionInfo& func_info);
 
   // Pointers registered with __register_frame, for cleanup.
   std::vector<void*> registered_frames_;
@@ -147,20 +150,31 @@ void PosixX64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
                                   void* code_execute_address,
                                   UnwindReservation unwind_reservation) {
   // Write the DWARF .eh_frame data into the reserved unwind space.
-  InitializeUnwindEntry(unwind_reservation.entry_address, code_execute_address,
-                        func_info);
+  size_t fde_offset = InitializeUnwindEntry(
+      unwind_reservation.entry_address, code_execute_address, func_info);
 
   // Register with the runtime unwinder using the execute-side address.
   // The execute mapping is readable (kExecuteReadOnly = PROT_EXEC|PROT_READ),
   // so the unwinder can read the .eh_frame data at runtime.
-  void* unwind_execute_address = unwind_reservation.entry_address -
-                                 generated_code_write_base_ +
-                                 generated_code_execute_base_;
-  __register_frame(unwind_execute_address);
-  registered_frames_.push_back(unwind_execute_address);
+  uint8_t* unwind_execute_address = unwind_reservation.entry_address -
+                                    generated_code_write_base_ +
+                                    generated_code_execute_base_;
+#if XE_PLATFORM_MAC
+  // macOS's libunwind __register_frame takes a pointer to a single FDE, unlike
+  // libgcc (Linux) which takes the start of a .eh_frame section (a CIE). Passing
+  // the section/CIE start on macOS registers garbage, so the unwinder cannot
+  // find FDEs for JIT PCs and C++ exceptions thrown from JIT code (e.g.
+  // FiberReentryException) fail to unwind to their handler and call
+  // std::terminate. Register the FDE directly instead.
+  void* register_address = unwind_execute_address + fde_offset;
+#else
+  void* register_address = unwind_execute_address;
+#endif
+  __register_frame(register_address);
+  registered_frames_.push_back(register_address);
 }
 
-void PosixX64CodeCache::InitializeUnwindEntry(
+size_t PosixX64CodeCache::InitializeUnwindEntry(
     uint8_t* unwind_entry_address, void* code_execute_address,
     const EmitFunctionInfo& func_info) {
   // Compute execute-side base address of the unwind buffer.
@@ -229,6 +243,7 @@ void PosixX64CodeCache::InitializeUnwindEntry(
 
   // === FDE (Frame Description Entry) ===
   uint8_t* fde_length_ptr = p;
+  size_t fde_offset = static_cast<size_t>(fde_length_ptr - unwind_entry_address);
   p += 4;  // placeholder for length
 
   uint8_t* fde_content_start = p;
@@ -322,6 +337,8 @@ void PosixX64CodeCache::InitializeUnwindEntry(
 
   assert_true(static_cast<size_t>(p - unwind_entry_address) <=
               kMaxUnwindInfoSize);
+
+  return fde_offset;
 }
 
 }  // namespace x64
