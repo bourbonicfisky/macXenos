@@ -97,14 +97,12 @@ target_link_libraries(xenia-app PRIVATE
   xxhash
 )
 
-# Vulkan/SPIR-V backends (not macOS)
-if(NOT APPLE)
-  target_link_libraries(xenia-app PRIVATE
-    xenia-gpu-vulkan
-    xenia-ui-vulkan
-    glslang-spirv
-  )
-endif()
+# Vulkan/SPIR-V backends (macOS via MoltenVK).
+target_link_libraries(xenia-app PRIVATE
+  xenia-gpu-vulkan
+  xenia-ui-vulkan
+  glslang-spirv
+)
 
 # Non-Android specific (always true for Windows/Linux)
 target_link_libraries(xenia-app PRIVATE

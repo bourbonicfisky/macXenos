@@ -20,9 +20,16 @@
 #include "xenia/base/platform.h"
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 #include <dlfcn.h>
-#elif XE_PLATFORM_WIN32
+#endif
+#if XE_PLATFORM_MAC
+#include <climits>
+#include <cstdlib>
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#endif
+#if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif
 
@@ -35,6 +42,83 @@ DEFINE_bool(
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+#if XE_PLATFORM_MAC
+// On modern macOS dlopen no longer searches /usr/local/lib for leaf library
+// names, so dlopen("libvulkan.1.dylib") fails even when the Homebrew Vulkan
+// loader is installed. The Homebrew loader also does not look in molten-vk's
+// ICD directory by default. Locate both explicitly here, and support an app
+// bundle that ships its own libvulkan + libMoltenVK + ICD manifest.
+static void* OpenVulkanLoaderMac() {
+  // Resolve the directory the executable lives in (…/Contents/MacOS) so bundled
+  // libraries can be found relative to it.
+  std::string exe_dir;
+  char exe_path[PATH_MAX];
+  uint32_t exe_path_size = sizeof(exe_path);
+  if (_NSGetExecutablePath(exe_path, &exe_path_size) == 0) {
+    std::string p(exe_path);
+    auto slash = p.find_last_of('/');
+    if (slash != std::string::npos) {
+      exe_dir = p.substr(0, slash);
+    }
+  }
+
+  // Point the loader at a MoltenVK ICD manifest if the environment hasn't
+  // already selected one - Homebrew installs it outside the loader's default
+  // search path, so without this the loader finds no portability driver.
+  if (!getenv("VK_ICD_FILENAMES") && !getenv("VK_DRIVER_FILES")) {
+    std::vector<std::string> icd_candidates;
+    if (!exe_dir.empty()) {
+      icd_candidates.push_back(
+          exe_dir + "/../Resources/vulkan/icd.d/MoltenVK_icd.json");
+    }
+    if (const char* sdk = getenv("VULKAN_SDK")) {
+      icd_candidates.push_back(std::string(sdk) +
+                               "/share/vulkan/icd.d/MoltenVK_icd.json");
+    }
+    icd_candidates.push_back("/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json");
+    icd_candidates.push_back("/usr/local/share/vulkan/icd.d/MoltenVK_icd.json");
+    icd_candidates.push_back("/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json");
+    icd_candidates.push_back(
+        "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json");
+    for (const std::string& icd : icd_candidates) {
+      if (access(icd.c_str(), R_OK) == 0) {
+        setenv("VK_ICD_FILENAMES", icd.c_str(), 1);
+        XELOGI("Using MoltenVK ICD manifest: {}", icd);
+        break;
+      }
+    }
+  }
+
+  // Try the Vulkan loader (preferred - enables portability enumeration and
+  // layers), then MoltenVK directly as a last resort.
+  std::vector<std::string> candidates;
+  candidates.push_back("libvulkan.1.dylib");  // honors DYLD_LIBRARY_PATH / rpath
+  if (!exe_dir.empty()) {
+    candidates.push_back(exe_dir + "/../Frameworks/libvulkan.1.dylib");
+  }
+  if (const char* sdk = getenv("VULKAN_SDK")) {
+    candidates.push_back(std::string(sdk) + "/lib/libvulkan.1.dylib");
+  }
+  candidates.push_back("/usr/local/lib/libvulkan.1.dylib");
+  candidates.push_back("/opt/homebrew/lib/libvulkan.1.dylib");
+  if (!exe_dir.empty()) {
+    candidates.push_back(exe_dir + "/../Frameworks/libMoltenVK.dylib");
+  }
+  candidates.push_back("libMoltenVK.dylib");
+  candidates.push_back("/usr/local/lib/libMoltenVK.dylib");
+  candidates.push_back("/opt/homebrew/lib/libMoltenVK.dylib");
+
+  for (const std::string& path : candidates) {
+    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (handle) {
+      XELOGI("Loaded Vulkan loader: {}", path);
+      return handle;
+    }
+  }
+  return nullptr;
+}
+#endif
 
 std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     const bool with_surface, const bool try_enable_validation) {
@@ -49,14 +133,22 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   Functions& ifn = vulkan_instance->functions_;
 
   bool functions_loaded = true;
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 #if XE_PLATFORM_ANDROID
   const char* const loader_library_name = "libvulkan.so";
+#elif XE_PLATFORM_MAC
+  // The Vulkan SDK loader on macOS, which dispatches to MoltenVK as an ICD
+  // (and enables portability enumeration / validation layers).
+  const char* const loader_library_name = "libvulkan.1.dylib";
 #else
   const char* const loader_library_name = "libvulkan.so.1";
 #endif
+#if XE_PLATFORM_MAC
+  vulkan_instance->loader_ = OpenVulkanLoaderMac();
+#else
   // http://developer.download.nvidia.com/mobile/shield/assets/Vulkan/UsingtheVulkanAPI.pdf
   vulkan_instance->loader_ = dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
+#endif
   if (!vulkan_instance->loader_) {
     XELOGE("Failed to load {}", loader_library_name);
     return nullptr;
@@ -157,6 +249,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     requested_extensions.emplace(
         "VK_KHR_win32_surface",
         &vulkan_instance->extensions_.ext_KHR_win32_surface);
+#endif
+#ifdef VK_USE_PLATFORM_METAL_EXT
+    // #218.
+    requested_extensions.emplace(
+        "VK_EXT_metal_surface",
+        &vulkan_instance->extensions_.ext_EXT_metal_surface);
 #endif
   }
 
@@ -441,6 +539,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
 #include "xenia/ui/vulkan/functions/instance_khr_win32_surface.inc"
   }
 #endif
+#ifdef VK_USE_PLATFORM_METAL_EXT
+  if (vulkan_instance->extensions_.ext_EXT_metal_surface) {
+#include "xenia/ui/vulkan/functions/instance_ext_metal_surface.inc"
+  }
+#endif
   if (vulkan_instance->extensions_.ext_KHR_surface) {
 #include "xenia/ui/vulkan/functions/instance_khr_surface.inc"
   }
@@ -540,7 +643,7 @@ VulkanInstance::~VulkanInstance() {
     functions_.vkDestroyInstance(instance_, nullptr);
   }
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
   if (loader_) {
     dlclose(loader_);
   }

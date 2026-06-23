@@ -10,11 +10,14 @@
 #include "xenia/ui/vulkan/spirv_tools_context.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <vector>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
 #include <dlfcn.h>
 #elif XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
@@ -26,18 +29,44 @@ namespace vulkan {
 
 bool SpirvToolsContext::Initialize(unsigned int spirv_version) {
   const char* vulkan_sdk_env = std::getenv("VULKAN_SDK");
+#if !XE_PLATFORM_MAC
+  // On macOS the shared library is installed in a standard search location
+  // (e.g. Homebrew's /usr/local/lib), so VULKAN_SDK is not required.
   if (!vulkan_sdk_env) {
     XELOGE("SPIRV-Tools: Failed to get the VULKAN_SDK environment variable");
     Shutdown();
     return false;
   }
-  std::filesystem::path vulkan_sdk_path(vulkan_sdk_env);
+#endif
+  std::filesystem::path vulkan_sdk_path(vulkan_sdk_env ? vulkan_sdk_env : "");
 #if XE_PLATFORM_LINUX
   library_ = dlopen((vulkan_sdk_path / "bin/libSPIRV-Tools-shared.so").c_str(),
                     RTLD_NOW | RTLD_LOCAL);
   if (!library_) {
     XELOGE(
         "SPIRV-Tools: Failed to load $VULKAN_SDK/bin/libSPIRV-Tools-shared.so");
+    Shutdown();
+    return false;
+  }
+#elif XE_PLATFORM_MAC
+  // Try $VULKAN_SDK first (if set), then the plain leaf name (resolved via the
+  // dynamic loader / DYLD_LIBRARY_PATH), then the standard Homebrew locations.
+  std::vector<std::string> spirv_candidates;
+  if (vulkan_sdk_env) {
+    spirv_candidates.push_back(
+        (vulkan_sdk_path / "lib/libSPIRV-Tools-shared.dylib").string());
+  }
+  spirv_candidates.push_back("libSPIRV-Tools-shared.dylib");
+  spirv_candidates.push_back("/usr/local/lib/libSPIRV-Tools-shared.dylib");
+  spirv_candidates.push_back("/opt/homebrew/lib/libSPIRV-Tools-shared.dylib");
+  for (const std::string& candidate : spirv_candidates) {
+    library_ = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (library_) {
+      break;
+    }
+  }
+  if (!library_) {
+    XELOGE("SPIRV-Tools: Failed to load libSPIRV-Tools-shared.dylib");
     Shutdown();
     return false;
   }
@@ -86,7 +115,7 @@ void SpirvToolsContext::Shutdown() {
     context_ = nullptr;
   }
   if (library_) {
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
     dlclose(library_);
 #elif XE_PLATFORM_WIN32
     FreeLibrary(library_);
