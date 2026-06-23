@@ -181,8 +181,12 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 }
               }
 #endif
-#if XE_PLATFORM_LINUX
-              // Linux: Use simplified timing logic to avoid oversleeping
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+              // Linux/macOS: Use simplified timing logic to avoid oversleeping.
+              // macOS (XE_PLATFORM_MAC) is its own platform branch and is NOT
+              // XE_PLATFORM_LINUX, so without this it would fall through the
+              // whole loop with no MarkVblank() and no sleep — a sleepless spin
+              // that also never delivers a vblank to the guest (black screen).
               MarkVblank();
 
               if (cvars::vsync || normalized_framerate_limit > 0) {

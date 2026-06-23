@@ -299,6 +299,30 @@ class CodeCacheBase : public CodeCache {
           kIndirectionTableBase + kIndirectionTableSize);
     }
 
+#if XE_PLATFORM_MAC
+    // macOS cannot execute from POSIX shared memory: an shm-backed MAP_SHARED
+    // view caps at a maximum protection of rw- (verified via vmmap on the
+    // 0xA0000000 execute view), even with the allow-unsigned-executable-memory
+    // entitlement. So the dual-aliased-view (RX/RW) shm code cache used on
+    // Linux/Windows can never be executed here — the guest faults with
+    // EXC_BAD_ACCESS code=2 on the very first generated instruction. Instead
+    // use a single private anonymous MAP_JIT region (AllocFixed adds MAP_JIT
+    // for executable anon mappings on macOS) with write_base == execute_base.
+    // This requires the app to be ad-hoc codesigned with
+    // com.apple.security.cs.allow-jit / allow-unsigned-executable-memory (see
+    // src/xenia/app/xenia.entitlements + the POST_BUILD codesign step).
+    generated_code_execute_base_ =
+        reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
+            reinterpret_cast<void*>(kGeneratedCodeExecuteBase),
+            kGeneratedCodeSize, xe::memory::AllocationType::kReserveCommit,
+            xe::memory::PageAccess::kExecuteReadWrite));
+    generated_code_write_base_ = generated_code_execute_base_;
+    if (!generated_code_execute_base_) {
+      XELOGE("Unable to allocate MAP_JIT code cache at {:X}",
+             uint64_t(kGeneratedCodeExecuteBase));
+      return false;
+    }
+#else
     file_name_ =
         fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
     mapping_ = xe::memory::CreateFileMappingHandle(
@@ -346,6 +370,7 @@ class CodeCacheBase : public CodeCache {
         return false;
       }
     }
+#endif  // XE_PLATFORM_MAC
 
     generated_code_map_.reserve(kMaximumFunctionCount);
     return true;

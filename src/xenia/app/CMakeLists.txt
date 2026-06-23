@@ -145,3 +145,17 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 xe_target_defaults(xenia-app)
+
+if(APPLE)
+  # The x64 JIT executes generated code from a private MAP_JIT region (see
+  # CodeCacheBase::Initialize); macOS only permits executing such memory when
+  # the binary is codesigned with the JIT entitlements. Ad-hoc sign every build
+  # so the code cache is executable (without this the guest faults with
+  # EXC_BAD_ACCESS code=2 on its first generated instruction).
+  add_custom_command(TARGET xenia-app POST_BUILD
+    COMMAND codesign -s - --entitlements
+            ${CMAKE_CURRENT_SOURCE_DIR}/xenia.entitlements --force
+            $<TARGET_FILE:xenia-app>
+    COMMENT "Ad-hoc signing xenia_canary with JIT entitlements"
+  )
+endif()

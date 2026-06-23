@@ -1272,8 +1272,12 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     return false;
   }
 
-  // Within range. Pause the emulator and eat the exception.
-  Pause();
+  // Within range — this is a guest crash. Emit the crash dump BEFORE pausing:
+  // the dump only reads the crashed (current) thread's own context, which does
+  // not require other threads to be suspended, and on macOS Pause() can block
+  // indefinitely (AudioSystem::Pause's worker never acks pause_fence_), which
+  // would otherwise swallow the crash dump and make the failure look like an
+  // idle stall. Pause (to freeze other threads for the dialog) comes after.
 
   // Dump information into the log.
   auto current_thread = kernel::XThread::GetCurrentThread();
@@ -1325,6 +1329,11 @@ bool Emulator::ExceptionCallback(Exception* ex) {
                     context->v[i].u32[2], context->v[i].u32[3]));
   }
   XELOGE("{}", crash_msg);
+
+  // Crash dump is out; now pause the emulator and eat the exception (freezes
+  // other guest threads for the dialog below).
+  Pause();
+
   std::string crash_dlg = fmt::format(
       "The guest has crashed.\n\n"
       "Xenia has now paused itself.\n\n"
