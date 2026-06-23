@@ -1606,7 +1606,13 @@ void X64HelperEmitter::EmitSaveVolatileRegs() {
   // mov(qword[rsp + offsetof(StackLayout::Thunk, r[0])], rax);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[1])], rcx);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[2])], rdx);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+  // macOS x86_64 uses the System V ABI just like Linux: rsi (guest context) and
+  // rdi (membase) are caller-saved (volatile), so the host function called below
+  // is free to clobber them. They MUST be saved here and restored in
+  // EmitLoadVolatileRegs; otherwise the guest resumes after a host call with a
+  // garbage context/membase (host leftovers) and faults on the next guest memory
+  // access. (Previously guarded XE_PLATFORM_LINUX only, omitting macOS.)
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[3])], rsi);
   mov(qword[rsp + offsetof(StackLayout::Thunk, r[4])], rdi);
 #endif
@@ -1627,7 +1633,9 @@ void X64HelperEmitter::EmitLoadVolatileRegs() {
   // mov(rax, qword[rsp + offsetof(StackLayout::Thunk, r[0])]);
   mov(rcx, qword[rsp + offsetof(StackLayout::Thunk, r[1])]);
   mov(rdx, qword[rsp + offsetof(StackLayout::Thunk, r[2])]);
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+  // Restore the System V caller-saved context (rsi) and membase (rdi) that the
+  // host call clobbered. See EmitSaveVolatileRegs. (Was XE_PLATFORM_LINUX only.)
   mov(rsi, qword[rsp + offsetof(StackLayout::Thunk, r[3])]);
   mov(rdi, qword[rsp + offsetof(StackLayout::Thunk, r[4])]);
 #endif
