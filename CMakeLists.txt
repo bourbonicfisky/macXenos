@@ -240,14 +240,24 @@ else()
       # -Wno-character-conversion is not recognized by all Apple clang versions
       # (e.g. clang-1700); guard it so -Werror -Wunknown-warning-option doesn't fail.
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-unknown-warning-option>
+      # The Cocoa/Metal windowing sources (window_mac.mm, surface_mac.mm) are
+      # written for ARC (use __bridge_transfer/__bridge_retained). Compile all
+      # Objective-C++ with ARC; the .mm sources contain no manual retain/release.
+      $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
     )
     add_link_options(-Wl,-no_warn_duplicate_libraries)
     link_libraries(
       "-framework CoreFoundation"
       "-framework Foundation"
       "-framework IOKit"
+      # Cocoa windowing + CAMetalLayer surface (window_mac.mm / surface_mac.mm).
+      "-framework AppKit"
+      "-framework QuartzCore"
+      "-framework Metal"
       dl
       pthread
+      # macOS keeps iconv in a separate libiconv (glibc bundles it on Linux).
+      iconv
     )
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # GTK3 via pkg-config
@@ -296,7 +306,12 @@ else()
   # linker/archiver LTO plugin version mismatch with clang's bitcode)
   add_compile_options($<$<CONFIG:Release>:-flto=thin>)
   add_link_options($<$<CONFIG:Release>:-flto=thin>)
-  add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+  # lld avoids a system linker/archiver LTO-plugin mismatch on Linux. On macOS
+  # the default linker (ld64) does thin-LTO natively and lld is not installed,
+  # so don't force it there.
+  if(NOT APPLE)
+    add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+  endif()
   find_program(LLVM_AR NAMES llvm-ar)
   find_program(LLVM_RANLIB NAMES llvm-ranlib)
   if(LLVM_AR)

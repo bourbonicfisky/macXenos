@@ -10,6 +10,12 @@
 #include "xenia/base/exception_handler.h"
 
 #include <signal.h>
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_MAC
+// On macOS the machine-context types live here and are exposed without the
+// _XOPEN_SOURCE dance that <ucontext.h> requires.
+#include <sys/ucontext.h>
+#endif
 #include <cstdint>
 
 #include "xenia/base/assert.h"
@@ -23,6 +29,9 @@ namespace xe {
 bool signal_handlers_installed_ = false;
 struct sigaction original_sigill_handler_;
 struct sigaction original_sigsegv_handler_;
+#if XE_PLATFORM_MAC
+struct sigaction original_sigbus_handler_;
+#endif  // XE_PLATFORM_MAC
 
 // This can be as large as needed, but isn't often needed.
 // As we will be sometimes firing many exceptions we want to avoid having to
@@ -35,12 +44,44 @@ std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
 
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
+#if XE_PLATFORM_MAC
+  // On macOS, uc_mcontext is a pointer to the machine context, and register
+  // state lives in __ss/__es/__fs rather than in a gregs[] array.
+  _STRUCT_MCONTEXT& mcontext =
+      *reinterpret_cast<ucontext_t*>(signal_context)->uc_mcontext;
+#else
   mcontext_t& mcontext =
       reinterpret_cast<ucontext_t*>(signal_context)->uc_mcontext;
+#endif  // XE_PLATFORM_MAC
 
   HostThreadContext thread_context;
 
 #if XE_ARCH_AMD64
+#if XE_PLATFORM_MAC
+  const _STRUCT_X86_THREAD_STATE64& ss = mcontext.__ss;
+  thread_context.rip = uint64_t(ss.__rip);
+  thread_context.eflags = uint32_t(ss.__rflags);
+  thread_context.rax = uint64_t(ss.__rax);
+  thread_context.rcx = uint64_t(ss.__rcx);
+  thread_context.rdx = uint64_t(ss.__rdx);
+  thread_context.rbx = uint64_t(ss.__rbx);
+  thread_context.rsp = uint64_t(ss.__rsp);
+  thread_context.rbp = uint64_t(ss.__rbp);
+  thread_context.rsi = uint64_t(ss.__rsi);
+  thread_context.rdi = uint64_t(ss.__rdi);
+  thread_context.r8 = uint64_t(ss.__r8);
+  thread_context.r9 = uint64_t(ss.__r9);
+  thread_context.r10 = uint64_t(ss.__r10);
+  thread_context.r11 = uint64_t(ss.__r11);
+  thread_context.r12 = uint64_t(ss.__r12);
+  thread_context.r13 = uint64_t(ss.__r13);
+  thread_context.r14 = uint64_t(ss.__r14);
+  thread_context.r15 = uint64_t(ss.__r15);
+  // __fpu_xmm0..__fpu_xmm15 are declared consecutively, so they can be copied
+  // as a single 16-register block.
+  std::memcpy(thread_context.xmm_registers, &mcontext.__fs.__fpu_xmm0,
+              sizeof(thread_context.xmm_registers));
+#else
   thread_context.rip = uint64_t(mcontext.gregs[REG_RIP]);
   thread_context.eflags = uint32_t(mcontext.gregs[REG_EFL]);
   // The REG_ order may be different than the register indices in the
@@ -63,6 +104,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   thread_context.r15 = uint64_t(mcontext.gregs[REG_R15]);
   std::memcpy(thread_context.xmm_registers, mcontext.fpregs->_xmm,
               sizeof(thread_context.xmm_registers));
+#endif  // XE_PLATFORM_MAC
 #elif XE_ARCH_ARM64
   std::memcpy(thread_context.x, mcontext.regs, sizeof(thread_context.x));
   thread_context.sp = mcontext.sp;
@@ -103,15 +145,30 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     case SIGILL:
       ex.InitializeIllegalInstruction(&thread_context);
       break;
+#if XE_PLATFORM_MAC
+    // macOS delivers memory protection violations (e.g. guest write-watch pages
+    // mprotected read-only) as SIGBUS rather than SIGSEGV. Both carry the same
+    // x86 page-fault error code in the exception state, so handle them
+    // identically as access violations.
+    case SIGBUS:
+#endif  // XE_PLATFORM_MAC
     case SIGSEGV: {
       Exception::AccessViolationOperation access_violation_operation;
 #if XE_ARCH_AMD64
       // x86_pf_error_code::X86_PF_WRITE
       constexpr uint64_t kX86PageFaultErrorCodeWrite = UINT64_C(1) << 1;
+#if XE_PLATFORM_MAC
+      // macOS exposes the page-fault error code in the exception state.
+      access_violation_operation =
+          (uint64_t(mcontext.__es.__err) & kX86PageFaultErrorCodeWrite)
+              ? Exception::AccessViolationOperation::kWrite
+              : Exception::AccessViolationOperation::kRead;
+#else
       access_violation_operation =
           (uint64_t(mcontext.gregs[REG_ERR]) & kX86PageFaultErrorCodeWrite)
               ? Exception::AccessViolationOperation::kWrite
               : Exception::AccessViolationOperation::kRead;
+#endif  // XE_PLATFORM_MAC
 #elif XE_ARCH_ARM64
       // For a Data Abort (EC - ESR_EL1 bits 31:26 - 0b100100 from a lower
       // Exception Level, 0b100101 without a change in the Exception Level),
@@ -163,6 +220,38 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     if (handlers_[i].first(&ex, handlers_[i].second)) {
       // Exception handled.
 #if XE_ARCH_AMD64
+#if XE_PLATFORM_MAC
+      _STRUCT_X86_THREAD_STATE64& ss_out = mcontext.__ss;
+      ss_out.__rip = thread_context.rip;
+      ss_out.__rflags = thread_context.eflags;
+      uint32_t modified_register_index;
+      // Pointers to the macOS thread-state integer registers, in X64Register
+      // order (must match the order in X64Register).
+      uint64_t* const kIntRegisterMap[] = {
+          &ss_out.__rax, &ss_out.__rcx, &ss_out.__rdx, &ss_out.__rbx,
+          &ss_out.__rsp, &ss_out.__rbp, &ss_out.__rsi, &ss_out.__rdi,
+          &ss_out.__r8,  &ss_out.__r9,  &ss_out.__r10, &ss_out.__r11,
+          &ss_out.__r12, &ss_out.__r13, &ss_out.__r14, &ss_out.__r15,
+      };
+      uint16_t modified_int_registers_remaining = ex.modified_int_registers();
+      while (xe::bit_scan_forward(modified_int_registers_remaining,
+                                  &modified_register_index)) {
+        modified_int_registers_remaining &=
+            ~(UINT16_C(1) << modified_register_index);
+        *kIntRegisterMap[modified_register_index] =
+            thread_context.int_registers[modified_register_index];
+      }
+      uint16_t modified_xmm_registers_remaining = ex.modified_xmm_registers();
+      while (xe::bit_scan_forward(modified_xmm_registers_remaining,
+                                  &modified_register_index)) {
+        modified_xmm_registers_remaining &=
+            ~(UINT16_C(1) << modified_register_index);
+        // __fpu_xmm0..__fpu_xmm15 are consecutive 16-byte registers.
+        std::memcpy((&mcontext.__fs.__fpu_xmm0) + modified_register_index,
+                    &thread_context.xmm_registers[modified_register_index],
+                    sizeof(vec128_t));
+      }
+#else
       mcontext.gregs[REG_RIP] = greg_t(thread_context.rip);
       mcontext.gregs[REG_EFL] = greg_t(thread_context.eflags);
       uint32_t modified_register_index;
@@ -189,6 +278,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                     &thread_context.xmm_registers[modified_register_index],
                     sizeof(vec128_t));
       }
+#endif  // XE_PLATFORM_MAC
 #elif XE_ARCH_ARM64
       uint32_t modified_register_index;
       uint32_t modified_x_registers_remaining = ex.modified_x_registers();
@@ -221,6 +311,37 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+#if XE_PLATFORM_MAC
+  // No registered handler resolved this exception. Just returning would
+  // re-execute the faulting instruction and fault again forever (macOS surfaces
+  // guest access violations as SIGBUS), turning a real bug into a silent
+  // livelock. Restore the original disposition and let the process crash with a
+  // proper report at the faulting instruction instead.
+  XELOGE(
+      "ExceptionHandler: unhandled signal {} at pc={:#018x} fault_address="
+      "{:#018x}; restoring default handler to crash with diagnostics",
+      signal_number,
+#if XE_ARCH_AMD64
+      uint64_t(thread_context.rip),
+#else
+      uint64_t(thread_context.pc),
+#endif  // XE_ARCH
+      uint64_t(reinterpret_cast<uintptr_t>(signal_info->si_addr)));
+  switch (signal_number) {
+    case SIGILL:
+      sigaction(SIGILL, &original_sigill_handler_, nullptr);
+      break;
+    case SIGSEGV:
+      sigaction(SIGSEGV, &original_sigsegv_handler_, nullptr);
+      break;
+    case SIGBUS:
+      sigaction(SIGBUS, &original_sigbus_handler_, nullptr);
+      break;
+    default:
+      break;
+  }
+#endif  // XE_PLATFORM_MAC
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
@@ -237,6 +358,13 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     if (sigaction(SIGSEGV, &signal_handler, &original_sigsegv_handler_) != 0) {
       assert_always("Failed to install new SIGSEGV handler");
     }
+#if XE_PLATFORM_MAC
+    // macOS reports memory protection violations as SIGBUS, so it must be
+    // intercepted too for guest access-violation / write-watch handling.
+    if (sigaction(SIGBUS, &signal_handler, &original_sigbus_handler_) != 0) {
+      assert_always("Failed to install new SIGBUS handler");
+    }
+#endif  // XE_PLATFORM_MAC
     signal_handlers_installed_ = true;
   }
 
@@ -277,6 +405,11 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       if (sigaction(SIGSEGV, &original_sigsegv_handler_, NULL) != 0) {
         assert_always("Failed to restore original SIGSEGV handler");
       }
+#if XE_PLATFORM_MAC
+      if (sigaction(SIGBUS, &original_sigbus_handler_, NULL) != 0) {
+        assert_always("Failed to restore original SIGBUS handler");
+      }
+#endif  // XE_PLATFORM_MAC
       signal_handlers_installed_ = false;
     }
   }

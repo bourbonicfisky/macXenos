@@ -13,15 +13,24 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sstream>
 
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
+
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 #if XE_PLATFORM_ANDROID
 #include <dlfcn.h>
@@ -100,7 +109,30 @@ PageAccess ToXeniaProtectFlags(const char* protection) {
   return PageAccess::kNoAccess;
 }
 
+#if XE_PLATFORM_MAC
+bool IsWritableExecutableMemorySupported() {
+  // macOS enforces W^X: a single shared file mapping cannot be both writable and
+  // executable. Report unsupported so the code cache uses separate RW (write)
+  // and RX (execute) views of the same shm instead of one RWX mapping.
+  return false;
+}
+#else
 bool IsWritableExecutableMemorySupported() { return true; }
+#endif  // XE_PLATFORM_MAC
+
+bool ReserveFixedRangesEarly() {
+  // No-op. This existed to pre-reserve the fixed sub-4 GB code-cache window
+  // against ASLR squatters, but canary's guest memory now lands at an OS-chosen
+  // base (Memory::MapViewsMac maps with mmap(nullptr,...) then MAP_FIXED), so
+  // there is no fixed low guest block to protect. Worse, an early anonymous
+  // PROT_NONE reservation here makes the code cache's later shm-backed
+  // MAP_FIXED views (RX at 0xA0000000, RW at 0xB0000000) fail with ENOMEM on
+  // macOS - the kernel will not overlay a sub-range of an anonymous reservation
+  // with a different (file) backing. The code cache instead MAP_FIXEDs into
+  // address space that is still free this early in startup. Kept as a no-op so
+  // the entry point's contract is unchanged.
+  return true;
+}
 
 struct MappedFileRange {
   uintptr_t region_begin;
@@ -139,12 +171,35 @@ void* AllocFixed(void* base_address, size_t length,
   uint32_t prot = ToPosixProtectFlags(access);
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 
+#if XE_PLATFORM_MAC
+  // macOS requires MAP_JIT for anonymous writable+executable allocations.
+  if (access == PageAccess::kExecuteReadWrite ||
+      access == PageAccess::kExecuteReadOnly) {
+    flags |= MAP_JIT;
+  }
+#endif  // XE_PLATFORM_MAC
+
   if (base_address != nullptr) {
     if (allocation_type == AllocationType::kCommit) {
+#if XE_PLATFORM_MAC
+      // Protect() can't query old access on macOS; mprotect the page-aligned
+      // span directly to commit.
+      size_t host_page = page_size();
+      uintptr_t aligned_addr =
+          reinterpret_cast<uintptr_t>(base_address) & ~(host_page - 1);
+      uintptr_t end_addr = reinterpret_cast<uintptr_t>(base_address) + length;
+      end_addr = (end_addr + host_page - 1) & ~(host_page - 1);
+      if (mprotect(reinterpret_cast<void*>(aligned_addr),
+                   end_addr - aligned_addr, prot) == 0) {
+        return base_address;
+      }
+      return nullptr;
+#else
       if (Protect(base_address, length, access)) {
         return base_address;
       }
       return nullptr;
+#endif  // XE_PLATFORM_MAC
     }
 #ifdef MAP_FIXED_NOREPLACE
     flags |= MAP_FIXED_NOREPLACE;
@@ -153,10 +208,20 @@ void* AllocFixed(void* base_address, size_t length,
 
   void* result = mmap(base_address, length, prot, flags, -1, 0);
 
-  if (result != MAP_FAILED) {
-    return result;
+  if (result == MAP_FAILED) {
+    return nullptr;
   }
-  return nullptr;
+
+  // macOS has no MAP_FIXED_NOREPLACE, so a fixed request is only a hint. If the
+  // kernel placed it elsewhere, fail rather than silently squatting a different
+  // range (e.g. the indirection table landing on the code-cache window and
+  // making the later code-cache MAP_FIXED fail with ENOMEM).
+  if (base_address != nullptr && result != base_address) {
+    munmap(result, length);
+    return nullptr;
+  }
+
+  return result;
 }
 
 bool DeallocFixed(void* base_address, size_t length,
@@ -249,6 +314,24 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
   return false;
 }
 
+// POSIX shared-memory object name for a mapping path. macOS limits these names
+// to ~31 chars (PSHMNAMLEN) - much shorter than Linux - so descriptive names
+// like "xenia_memory_<host ticks>" overflow it and shm_open fails. On macOS
+// derive a short, deterministic name from the path so create and unlink stay
+// consistent for the same path.
+#if !XE_PLATFORM_ANDROID
+static std::string ShmName(const std::filesystem::path& path) {
+#if XE_PLATFORM_MAC
+  char buf[24];
+  size_t hash = std::hash<std::string>{}(path.string());
+  std::snprintf(buf, sizeof(buf), "/xe%016zx", hash);
+  return std::string(buf);
+#else
+  return ("/" / path).string();
+#endif
+}
+#endif  // !XE_PLATFORM_ANDROID
+
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                           size_t length, PageAccess access,
                                           bool commit) {
@@ -293,20 +376,20 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
       return kFileMappingHandleInvalid;
   }
   oflag |= O_CREAT;
-  auto full_path = "/" / path;
-  int ret = shm_open(full_path.c_str(), oflag, 0777);
+  std::string shm_name = ShmName(path);
+  int ret = shm_open(shm_name.c_str(), oflag, 0777);
   if (ret < 0) {
     return kFileMappingHandleInvalid;
   }
   if (ftruncate(ret, length) < 0) {
     close(ret);
-    shm_unlink(full_path.c_str());
+    shm_unlink(shm_name.c_str());
     return kFileMappingHandleInvalid;
   }
   // Track for cleanup on abnormal exit and install cleanup handlers
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    g_shm_file_names.push_back(full_path.string());
+    g_shm_file_names.push_back(shm_name);
   }
   InstallCleanupHandlers();
   return ret;
@@ -317,13 +400,13 @@ void CloseFileMappingHandle(FileMappingHandle handle,
                             const std::filesystem::path& path) {
   close(handle);
 #if !XE_PLATFORM_ANDROID
-  auto full_path = "/" / path;
-  shm_unlink(full_path.c_str());
+  std::string shm_name = ShmName(path);
+  shm_unlink(shm_name.c_str());
   // Remove from tracking
   {
     std::lock_guard guard(g_shm_file_names_mutex);
     auto it = std::find(g_shm_file_names.begin(), g_shm_file_names.end(),
-                        full_path.string());
+                        shm_name);
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
     }
@@ -337,7 +420,13 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
 
   int flags = MAP_SHARED;
   if (base_address != nullptr) {
-#ifdef MAP_FIXED_NOREPLACE
+#if XE_PLATFORM_MAC
+    // macOS has no MAP_FIXED_NOREPLACE; without MAP_FIXED the address hint is
+    // ignored and the aliased guest views land at system-chosen addresses,
+    // breaking the fixed view layout. The caller reserved this range first
+    // (BaseHeap / ReserveFixedRangesEarly), so overlay it with MAP_FIXED.
+    flags |= MAP_FIXED;
+#elif defined(MAP_FIXED_NOREPLACE)
     flags |= MAP_FIXED_NOREPLACE;
 #endif
   }
@@ -358,6 +447,30 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
 bool UnmapFileView(FileMappingHandle handle, void* base_address,
                    size_t length) {
   std::lock_guard guard(g_mapped_file_ranges_mutex);
+#if XE_PLATFORM_MAC
+  // MapViewsMac maps the guest views into one larger reserved block, so a single
+  // tracked range can be unmapped in parts. Support partial unmapping by
+  // splitting the tracked range around the unmapped span (canary/macos).
+  uintptr_t unmap_begin = reinterpret_cast<uintptr_t>(base_address);
+  uintptr_t unmap_end = unmap_begin + length;
+  for (auto mapped_range = mapped_file_ranges.begin();
+       mapped_range != mapped_file_ranges.end(); ++mapped_range) {
+    if (unmap_begin >= mapped_range->region_begin &&
+        unmap_end <= mapped_range->region_end) {
+      uintptr_t orig_begin = mapped_range->region_begin;
+      uintptr_t orig_end = mapped_range->region_end;
+      mapped_file_ranges.erase(mapped_range);
+      if (orig_begin < unmap_begin) {
+        mapped_file_ranges.push_back({orig_begin, unmap_begin});
+      }
+      if (unmap_end < orig_end) {
+        mapped_file_ranges.push_back({unmap_end, orig_end});
+      }
+      return munmap(base_address, length) == 0;
+    }
+  }
+  return munmap(base_address, length) == 0;
+#else
   for (auto mapped_range = mapped_file_ranges.begin();
        mapped_range != mapped_file_ranges.end();) {
     if (mapped_range->region_begin ==
@@ -372,6 +485,7 @@ bool UnmapFileView(FileMappingHandle handle, void* base_address,
   // TODO: Implement partial file unmapping.
   assert_always("Error: Partial unmapping of files not yet supported.");
   return munmap(base_address, length) == 0;
+#endif
 }
 
 }  // namespace memory

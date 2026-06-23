@@ -26,12 +26,14 @@ function(xe_platform_sources target base_path)
     set(pattern "*")
   endif()
 
-  # Glob all source files
+  # Glob all source files. .mm (Objective-C++) is macOS-only; include it so the
+  # *_mac.mm windowing/platform sources can be added back on Apple below.
   file(${glob_mode} _all_sources    "${base_path}/*.h"
     "${base_path}/*.cc"
     "${base_path}/*.cpp"
     "${base_path}/*.c"
     "${base_path}/*.inc"
+    "${base_path}/*.mm"
   )
 
   # Build exclude patterns
@@ -74,6 +76,17 @@ function(xe_platform_sources target base_path)
       "${base_path}/*_x11.cc"
       "${base_path}/*_gtk.h"
       "${base_path}/*_gtk.cc"
+    )
+  elseif(APPLE)
+    # macOS is a POSIX/Unix host: it shares the _posix files (with macOS
+    # specifics gated by XE_PLATFORM_MAC inside them) plus its own _mac files.
+    # Objective-C++ (_mac.mm, Cocoa/Metal) is macOS-only. Mirrors mainline's
+    # platform_files.lua Mac filter; deliberately excludes _linux/_gtk/_x11.
+    file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
+      "${base_path}/*_posix.cc"
+      "${base_path}/*_mac.h"
+      "${base_path}/*_mac.cc"
+      "${base_path}/*_mac.mm"
     )
   endif()
 
@@ -127,8 +140,13 @@ function(xe_target_defaults target)
         source_group(TREE ${PROJECT_SOURCE_DIR} PREFIX "External" FILES ${_external_srcs})
       endif()
     endif()
-  elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    # GCC is too noisy for -Werror; only apply to Clang
+  elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+    # GCC is too noisy for -Werror; only apply to Clang.
+    # macOS: Xenia and its bundled third-party libraries were written against an
+    # older warning baseline than the current mac toolchain (libc++; e.g. size_t
+    # vs uint64_t format mismatches that don't warn on Linux's LP64 typedefs).
+    # Keep warnings non-fatal here rather than patching dozens of upstream files;
+    # Windows/Linux retain FatalWarnings. (Mirrors mainline's macos-moltenvk.)
     target_compile_options(${target} PRIVATE -Werror)
   endif()
 endfunction()

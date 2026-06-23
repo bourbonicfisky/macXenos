@@ -26,11 +26,18 @@ namespace x64 {
 class X64Emitter;
 
 typedef bool (*SequenceSelectFn)(X64Emitter&, const hir::Instr*, uint32_t ikey);
-extern std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
+// Construct-on-first-use: the EMITTER_OPCODE_TABLE macro registers sequences
+// from static initializers across many translation units, which can run before
+// a plain global map is constructed (static init order is unspecified across
+// TUs). On libc++ inserting into the not-yet-constructed map reads
+// max_load_factor_ == 0 and computes a bogus 2^63 bucket count
+// (bad_array_new_length); libstdc++ happens to tolerate it. A function-local
+// static is guaranteed initialized on first use.
+std::unordered_map<uint32_t, SequenceSelectFn>& sequence_table();
 
 template <typename T>
 bool Register() {
-  sequence_table.insert({T::head_key(), T::Select});
+  sequence_table().insert({T::head_key(), T::Select});
   return true;
 }
 

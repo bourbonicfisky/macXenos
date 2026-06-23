@@ -12,6 +12,14 @@
 #include <cstring>
 #include <random>
 
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/mman.h>
+#include <cerrno>
+#endif
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -191,16 +199,39 @@ bool Memory::Initialize() {
 
   // Create main page file-backed mapping. This is all reserved but
   // uncommitted (so it shouldn't expand page file).
+#if XE_PLATFORM_MAC
+  // entire 4gb space + 512mb physical, plus page-alignment slack: macOS rejects
+  // MAP_SHARED views that run past the shm object, and the 4K-offset physical
+  // view (offset 0x100001000, size 0x20000000) extends one page beyond
+  // 0x11FFFFFFF, so size the object up to cover it (canary/macos).
+  const size_t mapping_size = xe::round_up(
+      0x120000000ull + system_allocation_granularity_,
+      system_allocation_granularity_);
+#else
+  // entire 4gb space + 512mb physical:
+  const size_t mapping_size = 0x11FFFFFFF;
+#endif
   mapping_ = xe::memory::CreateFileMappingHandle(
-      file_name_,
-      // entire 4gb space + 512mb physical:
-      0x11FFFFFFF, xe::memory::PageAccess::kReadWrite, false);
+      file_name_, mapping_size, xe::memory::PageAccess::kReadWrite, false);
   if (mapping_ == xe::memory::kFileMappingHandleInvalid) {
     XELOGE("Unable to reserve the 4gb guest address space.");
     assert_always();
     return false;
   }
 
+#if XE_PLATFORM_MAC
+  // macOS does not honor a fixed address hint for a fresh mmap, and rejects
+  // MAP_SHARED views that run past the shm object. Reserve one OS-chosen
+  // contiguous block, then MAP_FIXED each file-backed view into it (canary/macos
+  // MapViewsMac), keeping the guest layout identical to other platforms without
+  // needing a fixed low base.
+  if (MapViewsMac()) {
+    XELOGE("Unable to find a continuous block in the 64bit address space.");
+    assert_always();
+    return false;
+  }
+  mapping_base_ = views_.all_views[0];
+#else
   // Attempt to create our views. This may fail at the first address
   // we pick, so try a few times.
   mapping_base_ = 0;
@@ -216,6 +247,7 @@ bool Memory::Initialize() {
     assert_always();
     return false;
   }
+#endif
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
 
@@ -364,6 +396,89 @@ static const struct {
         0x0000000100000000ull,
     },
 };
+
+#if XE_PLATFORM_MAC
+int Memory::MapViewsMac() {
+  assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
+
+  // macOS does not guarantee that a non-MAP_FIXED mmap will honor the requested
+  // address. Reserve a contiguous address range first, then MAP_FIXED each view
+  // within that reserved range to keep the guest layout identical to Windows.
+  const size_t total_size =
+      map_info[xe::countof(map_info) - 1].virtual_address_end -
+      map_info[0].virtual_address_start + 1;
+
+  // The guest block must NOT land in the sub-4 GB code-cache window
+  // (0x80000000-0xC0000000), which the JIT later claims at fixed addresses. With
+  // __PAGEZERO shrunk to 0x1000, mmap(nullptr) hands back a low base that
+  // swallows that window, and macOS ignores address hints without MAP_FIXED. So
+  // walk the address space above 4 GB with mach_vm_region to find a verified-free
+  // hole, then MAP_FIXED the reservation there.
+  mach_vm_address_t probe = 0x200000000ull;  // 8 GB, clear of the code cache
+  constexpr mach_vm_address_t kProbeCeiling = 0x100000000000ull;  // 16 TB
+  void* reserved_base = MAP_FAILED;
+  while (probe < kProbeCeiling) {
+    mach_vm_address_t region_addr = probe;
+    mach_vm_size_t region_size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(
+        mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+    if (kr != KERN_SUCCESS || region_addr >= probe + total_size) {
+      // Either nothing is mapped at/above probe, or the next mapping starts far
+      // enough away to leave a big-enough hole at probe.
+      void* p = mmap(reinterpret_cast<void*>(probe), total_size, PROT_NONE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      if (p != MAP_FAILED) {
+        reserved_base = p;
+        break;
+      }
+      // MAP_FIXED failed despite the hole; step past and keep looking.
+      probe += total_size;
+      continue;
+    }
+    // A region occupies part of [probe, probe+total_size); jump past it.
+    probe = region_addr + region_size;
+    probe = (probe + system_allocation_granularity_ - 1) &
+            ~uint64_t(system_allocation_granularity_ - 1);
+  }
+  if (reserved_base == MAP_FAILED) {
+    XELOGE("MapViewsMac: reserve failed: {}", std::strerror(errno));
+    return 1;
+  }
+
+  uint8_t* mapping_base = reinterpret_cast<uint8_t*>(reserved_base);
+  uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
+
+  for (size_t n = 0; n < xe::countof(map_info); n++) {
+    size_t view_size =
+        map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1;
+    size_t file_offset = map_info[n].target_address & granularity_mask;
+    void* target_address = mapping_base + map_info[n].virtual_address_start;
+    void* result = mmap(target_address, view_size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_FIXED, mapping_, file_offset);
+    if (result == MAP_FAILED || result != target_address) {
+      int err = errno;
+      XELOGE(
+          "MapViewsMac: map failed view {} addr 0x{:016X} size 0x{:X} "
+          "offset 0x{:X} err {} ({})",
+          n, reinterpret_cast<uintptr_t>(target_address), view_size,
+          file_offset, err, std::strerror(err));
+      munmap(reserved_base, total_size);
+      for (auto& view : views_.all_views) {
+        view = nullptr;
+      }
+      return 1;
+    }
+    views_.all_views[n] = reinterpret_cast<uint8_t*>(result);
+  }
+
+  return 0;
+}
+#endif  // XE_PLATFORM_MAC
+
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(xe::countof(map_info) == xe::countof(views_.all_views));
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU

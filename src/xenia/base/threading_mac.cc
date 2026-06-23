@@ -9,30 +9,16 @@
 
 #include "xenia/base/threading.h"
 
-#include <mach/mach.h>
 #include <mach/mach_time.h>
-#include <pthread.h>
-#include <time.h>
 
 namespace xe {
 namespace threading {
 
+// Only ticks() lives here. The other thread primitives are provided by the
+// shared threading.cc (current_thread_id) and threading_posix.cc, which carries
+// in-file XE_PLATFORM_MAC branches for the spots where macOS diverges from Linux
+// (realtime signals, SYS_gettid, pthread_setname_np arity, affinity, sigqueue).
 uint64_t ticks() { return mach_absolute_time(); }
-
-uint32_t current_thread_id() {
-  mach_port_t tid = pthread_mach_thread_np(pthread_self());
-  return static_cast<uint32_t>(tid);
-}
-
-void set_name(const std::string& name) { pthread_setname_np(name.c_str()); }
-
-void MaybeYield() { pthread_yield_np(); }
-
-void Sleep(std::chrono::microseconds duration) {
-  timespec rqtp = {duration.count() / 1000000, duration.count() % 1000};
-  nanosleep(&rqtp, nullptr);
-  // TODO(benvanik): spin while rmtp >0?
-}
 
 }  // namespace threading
 }  // namespace xe

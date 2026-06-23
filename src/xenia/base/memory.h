@@ -89,6 +89,14 @@ bool IsWritableExecutableMemorySupported();
 // writable executable memory on a system with it.
 bool IsWritableExecutableMemoryPreferred();
 
+// Reserves the fixed sub-4 GB JIT/code-cache ranges as early as possible (from
+// the process entry point), before dyld runtime loads (e.g. MoltenVK), malloc
+// zones or NSApplication can land in the low address space that the shrunk
+// macOS __PAGEZERO exposes. Returns false if something is already mapped inside
+// the range (the caller may re-exec for a fresh ASLR layout). A no-op returning
+// true on platforms other than macOS.
+bool ReserveFixedRangesEarly();
+
 // Allocates a block of memory at the given page-aligned base address.
 // Fails if the memory is not available.
 // Specify nullptr for base_address to leave it up to the system.

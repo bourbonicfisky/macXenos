@@ -71,7 +71,13 @@ using namespace xe::cpu::hir;
 using xe::cpu::hir::Instr;
 
 typedef bool (*SequenceSelectFn)(X64Emitter&, const Instr*, InstrKeyValue ikey);
-std::unordered_map<uint32_t, SequenceSelectFn> sequence_table;
+// Construct-on-first-use (see x64_sequences.h): guarantees the map is
+// initialized before any EMITTER_OPCODE_TABLE static initializer inserts into
+// it, regardless of cross-TU static init order.
+std::unordered_map<uint32_t, SequenceSelectFn>& sequence_table() {
+  static std::unordered_map<uint32_t, SequenceSelectFn> table;
+  return table;
+}
 
 // ============================================================================
 // OPCODE_COMMENT
@@ -3307,8 +3313,8 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
   } else {
     const InstrKey key(i);
 
-    auto it = sequence_table.find(key);
-    if (it != sequence_table.end()) {
+    auto it = sequence_table().find(key);
+    if (it != sequence_table().end()) {
       if (it->second(*e, i, InstrKey(i))) {
         *new_tail = i->next;
         return true;

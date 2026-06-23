@@ -103,14 +103,24 @@ enum class SignalType {
   k_Count
 };
 
+#if XE_PLATFORM_MAC
+// macOS has no POSIX realtime signals; map the (two) signal types onto the
+// user signals SIGUSR1/SIGUSR2, which are consecutive.
+#define XE_THREAD_SIGNAL_BASE SIGUSR1
+#define XE_THREAD_SIGNAL_MAX SIGUSR2
+#else
+#define XE_THREAD_SIGNAL_BASE SIGRTMIN
+#define XE_THREAD_SIGNAL_MAX SIGRTMAX
+#endif
+
 int GetSystemSignal(SignalType num) {
-  auto result = SIGRTMIN + static_cast<int>(num);
-  assert_true(result < SIGRTMAX);
+  auto result = XE_THREAD_SIGNAL_BASE + static_cast<int>(num);
+  assert_true(result <= XE_THREAD_SIGNAL_MAX);
   return result;
 }
 
 SignalType GetSystemSignalType(int num) {
-  return static_cast<SignalType>(num - SIGRTMIN);
+  return static_cast<SignalType>(num - XE_THREAD_SIGNAL_BASE);
 }
 
 std::array<std::atomic<bool>, static_cast<size_t>(SignalType::k_Count)>
@@ -196,6 +206,12 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 class PosixConditionBase {
  public:
   PosixConditionBase() {
+#if XE_PLATFORM_MAC
+    // macOS does not support robust mutexes (no PTHREAD_MUTEX_ROBUST /
+    // pthread_mutexattr_setrobust / pthread_mutex_consistent). Leave the mutex
+    // as a plain default std::mutex; EOWNERDEAD recovery is not available, but
+    // a plain mutex never reports it.
+#else
     // Initialize as robust mutex to handle thread termination gracefully
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -206,6 +222,7 @@ class PosixConditionBase {
     pthread_mutex_destroy(native_mutex);      // Destroy default mutex
     pthread_mutex_init(native_mutex, &attr);  // Reinit as robust
     pthread_mutexattr_destroy(&attr);
+#endif  // XE_PLATFORM_MAC
   }
 
   virtual ~PosixConditionBase() = default;
@@ -220,7 +237,11 @@ class PosixConditionBase {
     int lock_result = pthread_mutex_lock(native_mutex);
     if (lock_result == EOWNERDEAD) {
       // Recover from dead owner
+#if !XE_PLATFORM_MAC
+      // macOS has no pthread_mutex_consistent; with a plain (non-robust) mutex
+      // EOWNERDEAD never occurs, so this recovery path is unreachable there.
       pthread_mutex_consistent(native_mutex);
+#endif  // !XE_PLATFORM_MAC
     } else if (lock_result != 0) {
       return WaitResult::kFailed;
     }
@@ -284,7 +305,11 @@ class PosixConditionBase {
           // Successfully acquired lock or recovered from dead owner
           if (result == EOWNERDEAD) {
             // Make mutex consistent after previous owner died
+#if !XE_PLATFORM_MAC
+            // macOS has no pthread_mutex_consistent; with a plain (non-robust)
+            // mutex EOWNERDEAD never occurs, so this path is unreachable there.
             pthread_mutex_consistent(native_mutex);
+#endif  // !XE_PLATFORM_MAC
           }
           locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
         } else {
@@ -683,10 +708,19 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
+#if XE_PLATFORM_MAC
+      // macOS pthread_setname_np only names the calling thread; other threads
+      // cannot be renamed (name() still reads any thread via
+      // pthread_getname_np).
+      if (pthread_equal(pthread_self(), thread_)) {
+        pthread_setname_np(std::string(name).c_str());
+      }
+#else
       pthread_setname_np(thread_, std::string(name).c_str());
 #if XE_PLATFORM_ANDROID
       SetAndroidPreApi26Name(name);
 #endif
+#endif  // XE_PLATFORM_MAC
     }
   }
 
@@ -701,10 +735,23 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   }
 #endif
 
-  uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
+  uint32_t system_id() const {
+#if XE_PLATFORM_MAC
+    // pthread_t is an opaque pointer on macOS; use the kernel thread id.
+    uint64_t tid = 0;
+    pthread_threadid_np(thread_, &tid);
+    return static_cast<uint32_t>(tid);
+#else
+    return static_cast<uint32_t>(thread_);
+#endif  // XE_PLATFORM_MAC
+  }
 
   uint64_t affinity_mask() const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // macOS exposes no thread-affinity query API; report all cores available.
+    return ~uint64_t(0);
+#else
     cpu_set_t cpu_set;
 #if XE_PLATFORM_ANDROID
     if (sched_getaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t),
@@ -723,10 +770,16 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       result |= set << i;
     }
     return result;
+#endif  // XE_PLATFORM_MAC
   }
 
   void set_affinity_mask(uint64_t mask) const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // macOS has no hard thread-affinity API (only advisory affinity hints);
+    // treat as a best-effort no-op.
+    (void)mask;
+#else
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     for (auto i = 0u; i < 64; i++) {
@@ -744,6 +797,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       assert_always();
     }
 #endif
+#endif  // XE_PLATFORM_MAC
   }
 
   int priority() const {
@@ -801,6 +855,12 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     WaitStarted();
     std::unique_lock lock(callback_mutex_);
     user_callback_ = std::move(callback);
+#if XE_PLATFORM_MAC
+    // macOS has neither pthread_sigqueue nor sigqueue-to-thread, so no payload
+    // can ride the signal. The handler runs on the target thread and recovers
+    // this object from thread-local current_thread_ instead.
+    pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
+#else
     sigval value{};
     value.sival_ptr = this;
 #if XE_PLATFORM_ANDROID
@@ -810,6 +870,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback),
                      value);
 #endif
+#endif  // XE_PLATFORM_MAC
   }
 
   void CallUserCallback() const {
@@ -1362,12 +1423,17 @@ void Thread::Exit(int exit_code) {
 }
 
 void set_name(const std::string_view name) {
+#if XE_PLATFORM_MAC
+  // macOS names only the calling thread and takes just the name.
+  pthread_setname_np(std::string(name).c_str());
+#else
   pthread_setname_np(pthread_self(), std::string(name).c_str());
 #if XE_PLATFORM_ANDROID
   if (!android_pthread_getname_np_ && current_thread_) {
     current_thread_->condition().SetAndroidPreApi26Name(name);
   }
 #endif
+#endif  // XE_PLATFORM_MAC
 }
 
 static void signal_handler(int signal, siginfo_t* info, void* context) {
@@ -1381,12 +1447,22 @@ static void signal_handler(int signal, siginfo_t* info, void* context) {
       current_thread_->WaitSuspended();
     } break;
     case SignalType::kThreadUserCallback: {
+#if XE_PLATFORM_MAC
+      // No sigval payload on macOS; the handler runs on the target thread, so
+      // recover the thread object from thread-local state.
+      assert_not_null(current_thread_);
+      auto p_thread = &current_thread_->condition();
+      if (alertable_state_) {
+        p_thread->CallUserCallback();
+      }
+#else
       assert_not_null(info->si_value.sival_ptr);
       auto p_thread =
           static_cast<PosixCondition<Thread>*>(info->si_value.sival_ptr);
       if (alertable_state_) {
         p_thread->CallUserCallback();
       }
+#endif  // XE_PLATFORM_MAC
     } break;
 #if XE_PLATFORM_ANDROID
     case SignalType::kThreadTerminate: {

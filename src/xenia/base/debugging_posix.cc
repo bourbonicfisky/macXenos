@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/debugging.h"
+#include "xenia/base/platform.h"
 
 #include <csignal>
 #include <cstdarg>
@@ -20,6 +21,10 @@
 
 namespace xe {
 namespace debugging {
+
+// macOS provides these in debugging_mac.cc (sysctl-based attach check, mach
+// debugtrap); the /proc and SIGTRAP implementations below are Linux-only.
+#if !XE_PLATFORM_MAC
 
 bool IsDebuggerAttached() {
   std::ifstream proc_status_stream("/proc/self/status");
@@ -51,6 +56,8 @@ void Break() {
   });
   std::raise(SIGTRAP);
 }
+
+#endif  // !XE_PLATFORM_MAC
 
 namespace internal {
 void DebugPrint(const char* s) { std::clog << s << std::endl; }

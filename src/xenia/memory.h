@@ -558,6 +558,11 @@ class Memory {
 
  private:
   int MapViews(uint8_t* mapping_base);
+#if XE_PLATFORM_MAC
+  // macOS reserves an OS-chosen contiguous block and MAP_FIXEDs the views into
+  // it (see Memory::MapViewsMac); the fixed-base retry loop isn't usable there.
+  int MapViewsMac();
+#endif
   void UnmapViews();
 
   static uint32_t HostToGuestVirtualThunk(const void* context,

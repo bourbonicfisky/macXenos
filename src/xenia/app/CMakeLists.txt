@@ -31,6 +31,25 @@ if(WIN32)
       PROPERTIES COMPILE_OPTIONS "/arch:SSE2"
     )
   endif()
+elseif(APPLE)
+  # macOS: Cocoa entry (windowed_app_main_mac.cc) + a non-GTK AVX check, instead
+  # of the GTK-coupled posix files.
+  target_sources(xenia-app PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_mac.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_mac.cc
+  )
+  # The default x86_64 __PAGEZERO is 4 GB, which makes the entire sub-4 GB
+  # address space unmappable - including the code cache's fixed ranges
+  # (indirection table 0x80000000, generated code 0xA0000000/0xB0000000).
+  # Shrink __PAGEZERO so those ranges can be mapped (also relocates __TEXT).
+  target_link_options(xenia-app PRIVATE -Wl,-pagezero_size,0x1000)
+  if(XE_TARGET_X86_64)
+    # The AVX check must run on non-AVX CPUs, so don't build it with AVX.
+    set_source_files_properties(
+      ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_mac.cc
+      PROPERTIES COMPILE_OPTIONS "-msse2;-mno-avx"
+    )
+  endif()
 else()
   target_sources(xenia-app PRIVATE
     ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_posix.cc
