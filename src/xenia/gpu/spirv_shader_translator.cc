@@ -1953,21 +1953,17 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
 
     // Select or synthesize the output for this host vertex. The host vertex
     // within the strip is the low 2 bits of gl_VertexIndex; vertices 0..2 are
-    // the (captured) real rectangle corners, vertex 3 is the parallelogram
-    // completion -v0 + v1 + v2.
-    // TODO: longest-edge rotation - this fixed mapping is correct only when the
-    // rectangle's diagonal is the 1-2 edge.
+    // real rectangle corners, vertex 3 is the parallelogram completion. The
+    // strip's diagonal is fixed at slots 1-2, so the three real corners are
+    // rotated by longest edge (mirroring the d3d12 geometry shader) to put the
+    // rectangle's true diagonal on the strip diagonal - otherwise the second
+    // triangle is wrong (a visible diagonal split).
     spv::Id host_vertex = builder_->createBinOp(
         spv::OpBitwiseAnd, type_int_,
         builder_->createLoad(input_vertex_index_, spv::NoPrecision),
         builder_->makeIntConstant(3));
     spv::Id is_synthesized = builder_->createBinOp(
         spv::OpIEqual, type_bool_, host_vertex, builder_->makeIntConstant(3));
-    // Clamp the real-corner index to 0..2 so the load is never out of bounds
-    // (the value is discarded for the synthesized corner anyway).
-    spv::Id real_index = builder_->createTriOp(spv::OpSelect, type_int_,
-                                               is_synthesized, const_int_0_,
-                                               host_vertex);
     auto load_captured = [&](spv::Id storage, spv::Id index) -> spv::Id {
       id_vector_temp_.clear();
       id_vector_temp_.push_back(index);
@@ -1976,21 +1972,72 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
                                       id_vector_temp_),
           spv::NoPrecision);
     };
-    // -v0 + v1 + v2 == (v1 + v2) - v0.
+
+    // Choose the longest edge of the rectangle (in clip xy) as the diagonal,
+    // and build the slot->guest-vertex rotation:
+    //   edge 1-2 longest -> [0,1,2], edge 2-0 -> [1,2,0], edge 0-1 -> [2,0,1].
+    spv::Id pos0 = load_captured(var_main_rectangle_positions_, const_int_0_);
+    spv::Id pos1 = load_captured(var_main_rectangle_positions_,
+                                 builder_->makeIntConstant(1));
+    spv::Id pos2 = load_captured(var_main_rectangle_positions_,
+                                 builder_->makeIntConstant(2));
+    auto edge_len2 = [&](spv::Id pa, spv::Id pb) -> spv::Id {
+      uint_vector_temp_.clear();
+      uint_vector_temp_.push_back(0);
+      uint_vector_temp_.push_back(1);
+      spv::Id axy = builder_->createRvalueSwizzle(spv::NoPrecision, type_float2_,
+                                                  pa, uint_vector_temp_);
+      spv::Id bxy = builder_->createRvalueSwizzle(spv::NoPrecision, type_float2_,
+                                                  pb, uint_vector_temp_);
+      spv::Id d = builder_->createBinOp(spv::OpFSub, type_float2_, axy, bxy);
+      return builder_->createBinOp(spv::OpDot, type_float_, d, d);
+    };
+    spv::Id e12 = edge_len2(pos1, pos2);
+    spv::Id e20 = edge_len2(pos2, pos0);
+    spv::Id e01 = edge_len2(pos0, pos1);
+    spv::Id e12_longest = builder_->createBinOp(
+        spv::OpLogicalAnd, type_bool_,
+        builder_->createBinOp(spv::OpFOrdGreaterThanEqual, type_bool_, e12, e20),
+        builder_->createBinOp(spv::OpFOrdGreaterThanEqual, type_bool_, e12,
+                              e01));
+    spv::Id e20_ge_e01 = builder_->createBinOp(spv::OpFOrdGreaterThanEqual,
+                                               type_bool_, e20, e01);
+    auto rot = [&](int if12, int else20, int else01) -> spv::Id {
+      return builder_->createTriOp(
+          spv::OpSelect, type_int_, e12_longest, builder_->makeIntConstant(if12),
+          builder_->createTriOp(spv::OpSelect, type_int_, e20_ge_e01,
+                                builder_->makeIntConstant(else20),
+                                builder_->makeIntConstant(else01)));
+    };
+    spv::Id rot0 = rot(0, 1, 2);
+    spv::Id rot1 = rot(1, 2, 0);
+    spv::Id rot2 = rot(2, 0, 1);
+    // Real corner -> the rotated guest vertex for this strip slot (0..2).
+    spv::Id mapped = builder_->createTriOp(
+        spv::OpSelect, type_int_,
+        builder_->createBinOp(spv::OpIEqual, type_bool_, host_vertex,
+                              const_int_0_),
+        rot0,
+        builder_->createTriOp(
+            spv::OpSelect, type_int_,
+            builder_->createBinOp(spv::OpIEqual, type_bool_, host_vertex,
+                                  builder_->makeIntConstant(1)),
+            rot1, rot2));
+    // 4th vertex = -slot0 + slot1 + slot2 in rotated order.
     auto synthesize = [&](spv::Id storage) -> spv::Id {
-      spv::Id v0 = load_captured(storage, const_int_0_);
-      spv::Id v1 = load_captured(storage, builder_->makeIntConstant(1));
-      spv::Id v2 = load_captured(storage, builder_->makeIntConstant(2));
+      spv::Id a = load_captured(storage, rot0);
+      spv::Id b = load_captured(storage, rot1);
+      spv::Id c = load_captured(storage, rot2);
       return builder_->createBinOp(
           spv::OpFSub, type_float4_,
-          builder_->createBinOp(spv::OpFAdd, type_float4_, v1, v2), v0);
+          builder_->createBinOp(spv::OpFAdd, type_float4_, b, c), a);
     };
     // Position.
     {
       spv::Id selected = builder_->createTriOp(
           spv::OpSelect, type_float4_, is_synthesized,
           synthesize(var_main_rectangle_positions_),
-          load_captured(var_main_rectangle_positions_, real_index));
+          load_captured(var_main_rectangle_positions_, mapped));
       id_vector_temp_.clear();
       id_vector_temp_.push_back(
           builder_->makeIntConstant(kOutputPerVertexMemberPosition));
@@ -2007,7 +2054,7 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       spv::Id selected = builder_->createTriOp(
           spv::OpSelect, type_float4_, is_synthesized,
           synthesize(var_main_rectangle_interpolators_[i]),
-          load_captured(var_main_rectangle_interpolators_[i], real_index));
+          load_captured(var_main_rectangle_interpolators_[i], mapped));
       builder_->createStore(selected, input_output_interpolators_[i]);
     }
   }
