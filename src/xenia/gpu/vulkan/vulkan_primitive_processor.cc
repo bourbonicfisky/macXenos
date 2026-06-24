@@ -28,10 +28,16 @@ bool VulkanPrimitiveProcessor::Initialize() {
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       vulkan_device->properties();
+  // Metal (MoltenVK) cannot disable primitive restart, so the maximum index
+  // value is always treated as a restart - the primitive processor must widen
+  // 16-bit "list" index buffers that use 0xFFFF as a real vertex index to 32-bit.
+  const bool host_primitive_reset_always_enabled =
+      device_properties.driverID == VK_DRIVER_ID_MOLTENVK;
   if (!InitializeCommon(
           device_properties.fullDrawIndexUint32, device_properties.triangleFans,
           false, device_properties.geometryShader,
-          device_properties.geometryShader, device_properties.geometryShader)) {
+          device_properties.geometryShader, device_properties.geometryShader,
+          host_primitive_reset_always_enabled)) {
     Shutdown();
     return false;
   }

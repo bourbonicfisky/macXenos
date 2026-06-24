@@ -257,7 +257,8 @@ class PrimitiveProcessor {
                         bool triangle_fans_supported, bool line_loops_supported,
                         bool quad_lists_supported,
                         bool point_sprites_supported_without_vs_expansion,
-                        bool rectangle_lists_supported_without_vs_expansion);
+                        bool rectangle_lists_supported_without_vs_expansion,
+                        bool host_primitive_reset_always_enabled = false);
   // If any primitive type conversion is needed for auto-indexed draws, called
   // from InitializeCommon (thus only once in the primitive processor's
   // lifetime) to set up the backend's index buffer containing indices for
@@ -407,6 +408,13 @@ class PrimitiveProcessor {
   static void ReplaceResetIndex16To24(uint32_t* dest, const uint16_t* source,
                                       uint32_t count,
                                       uint16_t reset_index_guest_endian);
+  // Pure zero-extending widening of 16-bit indices to 32-bit, preserving every
+  // value (no endian swap, no masking, no reset replacement - mirrors the
+  // value-preserving behavior of the 16->32 conversions above). Used on hosts
+  // that cannot disable primitive restart (Metal) so a real 0xFFFF index
+  // becomes 0x0000FFFF rather than colliding with the 32-bit restart sentinel.
+  static void WidenIndices16To32(uint32_t* dest, const uint16_t* source,
+                                 uint32_t count);
   // The reset index and the low 24 bits mask are taken explicitly because this
   // function may be used two ways:
   // - Passthrough - when the vertex shader swaps the indices (when 32-bit
@@ -701,6 +709,13 @@ class PrimitiveProcessor {
   bool convert_quad_lists_to_triangle_lists_ = false;
   bool expand_point_sprites_in_vs_ = false;
   bool expand_rectangle_lists_in_vs_ = false;
+  // True on hosts that cannot disable primitive restart (Metal/MoltenVK), where
+  // the maximum index value (0xFFFF for 16-bit, 0xFFFFFFFF for 32-bit) is always
+  // treated as a primitive restart. A real 0xFFFF vertex index in a 16-bit "list"
+  // (reset-disabled) index buffer would then be misinterpreted as a restart and
+  // drop the primitive, so such buffers are widened to 32-bit (0xFFFF -> 0x0000FFFF,
+  // which is never the 32-bit restart sentinel).
+  bool host_primitive_reset_always_enabled_ = false;
 
   // Byte offsets used, for simplicity, directly as handles.
   size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;
