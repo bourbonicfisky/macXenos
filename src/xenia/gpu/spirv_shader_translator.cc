@@ -1528,8 +1528,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
     spv::Id memexport_allowed_for_host_vertex_of_guest_primitive =
         spv::NoResult;
     if (shader_modification.vertex.host_vertex_shader_type ==
-        Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
-      // Only for one host vertex for the point.
+            Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
+        main_rectangle_vs_expansion_) {
+      // Only for one host vertex of the guest primitive: host strip vertex 0
+      // (low 2 bits of gl_VertexIndex == 0). For point lists this is the single
+      // guest vertex; for rectangle lists the surrounding loop then runs the
+      // guest program 3x at this host vertex, exporting each of the 3 real
+      // rectangle vertices exactly once (the synthesized 4th vertex is computed
+      // in the merge block and never runs the guest program, so it cannot
+      // export).
       memexport_allowed_for_host_vertex_of_guest_primitive =
           builder_->createBinOp(
               spv::OpIEqual, type_bool_,
