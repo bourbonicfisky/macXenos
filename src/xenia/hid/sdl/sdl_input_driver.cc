@@ -201,6 +201,18 @@ void SDLInputDriver::LoadGameControllerDB() {
     std::string mapping_str =
         std::accumulate(row.begin(), row.end(), std::string{}, format);
 
+    // Capture SDL's built-in mapping for this GUID *before* applying the user
+    // override, so "Reset to default" can restore it even after a restart
+    // (when the override has already been loaded from disk).
+    if (builtin_mappings_.find(guid) == builtin_mappings_.end()) {
+      char* builtin = SDL_GameControllerMappingForGUID(
+          SDL_JoystickGetGUIDFromString(guid.c_str()));
+      if (builtin) {
+        builtin_mappings_[guid] = builtin;
+        SDL_free(builtin);
+      }
+    }
+
     int updated = SDL_GameControllerAddMapping(mapping_str.c_str());
 
     switch (updated) {
@@ -693,18 +705,33 @@ bool SDLInputDriver::ResetMapping(uint32_t user_index) {
   if (user_index >= controllers_.size() || !controllers_.at(user_index).sdl) {
     return false;
   }
-  const std::string original = original_mapping_.at(user_index);
-  if (original.empty()) {
-    return true;  // never rebound this session
+  SDL_GameController* gc = controllers_.at(user_index).sdl;
+
+  // GUID of this controller.
+  char guid_str[33] = {};
+  SDL_JoystickGetGUIDString(
+      SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(gc)), guid_str,
+      sizeof(guid_str));
+  const std::string guid(guid_str);
+
+  // Prefer SDL's built-in mapping captured at load (survives restart); fall
+  // back to the baseline captured before the first rebind this session.
+  std::string default_mapping;
+  auto builtin = builtin_mappings_.find(guid);
+  if (builtin != builtin_mappings_.end()) {
+    default_mapping = builtin->second;
+  } else if (!original_mapping_.at(user_index).empty()) {
+    default_mapping = original_mapping_.at(user_index);
   }
-  if (SDL_GameControllerAddMapping(original.c_str()) < 0) {
+  if (default_mapping.empty()) {
+    // Nothing customized that we can revert.
     return false;
   }
-  std::string guid, name;
-  std::vector<std::pair<std::string, std::string>> entries;
-  if (ParseMapping(original, &guid, &name, &entries)) {
-    WriteUserMapping(guid, nullptr);
+  if (SDL_GameControllerAddMapping(default_mapping.c_str()) < 0) {
+    return false;
   }
+  // Drop the persisted user override so the default also applies next launch.
+  WriteUserMapping(guid, nullptr);
   original_mapping_.at(user_index).clear();
   controllers_.at(user_index).state_changed = true;
   return true;

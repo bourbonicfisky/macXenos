@@ -14,6 +14,8 @@
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 #include "SDL.h"
 #include "third_party/rapidcsv/src/rapidcsv.h"
@@ -109,6 +111,9 @@ class SDLInputDriver final : public InputDriver {
   // SDL mapping string captured before the first user rebind of a slot, so
   // ResetMapping can restore the as-loaded mapping.
   std::array<std::string, HID_SDL_USER_COUNT> original_mapping_ = {};
+  // SDL's built-in mapping per GUID, captured at DB load before user overrides
+  // are applied, so ResetMapping can restore the true default across restarts.
+  std::unordered_map<std::string, std::string> builtin_mappings_;
 
   bool sdl_events_initialized_;
   bool sdl_gamecontroller_initialized_;
