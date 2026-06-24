@@ -3436,31 +3436,36 @@ void VulkanPipelineCache::InitializeShaderStorage(
   }
 }
 
-void VulkanPipelineCache::ShutdownShaderStorage() {
-  // Save VkPipelineCache to disk before shutting down storage.
-  if (vk_pipeline_cache_ != VK_NULL_HANDLE &&
-      !vk_pipeline_cache_path_.empty()) {
-    const ui::vulkan::VulkanDevice* const vulkan_device =
-        command_processor_.GetVulkanDevice();
-    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-    const VkDevice device = vulkan_device->device();
+void VulkanPipelineCache::SaveVkPipelineCache() {
+  // Save VkPipelineCache (the MoltenVK warm-compile blob) to disk.
+  if (vk_pipeline_cache_ == VK_NULL_HANDLE || vk_pipeline_cache_path_.empty()) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
 
-    size_t cache_size = 0;
+  size_t cache_size = 0;
+  if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
+                                 nullptr) == VK_SUCCESS &&
+      cache_size > 0) {
+    std::vector<uint8_t> cache_data(cache_size);
     if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
-                                   nullptr) == VK_SUCCESS &&
-        cache_size > 0) {
-      std::vector<uint8_t> cache_data(cache_size);
-      if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
-                                     cache_data.data()) == VK_SUCCESS) {
-        if (FILE* cache_file =
-                xe::filesystem::OpenFile(vk_pipeline_cache_path_, "wb")) {
-          fwrite(cache_data.data(), 1, cache_size, cache_file);
-          fclose(cache_file);
-          XELOGI("Saved {} bytes of VkPipelineCache data", cache_size);
-        }
+                                   cache_data.data()) == VK_SUCCESS) {
+      if (FILE* cache_file =
+              xe::filesystem::OpenFile(vk_pipeline_cache_path_, "wb")) {
+        fwrite(cache_data.data(), 1, cache_size, cache_file);
+        fclose(cache_file);
+        XELOGI("Saved {} bytes of VkPipelineCache data", cache_size);
       }
     }
   }
+}
+
+void VulkanPipelineCache::ShutdownShaderStorage() {
+  // Save VkPipelineCache to disk before shutting down storage.
+  SaveVkPipelineCache();
   vk_pipeline_cache_path_.clear();
 
   // Shut down the storage writer (closes files, stops write thread).

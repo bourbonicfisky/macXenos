@@ -1139,6 +1139,12 @@ bool VulkanCommandProcessor::SetupContext() {
   return true;
 }
 
+void VulkanCommandProcessor::SaveShaderStorageToDisk() {
+  if (pipeline_cache_) {
+    pipeline_cache_->SaveVkPipelineCache();
+  }
+}
+
 void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 

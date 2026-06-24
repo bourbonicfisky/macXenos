@@ -110,6 +110,11 @@ class VulkanPipelineCache {
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
       std::function<void()> completion_callback = nullptr);
   void ShutdownShaderStorage();
+  // Serializes the host VkPipelineCache (the MoltenVK warm-compile blob) to its
+  // on-disk path. Safe to call while the title is running as long as the command
+  // processor worker is quiesced (e.g. after GraphicsSystem::Pause), so the warm
+  // cache can be persisted on the "cheap-skate" app exit that skips destructors.
+  void SaveVkPipelineCache();
 
   void EndSubmission();
   bool IsCreatingPipelines();

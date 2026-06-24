@@ -47,6 +47,8 @@
 #endif  // XE_PLATFORM_WIN32
 
 // Available graphics systems:
+#include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/null/null_graphics_system.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #if XE_PLATFORM_WIN32
@@ -566,6 +568,20 @@ void EmulatorApp::OnDestroy() {
 
   // Write all cvar overrides to the config.
   config::SaveConfig();
+
+  // Persist the host shader/pipeline cache (notably the MoltenVK VkPipelineCache
+  // warm-compile blob) before the cheap-skate exit below - std::quick_exit skips
+  // destructors, so the normal shutdown that writes it never runs, and every run
+  // would recompile pipelines from cold. Pause the GPU first so the cache can be
+  // serialized without racing the command processor worker.
+  if (emulator_) {
+    if (auto* graphics_system = emulator_->graphics_system()) {
+      graphics_system->Pause();
+      if (auto* command_processor = graphics_system->command_processor()) {
+        command_processor->SaveShaderStorageToDisk();
+      }
+    }
+  }
 
   // TODO(DrChat): Remove this code and do a proper exit.
   XELOGI("Cheap-skate exit!");

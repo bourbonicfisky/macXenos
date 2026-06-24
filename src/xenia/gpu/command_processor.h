@@ -134,6 +134,12 @@ class CommandProcessor {
   virtual bool Initialize();
   virtual void Shutdown();
 
+  // Persists any host shader/pipeline cache to disk without a full shutdown, so
+  // it survives the app's "cheap-skate" exit (which skips destructors). The
+  // caller must quiesce this command processor first (GraphicsSystem::Pause).
+  // Default no-op; backends that keep an on-disk host cache override this.
+  virtual void SaveShaderStorageToDisk() {}
+
   void CallInThread(std::function<void()> fn);
 
   virtual void ClearCaches();
