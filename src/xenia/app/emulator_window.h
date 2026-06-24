@@ -100,9 +100,16 @@ class EmulatorWindow {
   void ToggleConsoleSettingsDialog();
   void ToggleControllerConfigDialog();
 
-  // Human-readable descriptions of the controller hotkeys, for display in the
-  // controller UI (read-only reference).
-  std::vector<std::string> GetControllerHotkeyDescriptions() const;
+  // A controller hotkey for display/toggling in the controller UI.
+  struct ControllerHotkeyInfo {
+    int function;  // ButtonFunctions value
+    std::string description;
+    bool enabled;
+  };
+  // Controller hotkeys (deduplicated by function) for the controller UI.
+  std::vector<ControllerHotkeyInfo> GetControllerHotkeys() const;
+  // Enables/disables a hotkey by ButtonFunctions value and persists the choice.
+  void SetControllerHotkeyEnabled(int function, bool enabled);
 
   void SetHotkeysState(bool enabled) { disable_hotkeys_ = !enabled; }
 

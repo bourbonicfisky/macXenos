@@ -9,6 +9,8 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include <set>
+
 #include "third_party/imgui/imgui.h"
 #include "third_party/stb/stb_image_write.h"
 #if defined(__clang__)
@@ -25,6 +27,9 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/string_util.h"
+#include "xenia/base/utf8.h"
+#include "xenia/config.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -69,6 +74,11 @@ DEFINE_bool(fullscreen, false, "Whether to launch the emulator in fullscreen.",
 
 DEFINE_bool(controller_hotkeys, false, "Hotkeys for Xbox and PS controllers.",
             "General");
+
+DEFINE_string(disabled_controller_hotkeys, "",
+              "Comma-separated controller-hotkey function ids the user has "
+              "disabled (managed by the Controllers UI).",
+              "HID");
 
 DEFINE_string(
     postprocess_antialiasing, "",
@@ -1841,16 +1851,58 @@ const std::map<int, EmulatorWindow::ControllerHotKey> controller_hotkey_map = {
          EmulatorWindow::ButtonFunctions::DecTitleSelect,
          "D-PAD Up = Title Selection -1", true, false)}};
 
-std::vector<std::string> EmulatorWindow::GetControllerHotkeyDescriptions()
-    const {
-  std::vector<std::string> descriptions;
-  descriptions.reserve(controller_hotkey_map.size());
-  for (const auto& [buttons, hotkey] : controller_hotkey_map) {
-    if (!hotkey.pretty.empty()) {
-      descriptions.push_back(hotkey.pretty);
+namespace {
+// The set of ButtonFunctions ids the user has disabled, parsed from the
+// comma-separated cvar.
+std::set<int> ParseDisabledHotkeys() {
+  std::set<int> disabled;
+  for (const std::string_view token :
+       utf8::split(cvars::disabled_controller_hotkeys, ",", true)) {
+    if (token.empty()) {
+      continue;
     }
+    disabled.insert(string_util::from_string<int>(token, false));
   }
-  return descriptions;
+  return disabled;
+}
+
+std::string SerializeDisabledHotkeys(const std::set<int>& disabled) {
+  std::string out;
+  for (int function : disabled) {
+    if (!out.empty()) {
+      out += ",";
+    }
+    out += std::to_string(function);
+  }
+  return out;
+}
+}  // namespace
+
+std::vector<EmulatorWindow::ControllerHotkeyInfo>
+EmulatorWindow::GetControllerHotkeys() const {
+  const std::set<int> disabled = ParseDisabledHotkeys();
+  std::vector<ControllerHotkeyInfo> hotkeys;
+  std::set<int> seen_functions;
+  for (const auto& [buttons, hotkey] : controller_hotkey_map) {
+    const int function = static_cast<int>(hotkey.function);
+    if (hotkey.pretty.empty() || !seen_functions.insert(function).second) {
+      continue;
+    }
+    hotkeys.push_back(
+        {function, hotkey.pretty, disabled.find(function) == disabled.end()});
+  }
+  return hotkeys;
+}
+
+void EmulatorWindow::SetControllerHotkeyEnabled(int function, bool enabled) {
+  std::set<int> disabled = ParseDisabledHotkeys();
+  if (enabled) {
+    disabled.erase(function);
+  } else {
+    disabled.insert(function);
+  }
+  OVERRIDE_string(disabled_controller_hotkeys, SerializeDisabledHotkeys(disabled));
+  config::SaveConfig();
 }
 
 EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
@@ -1881,6 +1933,13 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
 
   auto it = controller_hotkey_map.find(buttons);
   if (it == controller_hotkey_map.end()) {
+    return Unknown_hotkey;
+  }
+
+  // Skip hotkeys the user has disabled in the Controllers UI.
+  const std::set<int> disabled_hotkeys = ParseDisabledHotkeys();
+  if (disabled_hotkeys.find(static_cast<int>(it->second.function)) !=
+      disabled_hotkeys.end()) {
     return Unknown_hotkey;
   }
 

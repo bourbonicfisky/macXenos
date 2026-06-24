@@ -146,12 +146,16 @@ void ControllerConfigDialog::DrawHotkeys() {
     }
   }
 
-  ImGui::TextDisabled("Controller hotkeys (hold Guide + the button):");
-  for (const auto& description :
-       emulator_window_.GetControllerHotkeyDescriptions()) {
-    ImGui::BulletText("%s", description.c_str());
+  ImGui::TextDisabled(
+      "Controller hotkeys (hold Guide + the button). Uncheck to disable:");
+  for (const auto& hotkey : emulator_window_.GetControllerHotkeys()) {
+    bool enabled = hotkey.enabled;
+    ImGui::PushID(hotkey.function);
+    if (ImGui::Checkbox(hotkey.description.c_str(), &enabled)) {
+      emulator_window_.SetControllerHotkeyEnabled(hotkey.function, enabled);
+    }
+    ImGui::PopID();
   }
-  ImGui::TextDisabled("These hotkeys are not yet editable from this screen.");
 }
 
 void ControllerConfigDialog::OnDraw(ImGuiIO& io) {
