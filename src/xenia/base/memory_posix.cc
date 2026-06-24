@@ -267,6 +267,42 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+#if XE_PLATFORM_MAC
+  // macOS has no /proc/self/maps; query the kernel's VM map via mach_vm_region.
+  // (The Linux path below would silently fail on macOS and leave access_out
+  // uninitialized.)
+  mach_vm_address_t region_address =
+      reinterpret_cast<mach_vm_address_t>(base_address);
+  mach_vm_size_t region_size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name = MACH_PORT_NULL;
+  kern_return_t kr = mach_vm_region(
+      mach_task_self(), &region_address, &region_size, VM_REGION_BASIC_INFO_64,
+      reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+  // mach_vm_region returns the region containing the address, or the next region
+  // above it if the address lies in an unmapped hole.
+  if (kr != KERN_SUCCESS ||
+      region_address > reinterpret_cast<mach_vm_address_t>(base_address)) {
+    // base_address is not within any mapped region.
+    access_out = PageAccess::kNoAccess;
+    return false;
+  }
+  vm_prot_t protection = info.protection;
+  if (!(protection & VM_PROT_READ)) {
+    access_out = PageAccess::kNoAccess;
+  } else if (protection & VM_PROT_EXECUTE) {
+    access_out = (protection & VM_PROT_WRITE) ? PageAccess::kExecuteReadWrite
+                                              : PageAccess::kExecuteReadOnly;
+  } else {
+    access_out = (protection & VM_PROT_WRITE) ? PageAccess::kReadWrite
+                                              : PageAccess::kReadOnly;
+  }
+  length = static_cast<size_t>(
+      (region_address + region_size) -
+      reinterpret_cast<mach_vm_address_t>(base_address));
+  return true;
+#else
   // No generic POSIX solution exists. The Linux solution should work on all
   // Linux kernel based OS, including Android.
   std::ifstream memory_maps;
@@ -312,6 +348,7 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 
   memory_maps.close();
   return false;
+#endif  // XE_PLATFORM_MAC
 }
 
 // POSIX shared-memory object name for a mapping path. macOS limits these names
