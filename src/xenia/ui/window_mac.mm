@@ -21,6 +21,10 @@
   xe::ui::MacWindow* window_;
 }
 - (instancetype)initWithWindow:(xe::ui::MacWindow*)window;
+// Standard application-menu actions. Routed through the delegate (already
+// retained for the window's lifetime) so the app menu needs no extra owner.
+- (void)quit:(id)sender;
+- (void)openAbout:(id)sender;
 @end
 
 @implementation XeniaWindowDelegate
@@ -30,6 +34,16 @@
     window_ = window;
   }
   return self;
+}
+- (void)quit:(id)sender {
+  // Same clean close path as the cross-platform File>Exit item.
+  if (window_) {
+    window_->RequestClose();
+  }
+}
+- (void)openAbout:(id)sender {
+  [[NSWorkspace sharedWorkspace]
+      openURL:[NSURL URLWithString:@"https://xenia.jp/about/"]];
 }
 - (void)windowDidResize:(NSNotification*)notification {
   window_->HandleResize();
@@ -116,6 +130,28 @@
 }
 @end
 
+// Bridges a native NSMenuItem target/action to a stored C++ callback. Each
+// kString MacMenuItem owns one of these (retained), wiring the menu click to
+// the cross-platform MenuItem::OnSelected.
+@interface XeniaMenuTarget : NSObject {
+ @public
+  std::function<void()> action;
+}
+- (void)invoke:(id)sender;
+@end
+
+@implementation XeniaMenuTarget
+- (void)invoke:(id)sender {
+  // Copy onto the stack first: the action may synchronously tear down the
+  // owning MenuItem (and thus this target), as the cross-platform contract for
+  // OnSelected warns.
+  std::function<void()> fn = action;
+  if (fn) {
+    fn();
+  }
+}
+@end
+
 namespace xe {
 namespace ui {
 
@@ -185,6 +221,76 @@ VirtualKey TranslateMacKeyCode(uint16_t key_code) {
   }
 }
 
+// Strips Windows-style '&' mnemonic markers for native display, collapsing the
+// literal "&&" escape to a single '&' (mirrors the Win32/GTK convention).
+NSString* MakeNativeMenuTitle(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '&') {
+      if (i + 1 < text.size() && text[i + 1] == '&') {
+        out.push_back('&');
+        ++i;
+      }
+      // Otherwise drop the mnemonic marker.
+    } else {
+      out.push_back(text[i]);
+    }
+  }
+  return [NSString stringWithUTF8String:out.c_str()];
+}
+
+// Builds the standard macOS application menu (the first, app-named menu) with
+// About / Hide / Quit. Quit and About route through the window delegate; the
+// Hide/Show items use the standard NSApplication responder-chain selectors.
+NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
+  NSMenuItem* app_item = [[NSMenuItem alloc] init];
+  NSMenu* app_menu = [[NSMenu alloc] initWithTitle:@""];
+  app_menu.autoenablesItems = NO;
+
+  NSString* app_name = [[NSProcessInfo processInfo] processName];
+
+  NSMenuItem* about =
+      [[NSMenuItem alloc] initWithTitle:[@"About " stringByAppendingString:app_name]
+                                 action:@selector(openAbout:)
+                          keyEquivalent:@""];
+  about.target = delegate;
+  [app_menu addItem:about];
+  [app_menu addItem:[NSMenuItem separatorItem]];
+
+  NSMenuItem* hide =
+      [[NSMenuItem alloc] initWithTitle:[@"Hide " stringByAppendingString:app_name]
+                                 action:@selector(hide:)
+                          keyEquivalent:@"h"];
+  [app_menu addItem:hide];
+  NSMenuItem* hide_others =
+      [[NSMenuItem alloc] initWithTitle:@"Hide Others"
+                                 action:@selector(hideOtherApplications:)
+                          keyEquivalent:@"h"];
+  hide_others.keyEquivalentModifierMask =
+      NSEventModifierFlagCommand | NSEventModifierFlagOption;
+  [app_menu addItem:hide_others];
+  [app_menu addItem:[[NSMenuItem alloc] initWithTitle:@"Show All"
+                                               action:@selector(unhideAllApplications:)
+                                        keyEquivalent:@""]];
+  [app_menu addItem:[NSMenuItem separatorItem]];
+
+  NSMenuItem* quit =
+      [[NSMenuItem alloc] initWithTitle:[@"Quit " stringByAppendingString:app_name]
+                                 action:@selector(quit:)
+                          keyEquivalent:@"q"];
+  if (delegate) {
+    quit.target = delegate;
+  } else {
+    // Fallback if the delegate isn't available yet: standard termination.
+    quit.action = @selector(terminate:);
+  }
+  [app_menu addItem:quit];
+
+  app_item.submenu = app_menu;
+  return app_item;
+}
+
 }  // namespace
 
 std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
@@ -200,6 +306,115 @@ std::unique_ptr<MenuItem> MenuItem::Create(Type type, const std::string& text,
                                            std::function<void()> callback) {
   return std::make_unique<MacMenuItem>(type, text, hotkey, callback);
 }
+
+MacMenuItem::MacMenuItem(Type type, const std::string& text,
+                         const std::string& hotkey,
+                         std::function<void()> callback)
+    : MenuItem(type, text, hotkey, std::move(callback)) {
+  @autoreleasepool {
+    NSString* title = MakeNativeMenuTitle(text);
+    switch (type) {
+      case Type::kNormal: {
+        // Root container: the menu bar itself.
+        NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
+        menu.autoenablesItems = NO;
+        ns_menu_ = (__bridge_retained void*)menu;
+        break;
+      }
+      case Type::kPopup: {
+        // A top-level/submenu title carrying its own NSMenu of children.
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title
+                                                      action:nil
+                                               keyEquivalent:@""];
+        NSMenu* submenu = [[NSMenu alloc] initWithTitle:title];
+        submenu.autoenablesItems = NO;
+        item.submenu = submenu;
+        ns_menu_item_ = (__bridge_retained void*)item;
+        ns_menu_ = (__bridge_retained void*)submenu;
+        break;
+      }
+      case Type::kSeparator: {
+        ns_menu_item_ = (__bridge_retained void*)[NSMenuItem separatorItem];
+        break;
+      }
+      case Type::kString: {
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title
+                                                      action:nil
+                                               keyEquivalent:@""];
+        // Bridge the native action to the stored C++ callback. Deliberately no
+        // keyEquivalent for cross-platform items: existing HandleKeyEvent stays
+        // the source of truth for shortcuts, so menu items don't double-fire or
+        // steal keystrokes. The shortcut text is rendered for discoverability.
+        XeniaMenuTarget* target = [[XeniaMenuTarget alloc] init];
+        MacMenuItem* owner = this;
+        target->action = [owner]() { owner->OnSelected(); };
+        item.target = target;
+        item.action = @selector(invoke:);
+        if (!hotkey.empty()) {
+          NSString* shortcut =
+              [NSString stringWithUTF8String:hotkey.c_str()];
+          NSString* full =
+              [NSString stringWithFormat:@"%@\t%@", title, shortcut];
+          item.attributedTitle = [[NSAttributedString alloc] initWithString:full];
+        }
+        target_ = (__bridge_retained void*)target;
+        ns_menu_item_ = (__bridge_retained void*)item;
+        break;
+      }
+    }
+  }
+}
+
+MacMenuItem::~MacMenuItem() {
+  @autoreleasepool {
+    if (ns_menu_) {
+      NSMenu* menu = (__bridge_transfer NSMenu*)ns_menu_;
+      ns_menu_ = nullptr;
+      (void)menu;
+    }
+    if (ns_menu_item_) {
+      NSMenuItem* item = (__bridge_transfer NSMenuItem*)ns_menu_item_;
+      ns_menu_item_ = nullptr;
+      (void)item;
+    }
+    if (target_) {
+      XeniaMenuTarget* target = (__bridge_transfer XeniaMenuTarget*)target_;
+      target_ = nullptr;
+      (void)target;
+    }
+  }
+}
+
+void MacMenuItem::SetEnabled(bool enabled) {
+  @autoreleasepool {
+    // Mirror Win32MenuItem: apply to the items shown in this menu. For the root
+    // menu these are the top-level titles, matching SetMainMenuEnabled.
+    NSMenu* menu = (__bridge NSMenu*)ns_menu_;
+    if (!menu) {
+      return;
+    }
+    for (NSMenuItem* item in menu.itemArray) {
+      item.enabled = enabled ? YES : NO;
+    }
+  }
+}
+
+void MacMenuItem::OnChildAdded(MenuItem* generic_child_item) {
+  @autoreleasepool {
+    auto child = static_cast<MacMenuItem*>(generic_child_item);
+    // Container is the NSMenu of a kNormal root or a kPopup submenu.
+    NSMenu* menu = (__bridge NSMenu*)ns_menu_;
+    if (!menu || child->type() == Type::kNormal) {
+      return;
+    }
+    NSMenuItem* item = (__bridge NSMenuItem*)child->ns_menu_item();
+    if (item) {
+      [menu addItem:item];
+    }
+  }
+}
+
+void MacMenuItem::OnChildRemoved(MenuItem* generic_child_item) {}
 
 MacWindow::~MacWindow() {
   EnterDestructor();
@@ -257,6 +472,10 @@ bool MacWindow::OpenImpl() {
     [window setTitle:[NSString stringWithUTF8String:std::string(GetTitle())
                                                         .c_str()]];
     [window setReleasedWhenClosed:NO];
+    // Permit native (Spaces) fullscreen so the cross-platform fullscreen toggle
+    // and the green title-bar button work; see ApplyNewFullscreen.
+    window.collectionBehavior =
+        window.collectionBehavior | NSWindowCollectionBehaviorFullScreenPrimary;
     // Deliver mouseMoved: to the first responder so ImGui gets hover updates
     // (menu highlight, etc.), not just clicks/drags.
     [window setAcceptsMouseMovedEvents:YES];
@@ -300,6 +519,52 @@ void MacWindow::ApplyNewTitle() {
     [window setTitle:[NSString stringWithUTF8String:std::string(GetTitle())
                                                         .c_str()]];
   }
+}
+
+void MacWindow::ApplyNewFullscreen() {
+  // Reconcile the native window state with the desired IsFullscreen() (this hook
+  // means "make native match desired", so toggle only when they differ — robust
+  // to redundant applies). macOS auto-hides/reveals the menu bar in native
+  // fullscreen, so unlike GTK the menu needs no detaching here.
+  NSWindow* window = (__bridge NSWindow*)window_;
+  if (!window) {
+    return;
+  }
+  bool native_fullscreen =
+      ([window styleMask] & NSWindowStyleMaskFullScreen) != 0;
+  if (native_fullscreen != IsFullscreen()) {
+    [window toggleFullScreen:nil];
+  }
+}
+
+void MacWindow::ApplyNewMainMenu(MenuItem* old_main_menu) {
+  // The macOS menu bar is app-global (NSApp.mainMenu); applied here from the
+  // single emulator window that owns the menu. Runs on the UI thread, which is
+  // the main thread on macOS (where AppKit requires menu mutation).
+  @autoreleasepool {
+    auto* main_menu = static_cast<MacMenuItem*>(GetMainMenu());
+    NSMenu* bar = main_menu ? (__bridge NSMenu*)main_menu->ns_menu() : nil;
+    if (!bar) {
+      [NSApp setMainMenu:[[NSMenu alloc] initWithTitle:@""]];
+      return;
+    }
+    // Prepend the standard application menu once. Tagged so repeated applies
+    // (e.g. via CompleteMainMenuItemsUpdate) don't insert duplicates.
+    static const NSInteger kAppMenuTag = 0x58454E49;  // 'XENI'
+    if (bar.numberOfItems == 0 || [bar itemAtIndex:0].tag != kAppMenuTag) {
+      NSMenuItem* app_item =
+          CreateApplicationMenuItem((__bridge XeniaWindowDelegate*)delegate_);
+      app_item.tag = kAppMenuTag;
+      [bar insertItem:app_item atIndex:0];
+    }
+    [NSApp setMainMenu:bar];
+  }
+}
+
+void MacWindow::CompleteMainMenuItemsUpdateImpl() {
+  // Item state (enabled flags, titles) is reflected live on the NSMenu objects,
+  // so no rebuild is required; ensure the bar is installed.
+  ApplyNewMainMenu(GetMainMenu());
 }
 
 std::unique_ptr<Surface> MacWindow::CreateSurfaceImpl(

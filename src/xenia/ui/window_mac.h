@@ -55,7 +55,15 @@ class MacWindow : public Window {
   bool OpenImpl() override;
   void RequestCloseImpl() override;
   void ApplyNewTitle() override;
+  void ApplyNewFullscreen() override;
   void FocusImpl() override;
+
+  // Builds the native NSMenu tree from GetMainMenu() and installs it as the
+  // app-global NSApp.mainMenu (prepending a standard application menu). The
+  // macOS menu bar is global rather than per-window; with the single-window
+  // emulator this is applied from the window that owns the menu.
+  void ApplyNewMainMenu(MenuItem* old_main_menu) override;
+  void CompleteMainMenuItemsUpdateImpl() override;
 
   std::unique_ptr<Surface> CreateSurfaceImpl(
       Surface::TypeFlags allowed_types) override;
@@ -76,13 +84,33 @@ class MacWindow : public Window {
   void* delegate_ = nullptr;   // XeniaWindowDelegate*
 };
 
-// Menus are not yet implemented on macOS; this is a no-op placeholder mirroring
-// AndroidMenuItem.
+// Native macOS menu backing. Mirrors Win32MenuItem / GTKMenuItem: each node
+// eagerly builds its native objects in the constructor and appends children as
+// the cross-platform tree is assembled. kNormal/kPopup own an NSMenu; the item
+// shown in the parent's NSMenu is the NSMenuItem (a separator, a leaf, or the
+// submenu carrier for a popup).
 class MacMenuItem final : public MenuItem {
  public:
   MacMenuItem(Type type, const std::string& text, const std::string& hotkey,
-              std::function<void()> callback)
-      : MenuItem(type, text, hotkey, callback) {}
+              std::function<void()> callback);
+  ~MacMenuItem() override;
+
+  // Opaque Objective-C pointers (this header is included from plain C++ too).
+  void* ns_menu() const { return ns_menu_; }            // NSMenu*
+  void* ns_menu_item() const { return ns_menu_item_; }  // NSMenuItem*
+
+  void SetEnabled(bool enabled) override;
+
+  using MenuItem::OnSelected;
+
+ protected:
+  void OnChildAdded(MenuItem* child_item) override;
+  void OnChildRemoved(MenuItem* child_item) override;
+
+ private:
+  void* ns_menu_ = nullptr;       // NSMenu* (retained) for kNormal/kPopup
+  void* ns_menu_item_ = nullptr;  // NSMenuItem* (retained) for popup/leaf/sep
+  void* target_ = nullptr;        // XeniaMenuTarget* (retained) for kString
 };
 
 }  // namespace ui
