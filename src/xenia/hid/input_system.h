@@ -60,6 +60,18 @@ class InputSystem {
   // a controller driver performed the move.
   bool ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot);
 
+  // Device-mapping rebind forwards to the controller drivers (see InputDriver).
+  // Callers should hold lock() around these.
+  bool BeginControllerInputCapture(uint32_t user_index);
+  void CancelControllerInputCapture();
+  bool PollControllerInputCapture(std::string* out_binding);
+  std::string GetControllerOutputBinding(uint32_t user_index,
+                                         const std::string& sdl_output);
+  bool RebindControllerOutput(uint32_t user_index,
+                              const std::string& sdl_output,
+                              const std::string& binding);
+  bool ResetControllerMapping(uint32_t user_index);
+
   const std::bitset<XUserMaxUserCount> GetConnectedSlots() const {
     return connected_slots;
   }

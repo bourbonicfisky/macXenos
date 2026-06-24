@@ -81,6 +81,31 @@ class InputDriver {
     return false;
   }
 
+  // Device-mapping rebind, for UI that lets the user remap a controller's
+  // physical buttons. SDL-style binding tokens are used (e.g. "b3" for a
+  // button). All default to unsupported.
+  //
+  // BeginInputCapture: start listening for the next physical input on the
+  //   controller in user_index. Returns true if capture started.
+  // PollCapturedInput: returns true once an input has been captured, writing
+  //   its SDL binding token to out_binding.
+  // GetOutputBinding: current binding for an SDL output name (e.g. "a").
+  // RebindOutput: point an SDL output (e.g. "a") at a captured binding and
+  //   apply + persist it for this controller's GUID.
+  // ResetMapping: restore the controller's mapping to its as-loaded default.
+  virtual bool BeginInputCapture(uint32_t user_index) { return false; }
+  virtual void CancelInputCapture() {}
+  virtual bool PollCapturedInput(std::string* out_binding) { return false; }
+  virtual std::string GetOutputBinding(uint32_t user_index,
+                                       const std::string& sdl_output) {
+    return "";
+  }
+  virtual bool RebindOutput(uint32_t user_index, const std::string& sdl_output,
+                            const std::string& binding) {
+    return false;
+  }
+  virtual bool ResetMapping(uint32_t user_index) { return false; }
+
  protected:
   explicit InputDriver(xe::ui::Window* window, size_t window_z_order)
       : window_(window), window_z_order_(window_z_order) {}

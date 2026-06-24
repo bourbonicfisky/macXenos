@@ -35,8 +35,12 @@ class ControllerConfigDialog final : public ui::ImGuiDialog {
  private:
   void DrawConnectedControllers();
   void DrawHotkeys();
+  void DrawRebind();
 
   EmulatorWindow& emulator_window_;
+  // SDL output name (e.g. "a") currently awaiting a captured physical button,
+  // or empty when not capturing.
+  std::string capturing_output_;
 };
 
 // Human-readable brand label for a controller kind (text form of the glyph

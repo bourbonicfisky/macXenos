@@ -13,6 +13,9 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
 
+#include <algorithm>
+#include <fstream>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
@@ -493,6 +496,220 @@ bool SDLInputDriver::ReassignControllerSlot(uint32_t from_slot,
   return true;
 }
 
+namespace {
+// Parse an SDL mapping string "guid,name,key:value,...,". Returns the guid,
+// name, and the ordered key:value entries (skipping empties/non-pairs).
+bool ParseMapping(const std::string& mapping, std::string* guid,
+                  std::string* name,
+                  std::vector<std::pair<std::string, std::string>>* entries) {
+  std::vector<std::string> parts;
+  size_t start = 0;
+  while (start <= mapping.size()) {
+    size_t comma = mapping.find(',', start);
+    if (comma == std::string::npos) {
+      parts.push_back(mapping.substr(start));
+      break;
+    }
+    parts.push_back(mapping.substr(start, comma - start));
+    start = comma + 1;
+  }
+  if (parts.size() < 2) {
+    return false;
+  }
+  *guid = parts[0];
+  *name = parts[1];
+  entries->clear();
+  for (size_t i = 2; i < parts.size(); ++i) {
+    if (parts[i].empty()) {
+      continue;
+    }
+    size_t colon = parts[i].find(':');
+    if (colon == std::string::npos) {
+      continue;
+    }
+    entries->emplace_back(parts[i].substr(0, colon), parts[i].substr(colon + 1));
+  }
+  return true;
+}
+
+std::string BuildMapping(
+    const std::string& guid, const std::string& name,
+    const std::vector<std::pair<std::string, std::string>>& entries) {
+  std::string out = guid + "," + name;
+  for (const auto& [key, value] : entries) {
+    out += "," + key + ":" + value;
+  }
+  out += ",";
+  return out;
+}
+
+// Writable user controller-DB path: the mappings_file basename next to the
+// executable (writable for the bare macOS build; a .app would need a config
+// dir). The harden-macos-controller-input read path resolves this on launch.
+std::filesystem::path UserMappingPath() {
+  std::filesystem::path name =
+      std::filesystem::path(cvars::mappings_file).filename();
+  if (name.empty()) {
+    name = "gamecontrollerdb.txt";
+  }
+  std::filesystem::path folder = xe::filesystem::GetExecutableFolder();
+  return folder.empty() ? name : folder / name;
+}
+
+// Replace (mapping != nullptr) or remove (nullptr) the line for `guid` in the
+// user controller DB, creating the file if needed.
+void WriteUserMapping(const std::string& guid, const std::string* mapping) {
+  const std::filesystem::path path = UserMappingPath();
+  std::vector<std::string> lines;
+  {
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+      lines.push_back(line);
+    }
+  }
+  bool replaced = false;
+  for (auto& line : lines) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    size_t comma = line.find(',');
+    std::string line_guid = comma == std::string::npos ? line : line.substr(0, comma);
+    if (line_guid == guid) {
+      line = mapping ? *mapping : std::string();
+      replaced = true;
+    }
+  }
+  lines.erase(std::remove(lines.begin(), lines.end(), std::string()),
+              lines.end());
+  if (mapping && !replaced) {
+    lines.push_back(*mapping);
+  }
+  std::ofstream out(path, std::ios::trunc);
+  for (const auto& line : lines) {
+    out << line << "\n";
+  }
+}
+}  // namespace
+
+bool SDLInputDriver::BeginInputCapture(uint32_t user_index) {
+  if (user_index >= controllers_.size() || !controllers_.at(user_index).sdl) {
+    return false;
+  }
+  std::lock_guard<std::mutex> guard(capture_mutex_);
+  capture_slot_ = static_cast<int>(user_index);
+  capture_has_result_ = false;
+  capture_result_.clear();
+  return true;
+}
+
+void SDLInputDriver::CancelInputCapture() {
+  std::lock_guard<std::mutex> guard(capture_mutex_);
+  capture_slot_ = -1;
+  capture_has_result_ = false;
+  capture_result_.clear();
+}
+
+bool SDLInputDriver::PollCapturedInput(std::string* out_binding) {
+  std::lock_guard<std::mutex> guard(capture_mutex_);
+  if (!capture_has_result_) {
+    return false;
+  }
+  if (out_binding) {
+    *out_binding = capture_result_;
+  }
+  capture_has_result_ = false;
+  return true;
+}
+
+std::string SDLInputDriver::GetOutputBinding(uint32_t user_index,
+                                             const std::string& sdl_output) {
+  if (user_index >= controllers_.size() || !controllers_.at(user_index).sdl) {
+    return "";
+  }
+  char* raw = SDL_GameControllerMapping(controllers_.at(user_index).sdl);
+  if (!raw) {
+    return "";
+  }
+  std::string mapping(raw);
+  SDL_free(raw);
+  std::string guid, name;
+  std::vector<std::pair<std::string, std::string>> entries;
+  if (!ParseMapping(mapping, &guid, &name, &entries)) {
+    return "";
+  }
+  for (const auto& [key, value] : entries) {
+    if (key == sdl_output) {
+      return value;
+    }
+  }
+  return "";
+}
+
+bool SDLInputDriver::RebindOutput(uint32_t user_index,
+                                  const std::string& sdl_output,
+                                  const std::string& binding) {
+  if (user_index >= controllers_.size() || !controllers_.at(user_index).sdl) {
+    return false;
+  }
+  SDL_GameController* gc = controllers_.at(user_index).sdl;
+  char* raw = SDL_GameControllerMapping(gc);
+  if (!raw) {
+    return false;
+  }
+  std::string mapping(raw);
+  SDL_free(raw);
+  // Remember the as-loaded mapping once, so ResetMapping can restore it.
+  if (original_mapping_.at(user_index).empty()) {
+    original_mapping_.at(user_index) = mapping;
+  }
+  std::string guid, name;
+  std::vector<std::pair<std::string, std::string>> entries;
+  if (!ParseMapping(mapping, &guid, &name, &entries)) {
+    return false;
+  }
+  bool found = false;
+  for (auto& [key, value] : entries) {
+    if (key == sdl_output) {
+      value = binding;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    entries.emplace_back(sdl_output, binding);
+  }
+  std::string updated = BuildMapping(guid, name, entries);
+  if (SDL_GameControllerAddMapping(updated.c_str()) < 0) {
+    XELOGW("SDL rebind: failed to apply mapping '{}'", updated);
+    return false;
+  }
+  WriteUserMapping(guid, &updated);
+  controllers_.at(user_index).state_changed = true;
+  return true;
+}
+
+bool SDLInputDriver::ResetMapping(uint32_t user_index) {
+  if (user_index >= controllers_.size() || !controllers_.at(user_index).sdl) {
+    return false;
+  }
+  const std::string original = original_mapping_.at(user_index);
+  if (original.empty()) {
+    return true;  // never rebound this session
+  }
+  if (SDL_GameControllerAddMapping(original.c_str()) < 0) {
+    return false;
+  }
+  std::string guid, name;
+  std::vector<std::pair<std::string, std::string>> entries;
+  if (ParseMapping(original, &guid, &name, &entries)) {
+    WriteUserMapping(guid, nullptr);
+  }
+  original_mapping_.at(user_index).clear();
+  controllers_.at(user_index).state_changed = true;
+  return true;
+}
+
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
@@ -506,6 +723,24 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
     SDL_FlushEvents(SDL_JOYAXISMOTION, SDL_FINGERDOWN - 1);
     sdl_events_unflushed_ = 0;
   }
+
+  // Device-mapping rebind: capture the next physical button press on the
+  // controller being rebound. Uses the raw joystick event (the physical button
+  // index) rather than the translated controller event.
+  if (event.type == SDL_JOYBUTTONDOWN) {
+    std::lock_guard<std::mutex> guard(capture_mutex_);
+    if (capture_slot_ >= 0 && !capture_has_result_ &&
+        capture_slot_ < static_cast<int>(controllers_.size())) {
+      SDL_GameController* gc = controllers_.at(capture_slot_).sdl;
+      if (gc && event.jbutton.which ==
+                    SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc))) {
+        capture_result_ = "b" + std::to_string(event.jbutton.button);
+        capture_has_result_ = true;
+        capture_slot_ = -1;
+      }
+    }
+  }
+
   switch (event.type) {
     case SDL_CONTROLLERDEVICEADDED:
       OnControllerDeviceAdded(event);

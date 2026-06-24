@@ -158,6 +158,111 @@ void ControllerConfigDialog::DrawHotkeys() {
   }
 }
 
+void ControllerConfigDialog::DrawRebind() {
+  auto* input_sys = emulator_window_.emulator()->input_system();
+  if (!input_sys) {
+    ImGui::TextUnformatted("Input system is not available.");
+    return;
+  }
+  auto lock = input_sys->lock();
+
+  // Rebind the first connected controller (per-GUID, so it applies to every pad
+  // of that model).
+  int slot = -1;
+  hid::ControllerIdentity identity;
+  for (uint32_t s = 0; s < XUserMaxUserCount; ++s) {
+    identity = input_sys->GetControllerIdentity(s);
+    if (identity.present) {
+      slot = static_cast<int>(s);
+      break;
+    }
+  }
+  if (slot < 0) {
+    ImGui::TextUnformatted("Connect a controller to remap its buttons.");
+    capturing_output_.clear();
+    return;
+  }
+
+  ImGui::Text("Remapping: Player %d - %s", slot + 1,
+              identity.name.empty() ? ControllerKindLabel(identity.kind)
+                                     : identity.name.c_str());
+  ImGui::TextDisabled(
+      "Click Rebind, then press the physical button you want for that action.");
+  ImGui::Separator();
+
+  // Apply a captured input to the rebind in progress.
+  if (!capturing_output_.empty()) {
+    std::string binding;
+    if (input_sys->PollControllerInputCapture(&binding)) {
+      input_sys->RebindControllerOutput(static_cast<uint32_t>(slot),
+                                        capturing_output_, binding);
+      capturing_output_.clear();
+    }
+  }
+
+  struct Rebindable {
+    const char* output;
+    const char* label;
+  };
+  static const Rebindable kRebindable[] = {
+      {"a", "A / Cross"},
+      {"b", "B / Circle"},
+      {"x", "X / Square"},
+      {"y", "Y / Triangle"},
+      {"leftshoulder", "Left Shoulder (LB / L1)"},
+      {"rightshoulder", "Right Shoulder (RB / R1)"},
+      {"back", "Back / Share"},
+      {"start", "Start / Options"},
+  };
+
+  if (ImGui::BeginTable("##rebind", 3,
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+    ImGui::TableSetupColumn("Button");
+    ImGui::TableSetupColumn("Current");
+    ImGui::TableSetupColumn("");
+    ImGui::TableHeadersRow();
+    for (const auto& rb : kRebindable) {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(rb.label);
+      ImGui::TableNextColumn();
+      std::string binding = input_sys->GetControllerOutputBinding(
+          static_cast<uint32_t>(slot), rb.output);
+      ImGui::TextUnformatted(binding.empty() ? "(unmapped)" : binding.c_str());
+      ImGui::TableNextColumn();
+      ImGui::PushID(rb.output);
+      if (capturing_output_ == rb.output) {
+        ImGui::TextUnformatted("press a button...");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) {
+          input_sys->CancelControllerInputCapture();
+          capturing_output_.clear();
+        }
+      } else {
+        ImGui::BeginDisabled(!capturing_output_.empty());
+        if (ImGui::SmallButton("Rebind") &&
+            input_sys->BeginControllerInputCapture(
+                static_cast<uint32_t>(slot))) {
+          capturing_output_ = rb.output;
+        }
+        ImGui::EndDisabled();
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::Separator();
+  ImGui::BeginDisabled(!capturing_output_.empty());
+  if (ImGui::Button("Reset to default")) {
+    input_sys->ResetControllerMapping(static_cast<uint32_t>(slot));
+  }
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Binding values are SDL physical inputs (e.g. b3). Saved to the user "
+      "gamecontrollerdb.txt next to the app.");
+}
+
 void ControllerConfigDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(20, 20), ImGuiCond_FirstUseEver);
@@ -182,6 +287,11 @@ void ControllerConfigDialog::OnDraw(ImGuiIO& io) {
     if (ImGui::BeginTabItem("Connected")) {
       ImGui::Dummy(ImVec2(2.f, 2.f));
       DrawConnectedControllers();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Rebind")) {
+      ImGui::Dummy(ImVec2(2.f, 2.f));
+      DrawRebind();
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Hotkeys")) {

@@ -50,6 +50,16 @@ class SDLInputDriver final : public InputDriver {
                              ControllerIdentity* out_identity) override;
   bool ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot) override;
 
+  // Device-mapping rebind (UI-driven; see InputDriver for contracts).
+  bool BeginInputCapture(uint32_t user_index) override;
+  void CancelInputCapture() override;
+  bool PollCapturedInput(std::string* out_binding) override;
+  std::string GetOutputBinding(uint32_t user_index,
+                               const std::string& sdl_output) override;
+  bool RebindOutput(uint32_t user_index, const std::string& sdl_output,
+                    const std::string& binding) override;
+  bool ResetMapping(uint32_t user_index) override;
+
  private:
   struct ControllerState {
     SDL_GameController* sdl;
@@ -89,6 +99,16 @@ class SDLInputDriver final : public InputDriver {
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
   void QueueControllerUpdate();
+
+  // Device-mapping rebind capture state. HandleEvent may run on an SDL-owned
+  // thread while the UI polls from the main thread, so this is mutex-guarded.
+  std::mutex capture_mutex_;
+  int capture_slot_ = -1;       // slot currently capturing, or -1
+  bool capture_has_result_ = false;
+  std::string capture_result_;  // SDL binding token, e.g. "b3"
+  // SDL mapping string captured before the first user rebind of a slot, so
+  // ResetMapping can restore the as-loaded mapping.
+  std::array<std::string, HID_SDL_USER_COUNT> original_mapping_ = {};
 
   bool sdl_events_initialized_;
   bool sdl_gamecontroller_initialized_;

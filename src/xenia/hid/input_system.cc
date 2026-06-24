@@ -137,6 +137,60 @@ bool InputSystem::ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot) {
   return moved;
 }
 
+bool InputSystem::BeginControllerInputCapture(uint32_t user_index) {
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    if (driver->BeginInputCapture(user_index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void InputSystem::CancelControllerInputCapture() {
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    driver->CancelInputCapture();
+  }
+}
+
+bool InputSystem::PollControllerInputCapture(std::string* out_binding) {
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    if (driver->PollCapturedInput(out_binding)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string InputSystem::GetControllerOutputBinding(
+    uint32_t user_index, const std::string& sdl_output) {
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    std::string binding = driver->GetOutputBinding(user_index, sdl_output);
+    if (!binding.empty()) {
+      return binding;
+    }
+  }
+  return "";
+}
+
+bool InputSystem::RebindControllerOutput(uint32_t user_index,
+                                         const std::string& sdl_output,
+                                         const std::string& binding) {
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    if (driver->RebindOutput(user_index, sdl_output, binding)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool InputSystem::ResetControllerMapping(uint32_t user_index) {
+  bool any = false;
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    any |= driver->ResetMapping(user_index);
+  }
+  return any;
+}
+
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");
