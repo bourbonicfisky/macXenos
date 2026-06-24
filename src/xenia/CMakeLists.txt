@@ -37,14 +37,12 @@ add_subdirectory(debug/ui)
 add_subdirectory(app/discord)
 add_subdirectory(app)
 
-# SDL-based modules (not Android; skipped on the macOS PoC, which uses the nop
-# apu/hid — avoids the SDL2.framework dependency. Re-enable when wiring real
-# audio/input on macOS.)
-if(NOT APPLE)
-  add_subdirectory(apu/sdl)
-  add_subdirectory(helper/sdl)
-  add_subdirectory(hid/sdl)
-endif()
+# SDL-based modules. On macOS, SDL2 is now built from the vendored submodule
+# (third_party/CMakeLists.txt) so these provide real audio + joystick (formerly
+# skipped on APPLE to avoid the SDL2.framework dependency).
+add_subdirectory(apu/sdl)
+add_subdirectory(helper/sdl)
+add_subdirectory(hid/sdl)
 
 # Platform-conditional modules
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

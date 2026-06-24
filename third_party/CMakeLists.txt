@@ -448,11 +448,21 @@ if(WIN32)
   target_include_directories(SDL2 PUBLIC SDL2/include)
   target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
 elseif(APPLE)
-  # Use system SDL2 framework on macOS
-  add_library(SDL2 INTERFACE)
-  find_library(SDL2_LIBRARY SDL2 REQUIRED)
-  target_include_directories(SDL2 INTERFACE "${SDL2_LIBRARY}/Headers")
-  target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
+  # Build SDL2 from the vendored submodule via its own CMake (self-contained;
+  # no system SDL2 framework required). SDL2 configures its own CoreAudio/Cocoa/
+  # IOKit backends and links the needed system frameworks through its target
+  # interface.
+  set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+  set(SDL_STATIC ON CACHE BOOL "" FORCE)
+  set(SDL_TEST OFF CACHE BOOL "" FORCE)
+  set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+  set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+  add_subdirectory(SDL2 EXCLUDE_FROM_ALL)
+  # The rest of the tree links the target name "SDL2"; SDL's static target is
+  # "SDL2-static".
+  if(NOT TARGET SDL2)
+    add_library(SDL2 ALIAS SDL2-static)
+  endif()
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # Use system SDL2 on Linux
   add_library(SDL2 INTERFACE)

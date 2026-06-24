@@ -109,14 +109,14 @@ target_link_libraries(xenia-app PRIVATE
   xenia-app-discord
   xenia-debug-ui
 )
-# SDL audio/input — skipped on the macOS PoC (uses nop apu/hid instead).
-if(NOT APPLE)
-  target_link_libraries(xenia-app PRIVATE
-    xenia-apu-sdl
-    xenia-helper-sdl
-    xenia-hid-sdl
-  )
-endif()
+# SDL audio/input. On macOS SDL2 is built from the vendored submodule, so the
+# app links the SDL modules on all desktop platforms (audio is registered;
+# SDL HID remains unregistered on macOS until input is wired separately).
+target_link_libraries(xenia-app PRIVATE
+  xenia-apu-sdl
+  xenia-helper-sdl
+  xenia-hid-sdl
+)
 
 # Architecture-specific backend
 if(XE_TARGET_X86_64)
