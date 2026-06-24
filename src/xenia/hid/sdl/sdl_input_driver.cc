@@ -15,7 +15,9 @@
 
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/helper/sdl/sdl_helper.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/ui/virtual_key.h"
@@ -106,6 +108,12 @@ X_STATUS SDLInputDriver::Setup() {
         },
         this);
 
+    // macOS note: Bluetooth controllers reach SDL through raw HID (HIDAPI). On
+    // recent macOS this requires the user to grant the app "Input Monitoring"
+    // (System Settings > Privacy & Security), and an ad-hoc-signed/non-App-Store
+    // build cannot pre-grant it. Symptom if denied: a pad works over USB but is
+    // silent or undetected over Bluetooth. This is a permission gate, NOT a
+    // controller-mapping bug (SDL still maps Xbox/PlayStation pads correctly).
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
       return;
     }
@@ -125,19 +133,49 @@ void SDLInputDriver::LoadGameControllerDB() {
     return;
   }
 
-  if (!std::filesystem::exists(cvars::mappings_file)) {
+  // Resolve the mappings file. A relative path historically resolved only
+  // against the current working directory, which breaks when launched as a
+  // macOS .app bundle (the CWD is not the bundle). Try, in order: the path as
+  // given (CWD, legacy behavior), next to the executable, and on macOS the
+  // .app's Resources directory. This is a strict superset of the old behavior,
+  // so CLI usage is unchanged. If none resolve, SDL's built-in database (which
+  // already covers mainstream Xbox/PlayStation pads) remains in effect.
+  std::filesystem::path mappings_path = cvars::mappings_file;
+  if (mappings_path.is_relative()) {
+    std::vector<std::filesystem::path> candidates;
+    candidates.push_back(mappings_path);  // CWD-relative (legacy behavior)
+    const std::filesystem::path exe_folder =
+        xe::filesystem::GetExecutableFolder();
+    if (!exe_folder.empty()) {
+      candidates.push_back(exe_folder / mappings_path);
+#if XE_PLATFORM_MAC
+      // Inside a bundle: <App>.app/Contents/MacOS/<exe> ->
+      // <App>.app/Contents/Resources/<file>.
+      candidates.push_back(exe_folder.parent_path() / "Resources" /
+                           mappings_path);
+#endif  // XE_PLATFORM_MAC
+    }
+    for (const auto& candidate : candidates) {
+      if (std::filesystem::exists(candidate)) {
+        mappings_path = candidate;
+        break;
+      }
+    }
+  }
+
+  if (!std::filesystem::exists(mappings_path)) {
     XELOGW("SDL GameControllerDB: file '{}' does not exist.",
-           cvars::mappings_file);
+           xe::path_to_utf8(mappings_path));
     return;
   }
 
-  XELOGI("SDL GameControllerDB: Loading {}", cvars::mappings_file);
+  XELOGI("SDL GameControllerDB: Loading {}", xe::path_to_utf8(mappings_path));
 
   uint32_t updated_mappings = 0;
   uint32_t added_mappings = 0;
 
   rapidcsv::Document mappings(
-      xe::path_to_utf8(cvars::mappings_file), rapidcsv::LabelParams(-1, -1),
+      xe::path_to_utf8(mappings_path), rapidcsv::LabelParams(-1, -1),
       rapidcsv::SeparatorParams(), rapidcsv::ConverterParams(),
       rapidcsv::LineReaderParams(true /* pSkipCommentLines */,
                                  '#' /* pCommentPrefix */,
@@ -409,6 +447,52 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
 InputType SDLInputDriver::GetInputType() const { return InputType::Controller; }
 
+bool SDLInputDriver::GetControllerIdentity(uint32_t user_index,
+                                           ControllerIdentity* out_identity) {
+  if (user_index >= controllers_.size()) {
+    return false;
+  }
+  const auto& state = controllers_.at(user_index);
+  if (!state.sdl) {
+    return false;
+  }
+  if (out_identity) {
+    out_identity->present = true;
+    out_identity->kind = state.kind;
+    out_identity->name = state.name;
+  }
+  return true;
+}
+
+bool SDLInputDriver::ReassignControllerSlot(uint32_t from_slot,
+                                            uint32_t to_slot) {
+  if (from_slot >= controllers_.size() || to_slot >= controllers_.size()) {
+    return false;
+  }
+  // Only this driver's controllers can be moved, and only from an occupied
+  // source slot.
+  if (!controllers_.at(from_slot).sdl) {
+    return false;
+  }
+  if (from_slot == to_slot) {
+    return true;
+  }
+  // Swap state (and per-slot keystroke tracking). If the target slot is empty
+  // this is effectively a move; if occupied the two controllers trade places.
+  std::swap(controllers_.at(from_slot), controllers_.at(to_slot));
+  std::swap(keystroke_states_.at(from_slot), keystroke_states_.at(to_slot));
+  for (uint32_t slot : {from_slot, to_slot}) {
+    auto& state = controllers_.at(slot);
+    if (state.sdl) {
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+      SDL_GameControllerSetPlayerIndex(state.sdl, static_cast<int>(slot));
+#endif
+      state.state_changed = true;
+    }
+  }
+  return true;
+}
+
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
@@ -441,6 +525,35 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   }
   return;
 }
+
+namespace {
+// Maps SDL's native controller type to Xenia's backend-agnostic ControllerKind
+// for UI display. Newer enum values are version-gated so the driver still
+// builds against an older SDL header.
+ControllerKind ControllerKindFromSDL(SDL_GameController* controller) {
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+  switch (SDL_GameControllerGetType(controller)) {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+      return ControllerKind::kXbox;
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLER_TYPE_PS5:
+#endif
+      return ControllerKind::kPlayStation;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+      return ControllerKind::kNintendo;
+    case SDL_CONTROLLER_TYPE_UNKNOWN:
+      return ControllerKind::kUnknown;
+    default:
+      return ControllerKind::kOther;
+  }
+#else
+  return ControllerKind::kUnknown;
+#endif
+}
+}  // namespace
 
 void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   // Open the controller.
@@ -506,6 +619,11 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
     // XInput seems to start with packet_number = 1 .
     state.state_changed = true;
     UpdateXCapabilities(state);
+    // Cache identity for UI display (does not affect the guest, which always
+    // sees an Xbox 360 pad).
+    const char* sdl_name = SDL_GameControllerName(controller);
+    state.name = sdl_name ? sdl_name : "";
+    state.kind = ControllerKindFromSDL(controller);
 
     XELOGI("SDL OnControllerDeviceAdded: Added at index {}.", user_id);
     XELOGI("SDL Controller {}: {}", user_id,

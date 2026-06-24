@@ -25,11 +25,20 @@ namespace hid {
 
 DEFINE_bool(vibration, true, "Toggle controller vibration.", "HID");
 
-DEFINE_double(left_stick_deadzone_percentage, 0.0,
+// A small default deadzone on macOS suppresses analog-stick drift (common on
+// worn PlayStation pads) that would otherwise register as guest input. Other
+// platforms keep the historical 0.0 default. Overridable by the user anywhere.
+#if XE_PLATFORM_MAC
+#define XE_HID_DEFAULT_STICK_DEADZONE 0.05
+#else
+#define XE_HID_DEFAULT_STICK_DEADZONE 0.0
+#endif  // XE_PLATFORM_MAC
+
+DEFINE_double(left_stick_deadzone_percentage, XE_HID_DEFAULT_STICK_DEADZONE,
               "Defines deadzone level for left stick. Allowed range [0.0-1.0].",
               "HID");
 DEFINE_double(
-    right_stick_deadzone_percentage, 0.0,
+    right_stick_deadzone_percentage, XE_HID_DEFAULT_STICK_DEADZONE,
     "Defines deadzone level for right stick. Allowed range [0.0-1.0].", "HID");
 
 InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
@@ -95,6 +104,37 @@ std::vector<InputDriver*> InputSystem::FilterDrivers(uint32_t flags) {
     }
   }
   return filtered_drivers;
+}
+
+ControllerIdentity InputSystem::GetControllerIdentity(uint32_t user_index) {
+  ControllerIdentity identity;
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    if (driver->GetControllerIdentity(user_index, &identity)) {
+      break;
+    }
+  }
+  return identity;
+}
+
+bool InputSystem::ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot) {
+  if (from_slot >= XUserMaxUserCount || to_slot >= XUserMaxUserCount) {
+    return false;
+  }
+  bool moved = false;
+  for (auto& driver : FilterDrivers(InputType::Controller)) {
+    if (driver->ReassignControllerSlot(from_slot, to_slot)) {
+      moved = true;
+      break;
+    }
+  }
+  if (moved) {
+    // Re-derive occupancy for the two affected slots (a move can empty the
+    // source slot, a swap leaves both occupied).
+    for (uint32_t slot : {from_slot, to_slot}) {
+      connected_slots.set(slot, GetControllerIdentity(slot).present);
+    }
+  }
+  return moved;
 }
 
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,

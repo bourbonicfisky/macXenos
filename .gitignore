@@ -116,3 +116,8 @@ node_modules/.bin/
 /cache0
 /devkit
 recent.toml
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example

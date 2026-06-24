@@ -21,6 +21,7 @@
 #endif
 
 #include "xenia/app/console_settings_dialog.h"
+#include "xenia/app/controller_config_dialog.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -874,6 +875,9 @@ bool EmulatorWindow::Initialize() {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Display controller hotkeys", "",
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
+    hid_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Controller settings...", "",
+        std::bind(&EmulatorWindow::ToggleControllerConfigDialog, this)));
   }
   main_menu->AddChild(std::move(hid_menu));
 
@@ -1626,6 +1630,19 @@ void EmulatorWindow::ToggleConsoleSettingsDialog() {
   }
 }
 
+void EmulatorWindow::ToggleControllerConfigDialog() {
+  if (!controller_config_dialog_) {
+    controller_config_dialog_ = std::unique_ptr<ControllerConfigDialog>(
+        new ControllerConfigDialog(imgui_drawer_.get(), *this));
+  } else {
+    if (controller_config_dialog_->IsClosing()) {
+      controller_config_dialog_.release();
+    } else {
+      controller_config_dialog_.reset();
+    }
+  }
+}
+
 void EmulatorWindow::ToggleControllerVibration() {
   auto input_sys = emulator()->input_system();
   if (input_sys) {
@@ -1823,6 +1840,18 @@ const std::map<int, EmulatorWindow::ControllerHotKey> controller_hotkey_map = {
      EmulatorWindow::ControllerHotKey(
          EmulatorWindow::ButtonFunctions::DecTitleSelect,
          "D-PAD Up = Title Selection -1", true, false)}};
+
+std::vector<std::string> EmulatorWindow::GetControllerHotkeyDescriptions()
+    const {
+  std::vector<std::string> descriptions;
+  descriptions.reserve(controller_hotkey_map.size());
+  for (const auto& [buttons, hotkey] : controller_hotkey_map) {
+    if (!hotkey.pretty.empty()) {
+      descriptions.push_back(hotkey.pretty);
+    }
+  }
+  return descriptions;
+}
 
 EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
     int buttons) {

@@ -50,6 +50,16 @@ class InputSystem {
   bool GetVibrationCvar();
   void ToggleVibration();
 
+  // Returns the identity (kind/name) of the controller in the given slot for UI
+  // display, querying the controller drivers. Identity.present is false for an
+  // empty slot or a driver without identity info.
+  ControllerIdentity GetControllerIdentity(uint32_t user_index);
+
+  // Reassigns the controller in from_slot to to_slot (swapping if to_slot is
+  // occupied), keeping the connected-slot bookkeeping in sync. Returns true if
+  // a controller driver performed the move.
+  bool ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot);
+
   const std::bitset<XUserMaxUserCount> GetConnectedSlots() const {
     return connected_slots;
   }

@@ -9,10 +9,25 @@
 
 #include "xenia/helper/sdl/sdl_helper.h"
 
+#include "xenia/base/platform.h"
+
 // On linux we likely build on an "outdated" system but still want to control
 // these features when available on a newer system.
 #if !SDL_VERSION_ATLEAST(2, 0, 14)
 #define SDL_HINT_AUDIO_DEVICE_APP_NAME "SDL_AUDIO_DEVICE_APP_NAME"
+#endif
+
+// HIDAPI hint names are stable strings; define fallbacks so building against an
+// older SDL header still compiles (setting an unknown hint at runtime is a
+// harmless no-op). Mirrors the SDL_HINT_AUDIO_DEVICE_APP_NAME fallback above.
+#ifndef SDL_HINT_JOYSTICK_HIDAPI
+#define SDL_HINT_JOYSTICK_HIDAPI "SDL_JOYSTICK_HIDAPI"
+#endif
+#ifndef SDL_HINT_JOYSTICK_HIDAPI_PS4
+#define SDL_HINT_JOYSTICK_HIDAPI_PS4 "SDL_JOYSTICK_HIDAPI_PS4"
+#endif
+#ifndef SDL_HINT_JOYSTICK_HIDAPI_PS5
+#define SDL_HINT_JOYSTICK_HIDAPI_PS5 "SDL_JOYSTICK_HIDAPI_PS5"
 #endif
 
 #include "xenia/base/assert.h"
@@ -71,6 +86,17 @@ bool SDLHelper::SetHints() {
   suc &= setHint(SDL_HINT_AUDIO_CATEGORY, "playback");
 
   suc &= setHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "xenia emulator");
+
+#if XE_PLATFORM_MAC
+  // macOS only: make Bluetooth/USB PlayStation pad handling deterministic
+  // rather than dependent on SDL's per-build defaults. SDL still owns the
+  // physical->XInput-layout mapping; these only select the HIDAPI backend so
+  // DualShock 4 / DualSense expose the full button/rumble set. Left at normal
+  // priority so an explicit user env override still wins.
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+#endif  // XE_PLATFORM_MAC
 
   return suc;
 }

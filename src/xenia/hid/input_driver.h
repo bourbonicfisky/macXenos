@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
 
 #include "xenia/hid/input.h"
 #include "xenia/ui/window.h"
@@ -30,6 +31,25 @@ class InputSystem;
 
 enum InputType { None, Controller = 1, Keyboard = 2, Other = 4 };
 
+// Brand family of a connected controller, decoupled from any backend's native
+// enum so UI code (glyphs/labels) doesn't depend on SDL. Drivers map their own
+// type info into this.
+enum class ControllerKind {
+  kUnknown,
+  kXbox,
+  kPlayStation,
+  kNintendo,
+  kOther,
+};
+
+// Identity of the controller occupying a player slot, surfaced for UI (the
+// guest always sees an Xbox 360 pad regardless of this).
+struct ControllerIdentity {
+  bool present = false;
+  ControllerKind kind = ControllerKind::kUnknown;
+  std::string name;  // backend-reported display name, e.g. "PS4 Controller"
+};
+
 class InputDriver {
  public:
   virtual ~InputDriver() = default;
@@ -45,6 +65,21 @@ class InputDriver {
                                 X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
   virtual InputType GetInputType() const = 0;
+
+  // Reports the identity of the controller in the given slot for UI display.
+  // Returns false (and leaves out_identity untouched) for drivers that have no
+  // notion of controller identity (keyboard, nop) or an empty slot.
+  virtual bool GetControllerIdentity(uint32_t user_index,
+                                     ControllerIdentity* out_identity) {
+    return false;
+  }
+
+  // Reassigns the controller occupying from_slot to to_slot for UI-driven slot
+  // management. If to_slot is occupied the two controllers swap. Returns true
+  // if this driver owns from_slot and performed the move. Default: unsupported.
+  virtual bool ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot) {
+    return false;
+  }
 
  protected:
   explicit InputDriver(xe::ui::Window* window, size_t window_z_order)

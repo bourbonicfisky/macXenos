@@ -46,12 +46,20 @@ class SDLInputDriver final : public InputDriver {
                         X_INPUT_KEYSTROKE* out_keystroke) override;
   virtual InputType GetInputType() const override;
 
+  bool GetControllerIdentity(uint32_t user_index,
+                             ControllerIdentity* out_identity) override;
+  bool ReassignControllerSlot(uint32_t from_slot, uint32_t to_slot) override;
+
  private:
   struct ControllerState {
     SDL_GameController* sdl;
     X_INPUT_CAPABILITIES caps;
     X_INPUT_STATE state;
     bool state_changed;
+    // Cached identity for UI display (populated on device-added). The guest is
+    // unaffected by this; it always sees an Xbox 360 pad.
+    ControllerKind kind;
+    std::string name;
   };
 
   enum class RepeatState {

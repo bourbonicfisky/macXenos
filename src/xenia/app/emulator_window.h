@@ -30,6 +30,7 @@ namespace xe {
 namespace app {
 
 class ConsoleSettingsDialog;
+class ControllerConfigDialog;
 
 struct RecentTitleEntry {
   std::string title_name;
@@ -97,6 +98,11 @@ class EmulatorWindow {
   void ToggleProfilesConfigDialog();
   void ToggleXMPConfigDialog();
   void ToggleConsoleSettingsDialog();
+  void ToggleControllerConfigDialog();
+
+  // Human-readable descriptions of the controller hotkeys, for display in the
+  // controller UI (read-only reference).
+  std::vector<std::string> GetControllerHotkeyDescriptions() const;
 
   void SetHotkeysState(bool enabled) { disable_hotkeys_ = !enabled; }
 
@@ -318,6 +324,7 @@ class EmulatorWindow {
 
   std::unique_ptr<DisplayConfigDialog> display_config_dialog_;
   std::unique_ptr<ConsoleSettingsDialog> console_settings_dialog_;
+  std::unique_ptr<ControllerConfigDialog> controller_config_dialog_;
 
   // Storing pointers and toggling dialog state is useful for broadcasting
   // messages back to guest.
