@@ -1074,6 +1074,26 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Block* main_switch_merge_;
   std::vector<spv::Id> main_switch_next_pc_phi_operands_;
 
+  // Rectangle-list vertex-shader expansion (kRectangleListAsTriangleStrip on
+  // hosts without geometry shaders): the guest vertex program is wrapped in an
+  // outer loop so a single host invocation can transform all three rectangle
+  // vertices, then select (real corner) or synthesize (4th corner) its output.
+  // These are only set up when the host vertex shader type is the rectangle
+  // list one; otherwise they stay spv::NoResult / nullptr.
+  bool main_rectangle_vs_expansion_ = false;
+  spv::Block* main_rectangle_loop_header_ = nullptr;
+  spv::Block* main_rectangle_loop_continue_ = nullptr;
+  spv::Block* main_rectangle_loop_merge_ = nullptr;
+  // Function-class int, the current rectangle vertex (0..2).
+  spv::Id var_main_rectangle_loop_index_ = spv::NoResult;
+  // Function-class array[3] of float4: the three rectangle vertices' guest
+  // clip-space positions, captured one per loop iteration.
+  spv::Id var_main_rectangle_positions_ = spv::NoResult;
+  // Function-class array[3] of float4 per active interpolator (NoResult if the
+  // interpolator is not used): the three rectangle vertices' interpolators.
+  std::array<spv::Id, xenos::kMaxInterpolators>
+      var_main_rectangle_interpolators_;
+
   // If the exec bool constant / predicate conditional is open, block after it
   // (not added to the function yet).
   spv::Block* cf_exec_conditional_merge_;

@@ -2414,6 +2414,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             Shader::HostVertexShaderType::kVertex &&
         primitive_processing_result.host_vertex_shader_type !=
             Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
+        // Rectangle lists are expanded in the vertex shader on hosts without
+        // geometry shaders (kRectangleListAsTriangleStrip); the SPIR-V
+        // translator implements that expansion.
+        primitive_processing_result.host_vertex_shader_type !=
+            Shader::HostVertexShaderType::kRectangleListAsTriangleStrip &&
         !Shader::IsHostVertexShaderTypeDomain(
             primitive_processing_result.host_vertex_shader_type)) {
       return false;
