@@ -47,6 +47,9 @@
 #include "xenia/kernel/xconfig.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
+#if XE_PLATFORM_MAC
+#include "xenia/ui/process_relaunch_mac.h"
+#endif  // XE_PLATFORM_MAC
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/imgui_host_notification.h"
@@ -781,12 +784,18 @@ bool EmulatorWindow::Initialize() {
         MenuItem::Create(MenuItem::Type::kString, "Extract",
                          std::bind(&EmulatorWindow::ExtractZarchive, this)));
     file_menu->AddChild(std::move(zar_menu));
-#ifdef DEBUG
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     file_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Close",
+        MenuItem::Create(MenuItem::Type::kString, "Stop Emulation",
                          std::bind(&EmulatorWindow::FileClose, this)));
-#endif  // #ifdef DEBUG
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Reboot Title",
+                         std::bind(&EmulatorWindow::RelaunchLastTitle, this,
+                                   /*warm=*/true)));
+    file_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Full Reboot",
+                         std::bind(&EmulatorWindow::RelaunchLastTitle, this,
+                                   /*warm=*/false)));
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     file_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "Show content directory...",
@@ -1284,7 +1293,79 @@ void EmulatorWindow::FileOpen() {
   }
 }
 
-void EmulatorWindow::FileClose() { emulator_->TerminateTitle(); }
+void EmulatorWindow::FileClose() {
+  emulator_->TerminateTitle();
+  // The guest has stopped producing frames, but the presenter still holds the
+  // last one in its mailbox, so the window would look frozen/paused. Push an
+  // inactive (0x0) guest-output frame to clear the screen to black - this is
+  // the presenter's own active->inactive blanking path, just driven by us.
+  if (ui::Presenter* presenter = GetGraphicsSystemPresenter()) {
+    presenter->RefreshGuestOutput(
+        0, 0, 0, 0,
+        [](ui::Presenter::GuestOutputRefreshContext&) { return true; });
+  }
+}
+
+void EmulatorWindow::RelaunchLastTitle(bool warm) {
+#if XE_PLATFORM_MAC
+  if (last_media_path_.empty()) {
+    XELOGW("RelaunchLastTitle: no media loaded yet; ignoring.");
+    return;
+  }
+  if (warm) {
+    // Reboot: terminate + finalize shader/pipeline storage so the relaunch
+    // boots warm (no shader re-translation).
+    FlushBeforeRelaunch();
+  } else {
+    // Full Reboot: skip all GPU work, just persist config and relaunch from a
+    // fresh process. Boots cold (re-translates shaders) for a clean slate, and
+    // is bulletproof - no terminate, no GPU touch, so nothing to deadlock or
+    // race. Also the safe fallback if the warm path ever misbehaves.
+    config::SaveConfig();
+  }
+  xe::ui::RelaunchWithTarget(xe::path_to_utf8(last_media_path_));
+  // RelaunchWithTarget only returns on failure.
+  XELOGE("Relaunch failed; staying in the current state.");
+#else
+  XELOGW("RelaunchLastTitle: re-exec relaunch is macOS-only.");
+#endif  // XE_PLATFORM_MAC
+}
+
+void EmulatorWindow::FlushBeforeRelaunch() {
+  // Quiesce the guest FIRST. graphics_system->Pause() below waits on the
+  // command-processor worker from the UI thread (CallInThread + fence.Wait);
+  // while a title is actively rendering the worker is mid-ExecutePrimaryBuffer
+  // (presenting, needing this very thread), so pausing then would deadlock ->
+  // beachball. Terminating the title stops guest GPU submission so the worker
+  // drains and goes idle, making the pause safe. This is the same crash-safe
+  // terminate Stop uses.
+  if (emulator_->is_title_open()) {
+    emulator_->TerminateTitle();
+  }
+
+  // Persist cvar overrides so they survive the re-exec (a re-exec replaces the
+  // process image with no destructors, so OnDestroy's SaveConfig never runs).
+  config::SaveConfig();
+
+  // Finalize the host shader/pipeline storage so the relaunched title boots warm
+  // instead of re-translating every shader from cold. SaveShaderStorageToDisk
+  // drains the storage-writer thread and closes the storage files (see
+  // VulkanCommandProcessor::SaveShaderStorageToDisk).
+  //
+  // We deliberately do NOT call graphics_system->Pause() first (OnDestroy does,
+  // but it runs after the emulator thread is already shut down). Pause() blocks
+  // the UI thread on the command-processor worker via fence.Wait(); if that
+  // worker is still draining a present it needs this very thread -> deadlock
+  // (beachball), which terminate-first does not fully close. The storage
+  // finalize runs on the independent storage-writer thread (never blocked on the
+  // UI thread, so it joins cleanly) and the guest is already terminated, so no
+  // new shaders are being enqueued - the pause buys nothing here but the hang.
+  if (auto* graphics_system = emulator_->graphics_system()) {
+    if (auto* command_processor = graphics_system->command_processor()) {
+      command_processor->SaveShaderStorageToDisk();
+    }
+  }
+}
 
 void EmulatorWindow::InstallContent() {
   std::vector<std::filesystem::path> paths;
@@ -2284,12 +2365,26 @@ xe::X_STATUS EmulatorWindow::RunTitle(
   }
 
   if (emulator_->is_title_open()) {
+#if XE_PLATFORM_MAC
+    // Switching titles in a process that already booted one corrupts guest
+    // memory in-process (kernel_state_ persists across titles; Memory::Reset()
+    // can't safely scrub it - see the add-emulation-lifecycle-controls design).
+    // Re-exec into a pristine process with the new target instead. Flush config
+    // + the host shader cache first so the relaunch boots warm.
+    FlushBeforeRelaunch();
+    xe::ui::RelaunchWithTarget(
+        xe::path_to_utf8(std::filesystem::absolute(path_to_file)));
+    // RelaunchWithTarget only returns on failure.
+    XELOGE("Relaunch failed; staying in the current title.");
+    return X_STATUS_UNSUCCESSFUL;
+#else
     // Terminate the current title and start a new title.
     // if (emulator_->TerminateTitle() == X_STATUS_SUCCESS) {
     //   return RunTitle(path);
     // }
 
     return X_STATUS_UNSUCCESSFUL;
+#endif  // XE_PLATFORM_MAC
   }
 
   // Prevent crashing the emulator by not loading a game if a game is already
@@ -2333,6 +2428,8 @@ xe::X_STATUS EmulatorWindow::RunTitle(
 
     emulator_->file_system()->Clear();
   } else {
+    // Remember the media so Start/Reboot can re-boot it after a Stop.
+    last_media_path_ = abs_path;
     AddRecentlyLaunchedTitle(path_to_file, emulator_->title_name());
 
     auto xam =

@@ -7,20 +7,105 @@
  ******************************************************************************
  */
 
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
 #include <unistd.h>
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/ui/process_relaunch_mac.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context_mac.h"
 
+namespace {
+// Captured at process entry so a lifecycle relaunch can rebuild the command
+// line. argv lives for the life of the process, so storing the pointers is
+// safe.
+int g_saved_argc = 0;
+char** g_saved_argv = nullptr;
+}  // namespace
+
+namespace xe {
+namespace ui {
+
+bool RelaunchWithTarget(const std::string& target_path) {
+  if (!g_saved_argv || g_saved_argc < 1) {
+    XELOGE("RelaunchWithTarget: no saved argv; cannot relaunch");
+    return false;
+  }
+
+  // Rebuild argv: keep argv[0] and all original flags, drop any prior
+  // positional path or --target (we supply a fresh one), then append the new
+  // --target last so it wins.
+  std::vector<char*> new_argv;
+  new_argv.push_back(g_saved_argv[0]);
+  for (int i = 1; i < g_saved_argc; ++i) {
+    char* a = g_saved_argv[i];
+    if (!a || a[0] != '-') {
+      continue;  // positional (the old target) - drop
+    }
+    if (std::strncmp(a, "--target", 8) == 0) {
+      continue;  // old --target - drop
+    }
+    new_argv.push_back(a);
+  }
+  std::string target_arg = "--target=" + target_path;
+  new_argv.push_back(const_cast<char*>(target_arg.c_str()));
+  new_argv.push_back(nullptr);
+
+  // Give the relaunch a fresh ASLR-retry budget (we may be a relaunch already).
+  unsetenv("XENIA_ASLR_RETRY");
+
+  // Resolve the real executable path: posix_spawn does not search PATH, and our
+  // argv[0] may be relative to the original working directory.
+  char exe_path[PATH_MAX];
+  uint32_t exe_path_size = sizeof(exe_path);
+  const char* spawn_path = new_argv[0];
+  if (_NSGetExecutablePath(exe_path, &exe_path_size) == 0) {
+    spawn_path = exe_path;
+  }
+
+  XELOGI("Relaunching for new target: {}", target_path);
+  xe::FlushLog();
+
+  // Spawn a brand-new process rather than execv-ing in place. An in-place execv
+  // keeps the same PID and the kernel-side WindowServer/NSApplication state;
+  // on a re-exec-of-a-re-exec that stale registration leaves the new Cocoa app
+  // unable to take foreground - the window launches but stays unfocused and
+  // unrendered until the user clicks it. A fresh PID activates cleanly.
+  pid_t child_pid = 0;
+  int spawn_result = posix_spawn(&child_pid, spawn_path, nullptr, nullptr,
+                                 new_argv.data(), *_NSGetEnviron());
+  if (spawn_result != 0) {
+    XELOGE("RelaunchWithTarget: posix_spawn failed: {}",
+           std::strerror(spawn_result));
+    return false;
+  }
+
+  // Hand off: quit this process immediately so only the fresh instance remains.
+  // Config was already persisted by the caller; nothing else needs teardown.
+  xe::FlushLog();
+  _exit(EXIT_SUCCESS);
+}
+
+}  // namespace ui
+}  // namespace xe
+
 extern "C" int main(int argc, char** argv) {
   int result;
+
+  g_saved_argc = argc;
+  g_saved_argv = argv;
 
   // Reserve the fixed sub-4 GB JIT ranges before anything (NSApplication, dyld
   // runtime dylib loads such as MoltenVK, malloc zones) can land in the low

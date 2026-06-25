@@ -277,6 +277,15 @@ class EmulatorWindow {
   void OnMouseUp(const ui::MouseEvent& e);
   void FileOpen();
   void FileClose();
+  // Persist config + host shader cache before a re-exec relaunch (macOS
+  // lifecycle controls), mirroring the OnDestroy pre-quick_exit flush.
+  void FlushBeforeRelaunch();
+  // Re-boot the last-loaded media in a pristine process (re-exec). Used by the
+  // Reboot/Start lifecycle controls; no-op if no media has been loaded. When
+  // warm, finalizes the shader/pipeline storage first so the relaunch boots
+  // warm (Reboot); when not warm, just persists config and relaunches
+  // immediately (Quick Reboot) - bulletproof but boots cold.
+  void RelaunchLastTitle(bool warm);
   void InstallContent();
   void ExtractZarchive();
   void CreateZarchive();
@@ -314,6 +323,9 @@ class EmulatorWindow {
   void ClearDialogs();
 
   Emulator* emulator_;
+  // Absolute path of the last media that successfully launched; persists across
+  // a Stop so Start/Reboot can re-boot it. Empty until something is loaded.
+  std::filesystem::path last_media_path_;
   ui::WindowedAppContext& app_context_;
   EmulatorWindowListener window_listener_;
   std::unique_ptr<ui::Window> window_;

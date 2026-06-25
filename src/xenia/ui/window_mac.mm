@@ -486,6 +486,15 @@ bool MacWindow::OpenImpl() {
 
     [window center];
     [window makeKeyAndOrderFront:nil];
+    // Bring the whole app to the foreground, not just order this window within
+    // it. On a self-relaunch (posix_spawn from the prior instance, used by the
+    // emulation lifecycle Reboot/Load controls) the new process can launch
+    // backgrounded: the window stays unfocused, macOS marks it occluded, and
+    // the presenter throttles painting - so it shows black until the user clicks
+    // it. Activating here, when the window is actually shown (not at run-loop
+    // start before it exists), foregrounds it reliably past the relaunch focus
+    // race. Harmless on a normal launch (already frontmost).
+    [NSApp activateIgnoringOtherApps:YES];
     // Route keyboard events to the content view.
     [window makeFirstResponder:view];
 

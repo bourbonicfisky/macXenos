@@ -1141,7 +1141,15 @@ bool VulkanCommandProcessor::SetupContext() {
 
 void VulkanCommandProcessor::SaveShaderStorageToDisk() {
   if (pipeline_cache_) {
-    pipeline_cache_->SaveVkPipelineCache();
+    // Finalize the on-disk shader/pipeline storage, not just the VkPipelineCache
+    // blob. ShutdownShaderStorage drains the background storage-writer thread
+    // and fcloses the storage files (flushing them to the OS) in addition to
+    // saving the VkPipelineCache. This matters because the only callers are
+    // pre-exit paths (OnDestroy's quick_exit, and the lifecycle re-exec): both
+    // skip destructors, so without this the writer thread is killed mid-stream
+    // and the shader-translation DB is never persisted -> every launch reloads
+    // "0 shaders" and re-translates from cold.
+    pipeline_cache_->ShutdownShaderStorage();
   }
 }
 
