@@ -132,6 +132,7 @@ DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
 
 DECLARE_int32(window_size_x);
 DECLARE_int32(window_size_y);
+DECLARE_string(window_guest_resolution_mode);
 
 namespace xe {
 namespace app {
@@ -724,7 +725,37 @@ void EmulatorApp::EmulatorThread() {
       discord::DiscordPresence::PlayingTitle(
           game_title.empty() ? "Unknown Title" : std::string(game_title));
     }
-    app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+    app_context().CallInUIThread([this]() {
+      emulator_window_->UpdateTitle();
+      // Size the host window to the guest resolution now that a title is loaded
+      // and the guest video mode is known (per window_guest_resolution_mode).
+      // Must run on the UI thread (window/AppKit access).
+      ui::GuestResolutionWindowMode mode = ui::ParseGuestResolutionWindowMode(
+          cvars::window_guest_resolution_mode);
+      ui::Window* window =
+          emulator_window_ ? emulator_window_->window() : nullptr;
+      gpu::GraphicsSystem* graphics_system = emulator_->graphics_system();
+      if (mode != ui::GuestResolutionWindowMode::kOff && window &&
+          graphics_system) {
+        auto [guest_width, guest_height] = graphics_system->GetResolution();
+        if (guest_width && guest_height) {
+          uint32_t logical_width = guest_width;
+          uint32_t logical_height = guest_height;
+          if (mode == ui::GuestResolutionWindowMode::kActual) {
+            // Request the logical size whose physical/backing size equals the
+            // guest resolution at the current DPI (true 1:1 mapping).
+            logical_width = window->SizeToLogical(guest_width);
+            logical_height = window->SizeToLogical(guest_height);
+          }
+          XELOGI(
+              "Guest-resolution window sizing: mode={}, guest={}x{}, "
+              "requesting logical {}x{} (dpi {})",
+              cvars::window_guest_resolution_mode, guest_width, guest_height,
+              logical_width, logical_height, window->GetDpi());
+          window->SetDesiredLogicalSize(logical_width, logical_height);
+        }
+      }
+    });
     emulator_thread_event_->Set();
   });
 

@@ -537,6 +537,49 @@ void MacWindow::ApplyNewFullscreen() {
   }
 }
 
+void MacWindow::SetDesiredLogicalSizeImpl() {
+  @autoreleasepool {
+    NSWindow* window = (__bridge NSWindow*)window_;
+    if (!window) {
+      return;
+    }
+    // Never fight native (Spaces) fullscreen; the common Window also guards this,
+    // but the native state is the source of truth here.
+    if (([window styleMask] & NSWindowStyleMaskFullScreen) != 0) {
+      return;
+    }
+    // Un-maximize (un-zoom) so the requested size is actually applied.
+    if ([window isZoomed]) {
+      [window zoom:nil];
+    }
+    // Clamp the requested logical (point) size to the screen's visible frame so
+    // the title bar can't land off-screen on smaller displays. visibleFrame is
+    // in points, matching the logical desired size.
+    NSScreen* screen = [window screen];
+    if (!screen) {
+      screen = [NSScreen mainScreen];
+    }
+    NSRect visible = [screen visibleFrame];
+    CGFloat width = CGFloat(GetDesiredLogicalWidth());
+    CGFloat height = CGFloat(GetDesiredLogicalHeight());
+    if (width > visible.size.width) {
+      width = visible.size.width;
+    }
+    if (height > visible.size.height) {
+      height = visible.size.height;
+    }
+    // Store the (possibly clamped) logical size back as the desired size.
+    OnDesiredLogicalSizeUpdate(uint32_t(width), uint32_t(height));
+    // setContentSize: delivers a delegate resize (HandleResize); flag it so the
+    // feedback isn't treated as a user resize. Re-center for a tidy placement.
+    applying_desired_size_ = true;
+    [window setContentSize:NSMakeSize(width, height)];
+    [window center];
+    UpdateSizeFromView();
+    applying_desired_size_ = false;
+  }
+}
+
 void MacWindow::ApplyNewMainMenu(MenuItem* old_main_menu) {
   // The macOS menu bar is app-global (NSApp.mainMenu); applied here from the
   // single emulator window that owns the menu. Runs on the UI thread, which is
@@ -612,9 +655,14 @@ void MacWindow::UpdateSizeFromView() {
   layer.drawableSize = CGSizeMake(backing.width, backing.height);
   WindowDestructionReceiver destruction_receiver(this);
   // canary's OnActualSizeUpdate takes a WindowResizeAction; a native/user resize
-  // is kManual (matching window_gtk.cc / window_win.cc).
-  OnActualSizeUpdate(physical_width, physical_height,
-                     WindowResizeAction::kManual, destruction_receiver);
+  // is kManual (matching window_gtk.cc / window_win.cc) and persists the size to
+  // window_size_x/y. A programmatic auto-size (SetDesiredLogicalSizeImpl) is not
+  // a user action, so report it as non-manual to avoid clobbering those cvars.
+  WindowResizeAction action = applying_desired_size_
+                                  ? WindowResizeAction::kAutoMaximize
+                                  : WindowResizeAction::kManual;
+  OnActualSizeUpdate(physical_width, physical_height, action,
+                     destruction_receiver);
 }
 
 void MacWindow::HandleResize() {

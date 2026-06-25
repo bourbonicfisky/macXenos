@@ -18,9 +18,33 @@
 
 DEFINE_int32(window_size_x, 1280, "Xenia window width", "UI");
 DEFINE_int32(window_size_y, 720, "Xenia window height", "UI");
+DEFINE_string(
+    window_guest_resolution_mode, "scaled",
+    "How the window is sized from the guest resolution when a title launches: "
+    "'scaled' (window logical/point size equals the guest resolution; on a "
+    "HiDPI display the backing store is larger by the scale factor), 'actual' "
+    "(window physical pixel size equals the guest resolution - true 1:1, a "
+    "smaller window on HiDPI), or 'off' (keep the window_size_x/y size). "
+    "Currently implemented on macOS only.",
+    "UI");
 
 namespace xe {
 namespace ui {
+
+GuestResolutionWindowMode ParseGuestResolutionWindowMode(
+    const std::string_view value) {
+  if (value == "off") {
+    return GuestResolutionWindowMode::kOff;
+  }
+  if (value == "actual") {
+    return GuestResolutionWindowMode::kActual;
+  }
+  if (value != "scaled") {
+    XELOGW("Unknown window_guest_resolution_mode '{}', falling back to 'scaled'",
+           value);
+  }
+  return GuestResolutionWindowMode::kScaled;
+}
 
 Window::Window(WindowedAppContext& app_context, const std::string_view title,
                uint32_t desired_logical_width, uint32_t desired_logical_height)
@@ -248,6 +272,29 @@ void Window::SetFullscreen(bool new_fullscreen) {
 
   WindowDestructionReceiver destruction_receiver(this);
   ApplyNewFullscreen();
+  if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
+    return;
+  }
+}
+
+void Window::SetDesiredLogicalSize(uint32_t logical_width,
+                                   uint32_t logical_height) {
+  if (!logical_width || !logical_height) {
+    return;
+  }
+  // Policy (kept in one place): never resize a window the user has put into
+  // fullscreen - leave it undisturbed. Un-maximizing is the implementation's
+  // responsibility in SetDesiredLogicalSizeImpl, as maximization state is
+  // tracked natively, not by the common Window.
+  if (fullscreen_) {
+    return;
+  }
+  OnDesiredLogicalSizeUpdate(logical_width, logical_height);
+  if (!CanApplyState()) {
+    return;
+  }
+  WindowDestructionReceiver destruction_receiver(this);
+  SetDesiredLogicalSizeImpl();
   if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
     return;
   }

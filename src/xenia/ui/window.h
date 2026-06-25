@@ -29,6 +29,25 @@
 namespace xe {
 namespace ui {
 
+// How the host window is sized from the guest video resolution at title launch.
+// Controlled by the `window_guest_resolution_mode` cvar.
+enum class GuestResolutionWindowMode {
+  // Don't auto-size; keep the window_size_x/y size.
+  kOff,
+  // Window logical (point) size equals the guest resolution. On a HiDPI display
+  // the backing store is larger by the scale factor (e.g. 1080p -> a 1920x1080
+  // point window backed at 2x).
+  kScaled,
+  // Window physical (backing-store pixel) size equals the guest resolution
+  // (true 1:1 guest-pixel mapping; a smaller point window on HiDPI).
+  kActual,
+};
+
+// Parses the `window_guest_resolution_mode` cvar string. Tolerant: an
+// unrecognized value falls back to kScaled (with a warning logged).
+GuestResolutionWindowMode ParseGuestResolutionWindowMode(
+    const std::string_view value);
+
 class Window {
  public:
   // Transitions between these phases is sequential and looped (and >= and <=
@@ -329,14 +348,14 @@ class Window {
   // necessarily be true immediately.
   void Focus();
 
-  // TODO(Triang3l): A resize function, primarily for snapping externally to
-  // 1280x720, 1920x1080, and other 1:1 resolutions. It will need to resize the
-  // window (to a desired logical size - the actual physical size is entirely
-  // the feedback of the implementation) in the normal state, and possibly also
-  // un-maximize (and possibly un-fullscreen) it (but this choice will possibly
-  // need to be exposed to the caller). Because it's currently not needed, it's
-  // not implemented to avoid platform-specific complexities regarding
-  // maximization, DPI, etc.
+  // Requests a resize of the window to a desired logical size, primarily for
+  // snapping to the guest resolution (1280x720, 1920x1080, and other 1:1
+  // resolutions) at title launch. The actual physical size is the feedback of
+  // the implementation (which may clamp the request, e.g. to the monitor work
+  // area). A fullscreen window is left undisturbed (no-op); a maximized window
+  // is un-maximized by the implementation before sizing. Implemented on macOS;
+  // a no-op on backends that don't override SetDesiredLogicalSizeImpl.
+  void SetDesiredLogicalSize(uint32_t logical_width, uint32_t logical_height);
 
   void SetPresenter(Presenter* presenter);
 
@@ -504,6 +523,11 @@ class Window {
   // different than it was previously.
   virtual void ApplyNewFullscreen() {}
   virtual void ApplyNewTitle() {}
+  // Applies the desired logical size (GetDesiredLogicalWidth()/Height()) to the
+  // native window, un-maximizing if needed. The implementation may clamp the
+  // request and store the clamped size via OnDesiredLogicalSizeUpdate. Default
+  // no-op for backends that don't support programmatic resizing yet.
+  virtual void SetDesiredLogicalSizeImpl() {}
   // can_apply_state_in_current_phase whether the window is in a life cycle
   // phase that would normally accept Apply calls (the native window surely
   // exists), since this function may be called in closed states too to update

@@ -56,6 +56,9 @@ class MacWindow : public Window {
   void RequestCloseImpl() override;
   void ApplyNewTitle() override;
   void ApplyNewFullscreen() override;
+  // Resizes the NSWindow content to the desired logical size (un-zooming first),
+  // clamped to the screen's visible frame. See window.h.
+  void SetDesiredLogicalSizeImpl() override;
   void FocusImpl() override;
 
   // Builds the native NSMenu tree from GetMainMenu() and installs it as the
@@ -77,6 +80,11 @@ class MacWindow : public Window {
   // queue at a time (see RequestPaintImpl). Atomic because RequestPaint may be
   // called from non-UI threads.
   std::atomic<bool> paint_scheduled_{false};
+
+  // True while a programmatic SetDesiredLogicalSizeImpl resize is in flight, so
+  // the resulting size feedback isn't mistaken for a user (kManual) resize and
+  // doesn't overwrite the window_size_x/y cvars.
+  bool applying_desired_size_ = false;
 
   // Opaque Objective-C pointers (this header is included from plain C++ too).
   void* window_ = nullptr;     // NSWindow*
