@@ -284,7 +284,7 @@ class EmulatorWindow {
   // Reboot/Start lifecycle controls; no-op if no media has been loaded. When
   // warm, finalizes the shader/pipeline storage first so the relaunch boots
   // warm (Reboot); when not warm, just persists config and relaunches
-  // immediately (Quick Reboot) - bulletproof but boots cold.
+  // immediately (Full Reboot) - bulletproof but boots cold.
   void RelaunchLastTitle(bool warm);
   void InstallContent();
   void ExtractZarchive();
