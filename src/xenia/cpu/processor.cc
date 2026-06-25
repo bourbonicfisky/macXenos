@@ -1092,6 +1092,15 @@ uint32_t Processor::StepToGuestSafePoint(uint32_t thread_id, bool ignore_host) {
         "Processor::StepToSafePoint(): target thread is the calling thread!");
     return 0;
   }
+  // Stepping to a safe point relies on the stack walker and the guest
+  // breakpoint/single-step engine, neither of which is available on platforms
+  // without a StackWalker implementation (POSIX/macOS - StackWalker::Create
+  // returns null). Without it we can't synchronize the thread's context to a
+  // basic-block boundary; the caller (e.g. KernelState::TerminateTitle) will
+  // act on the already-suspended thread directly instead of crashing here.
+  if (!stack_walker_) {
+    return 0;
+  }
   auto thread_info = QueryThreadDebugInfo(thread_id);
   auto thread = thread_info->thread;
 
