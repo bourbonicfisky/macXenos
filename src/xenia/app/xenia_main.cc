@@ -770,10 +770,27 @@ void EmulatorApp::EmulatorThread() {
     app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
   });
 
-  emulator_->on_terminate.AddListener([]() {
+  emulator_->on_terminate.AddListener([this]() {
     if (cvars::discord) {
       discord::DiscordPresence::NotPlaying();
     }
+    // Title stopped - refresh lifecycle menu enable-state on the UI thread
+    // (Stop greys out; Reboot/Full Reboot stay enabled via remembered media).
+    app_context().CallInUIThread([this]() {
+      if (emulator_window_) {
+        emulator_window_->UpdateLifecycleMenuState();
+      }
+    });
+  });
+
+  // A title that exits on its own (not via Stop) lands in the same stopped
+  // state; keep the menu in sync.
+  emulator_->on_exit.AddListener([this]() {
+    app_context().CallInUIThread([this]() {
+      if (emulator_window_) {
+        emulator_window_->UpdateLifecycleMenuState();
+      }
+    });
   });
 
   // Enable emulator input now that the emulator is properly loaded.

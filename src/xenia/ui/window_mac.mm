@@ -387,13 +387,21 @@ MacMenuItem::~MacMenuItem() {
 
 void MacMenuItem::SetEnabled(bool enabled) {
   @autoreleasepool {
-    // Mirror Win32MenuItem: apply to the items shown in this menu. For the root
-    // menu these are the top-level titles, matching SetMainMenuEnabled.
+    // Container (root menu / popup submenu): apply to the items shown in this
+    // menu. For the root menu these are the top-level titles, matching
+    // SetMainMenuEnabled.
     NSMenu* menu = (__bridge NSMenu*)ns_menu_;
-    if (!menu) {
+    if (menu) {
+      for (NSMenuItem* item in menu.itemArray) {
+        item.enabled = enabled ? YES : NO;
+      }
       return;
     }
-    for (NSMenuItem* item in menu.itemArray) {
+    // Leaf item (e.g. a kString action): enable/disable just this NSMenuItem,
+    // so individual lifecycle items can be greyed per state. Relies on the
+    // owning menu's autoenablesItems=NO (set when the menu is built).
+    NSMenuItem* item = (__bridge NSMenuItem*)ns_menu_item_;
+    if (item) {
       item.enabled = enabled ? YES : NO;
     }
   }

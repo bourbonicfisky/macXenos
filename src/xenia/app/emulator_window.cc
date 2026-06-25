@@ -280,6 +280,8 @@ void EmulatorWindow::OnEmulatorInitialized() {
 
   emulator_initialized_ = true;
   window_->SetMainMenuEnabled(true);
+  // Set the initial lifecycle item enable-state now that the menu is live.
+  UpdateLifecycleMenuState();
   // When the user can see that the emulator isn't initializing anymore (the
   // menu isn't disabled), enter fullscreen if requested.
   if (cvars::fullscreen) {
@@ -785,17 +787,25 @@ bool EmulatorWindow::Initialize() {
                          std::bind(&EmulatorWindow::ExtractZarchive, this)));
     file_menu->AddChild(std::move(zar_menu));
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-    file_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Stop Emulation",
-                         std::bind(&EmulatorWindow::FileClose, this)));
-    file_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Reboot Title",
-                         std::bind(&EmulatorWindow::RelaunchLastTitle, this,
-                                   /*warm=*/true)));
-    file_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Full Reboot",
-                         std::bind(&EmulatorWindow::RelaunchLastTitle, this,
-                                   /*warm=*/false)));
+    {
+      auto stop_item =
+          MenuItem::Create(MenuItem::Type::kString, "Stop Emulation",
+                           std::bind(&EmulatorWindow::FileClose, this));
+      stop_menu_item_ = stop_item.get();
+      file_menu->AddChild(std::move(stop_item));
+
+      auto reboot_item = MenuItem::Create(
+          MenuItem::Type::kString, "Reboot Title",
+          std::bind(&EmulatorWindow::RelaunchLastTitle, this, /*warm=*/true));
+      reboot_menu_item_ = reboot_item.get();
+      file_menu->AddChild(std::move(reboot_item));
+
+      auto full_reboot_item = MenuItem::Create(
+          MenuItem::Type::kString, "Full Reboot",
+          std::bind(&EmulatorWindow::RelaunchLastTitle, this, /*warm=*/false));
+      full_reboot_menu_item_ = full_reboot_item.get();
+      file_menu->AddChild(std::move(full_reboot_item));
+    }
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     file_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "Show content directory...",
@@ -1329,6 +1339,26 @@ void EmulatorWindow::RelaunchLastTitle(bool warm) {
 #else
   XELOGW("RelaunchLastTitle: re-exec relaunch is macOS-only.");
 #endif  // XE_PLATFORM_MAC
+}
+
+void EmulatorWindow::UpdateLifecycleMenuState() {
+  const bool running = emulator_->is_title_open();
+  const bool have_media = !last_media_path_.empty();
+  // Stop only applies while a title is running; Reboot/Full Reboot need media
+  // to have been loaded (they re-exec the remembered path, from running OR
+  // stopped). Load/Open stays always-available.
+  if (stop_menu_item_) {
+    stop_menu_item_->SetEnabled(running);
+  }
+  if (reboot_menu_item_) {
+    reboot_menu_item_->SetEnabled(have_media);
+  }
+  if (full_reboot_menu_item_) {
+    full_reboot_menu_item_->SetEnabled(have_media);
+  }
+  if (window_) {
+    window_->CompleteMainMenuItemsUpdate();
+  }
 }
 
 void EmulatorWindow::FlushBeforeRelaunch() {
@@ -2430,6 +2460,9 @@ xe::X_STATUS EmulatorWindow::RunTitle(
   } else {
     // Remember the media so Start/Reboot can re-boot it after a Stop.
     last_media_path_ = abs_path;
+    // Title is now running and media is remembered - refresh menu enable state
+    // (on_launch fires before this point, before last_media_path_ is set).
+    UpdateLifecycleMenuState();
     AddRecentlyLaunchedTitle(path_to_file, emulator_->title_name());
 
     auto xam =

@@ -85,6 +85,9 @@ class EmulatorWindow {
   void OnEmulatorInitialized();
 
   xe::X_STATUS RunTitle(const std::filesystem::path& path_to_file);
+  // Grey the lifecycle menu items per current state (Stop when running, Reboot/
+  // Full Reboot when media has been loaded). Must be called on the UI thread.
+  void UpdateLifecycleMenuState();
   void UpdateTitle();
   void SetFullscreen(bool fullscreen);
   void ToggleFullscreen();
@@ -326,6 +329,11 @@ class EmulatorWindow {
   // Absolute path of the last media that successfully launched; persists across
   // a Stop so Start/Reboot can re-boot it. Empty until something is loaded.
   std::filesystem::path last_media_path_;
+  // Non-owning pointers to the lifecycle menu items (owned by the menu tree),
+  // kept so UpdateLifecycleMenuState can grey them per emulation state.
+  ui::MenuItem* stop_menu_item_ = nullptr;
+  ui::MenuItem* reboot_menu_item_ = nullptr;
+  ui::MenuItem* full_reboot_menu_item_ = nullptr;
   ui::WindowedAppContext& app_context_;
   EmulatorWindowListener window_listener_;
   std::unique_ptr<ui::Window> window_;
