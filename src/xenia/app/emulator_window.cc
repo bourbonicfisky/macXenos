@@ -955,7 +955,7 @@ bool EmulatorWindow::Initialize() {
     help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     help_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&About...",
-        []() { LaunchWebBrowser("https://xenia.jp/about/"); }));
+        [this]() { window_->ShowAboutDialog(); }));
   }
   main_menu->AddChild(std::move(help_menu));
 

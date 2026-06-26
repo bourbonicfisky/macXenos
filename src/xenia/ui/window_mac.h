@@ -32,6 +32,11 @@ class MacWindow : public Window {
   // the backing scale factor folded into GetLatestDpiImpl.
   uint32_t GetMediumDpi() const override { return 96; }
 
+  // Shows the standard macOS About panel (app icon + version from the bundle)
+  // with a credits block of clickable links. Also invoked by the application
+  // menu's About item.
+  void ShowAboutDialog() override;
+
   // Called by the Cocoa window delegate (defined in the .mm).
   void HandleResize();
   void HandleNativeClose();

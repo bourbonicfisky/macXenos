@@ -16,6 +16,52 @@
 #include "xenia/ui/ui_event.h"
 #include "xenia/ui/virtual_key.h"
 
+// Shows the standard macOS About panel. The app icon and version come from the
+// bundle's Info.plist automatically; the credits block carries clickable links
+// (the standard panel makes NSLinkAttributeName runs clickable). Used by both
+// the application-menu About item and the cross-platform Help > About.
+static void ShowMacAboutPanel() {
+  NSMutableParagraphStyle* para = [[NSMutableParagraphStyle alloc] init];
+  para.alignment = NSTextAlignmentCenter;
+  para.paragraphSpacing = 6.0;
+  NSDictionary* text_attrs = @{
+    NSParagraphStyleAttributeName : para,
+    NSFontAttributeName : [NSFont systemFontOfSize:11.0],
+    NSForegroundColorAttributeName : [NSColor labelColor],
+  };
+  NSMutableAttributedString* credits =
+      [[NSMutableAttributedString alloc] init];
+  void (^add_line)(NSString*, NSString*) = ^(NSString* label, NSString* url) {
+    [credits appendAttributedString:[[NSAttributedString alloc]
+                                         initWithString:label
+                                             attributes:text_attrs]];
+    NSMutableDictionary* link_attrs = [text_attrs mutableCopy];
+    link_attrs[NSLinkAttributeName] = url;
+    [credits appendAttributedString:[[NSAttributedString alloc]
+                                         initWithString:url
+                                             attributes:link_attrs]];
+    [credits appendAttributedString:[[NSAttributedString alloc]
+                                         initWithString:@"\n\n"
+                                             attributes:text_attrs]];
+  };
+
+  add_line(@"Mac build of Xenia Canary. Ported by dmg:\n",
+           @"https://www.patreon.com/dmug");
+  add_line(@"Original project:\n",
+           @"https://github.com/xenia-canary/xenia-canary");
+  add_line(@"Project homepage:\n", @"https://xenia.jp/about/");
+  add_line(@"Game compatibility:\n",
+           @"https://xenia-manager.github.io/compatibility");
+  add_line(@"Report game compatibility:\n",
+           @"https://github.com/xenia-project/game-compatibility/issues");
+
+  [NSApp orderFrontStandardAboutPanel:@{
+    NSAboutPanelOptionApplicationName : @"Xenia Canary, Mac Build",
+    NSAboutPanelOptionCredits : credits,
+  }];
+  [NSApp activateIgnoringOtherApps:YES];
+}
+
 // Delegate forwarding native window events back into the MacWindow.
 @interface XeniaWindowDelegate : NSObject <NSWindowDelegate> {
   xe::ui::MacWindow* window_;
@@ -41,10 +87,7 @@
     window_->RequestClose();
   }
 }
-- (void)openAbout:(id)sender {
-  [[NSWorkspace sharedWorkspace]
-      openURL:[NSURL URLWithString:@"https://xenia.jp/about/"]];
-}
+- (void)openAbout:(id)sender { ShowMacAboutPanel(); }
 - (void)windowDidResize:(NSNotification*)notification {
   window_->HandleResize();
 }
@@ -522,6 +565,8 @@ void MacWindow::RequestCloseImpl() {
     [window performClose:nil];
   }
 }
+
+void MacWindow::ShowAboutDialog() { ShowMacAboutPanel(); }
 
 void MacWindow::FocusImpl() {
   NSWindow* window = (__bridge NSWindow*)window_;

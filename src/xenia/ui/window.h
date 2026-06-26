@@ -230,6 +230,12 @@ class Window {
     // Window might have been deleted.
   }
 
+  // Shows a platform "About" affordance for the application. Invoked from the
+  // Help menu and (on macOS) the standard application menu. The base
+  // implementation does nothing; platform windows may override it (the macOS
+  // window shows the native About panel).
+  virtual void ShowAboutDialog() {}
+
   // The `public` state setters are for calling from outside.
   // The implementation must use the public getters to obtain the desired state
   // while applying, but for updating the actual state, or for overriding the
