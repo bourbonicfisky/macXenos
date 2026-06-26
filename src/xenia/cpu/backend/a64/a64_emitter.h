@@ -71,8 +71,9 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
             std::vector<SourceMapEntry>* out_source_map);
 
  public:
-  // Reserved: sp, x19 (backend context), x20 (context), x21 (membase)
-  // Scratch: x0-x18 (caller-saved), v0-v3
+  // Reserved: sp, x18 (Apple arm64 platform register; reserved on all targets
+  // for portability), x19 (backend context), x20 (context), x21 (membase)
+  // Scratch: x0-x17 (caller-saved, incl. x16/x17 = IP0/IP1), x9; v0-v3
   // Available GPRs for register allocator: x22-x28
   static constexpr int GPR_COUNT = 7;
   // Available VEC regs: v4-v15, v16-v31
@@ -183,8 +184,23 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   size_t stack_size_ = 0;
 
-  static const uint32_t gpr_reg_map_[GPR_COUNT];
+  // GPR allocatable registers: x22-x28. x18 is intentionally absent — it is
+  // Apple's reserved arm64 platform register, and clobbering it on macOS arm64
+  // corrupts thread-local state. Defined inline so the exclusion is enforced at
+  // compile time (see static_assert below).
+  static constexpr uint32_t gpr_reg_map_[GPR_COUNT] = {22, 23, 24, 25,
+                                                       26, 27, 28};
   static const uint32_t vec_reg_map_[VEC_COUNT];
+
+  static_assert(
+      [] {
+        for (uint32_t r : gpr_reg_map_) {
+          if (r == 18) return false;
+        }
+        return true;
+      }(),
+      "x18 is Apple's reserved arm64 platform register and must never be "
+      "allocatable");
 
   std::vector<TailEmitter> tail_code_;
   std::vector<Xbyak_aarch64::Label*> label_cache_;

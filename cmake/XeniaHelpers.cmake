@@ -292,6 +292,13 @@ function(xe_test_suite name base_path)
   if(ARG_LINKS)
     target_link_libraries(${name} PRIVATE ${ARG_LINKS})
   endif()
+  # The default 64-bit macOS __PAGEZERO is 4 GB, which makes the entire sub-4 GB
+  # range unmappable. The JIT code cache reserves fixed low addresses (e.g.
+  # 0xA0000000), so test suites that initialize a backend must shrink __PAGEZERO
+  # exactly like xenia-app does, or code_cache Initialize() fails.
+  if(APPLE)
+    target_link_options(${name} PRIVATE -Wl,-pagezero_size,0x1000)
+  endif()
   xe_target_defaults(${name})
   set_target_properties(${name} PROPERTIES FOLDER "tests")
 

@@ -57,11 +57,10 @@ static uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
 static constexpr size_t kMaxCodeSize = 1_MiB;
 
 // Register maps:
-// GPR allocatable registers: x22, x23, x24, x25, x26, x27, x28
-// (x19=backend context, x20=context, x21=membase are reserved)
-const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT] = {
-    22, 23, 24, 25, 26, 27, 28,
-};
+// GPR allocatable registers (x22-x28) are defined inline in a64_emitter.h so
+// the x18 exclusion can be enforced at compile time (static_assert there).
+// (x18=Apple platform register, x19=backend context, x20=context, x21=membase
+// are reserved.)
 
 // VEC allocatable registers: v4-v15, v16-v31
 // (v0-v3 are scratch)

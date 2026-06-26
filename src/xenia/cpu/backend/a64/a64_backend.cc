@@ -23,6 +23,9 @@
 #if XE_ARCH_ARM64 && XE_COMPILER_MSVC
 #include <intrin.h>
 #endif
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#include <pthread.h>
+#endif
 #include "xenia/cpu/backend/a64/a64_assembler.h"
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
@@ -80,7 +83,8 @@ A64HelperEmitter::A64HelperEmitter(A64Backend* backend,
 //   x2 = return address value (arg1)
 //
 // ARM64 AAPCS64 calling convention:
-//   Caller-saved: x0-x18, v0-v7, v16-v31
+//   Caller-saved: x0-x17, v0-v7, v16-v31 (x18 is the platform register,
+//                 reserved by Apple/Windows; never used by the emitter)
 //   Callee-saved: x19-x28, x29(FP), x30(LR), d8-d15
 //
 // We save all callee-saved regs, set up context (x20) and membase (x21),
@@ -764,9 +768,19 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
   uint8_t* write_pos =
       &guest_trampoline_memory_[kGuestTrampolineSize * new_index];
 
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  // guest_trampoline_memory_ is a MAP_JIT region (AllocFixed adds MAP_JIT for
+  // executable anonymous mappings). On Apple Silicon it is writable XOR
+  // executable per thread, so disable write-protection before emitting the
+  // trampoline and re-enable it before the code can be branched to.
+  pthread_jit_write_protect_np(0);
+#endif
   BuildGuestTrampoline(write_pos, reinterpret_cast<void*>(proc), userdata1,
                        userdata2,
                        reinterpret_cast<void*>(guest_to_host_thunk_));
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  pthread_jit_write_protect_np(1);
+#endif
 
   // Flush instruction cache for the new trampoline code.
 #if XE_PLATFORM_WIN32

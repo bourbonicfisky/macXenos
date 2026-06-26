@@ -36,5 +36,11 @@ elseif(XE_TARGET_AARCH64)
   target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-cpu-backend-a64)
 endif()
 
+# The JIT code cache reserves fixed sub-4 GB addresses; the default 64-bit macOS
+# __PAGEZERO (4 GB) makes them unmappable, so shrink it like xenia-app does.
+if(APPLE)
+  target_link_options(xenia-cpu-ppc-tests PRIVATE -Wl,-pagezero_size,0x1000)
+endif()
+
 xe_target_defaults(xenia-cpu-ppc-tests)
 add_test(NAME xenia-cpu-ppc-tests COMMAND xenia-cpu-ppc-tests)

@@ -106,6 +106,31 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
               sizeof(thread_context.xmm_registers));
 #endif  // XE_PLATFORM_MAC
 #elif XE_ARCH_ARM64
+#if XE_PLATFORM_MAC
+  // Darwin arm64: registers live in __ss (thread state) and __ns (NEON), not in
+  // the Linux sigcontext layout. __ss stores x0-x28 contiguously in __x[], with
+  // x29 (fp), x30 (lr), sp and pc as separate fields. On arm64e (ptrauth) those
+  // pointer fields are opaque and must be read via the accessor macros; on plain
+  // arm64 (__DARWIN_OPAQUE_ARM_THREAD_STATE64 == 0) they are direct fields.
+  const _STRUCT_ARM_THREAD_STATE64& ss = mcontext.__ss;
+  std::memcpy(thread_context.x, ss.__x, sizeof(ss.__x));  // x0-x28
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+  thread_context.x[29] = uint64_t(__darwin_arm_thread_state64_get_fp(ss));
+  thread_context.x[30] = uint64_t(__darwin_arm_thread_state64_get_lr(ss));
+  thread_context.sp = uint64_t(__darwin_arm_thread_state64_get_sp(ss));
+  thread_context.pc = uint64_t(__darwin_arm_thread_state64_get_pc(ss));
+#else
+  thread_context.x[29] = ss.__fp;
+  thread_context.x[30] = ss.__lr;
+  thread_context.sp = ss.__sp;
+  thread_context.pc = ss.__pc;
+#endif  // __DARWIN_OPAQUE_ARM_THREAD_STATE64
+  thread_context.pstate = ss.__cpsr;
+  const _STRUCT_ARM_NEON_STATE64& ns = mcontext.__ns;
+  thread_context.fpsr = ns.__fpsr;
+  thread_context.fpcr = ns.__fpcr;
+  std::memcpy(thread_context.v, ns.__v, sizeof(thread_context.v));
+#else
   std::memcpy(thread_context.x, mcontext.regs, sizeof(thread_context.x));
   thread_context.sp = mcontext.sp;
   thread_context.pc = mcontext.pc;
@@ -138,6 +163,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     std::memcpy(thread_context.v, mcontext_fpsimd->vregs,
                 sizeof(thread_context.v));
   }
+#endif  // XE_PLATFORM_MAC
 #endif  // XE_ARCH
 
   Exception ex;
@@ -195,6 +221,36 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       // Exception Level, 0b100101 without a change in the Exception Level),
       // bit 6 is 0 for reading from a memory location, 1 for writing to a
       // memory location.
+#if XE_PLATFORM_MAC
+      // Contrary to a common belief, macOS *does* surface the ESR and the
+      // faulting virtual address via the ARM exception state (__es). Use them:
+      // si_addr is unreliable for Mach-translated SIGSEGV/SIGBUS (often 0), and
+      // a 0 fault address makes the write-watch handler decline a recoverable
+      // fault and crash via the restore-default path. Decode direction from the
+      // ESR WnR bit, mirroring the Linux path, and only fall back to decoding
+      // the faulting instruction if the syndrome is not a Data Abort.
+      const _STRUCT_ARM_EXCEPTION_STATE64& es = mcontext.__es;
+      mac_fault_address = uint64_t(es.__far);
+      const uint32_t mac_esr = es.__esr;
+      if (((mac_esr >> 26) & 0b111110) == 0b100100) {
+        access_violation_operation =
+            (mac_esr & (UINT32_C(1) << 6))
+                ? Exception::AccessViolationOperation::kWrite
+                : Exception::AccessViolationOperation::kRead;
+      } else {
+        bool instruction_is_store;
+        if (IsArm64LoadPrefetchStore(
+                *reinterpret_cast<const uint32_t*>(thread_context.pc),
+                instruction_is_store)) {
+          access_violation_operation =
+              instruction_is_store ? Exception::AccessViolationOperation::kWrite
+                                   : Exception::AccessViolationOperation::kRead;
+        } else {
+          access_violation_operation =
+              Exception::AccessViolationOperation::kUnknown;
+        }
+      }
+#else
       if (mcontext_esr && ((mcontext_esr->esr >> 26) & 0b111110) == 0b100100) {
         access_violation_operation =
             (mcontext_esr->esr & (UINT64_C(1) << 6))
@@ -225,6 +281,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
               Exception::AccessViolationOperation::kUnknown;
         }
       }
+#endif  // XE_PLATFORM_MAC
 #else
       access_violation_operation =
           Exception::AccessViolationOperation::kUnknown;
@@ -306,6 +363,46 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       }
 #endif  // XE_PLATFORM_MAC
 #elif XE_ARCH_ARM64
+#if XE_PLATFORM_MAC
+      _STRUCT_ARM_THREAD_STATE64& ss_out = mcontext.__ss;
+      uint32_t modified_register_index;
+      uint32_t modified_x_registers_remaining = ex.modified_x_registers();
+      while (xe::bit_scan_forward(modified_x_registers_remaining,
+                                  &modified_register_index)) {
+        modified_x_registers_remaining &=
+            ~(UINT32_C(1) << modified_register_index);
+        // x0-x28 are the contiguous __x[] array; x29/x30 are the separate
+        // fp/lr fields, restored unconditionally below.
+        if (modified_register_index < 29) {
+          ss_out.__x[modified_register_index] =
+              thread_context.x[modified_register_index];
+        }
+      }
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+      __darwin_arm_thread_state64_set_fp(ss_out, thread_context.x[29]);
+      __darwin_arm_thread_state64_set_lr_fptr(ss_out, thread_context.x[30]);
+      __darwin_arm_thread_state64_set_sp(ss_out, thread_context.sp);
+      __darwin_arm_thread_state64_set_pc_fptr(ss_out, thread_context.pc);
+#else
+      ss_out.__fp = thread_context.x[29];
+      ss_out.__lr = thread_context.x[30];
+      ss_out.__sp = thread_context.sp;
+      ss_out.__pc = thread_context.pc;
+#endif  // __DARWIN_OPAQUE_ARM_THREAD_STATE64
+      ss_out.__cpsr = uint32_t(thread_context.pstate);
+      _STRUCT_ARM_NEON_STATE64& ns_out = mcontext.__ns;
+      ns_out.__fpsr = thread_context.fpsr;
+      ns_out.__fpcr = thread_context.fpcr;
+      uint32_t modified_v_registers_remaining = ex.modified_v_registers();
+      while (xe::bit_scan_forward(modified_v_registers_remaining,
+                                  &modified_register_index)) {
+        modified_v_registers_remaining &=
+            ~(UINT32_C(1) << modified_register_index);
+        std::memcpy(&ns_out.__v[modified_register_index],
+                    &thread_context.v[modified_register_index],
+                    sizeof(vec128_t));
+      }
+#else
       uint32_t modified_register_index;
       uint32_t modified_x_registers_remaining = ex.modified_x_registers();
       while (xe::bit_scan_forward(modified_x_registers_remaining,
@@ -333,6 +430,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
               thread_context.x[modified_register_index];
         }
       }
+#endif  // XE_PLATFORM_MAC
 #endif  // XE_ARCH
       return;
     }

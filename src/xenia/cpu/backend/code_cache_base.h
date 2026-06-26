@@ -28,12 +28,28 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
+
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#include <pthread.h>
+#endif
 
 namespace xe {
 namespace cpu {
 namespace backend {
+
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+// Apple Silicon maps the JIT code cache as a single MAP_JIT region that is
+// writable XOR executable per thread (never both simultaneously). Toggle
+// write-protection off before writing generated code and back on before it is
+// executed. Used only on this (platform x arch) cell; the Intel macOS path uses
+// RWX MAP_JIT and other platforms use a dual-aliased mapping, so the brackets
+// are compiled out everywhere else.
+static inline void SetJitWritable() { pthread_jit_write_protect_np(0); }
+static inline void SetJitExecutable() { pthread_jit_write_protect_np(1); }
+#endif  // XE_PLATFORM_MAC && XE_ARCH_ARM64
 
 struct EmitFunctionInfo {
   struct _code_size {
@@ -185,6 +201,13 @@ class CodeCacheBase : public CodeCache {
       // Commit memory if needed.
       EnsureCommitted(high_mark);
 
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+      // Make the MAP_JIT region writable for this thread before any store into
+      // it. Re-enabled after PlaceCode below, which can still write DWARF
+      // unwind (.eh_frame) bytes into the reserved tail.
+      SetJitWritable();
+#endif
+
       // Copy code.
       std::memcpy(code_write_address, machine_code, func_info.code_size.total);
 
@@ -193,7 +216,8 @@ class CodeCacheBase : public CodeCache {
           tail_write_address,
           static_cast<size_t>(end_write_address - tail_write_address));
 
-      // Flush I-cache for code and fill regions.
+      // Flush I-cache for code and fill regions. (Cache maintenance works in
+      // either W^X state.)
       self().FlushCodeRange(code_write_address, func_info.code_size.total);
       if (tail_write_address < end_write_address) {
         self().FlushCodeRange(
@@ -201,9 +225,15 @@ class CodeCacheBase : public CodeCache {
             static_cast<size_t>(end_write_address - tail_write_address));
       }
 
-      // Platform-specific unwind registration.
+      // Platform-specific unwind registration (may write into the reserved tail).
       self().PlaceCode(guest_address, machine_code, func_info,
                        code_execute_address, unwind_reservation);
+
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+      // All writes to the generated-code region are done; make it executable
+      // again for this thread before it can be run.
+      SetJitExecutable();
+#endif
     }
 
     // Post-placement hook (e.g. VTune notification).
@@ -229,7 +259,13 @@ class CodeCacheBase : public CodeCache {
       high_mark = generated_code_offset_;
     }
     EnsureCommitted(high_mark);
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    SetJitWritable();
     std::memcpy(data_address, data, length);
+    SetJitExecutable();
+#else
+    std::memcpy(data_address, data, length);
+#endif
     return uint32_t(uintptr_t(data_address));
   }
 
