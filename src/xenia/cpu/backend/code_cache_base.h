@@ -121,36 +121,68 @@ class CodeCacheBase : public CodeCache {
 
   const std::filesystem::path& file_name() const override { return file_name_; }
   uintptr_t execute_base_address() const override {
-    return kGeneratedCodeExecuteBase;
+    // The real base, which on macOS arm64 is relocated above 4 GB. Equals
+    // kGeneratedCodeExecuteBase on platforms that keep the cache sub-4 GB.
+    // LookupFunction depends on this matching where code actually lives.
+    return reinterpret_cast<uintptr_t>(generated_code_execute_base_);
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
 
-  bool has_indirection_table() { return indirection_table_base_ != nullptr; }
+  // Indirection-table slot: holds a host code address. On Apple Silicon the
+  // code cache lives above 4 GB (macOS' default __PAGEZERO forbids sub-4 GB
+  // mappings), so a slot must hold a full 64-bit host pointer. Everywhere else
+  // the cache stays sub-4 GB and slots stay 32-bit: the table is mapped *at*
+  // the guest-address range, so the guest address itself is the slot pointer
+  // (see the Call/CallIndirect dispatch in the emitters). A universal 8-byte
+  // slot is intentionally NOT used: on x64 it would push the table (still based
+  // at kIndirectionTableBase) into the code region and break that aliasing.
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  using IndirectionSlot = uint64_t;
+#else
+  using IndirectionSlot = uint32_t;
+#endif
 
-  void set_indirection_default(uint32_t default_value) {
-    indirection_default_value_ = default_value;
+  // Host address of the slot for a guest address. Guest addresses are 4-byte
+  // aligned (PPC), so the slot index is the guest word offset; this matches the
+  // legacy uint32 layout exactly (byte offset == guest offset) and, for 8-byte
+  // slots, doubles the span.
+  IndirectionSlot* indirection_slot_for(uint32_t guest_address) {
+    assert_true((guest_address & 0x3u) == 0u);
+    return reinterpret_cast<IndirectionSlot*>(indirection_table_base_) +
+           ((guest_address - kIndirectionTableBase) >> 2);
   }
 
-  void AddIndirection(uint32_t guest_address, uint32_t host_address) {
+  bool has_indirection_table() { return indirection_table_base_ != nullptr; }
+
+  // Real host base of the indirection table (relocated high on macOS arm64).
+  // The emitter bakes slot addresses from this at emit time — the table is
+  // allocated once in Initialize() before any code is generated.
+  uint8_t* indirection_table_base() const { return indirection_table_base_; }
+
+  void set_indirection_default(uintptr_t default_value) {
+    indirection_default_value_ = static_cast<IndirectionSlot>(default_value);
+  }
+
+  void AddIndirection(uint32_t guest_address, uintptr_t host_address) {
     if (!indirection_table_base_) {
       return;
     }
-    uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
-        indirection_table_base_ + (guest_address - kIndirectionTableBase));
-    *indirection_slot = host_address;
+    *indirection_slot_for(guest_address) =
+        static_cast<IndirectionSlot>(host_address);
   }
 
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high) {
     if (!indirection_table_base_) {
       return;
     }
+    uint8_t* slot_low = reinterpret_cast<uint8_t*>(indirection_slot_for(guest_low));
+    uint8_t* slot_high =
+        reinterpret_cast<uint8_t*>(indirection_slot_for(guest_high));
     xe::memory::AllocFixed(
-        indirection_table_base_ + (guest_low - kIndirectionTableBase),
-        guest_high - guest_low, xe::memory::AllocationType::kCommit,
-        xe::memory::PageAccess::kReadWrite);
-    uint32_t* p = reinterpret_cast<uint32_t*>(indirection_table_base_);
-    for (uint32_t address = guest_low; address < guest_high; ++address) {
-      p[(address - kIndirectionTableBase) / 4] = indirection_default_value_;
+        slot_low, static_cast<size_t>(slot_high - slot_low),
+        xe::memory::AllocationType::kCommit, xe::memory::PageAccess::kReadWrite);
+    for (uint32_t address = guest_low; address < guest_high; address += 4) {
+      *indirection_slot_for(address) = indirection_default_value_;
     }
   }
 
@@ -242,10 +274,8 @@ class CodeCacheBase : public CodeCache {
 
     // Fix up indirection table.
     if (guest_address && indirection_table_base_) {
-      uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
-          indirection_table_base_ + (guest_address - kIndirectionTableBase));
-      *indirection_slot =
-          uint32_t(reinterpret_cast<uint64_t>(code_execute_address));
+      *indirection_slot_for(guest_address) = static_cast<IndirectionSlot>(
+          reinterpret_cast<uintptr_t>(code_execute_address));
     }
   }
 
@@ -305,7 +335,12 @@ class CodeCacheBase : public CodeCache {
   }
 
  protected:
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  // 8-byte slots double the table span (committed sparsely, macOS arm64 only).
+  static constexpr size_t kIndirectionTableSize = 0x3FFFFFFE;
+#else
   static constexpr size_t kIndirectionTableSize = 0x1FFFFFFF;
+#endif
   static constexpr uintptr_t kIndirectionTableBase = 0x80000000;
   static constexpr size_t kGeneratedCodeSize = 0x0FFFFFFF;
   static constexpr uintptr_t kGeneratedCodeExecuteBase = 0xA0000000;
@@ -322,10 +357,21 @@ class CodeCacheBase : public CodeCache {
   CodeCacheBase() = default;
 
   bool Initialize() {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // Apple Silicon forbids sub-4 GB mappings (default __PAGEZERO), so the table
+    // cannot live at kIndirectionTableBase. Let the kernel place it high
+    // (nullptr base) and store the real base; the emitter reads it at emit time,
+    // and slots hold full 64-bit host pointers (see IndirectionSlot). kReserve
+    // only; CommitExecutableRange commits the touched ranges.
+    indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
+        nullptr, kIndirectionTableSize, xe::memory::AllocationType::kReserve,
+        xe::memory::PageAccess::kReadWrite));
+#else
     indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
         reinterpret_cast<void*>(kIndirectionTableBase), kIndirectionTableSize,
         xe::memory::AllocationType::kReserve,
         xe::memory::PageAccess::kReadWrite));
+#endif
     if (!indirection_table_base_) {
       XELOGE("Unable to allocate code cache indirection table");
       XELOGE(
@@ -347,10 +393,20 @@ class CodeCacheBase : public CodeCache {
     // This requires the app to be ad-hoc codesigned with
     // com.apple.security.cs.allow-jit / allow-unsigned-executable-memory (see
     // src/xenia/app/xenia.entitlements + the POST_BUILD codesign step).
+#if XE_ARCH_ARM64
+    // Apple Silicon: place the MAP_JIT region high (nullptr base) so it is not
+    // sub-4 GB. Indirection slots are 64-bit (IndirectionSlot) so they can point
+    // here; execute_base_address() returns this real base for LookupFunction.
+    void* code_base = nullptr;
+#else
+    // Intel macOS keeps the fixed sub-4 GB window (still relies on the shrunk
+    // __PAGEZERO; the x64 backend's 32-bit indirection slots require it).
+    void* code_base = reinterpret_cast<void*>(kGeneratedCodeExecuteBase);
+#endif
     generated_code_execute_base_ =
         reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
-            reinterpret_cast<void*>(kGeneratedCodeExecuteBase),
-            kGeneratedCodeSize, xe::memory::AllocationType::kReserveCommit,
+            code_base, kGeneratedCodeSize,
+            xe::memory::AllocationType::kReserveCommit,
             xe::memory::PageAccess::kExecuteReadWrite));
     generated_code_write_base_ = generated_code_execute_base_;
     if (!generated_code_execute_base_) {
@@ -420,7 +476,7 @@ class CodeCacheBase : public CodeCache {
   xe::memory::FileMappingHandle mapping_ =
       xe::memory::kFileMappingHandleInvalid;
   xe::global_critical_region global_critical_region_;
-  uint32_t indirection_default_value_ = 0xFEEDF00D;
+  IndirectionSlot indirection_default_value_ = 0xFEEDF00D;
   uint8_t* indirection_table_base_ = nullptr;
   uint8_t* generated_code_execute_base_ = nullptr;
   uint8_t* generated_code_write_base_ = nullptr;

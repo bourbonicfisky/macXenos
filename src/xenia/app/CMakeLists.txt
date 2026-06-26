@@ -39,10 +39,15 @@ elseif(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_mac.cc
   )
   # The default x86_64 __PAGEZERO is 4 GB, which makes the entire sub-4 GB
-  # address space unmappable - including the code cache's fixed ranges
+  # address space unmappable - including the x64 code cache's fixed ranges
   # (indirection table 0x80000000, generated code 0xA0000000/0xB0000000).
   # Shrink __PAGEZERO so those ranges can be mapped (also relocates __TEXT).
-  target_link_options(xenia-app PRIVATE -Wl,-pagezero_size,0x1000)
+  # arm64 must NOT shrink it: macOS 26 SIGKILLs any sub-default __PAGEZERO, so
+  # the a64 code cache is relocated above 4 GB instead (64-bit indirection
+  # table; see code_cache_base.h / a64_backend.cc).
+  if(NOT XE_TARGET_AARCH64)
+    target_link_options(xenia-app PRIVATE -Wl,-pagezero_size,0x1000)
+  endif()
   if(XE_TARGET_X86_64)
     # The AVX check must run on non-AVX CPUs, so don't build it with AVX.
     set_source_files_properties(

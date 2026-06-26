@@ -93,10 +93,15 @@ bool A64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
 
   // Install into indirection table.
   uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);
+#if !(XE_PLATFORM_MAC && XE_ARCH_ARM64)
+  // Non-macOS arm64 keeps the code cache sub-4 GB, so slots stay 32-bit. On
+  // macOS arm64 the cache is relocated above 4 GB and slots are 64-bit
+  // (IndirectionSlot), so this constraint no longer holds.
   assert_true((host_address >> 32) == 0);
+#endif
   reinterpret_cast<A64CodeCache*>(backend_->code_cache())
       ->AddIndirection(function->address(),
-                       static_cast<uint32_t>(host_address));
+                       static_cast<uintptr_t>(host_address));
 
   return true;
 }

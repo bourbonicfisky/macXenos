@@ -561,6 +561,16 @@ A64Backend::A64Backend() {
   code_cache_ = A64CodeCache::Create();
 
   // Allocate executable memory for guest trampolines.
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  // Apple Silicon forbids sub-4 GB mappings (default __PAGEZERO), so this buffer
+  // cannot live near 0x10000. Let the kernel place it high (nullptr base); its
+  // host address is stored full-width in the 64-bit indirection table
+  // (see CreateGuestTrampoline's AddIndirection), so the location is free.
+  void* buf = memory::AllocFixed(nullptr,
+                                 kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES,
+                                 xe::memory::AllocationType::kReserveCommit,
+                                 xe::memory::PageAccess::kExecuteReadWrite);
+#else
   uint32_t base_address = 0x10000;
   void* buf = nullptr;
   while (base_address < 0x80000000) {
@@ -575,6 +585,7 @@ A64Backend::A64Backend() {
       break;
     }
   }
+#endif
   xenia_assert(buf);
   guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(buf);
   guest_trampoline_address_bitmap_.Resize(MAX_GUEST_TRAMPOLINES);
@@ -640,8 +651,10 @@ bool A64Backend::Initialize(Processor* processor) {
   }
 
   // Set the indirection table default to point at the resolve thunk.
+  // Pass the full host address; the code cache truncates to the slot width where
+  // it stays sub-4 GB (non-macOS arm64) and keeps all 64 bits on macOS arm64.
   code_cache_->set_indirection_default(
-      uint32_t(reinterpret_cast<uint64_t>(resolve_function_thunk_)));
+      reinterpret_cast<uintptr_t>(resolve_function_thunk_));
 
   // Commit the indirection table range used by guest trampolines so that
   // CreateGuestTrampoline can call AddIndirection without faulting.
@@ -795,9 +808,8 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
       GUEST_TRAMPOLINE_BASE +
       (static_cast<uint32_t>(new_index) * GUEST_TRAMPOLINE_MIN_LEN);
 
-  code_cache()->AddIndirection(
-      indirection_guest_addr,
-      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(write_pos)));
+  code_cache()->AddIndirection(indirection_guest_addr,
+                               reinterpret_cast<uintptr_t>(write_pos));
 
   return indirection_guest_addr;
 }

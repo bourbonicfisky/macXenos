@@ -36,9 +36,11 @@ elseif(XE_TARGET_AARCH64)
   target_link_libraries(xenia-cpu-ppc-tests PRIVATE xenia-cpu-backend-a64)
 endif()
 
-# The JIT code cache reserves fixed sub-4 GB addresses; the default 64-bit macOS
-# __PAGEZERO (4 GB) makes them unmappable, so shrink it like xenia-app does.
-if(APPLE)
+# The x64 JIT code cache reserves fixed sub-4 GB addresses; the default 64-bit
+# macOS __PAGEZERO (4 GB) makes them unmappable, so shrink it like xenia-app
+# does. arm64 relocates the code cache above 4 GB instead (macOS 26 forbids any
+# sub-default __PAGEZERO), so it keeps the default.
+if(APPLE AND NOT XE_TARGET_AARCH64)
   target_link_options(xenia-cpu-ppc-tests PRIVATE -Wl,-pagezero_size,0x1000)
 endif()
 

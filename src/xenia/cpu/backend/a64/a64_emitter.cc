@@ -360,8 +360,20 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
 
   if (code_cache_->has_indirection_table()) {
     // Load host code address from indirection table.
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // The code cache is relocated above 4 GB; slots hold 64-bit absolute host
+    // pointers (8-byte stride). The table base is fixed before codegen, and the
+    // guest address is known here, so the slot address is a compile-time
+    // constant: base + ((G - kIndirectionTableBase) >> 2) * sizeof(slot).
+    const uint64_t slot_addr =
+        reinterpret_cast<uint64_t>(code_cache_->indirection_table_base()) +
+        ((uint64_t(function->address()) - 0x80000000ull) >> 2) * 8ull;
+    mov(x16, slot_addr);
+    ldr(x9, ptr(x16, static_cast<uint32_t>(0)));  // x9 = full host code address
+#else
     mov(w16, function->address());
     ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
+#endif
   } else {
     // Fallback: resolve at runtime.
     mov(x0, x20);  // context
@@ -403,9 +415,22 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
 
   // Load host code address from indirection table.
   if (code_cache_->has_indirection_table()) {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    // Relocated, 64-bit-slot table (see Call). The guest address is in a
+    // register, so compute the slot at runtime:
+    //   slot = table_base + ((G - 0x80000000) >> 2) * 8
+    //        = (table_base - (0x80000000 << 1)) + (G << 1)
+    const uint64_t radj =
+        reinterpret_cast<uint64_t>(code_cache_->indirection_table_base()) -
+        (0x80000000ull << 1);
+    mov(x16, radj);
+    add(x16, x16, target_w, UXTW, 1);  // x16 = radj + (zext(G) << 1)
+    ldr(x9, ptr(x16, static_cast<uint32_t>(0)));  // x9 = full host code address
+#else
     mov(w16, target_w);  // w16 = guest address (also used by resolve thunk)
     ldr(w9, ptr(x16, static_cast<uint32_t>(
                          0)));  // w9 = host code from indirection table
+#endif
   } else {
     // Fallback: resolve at runtime.
     mov(w16, target_w);
