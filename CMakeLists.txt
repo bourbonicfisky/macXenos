@@ -236,8 +236,17 @@ else()
   )
 
   if(APPLE)
-    # macOS-specific settings
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
+    # macOS-specific settings.
+    # Default the minimum macOS version to 15.0 when it is unset OR empty. A bare
+    # `set(... CACHE STRING)` is a no-op if the cache already holds the variable
+    # (even as an empty string), in which case the compiler falls back to the
+    # build SDK version (e.g. 26 on a Tahoe host) and the binary refuses to run
+    # on older macOS. FORCE past an empty cache entry, but respect an explicit
+    # value the user passed via -DCMAKE_OSX_DEPLOYMENT_TARGET=.
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+      set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version"
+          FORCE)
+    endif()
     add_compile_options(
       $<$<COMPILE_LANGUAGE:CXX>:-Wno-shorten-64-to-32>
       -Wno-deprecated-declarations
