@@ -23,6 +23,7 @@
 #endif
 
 #include "xenia/app/console_settings_dialog.h"
+#include "xenia/app/host_settings_dialog.h"
 #include "xenia/app/controller_config_dialog.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -925,6 +926,9 @@ bool EmulatorWindow::Initialize() {
     console_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Open console settings", "",
         std::bind(&EmulatorWindow::ToggleConsoleSettingsDialog, this)));
+    console_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Host / Advanced settings...", "",
+        std::bind(&EmulatorWindow::ToggleHostSettingsDialog, this)));
   }
   main_menu->AddChild(std::move(console_menu));
 
@@ -1747,6 +1751,19 @@ void EmulatorWindow::ToggleConsoleSettingsDialog() {
       console_settings_dialog_.release();
     } else {
       console_settings_dialog_.reset();
+    }
+  }
+}
+
+void EmulatorWindow::ToggleHostSettingsDialog() {
+  if (!host_settings_dialog_) {
+    host_settings_dialog_ = std::unique_ptr<HostSettingsDialog>(
+        new HostSettingsDialog(imgui_drawer_.get(), *this));
+  } else {
+    if (host_settings_dialog_->IsClosing()) {
+      host_settings_dialog_.release();
+    } else {
+      host_settings_dialog_.reset();
     }
   }
 }
@@ -2591,6 +2608,10 @@ void EmulatorWindow::ClearDialogs() {
 
   if (console_settings_dialog_) {
     console_settings_dialog_.reset();
+  }
+
+  if (host_settings_dialog_) {
+    host_settings_dialog_.reset();
   }
 
   imgui_drawer_.get()->ClearDialogs();

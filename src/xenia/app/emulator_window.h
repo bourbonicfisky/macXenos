@@ -31,6 +31,7 @@ namespace app {
 
 class ConsoleSettingsDialog;
 class ControllerConfigDialog;
+class HostSettingsDialog;
 
 struct RecentTitleEntry {
   std::string title_name;
@@ -39,6 +40,10 @@ struct RecentTitleEntry {
 };
 
 class EmulatorWindow {
+  // The host settings dialog drives the macOS Apply & Relaunch action, which
+  // re-execs the current title via the private RelaunchLastTitle lifecycle path.
+  friend class HostSettingsDialog;
+
  public:
   using steady_clock = std::chrono::steady_clock;  // stdlib steady clock
 
@@ -102,6 +107,7 @@ class EmulatorWindow {
   void ToggleXMPConfigDialog();
   void ToggleConsoleSettingsDialog();
   void ToggleControllerConfigDialog();
+  void ToggleHostSettingsDialog();
 
   // A controller hotkey for display/toggling in the controller UI.
   struct ControllerHotkeyInfo {
@@ -351,6 +357,7 @@ class EmulatorWindow {
 
   std::unique_ptr<DisplayConfigDialog> display_config_dialog_;
   std::unique_ptr<ConsoleSettingsDialog> console_settings_dialog_;
+  std::unique_ptr<HostSettingsDialog> host_settings_dialog_;
   std::unique_ptr<ControllerConfigDialog> controller_config_dialog_;
 
   // Storing pointers and toggling dialog state is useful for broadcasting
