@@ -39,17 +39,73 @@ DEFINE_bool(
     "the OS debug output.",
     "Vulkan");
 
+#if XE_PLATFORM_MAC
+DEFINE_bool(
+    mvk_config_defaults, true,
+    "Apply a curated set of MoltenVK MVK_CONFIG_* translation-layer defaults "
+    "before instance creation (e.g. recover from transient Metal "
+    "command-buffer errors instead of losing the device). Each knob is only "
+    "set if the same environment variable is not already present, so a "
+    "user-provided value always wins. Set to false to let MoltenVK run on its "
+    "own defaults (for regression bisection). Does not change rendering output "
+    "(no resolution scaling, no anti-aliasing).",
+    "Vulkan");
+#endif
+
 namespace xe {
 namespace ui {
 namespace vulkan {
 
 #if XE_PLATFORM_MAC
+// Apply a curated set of MoltenVK MVK_CONFIG_* translation-layer defaults.
+// MoltenVK reads these from the environment when the instance/device is
+// created, so they must be set before the loader dlopen + vkCreateInstance.
+// Each is set only if absent, mirroring the VK_ICD_FILENAMES handling below,
+// so a user/launcher-provided value always wins. This tunes the Vulkan->Metal
+// translation only and never changes rendering output (no resolution scaling,
+// no anti-aliasing).
+static void ApplyMoltenVKConfigDefaults() {
+  if (!cvars::mvk_config_defaults) {
+    XELOGI("MoltenVK config defaults disabled (mvk_config_defaults=false)");
+    return;
+  }
+  // name -> value. Only translation-layer/stability/diagnostic knobs here.
+  static const std::pair<const char*, const char*> kKnobs[] = {
+      // Report a recoverable Metal command-buffer error as a recoverable
+      // condition instead of VK_ERROR_DEVICE_LOST, so a transient GPU hiccup
+      // is a visual glitch rather than a title-killing crash.
+      {"MVK_CONFIG_RESUME_LOST_DEVICE", "1"},
+      // Prefer the discrete GPU on dual-GPU Macs; a no-op on integrated-only
+      // machines.
+      {"MVK_CONFIG_FORCE_LOW_POWER_GPU", "0"},
+      // MVKConfigLogLevel: 0=NONE 1=ERROR 2=WARNING 3=INFO 4=DEBUG. WARNING
+      // keeps errors + driver warnings without the verbose INFO startup dump.
+      {"MVK_CONFIG_LOG_LEVEL", "2"},
+      // Note: MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS is intentionally NOT set
+      // here. It affects descriptor handling under pressure and is left as an
+      // env-driven A/B candidate until proven neutral-or-better on the working
+      // titles.
+  };
+  for (const auto& knob : kKnobs) {
+    if (getenv(knob.first)) {
+      XELOGI("MoltenVK config: {} inherited from environment", knob.first);
+      continue;
+    }
+    setenv(knob.first, knob.second, 1);
+    XELOGI("MoltenVK config: {}={} applied", knob.first, knob.second);
+  }
+}
+
 // On modern macOS dlopen no longer searches /usr/local/lib for leaf library
 // names, so dlopen("libvulkan.1.dylib") fails even when the Homebrew Vulkan
 // loader is installed. The Homebrew loader also does not look in molten-vk's
 // ICD directory by default. Locate both explicitly here, and support an app
 // bundle that ships its own libvulkan + libMoltenVK + ICD manifest.
 static void* OpenVulkanLoaderMac() {
+  // MoltenVK reads MVK_CONFIG_* from the environment at instance creation;
+  // apply our curated defaults before the loader is opened.
+  ApplyMoltenVKConfigDefaults();
+
   // Resolve the directory the executable lives in (…/Contents/MacOS) so bundled
   // libraries can be found relative to it.
   std::string exe_dir;
