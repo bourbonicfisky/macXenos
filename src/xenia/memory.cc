@@ -1005,13 +1005,20 @@ bool BaseHeap::Save(ByteStream* stream) {
     if (page.state & kMemoryAllocationCommit) {
       void* addr = TranslateRelative(i * page_size_);
 
-      memory::PageAccess old_access;
-      memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite,
-                      &old_access);
+      // See BaseHeap::Restore: on >4 KB host pages a 4 KB-granular mprotect
+      // fails with EINVAL and the mapping is already RW, so skip the host
+      // protect dance and read straight from the mapping.
+      if (ShouldSkipHostCommit(*this)) {
+        stream->Write(addr, page_size_);
+      } else {
+        memory::PageAccess old_access;
+        memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite,
+                        &old_access);
 
-      stream->Write(addr, page_size_);
+        stream->Write(addr, page_size_);
 
-      memory::Protect(addr, page_size_, old_access, nullptr);
+        memory::Protect(addr, page_size_, old_access, nullptr);
+      }
     }
   }
 
@@ -1037,9 +1044,17 @@ bool BaseHeap::Restore(ByteStream* stream) {
       page_access = memory::PageAccess::kReadOnly;
     }
 
+    // On hosts whose page size exceeds the 4 KB guest page (16 KB on macOS
+    // ARM64, 64 KB on some ARM64 Linux), host commit/mprotect on a 4 KB
+    // boundary fails with EINVAL, and the heap is already mapped RW via the
+    // shared file mapping (the software page_table_ is authoritative). Skip the
+    // host-level ops in that case, exactly as the normal commit/protect path
+    // does (see ShouldSkipHostCommit), and read straight into the mapping.
+    const bool skip_host_ops = ShouldSkipHostCommit(*this);
+
     // Commit the memory if it isn't already. We do not need to reserve any
     // memory, as the mapping has already taken care of that.
-    if (page.state & kMemoryAllocationCommit) {
+    if ((page.state & kMemoryAllocationCommit) && !skip_host_ops) {
       xe::memory::AllocFixed(TranslateRelative(i * page_size_), page_size_,
                              memory::AllocationType::kCommit,
                              memory::PageAccess::kReadWrite);
@@ -1050,12 +1065,16 @@ bool BaseHeap::Restore(ByteStream* stream) {
     // TODO(DrChat): read compressed with snappy.
     if (page.state & kMemoryAllocationCommit) {
       void* addr = TranslateRelative(i * page_size_);
-      xe::memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite,
-                          nullptr);
+      if (!skip_host_ops) {
+        xe::memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite,
+                            nullptr);
+      }
 
       stream->Read(addr, page_size_);
 
-      xe::memory::Protect(addr, page_size_, page_access, nullptr);
+      if (!skip_host_ops) {
+        xe::memory::Protect(addr, page_size_, page_access, nullptr);
+      }
     }
   }
 
