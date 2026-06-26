@@ -362,14 +362,18 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // Load host code address from indirection table.
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
     // The code cache is relocated above 4 GB; slots hold 64-bit absolute host
-    // pointers (8-byte stride). The table base is fixed before codegen, and the
+    // pointers (8-byte stride). The table base is fixed before codegen and the
     // guest address is known here, so the slot address is a compile-time
     // constant: base + ((G - kIndirectionTableBase) >> 2) * sizeof(slot).
+    // IMPORTANT: keep the guest address in x16 — if the slot still holds the
+    // resolve-thunk default, that thunk reads x16 as the guest address
+    // (a64_backend.cc EmitResolveFunctionThunk). Use x17 for the slot pointer.
+    mov(w16, function->address());  // x16 = guest address (for the resolve thunk)
     const uint64_t slot_addr =
         reinterpret_cast<uint64_t>(code_cache_->indirection_table_base()) +
         ((uint64_t(function->address()) - 0x80000000ull) >> 2) * 8ull;
-    mov(x16, slot_addr);
-    ldr(x9, ptr(x16, static_cast<uint32_t>(0)));  // x9 = full host code address
+    mov(x17, slot_addr);
+    ldr(x9, ptr(x17, static_cast<uint32_t>(0)));  // x9 = full host code address
 #else
     mov(w16, function->address());
     ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
@@ -420,12 +424,15 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     // register, so compute the slot at runtime:
     //   slot = table_base + ((G - 0x80000000) >> 2) * 8
     //        = (table_base - (0x80000000 << 1)) + (G << 1)
+    // IMPORTANT: keep the guest address in x16 for the resolve-thunk default
+    // path (it reads x16 as the guest address); compute the slot in x17.
+    mov(w16, target_w);  // x16 = guest address (also used by the resolve thunk)
     const uint64_t radj =
         reinterpret_cast<uint64_t>(code_cache_->indirection_table_base()) -
         (0x80000000ull << 1);
-    mov(x16, radj);
-    add(x16, x16, target_w, UXTW, 1);  // x16 = radj + (zext(G) << 1)
-    ldr(x9, ptr(x16, static_cast<uint32_t>(0)));  // x9 = full host code address
+    mov(x17, radj);
+    add(x17, x17, target_w, UXTW, 1);  // x17 = radj + (zext(G) << 1) = slot addr
+    ldr(x9, ptr(x17, static_cast<uint32_t>(0)));  // x9 = full host code address
 #else
     mov(w16, target_w);  // w16 = guest address (also used by resolve thunk)
     ldr(w9, ptr(x16, static_cast<uint32_t>(
