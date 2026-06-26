@@ -106,6 +106,21 @@ bool SDLAudioDriver::Initialize() {
 }
 
 void SDLAudioDriver::SubmitFrame(float* frame) {
+  if (cvars::media_diag) {
+    static std::atomic<uint64_t> s_n{0}, s_nonzero{0};
+    float peak = 0.0f;
+    for (uint32_t i = 0; i < frame_channels_ * channel_samples_; ++i) {
+      float a = frame[i] < 0.0f ? -frame[i] : frame[i];
+      if (a > peak) peak = a;
+    }
+    if (peak > 0.0f) s_nonzero.fetch_add(1);
+    uint64_t c = s_n.fetch_add(1);
+    if ((c % 500) == 0) {
+      XELOGI(
+          "[media-diag] audio.submit count={} this_peak={} nonzero_frames={}", c,
+          peak, s_nonzero.load());
+    }
+  }
   float* output_frame;
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);

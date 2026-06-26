@@ -12,5 +12,6 @@
 
 #include "xenia/base/cvar.h"
 DECLARE_bool(mute)
+DECLARE_bool(media_diag)
 
 #endif  // XENIA_APU_APU_FLAGS_H_
