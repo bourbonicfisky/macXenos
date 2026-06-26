@@ -110,16 +110,29 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
   result = path;
   bool was_resolved = false;
   while (true) {
+    // Device symlinks are registered unrooted ("GAME:", "D:"), but guest paths
+    // to a device are frequently rooted ("\game:\..." — e.g. DOA5's .lnk
+    // redirects). Match against the path with a single leading separator
+    // optionally stripped so both forms resolve to the device; without this a
+    // rooted device path matches no symlink and then no device ("device not
+    // found").
+    size_t lead = 0;
+    std::string_view candidate = result;
+    if (!candidate.empty() &&
+        (candidate.front() == '\\' || candidate.front() == '/')) {
+      candidate = candidate.substr(1);
+      lead = 1;
+    }
     auto it =
         std::find_if(symlinks_.cbegin(), symlinks_.cend(), [&](const auto& s) {
-          return xe::utf8::starts_with_case(result, s.first);
+          return xe::utf8::starts_with_case(candidate, s.first);
         });
     if (it == symlinks_.cend()) {
       break;
     }
     // Found symlink!
     auto target_path = (*it).second;
-    auto relative_path = result.substr((*it).first.size());
+    auto relative_path = result.substr(lead + (*it).first.size());
     result = target_path + relative_path;
     was_resolved = true;
   }
