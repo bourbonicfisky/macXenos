@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Distribution entitlements. Same as xenia.entitlements but WITHOUT
+	     com.apple.security.cs.get-task-allow (a debug-only entitlement that must
+	     not ship). The JIT entitlements are required because the x64 backend
+	     executes generated guest code from a MAP_JIT region; library validation
+	     is disabled so the hardened-runtime app can load the bundled MoltenVK,
+	     which is signed independently of the app. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

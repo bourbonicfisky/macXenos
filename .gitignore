@@ -95,6 +95,14 @@ node_modules/.bin/
 /build-arm64/
 /build-x64/
 
+# macOS distribution build artifacts (the .app/.dmg live under /build/dist and
+# are already covered by /build/; these catch outputs produced elsewhere and
+# Mac-specific build cruft). The committed packaging inputs - package_mac.sh,
+# Info.plist.in, xenia.dist.entitlements, xenia.icns - are NOT ignored.
+*.dmg
+*.dSYM/
+**/xcuserdata/
+
 # ==============================================================================
 # Local-only paths
 # ==============================================================================

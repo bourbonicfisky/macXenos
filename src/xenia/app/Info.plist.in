@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template. tools/build/package_mac.sh substitutes the @TOKENS@ at package
+     time. Not used by the bare-binary dev build. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Xenia Canary</string>
+	<key>CFBundleDisplayName</key>
+	<string>Xenia Canary</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.xenia.canary</string>
+	<key>CFBundleExecutable</key>
+	<string>xenia_canary</string>
+	<key>CFBundleIconFile</key>
+	<string>xenia.icns</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@SHORT_VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD_VERSION@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Xenia Canary contributors. BSD license.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+</dict>
+</plist>
