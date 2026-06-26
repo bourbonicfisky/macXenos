@@ -58,6 +58,10 @@ static constexpr uint8_t kDW_CFA_advance_loc2 = 0x03;
 static constexpr uint8_t kDW_CFA_def_cfa = 0x0c;
 static constexpr uint8_t kDW_CFA_def_cfa_offset = 0x0e;
 static constexpr uint8_t kDW_CFA_nop = 0x00;
+// DW_CFA_offset_extended (reg ULEB128, offset ULEB128). Required for register
+// numbers >= 64 (e.g. the NEON regs d8-d15 = DWARF 72-79), which do not fit the
+// 6-bit register field of the short DW_CFA_offset (0x80 | reg) form.
+static constexpr uint8_t kDW_CFA_offset_extended = 0x05;
 
 // DWARF pointer encoding constants.
 static constexpr uint8_t kDW_EH_PE_pcrel = 0x10;
@@ -107,9 +111,11 @@ class PosixA64CodeCache : public A64CodeCache {
                  const EmitFunctionInfo& func_info, void* code_execute_address,
                  UnwindReservation unwind_reservation) override;
 
-  void InitializeUnwindEntry(uint8_t* unwind_entry_address,
-                             void* code_execute_address,
-                             const EmitFunctionInfo& func_info);
+  // Returns the byte offset of the FDE within the unwind entry (macOS's
+  // __register_frame needs the FDE address, not the CIE/section start).
+  size_t InitializeUnwindEntry(uint8_t* unwind_entry_address,
+                               void* code_execute_address,
+                               const EmitFunctionInfo& func_info);
 
   std::vector<void*> registered_frames_;
   uint32_t unwind_table_count_ = 0;
@@ -157,17 +163,29 @@ void PosixA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
                                   const EmitFunctionInfo& func_info,
                                   void* code_execute_address,
                                   UnwindReservation unwind_reservation) {
-  InitializeUnwindEntry(unwind_reservation.entry_address, code_execute_address,
-                        func_info);
+  size_t fde_offset = InitializeUnwindEntry(
+      unwind_reservation.entry_address, code_execute_address, func_info);
 
   void* unwind_execute_address = unwind_reservation.entry_address -
                                  generated_code_write_base_ +
                                  generated_code_execute_base_;
-  __register_frame(unwind_execute_address);
-  registered_frames_.push_back(unwind_execute_address);
+#if XE_PLATFORM_MAC
+  // macOS's libunwind __register_frame takes a pointer to a single FDE, unlike
+  // libgcc (Linux) which takes the start of a .eh_frame section (a CIE). Passing
+  // the CIE start on macOS registers garbage, so the unwinder cannot find FDEs
+  // for JIT PCs and C++ exceptions thrown from JIT code (e.g.
+  // FiberReentryException) fail to unwind to their handler and call
+  // std::terminate. Register the FDE directly instead.
+  void* register_address =
+      static_cast<uint8_t*>(unwind_execute_address) + fde_offset;
+#else
+  void* register_address = unwind_execute_address;
+#endif
+  __register_frame(register_address);
+  registered_frames_.push_back(register_address);
 }
 
-void PosixA64CodeCache::InitializeUnwindEntry(
+size_t PosixA64CodeCache::InitializeUnwindEntry(
     uint8_t* unwind_entry_address, void* code_execute_address,
     const EmitFunctionInfo& func_info) {
   // Compute execute-side base address of the unwind buffer.
@@ -314,22 +332,21 @@ void PosixA64CodeCache::InitializeUnwindEntry(
       // stp q10,q11 at sp+0x080: d10=sp+0x080, d11=sp+0x090
       // stp q12,q13 at sp+0x0A0: d12=sp+0x0A0, d13=sp+0x0B0
       // stp q14,q15 at sp+0x0C0: d14=sp+0x0C0, d15=sp+0x0D0
-      *p++ = 0x80 | kDwarfRegD8;
-      p += WriteULEB128(p, (cfa - 0x060) / 8);
-      *p++ = 0x80 | kDwarfRegD9;
-      p += WriteULEB128(p, (cfa - 0x070) / 8);
-      *p++ = 0x80 | kDwarfRegD10;
-      p += WriteULEB128(p, (cfa - 0x080) / 8);
-      *p++ = 0x80 | kDwarfRegD11;
-      p += WriteULEB128(p, (cfa - 0x090) / 8);
-      *p++ = 0x80 | kDwarfRegD12;
-      p += WriteULEB128(p, (cfa - 0x0A0) / 8);
-      *p++ = 0x80 | kDwarfRegD13;
-      p += WriteULEB128(p, (cfa - 0x0B0) / 8);
-      *p++ = 0x80 | kDwarfRegD14;
-      p += WriteULEB128(p, (cfa - 0x0C0) / 8);
-      *p++ = 0x80 | kDwarfRegD15;
-      p += WriteULEB128(p, (cfa - 0x0D0) / 8);
+      // d8-d15 are DWARF regs 72-79 (>= 64) — must use DW_CFA_offset_extended
+      // (reg as ULEB128); the 0x80|reg short form would corrupt the opcode.
+      const struct {
+        uint8_t reg;
+        uint32_t save_off;
+      } neon_saves[] = {
+          {kDwarfRegD8, 0x060},  {kDwarfRegD9, 0x070},  {kDwarfRegD10, 0x080},
+          {kDwarfRegD11, 0x090}, {kDwarfRegD12, 0x0A0}, {kDwarfRegD13, 0x0B0},
+          {kDwarfRegD14, 0x0C0}, {kDwarfRegD15, 0x0D0},
+      };
+      for (const auto& s : neon_saves) {
+        *p++ = kDW_CFA_offset_extended;
+        p += WriteULEB128(p, s.reg);
+        p += WriteULEB128(p, (cfa - s.save_off) / 8);
+      }
     } else if (func_info.lr_save_offset > 0) {
       // Record where x30 (LR / return address) is saved.
       // Without this, the unwinder cannot find the return address.
@@ -355,6 +372,9 @@ void PosixA64CodeCache::InitializeUnwindEntry(
 
   assert_true(static_cast<size_t>(p - unwind_entry_address) <=
               kMaxUnwindInfoSize);
+
+  // Offset of the FDE (fde_length_ptr) from the start of the entry (the CIE).
+  return static_cast<size_t>(fde_length_ptr - cie_start);
 }
 
 }  // namespace a64
