@@ -1309,6 +1309,26 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     }
     crash_msg.append(fmt::format("Access Violation: {} at 0x{:016X}\n", op_str,
                                  ex->fault_address()));
+    // [arm64 fault diagnosis] Compare xenia's recorded page protection against
+    // the actual host page protection to tell a protect-sync bug (recorded RW
+    // but host RO/unmapped) from a legitimately-protected page.
+    {
+      uint32_t gva = memory()->HostToGuestVirtual(
+          reinterpret_cast<void*>(ex->fault_address()));
+      auto* heap = memory()->LookupHeap(gva);
+      uint32_t recorded = 0xFFFFFFFF;
+      bool qp = heap && heap->QueryProtect(gva, &recorded);
+      size_t hlen = 1;
+      xe::memory::PageAccess haccess = xe::memory::PageAccess::kNoAccess;
+      bool qh = xe::memory::QueryProtect(
+          reinterpret_cast<void*>(ex->fault_address()), hlen, haccess);
+      crash_msg.append(fmt::format(
+          "  [diag] guestVA=0x{:08X} heap={} page_size=0x{:X} "
+          "QueryProtect(recorded)={}/0x{:X} hostQuery={}/access={}\n",
+          gva, heap ? int(heap->heap_type()) : -1,
+          heap ? heap->page_size() : 0u, qp, recorded, qh,
+          static_cast<int>(haccess)));
+    }
   } else if (ex->code() == Exception::Code::kIllegalInstruction) {
     crash_msg.append("Illegal Instruction\n");
   }

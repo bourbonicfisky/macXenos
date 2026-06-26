@@ -110,15 +110,18 @@ void CrashDump() {
 }
 
 static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
-  // When the host page size is larger than 4 KB (e.g. 16 KB on macOS ARM64,
-  // 64 KB on some ARM64 Linux kernels), mprotect on 4 KB guest page boundaries
-  // fails with EINVAL. All heaps are backed by a shared file mapping
-  // (MapFileView) that is already mapped RW, so the commit is a no-op — skip
-  // it.
-  if (xe::memory::page_size() > 0x1000) {
-    return true;
-  }
-  return false;
+  // Host commit/protect uses mprotect, which fails with EINVAL when the range
+  // is not host-page-aligned. On hosts with a >4 KB page (16 KB macOS ARM64,
+  // 64 KB some ARM64 Linux), a heap whose guest page size is SMALLER than the
+  // host page (the 4 KB heaps) can't be committed/protected at guest
+  // granularity, so we skip the host op and rely on the shared RW mapping.
+  //
+  // Heaps whose guest page size is >= the host page (e.g. the 64 KB heaps) are
+  // host-page-aligned and MUST perform the real commit: a freshly committed
+  // page is host PROT_NONE until mprotect makes it RW, and skipping leaves it
+  // inaccessible so the guest faults writing to it (page table says RW, host
+  // says no-access).
+  return xe::memory::page_size() > heap.page_size();
 }
 
 xe::memory::PageAccess ToPageAccess(uint32_t protect) {
