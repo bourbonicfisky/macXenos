@@ -12,6 +12,8 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 
 #include "xenia/base/atomic.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/pe_image.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
@@ -19,6 +21,9 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xthread.h"
+
+// Diagnostic only: shares the global --media_diag flag (defined in apu_flags.cc).
+DECLARE_bool(media_diag);
 
 namespace xe {
 namespace kernel {
@@ -220,6 +225,34 @@ void RtlInitAnsiString_entry(pointer_t<X_ANSI_STRING> destination,
     uint16_t length = (uint16_t)strlen(source);
     destination->length = length;
     destination->maximum_length = length + 1;
+
+    uint32_t lr = 0;
+    {
+      auto* cur = XThread::GetCurrentThread();
+      if (cur && cur->thread_state() && cur->thread_state()->context()) {
+        lr = (uint32_t)cur->thread_state()->context()->lr;
+      }
+    }
+    if (cvars::media_diag && (length <= 8 || lr == 0x829536A8)) {
+      // FMV-gate diag: RtlInitAnsiString is host strlen(source). The FMV path
+      // calls it from guest LR 0x829536A8 (right after bl RtlInitAnsiString,
+      // dest = the NtCreateFile ObjectName). Log every FMV-path call so the slot
+      // holding the real "\game:\..." string is visible: if strlen is correct
+      // (21) there, the truncation is a timing/reorder elsewhere; if it is short
+      // there too, `source` is the wrong pointer.
+      const char* s = source;
+      std::string bytes;
+      char b[4];
+      for (int i = 0; i < 40; i++) {
+        snprintf(b, sizeof(b), "%02X ", (uint8_t)s[i]);
+        bytes += b;
+      }
+      XELOGI(
+          "[media-diag] rtl.initansi lr={:08X} dest={:08X} src={:08X} strlen={} "
+          "bytes40=[{}]",
+          lr, destination.guest_address(), source.guest_address(), length,
+          bytes);
+    }
   } else {
     destination->reset();
   }

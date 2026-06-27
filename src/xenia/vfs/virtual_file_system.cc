@@ -213,7 +213,7 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
         // visible without extracting the XEX. PPC code is fixed 4-byte,
         // big-endian; the bl is at lr-4.
         if (guest_lr && cur && cur->memory() && path.size() <= 8) {
-          for (int32_t off = -0x2C; off <= 0x08; off += 4) {
+          for (int32_t off = -0x200; off <= 0x08; off += 4) {
             uint32_t addr = guest_lr + off;
             auto* p = cur->memory()->TranslateVirtual<const uint32_t*>(addr);
             if (!p) continue;
