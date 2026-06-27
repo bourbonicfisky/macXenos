@@ -62,6 +62,20 @@ struct EmitFunctionInfo {
   size_t prolog_stack_alloc_offset;
   size_t stack_size;
 #if XE_ARCH_ARM64
+  // What kind of frame this is.  The POSIX DWARF generator must describe each
+  // frame from ground truth, NOT infer it from stack_size: THUNK_STACK_SIZE
+  // (224) is also a perfectly ordinary guest-function frame size (80-byte base
+  // + 144 bytes of locals), and a guest function saves LR at a different offset
+  // than the HostToGuest thunk.  Misclassifying one as the other yields a wrong
+  // return-address rule and breaks C++ exception unwinding (the fiber-reentry
+  // crash).  Default kGuest; thunk emitters set their own kind.
+  enum class FrameKind : uint8_t {
+    kGuest = 0,         // ordinary JIT guest function (generic LR-only CFI)
+    kHostToGuestThunk,  // saves all callee-saved regs (x19-x28, fp/lr, q8-q15)
+    kGuestToHostThunk,
+    kResolveThunk,
+  };
+  FrameKind frame_kind = FrameKind::kGuest;
   // Offset from SP where x30 (LR) is saved.  ARM64 callees save LR
   // explicitly at varying offsets; the unwind info generator needs this
   // to tell the unwinder where to find the return address.

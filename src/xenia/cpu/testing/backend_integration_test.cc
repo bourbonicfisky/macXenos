@@ -912,3 +912,108 @@ TEST_CASE("JIT_UNWIND_INFO_REGISTERED", "[backend]") {
 
   memory.reset();
 }
+
+// =============================================================================
+// C++ exception unwinds through the a64 JIT frame chain and is CAUGHT
+// =============================================================================
+// Regression test for the arm64 fiber-reentry crash (DOA5 match-load SIGABRT).
+// XThread::Reenter throws FiberReentryException from a host export shim invoked
+// from JIT code, and it must unwind back through:
+//   builtin -> GuestToHostThunk -> guest JIT frame -> HostToGuestThunk -> Call
+// to a host catch. The JIT_UNWIND_INFO_REGISTERED test above only proves a
+// backtrace() *walks* these frames; it never throws, so it cannot catch a wrong
+// per-frame CFI (e.g. an LR-save recorded at the wrong offset), which derails
+// the two-phase handler search -> std::terminate. This test throws a real C++
+// exception through that exact chain and requires it to be caught.
+//
+// To stress register-allocator spilling (which is what gives a real guest
+// function a large, 224-byte-class frame — the size that used to be
+// misclassified as the HostToGuest thunk and given a wrong LR-save rule), the
+// guest function keeps several vector registers live across the throwing call.
+#if !XE_PLATFORM_WIN32
+struct UnwindProbeException {
+  int marker;
+};
+
+static void ThrowingBuiltin(ppc::PPCContext* ctx, void* arg0, void* arg1) {
+  throw UnwindProbeException{0x5A5A};
+}
+
+TEST_CASE("JIT_EXCEPTION_UNWINDS_TO_CATCH", "[backend]") {
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+  backend.reset(new xe::cpu::backend::x64::X64Backend());
+#elif XE_ARCH_ARM64
+  backend.reset(new xe::cpu::backend::a64::A64Backend());
+#endif
+  REQUIRE(backend);
+
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  auto* builtin_fn =
+      processor->DefineBuiltin("ThrowingBuiltin", ThrowingBuiltin, nullptr,
+                               nullptr);
+
+  // Guest function: load 8 vector regs, call the (throwing) builtin, then store
+  // them back. The builtin never returns normally, but the post-call stores
+  // keep the VRs live across the call so the allocator must spill them to the
+  // stack frame — exercising a non-trivial guest frame on the unwind path.
+  auto module = std::make_unique<TestModule>(
+      processor.get(), "Test",
+      [](uint32_t address) { return address == 0x80000000; },
+      [builtin_fn](HIRBuilder& b) {
+        auto v0 = LoadVR(b, 10);
+        auto v1 = LoadVR(b, 11);
+        auto v2 = LoadVR(b, 12);
+        auto v3 = LoadVR(b, 13);
+        auto v4 = LoadVR(b, 14);
+        auto v5 = LoadVR(b, 15);
+        auto v6 = LoadVR(b, 16);
+        auto v7 = LoadVR(b, 17);
+        b.CallExtern(builtin_fn);
+        StoreVR(b, 3, v0);
+        StoreVR(b, 4, v1);
+        StoreVR(b, 5, v2);
+        StoreVR(b, 6, v3);
+        StoreVR(b, 7, v4);
+        StoreVR(b, 8, v5);
+        StoreVR(b, 9, v6);
+        StoreVR(b, 18, v7);
+        b.Return();
+        return true;
+      },
+      /*skip_cf_simplification=*/true);
+  processor->AddModule(std::move(module));
+  processor->backend()->CommitExecutableRange(0x80000000, 0x80010000);
+
+  auto fn = processor->ResolveFunction(0x80000000);
+  REQUIRE(fn != nullptr);
+
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = memory->SystemHeapAlloc(stack_size);
+  auto thread_state = std::make_unique<ThreadState>(
+      processor.get(), 0x100, stack_address + stack_size);
+  auto ctx = thread_state->context();
+  ctx->lr = 0xBCBCBCBC;
+
+  bool caught = false;
+  try {
+    fn->Call(thread_state.get(), uint32_t(ctx->lr));
+  } catch (const UnwindProbeException& e) {
+    caught = true;
+    REQUIRE(e.marker == 0x5A5A);
+  }
+
+  // If the unwinder mis-locates a return address on this chain, the exception
+  // never reaches here and the process std::terminate()s instead.
+  REQUIRE(caught);
+
+  memory->SystemHeapFree(stack_address);
+
+  memory.reset();
+}
+#endif
