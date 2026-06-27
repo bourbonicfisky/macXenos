@@ -12,10 +12,13 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #include "devices/host_path_entry.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xthread.h"
 
@@ -205,6 +208,22 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
             "in_len={} in='{}' in_hex=[{}] norm_len={} norm='{}'",
             guest_lr, guest_tid, path.size(), path, hex(path),
             normalized_path.size(), normalized_path);
+        // Disassemble the guest code around the caller LR so the bl target (which
+        // kernel function) and the preceding X_ANSI_STRING/length setup are
+        // visible without extracting the XEX. PPC code is fixed 4-byte,
+        // big-endian; the bl is at lr-4.
+        if (guest_lr && cur && cur->memory() && path.size() <= 8) {
+          for (int32_t off = -0x2C; off <= 0x08; off += 4) {
+            uint32_t addr = guest_lr + off;
+            auto* p = cur->memory()->TranslateVirtual<const uint32_t*>(addr);
+            if (!p) continue;
+            uint32_t code = xe::byte_swap(*p);
+            StringBuffer sb;
+            xe::cpu::ppc::DisasmPPC(addr, code, &sb);
+            XELOGI("[media-diag] fmv.disasm {:08X}: {:08X}  {}{}", addr, code,
+                   sb.to_string_view(), addr == guest_lr ? "   <-- LR" : "");
+          }
+        }
       }
     }
     return nullptr;
