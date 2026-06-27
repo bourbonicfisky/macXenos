@@ -9,6 +9,7 @@
 
 #include "xenia/apu/xma_decoder.h"
 
+#include "xenia/apu/apu_flags.h"
 #include "xenia/apu/xma_context.h"
 #include "xenia/apu/xma_context_fake.h"
 #include "xenia/apu/xma_context_master.h"
@@ -287,6 +288,18 @@ uint32_t XmaDecoder::ReadRegister(uint32_t addr) {
 
   assert_true(r < XmaRegisterFile::kRegisterCount);
 
+  if (cvars::media_diag) {
+    // A spin-wait polls via reads. Capture which register the guest keeps
+    // reading and the value we hand back (post byte_swap) so we can see exactly
+    // what acknowledgement DOA5 is waiting on before it would issue a kick.
+    static std::atomic<uint64_t> s_reads{0};
+    uint64_t rd = s_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((rd % 1000) == 0) {
+      XELOGI("[media-diag] xma.reg_read reads={} r={:04X} ret={:08X}", rd, r,
+             xe::byte_swap(register_file_[r]));
+    }
+  }
+
   switch (r) {
     case XmaRegister::ContextArrayAddress:
       break;
@@ -327,6 +340,44 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 
   assert_true(r < XmaRegisterFile::kRegisterCount);
   register_file_[r] = value;
+
+  if (cvars::media_diag) {
+    // Categorize every XMA register the guest touches so we can tell whether it
+    // performs full XMA setup (context-array address + lock/clear) and merely
+    // never kicks, or never really drives XMA at all. Counters are per-category;
+    // a periodic dump shows the whole pattern, and any kick logs immediately.
+    static std::atomic<uint64_t> s_total{0}, s_ctxarr{0}, s_curnext{0},
+        s_kick{0}, s_lock{0}, s_clear{0}, s_other{0};
+    const bool is_kick =
+        (r >= XmaRegister::Context0Kick && r <= XmaRegister::Context9Kick);
+    const bool is_lock =
+        (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock);
+    const bool is_clear =
+        (r >= XmaRegister::Context0Clear && r <= XmaRegister::Context9Clear);
+    const bool is_ctxarr = (r == XmaRegister::ContextArrayAddress);
+    const bool is_curnext = (r == XmaRegister::CurrentContextIndex ||
+                             r == XmaRegister::NextContextIndex);
+    if (is_kick) s_kick.fetch_add(1, std::memory_order_relaxed);
+    else if (is_lock) s_lock.fetch_add(1, std::memory_order_relaxed);
+    else if (is_clear) s_clear.fetch_add(1, std::memory_order_relaxed);
+    else if (is_ctxarr) s_ctxarr.fetch_add(1, std::memory_order_relaxed);
+    else if (is_curnext) s_curnext.fetch_add(1, std::memory_order_relaxed);
+    else s_other.fetch_add(1, std::memory_order_relaxed);
+    uint64_t t = s_total.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (is_kick || is_lock || is_clear || is_ctxarr || (t % 1000) == 0) {
+      XELOGI(
+          "[media-diag] xma.reg_write total={} ctxarr={} curnext={} kick={} "
+          "lock={} clear={} other={} | this r={} val={:08X}{}",
+          t, s_ctxarr.load(std::memory_order_relaxed),
+          s_curnext.load(std::memory_order_relaxed),
+          s_kick.load(std::memory_order_relaxed),
+          s_lock.load(std::memory_order_relaxed),
+          s_clear.load(std::memory_order_relaxed),
+          s_other.load(std::memory_order_relaxed), r, value,
+          is_kick ? " <KICK>" : (is_lock ? " <LOCK>" : (is_clear ? " <CLEAR>"
+              : (is_ctxarr ? " <CTXARR>" : ""))));
+    }
+  }
 
   if (r >= XmaRegister::Context0Kick && r <= XmaRegister::Context9Kick) {
     // Context kick command.

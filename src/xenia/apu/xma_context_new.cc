@@ -115,7 +115,10 @@ bool XmaContextNew::Work() {
   if (cvars::media_diag) {
     static std::atomic<uint64_t> s_calls{0}, s_en{0}, s_alloc{0};
     uint64_t c = s_calls.fetch_add(1);
-    if (is_enabled()) s_en.fetch_add(1);
+    if (is_enabled()) {
+      s_en.fetch_add(1);
+      g_media_diag_stats.work_enabled.fetch_add(1, std::memory_order_relaxed);
+    }
     if (is_allocated()) s_alloc.fetch_add(1);
     if ((c % 2000) == 0) {
       XELOGI("[media-diag] xma.work calls={} enabled={} allocated={}", c,
@@ -611,6 +614,14 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
     if ((c % 200) == 0) {
       XELOGI("[media-diag] xma.decode attempt={} decoded={} raw_peak={}", c,
              media_diag_decoded, peak);
+    }
+    g_media_diag_stats.decode_attempt.fetch_add(1, std::memory_order_relaxed);
+    if (media_diag_decoded) {
+      g_media_diag_stats.decode_ok.fetch_add(1, std::memory_order_relaxed);
+      if (peak > 0) {
+        g_media_diag_stats.decode_nonzero.fetch_add(
+            1, std::memory_order_relaxed);
+      }
     }
   }
   if (media_diag_decoded) {
