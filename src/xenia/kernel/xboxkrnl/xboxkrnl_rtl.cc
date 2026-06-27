@@ -7,7 +7,10 @@
  ******************************************************************************
  */
 
+#include <atomic>
+#include <chrono>
 #include <cwctype>
+#include <thread>
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 
@@ -252,6 +255,40 @@ void RtlInitAnsiString_entry(pointer_t<X_ANSI_STRING> destination,
           "bytes40=[{}]",
           lr, destination.guest_address(), source.guest_address(), length,
           bytes);
+
+      // GROW-CHECK (same-thread vs cross-thread): fire ONLY on the real path
+      // buffer caught mid-build — content starts with "\gam"/"game" (the
+      // \game:\ninja... prefix) but strlen is short. Re-measure after an actual
+      // SLEEP: this blocks the consumer (guest) thread, so if a PRODUCER thread
+      // is filling the buffer it gets to run and the buffer GROWS -> cross-thread
+      // race. If it stays short -> no concurrent producer -> same-thread (a64
+      // codegen). dmb before each read so we observe real memory.
+      auto barrier_strlen = [&]() -> uint32_t {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        return (uint32_t)strlen(s);
+      };
+      // Fire on the FMV-path short buffers (caller 0x829536A8, len<=4 = the
+      // empty/short candidate slots), capped so the 5ms sleeps don't pile up.
+      static std::atomic<int> s_grow_fires{0};
+      if (lr == 0x829536A8 && length <= 4 &&
+          s_grow_fires.fetch_add(1, std::memory_order_relaxed) < 24) {
+        uint32_t len0 = barrier_strlen();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        uint32_t len1 = barrier_strlen();
+        std::string after;
+        for (int i = 0; i < 40; i++) {
+          snprintf(b, sizeof(b), "%02X ", (uint8_t)s[i]);
+          after += b;
+        }
+        XELOGI(
+            "[media-diag] rtl.growcheck lr={:08X} src={:08X} tid={:08X} "
+            "len_before={} len_after_5ms={} grew={} verdict={} after40=[{}]",
+            lr, source.guest_address(),
+            XThread::GetCurrentThread() ? XThread::GetCurrentThread()->thread_id()
+                                        : 0,
+            len0, len1, (len1 > len0) ? "YES" : "no",
+            (len1 > len0) ? "CROSS-THREAD-RACE" : "SAME-THREAD", after);
+      }
     }
   } else {
     destination->reset();
