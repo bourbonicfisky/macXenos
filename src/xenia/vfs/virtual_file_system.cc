@@ -12,10 +12,14 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #include "devices/host_path_entry.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/xfile.h"
+
+// Diagnostic only: shares the global --media_diag flag (defined in apu_flags.cc).
+DECLARE_bool(media_diag);
 
 namespace xe {
 namespace vfs {
@@ -161,6 +165,28 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     // not an actual problem nor something we care about.
     if (path != "ShaderDumpxe:\\CompareBackEnds") {
       XELOGE("ResolvePath({}) failed - device not found", path);
+    }
+    if (cvars::media_diag) {
+      // FMV-gate diag: is a failing path (e.g. "\\gam", "") a TRUNCATED longer
+      // string? Dump raw len + hex of both the as-received path and the
+      // post-canonicalize/symlink normalized_path so an x64-vs-arm64 A/B shows
+      // whether the guest hands us a short string on arm64. A length that is
+      // short vs the expected "\\game:\\..." is the smoking gun for a string
+      // (length/pointer) miscompile on the a64 JIT.
+      auto hex = [](std::string_view s) {
+        std::string o;
+        char b[4];
+        for (unsigned char c : s) {
+          snprintf(b, sizeof(b), "%02X ", c);
+          o += b;
+        }
+        return o;
+      };
+      XELOGI(
+          "[media-diag] vfs.resolve_fail in_len={} in='{}' in_hex=[{}] "
+          "norm_len={} norm='{}'",
+          path.size(), path, hex(path), normalized_path.size(),
+          normalized_path);
     }
     return nullptr;
   }
