@@ -11,6 +11,7 @@
 
 #if !XE_PLATFORM_WIN32
 #include <signal.h>
+#include <unwind.h>  // [reentry-unwind diag] _Unwind_Backtrace
 #endif
 
 #include "xenia/base/byte_stream.h"
@@ -640,11 +641,45 @@ void XThread::Execute() {
   Exit(!want_exit_code ? 0 : exit_code);
 }
 
+// [reentry-unwind diag] runtime unwinder FDE lookup (libunwind / __register_frame).
+extern "C" void* _Unwind_FindEnclosingFunction(void*);
+
+// [reentry-unwind diag] _Unwind_Backtrace callback — walks via the REAL DWARF
+// exception unwinder (same mechanism as `throw`). If it truncates, the last
+// frame reached is the deepest the throw can unwind; the next frame up is where
+// the FDE/CFI is bad. Logs each frame's PC + whether it has a registered FDE.
+static _Unwind_Reason_Code ReentryUnwindCb(struct _Unwind_Context* ctx,
+                                           void* arg) {
+  int* n = reinterpret_cast<int*>(arg);
+  uintptr_t pc = _Unwind_GetIP(ctx);
+  void* fde = _Unwind_FindEnclosingFunction(reinterpret_cast<void*>(pc));
+  XELOGI("[reentry-unwind] uw {} pc={:016X} fde={:016X} {}", *n,
+         static_cast<uint64_t>(pc), reinterpret_cast<uint64_t>(fde),
+         fde ? "" : "<-- NO FDE");
+  (*n)++;
+  return _URC_NO_REASON;
+}
+
 void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
   // KeSetCurrentStackPointers in games like Forza Horizon 2).
   // Must unwind through all frames between here and Execute().
 #if !XE_PLATFORM_WIN32
+  // [reentry-unwind diag] Before throwing, walk the host frame-pointer chain and
+  // ask the runtime unwinder whether each return address has a registered DWARF
+  // FDE. The FiberReentryException below must unwind through every frame to the
+  // catch in Execute(); the FIRST frame here with no FDE is where that unwind
+  // derails -> std::terminate -> abort (the gameplay-load crash). Fires only on
+  // the first few reentries (rare path) — no spam.
+  {
+    static std::atomic<int> s_diag_fires{0};
+    if (s_diag_fires.fetch_add(1) < 4) {
+      int n = 0;
+      XELOGI("[reentry-unwind] === _Unwind_Backtrace (real DWARF unwind) ===");
+      _Unwind_Backtrace(&ReentryUnwindCb, &n);
+      XELOGI("[reentry-unwind] === backtrace reached {} frames ===", n);
+    }
+  }
   // Throw a C++ exception that unwinds through JIT frames (using DWARF
   // .eh_frame info) and host frames (using compiler-generated DWARF),
   // calling destructors properly along the way.
