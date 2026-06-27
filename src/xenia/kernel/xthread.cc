@@ -587,6 +587,8 @@ void XThread::Execute() {
         thread_state_, address, args.data(), args.size()));
     next_address = 0;
   } catch (const FiberReentryException& e) {
+    XELOGI("[reentry-unwind] *** TYPED catch HIT at Execute (addr={:08X}) "
+           "-- reentry unwound correctly", e.address);
 #if XE_PLATFORM_LINUX
     // Ensure SIGRTMIN (used for thread suspend) is not left blocked.
     sigset_t set;
@@ -595,6 +597,14 @@ void XThread::Execute() {
     pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
 #endif
     next_address = e.address;
+  } catch (...) {
+    // [reentry-unwind diag] If THIS fires, the exception reached Execute but the
+    // typed catch did not match (candidate B: handler/RTTI). If NEITHER catch
+    // fires and we terminate, the throw never reached Execute through the JIT
+    // frames (candidate A: real two-phase unwind can't traverse them).
+    XELOGE("[reentry-unwind] *** catch(...) HIT at Execute -- reached the frame "
+           "but TYPED catch MISSED (candidate B / RTTI). rethrowing.");
+    throw;
   }
 
   while (next_address != 0) {
