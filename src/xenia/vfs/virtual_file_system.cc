@@ -223,6 +223,55 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
             XELOGI("[media-diag] fmv.disasm {:08X}: {:08X}  {}{}", addr, code,
                    sb.to_string_view(), addr == guest_lr ? "   <-- LR" : "");
           }
+          // Guest register + stack snapshot at the failure. ctr = the bcctrl
+          // target (which callee built the short string); r1 = guest stack; the
+          // callee filled buffers near r1+0x60. Helps ID the string builder and
+          // read the X_ANSI_STRING it produced.
+          auto* ctx = cur->thread_state()->context();
+          XELOGI(
+              "[media-diag] fmv.regs ctr={:08X} r1={:08X} r3={:08X} r4={:08X} "
+              "r5={:08X} r6={:08X} r7={:08X} r11={:08X}",
+              uint32_t(ctx->ctr), uint32_t(ctx->r[1]), uint32_t(ctx->r[3]),
+              uint32_t(ctx->r[4]), uint32_t(ctx->r[5]), uint32_t(ctx->r[6]),
+              uint32_t(ctx->r[7]), uint32_t(ctx->r[11]));
+          // Dump the guest stack window holding the callee's output buffers as
+          // candidate X_ANSI_STRINGs (be16 length, be16 max, be32 ptr).
+          uint32_t sp = uint32_t(ctx->r[1]);
+          for (uint32_t boff = 0x50; boff <= 0x84; boff += 4) {
+            auto* w = cur->memory()->TranslateVirtual<const uint32_t*>(sp + boff);
+            if (!w) continue;
+            uint32_t raw = xe::byte_swap(*w);
+            XELOGI("[media-diag] fmv.stack r1+{:02X} ({:08X}): {:08X}", boff,
+                   sp + boff, raw);
+          }
+          // NtCreateFile: r5=OBJECT_ATTRIBUTES{ +0 RootDir, +4 ObjectName,
+          // +8 Attrs }; ObjectName -> X_ANSI_STRING{ +0 be16 len, +2 be16 max,
+          // +4 be32 ptr }. Dump the actual buffer to see if it holds MORE bytes
+          // than `len` claims (=> a64 length mis-compute / truncation) or really
+          // is a short string (=> wrong string built upstream).
+          auto rd32 = [&](uint32_t a) -> uint32_t {
+            auto* w = cur->memory()->TranslateVirtual<const uint32_t*>(a);
+            return w ? xe::byte_swap(*w) : 0;
+          };
+          uint32_t oa = uint32_t(ctx->r[5]);
+          uint32_t objname = rd32(oa + 4);
+          if (objname) {
+            uint32_t lenmax = rd32(objname);
+            uint16_t alen = uint16_t(lenmax >> 16);
+            uint16_t amax = uint16_t(lenmax & 0xFFFF);
+            uint32_t bufp = rd32(objname + 4);
+            std::string bytes;
+            char b[4];
+            for (uint32_t i = 0; i < 32; i++) {
+              auto* c = cur->memory()->TranslateVirtual<const uint8_t*>(bufp + i);
+              snprintf(b, sizeof(b), "%02X ", c ? *c : 0);
+              bytes += b;
+            }
+            XELOGI(
+                "[media-diag] fmv.objname oa={:08X} name_ptr={:08X} len={} "
+                "max={} buf={:08X} buf32=[{}]",
+                oa, objname, alen, amax, bufp, bytes);
+          }
         }
       }
     }
