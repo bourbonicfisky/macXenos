@@ -88,14 +88,22 @@ bool SDLHelper::SetHints() {
   suc &= setHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "xenia emulator");
 
 #if XE_PLATFORM_MAC
-  // macOS only: make Bluetooth/USB PlayStation pad handling deterministic
-  // rather than dependent on SDL's per-build defaults. SDL still owns the
-  // physical->XInput-layout mapping; these only select the HIDAPI backend so
-  // DualShock 4 / DualSense expose the full button/rumble set. Left at normal
-  // priority so an explicit user env override still wins.
-  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
-  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "1");
-  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+  // macOS only: DISABLE SDL's HIDAPI joystick backend; route pads through the
+  // OS-native GameController (MFi) / IOKit drivers instead. SDL's macOS hidapi
+  // hot-plug teardown (SDL_JoystickUpdate -> HIDAPI_DelDevice ->
+  // PLATFORM_hid_close) crashes when a controller is unplugged while a title
+  // runs: it calls IOHIDDeviceRegisterInputReportCallback and then
+  // IOHIDDeviceClose on the already-freed IOKit handle, faulting with
+  // EXC_BAD_ACCESS. SDL's own hid_close guards for this are environment-
+  // dependent (its comment notes the IOHIDDeviceClose behavior flips across
+  // macOS versions) and can't win everywhere, so we avoid the path entirely.
+  // The IOKit/MFi drivers map DualShock/Xbox pads (via SDL's built-in mappings
+  // + gamecontrollerdb) and hot-plug cleanly. Tradeoff: HIDAPI-only extras
+  // (rumble/touchpad/gyro) are unavailable. Normal priority so a user env
+  // override can still re-enable HIDAPI if desired.
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "0");
+  suc &= setHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
 #endif  // XE_PLATFORM_MAC
 
   return suc;

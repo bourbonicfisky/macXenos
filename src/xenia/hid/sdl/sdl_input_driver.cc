@@ -111,21 +111,12 @@ X_STATUS SDLInputDriver::Setup() {
         },
         this);
 
-#if XE_PLATFORM_MAC
-    // macOS: disable SDL's HIDAPI joystick backend and use the GameController
-    // (MFi) / IOKit drivers instead. SDL's macOS hidapi hot-plug teardown
-    // (SDL_JoystickUpdate -> HIDAPI_DelDevice -> PLATFORM_hid_close ->
-    // IOHIDDeviceRegisterInputReportCallback) crashes in CoreFoundation
-    // (EXC_BAD_ACCESS, KERN_INVALID_ADDRESS at 0x18) when a controller is
-    // plugged or unplugged while a title runs. The MFi backend
-    // (GameController.framework) detects modern Xbox/PlayStation pads over USB
-    // and Bluetooth (verified: a DualShock 4 reaches the guest), hot-plugs
-    // cleanly, and avoids the HIDAPI "Input Monitoring" permission gate that
-    // otherwise silences Bluetooth pads on ad-hoc-signed builds. MFi may take a
-    // moment to enumerate an already-connected pad after launch. Must be set
-    // before the GameController subsystem initializes.
-    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
-#endif  // XE_PLATFORM_MAC
+    // macOS note: Bluetooth controllers reach SDL through raw HID (HIDAPI). On
+    // recent macOS this requires the user to grant the app "Input Monitoring"
+    // (System Settings > Privacy & Security), and an ad-hoc-signed/non-App-Store
+    // build cannot pre-grant it. Symptom if denied: a pad works over USB but is
+    // silent or undetected over Bluetooth. This is a permission gate, NOT a
+    // controller-mapping bug (SDL still maps Xbox/PlayStation pads correctly).
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
       return;
     }
