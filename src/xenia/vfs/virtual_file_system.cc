@@ -17,6 +17,9 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/xfile.h"
+#include "xenia/kernel/xthread.h"
+
+#include <unordered_set>
 
 // Diagnostic only: shares the global --media_diag flag (defined in apu_flags.cc).
 DECLARE_bool(media_diag);
@@ -182,11 +185,27 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
         }
         return o;
       };
-      XELOGI(
-          "[media-diag] vfs.resolve_fail in_len={} in='{}' in_hex=[{}] "
-          "norm_len={} norm='{}'",
-          path.size(), path, hex(path), normalized_path.size(),
-          normalized_path);
+      // Capture the GUEST caller via the current thread's link register — this
+      // is the return address into the guest routine that built+passed the
+      // truncated path, i.e. the FMV string-build site to localize the a64 JIT
+      // mis-compile. Dedup by (len, lr) so each distinct caller logs once
+      // despite ~19k failures (safe: global_critical_region_ is held here).
+      uint32_t guest_lr = 0;
+      uint32_t guest_tid = 0;
+      auto* cur = kernel::XThread::GetCurrentThread();
+      if (cur && cur->thread_state() && cur->thread_state()->context()) {
+        guest_lr = static_cast<uint32_t>(cur->thread_state()->context()->lr);
+        guest_tid = cur->thread_id();
+      }
+      static std::unordered_set<uint64_t> s_seen;
+      uint64_t key = (static_cast<uint64_t>(guest_lr) << 8) | (path.size() & 0xFF);
+      if (s_seen.insert(key).second) {
+        XELOGI(
+            "[media-diag] vfs.resolve_fail NEW-CALLER guest_lr={:08X} tid={:08X} "
+            "in_len={} in='{}' in_hex=[{}] norm_len={} norm='{}'",
+            guest_lr, guest_tid, path.size(), path, hex(path),
+            normalized_path.size(), normalized_path);
+      }
     }
     return nullptr;
   }
