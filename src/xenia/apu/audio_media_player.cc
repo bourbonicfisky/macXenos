@@ -8,10 +8,14 @@
  */
 
 #include "xenia/apu/audio_media_player.h"
+#include "xenia/apu/apu_flags.h"
 #include "xenia/apu/audio_driver.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/apu/xma_context.h"
 #include "xenia/base/logging.h"
+
+#include <atomic>
+#include <cmath>
 
 extern "C" {
 #if XE_COMPILER_MSVC
@@ -128,6 +132,42 @@ ProcessAudioResult ProcessAudioLoop(AudioMediaPlayer* player,
         if (ret < 0) {
           XELOGW("Error during decoding: {:X}", ret);
           break;
+        }
+
+        if (cvars::media_diag) {
+          // Per-decoded-frame probe: splits "libavcodec returns silence" from
+          // "we drop a non-FLT/FLTP format at ConvertAudioFrame" from "decode
+          // errors out". Compute the peak directly from the AVFrame so it is
+          // independent of ConvertAudioFrame's format switch.
+          const int chans = avctx->ch_layout.nb_channels;
+          float peak = 0.0f;
+          bool peak_known = true;
+          if (frame->format == AV_SAMPLE_FMT_FLTP) {
+            for (int ch = 0; ch < chans; ch++) {
+              const float* d = reinterpret_cast<const float*>(frame->data[ch]);
+              for (int s = 0; s < frame->nb_samples; s++)
+                peak = std::max(peak, std::fabs(d[s]));
+            }
+          } else if (frame->format == AV_SAMPLE_FMT_FLT) {
+            const float* d = reinterpret_cast<const float*>(frame->data[0]);
+            for (int s = 0; s < frame->nb_samples * chans; s++)
+              peak = std::max(peak, std::fabs(d[s]));
+          } else {
+            peak_known = false;  // a format ConvertAudioFrame would DROP
+          }
+          static std::atomic<uint64_t> s_frames{0}, s_nz{0}, s_dropfmt{0};
+          uint64_t f = s_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+          if (peak_known && peak > 0.0f)
+            s_nz.fetch_add(1, std::memory_order_relaxed);
+          if (!peak_known) s_dropfmt.fetch_add(1, std::memory_order_relaxed);
+          if (f <= 20 || (f % 100) == 0) {
+            XELOGI(
+                "[media-diag] fmv.decode frame={} fmt={} nb_samples={} ch={} "
+                "peak={} nz_frames={} dropped_fmt={}",
+                f, frame->format, frame->nb_samples, chans,
+                peak_known ? peak : -1.0f, s_nz.load(std::memory_order_relaxed),
+                s_dropfmt.load(std::memory_order_relaxed));
+          }
         }
 
         ConvertAudioFrame(frame, avctx->ch_layout.nb_channels, &frameBuffer);
