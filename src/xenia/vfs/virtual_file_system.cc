@@ -223,6 +223,26 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
             XELOGI("[media-diag] fmv.disasm {:08X}: {:08X}  {}{}", addr, code,
                    sb.to_string_view(), addr == guest_lr ? "   <-- LR" : "");
           }
+          // One-shot disasm of the buffer producers called before
+          // RtlInitAnsiString (bl 0x8295E2E8 at 0x82953674, bl 0x82B1B3A0 at
+          // 0x8295361C). Shows whether the string is built inline (program-order,
+          // same thread → an a64 store-ordering/address bug) or handed to another
+          // path. Dump from each function start forward.
+          static bool s_dumped_producers = false;
+          if (!s_dumped_producers) {
+            s_dumped_producers = true;
+            for (uint32_t fn : {0x8295E2E8u, 0x82B1B3A0u}) {
+              for (uint32_t a = fn; a < fn + 0xC0; a += 4) {
+                auto* p2 = cur->memory()->TranslateVirtual<const uint32_t*>(a);
+                if (!p2) break;
+                uint32_t code = xe::byte_swap(*p2);
+                StringBuffer sb;
+                xe::cpu::ppc::DisasmPPC(a, code, &sb);
+                XELOGI("[media-diag] fmv.producer {:08X}: {:08X}  {}", a, code,
+                       sb.to_string_view());
+              }
+            }
+          }
           // Guest register + stack snapshot at the failure. ctr = the bcctrl
           // target (which callee built the short string); r1 = guest stack; the
           // callee filled buffers near r1+0x60. Helps ID the string builder and
