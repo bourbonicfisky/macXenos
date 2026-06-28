@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <cstring>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
@@ -19,6 +22,17 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
+
+// ARM64 FMV workaround cvar (used by the narrow shim in NtCreateFile_entry).
+DEFINE_bool(
+    arm64_fmv_objname_length_workaround, true,
+    "ARM64 only: an a64 codegen miscompute can leave an NtCreateFile ObjectName "
+    "length stale-short (0/4) while the buffer already holds the full path, so "
+    "FMV/cutscene .wmv opens get a truncated name and fail (no video, no WMA "
+    "audio). Narrowly recompute the length for .wmv media paths so cinematics "
+    "play. Diagnostic workaround for local Apple Silicon builds, NOT the codegen "
+    "root fix; harmless on x64 (the truncation never occurs there).",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -56,6 +70,34 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
 
   auto object_name =
       kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(object_attrs->name_ptr);
+
+  // ARM64 FMV workaround (narrow; see cvar above). An upstream a64 codegen
+  // miscompute leaves this ObjectName length stale-short (0/4) while the buffer
+  // already holds the full path (proven: forcing the length recovers FMV video
+  // AND its WMA/libavcodec audio). Restrict HARD to the observed media case — a
+  // short length whose buffer is a longer ASCII path ending in ".wmv" — so we do
+  // NOT change NT string semantics for genuinely-short descriptors. This is a
+  // workaround, not the codegen root fix (that is the a64 length miscompute).
+  if (cvars::arm64_fmv_objname_length_workaround && object_name &&
+      object_name->length <= 4 && object_name->pointer) {
+    const char* buf =
+        kernel_memory()->TranslateVirtual<const char*>(object_name->pointer);
+    if (buf) {
+      uint16_t real = (uint16_t)strnlen(buf, 256);
+      auto ends_wmv = [](const char* s, uint16_t n) -> bool {
+        if (n < 4) return false;
+        const char* e = s + n - 4;
+        auto lc = [](char c) { return (c >= 'A' && c <= 'Z') ? char(c + 32) : c; };
+        return lc(e[0]) == '.' && lc(e[1]) == 'w' && lc(e[2]) == 'm' &&
+               lc(e[3]) == 'v';
+      };
+      if (real > object_name->length && real < 256 && ends_wmv(buf, real)) {
+        XELOGW("[arm64-fmv-fix] ObjectName length {} -> {} for '{}'",
+               (uint16_t)object_name->length, real, buf);
+        object_name->length = real;  // be<uint16_t> assignment byte-swaps
+      }
+    }
+  }
 
   vfs::Entry* root_entry = nullptr;
 
