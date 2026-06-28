@@ -15,6 +15,8 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
@@ -28,6 +30,13 @@
 DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
 DECLARE_bool(emit_inline_mmio_checks);
 DECLARE_bool(media_diag);  // diagnostic (defined in apu/apu_flags.cc)
+// Own off-by-default flag (was media_diag) so the per-store DOA5 ctx-id watch
+// does NOT run under plain --media_diag — it adds per-store overhead and the
+// writer is already found (the MmGetPhysicalAddress path). Pass to re-enable.
+DEFINE_bool(arm64_cfc_storewatch, false,
+            "ARM64 diag: watch guest stores to the DOA5 XMA ctx-id field "
+            "(0xE8077060); heavy (per-store check). Off by default.",
+            "CPU");
 
 namespace xe {
 namespace cpu {
@@ -180,6 +189,37 @@ static void XmaCfcStoreWatchHit(void* _ctx, uint32_t guestaddr) {
         static_cast<uint32_t>(ctx->r[9]), static_cast<uint32_t>(ctx->r[11]),
         static_cast<uint32_t>(ctx->r[12]));
   }
+  if (n == 0) {
+    // Disasm the writer's vicinity (lr = return addr of the store's function;
+    // a `bl` just before lr targets the actual writer if the store is one frame
+    // deeper). Shows the store + how 0xD580 is computed.
+    const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+    // The store lives inside the function called by the `bl` just before lr.
+    // Decode that bl to get its target and disasm the writer function itself.
+    StringBuffer sb;
+    uint32_t bl_target = 0;
+    {
+      const uint8_t* b = ctx->virtual_membase + (lr - 4);
+      const uint32_t blw = (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) |
+                           (uint32_t(b[2]) << 8) | uint32_t(b[3]);
+      if ((blw & 0xFC000003u) == 0x48000001u) {  // bl (I-form, LK=1, AA=0)
+        int32_t li = static_cast<int32_t>(blw & 0x03FFFFFC);
+        li = (li << 6) >> 6;  // sign-extend 24-bit LI<<2
+        bl_target = (lr - 4) + static_cast<uint32_t>(li);
+      }
+    }
+    uint32_t start = bl_target ? bl_target : (lr - 0x60);
+    for (uint32_t pc = start; pc < start + 0x140; pc += 4) {
+      const uint8_t* p = ctx->virtual_membase + pc;
+      const uint32_t code = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                            (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+      sb.Reset();
+      ppc::DisasmPPC(pc, code, &sb);
+      XELOGW("[media-diag] cfc.wdisasm {:08X}: {:08X}  {}", pc, code,
+             sb.to_string_view());
+      if (code == 0x4E800020u) break;  // blr = end of writer fn
+    }
+  }
 }
 
 // Emit an inline (boot-armed, --media_diag-gated) watch: if the store address
@@ -187,7 +227,7 @@ static void XmaCfcStoreWatchHit(void* _ctx, uint32_t guestaddr) {
 // w17/w1 are scratch. Mirrors the existing inline-MMIO-check pattern.
 static void EmitCfcStoreWatch(A64Emitter& e, Xbyak_aarch64::XReg addr) {
   using namespace Xbyak_aarch64;
-  if (!cvars::media_diag) {
+  if (!cvars::arm64_cfc_storewatch) {
     return;
   }
   // ComputeMemoryAddress adds 0x1000 to guest addrs >= 0xE0000000 (expansion-
@@ -709,6 +749,7 @@ struct STORE_OFFSET_I8
     } else {
       e.strb(i.src3, ptr(e.GetMembaseReg(), e.x0));
     }
+    EmitCfcStoreWatch(e, e.x0);  // [media-diag] watch 0xE8077060 (offset byte store)
   }
 };
 struct STORE_OFFSET_I16
@@ -732,6 +773,7 @@ struct STORE_OFFSET_I16
         e.strh(i.src3, ptr(e.GetMembaseReg(), e.x0));
       }
     }
+    EmitCfcStoreWatch(e, e.x0);  // [media-diag] watch 0xE8077060 (offset hw store)
   }
 };
 struct STORE_OFFSET_I32
@@ -825,6 +867,7 @@ struct STORE_OFFSET_I32
             e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
           }
         }
+        EmitCfcStoreWatch(e, e.x0);  // [media-diag] watch 0xE8077060 (offset word)
       }
       e.L(done);
     } else {
@@ -847,6 +890,7 @@ struct STORE_OFFSET_I32
           e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
         }
       }
+      EmitCfcStoreWatch(e, e.x0);  // [media-diag] watch 0xE8077060 (offset word)
     }
   }
 };
@@ -871,6 +915,7 @@ struct STORE_OFFSET_I64
         e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
       }
     }
+    EmitCfcStoreWatch(e, e.x0);  // [media-diag] watch 0xE8077060 (offset dword)
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_STORE_OFFSET, STORE_OFFSET_I8, STORE_OFFSET_I16,

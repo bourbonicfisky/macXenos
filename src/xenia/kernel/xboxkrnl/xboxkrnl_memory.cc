@@ -9,10 +9,15 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
+
+DECLARE_bool(media_diag);  // diagnostic (defined in apu/apu_flags.cc)
 
 DEFINE_bool(
     ignore_offset_for_ranged_allocations, false,
@@ -649,6 +654,22 @@ dword_result_t MmGetPhysicalAddress_entry(dword_t base_address) {
   assert_true(physical_address != UINT32_MAX);
   if (physical_address == UINT32_MAX) {
     physical_address = 0;
+  }
+  // [media-diag] DOA5 XMA-kick index hunt: the audio engine calls this from guest
+  // LR 0x8297D7FC and computes index = (result - base)>>6, which comes out 0xD580
+  // (-> wrong kick reg 0xCFC -> gameplay silence). Log the in/out of the exact
+  // call so we can see whether the input ptr is sane and the output is linear.
+  if (cvars::media_diag) {
+    uint32_t lr = 0;
+    auto* th = XThread::GetCurrentThread();
+    if (th && th->thread_state() && th->thread_state()->context()) {
+      lr = static_cast<uint32_t>(th->thread_state()->context()->lr);
+    }
+    if (lr == 0x8297D7FC) {
+      XELOGW(
+          "[media-diag] MmGetPhysicalAddress in={:08X} out={:08X} lr={:08X}",
+          static_cast<uint32_t>(base_address), physical_address, lr);
+    }
   }
   return physical_address;
 }
