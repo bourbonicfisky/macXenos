@@ -106,52 +106,6 @@ bool SDLAudioDriver::Initialize() {
 }
 
 void SDLAudioDriver::SubmitFrame(float* frame) {
-  if (cvars::media_diag) {
-    static std::atomic<uint64_t> s_n{0}, s_nonzero{0};
-    float peak = 0.0f;
-    for (uint32_t i = 0; i < frame_channels_ * channel_samples_; ++i) {
-      float a = frame[i] < 0.0f ? -frame[i] : frame[i];
-      if (a > peak) peak = a;
-    }
-    if (peak > 0.0f) s_nonzero.fetch_add(1);
-    uint64_t c = s_n.fetch_add(1);
-    if ((c % 500) == 0) {
-      XELOGI(
-          "[media-diag] audio.submit count={} this_peak={} nonzero_frames={}", c,
-          peak, s_nonzero.load());
-    }
-
-    // Feed the shared pipeline heartbeat and flush per-window deltas. SubmitFrame
-    // is the output cadence, so this is the natural clock: when audio dies, the
-    // window line shows which stage's nonzero-rate hit zero first.
-    //   work_en>0, decode nz>0, submit nz=0  => guest mix dropped the PCM (post-XMA)
-    //   work_en>0, decode nz=0  (att>0)      => decode/libavcodec stopped producing
-    //   work_en=0 / att=0                    => guest stopped driving XMA
-    // If the WINDOW line itself stops, the guest stopped submitting (earliest).
-    auto& st = xe::apu::g_media_diag_stats;
-    constexpr auto relaxed = std::memory_order_relaxed;
-    st.submit_frames.fetch_add(1, relaxed);
-    if (peak > 0.0f) st.submit_nonzero.fetch_add(1, relaxed);
-    static std::atomic<uint64_t> s_window_start{0};
-    static std::atomic<uint64_t> p_work{0}, p_da{0}, p_dok{0}, p_dnz{0},
-        p_sf{0}, p_snz{0};
-    uint64_t sf = st.submit_frames.load(relaxed);
-    if (sf - s_window_start.load(relaxed) >= 200) {
-      s_window_start.store(sf, relaxed);
-      uint64_t work = st.work_enabled.load(relaxed);
-      uint64_t da = st.decode_attempt.load(relaxed);
-      uint64_t dok = st.decode_ok.load(relaxed);
-      uint64_t dnz = st.decode_nonzero.load(relaxed);
-      uint64_t snz = st.submit_nonzero.load(relaxed);
-      XELOGI(
-          "[media-diag] WINDOW work_en=+{} decode(att=+{} ok=+{} nz=+{}) "
-          "submit(frm=+{} nz=+{})",
-          work - p_work.exchange(work, relaxed),
-          da - p_da.exchange(da, relaxed), dok - p_dok.exchange(dok, relaxed),
-          dnz - p_dnz.exchange(dnz, relaxed), sf - p_sf.exchange(sf, relaxed),
-          snz - p_snz.exchange(snz, relaxed));
-    }
-  }
   float* output_frame;
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);

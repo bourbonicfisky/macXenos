@@ -7,15 +7,12 @@
  ******************************************************************************
  */
 
-#include <atomic>
 #include <chrono>
 #include <cwctype>
-#include <thread>
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 
 #include "xenia/base/atomic.h"
-#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/pe_image.h"
 #include "xenia/kernel/kernel_state.h"
@@ -24,9 +21,6 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xthread.h"
-
-// Diagnostic only: shares the global --media_diag flag (defined in apu_flags.cc).
-DECLARE_bool(media_diag);
 
 namespace xe {
 namespace kernel {
@@ -228,97 +222,6 @@ void RtlInitAnsiString_entry(pointer_t<X_ANSI_STRING> destination,
     uint16_t length = (uint16_t)strlen(source);
     destination->length = length;
     destination->maximum_length = length + 1;
-
-    uint32_t lr = 0;
-    {
-      auto* cur = XThread::GetCurrentThread();
-      if (cur && cur->thread_state() && cur->thread_state()->context()) {
-        lr = (uint32_t)cur->thread_state()->context()->lr;
-      }
-    }
-    if (cvars::media_diag && (length <= 8 || lr == 0x829536A8)) {
-      // FMV-gate diag: RtlInitAnsiString is host strlen(source). The FMV path
-      // calls it from guest LR 0x829536A8 (right after bl RtlInitAnsiString,
-      // dest = the NtCreateFile ObjectName). Log every FMV-path call so the slot
-      // holding the real "\game:\..." string is visible: if strlen is correct
-      // (21) there, the truncation is a timing/reorder elsewhere; if it is short
-      // there too, `source` is the wrong pointer.
-      const char* s = source;
-      std::string bytes;
-      char b[4];
-      for (int i = 0; i < 40; i++) {
-        snprintf(b, sizeof(b), "%02X ", (uint8_t)s[i]);
-        bytes += b;
-      }
-      XELOGI(
-          "[media-diag] rtl.initansi lr={:08X} dest={:08X} src={:08X} strlen={} "
-          "bytes40=[{}]",
-          lr, destination.guest_address(), source.guest_address(), length,
-          bytes);
-
-      // GROW-CHECK (same-thread vs cross-thread): fire ONLY on the real path
-      // buffer caught mid-build — content starts with "\gam"/"game" (the
-      // \game:\ninja... prefix) but strlen is short. Re-measure after an actual
-      // SLEEP: this blocks the consumer (guest) thread, so if a PRODUCER thread
-      // is filling the buffer it gets to run and the buffer GROWS -> cross-thread
-      // race. If it stays short -> no concurrent producer -> same-thread (a64
-      // codegen). dmb before each read so we observe real memory.
-      auto barrier_strlen = [&]() -> uint32_t {
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        return (uint32_t)strlen(s);
-      };
-      // Fire on the FMV-path short buffers (caller 0x829536A8, len<=4 = the
-      // empty/short candidate slots), capped so the 5ms sleeps don't pile up.
-      static std::atomic<int> s_grow_fires{0};
-      if (lr == 0x829536A8 && length <= 4 &&
-          s_grow_fires.fetch_add(1, std::memory_order_relaxed) < 24) {
-        uint32_t len0 = barrier_strlen();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        uint32_t len1 = barrier_strlen();
-        std::string after;
-        for (int i = 0; i < 40; i++) {
-          snprintf(b, sizeof(b), "%02X ", (uint8_t)s[i]);
-          after += b;
-        }
-        XELOGI(
-            "[media-diag] rtl.growcheck lr={:08X} src={:08X} tid={:08X} "
-            "len_before={} len_after_5ms={} grew={} verdict={} after40=[{}]",
-            lr, source.guest_address(),
-            XThread::GetCurrentThread() ? XThread::GetCurrentThread()->thread_id()
-                                        : 0,
-            len0, len1, (len1 > len0) ? "YES" : "no",
-            (len1 > len0) ? "CROSS-THREAD-RACE" : "SAME-THREAD", after);
-      }
-
-      // PRODUCER TRACE (2026-06-27): the FMV consumer (guest 0x82953618) receives
-      // the path pointer in r3 (= src here); the buffer is built by an UPSTREAM
-      // caller not in its local call graph. Dump the guest stack linkage area so
-      // the caller return-address chain is visible — any word in [0x82000000,
-      // 0x83000000) is a guest code address (a return site up the stack). Map
-      // these to functions to find who builds the path before RtlInitAnsiString.
-      static std::atomic<int> s_prod_fires{0};
-      if (lr == 0x829536A8 && length <= 4 &&
-          s_prod_fires.fetch_add(1, std::memory_order_relaxed) < 8) {
-        auto* cur2 = XThread::GetCurrentThread();
-        uint32_t sp = (uint32_t)cur2->thread_state()->context()->r[1];
-        auto* kmem = kernel_memory();
-        std::string callers;
-        char cb[24];
-        for (uint32_t off = 0; off <= 0x180; off += 4) {
-          const uint8_t* p = kmem->TranslateVirtual<uint8_t*>(sp + off);
-          uint32_t w = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
-                       (uint32_t(p[2]) << 8) | uint32_t(p[3]);
-          if (w >= 0x82000000u && w < 0x83000000u) {
-            snprintf(cb, sizeof(cb), "+%X:%08X ", off, w);
-            callers += cb;
-          }
-        }
-        XELOGI(
-            "[media-diag] fmv.producer-trace sp={:08X} src={:08X} "
-            "stack_code_addrs=[{}]",
-            sp, source.guest_address(), callers);
-      }
-    }
   } else {
     destination->reset();
   }

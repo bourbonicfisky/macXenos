@@ -12,20 +12,10 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #include "devices/host_path_entry.h"
-#include "xenia/base/byte_order.h"
-#include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
-#include "xenia/base/string_buffer.h"
-#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/kernel/xfile.h"
-#include "xenia/kernel/xthread.h"
-
-#include <unordered_set>
-
-// Diagnostic only: shares the global --media_diag flag (defined in apu_flags.cc).
-DECLARE_bool(media_diag);
 
 namespace xe {
 namespace vfs {
@@ -171,129 +161,6 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     // not an actual problem nor something we care about.
     if (path != "ShaderDumpxe:\\CompareBackEnds") {
       XELOGE("ResolvePath({}) failed - device not found", path);
-    }
-    if (cvars::media_diag) {
-      // FMV-gate diag: is a failing path (e.g. "\\gam", "") a TRUNCATED longer
-      // string? Dump raw len + hex of both the as-received path and the
-      // post-canonicalize/symlink normalized_path so an x64-vs-arm64 A/B shows
-      // whether the guest hands us a short string on arm64. A length that is
-      // short vs the expected "\\game:\\..." is the smoking gun for a string
-      // (length/pointer) miscompile on the a64 JIT.
-      auto hex = [](std::string_view s) {
-        std::string o;
-        char b[4];
-        for (unsigned char c : s) {
-          snprintf(b, sizeof(b), "%02X ", c);
-          o += b;
-        }
-        return o;
-      };
-      // Capture the GUEST caller via the current thread's link register — this
-      // is the return address into the guest routine that built+passed the
-      // truncated path, i.e. the FMV string-build site to localize the a64 JIT
-      // mis-compile. Dedup by (len, lr) so each distinct caller logs once
-      // despite ~19k failures (safe: global_critical_region_ is held here).
-      uint32_t guest_lr = 0;
-      uint32_t guest_tid = 0;
-      auto* cur = kernel::XThread::GetCurrentThread();
-      if (cur && cur->thread_state() && cur->thread_state()->context()) {
-        guest_lr = static_cast<uint32_t>(cur->thread_state()->context()->lr);
-        guest_tid = cur->thread_id();
-      }
-      static std::unordered_set<uint64_t> s_seen;
-      uint64_t key = (static_cast<uint64_t>(guest_lr) << 8) | (path.size() & 0xFF);
-      if (s_seen.insert(key).second) {
-        XELOGI(
-            "[media-diag] vfs.resolve_fail NEW-CALLER guest_lr={:08X} tid={:08X} "
-            "in_len={} in='{}' in_hex=[{}] norm_len={} norm='{}'",
-            guest_lr, guest_tid, path.size(), path, hex(path),
-            normalized_path.size(), normalized_path);
-        // Disassemble the guest code around the caller LR so the bl target (which
-        // kernel function) and the preceding X_ANSI_STRING/length setup are
-        // visible without extracting the XEX. PPC code is fixed 4-byte,
-        // big-endian; the bl is at lr-4.
-        if (guest_lr && cur && cur->memory() && path.size() <= 8) {
-          for (int32_t off = -0x200; off <= 0x08; off += 4) {
-            uint32_t addr = guest_lr + off;
-            auto* p = cur->memory()->TranslateVirtual<const uint32_t*>(addr);
-            if (!p) continue;
-            uint32_t code = xe::byte_swap(*p);
-            StringBuffer sb;
-            xe::cpu::ppc::DisasmPPC(addr, code, &sb);
-            XELOGI("[media-diag] fmv.disasm {:08X}: {:08X}  {}{}", addr, code,
-                   sb.to_string_view(), addr == guest_lr ? "   <-- LR" : "");
-          }
-          // One-shot disasm of the buffer producers called before
-          // RtlInitAnsiString (bl 0x8295E2E8 at 0x82953674, bl 0x82B1B3A0 at
-          // 0x8295361C). Shows whether the string is built inline (program-order,
-          // same thread → an a64 store-ordering/address bug) or handed to another
-          // path. Dump from each function start forward.
-          static bool s_dumped_producers = false;
-          if (!s_dumped_producers) {
-            s_dumped_producers = true;
-            for (uint32_t fn : {0x8295E2E8u, 0x82B1B3A0u}) {
-              for (uint32_t a = fn; a < fn + 0xC0; a += 4) {
-                auto* p2 = cur->memory()->TranslateVirtual<const uint32_t*>(a);
-                if (!p2) break;
-                uint32_t code = xe::byte_swap(*p2);
-                StringBuffer sb;
-                xe::cpu::ppc::DisasmPPC(a, code, &sb);
-                XELOGI("[media-diag] fmv.producer {:08X}: {:08X}  {}", a, code,
-                       sb.to_string_view());
-              }
-            }
-          }
-          // Guest register + stack snapshot at the failure. ctr = the bcctrl
-          // target (which callee built the short string); r1 = guest stack; the
-          // callee filled buffers near r1+0x60. Helps ID the string builder and
-          // read the X_ANSI_STRING it produced.
-          auto* ctx = cur->thread_state()->context();
-          XELOGI(
-              "[media-diag] fmv.regs ctr={:08X} r1={:08X} r3={:08X} r4={:08X} "
-              "r5={:08X} r6={:08X} r7={:08X} r11={:08X}",
-              uint32_t(ctx->ctr), uint32_t(ctx->r[1]), uint32_t(ctx->r[3]),
-              uint32_t(ctx->r[4]), uint32_t(ctx->r[5]), uint32_t(ctx->r[6]),
-              uint32_t(ctx->r[7]), uint32_t(ctx->r[11]));
-          // Dump the guest stack window holding the callee's output buffers as
-          // candidate X_ANSI_STRINGs (be16 length, be16 max, be32 ptr).
-          uint32_t sp = uint32_t(ctx->r[1]);
-          for (uint32_t boff = 0x50; boff <= 0x84; boff += 4) {
-            auto* w = cur->memory()->TranslateVirtual<const uint32_t*>(sp + boff);
-            if (!w) continue;
-            uint32_t raw = xe::byte_swap(*w);
-            XELOGI("[media-diag] fmv.stack r1+{:02X} ({:08X}): {:08X}", boff,
-                   sp + boff, raw);
-          }
-          // NtCreateFile: r5=OBJECT_ATTRIBUTES{ +0 RootDir, +4 ObjectName,
-          // +8 Attrs }; ObjectName -> X_ANSI_STRING{ +0 be16 len, +2 be16 max,
-          // +4 be32 ptr }. Dump the actual buffer to see if it holds MORE bytes
-          // than `len` claims (=> a64 length mis-compute / truncation) or really
-          // is a short string (=> wrong string built upstream).
-          auto rd32 = [&](uint32_t a) -> uint32_t {
-            auto* w = cur->memory()->TranslateVirtual<const uint32_t*>(a);
-            return w ? xe::byte_swap(*w) : 0;
-          };
-          uint32_t oa = uint32_t(ctx->r[5]);
-          uint32_t objname = rd32(oa + 4);
-          if (objname) {
-            uint32_t lenmax = rd32(objname);
-            uint16_t alen = uint16_t(lenmax >> 16);
-            uint16_t amax = uint16_t(lenmax & 0xFFFF);
-            uint32_t bufp = rd32(objname + 4);
-            std::string bytes;
-            char b[4];
-            for (uint32_t i = 0; i < 32; i++) {
-              auto* c = cur->memory()->TranslateVirtual<const uint8_t*>(bufp + i);
-              snprintf(b, sizeof(b), "%02X ", c ? *c : 0);
-              bytes += b;
-            }
-            XELOGI(
-                "[media-diag] fmv.objname oa={:08X} name_ptr={:08X} len={} "
-                "max={} buf={:08X} buf32=[{}]",
-                oa, objname, alen, amax, bufp, bytes);
-          }
-        }
-      }
     }
     return nullptr;
   }

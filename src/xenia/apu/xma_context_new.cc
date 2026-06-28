@@ -8,7 +8,6 @@
 */
 
 #include "xenia/apu/xma_context_new.h"
-#include "xenia/apu/apu_flags.h"
 #include "xenia/apu/xma_helpers.h"
 
 #include "xenia/base/logging.h"
@@ -112,19 +111,6 @@ RingBuffer XmaContextNew::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
 }
 
 bool XmaContextNew::Work() {
-  if (cvars::media_diag) {
-    static std::atomic<uint64_t> s_calls{0}, s_en{0}, s_alloc{0};
-    uint64_t c = s_calls.fetch_add(1);
-    if (is_enabled()) {
-      s_en.fetch_add(1);
-      g_media_diag_stats.work_enabled.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (is_allocated()) s_alloc.fetch_add(1);
-    if ((c % 2000) == 0) {
-      XELOGI("[media-diag] xma.work calls={} enabled={} allocated={}", c,
-             s_en.load(), s_alloc.load());
-    }
-  }
   if (!is_enabled() || !is_allocated()) {
     return false;
   }
@@ -596,40 +582,9 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
 
   PrepareDecoder(data->sample_rate, bool(data->is_stereo));
   PreparePacket(packet_info.current_frame_size_, padding_start);
-  const bool media_diag_decoded =
-      DecodePacket(av_context_, av_packet_, av_frame_);
-  if (cvars::media_diag) {
-    static std::atomic<uint64_t> s_dec{0};
-    uint64_t c = s_dec.fetch_add(1);
-    int peak = 0;
-    if (media_diag_decoded) {
-      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data),
-                   bool(data->is_stereo), raw_frame_.data());
-      const int16_t* s = reinterpret_cast<const int16_t*>(raw_frame_.data());
-      for (size_t i = 0; i < raw_frame_.size() / 2; ++i) {
-        int a = s[i] < 0 ? -s[i] : s[i];
-        if (a > peak) peak = a;
-      }
-    }
-    if ((c % 200) == 0) {
-      XELOGI("[media-diag] xma.decode attempt={} decoded={} raw_peak={}", c,
-             media_diag_decoded, peak);
-    }
-    g_media_diag_stats.decode_attempt.fetch_add(1, std::memory_order_relaxed);
-    if (media_diag_decoded) {
-      g_media_diag_stats.decode_ok.fetch_add(1, std::memory_order_relaxed);
-      if (peak > 0) {
-        g_media_diag_stats.decode_nonzero.fetch_add(
-            1, std::memory_order_relaxed);
-      }
-    }
-  }
-  if (media_diag_decoded) {
-    // dump_raw(av_frame_, id());
-    if (!cvars::media_diag) {
-      ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data),
-                   bool(data->is_stereo), raw_frame_.data());
-    }
+  if (DecodePacket(av_context_, av_packet_, av_frame_)) {
+    ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data),
+                 bool(data->is_stereo), raw_frame_.data());
     current_frame_remaining_subframes_ = 4 << data->is_stereo;
 
     // Loop end: limit output to subframes 0..loop_subframe_end.
