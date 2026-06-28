@@ -1128,3 +1128,111 @@ TEST_CASE("ROTATE_LEFT_I32", "[bitwise]") {
         REQUIRE(static_cast<uint32_t>(ctx->r[3]) == 0x12345678);
       });
 }
+
+// ============================================================================
+// Narrow-integer dirty-upper-bits regression (a64 backend)
+// ============================================================================
+// On ARM64 there are no 8/16-bit sub-registers, so an I8/I16 value produced by
+// a non-masking op (e.g. ADD_I8 overflow: 0x80 + 0x80 = 0x100) leaves dirty
+// bits above the narrow width in the host register. Unsigned consumers (SHR,
+// unsigned COMPARE, and the BRANCH/SELECT condition) must mask those bits.
+// These cases feed a deliberately-dirty narrow value (no Truncate in between)
+// straight into each consumer; before the masking fix they read the dirty upper
+// bits and produce the wrong result. (This is the class behind the arm64
+// FMV/audio path-string truncation.)
+
+TEST_CASE("SHR_I8_DIRTY_UPPER_BITS", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto dirty = b.Add(b.Truncate(LoadGPR(b, 4), INT8_TYPE),
+                       b.Truncate(LoadGPR(b, 5), INT8_TYPE));
+    StoreGPR(b, 3,
+             b.ZeroExtend(b.Shr(dirty, b.Truncate(LoadGPR(b, 6), INT8_TYPE)),
+                          INT64_TYPE));
+    b.Return();
+  });
+  // (uint8)(0x80+0x80)=0x00; 0x00>>1=0x00.  Dirty reg 0x100>>1 would be 0x80.
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->r[4] = 0x80;
+        ctx->r[5] = 0x80;
+        ctx->r[6] = 1;
+      },
+      [](PPCContext* ctx) { REQUIRE(static_cast<uint8_t>(ctx->r[3]) == 0x00); });
+}
+
+TEST_CASE("SHR_I8_DIRTY_UPPER_BITS_CONST_SHIFT", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto dirty = b.Add(b.Truncate(LoadGPR(b, 4), INT8_TYPE),
+                       b.Truncate(LoadGPR(b, 5), INT8_TYPE));
+    StoreGPR(b, 3, b.ZeroExtend(b.Shr(dirty, int8_t(1)), INT64_TYPE));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->r[4] = 0x80;
+        ctx->r[5] = 0x80;
+      },
+      [](PPCContext* ctx) { REQUIRE(static_cast<uint8_t>(ctx->r[3]) == 0x00); });
+}
+
+TEST_CASE("COMPARE_EQ_I8_DIRTY_UPPER_BITS", "[compare]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto dirty = b.Add(b.Truncate(LoadGPR(b, 4), INT8_TYPE),
+                       b.Truncate(LoadGPR(b, 5), INT8_TYPE));
+    StoreGPR(b, 3,
+             b.ZeroExtend(
+                 b.CompareEQ(dirty, b.Truncate(LoadGPR(b, 6), INT8_TYPE)),
+                 INT64_TYPE));
+    b.Return();
+  });
+  // (uint8)(0x80+0x80)=0x00 == 0x00 -> 1.  Dirty 0x100 == 0 -> 0.
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->r[4] = 0x80;
+        ctx->r[5] = 0x80;
+        ctx->r[6] = 0;
+      },
+      [](PPCContext* ctx) { REQUIRE(ctx->r[3] == 1); });
+}
+
+TEST_CASE("COMPARE_ULT_I8_DIRTY_UPPER_BITS", "[compare]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto dirty = b.Add(b.Truncate(LoadGPR(b, 4), INT8_TYPE),
+                       b.Truncate(LoadGPR(b, 5), INT8_TYPE));
+    StoreGPR(b, 3,
+             b.ZeroExtend(
+                 b.CompareULT(dirty, b.Truncate(LoadGPR(b, 6), INT8_TYPE)),
+                 INT64_TYPE));
+    b.Return();
+  });
+  // (uint8)(0x80+0x80)=0x00 < 0x10 -> 1.  Dirty 0x100 < 0x10 -> 0.
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->r[4] = 0x80;
+        ctx->r[5] = 0x80;
+        ctx->r[6] = 0x10;
+      },
+      [](PPCContext* ctx) { REQUIRE(ctx->r[3] == 1); });
+}
+
+TEST_CASE("SELECT_I8_DIRTY_COND", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto cond = b.Add(b.Truncate(LoadGPR(b, 4), INT8_TYPE),
+                      b.Truncate(LoadGPR(b, 5), INT8_TYPE));
+    StoreGPR(b, 3,
+             b.ZeroExtend(b.Select(cond, b.Truncate(LoadGPR(b, 7), INT8_TYPE),
+                                   b.Truncate(LoadGPR(b, 8), INT8_TYPE)),
+                          INT64_TYPE));
+    b.Return();
+  });
+  // cond=(uint8)(0x80+0x80)=0x00 -> false -> value2 (0xBB).
+  // Dirty 0x100 != 0 would wrongly select value1 (0xAA).
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->r[4] = 0x80;
+        ctx->r[5] = 0x80;
+        ctx->r[7] = 0xAA;
+        ctx->r[8] = 0xBB;
+      },
+      [](PPCContext* ctx) { REQUIRE(static_cast<uint8_t>(ctx->r[3]) == 0xBB); });
+}

@@ -37,13 +37,17 @@ EMITTER_OPCODE_TABLE(OPCODE_BRANCH, BRANCH);
 struct BRANCH_TRUE_I8
     : Sequence<BRANCH_TRUE_I8, I<OPCODE_BRANCH_TRUE, VoidOp, I8Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.GetLabel(i.src2.value->id));
+    // Only the low 8 bits define truthiness; an I8 value may carry dirty bits.
+    e.uxtb(e.w0, i.src1);
+    e.cbnz(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_I16
     : Sequence<BRANCH_TRUE_I16, I<OPCODE_BRANCH_TRUE, VoidOp, I16Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.GetLabel(i.src2.value->id));
+    // Only the low 16 bits define truthiness; an I16 value may carry dirty bits.
+    e.uxth(e.w0, i.src1);
+    e.cbnz(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_I32
@@ -82,14 +86,18 @@ EMITTER_OPCODE_TABLE(OPCODE_BRANCH_TRUE, BRANCH_TRUE_I8, BRANCH_TRUE_I16,
 struct BRANCH_FALSE_I8
     : Sequence<BRANCH_FALSE_I8, I<OPCODE_BRANCH_FALSE, VoidOp, I8Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbz(i.src1, e.GetLabel(i.src2.value->id));
+    // Only the low 8 bits define truthiness; an I8 value may carry dirty bits.
+    e.uxtb(e.w0, i.src1);
+    e.cbz(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_I16
     : Sequence<BRANCH_FALSE_I16,
                I<OPCODE_BRANCH_FALSE, VoidOp, I16Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbz(i.src1, e.GetLabel(i.src2.value->id));
+    // Only the low 16 bits define truthiness; an I16 value may carry dirty bits.
+    e.uxth(e.w0, i.src1);
+    e.cbz(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_I32

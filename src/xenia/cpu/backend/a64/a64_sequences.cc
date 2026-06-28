@@ -1965,7 +1965,10 @@ struct SHR_I8 : Sequence<SHR_I8, I<OPCODE_SHR, I8Op, I8Op, I8Op>> {
                           static_cast<uint8_t>(i.src1.constant()) >>
                           (i.src2.constant() & 0x7))));
       } else {
-        e.lsr(i.dest, i.src1, static_cast<uint32_t>(i.src2.constant() & 0x1F));
+        // An I8 value may carry dirty bits above bit 7; a logical shift would
+        // pull them down into the result, so mask to 8 bits first.
+        e.uxtb(i.dest, i.src1);
+        e.lsr(i.dest, i.dest, static_cast<uint32_t>(i.src2.constant() & 0x1F));
       }
     } else {
       // Read shift amount first — dest may alias src2.
@@ -1975,6 +1978,8 @@ struct SHR_I8 : Sequence<SHR_I8, I<OPCODE_SHR, I8Op, I8Op, I8Op>> {
       } else if (i.dest.reg().getIdx() != i.src1.reg().getIdx()) {
         e.mov(i.dest, i.src1);
       }
+      // Clear dirty upper bits before the shift (see note above).
+      e.uxtb(i.dest, i.dest);
       e.lsr(i.dest, i.dest, e.w0);
     }
   }
@@ -1987,7 +1992,10 @@ struct SHR_I16 : Sequence<SHR_I16, I<OPCODE_SHR, I16Op, I16Op, I8Op>> {
                           static_cast<uint16_t>(i.src1.constant()) >>
                           (i.src2.constant() & 0xF))));
       } else {
-        e.lsr(i.dest, i.src1, static_cast<uint32_t>(i.src2.constant() & 0x1F));
+        // An I16 value may carry dirty bits above bit 15; mask before shifting
+        // so they do not pull down into the result.
+        e.uxth(i.dest, i.src1);
+        e.lsr(i.dest, i.dest, static_cast<uint32_t>(i.src2.constant() & 0x1F));
       }
     } else {
       // Read shift amount first — dest may alias src2.
@@ -1997,6 +2005,8 @@ struct SHR_I16 : Sequence<SHR_I16, I<OPCODE_SHR, I16Op, I16Op, I8Op>> {
       } else if (i.dest.reg().getIdx() != i.src1.reg().getIdx()) {
         e.mov(i.dest, i.src1);
       }
+      // Clear dirty upper bits before the shift (see note above).
+      e.uxth(i.dest, i.dest);
       e.lsr(i.dest, i.dest, e.w0);
     }
   }
@@ -2407,24 +2417,30 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
 #define DEFINE_COMPARE_XX(NAME, COND)                                          \
   struct NAME##_I8 : Sequence<NAME##_I8, I<OPCODE_##NAME, I8Op, I8Op, I8Op>> { \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
+      /* I8 values may carry dirty bits above bit 7; an unsigned compare must  \
+         mask register operands (the signed variant below uses sxtb). */       \
       if (i.src1.is_constant) {                                                \
         e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));          \
         if (i.src2.is_constant) {                                              \
           e.mov(e.w1, static_cast<uint64_t>(i.src2.constant() & 0xFF));        \
           e.cmp(e.w0, e.w1);                                                   \
         } else {                                                               \
-          e.cmp(e.w0, i.src2);                                                 \
+          e.uxtb(e.w1, i.src2);                                                \
+          e.cmp(e.w0, e.w1);                                                   \
         }                                                                      \
       } else if (i.src2.is_constant) {                                         \
         uint32_t imm = static_cast<uint32_t>(i.src2.constant() & 0xFF);        \
+        e.uxtb(e.w1, i.src1);                                                  \
         if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, imm);                                                  \
+          e.cmp(e.w1, imm);                                                    \
         } else {                                                               \
           e.mov(e.w0, static_cast<uint64_t>(imm));                             \
-          e.cmp(i.src1, e.w0);                                                 \
+          e.cmp(e.w1, e.w0);                                                   \
         }                                                                      \
       } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.uxtb(e.w0, i.src1);                                                  \
+        e.uxtb(e.w1, i.src2);                                                  \
+        e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \
@@ -2432,24 +2448,29 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
   struct NAME##_I16                                                            \
       : Sequence<NAME##_I16, I<OPCODE_##NAME, I8Op, I16Op, I16Op>> {           \
     static void Emit(A64Emitter& e, const EmitArgType& i) {                    \
+      /* I16 values may carry dirty bits above bit 15; mask before compare. */ \
       if (i.src1.is_constant) {                                                \
         e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFFFF));        \
         if (i.src2.is_constant) {                                              \
           e.mov(e.w1, static_cast<uint64_t>(i.src2.constant() & 0xFFFF));      \
           e.cmp(e.w0, e.w1);                                                   \
         } else {                                                               \
-          e.cmp(e.w0, i.src2);                                                 \
+          e.uxth(e.w1, i.src2);                                                \
+          e.cmp(e.w0, e.w1);                                                   \
         }                                                                      \
       } else if (i.src2.is_constant) {                                         \
         uint32_t imm = static_cast<uint32_t>(i.src2.constant() & 0xFFFF);      \
+        e.uxth(e.w1, i.src1);                                                  \
         if (imm <= 4095) {                                                     \
-          e.cmp(i.src1, imm);                                                  \
+          e.cmp(e.w1, imm);                                                    \
         } else {                                                               \
           e.mov(e.w0, static_cast<uint64_t>(imm));                             \
-          e.cmp(i.src1, e.w0);                                                 \
+          e.cmp(e.w1, e.w0);                                                   \
         }                                                                      \
       } else {                                                                 \
-        e.cmp(i.src1, i.src2);                                                 \
+        e.uxth(e.w0, i.src1);                                                  \
+        e.uxth(e.w1, i.src2);                                                  \
+        e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
       e.cset(i.dest, Xbyak_aarch64::COND);                                     \
     }                                                                          \
@@ -2507,7 +2528,6 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
     }                                                                          \
   };                                                                           \
   struct _tag_##NAME {}
-
 DEFINE_COMPARE_XX(COMPARE_EQ, EQ);
 DEFINE_COMPARE_XX(COMPARE_NE, NE);
 // Signed I8/I16 comparisons need sign-extension to 32-bit because ARM64
@@ -2628,7 +2648,10 @@ DEFINE_COMPARE_XX(COMPARE_UGE, HS);
 struct SELECT_I8
     : Sequence<SELECT_I8, I<OPCODE_SELECT, I8Op, I8Op, I8Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
@@ -2647,7 +2670,10 @@ struct SELECT_I8
 struct SELECT_I16
     : Sequence<SELECT_I16, I<OPCODE_SELECT, I16Op, I8Op, I16Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
@@ -2666,7 +2692,10 @@ struct SELECT_I16
 struct SELECT_I32
     : Sequence<SELECT_I32, I<OPCODE_SELECT, I32Op, I8Op, I32Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
@@ -2687,7 +2716,10 @@ struct SELECT_I32
 struct SELECT_I64
     : Sequence<SELECT_I64, I<OPCODE_SELECT, I64Op, I8Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
@@ -2706,7 +2738,10 @@ struct SELECT_I64
 struct SELECT_F32
     : Sequence<SELECT_F32, I<OPCODE_SELECT, F32Op, I8Op, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
@@ -2737,7 +2772,10 @@ struct SELECT_F32
 struct SELECT_F64
     : Sequence<SELECT_F64, I<OPCODE_SELECT, F64Op, I8Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    WReg cond = i.src1.is_constant ? e.w0 : WReg(i.src1.reg().getIdx());
+    WReg cond = e.w0;
+    // The I8 condition may carry dirty bits above bit 7; only the low 8 bits
+    // define truthiness, so mask a register operand before testing it.
+    if (!i.src1.is_constant) e.uxtb(e.w0, i.src1);
     if (i.src1.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src1.constant() & 0xFF));
     }
