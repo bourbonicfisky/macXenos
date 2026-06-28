@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 
+#include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/base/vec128.h"
 #include "xenia/guest_pointers.h"
@@ -434,12 +435,11 @@ typedef struct alignas(64) PPCContext_s {
   inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {
     static_assert(std::is_pointer_v<T>);
     uint8_t* host_address = virtual_membase + guest_address;
-#if XE_PLATFORM_WIN32 == 1
-    if (guest_address >=
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+    if (xe::memory::allocation_granularity() > 0x1000 &&
+        guest_address >=
+            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
       host_address += 0x1000;
     }
-#endif
     return reinterpret_cast<T>(host_address);
   }
   template <typename T>
@@ -463,11 +463,10 @@ typedef struct alignas(64) PPCContext_s {
   inline uint32_t HostToGuestVirtual(T* host_ptr) XE_RESTRICT const {
     uint32_t guest_tmp = static_cast<uint32_t>(
         reinterpret_cast<const uint8_t*>(host_ptr) - virtual_membase);
-#if XE_PLATFORM_WIN32 == 1
-    if (guest_tmp >= static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
+    if (xe::memory::allocation_granularity() > 0x1000 &&
+        guest_tmp >= static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this))) {
       guest_tmp -= 0x1000;
     }
-#endif
     return guest_tmp;
   }
   static std::string GetRegisterName(PPCRegister reg);
