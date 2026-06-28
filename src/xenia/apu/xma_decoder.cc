@@ -22,6 +22,10 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
 #include "xenia/base/string_buffer.h"
+#include <cstdio>
+
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
@@ -262,6 +266,18 @@ uint32_t XmaDecoder::AllocateContext() {
   XmaContext& context = *contexts_[index];
   assert_false(context.is_allocated());
   context.set_is_allocated(true);
+  // [media-diag] Correlate the poisoned kick ctx_id (0xD580) with the context
+  // pointer handed to the guest. The guest must convert ptr->index to kick
+  // ((ptr-base)/0x40); if the base-subtract is dropped/miscompiled on arm64 it
+  // gets ptr/0x40 instead. If guest_ptr/0x40 == 0xD580, that's the bug class.
+  if (cvars::media_diag) {
+    const uint32_t gp = context.guest_ptr();
+    XELOGW(
+        "[media-diag] xma.AllocateContext index={} guest_ptr={:08X} base={:08X} "
+        "gp/0x40={:08X} (gp-base)/0x40={} gp&FFFF={:04X}",
+        static_cast<uint32_t>(index), gp, context_data_first_ptr_, gp / 0x40,
+        (gp - context_data_first_ptr_) / 0x40, gp & 0xFFFF);
+  }
   return context.guest_ptr();
 }
 
@@ -340,6 +356,119 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 
   assert_true(r < XmaRegisterFile::kRegisterCount);
   register_file_[r] = value;
+
+  // [media-diag] 0xCFC-writer trace. DOA5 gameplay floods this XMA reg and never
+  // kicks on arm64 (Intel kicks normally) → gameplay audio is final-mix zeros.
+  // The MMIO write callback is passed a null ppc_context (all dispatch paths use
+  // write(nullptr,...)), so read the FAULTING GUEST THREAD's context for the
+  // writer LR. Identifies who floods 0xCFC: a misrouted XMA kick (a64 codegen) or
+  // unrelated side traffic. Diagnostic only; does NOT handle/alias 0xCFC.
+  if (cvars::media_diag && r == 0xCFC) {
+    auto* th = kernel::XThread::GetCurrentThread();
+    auto* ctx =
+        (th && th->thread_state()) ? th->thread_state()->context() : nullptr;
+    if (ctx) {
+      static std::atomic<int> s_fires{0};
+      static std::atomic<int> s_n_lrs{0};
+      static uint32_t s_seen_lrs[8] = {0};
+      const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+      const int fires = s_fires.fetch_add(1, std::memory_order_relaxed);
+      bool known = false;
+      const int n = s_n_lrs.load(std::memory_order_relaxed);
+      for (int i = 0; i < n && i < 8; ++i) {
+        if (s_seen_lrs[i] == lr) {
+          known = true;
+          break;
+        }
+      }
+      if (!known && n < 8) {
+        s_seen_lrs[n] = lr;
+        s_n_lrs.store(n + 1, std::memory_order_relaxed);
+        XELOGW(
+            "[media-diag] xma.cfc-writer NEW-LR lr={:08X} r1={:08X} r3={:08X} "
+            "r4={:08X} r5={:08X} r6={:08X} r9={:08X} r11={:08X} r12={:08X} "
+            "val={:08X} (#{})",
+            lr, static_cast<uint32_t>(ctx->r[1]),
+            static_cast<uint32_t>(ctx->r[3]), static_cast<uint32_t>(ctx->r[4]),
+            static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]),
+            static_cast<uint32_t>(ctx->r[9]), static_cast<uint32_t>(ctx->r[11]),
+            static_cast<uint32_t>(ctx->r[12]), value, fires);
+        // Disassemble the actual writer function (0x8297E0E8, called at lr-4) and
+        // the sibling called right after (0x829769F0 at lr+4 — a likely real
+        // XMA/audio work/kick path). lr is only the caller return site; the store
+        // + address math live in 0x8297E0E8. Dump each forward to blr / +0x180.
+        // (Addresses from the prior run; DOA5 guest code is at fixed addresses.)
+        StringBuffer sb;
+        auto dump_fn = [&](uint32_t start, const char* tag) {
+          for (uint32_t pc = start; pc < start + 0x180; pc += 4) {
+            const uint8_t* p = memory()->TranslateVirtual<const uint8_t*>(pc);
+            const uint32_t code = (uint32_t(p[0]) << 24) |
+                                  (uint32_t(p[1]) << 16) |
+                                  (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+            sb.Reset();
+            cpu::ppc::DisasmPPC(pc, code, &sb);
+            XELOGW("[media-diag] {} {:08X}: {:08X}  {}", tag, pc, code,
+                   sb.to_string_view());
+            if (code == 0x4E800020u) break;  // blr (bclr 20,0) = function end
+          }
+        };
+        dump_fn(0x8297E0E8u, "cfc.fn");   // the 0xCFC writer
+        dump_fn(0x829769F0u, "cfc.sib");  // sibling called right after
+        std::string callers;
+        char cb[24];
+        const uint32_t sp = static_cast<uint32_t>(ctx->r[1]);
+        for (uint32_t off = 0; off <= 0x140; off += 4) {
+          const uint8_t* q =
+              memory()->TranslateVirtual<const uint8_t*>(sp + off);
+          const uint32_t w = (uint32_t(q[0]) << 24) | (uint32_t(q[1]) << 16) |
+                             (uint32_t(q[2]) << 8) | uint32_t(q[3]);
+          if (w >= 0x82000000u && w < 0x83000000u) {
+            snprintf(cb, sizeof(cb), "+%X:%08X ", off, w);
+            callers += cb;
+          }
+        }
+        XELOGW("[media-diag] cfc.callers sp={:08X} [{}]", sp, callers);
+
+        // Context-struct dump — find who poisoned ctx_id (entry[0x50]). r3 = the
+        // audio manager (=0xE8077000); [r3+8] = context-entry array (0x60 stride);
+        // entry[0x50] (BE halfword) = the context id that derives the kick reg
+        // (valid 0..319 -> reg 0x650+id/32; 0xD580 -> reg 0xCFC = the misdirect).
+        auto rd32 = [&](uint32_t a) -> uint32_t {
+          const uint8_t* m = memory()->TranslateVirtual<const uint8_t*>(a);
+          return (uint32_t(m[0]) << 24) | (uint32_t(m[1]) << 16) |
+                 (uint32_t(m[2]) << 8) | uint32_t(m[3]);
+        };
+        auto rd16 = [&](uint32_t a) -> uint16_t {
+          const uint8_t* m = memory()->TranslateVirtual<const uint8_t*>(a);
+          return static_cast<uint16_t>((uint16_t(m[0]) << 8) | m[1]);
+        };
+        const uint32_t mgr = static_cast<uint32_t>(ctx->r[3]);
+        const uint32_t base = rd32(mgr + 8);
+        XELOGW(
+            "[media-diag] cfc.mgr r3={:08X} [0]={:08X} [4]={:08X} [8]={:08X} "
+            "[C]={:08X} [10]={:08X}",
+            mgr, rd32(mgr + 0), rd32(mgr + 4), base, rd32(mgr + 0xC),
+            rd32(mgr + 0x10));
+        for (uint32_t i = 0; i < 8; ++i) {
+          const uint32_t e = base + i * 0x60;
+          const uint16_t id = rd16(e + 0x50);
+          XELOGW(
+              "[media-diag] cfc.entry[{}] @{:08X} +40={:08X} +44={:08X} "
+              "+48={:08X} +4C={:08X} +50(id)={:04X} grp={} kickreg={:X}",
+              i, e, rd32(e + 0x40), rd32(e + 0x44), rd32(e + 0x48),
+              rd32(e + 0x4C), id, (id >> 5), 0x650 + (id >> 5));
+        }
+      } else if ((fires % 50000) == 0) {
+        XELOGW("[media-diag] xma.cfc-writer count={} latest_lr={:08X}", fires,
+               lr);
+      }
+    } else {
+      static std::atomic<bool> s_warned{false};
+      if (!s_warned.exchange(true)) {
+        XELOGW("[media-diag] xma.cfc-writer: no current-thread context");
+      }
+    }
+  }
 
   if (cvars::media_diag) {
     // Categorize every XMA register the guest touches so we can tell whether it
