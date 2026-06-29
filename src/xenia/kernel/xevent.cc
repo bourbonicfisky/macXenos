@@ -10,7 +10,13 @@
 #include "xenia/kernel/xevent.h"
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
+#include "xenia/kernel/xthread.h"
+
+DECLARE_bool(io_ledger_diag);  // defined in xboxkrnl_io.cc
 
 namespace xe {
 namespace kernel {
@@ -58,12 +64,28 @@ void XEvent::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
 }
 
 int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ts = cpu::ThreadState::Get();
+    xboxkrnl::IoLedgerOnEventSet(guest_object(), "XEvent::Set",
+                                 cur ? cur->thread_id() : 0u,
+                                 ts ? static_cast<uint32_t>(ts->context()->lr)
+                                    : 0u);
+  }
   set_priority_increment(priority_increment);
   event_->Set();
   return 1;
 }
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ts = cpu::ThreadState::Get();
+    xboxkrnl::IoLedgerOnEventSet(guest_object(), "XEvent::Pulse",
+                                 cur ? cur->thread_id() : 0u,
+                                 ts ? static_cast<uint32_t>(ts->context()->lr)
+                                    : 0u);
+  }
   set_priority_increment(priority_increment);
   event_->Pulse();
   return 1;
