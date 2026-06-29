@@ -33,11 +33,21 @@ void IoLedgerOnLoaderWait(const char* api, uint32_t handle_or_ptr, bool by_handl
                           uint32_t count, uint64_t timeout, uint32_t alertable,
                           uint64_t dur_ms, uint32_t result, uint32_t lr,
                           uint32_t thid);
-// Gate-signal tracer: called from the event Set paths with the event's guest
-// object address. If it matches the loader's gate event, logs the signaler
-// (the consumer) thid/LR + interval, and marks it so its waits get tapped too.
+// Gate-signal tracer + per-object signal summary: called from the event Set/
+// Pulse paths with the event's guest object address.
 void IoLedgerOnEventSet(uint32_t event_guest_addr, const char* api,
                         uint32_t thid, uint32_t lr);
+// Event Reset (KeResetEvent / NtClearEvent / auto-reset path) → signal summary.
+void IoLedgerOnEventReset(uint32_t event_guest_addr, uint32_t thid, uint32_t lr);
+
+// Passive wait registry (the "terminal unresolved wait" hunt). WaitEnter records
+// an in-progress wait before it blocks; WaitExit clears it on return. On the
+// spin/freeze dump, waits outstanding > a threshold are printed with each waited
+// object's signal summary. Names the object the AsyncScheduler is stuck on.
+void IoLedgerWaitEnter(const char* api, uint32_t wait_type, uint64_t timeout,
+                       uint32_t alertable, uint32_t count, bool by_handle,
+                       const uint32_t* handles);
+void IoLedgerWaitExit();
 
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                  \

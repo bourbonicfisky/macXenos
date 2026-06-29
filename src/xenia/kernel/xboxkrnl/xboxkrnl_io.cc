@@ -87,6 +87,25 @@ struct IoLedger {
   uint32_t gate_obj_addr = 0;       // guest X_KEVENT addr of the loader's gate
   uint32_t gate_signaler_thid = 0;  // who KeSetEvent's the gate (the consumer)
   uint64_t gate_last_signal_tick = 0;
+  // Passive wait registry: in-progress waits, keyed by thid (one wait/thread).
+  struct WaitEntry {
+    const char* api;
+    uint32_t lr, wait_type, alertable, count;
+    uint64_t timeout, enter_tick;
+    bool by_handle;
+    uint32_t handles[8];  // capped
+  };
+  std::unordered_map<uint32_t, WaitEntry> waits;  // key: thid
+  // Per-object signal summary (cheap O(1) update; no full history ring).
+  struct SignalSummary {
+    uint64_t set_count = 0, last_set_tick = 0;
+    uint32_t last_set_thid = 0, last_set_lr = 0;
+    const char* last_set_op = "";
+    uint64_t reset_count = 0, last_reset_tick = 0;
+    uint32_t last_reset_thid = 0;
+  };
+  std::mutex sig_mu;  // separate lock: event Set is high-frequency
+  std::unordered_map<uint32_t, SignalSummary> sigsum;  // key: obj guest addr
 };
 // Intentionally leaked to avoid static-destruction races at shutdown.
 IoLedger* io_ledger() {
@@ -190,9 +209,20 @@ void IoLedgerOnEventSet(uint32_t event_guest_addr, const char* api,
                         uint32_t thid, uint32_t lr) {
   if (!cvars::io_ledger_diag || !event_guest_addr) return;
   auto* L = io_ledger();
+  const uint64_t now = Clock::QueryHostUptimeMillis();
+  // Per-object signal summary (its own lock; event Set is very high-frequency).
+  {
+    std::lock_guard<std::mutex> lk(L->sig_mu);
+    auto& s = L->sigsum[event_guest_addr];
+    s.set_count++;
+    s.last_set_tick = now;
+    s.last_set_thid = thid;
+    s.last_set_lr = lr;
+    s.last_set_op = api;
+  }
+  // Gate-signal logging + mark the consumer.
   std::lock_guard<std::mutex> lk(L->mu);
   if (!L->gate_obj_addr || event_guest_addr != L->gate_obj_addr) return;
-  const uint64_t now = Clock::QueryHostUptimeMillis();
   const uint64_t interval =
       L->gate_last_signal_tick ? now - L->gate_last_signal_tick : 0;
   L->gate_last_signal_tick = now;
@@ -201,6 +231,49 @@ void IoLedgerOnEventSet(uint32_t event_guest_addr, const char* api,
       "[gate-signal] event={:08X} {} signaler_thid={:08X} lr={:08X} "
       "interval_ms={}",
       event_guest_addr, api, thid, lr, interval);
+}
+
+void IoLedgerOnEventReset(uint32_t event_guest_addr, uint32_t thid,
+                          uint32_t lr) {
+  if (!cvars::io_ledger_diag || !event_guest_addr) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->sig_mu);
+  auto& s = L->sigsum[event_guest_addr];
+  s.reset_count++;
+  s.last_reset_tick = Clock::QueryHostUptimeMillis();
+  s.last_reset_thid = thid;
+}
+
+void IoLedgerWaitEnter(const char* api, uint32_t wait_type, uint64_t timeout,
+                       uint32_t alertable, uint32_t count, bool by_handle,
+                       const uint32_t* handles) {
+  if (!cvars::io_ledger_diag) return;
+  auto* cur = XThread::GetCurrentThread();
+  if (!cur) return;
+  auto* ts = cpu::ThreadState::Get();
+  auto* L = io_ledger();
+  IoLedger::WaitEntry e{};
+  e.api = api;
+  e.lr = ts ? static_cast<uint32_t>(ts->context()->lr) : 0u;
+  e.wait_type = wait_type;
+  e.alertable = alertable;
+  e.count = count;
+  e.timeout = timeout;
+  e.enter_tick = Clock::QueryHostUptimeMillis();
+  e.by_handle = by_handle;
+  const uint32_t n = count < 8 ? count : 8;
+  for (uint32_t i = 0; i < n; ++i) e.handles[i] = handles[i];
+  std::lock_guard<std::mutex> lk(L->mu);
+  L->waits[cur->thread_id()] = e;
+}
+
+void IoLedgerWaitExit() {
+  if (!cvars::io_ledger_diag) return;
+  auto* cur = XThread::GetCurrentThread();
+  if (!cur) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  L->waits.erase(cur->thread_id());
 }
 
 void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context) {
@@ -256,6 +329,57 @@ void IoLedgerDumpOutstanding(const char* reason) {
         "[io-ledger]   RECENT seq={} age_ms={} path={} off={:X} len={:X} "
         "bytes={:X} thid={:08X} lr={:08X}",
         r.seq, now - r.tick, r.path, r.offset, r.length, r.bytes, r.thid, r.lr);
+  }
+
+  // Passive wait registry: terminal unresolved waits (outstanding > 2s) + the
+  // signal summary of each waited object — names what a thread is stuck on.
+  for (auto& kv : L->waits) {
+    auto& w = kv.second;
+    const uint64_t age = now - w.enter_tick;
+    if (age < 2000) continue;
+    XELOGW(
+        "[wait-stuck] thid={:08X} {} wait_type={} count={} timeout={:X} "
+        "alertable={} age_ms={} lr={:08X}",
+        kv.first, w.api, w.wait_type, w.count, w.timeout, w.alertable, age,
+        w.lr);
+    const uint32_t n = w.count < 8 ? w.count : 8;
+    for (uint32_t i = 0; i < n; ++i) {
+      uint32_t obj_addr = 0, type = 0xFFFFFFFFu;
+      object_ref<XObject> obj;
+      if (w.by_handle) {
+        obj =
+            kernel_state()->object_table()->LookupObject<XObject>(w.handles[i]);
+      } else if (w.handles[i]) {
+        obj = XObject::GetNativeObject<XObject>(
+            kernel_state(), kernel_memory()->TranslateVirtual(w.handles[i]));
+      }
+      if (obj) {
+        obj_addr = obj->guest_object();
+        type = static_cast<uint32_t>(obj->type());
+      }
+      uint64_t setc = 0, lset = 0, rstc = 0, lrst = 0;
+      uint32_t sthid = 0, slr = 0;
+      const char* sop = "";
+      {
+        std::lock_guard<std::mutex> sk(L->sig_mu);
+        auto it = L->sigsum.find(obj_addr);
+        if (it != L->sigsum.end()) {
+          setc = it->second.set_count;
+          lset = it->second.last_set_tick;
+          sthid = it->second.last_set_thid;
+          slr = it->second.last_set_lr;
+          sop = it->second.last_set_op;
+          rstc = it->second.reset_count;
+          lrst = it->second.last_reset_tick;
+        }
+      }
+      XELOGW(
+          "[wait-stuck]   obj[{}/{}] handle={:08X} obj={:08X} type={:X} "
+          "set_count={} last_set={}ms_ago by_thid={:08X} lr={:08X} op={} "
+          "reset_count={} last_reset={}ms_ago",
+          i, w.count, w.handles[i], obj_addr, type, setc, lset ? now - lset : 0,
+          sthid, slr, sop, rstc, lrst ? now - lrst : 0);
+    }
   }
 }
 

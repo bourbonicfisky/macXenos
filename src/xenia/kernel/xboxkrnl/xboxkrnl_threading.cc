@@ -1223,13 +1223,18 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
                                            lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   const bool diag = cvars::io_ledger_diag;
-  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  const uint32_t h = object_ptr.guest_address();
+  uint64_t t0 = 0u;
+  if (diag) {
+    IoLedgerWaitEnter("KeWaitSingle", 0, timeout, alertable, 1, false, &h);
+    t0 = Clock::QueryHostUptimeMillis();
+  }
   uint32_t result = xeKeWaitForSingleObject(
       object_ptr, wait_reason, processor_mode, alertable,
       timeout_ptr ? &timeout : nullptr);
   if (diag) {
-    LoaderWaitTap("KeWaitSingle", object_ptr.guest_address(), false, 1, timeout,
-                  alertable, t0, result);
+    IoLedgerWaitExit();
+    LoaderWaitTap("KeWaitSingle", h, false, 1, timeout, alertable, t0, result);
   }
   return result;
 }
@@ -1264,10 +1269,16 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
                                              lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   const bool diag = cvars::io_ledger_diag;
-  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  const uint32_t h = object_handle;
+  uint64_t t0 = 0u;
+  if (diag) {
+    IoLedgerWaitEnter("NtWaitSingle", 0, timeout, alertable, 1, true, &h);
+    t0 = Clock::QueryHostUptimeMillis();
+  }
   uint32_t result = NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
                                             timeout_ptr ? &timeout : nullptr);
   if (diag) {
+    IoLedgerWaitExit();
     LoaderWaitTap("NtWaitSingle", object_handle, true, 1, timeout, alertable, t0,
                   result);
   }
@@ -1299,7 +1310,16 @@ dword_result_t KeWaitForMultipleObjects_entry(
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   const bool diag = cvars::io_ledger_diag;
-  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  uint64_t t0 = 0u;
+  if (diag) {
+    uint32_t harr[8] = {0};
+    const uint32_t cnt = uint32_t(count);
+    const uint32_t hn = cnt < 8u ? cnt : 8u;
+    for (uint32_t i = 0; i < hn; ++i) harr[i] = uint32_t(objects_ptr[i]);
+    IoLedgerWaitEnter("KeWaitMultiple", wait_type, timeout, alertable, cnt,
+                      false, harr);
+    t0 = Clock::QueryHostUptimeMillis();
+  }
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
       wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
@@ -1309,6 +1329,7 @@ dword_result_t KeWaitForMultipleObjects_entry(
     }
   }
   if (diag) {
+    IoLedgerWaitExit();
     LoaderWaitTap("KeWaitMultiple", count ? uint32_t(objects_ptr[0]) : 0u, false,
                   count, timeout, alertable, t0, result);
   }
@@ -1368,11 +1389,21 @@ dword_result_t NtWaitForMultipleObjectsEx_entry(
     return X_STATUS_INVALID_PARAMETER;
   }
   const bool diag = cvars::io_ledger_diag;
-  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  uint64_t t0 = 0u;
+  if (diag) {
+    uint32_t harr[8] = {0};
+    const uint32_t cnt = uint32_t(count);
+    const uint32_t hn = cnt < 8u ? cnt : 8u;
+    for (uint32_t i = 0; i < hn; ++i) harr[i] = uint32_t(handles[i]);
+    IoLedgerWaitEnter("NtWaitMultiple", wait_type, timeout, alertable, cnt, true,
+                      harr);
+    t0 = Clock::QueryHostUptimeMillis();
+  }
   uint32_t result = xeNtWaitForMultipleObjectsEx(
       count, handles, wait_type, wait_mode, alertable,
       timeout_ptr ? &timeout : nullptr);
   if (diag) {
+    IoLedgerWaitExit();
     LoaderWaitTap("NtWaitMultiple", count ? uint32_t(handles[0]) : 0u, true,
                   count, timeout, alertable, t0, result);
   }

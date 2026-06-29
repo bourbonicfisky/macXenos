@@ -92,6 +92,13 @@ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
 }
 
 int32_t XEvent::Reset() {
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ts = cpu::ThreadState::Get();
+    xboxkrnl::IoLedgerOnEventReset(guest_object(), cur ? cur->thread_id() : 0u,
+                                   ts ? static_cast<uint32_t>(ts->context()->lr)
+                                      : 0u);
+  }
   event_->Reset();
   return 1;
 }
