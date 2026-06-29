@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -48,6 +49,12 @@ namespace {
 // that caller LR is the PC inside the poll loop that called Sleep — the gold.
 void DelayPollDiagProbe(const ppc_context_t& context) {
   constexpr uint32_t kSpinThreshold = 1000;
+  const uint32_t r1 = static_cast<uint32_t>(context->r[1]);
+  auto rd32 = [&](uint32_t a) -> uint32_t {
+    const uint8_t* m = kernel_memory()->TranslateVirtual<const uint8_t*>(a);
+    return (uint32_t(m[0]) << 24) | (uint32_t(m[1]) << 16) |
+           (uint32_t(m[2]) << 8) | uint32_t(m[3]);
+  };
   auto* thread = XThread::GetCurrentThread();
   const uint32_t tid = thread ? thread->thread_id() : 0;
   const uint32_t lr = static_cast<uint32_t>(context->lr);
@@ -56,36 +63,49 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
   static std::mutex mu;
   static std::unordered_map<uint64_t, uint32_t> counts;
   static std::unordered_set<uint64_t> dumped;
-  bool dump = false;
+  static std::unordered_map<uint64_t, uint32_t> relogs;
+  static std::atomic<bool> pump_dumped{false};
+  bool first = false, relog = false;
+  uint32_t c = 0;
   {
     std::lock_guard<std::mutex> lk(mu);
-    if (++counts[key] >= kSpinThreshold && dumped.insert(key).second) {
-      dump = true;
+    c = ++counts[key];
+    if (c >= kSpinThreshold && dumped.insert(key).second) {
+      first = true;
+    } else if (dumped.count(key) && (c % 5000) == 0 && relogs[key] < 12) {
+      relogs[key]++;
+      relog = true;
     }
   }
-  if (!dump) {
+  if (!first && !relog) {
     return;
   }
 
-  const uint32_t r1 = static_cast<uint32_t>(context->r[1]);
-  auto rd32 = [&](uint32_t a) -> uint32_t {
-    const uint8_t* m = kernel_memory()->TranslateVirtual<const uint8_t*>(a);
-    return (uint32_t(m[0]) << 24) | (uint32_t(m[1]) << 16) |
-           (uint32_t(m[2]) << 8) | uint32_t(m[3]);
-  };
+  // The Sleep helper saves the poll loop's caller LR (stw) at [r1+0x68], and its
+  // r31 (std, low word) at [r1+0x64]. r31 = the polled job/queue object.
   const uint32_t caller_lr = rd32(r1 + 0x68);
+  const uint32_t r31 = rd32(r1 + 0x64);
+  const uint32_t c4 = rd32(r31 + 0x4);
+  const uint32_t cC = rd32(r31 + 0xC);
+  const uint32_t c10 = rd32(r31 + 0x10);
 
+  if (relog) {
+    // Change-over-time: are the counters frozen or moving?
+    XELOGW(
+        "[delay-poll] COUNTERS tid={:08X} r31={:08X} n={} +4={:08X} +C={:08X} "
+        "+10={:08X}",
+        tid, r31, c, c4, cC, c10);
+    return;
+  }
+
+  // First full dump for this (tid, caller-LR).
+  const uint32_t a18 = rd32(r31 + 0x18);
+  const uint32_t pumparg = a18 ? rd32(a18 + 0x14) : 0;
   XELOGW(
       "[delay-poll] SPIN tid={:08X} lr={:08X} r1={:08X} caller_lr={:08X} "
-      "cr={:016X} r3={:08X} r10={:08X} r11={:08X} r12={:08X} r30={:08X} "
-      "r31={:08X}",
-      tid, lr, r1, caller_lr, context->cr(),
-      static_cast<uint32_t>(context->r[3]),
-      static_cast<uint32_t>(context->r[10]),
-      static_cast<uint32_t>(context->r[11]),
-      static_cast<uint32_t>(context->r[12]),
-      static_cast<uint32_t>(context->r[30]),
-      static_cast<uint32_t>(context->r[31]));
+      "r31={:08X} cnt+4={:08X} cnt+C={:08X} cnt+10={:08X} [r31+18]={:08X} "
+      "pumparg={:08X} cr={:016X}",
+      tid, lr, r1, caller_lr, r31, c4, cC, c10, a18, pumparg, context->cr());
 
   // Stack return-address scan (cross-check the caller chain).
   StringBuffer chain;
@@ -98,8 +118,7 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
   XELOGW("[delay-poll] stack tid={:08X} r1={:08X} [{}]", tid, r1,
          chain.to_string_view());
 
-  // Disasm the poll loop around the caller LR (flag load/compare/branch + the
-  // bl into the Sleep helper).
+  // Disasm the poll loop around the caller LR.
   StringBuffer sb;
   for (uint32_t pc = caller_lr - 0x80u; pc <= caller_lr + 0x20u; pc += 4) {
     const uint8_t* p = kernel_memory()->TranslateVirtual<const uint8_t*>(pc);
@@ -108,6 +127,23 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
     sb.Reset();
     xe::cpu::ppc::DisasmPPC(pc, code, &sb);
     XELOGW("[delay-poll] poll {:08X}: {:08X}  {}", pc, code, sb.to_string_view());
+  }
+
+  // One-time disasm of the shared job-system pump 0x82954C18 (treat as rendezvous
+  // point, not proven root): its dispatch/signal logic + any bl to event exports.
+  if (!pump_dumped.exchange(true, std::memory_order_relaxed)) {
+    for (uint32_t pc = 0x82954C18u; pc < 0x82954C18u + 0x240u; pc += 4) {
+      const uint8_t* p = kernel_memory()->TranslateVirtual<const uint8_t*>(pc);
+      const uint32_t code = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                            (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+      sb.Reset();
+      xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+      XELOGW("[delay-poll] pump {:08X}: {:08X}  {}", pc, code,
+             sb.to_string_view());
+      if (code == 0x4E800020u) {  // blr → function end
+        break;
+      }
+    }
   }
 }
 }  // namespace
