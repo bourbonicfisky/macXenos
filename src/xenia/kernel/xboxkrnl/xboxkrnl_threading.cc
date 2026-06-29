@@ -776,6 +776,29 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(handle);
+  if (cvars::delay_poll_diag) {
+    // The DOA5 load-stall "pump" (0x82954C18) calls NtSetEvent on the worker
+    // event every poll tick. Split: does the lookup FAIL (invalid handle =>
+    // silent no-signal, matches the never-signaled worker event) or SUCCEED
+    // (signal delivered but the worker never wakes)?
+    static std::atomic<uint32_t> s_fail{0}, s_ok{0};
+    if (!ev) {
+      const uint32_t n = s_fail.fetch_add(1, std::memory_order_relaxed);
+      if (n < 24 || (n % 5000) == 0) {
+        XELOGW(
+            "[nt-setevent] INVALID handle={:08X} (LookupObject<XEvent> null) "
+            "fails={}",
+            static_cast<uint32_t>(handle), n + 1);
+      }
+    } else {
+      const uint32_t n = s_ok.fetch_add(1, std::memory_order_relaxed);
+      if (n < 8 || (n % 50000) == 0) {
+        XELOGW("[nt-setevent] OK handle={:08X} type={} oks={}",
+               static_cast<uint32_t>(handle),
+               static_cast<uint32_t>(ev->type()), n + 1);
+      }
+    }
+  }
   if (ev) {
     // d3 ros does this
     if (ev->type() != XObject::Type::Event) {
