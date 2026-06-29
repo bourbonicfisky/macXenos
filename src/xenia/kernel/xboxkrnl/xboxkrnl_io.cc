@@ -75,6 +75,14 @@ struct IoLedger {
   uint32_t recent_head = 0;
   // Snapshot at previous dump, to report per-dump deltas.
   uint64_t reads_at_last_dump = 0, opens_at_last_dump = 0;
+  // Reader threads (the loader) → their last read, for the inter-read wait probe.
+  struct ReaderInfo {
+    uint64_t last_seq;
+    uint64_t last_off;
+    uint64_t last_tick;
+    std::string last_path;
+  };
+  std::unordered_map<uint32_t, ReaderInfo> readers;  // key: thid
 };
 // Intentionally leaked to avoid static-destruction races at shutdown.
 IoLedger* io_ledger() {
@@ -105,6 +113,8 @@ void IoLedgerOnRead(const std::string& path, uint64_t offset, uint32_t length,
   L->recent[L->recent_head % IoLedger::kRing] =
       RecentRead{s, path, offset, length, bytes, thid, lr, L->last_read_tick};
   L->recent_head++;
+  L->readers[thid] =
+      IoLedger::ReaderInfo{s, offset, L->last_read_tick, path};
   if (apc_queued && apc_context) {
     L->apc_queued++;
     L->outstanding[apc_context] =
@@ -122,6 +132,46 @@ void IoLedgerOnRead(const std::string& path, uint64_t offset, uint32_t length,
   }
 }
 }  // namespace
+
+void IoLedgerOnLoaderWait(const char* api, uint32_t handle_or_ptr, bool by_handle,
+                          uint32_t count, uint64_t timeout, uint32_t alertable,
+                          uint64_t dur_ms, uint32_t result, uint32_t lr,
+                          uint32_t thid) {
+  if (!cvars::io_ledger_diag || dur_ms <= 100) return;
+  auto* L = io_ledger();
+  uint64_t last_seq, last_off;
+  std::string last_path;
+  {
+    std::lock_guard<std::mutex> lk(L->mu);
+    auto it = L->readers.find(thid);
+    if (it == L->readers.end()) return;  // not a reader thread
+    const uint64_t now = Clock::QueryHostUptimeMillis();
+    if (now - it->second.last_tick > 5000) return;  // only the ACTIVE loader
+    last_seq = it->second.last_seq;
+    last_off = it->second.last_off;
+    last_path = it->second.last_path;
+  }
+  // Resolve the waited object's type (event/semaphore/timer/...): done only for
+  // the rare long wait, outside the ledger lock.
+  uint32_t type = 0xFFFFFFFFu;
+  if (by_handle) {
+    if (auto obj = kernel_state()->object_table()->LookupObject<XObject>(
+            handle_or_ptr)) {
+      type = static_cast<uint32_t>(obj->type());
+    }
+  } else if (handle_or_ptr) {
+    auto* p = kernel_memory()->TranslateVirtual(handle_or_ptr);
+    if (auto obj = XObject::GetNativeObject<XObject>(kernel_state(), p)) {
+      type = static_cast<uint32_t>(obj->type());
+    }
+  }
+  XELOGW(
+      "[loader-wait] thid={:08X} {} handle={:08X} type={:X} count={} "
+      "timeout={:X} alertable={} dur_ms={} result={:08X} lr={:08X} "
+      "last_read seq={} off={:X} path={}",
+      thid, api, handle_or_ptr, type, count, timeout, alertable, dur_ms, result,
+      lr, last_seq, last_off, last_path);
+}
 
 void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context) {
   if (!cvars::io_ledger_diag) return;

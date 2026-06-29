@@ -39,6 +39,8 @@ DEFINE_bool(
     "(the polled flag's load/compare/branch). Revert before any fix.",
     "Kernel");
 
+DECLARE_bool(io_ledger_diag);  // defined in xboxkrnl_io.cc
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
@@ -1163,6 +1165,22 @@ dword_result_t NtCancelTimer_entry(dword_t timer_handle,
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCancelTimer, kThreading, kImplemented);
 
+// Loader inter-read wait probe tap: time a wait and route long ones to the
+// io-ledger (which filters to the active reader/loader thread). See
+// --io_ledger_diag. Revert before any fix.
+static void LoaderWaitTap(const char* api, uint32_t handle_or_ptr,
+                          bool by_handle, uint32_t count, uint64_t timeout,
+                          uint32_t alertable, uint64_t t0, uint32_t result) {
+  const uint64_t dt = Clock::QueryHostUptimeMillis() - t0;
+  if (dt <= 100) return;
+  auto* cur = XThread::GetCurrentThread();
+  auto* ts = cpu::ThreadState::Get();
+  IoLedgerOnLoaderWait(
+      api, handle_or_ptr, by_handle, count, timeout, alertable, dt, result,
+      ts ? static_cast<uint32_t>(ts->context()->lr) : 0u,
+      cur ? cur->thread_id() : 0u);
+}
+
 uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
                                  uint32_t processor_mode, uint32_t alertable,
                                  uint64_t* timeout_ptr) {
@@ -1190,8 +1208,16 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
                                            dword_t alertable,
                                            lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
-                                 alertable, timeout_ptr ? &timeout : nullptr);
+  const bool diag = cvars::io_ledger_diag;
+  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  uint32_t result = xeKeWaitForSingleObject(
+      object_ptr, wait_reason, processor_mode, alertable,
+      timeout_ptr ? &timeout : nullptr);
+  if (diag) {
+    LoaderWaitTap("KeWaitSingle", object_ptr.guest_address(), false, 1, timeout,
+                  alertable, t0, result);
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(KeWaitForSingleObject, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
@@ -1223,8 +1249,15 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
                                              dword_t alertable,
                                              lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
-                                 timeout_ptr ? &timeout : nullptr);
+  const bool diag = cvars::io_ledger_diag;
+  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  uint32_t result = NtWaitForSingleObjectEx(object_handle, wait_mode, alertable,
+                                            timeout_ptr ? &timeout : nullptr);
+  if (diag) {
+    LoaderWaitTap("NtWaitSingle", object_handle, true, 1, timeout, alertable, t0,
+                  result);
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(NtWaitForSingleObjectEx, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
@@ -1251,6 +1284,8 @@ dword_result_t KeWaitForMultipleObjects_entry(
     }
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  const bool diag = cvars::io_ledger_diag;
+  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
       wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
@@ -1258,6 +1293,10 @@ dword_result_t KeWaitForMultipleObjects_entry(
     if (result == X_STATUS_USER_APC) {
       xeProcessUserApcs(nullptr);
     }
+  }
+  if (diag) {
+    LoaderWaitTap("KeWaitMultiple", count ? uint32_t(objects_ptr[0]) : 0u, false,
+                  count, timeout, alertable, t0, result);
   }
   return result;
 }
@@ -1314,9 +1353,16 @@ dword_result_t NtWaitForMultipleObjectsEx_entry(
       (wait_type != X_KWAIT_REASON::WaitAny && wait_type)) {
     return X_STATUS_INVALID_PARAMETER;
   }
-  return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode,
-                                      alertable,
-                                      timeout_ptr ? &timeout : nullptr);
+  const bool diag = cvars::io_ledger_diag;
+  const uint64_t t0 = diag ? Clock::QueryHostUptimeMillis() : 0u;
+  uint32_t result = xeNtWaitForMultipleObjectsEx(
+      count, handles, wait_type, wait_mode, alertable,
+      timeout_ptr ? &timeout : nullptr);
+  if (diag) {
+    LoaderWaitTap("NtWaitMultiple", count ? uint32_t(handles[0]) : 0u, true,
+                  count, timeout, alertable, t0, result);
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(NtWaitForMultipleObjectsEx, kThreading, kImplemented,
                          kBlocking, kHighFrequency);

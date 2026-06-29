@@ -26,6 +26,13 @@ xe::cpu::Export* RegisterExport_xboxkrnl(xe::cpu::Export* export_entry);
 // before any fix.
 void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context);
 void IoLedgerDumpOutstanding(const char* reason);
+// Loader inter-read wait probe: called from the kernel wait entries with the
+// measured wait duration. Logs (and resolves the object type) only for an active
+// reader thread (the loader) blocking >100ms — names the inter-read dependency.
+void IoLedgerOnLoaderWait(const char* api, uint32_t handle_or_ptr, bool by_handle,
+                          uint32_t count, uint64_t timeout, uint32_t alertable,
+                          uint64_t dur_ms, uint32_t result, uint32_t lr,
+                          uint32_t thid);
 
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                  \
