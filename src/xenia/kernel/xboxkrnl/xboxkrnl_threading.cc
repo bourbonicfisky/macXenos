@@ -8,19 +8,109 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
+
+DEFINE_bool(
+    delay_poll_diag, false,
+    "Diagnostic (default off): when a guest thread spins calling "
+    "KeDelayExecutionThread from the shared Sleep helper (DOA5 next-level load "
+    "livelock), dump ONCE per (tid, immediate-LR) after a repeat threshold: the "
+    "Sleep helper's CALLER LR (the poll loop, read from the saved-LR slot "
+    "[r1+0x68]) + a stack-return scan + a disasm window around that caller "
+    "(the polled flag's load/compare/branch). Revert before any fix.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+namespace {
+// delay_poll_diag: see cvar. The shared guest Sleep helper (immediate caller LR
+// 0x829539FC) saves ITS caller's LR at old_sp-8 = r1+0x68 (after `stwu r1,-0x70`);
+// that caller LR is the PC inside the poll loop that called Sleep — the gold.
+void DelayPollDiagProbe(const ppc_context_t& context) {
+  constexpr uint32_t kSpinThreshold = 1000;
+  auto* thread = XThread::GetCurrentThread();
+  const uint32_t tid = thread ? thread->thread_id() : 0;
+  const uint32_t lr = static_cast<uint32_t>(context->lr);
+  const uint64_t key = (static_cast<uint64_t>(tid) << 32) | lr;
+
+  static std::mutex mu;
+  static std::unordered_map<uint64_t, uint32_t> counts;
+  static std::unordered_set<uint64_t> dumped;
+  bool dump = false;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    if (++counts[key] >= kSpinThreshold && dumped.insert(key).second) {
+      dump = true;
+    }
+  }
+  if (!dump) {
+    return;
+  }
+
+  const uint32_t r1 = static_cast<uint32_t>(context->r[1]);
+  auto rd32 = [&](uint32_t a) -> uint32_t {
+    const uint8_t* m = kernel_memory()->TranslateVirtual<const uint8_t*>(a);
+    return (uint32_t(m[0]) << 24) | (uint32_t(m[1]) << 16) |
+           (uint32_t(m[2]) << 8) | uint32_t(m[3]);
+  };
+  const uint32_t caller_lr = rd32(r1 + 0x68);
+
+  XELOGW(
+      "[delay-poll] SPIN tid={:08X} lr={:08X} r1={:08X} caller_lr={:08X} "
+      "cr={:016X} r3={:08X} r10={:08X} r11={:08X} r12={:08X} r30={:08X} "
+      "r31={:08X}",
+      tid, lr, r1, caller_lr, context->cr(),
+      static_cast<uint32_t>(context->r[3]),
+      static_cast<uint32_t>(context->r[10]),
+      static_cast<uint32_t>(context->r[11]),
+      static_cast<uint32_t>(context->r[12]),
+      static_cast<uint32_t>(context->r[30]),
+      static_cast<uint32_t>(context->r[31]));
+
+  // Stack return-address scan (cross-check the caller chain).
+  StringBuffer chain;
+  for (uint32_t off = 0; off <= 0x140; off += 4) {
+    const uint32_t w = rd32(r1 + off);
+    if (w >= 0x82000000u && w < 0x83000000u) {
+      chain.AppendFormat("+{:X}:{:08X} ", off, w);
+    }
+  }
+  XELOGW("[delay-poll] stack tid={:08X} r1={:08X} [{}]", tid, r1,
+         chain.to_string_view());
+
+  // Disasm the poll loop around the caller LR (flag load/compare/branch + the
+  // bl into the Sleep helper).
+  StringBuffer sb;
+  for (uint32_t pc = caller_lr - 0x80u; pc <= caller_lr + 0x20u; pc += 4) {
+    const uint8_t* p = kernel_memory()->TranslateVirtual<const uint8_t*>(pc);
+    const uint32_t code = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                          (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+    sb.Reset();
+    xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+    XELOGW("[delay-poll] poll {:08X}: {:08X}  {}", pc, code, sb.to_string_view());
+  }
+}
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -479,6 +569,9 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
+  if (cvars::delay_poll_diag) {
+    DelayPollDiagProbe(context);
+  }
   return KeDelayExecutionThread(processor_mode, alertable,
                                 interval_ptr ? &interval : nullptr, context);
 }
