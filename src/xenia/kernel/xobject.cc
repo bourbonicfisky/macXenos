@@ -9,14 +9,7 @@
 
 #include "xenia/kernel/xobject.h"
 
-#include <algorithm>
-#include <chrono>
-#include <mutex>
-#include <unordered_map>
-
 #include "xenia/base/byte_stream.h"
-#include "xenia/base/cvar.h"
-#include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -31,192 +24,8 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
-DEFINE_bool(
-    kernel_wait_diag, false,
-    "Diagnostic (default off, no behavior change): summarize STUCK guest waits "
-    "and signal/release ops on kernel objects (events/semaphores/etc.) to find a "
-    "never-signaled object behind a load-stall livelock. Under this flag, "
-    "effectively-infinite waits are split into ~3s diagnostic intervals and a "
-    "rate-limited '[wait-diag] STUCK ...' summary is logged while a wait fails to "
-    "satisfy; '[wait-diag] SIGNAL ...' (enable kernel_wait_diag_signals) logs "
-    "signal ops. Cross-reference STUCK.last_op to bucket the stall (never "
-    "signaled / wrong waiter / lost wake).",
-    "Kernel");
-DEFINE_bool(kernel_wait_diag_signals, false,
-            "With --kernel_wait_diag, also log every signal/release op "
-            "(higher volume); off by default to keep summaries readable.",
-            "Kernel");
-
 namespace xe {
 namespace kernel {
-
-// --- kernel_wait_diag --------------------------------------------------------
-namespace {
-struct WaitDiagSignal {
-  uint64_t count = 0;
-  uint32_t last_tid = 0;
-  const char* last_op = "none";
-};
-std::mutex wait_diag_mutex_;
-std::unordered_map<XObject*, WaitDiagSignal> wait_diag_signals_;
-constexpr std::chrono::milliseconds kWaitDiagCap{3000};
-
-const char* WaitDiagType(XObject::Type t) {
-  switch (t) {
-    case XObject::Type::Event: return "Event";
-    case XObject::Type::Semaphore: return "Semaphore";
-    case XObject::Type::Mutant: return "Mutant";
-    case XObject::Type::Timer: return "Timer";
-    case XObject::Type::Thread: return "Thread";
-    case XObject::Type::File: return "File";
-    case XObject::Type::IOCompletion: return "IOCompletion";
-    case XObject::Type::NotifyListener: return "NotifyListener";
-    default: return "Other";
-  }
-}
-
-uint32_t WaitDiagTid() {
-  auto* t = XThread::GetCurrentThread();
-  return t ? t->thread_id() : 0;
-}
-
-void WaitDiagLogStuck(XObject* obj, const char* kind, double waited_ms,
-                      int rounds, uint32_t extra_objs) {
-  uint64_t sigs = 0;
-  const char* last_op = "never";
-  uint32_t last_tid = 0;
-  {
-    std::lock_guard<std::mutex> lk(wait_diag_mutex_);
-    auto it = wait_diag_signals_.find(obj);
-    if (it != wait_diag_signals_.end()) {
-      sigs = it->second.count;
-      last_op = it->second.last_op;
-      last_tid = it->second.last_tid;
-    }
-  }
-  XELOGW(
-      "[wait-diag] STUCK tid={:08X} {} obj={:X} handle={:08X} type={} "
-      "waited_ms={} rounds={} extra_objs={} signals={} last_op={} "
-      "last_signal_tid={:08X}",
-      WaitDiagTid(), kind, reinterpret_cast<uintptr_t>(obj),
-      static_cast<uint32_t>(obj->handle()), WaitDiagType(obj->type()),
-      static_cast<uint64_t>(waited_ms), rounds, extra_objs, sigs, last_op,
-      last_tid);
-}
-
-// Capped diagnostic wrappers: identical semantics to the underlying
-// xe::threading::Wait* (return value + timeout honored), but while an
-// effectively-infinite wait fails to satisfy they emit a rate-limited STUCK
-// summary every ~3s. Active only under --kernel_wait_diag.
-xe::threading::WaitResult DiagWait(xe::threading::WaitHandle* h, bool alertable,
-                                   std::chrono::milliseconds timeout,
-                                   XObject* obj) {
-  if (!cvars::kernel_wait_diag) {
-    return xe::threading::Wait(h, alertable, timeout);
-  }
-  const bool infinite = timeout == std::chrono::milliseconds::max();
-  auto start = std::chrono::steady_clock::now();
-  auto deadline = infinite ? std::chrono::steady_clock::time_point::max()
-                           : start + timeout;
-  int rounds = 0;
-  for (;;) {
-    auto now = std::chrono::steady_clock::now();
-    auto remaining =
-        infinite ? kWaitDiagCap
-                 : std::chrono::duration_cast<std::chrono::milliseconds>(
-                       deadline - now);
-    auto r = xe::threading::Wait(h, alertable, std::min(remaining, kWaitDiagCap));
-    if (r != xe::threading::WaitResult::kTimeout) return r;
-    if (!infinite && std::chrono::steady_clock::now() >= deadline) return r;
-    ++rounds;
-    WaitDiagLogStuck(obj, "Wait",
-                     std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - start)
-                         .count(),
-                     rounds, 0);
-  }
-}
-
-std::pair<xe::threading::WaitResult, size_t> DiagWaitAny(
-    xe::threading::WaitHandle** handles, size_t count, bool alertable,
-    std::chrono::milliseconds timeout, XObject** objects) {
-  if (!cvars::kernel_wait_diag) {
-    return xe::threading::WaitAny(handles, count, alertable, timeout);
-  }
-  const bool infinite = timeout == std::chrono::milliseconds::max();
-  auto start = std::chrono::steady_clock::now();
-  auto deadline = infinite ? std::chrono::steady_clock::time_point::max()
-                           : start + timeout;
-  int rounds = 0;
-  for (;;) {
-    auto now = std::chrono::steady_clock::now();
-    auto remaining =
-        infinite ? kWaitDiagCap
-                 : std::chrono::duration_cast<std::chrono::milliseconds>(
-                       deadline - now);
-    auto r = xe::threading::WaitAny(handles, count, alertable,
-                                    std::min(remaining, kWaitDiagCap));
-    if (r.first != xe::threading::WaitResult::kTimeout) return r;
-    if (!infinite && std::chrono::steady_clock::now() >= deadline) return r;
-    ++rounds;
-    WaitDiagLogStuck(objects[0], "WaitAny",
-                     std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - start)
-                         .count(),
-                     rounds, static_cast<uint32_t>(count - 1));
-  }
-}
-
-xe::threading::WaitResult DiagWaitAll(xe::threading::WaitHandle** handles,
-                                      size_t count, bool alertable,
-                                      std::chrono::milliseconds timeout,
-                                      XObject** objects) {
-  if (!cvars::kernel_wait_diag) {
-    return xe::threading::WaitAll(handles, count, alertable, timeout);
-  }
-  const bool infinite = timeout == std::chrono::milliseconds::max();
-  auto start = std::chrono::steady_clock::now();
-  auto deadline = infinite ? std::chrono::steady_clock::time_point::max()
-                           : start + timeout;
-  int rounds = 0;
-  for (;;) {
-    auto now = std::chrono::steady_clock::now();
-    auto remaining =
-        infinite ? kWaitDiagCap
-                 : std::chrono::duration_cast<std::chrono::milliseconds>(
-                       deadline - now);
-    auto r = xe::threading::WaitAll(handles, count, alertable,
-                                    std::min(remaining, kWaitDiagCap));
-    if (r != xe::threading::WaitResult::kTimeout) return r;
-    if (!infinite && std::chrono::steady_clock::now() >= deadline) return r;
-    ++rounds;
-    WaitDiagLogStuck(objects[0], "WaitAll",
-                     std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - start)
-                         .count(),
-                     rounds, static_cast<uint32_t>(count - 1));
-  }
-}
-}  // namespace
-
-void KernelWaitDiagSignal(XObject* object, const char* op) {
-  if (!cvars::kernel_wait_diag || !object) {
-    return;
-  }
-  {
-    std::lock_guard<std::mutex> lk(wait_diag_mutex_);
-    auto& rec = wait_diag_signals_[object];
-    rec.count++;
-    rec.last_op = op;
-    rec.last_tid = WaitDiagTid();
-  }
-  if (cvars::kernel_wait_diag_signals) {
-    XELOGW("[wait-diag] SIGNAL tid={:08X} obj={:X} handle={:08X} type={} op={}",
-           WaitDiagTid(), reinterpret_cast<uintptr_t>(object),
-           static_cast<uint32_t>(object->handle()),
-           WaitDiagType(object->type()), op);
-  }
-}
 
 XObject::XObject(Type type)
     : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
@@ -393,7 +202,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                   : std::chrono::milliseconds::max();
 
   auto result =
-      DiagWait(wait_handle, alertable ? true : false, timeout_ms, this);
+      xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
 
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
@@ -472,8 +281,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
   X_STATUS status;
   uint32_t boost_increment = 0;
   if (wait_type) {
-    auto result = DiagWaitAny(wait_handles, count, alertable ? true : false,
-                              timeout_ms, objects);
+    auto result = xe::threading::WaitAny(wait_handles, count,
+                                         alertable ? true : false, timeout_ms);
     switch (result.first) {
       case xe::threading::WaitResult::kSuccess:
         objects[result.second]->WaitCallback();
@@ -496,8 +305,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         break;
     }
   } else {
-    auto result = DiagWaitAll(wait_handles, count, alertable ? true : false,
-                              timeout_ms, objects);
+    auto result = xe::threading::WaitAll(wait_handles, count,
+                                         alertable ? true : false, timeout_ms);
     switch (result) {
       case xe::threading::WaitResult::kSuccess:
         for (uint32_t i = 0; i < count; i++) {

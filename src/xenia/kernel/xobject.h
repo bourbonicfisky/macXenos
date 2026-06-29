@@ -382,11 +382,6 @@ class object_ref {
   T* value_ = nullptr;
 };
 
-// kernel_wait_diag: record a signal/release op on a kernel object from the
-// signal sites (KeSetEvent/NtSetEvent/KePulseEvent/Ke|NtReleaseSemaphore, ...).
-// No-op unless --kernel_wait_diag is set. Defined in xobject.cc.
-void KernelWaitDiagSignal(XObject* object, const char* op);
-
 template <class _Ty>
 bool operator==(const object_ref<_Ty>& _Left, std::nullptr_t) noexcept {
   return (_Left.get() == reinterpret_cast<_Ty*>(0));
