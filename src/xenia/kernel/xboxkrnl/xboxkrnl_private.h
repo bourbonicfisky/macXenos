@@ -33,6 +33,11 @@ void IoLedgerOnLoaderWait(const char* api, uint32_t handle_or_ptr, bool by_handl
                           uint32_t count, uint64_t timeout, uint32_t alertable,
                           uint64_t dur_ms, uint32_t result, uint32_t lr,
                           uint32_t thid);
+// Gate-signal tracer: called from the event Set paths with the event's guest
+// object address. If it matches the loader's gate event, logs the signaler
+// (the consumer) thid/LR + interval, and marks it so its waits get tapped too.
+void IoLedgerOnEventSet(uint32_t event_guest_addr, const char* api,
+                        uint32_t thid, uint32_t lr);
 
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                  \

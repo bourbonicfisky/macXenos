@@ -83,6 +83,10 @@ struct IoLedger {
     std::string last_path;
   };
   std::unordered_map<uint32_t, ReaderInfo> readers;  // key: thid
+  // Gate event (what the loader waits on) + its signaler (the consumer).
+  uint32_t gate_obj_addr = 0;       // guest X_KEVENT addr of the loader's gate
+  uint32_t gate_signaler_thid = 0;  // who KeSetEvent's the gate (the consumer)
+  uint64_t gate_last_signal_tick = 0;
 };
 // Intentionally leaked to avoid static-destruction races at shutdown.
 IoLedger* io_ledger() {
@@ -139,38 +143,64 @@ void IoLedgerOnLoaderWait(const char* api, uint32_t handle_or_ptr, bool by_handl
                           uint32_t thid) {
   if (!cvars::io_ledger_diag || dur_ms <= 100) return;
   auto* L = io_ledger();
-  uint64_t last_seq, last_off;
+  // Resolve the waited object's type + guest address (done only for the rare
+  // long wait, outside the ledger lock).
+  uint32_t type = 0xFFFFFFFFu, obj_addr = 0;
+  object_ref<XObject> obj;
+  if (by_handle) {
+    obj = kernel_state()->object_table()->LookupObject<XObject>(handle_or_ptr);
+  } else if (handle_or_ptr) {
+    auto* p = kernel_memory()->TranslateVirtual(handle_or_ptr);
+    obj = XObject::GetNativeObject<XObject>(kernel_state(), p);
+  }
+  if (obj) {
+    type = static_cast<uint32_t>(obj->type());
+    obj_addr = obj->guest_object();
+  }
+
+  const char* role = nullptr;
+  uint64_t last_seq = 0, last_off = 0;
   std::string last_path;
   {
     std::lock_guard<std::mutex> lk(L->mu);
-    auto it = L->readers.find(thid);
-    if (it == L->readers.end()) return;  // not a reader thread
     const uint64_t now = Clock::QueryHostUptimeMillis();
-    if (now - it->second.last_tick > 5000) return;  // only the ACTIVE loader
-    last_seq = it->second.last_seq;
-    last_off = it->second.last_off;
-    last_path = it->second.last_path;
-  }
-  // Resolve the waited object's type (event/semaphore/timer/...): done only for
-  // the rare long wait, outside the ledger lock.
-  uint32_t type = 0xFFFFFFFFu;
-  if (by_handle) {
-    if (auto obj = kernel_state()->object_table()->LookupObject<XObject>(
-            handle_or_ptr)) {
-      type = static_cast<uint32_t>(obj->type());
-    }
-  } else if (handle_or_ptr) {
-    auto* p = kernel_memory()->TranslateVirtual(handle_or_ptr);
-    if (auto obj = XObject::GetNativeObject<XObject>(kernel_state(), p)) {
-      type = static_cast<uint32_t>(obj->type());
+    auto it = L->readers.find(thid);
+    if (it != L->readers.end() && now - it->second.last_tick <= 5000) {
+      role = "loader";
+      last_seq = it->second.last_seq;
+      last_off = it->second.last_off;
+      last_path = it->second.last_path;
+      // The loader's single-object wait names the flow-control gate event.
+      if (count == 1 && obj_addr) L->gate_obj_addr = obj_addr;
+    } else if (thid == L->gate_signaler_thid && L->gate_signaler_thid) {
+      role = "consumer";  // the thread that signals the loader's gate
+    } else {
+      return;
     }
   }
   XELOGW(
-      "[loader-wait] thid={:08X} {} handle={:08X} type={:X} count={} "
-      "timeout={:X} alertable={} dur_ms={} result={:08X} lr={:08X} "
+      "[loader-wait] role={} thid={:08X} {} handle={:08X} obj={:08X} type={:X} "
+      "count={} timeout={:X} alertable={} dur_ms={} result={:08X} lr={:08X} "
       "last_read seq={} off={:X} path={}",
-      thid, api, handle_or_ptr, type, count, timeout, alertable, dur_ms, result,
-      lr, last_seq, last_off, last_path);
+      role, thid, api, handle_or_ptr, obj_addr, type, count, timeout, alertable,
+      dur_ms, result, lr, last_seq, last_off, last_path);
+}
+
+void IoLedgerOnEventSet(uint32_t event_guest_addr, const char* api,
+                        uint32_t thid, uint32_t lr) {
+  if (!cvars::io_ledger_diag || !event_guest_addr) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  if (!L->gate_obj_addr || event_guest_addr != L->gate_obj_addr) return;
+  const uint64_t now = Clock::QueryHostUptimeMillis();
+  const uint64_t interval =
+      L->gate_last_signal_tick ? now - L->gate_last_signal_tick : 0;
+  L->gate_last_signal_tick = now;
+  L->gate_signaler_thid = thid;  // mark the consumer so its waits get tapped
+  XELOGW(
+      "[gate-signal] event={:08X} {} signaler_thid={:08X} lr={:08X} "
+      "interval_ms={}",
+      event_guest_addr, api, thid, lr, interval);
 }
 
 void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context) {

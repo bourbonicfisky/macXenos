@@ -740,6 +740,13 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
     return 0;
   }
 
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ts = cpu::ThreadState::Get();
+    IoLedgerOnEventSet(ev->guest_object(), "KeSetEvent",
+                       cur ? cur->thread_id() : 0u,
+                       ts ? static_cast<uint32_t>(ts->context()->lr) : 0u);
+  }
   return ev->Set(increment, !!wait);
 }
 
@@ -757,6 +764,13 @@ dword_result_t KePulseEvent_entry(pointer_t<X_KEVENT> event_ptr,
     return 0;
   }
 
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ts = cpu::ThreadState::Get();
+    IoLedgerOnEventSet(ev->guest_object(), "KePulseEvent",
+                       cur ? cur->thread_id() : 0u,
+                       ts ? static_cast<uint32_t>(ts->context()->lr) : 0u);
+  }
   return ev->Pulse(increment, !!wait);
 }
 DECLARE_XBOXKRNL_EXPORT2(KePulseEvent, kThreading, kImplemented,
