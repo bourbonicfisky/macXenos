@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -54,6 +55,13 @@ struct IoLedgerEntry {
   uint64_t queued_tick;
   std::string path;
 };
+struct RecentRead {
+  uint64_t seq;
+  std::string path;
+  uint64_t offset;
+  uint32_t length, bytes, thid, lr;
+  uint64_t tick;
+};
 struct IoLedger {
   std::mutex mu;
   uint64_t read_count = 0, open_count = 0;
@@ -61,6 +69,12 @@ struct IoLedger {
   uint64_t last_read_tick = 0;
   uint64_t seq = 0;
   std::unordered_map<uint32_t, IoLedgerEntry> outstanding;  // key: apc_context
+  // Recent-reads ring (progress-vs-loop discriminator during the stall).
+  static constexpr uint32_t kRing = 32;
+  std::vector<RecentRead> recent{kRing};
+  uint32_t recent_head = 0;
+  // Snapshot at previous dump, to report per-dump deltas.
+  uint64_t reads_at_last_dump = 0, opens_at_last_dump = 0;
 };
 // Intentionally leaked to avoid static-destruction races at shutdown.
 IoLedger* io_ledger() {
@@ -88,6 +102,9 @@ void IoLedgerOnRead(const std::string& path, uint64_t offset, uint32_t length,
   L->read_count++;
   L->last_read_tick = Clock::QueryHostUptimeMillis();
   const uint64_t s = ++L->seq;
+  L->recent[L->recent_head % IoLedger::kRing] =
+      RecentRead{s, path, offset, length, bytes, thid, lr, L->last_read_tick};
+  L->recent_head++;
   if (apc_queued && apc_context) {
     L->apc_queued++;
     L->outstanding[apc_context] =
@@ -126,11 +143,15 @@ void IoLedgerDumpOutstanding(const char* reason) {
   if (s_last_dump_tick && now - s_last_dump_tick < 2000) return;  // once / 2s
   s_last_dump_tick = now;
   const uint64_t read_age = L->last_read_tick ? now - L->last_read_tick : 0;
+  const uint64_t d_reads = L->read_count - L->reads_at_last_dump;
+  const uint64_t d_opens = L->open_count - L->opens_at_last_dump;
+  L->reads_at_last_dump = L->read_count;
+  L->opens_at_last_dump = L->open_count;
   XELOGW(
-      "[io-ledger] DUMP ({}) reads={} opens={} apc_queued={} apc_delivered={} "
-      "outstanding={} last_read_age_ms={}",
-      reason, L->read_count, L->open_count, L->apc_queued, L->apc_delivered,
-      L->outstanding.size(), read_age);
+      "[io-ledger] DUMP ({}) reads={} (+{}) opens={} (+{}) apc_queued={} "
+      "apc_delivered={} outstanding={} last_read_age_ms={}",
+      reason, L->read_count, d_reads, L->open_count, d_opens, L->apc_queued,
+      L->apc_delivered, L->outstanding.size(), read_age);
   uint32_t shown = 0;
   for (auto& kv : L->outstanding) {
     auto& e = kv.second;
@@ -142,6 +163,19 @@ void IoLedgerDumpOutstanding(const char* reason) {
         e.seq, age, e.path, e.offset, e.length, e.apc_routine, e.apc_context,
         e.iosb, e.thid, e.lr);
     if (++shown >= 32) break;
+  }
+  // Recent-reads ring: the last kRing reads in chronological order. If they loop
+  // on one file / fixed offsets ⇒ stuck retry; if path/offset advance ⇒ progress.
+  const uint32_t count =
+      L->recent_head < IoLedger::kRing ? L->recent_head : IoLedger::kRing;
+  for (uint32_t k = 0; k < count; ++k) {
+    const uint32_t idx =
+        (L->recent_head - count + k) % IoLedger::kRing;
+    auto& r = L->recent[idx];
+    XELOGW(
+        "[io-ledger]   RECENT seq={} age_ms={} path={} off={:X} len={:X} "
+        "bytes={:X} thid={:08X} lr={:08X}",
+        r.seq, now - r.tick, r.path, r.offset, r.length, r.bytes, r.thid, r.lr);
   }
 }
 
