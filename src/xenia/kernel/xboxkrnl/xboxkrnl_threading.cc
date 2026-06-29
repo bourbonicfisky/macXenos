@@ -577,6 +577,7 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
     return 0;
   }
 
+  KernelWaitDiagSignal(ev.get(), "KeSetEvent");
   return ev->Set(increment, !!wait);
 }
 
@@ -594,6 +595,7 @@ dword_result_t KePulseEvent_entry(pointer_t<X_KEVENT> event_ptr,
     return 0;
   }
 
+  KernelWaitDiagSignal(ev.get(), "KePulseEvent");
   return ev->Pulse(increment, !!wait);
 }
 DECLARE_XBOXKRNL_EXPORT2(KePulseEvent, kThreading, kImplemented,
@@ -652,6 +654,7 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
     if (ev->type() != XObject::Type::Event) {
       return X_STATUS_OBJECT_TYPE_MISMATCH;
     }
+    KernelWaitDiagSignal(ev.get(), "NtSetEvent");
     int32_t was_signalled = ev->Set(0, false);
     if (previous_state_ptr) {
       *previous_state_ptr = static_cast<uint32_t>(was_signalled);
@@ -674,6 +677,7 @@ dword_result_t NtPulseEvent_entry(dword_t handle,
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(handle);
   if (ev) {
+    KernelWaitDiagSignal(ev.get(), "NtPulseEvent");
     int32_t was_signalled = ev->Pulse(0, false);
     if (previous_state_ptr) {
       *previous_state_ptr = static_cast<uint32_t>(was_signalled);
@@ -751,6 +755,7 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment,
 
   sem->set_priority_increment(increment);
 
+  KernelWaitDiagSignal(sem.get(), "KeReleaseSemaphore");
   int32_t previous_count = 0;
   [[maybe_unused]] bool success =
       sem->ReleaseSemaphore(adjustment, &previous_count);
@@ -813,6 +818,7 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
   auto sem =
       kernel_state()->object_table()->LookupObject<XSemaphore>(sem_handle);
   if (sem) {
+    KernelWaitDiagSignal(sem.get(), "NtReleaseSemaphore");
     bool success =
         sem->ReleaseSemaphore((int32_t)release_count, &previous_count);
     if (!success) {
