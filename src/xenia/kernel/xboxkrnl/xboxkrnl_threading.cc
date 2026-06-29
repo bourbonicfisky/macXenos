@@ -118,6 +118,9 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
   XELOGW("[delay-poll] ITEM tid={:08X} item={:08X} [{}]", tid, c4,
          item.to_string_view());
 
+  // Pivot A: dump the async-I/O ledger during the stall (rate-limited inside).
+  IoLedgerDumpOutstanding("delay-poll-spin");
+
   // Stack return-address scan (cross-check the caller chain).
   StringBuffer chain;
   for (uint32_t off = 0; off <= 0x140; off += 4) {
@@ -1616,6 +1619,7 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
     uint32_t arg2 = xe::load_and_swap<uint32_t>(scratch_ptr + 12);
 
     if (normal_routine) {
+      IoLedgerOnApcDelivered(normal_routine, normal_context);
       uint64_t normal_args[] = {normal_context, arg1, arg2};
       ctx->processor->Execute(ctx->thread_state, normal_routine, normal_args,
                               xe::countof(normal_args));

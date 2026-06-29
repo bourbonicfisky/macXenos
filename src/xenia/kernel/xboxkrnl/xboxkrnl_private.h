@@ -20,6 +20,13 @@ namespace xboxkrnl {
 
 xe::cpu::Export* RegisterExport_xboxkrnl(xe::cpu::Export* export_entry);
 
+// --io_ledger_diag (default off): async-I/O completion ledger for the DOA5
+// load-stall hunt. Implemented in xboxkrnl_io.cc; called from the APC delivery
+// loop (xeProcessUserApcs) and the spin detector (DelayPollDiagProbe). Revert
+// before any fix.
+void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context);
+void IoLedgerDumpOutstanding(const char* reason);
+
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                  \
   void Register##n##Exports(xe::cpu::ExportResolver* export_resolver, \

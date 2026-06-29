@@ -8,9 +8,14 @@
  */
 
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
+#include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -23,9 +28,122 @@
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
 
+DEFINE_bool(
+    io_ledger_diag, false,
+    "Diagnostic (default off): async-I/O completion ledger for the DOA5 "
+    "load-stall hunt. Logs NtCreateFile opens and NtReadFile issues (path, "
+    "offset, length, sync, event, APC routine/context, io_status_block, "
+    "thid/LR, bytes/status), tracks completion-APC queued-vs-delivered, and on "
+    "the spin detector dumps outstanding (queued-but-undelivered) completion "
+    "APCs older than a threshold. Goal: find an issued read whose completion is "
+    "never delivered, or prove all I/O completed (then the queue waits on a "
+    "non-I/O job). Revert before any fix.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+// ── io_ledger_diag ──────────────────────────────────────────────────────────
+namespace {
+struct IoLedgerEntry {
+  uint64_t seq;
+  uint32_t apc_routine, apc_context, iosb, thid, lr;
+  uint64_t offset;
+  uint32_t length;
+  uint64_t queued_tick;
+  std::string path;
+};
+struct IoLedger {
+  std::mutex mu;
+  uint64_t read_count = 0, open_count = 0;
+  uint64_t apc_queued = 0, apc_delivered = 0;
+  uint64_t last_read_tick = 0;
+  uint64_t seq = 0;
+  std::unordered_map<uint32_t, IoLedgerEntry> outstanding;  // key: apc_context
+};
+// Intentionally leaked to avoid static-destruction races at shutdown.
+IoLedger* io_ledger() {
+  static IoLedger* g = new IoLedger();
+  return g;
+}
+void IoLedgerOnOpen(const std::string& path, uint32_t status) {
+  if (!cvars::io_ledger_diag) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  L->open_count++;
+  if (L->open_count <= 48) {
+    XELOGI("[io-ledger] OPEN #{} status={:08X} path={}", L->open_count, status,
+           path);
+  }
+}
+void IoLedgerOnRead(const std::string& path, uint64_t offset, uint32_t length,
+                    bool sync, uint32_t ev_handle, uint32_t apc_routine,
+                    uint32_t apc_context, uint32_t iosb, uint32_t status,
+                    uint32_t bytes, bool apc_queued, bool ev_signaled,
+                    uint32_t thid, uint32_t lr) {
+  if (!cvars::io_ledger_diag) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  L->read_count++;
+  L->last_read_tick = Clock::QueryHostUptimeMillis();
+  const uint64_t s = ++L->seq;
+  if (apc_queued && apc_context) {
+    L->apc_queued++;
+    L->outstanding[apc_context] =
+        IoLedgerEntry{s,      apc_routine, apc_context,        iosb,
+                      thid,   lr,          offset,             length,
+                      L->last_read_tick, path};
+  }
+  if (L->read_count <= 48 || (L->read_count % 4000) == 0) {
+    XELOGI(
+        "[io-ledger] READ #{} seq={} path={} off={:X} len={:X} sync={} "
+        "ev={:08X} apc_r={:08X} apc_c={:08X} iosb={:08X} st={:08X} bytes={:X} "
+        "apcq={} evsig={} thid={:08X} lr={:08X}",
+        L->read_count, s, path, offset, length, sync, ev_handle, apc_routine,
+        apc_context, iosb, status, bytes, apc_queued, ev_signaled, thid, lr);
+  }
+}
+}  // namespace
+
+void IoLedgerOnApcDelivered(uint32_t normal_routine, uint32_t normal_context) {
+  if (!cvars::io_ledger_diag) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  auto it = L->outstanding.find(normal_context);
+  if (it != L->outstanding.end()) {
+    L->apc_delivered++;
+    L->outstanding.erase(it);
+  }
+}
+
+void IoLedgerDumpOutstanding(const char* reason) {
+  if (!cvars::io_ledger_diag) return;
+  auto* L = io_ledger();
+  std::lock_guard<std::mutex> lk(L->mu);
+  static uint64_t s_last_dump_tick = 0;
+  const uint64_t now = Clock::QueryHostUptimeMillis();
+  if (s_last_dump_tick && now - s_last_dump_tick < 2000) return;  // once / 2s
+  s_last_dump_tick = now;
+  const uint64_t read_age = L->last_read_tick ? now - L->last_read_tick : 0;
+  XELOGW(
+      "[io-ledger] DUMP ({}) reads={} opens={} apc_queued={} apc_delivered={} "
+      "outstanding={} last_read_age_ms={}",
+      reason, L->read_count, L->open_count, L->apc_queued, L->apc_delivered,
+      L->outstanding.size(), read_age);
+  uint32_t shown = 0;
+  for (auto& kv : L->outstanding) {
+    auto& e = kv.second;
+    const uint64_t age = now - e.queued_tick;
+    if (age < 1000) continue;  // only stale ones
+    XELOGW(
+        "[io-ledger]   OUTSTANDING seq={} age_ms={} path={} off={:X} len={:X} "
+        "apc_r={:08X} apc_c={:08X} iosb={:08X} thid={:08X} lr={:08X}",
+        e.seq, age, e.path, e.offset, e.length, e.apc_routine, e.apc_context,
+        e.iosb, e.thid, e.lr);
+    if (++shown >= 32) break;
+  }
+}
 
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
@@ -110,6 +228,7 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
 
   *handle_out = handle;
 
+  IoLedgerOnOpen(target_path, result);
   return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCreateFile, kFileSystem, kImplemented);
@@ -133,6 +252,8 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   X_STATUS result = X_STATUS_SUCCESS;
 
   bool signal_event = false;
+  uint32_t ledger_bytes = 0;       // io_ledger_diag capture
+  bool ledger_apc_queued = false;  // io_ledger_diag capture
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
   if (event_handle && !ev) {
     result = X_STATUS_INVALID_HANDLE;
@@ -151,6 +272,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           buffer.guest_address(), buffer_length,
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
+      ledger_bytes = bytes_read;
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;
@@ -164,6 +286,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           auto thread = XThread::GetCurrentThread();
           thread->EnqueueApc(static_cast<uint32_t>(apc_routine_ptr) & ~1u,
                              apc_context, io_status_block, 0);
+          ledger_apc_queued = true;
         }
       }
 
@@ -212,6 +335,24 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
 
   if (ev && signal_event) {
     ev->Set(0, false);
+  }
+
+  if (cvars::io_ledger_diag) {
+    auto* cur = XThread::GetCurrentThread();
+    auto* ctx = cpu::ThreadState::Get() ? cpu::ThreadState::Get()->context()
+                                        : nullptr;
+    IoLedgerOnRead(
+        file ? (file->entry() ? file->entry()->name() : std::string("?"))
+             : std::string("<bad-handle>"),
+        byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : ~0ull,
+        static_cast<uint32_t>(buffer_length), file && file->is_synchronous(),
+        static_cast<uint32_t>(event_handle),
+        static_cast<uint32_t>(apc_routine_ptr) & ~1u,
+        static_cast<uint32_t>(apc_context),
+        io_status_block.guest_address(), result, ledger_bytes,
+        ledger_apc_queued, (ev && signal_event),
+        cur ? cur->thread_id() : 0,
+        ctx ? static_cast<uint32_t>(ctx->lr) : 0);
   }
 
   return result;
