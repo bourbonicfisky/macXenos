@@ -2691,8 +2691,32 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       assert_unhandled_case(description.primitive_topology);
       return false;
   }
+  // MoltenVK/Metal cannot disable primitive restart: a pipeline with
+  // primitiveRestartEnable=VK_FALSE on a restart-capable topology (line/triangle
+  // strip or triangle fan) is rejected with VK_ERROR_FEATURE_NOT_PRESENT, which
+  // stalls titles that issue such draws (observed as the DOA5 round-load freeze:
+  // the render thread busy-spins retrying one un-creatable pipeline). Align the
+  // pipeline state with Metal's always-enabled restart by forcing it on for those
+  // topologies on such hosts. Correctness for a real maximum index used as a true
+  // vertex is preserved by the primitive processor's 16-bit->32-bit index widening
+  // (convert_16bit_list_indices_to_32bit_on_metal, active when the host cannot
+  // disable restart); 32-bit buffers can never contain the 0xFFFFFFFF sentinel as
+  // a real index. List topologies keep VK_FALSE (restart is N/A and asserted off).
+  bool force_primitive_restart = false;
+  if (vulkan_device->properties().driverID == VK_DRIVER_ID_MOLTENVK) {
+    switch (description.primitive_topology) {
+      case PipelinePrimitiveTopology::kLineStrip:
+      case PipelinePrimitiveTopology::kTriangleStrip:
+      case PipelinePrimitiveTopology::kTriangleFan:
+        force_primitive_restart = true;
+        break;
+      default:
+        break;
+    }
+  }
   input_assembly_state.primitiveRestartEnable =
-      description.primitive_restart ? VK_TRUE : VK_FALSE;
+      (description.primitive_restart || force_primitive_restart) ? VK_TRUE
+                                                                 : VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewport_state;
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
