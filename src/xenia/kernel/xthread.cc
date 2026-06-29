@@ -38,6 +38,16 @@ DEFINE_int64(main_xthread_stack_size_multiplier_hack, 1,
              "A hack for games with setjmp/longjmp issues.", "Kernel");
 #endif
 
+DEFINE_int64(
+    spin0_sleep_us, 0,
+    "Diagnostic / candidate fix (default 0 = current MaybeYield): when a guest "
+    "thread calls KeDelayExecutionThread(0)/Sleep(0) (non-alertable, the busy "
+    "poll-loop yield), do a real NanoSleep of this many microseconds instead of "
+    "sched_yield. Throttles the DOA5 load-stall poll loops that spam NtSetEvent "
+    "and contend the kernel locks/scheduler. Try 100. Revert/redesign before any "
+    "fix ships.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 
@@ -997,7 +1007,9 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
     }
   } else {
     if (timeout_ms == 0) {
-      if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
+      if (cvars::spin0_sleep_us > 0) {
+        xe::threading::NanoSleep(cvars::spin0_sleep_us * 1000);
+      } else if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
         xe::threading::NanoSleep(100);
       } else {
         xe::threading::MaybeYield();
