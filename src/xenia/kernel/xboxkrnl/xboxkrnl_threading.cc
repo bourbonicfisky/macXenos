@@ -8,7 +8,17 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+
 #include "xenia/base/atomic.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
@@ -18,9 +28,70 @@
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
+DEFINE_bool(
+    delay_poll_diag, false,
+    "Diagnostic (default off): detect a guest thread spinning in a "
+    "KeDelayExecutionThread poll loop (the DOA5 load-stall producer pattern). "
+    "When one (thread, caller-LR) repeats past a threshold, dump ONCE the guest "
+    "disasm window LR-0x100..LR+0x40 (flag load/compare/branch + the delay call) "
+    "plus CR and GPRs (r3-r12,r30,r31) to resolve the polled guest address. "
+    "Revert before any fix.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+namespace {
+// delay_poll_diag: see the cvar above. Fires once per (tid, caller-LR) after the
+// call from that site repeats kSpinThreshold times (a genuine poll loop, not a
+// one-off sleep).
+void DelayPollDiagProbe(const ppc_context_t& context) {
+  constexpr uint32_t kSpinThreshold = 1000;
+  auto* thread = XThread::GetCurrentThread();
+  const uint32_t tid = thread ? thread->thread_id() : 0;
+  const uint32_t lr = static_cast<uint32_t>(context->lr);
+  const uint64_t key = (static_cast<uint64_t>(tid) << 32) | lr;
+
+  static std::mutex mu;
+  static std::unordered_map<uint64_t, uint32_t> counts;
+  static std::unordered_set<uint64_t> dumped;
+  bool dump = false;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    if (++counts[key] >= kSpinThreshold && dumped.insert(key).second) {
+      dump = true;
+    }
+  }
+  if (!dump) {
+    return;
+  }
+
+  XELOGW(
+      "[delay-poll] SPIN tid={:08X} lr={:08X} cr={:016X} r3={:08X} r4={:08X} "
+      "r5={:08X} r6={:08X} r7={:08X} r8={:08X} r9={:08X} r10={:08X} r11={:08X} "
+      "r12={:08X} r30={:08X} r31={:08X}",
+      tid, lr, context->cr(), static_cast<uint32_t>(context->r[3]),
+      static_cast<uint32_t>(context->r[4]), static_cast<uint32_t>(context->r[5]),
+      static_cast<uint32_t>(context->r[6]), static_cast<uint32_t>(context->r[7]),
+      static_cast<uint32_t>(context->r[8]), static_cast<uint32_t>(context->r[9]),
+      static_cast<uint32_t>(context->r[10]),
+      static_cast<uint32_t>(context->r[11]),
+      static_cast<uint32_t>(context->r[12]),
+      static_cast<uint32_t>(context->r[30]),
+      static_cast<uint32_t>(context->r[31]));
+
+  StringBuffer sb;
+  for (uint32_t pc = lr - 0x100u; pc <= lr + 0x40u; pc += 4) {
+    const uint8_t* p = kernel_memory()->TranslateVirtual<const uint8_t*>(pc);
+    const uint32_t code = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                          (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+    sb.Reset();
+    xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+    XELOGW("[delay-poll] {:08X}: {:08X}  {}", pc, code, sb.to_string_view());
+  }
+}
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -479,6 +550,9 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
+  if (cvars::delay_poll_diag) {
+    DelayPollDiagProbe(context);
+  }
   return KeDelayExecutionThread(processor_mode, alertable,
                                 interval_ptr ? &interval : nullptr, context);
 }
