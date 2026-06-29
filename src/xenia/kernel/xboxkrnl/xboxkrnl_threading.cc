@@ -89,12 +89,21 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
   const uint32_t cC = rd32(r31 + 0xC);
   const uint32_t c10 = rd32(r31 + 0x10);
 
+  // The loop waits for item [r31+0x4] (=c4) to be marked done by 0x82880020(item).
+  // Dump the item's fields to find the completion flag + whether it ever changes.
+  StringBuffer item;
+  for (uint32_t off = 0; off <= 0x2C; off += 4) {
+    item.AppendFormat("+{:X}={:08X} ", off, rd32(c4 + off));
+  }
+
   if (relog) {
-    // Change-over-time: are the counters frozen or moving?
+    // Change-over-time: are the counters / item fields frozen or moving?
     XELOGW(
         "[delay-poll] COUNTERS tid={:08X} r31={:08X} n={} +4={:08X} +C={:08X} "
         "+10={:08X}",
         tid, r31, c, c4, cC, c10);
+    XELOGW("[delay-poll] ITEM tid={:08X} item={:08X} [{}]", tid, c4,
+           item.to_string_view());
     return;
   }
 
@@ -106,6 +115,8 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
       "r31={:08X} cnt+4={:08X} cnt+C={:08X} cnt+10={:08X} [r31+18]={:08X} "
       "pumparg={:08X} cr={:016X}",
       tid, lr, r1, caller_lr, r31, c4, cC, c10, a18, pumparg, context->cr());
+  XELOGW("[delay-poll] ITEM tid={:08X} item={:08X} [{}]", tid, c4,
+         item.to_string_view());
 
   // Stack return-address scan (cross-check the caller chain).
   StringBuffer chain;
@@ -139,6 +150,24 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
       sb.Reset();
       xe::cpu::ppc::DisasmPPC(pc, code, &sb);
       XELOGW("[delay-poll] pump {:08X}: {:08X}  {}", pc, code,
+             sb.to_string_view());
+      if (code == 0x4E800020u) {  // blr → function end
+        break;
+      }
+    }
+  }
+
+  // One-time disasm of the item "is done?" check 0x82880020 — which field of the
+  // item it tests = the completion flag the worker must set.
+  static std::atomic<bool> donechk_dumped{false};
+  if (!donechk_dumped.exchange(true, std::memory_order_relaxed)) {
+    for (uint32_t pc = 0x82880020u; pc < 0x82880020u + 0x140u; pc += 4) {
+      const uint8_t* p = kernel_memory()->TranslateVirtual<const uint8_t*>(pc);
+      const uint32_t code = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                            (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+      sb.Reset();
+      xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+      XELOGW("[delay-poll] donechk {:08X}: {:08X}  {}", pc, code,
              sb.to_string_view());
       if (code == 0x4E800020u) {  // blr → function end
         break;
