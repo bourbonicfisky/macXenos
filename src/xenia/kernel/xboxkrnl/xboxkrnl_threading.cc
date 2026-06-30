@@ -128,6 +128,20 @@ std::unordered_map<uint64_t, DispLast> g_disp_last;
 std::unordered_set<uint32_t> g_disp_queues;  // distinct LfQu queues seen
 uint64_t g_disp_last_dump_ms = 0;
 
+// Transient-orphan detector: per-queue last state + change time, keyed by the
+// magic-discovered queue address (NOT hardcoded — works when addresses shift on
+// x64). g_any_progress_ms = last time ANY tracked queue advanced, so we can
+// require "sibling still progressing" before calling a static queue orphaned.
+struct DispQState {
+  uint32_t seq = 0, head = 0, tail = 0;
+  uint64_t last_change_ms = 0;
+  bool orphan = false;
+  uint64_t orphan_start_ms = 0;
+};
+std::unordered_map<uint32_t, DispQState> g_disp_qstate;
+uint64_t g_any_progress_ms = 0;
+constexpr uint64_t kOrphanMs = 250;
+
 // Per zero-interval Sleep (the busy-spin): queue-first capture into the ring.
 // Sampled (every 256th) + change-triggered so the hot path stays near-free and
 // does NOT perturb the timing-sensitive stall (cf. the io_ledger A/B confound).
@@ -157,6 +171,41 @@ void DispatcherDiagOnSleep(const ppc_context_t& context) {
   if (g_disp_queues.size() < 32) {
     g_disp_queues.insert(q);
   }
+
+  // Transient-orphan detector (diagnostic; fires on orphan state, NOT on a hard
+  // freeze): a queue non-empty with static seq/head/tail for >kOrphanMs WHILE
+  // another queue progresses is "orphaned". Logs ORPHAN-START and, on recovery,
+  // the duration — so a race that is TERMINAL on arm64 but merely TRANSIENT on
+  // x64 is observable on both. Makes the Intel A/B a real discriminator instead
+  // of a hang/no-hang guess.
+  const uint64_t now = xe::Clock::QueryHostUptimeMillis();
+  auto& st = g_disp_qstate[q];
+  const bool changed = st.last_change_ms == 0 || st.seq != seq ||
+                       st.head != head || st.tail != tail;
+  if (changed) {
+    if (st.orphan) {
+      XELOGW(
+          "[dispatcher] ORPHAN-RECOVERED queue={:08X} duration_ms={} "
+          "head={:08X} tail={:08X} seq={:08X}",
+          q, now - st.orphan_start_ms, head, tail, seq);
+      st.orphan = false;
+    }
+    st.seq = seq;
+    st.head = head;
+    st.tail = tail;
+    st.last_change_ms = now;
+    g_any_progress_ms = now;  // some queue advanced (this one)
+  } else if (head != tail && !st.orphan && now - st.last_change_ms >= kOrphanMs &&
+             g_any_progress_ms > st.last_change_ms) {
+    // non-empty + static > threshold + a SIBLING advanced after this froze
+    st.orphan = true;
+    st.orphan_start_ms = st.last_change_ms;
+    XELOGW(
+        "[dispatcher] ORPHAN-START queue={:08X} stuck_ms={} head={:08X} "
+        "tail={:08X} seq={:08X} (sibling progress @ {})",
+        q, now - st.last_change_ms, head, tail, seq, g_any_progress_ms);
+  }
+
   auto it = g_disp_last.find(qkey);
   if (it != g_disp_last.end() && it->second.pc == caller_lr &&
       it->second.seq == seq && it->second.head == head &&
