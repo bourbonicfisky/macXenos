@@ -374,6 +374,7 @@ void DispatcherDiagDumpAtFreeze() {
       "B=select / C=82880020 CAS)",
       threads.size());
   StringBuffer sb;
+  uint32_t picker = 0;  // a parked worker's caller = the queue-select fn
   for (auto& t : threads) {
     if (!t) {
       continue;
@@ -416,6 +417,26 @@ void DispatcherDiagDumpAtFreeze() {
                sb.to_string_view());
       }
     }
+    // Stack-return scan → names the caller chain. For a parked worker (inside
+    // the WaitMultiple wrapper), the first return addr that is NOT the wrapper
+    // and NOT the register-restore/memcpy millicode is the dispatch loop that
+    // selected the queue — the real picker.
+    StringBuffer chain;
+    for (uint32_t off = 0; off <= 0x180u; off += 4) {
+      uint32_t w = 0;
+      if (!DiagRd32Safe(r1 + off, &w)) {
+        continue;
+      }
+      if (w >= 0x82000000u && w < 0x83000000u) {
+        chain.AppendFormat("+{:X}:{:08X} ", off, w);
+        const bool wrapper = (w >= 0x82954A00u && w < 0x82954C40u);
+        const bool milli = (w >= 0x82B1B380u && w < 0x82B1B620u);
+        if (!picker && tlr == 0x82954BE4u && !wrapper && !milli) {
+          picker = w;  // first real caller of a parked WaitAny worker
+        }
+      }
+    }
+    XELOGW("[dispatcher]   stack tid={:08X} [{}]", ttid, chain.to_string_view());
   }
 
   // Queue contents: bounded, race-checked walk of each distinct LfQu queue's
@@ -442,22 +463,22 @@ void DispatcherDiagDumpAtFreeze() {
     }
   }
 
-  // Q3: disasm the worker's real post-WaitAny continuation. The WaitMultiple
-  // wrapper (82954BE4) tail-branches to 0x82B1B3F4 — THAT is where the woken
-  // worker selects which queue/batch to service. Disasm far enough to spot the
-  // queue-select predicate (why 7C00 is picked but 6880 orphaned). One-time.
-  static std::atomic<bool> wake_dumped{false};
-  if (!wake_dumped.exchange(true, std::memory_order_relaxed)) {
-    XELOGW("[dispatcher] WAKEPATH disasm @82B1B3F4 (worker queue-select)");
-    for (uint32_t pc = 0x82B1B3F4u - 0x40u; pc < 0x82B1B3F4u + 0x180u;
-         pc += 4) {
+  // Q3: disasm the PICKER — the worker dispatch fn that called the WaitMultiple
+  // wrapper (found dynamically from a parked worker's stack, not a hardcoded
+  // thunk). `picker` is the return addr just AFTER the `bl` to the wrapper, so
+  // the queue-select predicate is in the window BEFORE it. One-time.
+  static std::atomic<bool> pick_dumped{false};
+  if (picker && !pick_dumped.exchange(true, std::memory_order_relaxed)) {
+    XELOGW("[dispatcher] PICKER caller={:08X} (worker dispatch / queue-select)",
+           picker);
+    for (uint32_t pc = picker - 0x80u; pc <= picker + 0x20u; pc += 4) {
       uint32_t code = 0;
       if (!DiagRd32Safe(pc, &code)) {
         continue;
       }
       sb.Reset();
       xe::cpu::ppc::DisasmPPC(pc, code, &sb);
-      XELOGW("[dispatcher]   wake {:08X}: {:08X}  {}", pc, code,
+      XELOGW("[dispatcher]   pick {:08X}: {:08X}  {}", pc, code,
              sb.to_string_view());
     }
   }
