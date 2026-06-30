@@ -47,8 +47,31 @@
 #define XE_HAS_SIGEV_THREAD_ID 0
 #endif
 
+#include "xenia/base/cvar.h"
+
+DEFINE_bool(
+    threading_blocking_waitany, false,
+    "Candidate fix (default off = current 1ms poll): make WaitMultiple(WaitAny) "
+    "event-driven instead of polling. Waiters register a latched wait-block with "
+    "each handle; a handle's Signal hands the wake to one registered waiter "
+    "under lock (auto-reset consumed exactly once), so a sub-millisecond "
+    "Set-then-Reset transient is no longer lost (the DOA5 worker-pool deadlock). "
+    "WaitAll still uses the poll. Regression-check broadly before shipping.",
+    "Threading");
+
 namespace xe {
 namespace threading {
+
+// Latched wait-block for the event-driven WaitMultiple(WaitAny) path. One per
+// in-flight WaitMultiple call; registered with each member handle. A handle's
+// Signal sets `satisfied`/`fired_index` under `m` and notifies `cv` — the latch
+// survives a subsequent Reset, which is exactly what the poll path lost.
+struct WaitBlock {
+  std::mutex m;
+  std::condition_variable cv;
+  int fired_index = -1;
+  bool satisfied = false;
+};
 
 #if XE_PLATFORM_ANDROID
 // May be null if no dynamically loaded functions are required.
@@ -276,6 +299,15 @@ class PosixConditionBase {
       return std::make_pair(result, 0);
     }
 
+    // Event-driven WaitAny (candidate fix): register a latched wait-block with
+    // each handle so a Signal hands the wake to a waiter under lock — no lost
+    // sub-ms Set/Reset transients. A bounded backstop re-poll covers handle
+    // types whose Signal path isn't yet hooked (e.g. mutant). WaitAll keeps the
+    // poll below.
+    if (!wait_all && cvars::threading_blocking_waitany) {
+      return WaitAnyBlocking(handles, timeout);
+    }
+
     // For multiple handles, we need to poll since we can't wait on multiple
     // condition variables simultaneously. This is a limitation of the POSIX
     // condition variable API.
@@ -380,6 +412,87 @@ class PosixConditionBase {
     }
   }
 
+  // Event-driven WaitAny: register a latched WaitBlock with each handle, block
+  // on its cv (woken by DeliverToWaitBlocksLocked from a handle's Signal), with
+  // a bounded backstop re-poll for safety / un-hooked signal sources.
+  static std::pair<WaitResult, size_t> WaitAnyBlocking(
+      std::vector<PosixConditionBase*>& handles,
+      std::chrono::milliseconds timeout) {
+    const size_t n = handles.size();
+    constexpr size_t kNone = std::numeric_limits<size_t>::max();
+    WaitBlock block;
+    size_t fired = kNone;
+
+    // Try-consume-if-already-signaled, else register, per handle (under its
+    // mutex_, then block.m — the consistent lock order with Signal).
+    auto try_take = [&](size_t i) -> bool {
+      std::lock_guard<std::mutex> bl(block.m);
+      if (!block.satisfied && handles[i]->signaled()) {
+        block.satisfied = true;
+        block.fired_index = static_cast<int>(i);
+        handles[i]->post_execution();  // consume under handle lock
+        return true;
+      }
+      return false;
+    };
+    for (size_t i = 0; i < n; ++i) {
+      std::lock_guard<std::mutex> hl(handles[i]->mutex_);
+      if (fired == kNone && try_take(i)) {
+        fired = i;
+        continue;  // satisfied immediately; do not register this handle
+      }
+      handles[i]->wait_blocks_.push_back({&block, i});
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto end = (timeout == std::chrono::milliseconds::max())
+                         ? std::chrono::steady_clock::time_point::max()
+                         : start + timeout;
+    while (fired == kNone) {
+      {
+        std::unique_lock<std::mutex> bl(block.m);
+        if (!block.satisfied) {
+          block.cv.wait_for(bl, std::chrono::milliseconds(4),
+                            [&] { return block.satisfied; });
+        }
+        if (block.satisfied) {
+          fired = static_cast<size_t>(block.fired_index);
+          break;
+        }
+      }
+      // Backstop: re-poll for a persistent signal whose source isn't hooked.
+      for (size_t i = 0; i < n && fired == kNone; ++i) {
+        std::lock_guard<std::mutex> hl(handles[i]->mutex_);
+        if (try_take(i)) {
+          fired = i;
+        }
+      }
+      if (fired == kNone &&
+          end != std::chrono::steady_clock::time_point::max() &&
+          std::chrono::steady_clock::now() >= end) {
+        break;
+      }
+    }
+
+    // Unregister from all handles.
+    for (size_t i = 0; i < n; ++i) {
+      std::lock_guard<std::mutex> hl(handles[i]->mutex_);
+      auto& v = handles[i]->wait_blocks_;
+      for (auto it = v.begin(); it != v.end();) {
+        if (it->first == &block) {
+          it = v.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
+    if (fired != kNone) {
+      return std::make_pair(WaitResult::kSuccess, fired);
+    }
+    return std::make_pair(WaitResult::kTimeout, size_t(0));
+  }
+
   [[nodiscard]] virtual void* native_handle() const {
     return const_cast<std::condition_variable&>(cond_).native_handle();
   }
@@ -387,8 +500,47 @@ class PosixConditionBase {
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+
+  // Called by a subclass Signal/Release WITH mutex_ held, after the signal
+  // state has been raised. Hands the wake to registered WaitAny waiters,
+  // latching satisfaction so a later Reset cannot revoke it. For consumable
+  // objects (auto-reset event, semaphore) it consumes via post_execution() —
+  // exactly once per available signal. Returns true if the signal was fully
+  // consumed (caller should then NOT also notify single Wait() waiters).
+  bool DeliverToWaitBlocksLocked() {
+    for (auto it = wait_blocks_.begin(); it != wait_blocks_.end();) {
+      if (!signaled()) {
+        return true;  // consumed by a prior block this pass
+      }
+      WaitBlock* b = it->first;
+      const size_t idx = it->second;
+      bool consumed = false;
+      {
+        std::lock_guard<std::mutex> bl(b->m);
+        if (b->satisfied) {
+          ++it;
+          continue;  // already satisfied via another handle
+        }
+        b->fired_index = static_cast<int>(idx);
+        b->satisfied = true;
+        b->cv.notify_all();
+        post_execution();  // consume (auto-reset: signal_=false; sema: count--)
+        consumed = true;
+      }
+      it = wait_blocks_.erase(it);  // this handle no longer owes this block
+      if (consumed && !signaled()) {
+        return true;  // signal fully consumed (auto-reset event)
+      }
+      // manual-reset (still signaled) → satisfy further blocks; semaphore with
+      // remaining count → likewise continue.
+    }
+    return !signaled();
+  }
+
   std::condition_variable cond_;
   std::mutex mutex_;
+  // Registered WaitAny wait-blocks: {block, this handle's index in that wait}.
+  std::vector<std::pair<WaitBlock*, size_t>> wait_blocks_;
 };
 
 // There really is no native POSIX handle for a single wait/signal construct
@@ -408,6 +560,11 @@ class PosixCondition<Event> : public PosixConditionBase {
   bool Signal() override {
     auto lock = std::unique_lock(mutex_);
     signal_ = true;
+    if (cvars::threading_blocking_waitany && DeliverToWaitBlocksLocked()) {
+      // Consumed by a WaitAny waiter (auto-reset) — do not also wake a single
+      // Wait() waiter, or the one signal would satisfy two.
+      return true;
+    }
     cond_.notify_all();
     return true;
   }
@@ -446,6 +603,9 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
       *out_previous_count = count_;
     }
     count_ += release_count;
+    if (cvars::threading_blocking_waitany) {
+      DeliverToWaitBlocksLocked();  // hand counts to WaitAny waiters
+    }
     cond_.notify_all();
     return true;
   }
