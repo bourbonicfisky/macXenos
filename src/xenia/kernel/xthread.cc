@@ -25,12 +25,6 @@
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
-#if XE_PLATFORM_MAC
-#include <pthread.h>
-#include <pthread/qos.h>
-#include <sched.h>
-#endif
-
 DEFINE_bool(ignore_thread_priorities, false,
             "Ignores game-specified thread priorities.", "Kernel");
 UPDATE_from_bool(ignore_thread_priorities, 2026, 4, 9, 12, true);
@@ -54,20 +48,24 @@ DEFINE_int64(
     "fix ships.",
     "Kernel");
 
-DEFINE_string(
-    macos_guest_qos, "off",
-    "macOS guest-thread scheduling experiment (default off). Any value != off "
-    "stops placing guest threads in SCHED_FIFO (set_priority becomes a no-op on "
-    "macOS), because Xenia currently runs prioritized guest workers as real-time "
-    "FIFO threads — which both starves the Apple Silicon asymmetric scheduler and "
-    "blocks an explicit QoS class (EPERM). Ladder: "
-    "off = current (SCHED_FIFO) · "
-    "timeshare = no FIFO, no QoS class (isolates 'is real-time FIFO the trigger?') · "
-    "user_initiated = no FIFO + QOS_CLASS_USER_INITIATED on guest threads · "
-    "user_interactive = no FIFO + QOS_CLASS_USER_INTERACTIVE. Logs [guest-qos] once "
-    "per guest thread (policy + actual QoS). Verdict oracle = --dispatcher_diag "
-    "orphan detector. Diagnostic; a real fix would narrow the QoS policy by role.",
+DEFINE_int64(
+    macos_spin0_backoff_us, 250,
+    "macOS-only: adaptive busy-poll backoff. The guest's lock-free pump loops "
+    "spam Sleep(0); on POSIX that is sched_yield, which keeps the spinner "
+    "runnable and on Apple Silicon's asymmetric scheduler starves the guest job "
+    "dispatcher (the DOA5 load-stall freeze). After a short burst of cheap "
+    "yields, a runaway Sleep(0) spinner instead sleeps this many microseconds so "
+    "the dispatcher gets the core. 0 disables (pure sched_yield, pre-fix "
+    "behavior). 250 is the validated value; tune via 100/250/500.",
     "Kernel");
+
+#if XE_PLATFORM_MAC
+// Adaptive Sleep(0) backoff tuning. After this many consecutive tight Sleep(0)
+// calls, escalate from sched_yield to the bounded NanoSleep; reset the run if
+// more than this many ms elapse between Sleep(0)s (thread isn't tight-spinning).
+static constexpr uint32_t kSpin0YieldBurst = 32;
+static constexpr uint64_t kSpin0ResetMs = 4;
+#endif
 
 namespace xe {
 namespace kernel {
@@ -341,44 +339,6 @@ void XThread::FreeStack() {
   }
 }
 
-// macos_guest_qos experiment: from inside a GUEST XThread, request an explicit
-// macOS QoS class so the Apple Silicon scheduler places/runs the guest job
-// workers coherently. Default off; logs once per guest thread. No-op off-macOS.
-static void ApplyGuestThreadQos([[maybe_unused]] XThread* thread) {
-#if XE_PLATFORM_MAC
-  if (!thread || !thread->is_guest_thread()) {
-    return;
-  }
-  const std::string& sel = cvars::macos_guest_qos;
-  if (sel == "off") {
-    return;  // baseline: SCHED_FIFO kept, no QoS
-  }
-  // For all non-off modes, set_priority() already skips SCHED_FIFO so the thread
-  // stays in the default timeshare class. "timeshare" sets no QoS class; the
-  // user_* modes additionally pin an explicit QoS class.
-  int rc = 0;
-  if (sel == "user_initiated") {
-    rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-  } else if (sel == "user_interactive") {
-    rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-  }
-  // Read back the actual scheduling policy (SCHED_OTHER=1 confirms FIFO skipped)
-  // and the effective QoS class, so the log proves the treatment took.
-  int policy = -1;
-  sched_param sp{};
-  pthread_getschedparam(pthread_self(), &policy, &sp);
-  qos_class_t got = QOS_CLASS_UNSPECIFIED;
-  int got_rel = 0;
-  pthread_get_qos_class_np(pthread_self(), &got, &got_rel);
-  uint64_t host_tid = 0;
-  pthread_threadid_np(nullptr, &host_tid);
-  XELOGI(
-      "[guest-qos] thid={:04X} host_tid={} mode={} rc={} policy={} got_class={:#x}",
-      thread->thread_id(), host_tid, sel, rc, policy,
-      static_cast<uint32_t>(got));
-#endif
-}
-
 X_STATUS XThread::Create() {
   // Thread kernel object.
   if (!CreateNative<X_KTHREAD>()) {
@@ -498,9 +458,6 @@ X_STATUS XThread::Create() {
     // Execute user code.
     current_xthread_tls_ = this;
     current_thread_ = this;
-    // macos_guest_qos experiment (default off): hint the macOS scheduler from
-    // inside the guest thread before any guest code runs.
-    ApplyGuestThreadQos(this);
     cpu::ThreadState::Bind(this->thread_state());
     running_ = true;
     Execute();
@@ -1070,11 +1027,40 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
   } else {
     if (timeout_ms == 0) {
       if (cvars::spin0_sleep_us > 0) {
+        // Diagnostic override: fixed NanoSleep on every Sleep(0) (A/B knob).
         xe::threading::NanoSleep(cvars::spin0_sleep_us * 1000);
       } else if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
         xe::threading::NanoSleep(100);
       } else {
+#if XE_PLATFORM_MAC
+        // Adaptive busy-poll backoff (macOS ship fix). The guest's lock-free
+        // pump loops spam Sleep(0); a bare sched_yield keeps the spinner
+        // runnable and on Apple Silicon's asymmetric scheduler that starves the
+        // guest job dispatcher → queue 83DF6880 orphans → DOA5 load-stall
+        // freeze. Keep the first burst of consecutive Sleep(0)s cheap (yield),
+        // then de-schedule a runaway spinner with a bounded sleep so the
+        // dispatcher gets the core. A multi-ms gap between Sleep(0)s means the
+        // thread isn't tight-spinning, so reset the run to stay low-latency.
+        const int64_t backoff_us = cvars::macos_spin0_backoff_us;
+        if (backoff_us > 0) {
+          static thread_local uint32_t spin0_run = 0;
+          static thread_local uint64_t spin0_last_ms = 0;
+          const uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+          if (now_ms - spin0_last_ms > kSpin0ResetMs) {
+            spin0_run = 0;
+          }
+          spin0_last_ms = now_ms;
+          if (++spin0_run <= kSpin0YieldBurst) {
+            xe::threading::MaybeYield();
+          } else {
+            xe::threading::NanoSleep(backoff_us * 1000);
+          }
+        } else {
+          xe::threading::MaybeYield();
+        }
+#else
         xe::threading::MaybeYield();
+#endif
       }
     } else {
       xe::threading::Sleep(std::chrono::milliseconds(timeout_ms));
