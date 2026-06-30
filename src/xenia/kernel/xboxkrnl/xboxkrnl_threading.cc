@@ -13,6 +13,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
@@ -22,6 +23,7 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
@@ -39,6 +41,23 @@ DEFINE_bool(
     "(the polled flag's load/compare/branch). Revert before any fix.",
     "Kernel");
 
+DEFINE_bool(
+    dispatcher_diag, false,
+    "Diagnostic (default off; run WITH --delay_poll_diag for the freeze "
+    "detector and --io_ledger_diag for the per-event signal summary). DOA5 "
+    "load-stall producer/dispatcher probe. QUEUE-FIRST: at the shared Sleep "
+    "helper, the polled object's magic [+0x40]=='LfQu' (0x4C665175) is the "
+    "authoritative dispatcher identity; record (queue head/tail/seq + poll-loop "
+    "PC/LR) into a change-triggered ring (push only on state change, so the "
+    "ring spans the whole stall). On the spin freeze, dump the ring PLUS an "
+    "all-thread live-LR snapshot + disasm window (captures a dispatcher stuck "
+    "in an ldarx/stdcx CAS loop that never crosses Sleep, which the ring alone "
+    "cannot see). Classify the live PC: drain-wait 8283811C (A) / new select "
+    "routine (B) / 82880020-style CAS (C). Event-signal identity (io_ledger "
+    "sigsum) is SECONDARY, cross-referenced by tid. Capture-only; revert "
+    "before any fix.",
+    "Kernel");
+
 DECLARE_bool(io_ledger_diag);  // defined in xboxkrnl_io.cc
 
 namespace xe {
@@ -46,6 +65,192 @@ namespace kernel {
 namespace xboxkrnl {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// dispatcher_diag: DOA5 load-stall producer/dispatcher probe (capture-only).
+// QUEUE-FIRST identity (LfQu magic), event-signal SECONDARY. See cvar comment.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kLfQuMagic = 0x4C665175u;  // 'LfQu'
+
+// Fast unguarded BE read — only for the current thread's own (committed) frame.
+inline uint32_t DiagRd32Fast(uint32_t a) {
+  const uint8_t* m = kernel_memory()->TranslateVirtual<const uint8_t*>(a);
+  return (uint32_t(m[0]) << 24) | (uint32_t(m[1]) << 16) |
+         (uint32_t(m[2]) << 8) | uint32_t(m[3]);
+}
+
+// Safe BE read: false unless `addr..addr+3` is mapped+readable, so an untrusted
+// register/SP value (e.g. another thread's context) can never fault us.
+bool DiagRd32Safe(uint32_t addr, uint32_t* out) {
+  auto* heap = kernel_memory()->LookupHeap(addr);
+  if (!heap) return false;
+  uint32_t protect = 0;
+  if (!heap->QueryProtect(addr, &protect) ||
+      !(protect & kMemoryProtectRead)) {
+    return false;
+  }
+  *out = DiagRd32Fast(addr);
+  return true;
+}
+
+// Locate the LfQu queue reachable from a poll loop's saved r31. Magic decides
+// identity (queue-first); offsets cover the 8283811C item form ([r31+0x4]) and
+// the 82847920 counter form (r31 / [r31+0xC] / [r31+0x10]). 0 = not a queue.
+uint32_t DiagFindLfQu(uint32_t r31) {
+  uint32_t magic = 0;
+  if (DiagRd32Safe(r31 + 0x40, &magic) && magic == kLfQuMagic) {
+    return r31;
+  }
+  for (uint32_t off : {0x4u, 0xCu, 0x10u, 0x18u}) {
+    uint32_t v = 0;
+    if (DiagRd32Safe(r31 + off, &v) && v &&
+        DiagRd32Safe(v + 0x40, &magic) && magic == kLfQuMagic) {
+      return v;
+    }
+  }
+  return 0;
+}
+
+struct DispLast {
+  uint32_t pc, seq, head, tail;
+};
+struct DispRingEntry {
+  uint64_t tick_ms;
+  uint32_t tid, pc, lr, q, seq, tail, head;
+};
+std::mutex g_disp_mu;
+constexpr uint32_t kDispRing = 128;
+DispRingEntry g_disp_ring[kDispRing] = {};
+uint32_t g_disp_head = 0;
+std::unordered_map<uint32_t, DispLast> g_disp_last;  // tid -> last pushed state
+uint64_t g_disp_last_dump_ms = 0;
+
+// Per zero-interval Sleep (the busy-spin): queue-first capture into the ring.
+// Sampled (every 256th) + change-triggered so the hot path stays near-free and
+// does NOT perturb the timing-sensitive stall (cf. the io_ledger A/B confound).
+void DispatcherDiagOnSleep(const ppc_context_t& context) {
+  thread_local uint32_t tls_n = 0;
+  if ((tls_n++ & 0xFFu) != 0u) {
+    return;  // sample every 256th Sleep(0)
+  }
+  const uint32_t r1 = static_cast<uint32_t>(context->r[1]);
+  // Current thread's own frame is committed → fast reads (mirrors the existing
+  // delay_poll_diag [r1+0x68]/[r1+0x64] gold).
+  const uint32_t caller_lr = DiagRd32Fast(r1 + 0x68);
+  const uint32_t r31 = DiagRd32Fast(r1 + 0x64);
+  const uint32_t q = DiagFindLfQu(r31);
+  if (!q) {
+    return;  // queue-first filter: not an LfQu poll loop
+  }
+  uint32_t seq = 0, tail = 0, head = 0;
+  DiagRd32Safe(q + 0x4, &seq);
+  DiagRd32Safe(q + 0x8, &tail);
+  DiagRd32Safe(q + 0x10, &head);
+  auto* thread = XThread::GetCurrentThread();
+  const uint32_t tid = thread ? thread->thread_id() : 0;
+
+  std::lock_guard<std::mutex> lk(g_disp_mu);
+  auto it = g_disp_last.find(tid);
+  if (it != g_disp_last.end() && it->second.pc == caller_lr &&
+      it->second.seq == seq && it->second.head == head &&
+      it->second.tail == tail) {
+    return;  // unchanged — keep the ring spanning the whole episode
+  }
+  g_disp_last[tid] = DispLast{caller_lr, seq, head, tail};
+  g_disp_ring[g_disp_head % kDispRing] =
+      DispRingEntry{xe::Clock::QueryHostUptimeMillis(),
+                    tid,
+                    caller_lr,
+                    static_cast<uint32_t>(context->lr),
+                    q,
+                    seq,
+                    tail,
+                    head};
+  g_disp_head++;
+}
+
+// On the freeze: dump the ring + an all-thread live-PC snapshot (rate-limited
+// to once / 2s so an episode logs a handful of snapshots, not one per thread).
+void DispatcherDiagDumpAtFreeze() {
+  std::vector<DispRingEntry> snapshot;
+  {
+    std::lock_guard<std::mutex> lk(g_disp_mu);
+    const uint64_t now = xe::Clock::QueryHostUptimeMillis();
+    if (g_disp_last_dump_ms != 0 && now - g_disp_last_dump_ms < 2000) {
+      return;
+    }
+    g_disp_last_dump_ms = now;
+    const uint32_t count = g_disp_head < kDispRing ? g_disp_head : kDispRing;
+    for (uint32_t k = 0; k < count; ++k) {
+      snapshot.push_back(g_disp_ring[(g_disp_head - count + k) % kDispRing]);
+    }
+  }
+  XELOGW("[dispatcher] RING n={} (queue-first LfQu poll-loop transitions)",
+         snapshot.size());
+  for (const auto& e : snapshot) {
+    XELOGW(
+        "[dispatcher] ring t={} tid={:08X} pc={:08X} lr={:08X} q={:08X} "
+        "seq={:08X} head={:08X} tail={:08X} {}",
+        e.tick_ms, e.tid, e.pc, e.lr, e.q, e.seq, e.head, e.tail,
+        e.head == e.tail ? "drained" : "NON-EMPTY");
+  }
+
+  // All-thread live-PC snapshot. Reads only the committed host PPCContext and
+  // (via DiagRd32Safe) mapped guest memory, so it is SIGSEGV-safe even on a
+  // racing thread. Catches a dispatcher spinning in a CAS loop (branch C) that
+  // never crosses Sleep — the one case the ring is structurally blind to.
+  auto threads = kernel_state()->object_table()->GetObjectsByType<XThread>(
+      XObject::Type::Thread);
+  XELOGW(
+      "[dispatcher] THREADS n={} (classify live PC: A=8283811C drain / "
+      "B=select / C=82880020 CAS)",
+      threads.size());
+  StringBuffer sb;
+  for (auto& t : threads) {
+    if (!t) {
+      continue;
+    }
+    auto* ts = t->thread_state();
+    if (!ts) {
+      continue;
+    }
+    auto* ctx = ts->context();
+    if (!ctx) {
+      continue;
+    }
+    const uint32_t ttid = t->thread_id();
+    const uint32_t tlr = static_cast<uint32_t>(ctx->lr);
+    const uint32_t r1 = static_cast<uint32_t>(ctx->r[1]);
+    const uint32_t r3 = static_cast<uint32_t>(ctx->r[3]);
+    const uint32_t r31 = static_cast<uint32_t>(ctx->r[31]);
+    // Does any register reference an LfQu queue? (producer/dispatcher tell)
+    uint32_t qref = 0, magic = 0;
+    for (uint32_t i = 0; i < 32; ++i) {
+      const uint32_t rv = static_cast<uint32_t>(ctx->r[i]);
+      if (DiagRd32Safe(rv + 0x40, &magic) && magic == kLfQuMagic) {
+        qref = rv;
+        break;
+      }
+    }
+    XELOGW(
+        "[dispatcher] thread tid={:08X} lr={:08X} r1={:08X} r3={:08X} "
+        "r31={:08X} lfqu_reg={:08X}",
+        ttid, tlr, r1, r3, r31, qref);
+    if (tlr >= 0x82000000u && tlr < 0x83000000u) {
+      for (uint32_t pc = tlr - 0x18u; pc <= tlr + 0x8u; pc += 4) {
+        uint32_t code = 0;
+        if (!DiagRd32Safe(pc, &code)) {
+          continue;
+        }
+        sb.Reset();
+        xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+        XELOGW("[dispatcher]   lr@{:08X}: {:08X}  {}", pc, code,
+               sb.to_string_view());
+      }
+    }
+  }
+}
+
 // delay_poll_diag: see cvar. The shared guest Sleep helper (immediate caller LR
 // 0x829539FC) saves ITS caller's LR at old_sp-8 = r1+0x68 (after `stwu r1,-0x70`);
 // that caller LR is the PC inside the poll loop that called Sleep — the gold.
@@ -122,6 +327,12 @@ void DelayPollDiagProbe(const ppc_context_t& context) {
 
   // Pivot A: dump the async-I/O ledger during the stall (rate-limited inside).
   IoLedgerDumpOutstanding("delay-poll-spin");
+
+  // dispatcher_diag: queue-first ring + all-thread live-PC snapshot (the LfQu
+  // producer/dispatcher that stops dispatching — branch A/B/C).
+  if (cvars::dispatcher_diag) {
+    DispatcherDiagDumpAtFreeze();
+  }
 
   // Stack return-address scan (cross-check the caller chain).
   StringBuffer chain;
@@ -639,6 +850,9 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
+  if (cvars::dispatcher_diag && interval == 0u) {
+    DispatcherDiagOnSleep(context);
+  }
   if (cvars::delay_poll_diag) {
     DelayPollDiagProbe(context);
   }
