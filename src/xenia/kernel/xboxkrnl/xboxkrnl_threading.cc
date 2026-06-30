@@ -471,7 +471,9 @@ void DispatcherDiagDumpAtFreeze() {
   if (picker && !pick_dumped.exchange(true, std::memory_order_relaxed)) {
     XELOGW("[dispatcher] PICKER caller={:08X} (worker dispatch / queue-select)",
            picker);
-    for (uint32_t pc = picker - 0x80u; pc <= picker + 0x20u; pc += 4) {
+    // -0x300 back captures the dispatch loop TOP + the queue-select arithmetic
+    // (r22 selector), not just the pump tail. One-time, report-completeness.
+    for (uint32_t pc = picker - 0x300u; pc <= picker + 0x20u; pc += 4) {
       uint32_t code = 0;
       if (!DiagRd32Safe(pc, &code)) {
         continue;
