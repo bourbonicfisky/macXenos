@@ -28,6 +28,7 @@
 #if XE_PLATFORM_MAC
 #include <pthread.h>
 #include <pthread/qos.h>
+#include <sched.h>
 #endif
 
 DEFINE_bool(ignore_thread_priorities, false,
@@ -55,12 +56,17 @@ DEFINE_int64(
 
 DEFINE_string(
     macos_guest_qos, "off",
-    "macOS experiment (default off): assign an explicit QoS class to GUEST "
-    "XThreads from inside each thread — off | user_initiated | user_interactive. "
-    "Tests whether the Apple Silicon P/E-core + QoS scheduler is mis-placing the "
-    "guest job workers (DOA5 load-stall is arm64/macOS-specific; Intel macOS "
-    "drains the same queue). Logs [guest-qos] once per guest thread. Use the "
-    "--dispatcher_diag orphan detector as pass/fail. Default-off diagnostic.",
+    "macOS guest-thread scheduling experiment (default off). Any value != off "
+    "stops placing guest threads in SCHED_FIFO (set_priority becomes a no-op on "
+    "macOS), because Xenia currently runs prioritized guest workers as real-time "
+    "FIFO threads — which both starves the Apple Silicon asymmetric scheduler and "
+    "blocks an explicit QoS class (EPERM). Ladder: "
+    "off = current (SCHED_FIFO) · "
+    "timeshare = no FIFO, no QoS class (isolates 'is real-time FIFO the trigger?') · "
+    "user_initiated = no FIFO + QOS_CLASS_USER_INITIATED on guest threads · "
+    "user_interactive = no FIFO + QOS_CLASS_USER_INTERACTIVE. Logs [guest-qos] once "
+    "per guest thread (policy + actual QoS). Verdict oracle = --dispatcher_diag "
+    "orphan detector. Diagnostic; a real fix would narrow the QoS policy by role.",
     "Kernel");
 
 namespace xe {
@@ -344,23 +350,32 @@ static void ApplyGuestThreadQos([[maybe_unused]] XThread* thread) {
     return;
   }
   const std::string& sel = cvars::macos_guest_qos;
-  qos_class_t cls;
-  if (sel == "user_initiated") {
-    cls = QOS_CLASS_USER_INITIATED;
-  } else if (sel == "user_interactive") {
-    cls = QOS_CLASS_USER_INTERACTIVE;
-  } else {
-    return;  // "off" / unrecognized → leave the default class
+  if (sel == "off") {
+    return;  // baseline: SCHED_FIFO kept, no QoS
   }
-  const int rc = pthread_set_qos_class_self_np(cls, 0);
+  // For all non-off modes, set_priority() already skips SCHED_FIFO so the thread
+  // stays in the default timeshare class. "timeshare" sets no QoS class; the
+  // user_* modes additionally pin an explicit QoS class.
+  int rc = 0;
+  if (sel == "user_initiated") {
+    rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+  } else if (sel == "user_interactive") {
+    rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+  }
+  // Read back the actual scheduling policy (SCHED_OTHER=1 confirms FIFO skipped)
+  // and the effective QoS class, so the log proves the treatment took.
+  int policy = -1;
+  sched_param sp{};
+  pthread_getschedparam(pthread_self(), &policy, &sp);
   qos_class_t got = QOS_CLASS_UNSPECIFIED;
   int got_rel = 0;
   pthread_get_qos_class_np(pthread_self(), &got, &got_rel);
   uint64_t host_tid = 0;
   pthread_threadid_np(nullptr, &host_tid);
   XELOGI(
-      "[guest-qos] thid={:04X} host_tid={} requested={} rc={} got_class={:#x}",
-      thread->thread_id(), host_tid, sel, rc, static_cast<uint32_t>(got));
+      "[guest-qos] thid={:04X} host_tid={} mode={} rc={} policy={} got_class={:#x}",
+      thread->thread_id(), host_tid, sel, rc, policy,
+      static_cast<uint32_t>(got));
 #endif
 }
 

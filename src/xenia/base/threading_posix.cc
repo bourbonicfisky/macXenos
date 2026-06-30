@@ -27,6 +27,12 @@
 #include <ctime>
 
 #include "logging.h"
+#include "xenia/base/cvar.h"
+
+// Defined in xenia/kernel/xthread.cc. When != "off" on macOS, guest threads are
+// left in the default timeshare class instead of SCHED_FIFO so an explicit QoS
+// class can be applied (macOS rejects QoS on fixed-priority threads with EPERM).
+DECLARE_string(macos_guest_qos);
 
 #if XE_PLATFORM_ANDROID
 #include <dlfcn.h>
@@ -1005,6 +1011,16 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void set_priority(int new_priority) const {
     WaitStarted();
+#if XE_PLATFORM_MAC
+    // macos_guest_qos experiment: when active, do NOT place threads in SCHED_FIFO.
+    // On macOS a thread with an explicit fixed-priority policy rejects a QoS class
+    // (pthread_set_qos_class_self_np → EPERM), and SCHED_FIFO is ineffective for
+    // guest priority here anyway. Leaving threads in the default timeshare class
+    // lets the QoS hint apply uniformly. Default ("off") keeps current behavior.
+    if (cvars::macos_guest_qos != "off") {
+      return;
+    }
+#endif
     if (!fifo_failed_) {
       // Try real-time SCHED_FIFO for best priority control.
       sched_param param{};
