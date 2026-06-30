@@ -63,7 +63,7 @@ DEFINE_int64(
 // Adaptive Sleep(0) backoff tuning. After this many consecutive tight Sleep(0)
 // calls, escalate from sched_yield to the bounded NanoSleep; reset the run if
 // more than this many ms elapse between Sleep(0)s (thread isn't tight-spinning).
-static constexpr uint32_t kSpin0YieldBurst = 32;
+static constexpr uint32_t kSpin0YieldBurst = 8;
 static constexpr uint64_t kSpin0ResetMs = 4;
 #endif
 
@@ -1029,18 +1029,19 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
       if (cvars::spin0_sleep_us > 0) {
         // Diagnostic override: fixed NanoSleep on every Sleep(0) (A/B knob).
         xe::threading::NanoSleep(cvars::spin0_sleep_us * 1000);
-      } else if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
-        xe::threading::NanoSleep(100);
       } else {
 #if XE_PLATFORM_MAC
-        // Adaptive busy-poll backoff (macOS ship fix). The guest's lock-free
-        // pump loops spam Sleep(0); a bare sched_yield keeps the spinner
-        // runnable and on Apple Silicon's asymmetric scheduler that starves the
-        // guest job dispatcher → queue 83DF6880 orphans → DOA5 load-stall
-        // freeze. Keep the first burst of consecutive Sleep(0)s cheap (yield),
-        // then de-schedule a runaway spinner with a bounded sleep so the
-        // dispatcher gets the core. A multi-ms gap between Sleep(0)s means the
-        // thread isn't tight-spinning, so reset the run to stay low-latency.
+        // Adaptive busy-poll backoff (macOS ship fix), applied to ALL Sleep(0)
+        // REGARDLESS of guest priority — the guest pump spinners that starve the
+        // dispatcher are not all normal-priority, and the validated blunt fix
+        // throttled every Sleep(0) (a per-priority gate let below-normal spinners
+        // escape and the freeze returned). The guest's lock-free pump loops spam
+        // Sleep(0); a bare sched_yield keeps the spinner runnable and on Apple
+        // Silicon's asymmetric scheduler that starves the guest job dispatcher
+        // (queue 83DF6880 orphans → DOA5 load-stall freeze). Keep a short burst
+        // of consecutive Sleep(0)s cheap (yield), then de-schedule a runaway
+        // spinner with a bounded sleep so the dispatcher gets the core; a
+        // multi-ms gap between Sleep(0)s resets the run to stay low-latency.
         const int64_t backoff_us = cvars::macos_spin0_backoff_us;
         if (backoff_us > 0) {
           static thread_local uint32_t spin0_run = 0;
@@ -1055,11 +1056,17 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
           } else {
             xe::threading::NanoSleep(backoff_us * 1000);
           }
+        } else if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
+          xe::threading::NanoSleep(100);
         } else {
           xe::threading::MaybeYield();
         }
 #else
-        xe::threading::MaybeYield();
+        if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
+          xe::threading::NanoSleep(100);
+        } else {
+          xe::threading::MaybeYield();
+        }
 #endif
       }
     } else {
