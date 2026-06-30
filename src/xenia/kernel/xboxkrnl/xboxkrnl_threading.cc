@@ -122,7 +122,10 @@ std::mutex g_disp_mu;
 constexpr uint32_t kDispRing = 128;
 DispRingEntry g_disp_ring[kDispRing] = {};
 uint32_t g_disp_head = 0;
-std::unordered_map<uint32_t, DispLast> g_disp_last;  // tid -> last pushed state
+// Keyed by (tid<<32 | q): a thread that polls TWO queues (e.g. 0xC over
+// 6880+7C00) would otherwise alternate-differ every sample and flood the ring.
+std::unordered_map<uint64_t, DispLast> g_disp_last;
+std::unordered_set<uint32_t> g_disp_queues;  // distinct LfQu queues seen
 uint64_t g_disp_last_dump_ms = 0;
 
 // Per zero-interval Sleep (the busy-spin): queue-first capture into the ring.
@@ -148,15 +151,19 @@ void DispatcherDiagOnSleep(const ppc_context_t& context) {
   DiagRd32Safe(q + 0x10, &head);
   auto* thread = XThread::GetCurrentThread();
   const uint32_t tid = thread ? thread->thread_id() : 0;
+  const uint64_t qkey = (static_cast<uint64_t>(tid) << 32) | q;
 
   std::lock_guard<std::mutex> lk(g_disp_mu);
-  auto it = g_disp_last.find(tid);
+  if (g_disp_queues.size() < 32) {
+    g_disp_queues.insert(q);
+  }
+  auto it = g_disp_last.find(qkey);
   if (it != g_disp_last.end() && it->second.pc == caller_lr &&
       it->second.seq == seq && it->second.head == head &&
       it->second.tail == tail) {
-    return;  // unchanged — keep the ring spanning the whole episode
+    return;  // (tid,q) unchanged — keep the ring spanning the whole episode
   }
-  g_disp_last[tid] = DispLast{caller_lr, seq, head, tail};
+  g_disp_last[qkey] = DispLast{caller_lr, seq, head, tail};
   g_disp_ring[g_disp_head % kDispRing] =
       DispRingEntry{xe::Clock::QueryHostUptimeMillis(),
                     tid,
@@ -167,6 +174,96 @@ void DispatcherDiagOnSleep(const ppc_context_t& context) {
                     tail,
                     head};
   g_disp_head++;
+}
+
+// Bounded, race-checked dump of an LfQu queue's undrained nodes (the stuck work
+// items). The queue is LIVE — other threads mutate head/tail/next — so we
+// snapshot (seq,head,tail) BEFORE and AFTER and label the walk RACED if they
+// move (the node bytes are then untrusted, not believed). Node count is
+// hard-capped; every read is mapped-guarded. Event handles (0xF8xxxxxx) are
+// flagged to tie a stuck item to the never-signaled event gating it.
+void DispatcherDiagWalkQueue(uint32_t q) {
+  uint32_t seq0 = 0, head0 = 0, tail0 = 0;
+  DiagRd32Safe(q + 0x4, &seq0);
+  DiagRd32Safe(q + 0x8, &tail0);
+  DiagRd32Safe(q + 0x10, &head0);
+  if (head0 == tail0) {
+    XELOGW("[dispatcher] queue {:08X} seq={:08X} head==tail={:08X} DRAINED", q,
+           seq0, head0);
+    return;
+  }
+  XELOGW(
+      "[dispatcher] queue {:08X} seq={:08X} head={:08X} tail={:08X} NON-EMPTY "
+      "(undrained-node walk; event handles flagged)",
+      q, seq0, head0, tail0);
+
+  constexpr uint32_t kMaxNodes = 24;
+  auto is_event = [](uint32_t w) { return (w & 0xFF000000u) == 0xF8000000u; };
+  const uint32_t span = tail0 - head0;  // unsigned
+  if (span > 0u && span <= 0x400u) {
+    // Contiguous region → layout-blind linear hex dump [head .. tail+0x40]
+    // (no next-ptr assumption needed; covers the observed 0x30-span case).
+    const uint32_t end = tail0 + 0x40u;
+    for (uint32_t a = head0; a < end && (a - head0) < kMaxNodes * 0x10u;
+         a += 0x10) {
+      uint32_t w[4] = {};
+      for (uint32_t i = 0; i < 4; ++i) {
+        DiagRd32Safe(a + i * 4, &w[i]);
+      }
+      XELOGW("[dispatcher]   node {:08X}: {:08X} {:08X} {:08X} {:08X} {}", a,
+             w[0], w[1], w[2], w[3],
+             (is_event(w[0]) || is_event(w[1]) || is_event(w[2]) ||
+              is_event(w[3]))
+                 ? "<event?>"
+                 : "");
+    }
+  } else {
+    // Non-contiguous → best-effort linked walk; auto-detect the next pointer as
+    // the first field pointing into this queue's heap neighborhood. Capped.
+    uint32_t cur = head0;
+    for (uint32_t n = 0; n < kMaxNodes && cur && cur != tail0; ++n) {
+      uint32_t f[8] = {};
+      bool ev = false;
+      for (uint32_t i = 0; i < 8; ++i) {
+        DiagRd32Safe(cur + i * 4, &f[i]);
+        ev = ev || is_event(f[i]);
+      }
+      uint32_t next = 0, next_off = 0;
+      for (uint32_t i = 0; i < 8; ++i) {
+        if ((f[i] & 0xFFF00000u) == (q & 0xFFF00000u) && f[i] && f[i] != cur) {
+          next = f[i];
+          next_off = i * 4;
+          break;
+        }
+      }
+      XELOGW(
+          "[dispatcher]   node {:08X}: {:08X} {:08X} {:08X} {:08X} {:08X} "
+          "{:08X} {:08X} {:08X} next@+{:X}={:08X} {}",
+          cur, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], next_off, next,
+          ev ? "<event?>" : "");
+      if (!next) {
+        break;  // can't advance — layout unknown / chain broken
+      }
+      cur = next;
+    }
+  }
+
+  uint32_t seq1 = 0, head1 = 0, tail1 = 0;
+  DiagRd32Safe(q + 0x4, &seq1);
+  DiagRd32Safe(q + 0x8, &tail1);
+  DiagRd32Safe(q + 0x10, &head1);
+  if (seq1 != seq0 || head1 != head0 || tail1 != tail0) {
+    XELOGW(
+        "[dispatcher] queue {:08X} RACED during walk (before seq={:08X} "
+        "head={:08X} tail={:08X} → after seq={:08X} head={:08X} tail={:08X}) — "
+        "node bytes UNTRUSTED",
+        q, seq0, head0, tail0, seq1, head1, tail1);
+  } else {
+    XELOGW(
+        "[dispatcher] queue {:08X} STABLE across walk (seq/head/tail unchanged) "
+        "— node bytes trusted",
+        q);
+  }
 }
 
 // On the freeze: dump the ring + an all-thread live-PC snapshot (rate-limited
@@ -248,6 +345,19 @@ void DispatcherDiagDumpAtFreeze() {
                sb.to_string_view());
       }
     }
+  }
+
+  // Queue contents: bounded, race-checked walk of each distinct LfQu queue's
+  // undrained nodes — the stuck work items + the event handle each is gated on.
+  std::vector<uint32_t> queues;
+  {
+    std::lock_guard<std::mutex> lk(g_disp_mu);
+    queues.assign(g_disp_queues.begin(), g_disp_queues.end());
+  }
+  XELOGW("[dispatcher] QUEUES n={} (contents walk: undrained nodes + race check)",
+         queues.size());
+  for (uint32_t q : queues) {
+    DispatcherDiagWalkQueue(q);
   }
 }
 
