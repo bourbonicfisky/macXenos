@@ -442,13 +442,15 @@ void DispatcherDiagDumpAtFreeze() {
     }
   }
 
-  // Q3: disasm the worker WaitAny wake path around 82954BE4 (the post-wait LR)
-  // far enough to spot the queue-select predicate — why a woken worker picks
-  // 7C00 but not 6880. One-time.
+  // Q3: disasm the worker's real post-WaitAny continuation. The WaitMultiple
+  // wrapper (82954BE4) tail-branches to 0x82B1B3F4 — THAT is where the woken
+  // worker selects which queue/batch to service. Disasm far enough to spot the
+  // queue-select predicate (why 7C00 is picked but 6880 orphaned). One-time.
   static std::atomic<bool> wake_dumped{false};
   if (!wake_dumped.exchange(true, std::memory_order_relaxed)) {
-    XELOGW("[dispatcher] WAKEPATH disasm @82954BE4 (worker post-WaitAny pick)");
-    for (uint32_t pc = 0x82954BE4u - 0x40u; pc < 0x82954BE4u + 0xC0u; pc += 4) {
+    XELOGW("[dispatcher] WAKEPATH disasm @82B1B3F4 (worker queue-select)");
+    for (uint32_t pc = 0x82B1B3F4u - 0x40u; pc < 0x82B1B3F4u + 0x180u;
+         pc += 4) {
       uint32_t code = 0;
       if (!DiagRd32Safe(pc, &code)) {
         continue;
