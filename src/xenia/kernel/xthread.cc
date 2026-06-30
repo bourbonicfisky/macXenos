@@ -25,6 +25,11 @@
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
+#if XE_PLATFORM_MAC
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
+
 DEFINE_bool(ignore_thread_priorities, false,
             "Ignores game-specified thread priorities.", "Kernel");
 UPDATE_from_bool(ignore_thread_priorities, 2026, 4, 9, 12, true);
@@ -46,6 +51,16 @@ DEFINE_int64(
     "sched_yield. Throttles the DOA5 load-stall poll loops that spam NtSetEvent "
     "and contend the kernel locks/scheduler. Try 100. Revert/redesign before any "
     "fix ships.",
+    "Kernel");
+
+DEFINE_string(
+    macos_guest_qos, "off",
+    "macOS experiment (default off): assign an explicit QoS class to GUEST "
+    "XThreads from inside each thread — off | user_initiated | user_interactive. "
+    "Tests whether the Apple Silicon P/E-core + QoS scheduler is mis-placing the "
+    "guest job workers (DOA5 load-stall is arm64/macOS-specific; Intel macOS "
+    "drains the same queue). Logs [guest-qos] once per guest thread. Use the "
+    "--dispatcher_diag orphan detector as pass/fail. Default-off diagnostic.",
     "Kernel");
 
 namespace xe {
@@ -320,6 +335,35 @@ void XThread::FreeStack() {
   }
 }
 
+// macos_guest_qos experiment: from inside a GUEST XThread, request an explicit
+// macOS QoS class so the Apple Silicon scheduler places/runs the guest job
+// workers coherently. Default off; logs once per guest thread. No-op off-macOS.
+static void ApplyGuestThreadQos([[maybe_unused]] XThread* thread) {
+#if XE_PLATFORM_MAC
+  if (!thread || !thread->is_guest_thread()) {
+    return;
+  }
+  const std::string& sel = cvars::macos_guest_qos;
+  qos_class_t cls;
+  if (sel == "user_initiated") {
+    cls = QOS_CLASS_USER_INITIATED;
+  } else if (sel == "user_interactive") {
+    cls = QOS_CLASS_USER_INTERACTIVE;
+  } else {
+    return;  // "off" / unrecognized → leave the default class
+  }
+  const int rc = pthread_set_qos_class_self_np(cls, 0);
+  qos_class_t got = QOS_CLASS_UNSPECIFIED;
+  int got_rel = 0;
+  pthread_get_qos_class_np(pthread_self(), &got, &got_rel);
+  uint64_t host_tid = 0;
+  pthread_threadid_np(nullptr, &host_tid);
+  XELOGI(
+      "[guest-qos] thid={:04X} host_tid={} requested={} rc={} got_class={:#x}",
+      thread->thread_id(), host_tid, sel, rc, static_cast<uint32_t>(got));
+#endif
+}
+
 X_STATUS XThread::Create() {
   // Thread kernel object.
   if (!CreateNative<X_KTHREAD>()) {
@@ -439,6 +483,9 @@ X_STATUS XThread::Create() {
     // Execute user code.
     current_xthread_tls_ = this;
     current_thread_ = this;
+    // macos_guest_qos experiment (default off): hint the macOS scheduler from
+    // inside the guest thread before any guest code runs.
+    ApplyGuestThreadQos(this);
     cpu::ThreadState::Bind(this->thread_state());
     running_ = true;
     Execute();
