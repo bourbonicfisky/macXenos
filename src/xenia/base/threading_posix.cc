@@ -21,6 +21,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <ctime>
@@ -252,6 +253,14 @@ class PosixConditionBase {
   virtual bool Signal() = 0;
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
+    // Route single waits through the same latched wait-block path as WaitAny so
+    // a Signal is delivered (and auto-reset consumed) exactly once across single
+    // AND multi waiters — no transient loss, no steal. (Gated; off = old path.)
+    if (cvars::threading_blocking_waitany) {
+      std::vector<PosixConditionBase*> one{this};
+      return WaitAnyBlocking(one, timeout).first;
+    }
+
     bool executed;
     auto predicate = [this] { return this->signaled(); };
 
@@ -435,42 +444,58 @@ class PosixConditionBase {
       }
       return false;
     };
-    for (size_t i = 0; i < n; ++i) {
-      std::lock_guard<std::mutex> hl(handles[i]->mutex_);
-      if (fired == kNone && try_take(i)) {
-        fired = i;
-        continue;  // satisfied immediately; do not register this handle
+    // Atomic arm: lock ALL members (unique, sorted by address to avoid deadlock)
+    // before the waiter is observable, so no Set/Reset on any member can slip
+    // through a per-handle registration gap. Lock order handle-mutexes(sorted)
+    // then block.m matches DeliverToWaitBlocksLocked.
+    {
+      std::vector<PosixConditionBase*> sorted(handles);
+      std::sort(sorted.begin(), sorted.end());
+      sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+      std::vector<std::unique_lock<std::mutex>> locks;
+      locks.reserve(sorted.size());
+      for (auto* h : sorted) {
+        locks.emplace_back(h->mutex_);
       }
-      handles[i]->wait_blocks_.push_back({&block, i});
-    }
+      for (size_t i = 0; i < n; ++i) {
+        if (fired == kNone && try_take(i)) {
+          fired = i;
+        } else {
+          handles[i]->wait_blocks_.push_back({&block, i});
+        }
+      }
+    }  // release all member locks; registered waiter is now armed
 
-    const auto start = std::chrono::steady_clock::now();
     const auto end = (timeout == std::chrono::milliseconds::max())
                          ? std::chrono::steady_clock::time_point::max()
-                         : start + timeout;
+                         : std::chrono::steady_clock::now() + timeout;
     while (fired == kNone) {
+      const auto now = std::chrono::steady_clock::now();
+      auto backstop = std::chrono::milliseconds(4);
+      if (end != std::chrono::steady_clock::time_point::max()) {
+        if (now >= end) {
+          break;  // timed out (checked before sleeping → no overshoot)
+        }
+        backstop = std::min(
+            backstop,
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - now));
+      }
       {
         std::unique_lock<std::mutex> bl(block.m);
         if (!block.satisfied) {
-          block.cv.wait_for(bl, std::chrono::milliseconds(4),
-                            [&] { return block.satisfied; });
+          block.cv.wait_for(bl, backstop, [&] { return block.satisfied; });
         }
         if (block.satisfied) {
           fired = static_cast<size_t>(block.fired_index);
           break;
         }
       }
-      // Backstop: re-poll for a persistent signal whose source isn't hooked.
+      // Backstop re-poll for a persistent signal whose source isn't hooked.
       for (size_t i = 0; i < n && fired == kNone; ++i) {
         std::lock_guard<std::mutex> hl(handles[i]->mutex_);
         if (try_take(i)) {
           fired = i;
         }
-      }
-      if (fired == kNone &&
-          end != std::chrono::steady_clock::time_point::max() &&
-          std::chrono::steady_clock::now() >= end) {
-        break;
       }
     }
 
