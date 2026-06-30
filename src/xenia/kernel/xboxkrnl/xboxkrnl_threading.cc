@@ -176,13 +176,78 @@ void DispatcherDiagOnSleep(const ppc_context_t& context) {
   g_disp_head++;
 }
 
+const char* DiagHeapTypeName(xe::HeapType t) {
+  switch (t) {
+    case xe::HeapType::kGuestVirtual:
+      return "GuestVirtual";
+    case xe::HeapType::kGuestXex:
+      return "GuestXex";
+    case xe::HeapType::kGuestPhysical:
+      return "GuestPhysical";
+    case xe::HeapType::kHostPhysical:
+      return "HostPhysical";
+  }
+  return "?";
+}
+
+// Q1/Q2: classify a node payload pointer (which heap, type, protection) and
+// dump a bounded field window — flagging queue pointers (0x83Dxxxxx), event
+// handles (0xF8xxxxxx), and an all-equal sentinel (poison/stale). The shared
+// control block (82D7D728) and the only-in-stuck payloads (BABCxxxx) all go
+// through the same path. NOTE the routing/event gate may live HERE (in a
+// control block), not in the node — so this is where "routing not in node"
+// gets tested, not concluded.
+void DispatcherDiagDumpPtr(uint32_t p) {
+  auto* heap = kernel_memory()->LookupHeap(p);
+  if (!heap) {
+    XELOGW("[dispatcher] ptr {:08X} UNMAPPED (no heap) — stale/poison", p);
+    return;
+  }
+  uint32_t protect = 0;
+  const bool readable =
+      heap->QueryProtect(p, &protect) && (protect & kMemoryProtectRead);
+  XELOGW(
+      "[dispatcher] ptr {:08X} heap[base={:08X} size={:08X} type={}] "
+      "protect={:X}{}",
+      p, heap->heap_base(), heap->heap_size(),
+      DiagHeapTypeName(heap->heap_type()), protect,
+      readable ? "" : " NOT-READABLE");
+  if (!readable) {
+    return;
+  }
+  uint32_t w[24] = {};
+  bool all_eq = true;
+  for (uint32_t i = 0; i < 24; ++i) {
+    DiagRd32Safe(p + i * 4, &w[i]);
+    if (w[i] != w[0]) {
+      all_eq = false;
+    }
+  }
+  auto tag = [](uint32_t v) -> const char* {
+    if ((v & 0xFFFF0000u) == 0x83DF0000u) return "<queue?>";
+    if ((v & 0xFF000000u) == 0xF8000000u) return "<event?>";
+    return "";
+  };
+  for (uint32_t i = 0; i < 24; i += 4) {
+    XELOGW(
+        "[dispatcher]   {:08X}+{:02X}: {:08X}{} {:08X}{} {:08X}{} {:08X}{}", p,
+        i * 4, w[i], tag(w[i]), w[i + 1], tag(w[i + 1]), w[i + 2],
+        tag(w[i + 2]), w[i + 3], tag(w[i + 3]));
+  }
+  if (all_eq) {
+    XELOGW(
+        "[dispatcher] ptr {:08X} window ALL {:08X} — likely poison/sentinel", p,
+        w[0]);
+  }
+}
+
 // Bounded, race-checked dump of an LfQu queue's undrained nodes (the stuck work
 // items). The queue is LIVE — other threads mutate head/tail/next — so we
 // snapshot (seq,head,tail) BEFORE and AFTER and label the walk RACED if they
 // move (the node bytes are then untrusted, not believed). Node count is
-// hard-capped; every read is mapped-guarded. Event handles (0xF8xxxxxx) are
-// flagged to tie a stuck item to the never-signaled event gating it.
-void DispatcherDiagWalkQueue(uint32_t q) {
+// hard-capped; every read is mapped-guarded. Each node's payload (+0x8) is
+// collected into `payloads` for classification; event handles flagged.
+void DispatcherDiagWalkQueue(uint32_t q, std::vector<uint32_t>* payloads) {
   uint32_t seq0 = 0, head0 = 0, tail0 = 0;
   DiagRd32Safe(q + 0x4, &seq0);
   DiagRd32Safe(q + 0x8, &tail0);
@@ -210,6 +275,9 @@ void DispatcherDiagWalkQueue(uint32_t q) {
       for (uint32_t i = 0; i < 4; ++i) {
         DiagRd32Safe(a + i * 4, &w[i]);
       }
+      if (payloads && w[2] >= 0x10000u) {
+        payloads->push_back(w[2]);  // node +0x8 = payload pointer
+      }
       XELOGW("[dispatcher]   node {:08X}: {:08X} {:08X} {:08X} {:08X} {}", a,
              w[0], w[1], w[2], w[3],
              (is_event(w[0]) || is_event(w[1]) || is_event(w[2]) ||
@@ -227,6 +295,9 @@ void DispatcherDiagWalkQueue(uint32_t q) {
       for (uint32_t i = 0; i < 8; ++i) {
         DiagRd32Safe(cur + i * 4, &f[i]);
         ev = ev || is_event(f[i]);
+      }
+      if (payloads && f[2] >= 0x10000u) {
+        payloads->push_back(f[2]);  // node +0x8 = payload pointer
       }
       uint32_t next = 0, next_off = 0;
       for (uint32_t i = 0; i < 8; ++i) {
@@ -356,8 +427,37 @@ void DispatcherDiagDumpAtFreeze() {
   }
   XELOGW("[dispatcher] QUEUES n={} (contents walk: undrained nodes + race check)",
          queues.size());
+  std::vector<uint32_t> payloads;
   for (uint32_t q : queues) {
-    DispatcherDiagWalkQueue(q);
+    DispatcherDiagWalkQueue(q, &payloads);
+  }
+  // Q1/Q2: classify each distinct node payload (the control block 82D7D728 +
+  // the only-in-stuck BABCxxxx pointers) — heap/type/protect + field window.
+  std::unordered_set<uint32_t> seen_payload;
+  XELOGW("[dispatcher] PAYLOADS n={} (distinct node +0x8 pointers, classified)",
+         payloads.size());
+  for (uint32_t p : payloads) {
+    if (seen_payload.insert(p).second) {
+      DispatcherDiagDumpPtr(p);
+    }
+  }
+
+  // Q3: disasm the worker WaitAny wake path around 82954BE4 (the post-wait LR)
+  // far enough to spot the queue-select predicate — why a woken worker picks
+  // 7C00 but not 6880. One-time.
+  static std::atomic<bool> wake_dumped{false};
+  if (!wake_dumped.exchange(true, std::memory_order_relaxed)) {
+    XELOGW("[dispatcher] WAKEPATH disasm @82954BE4 (worker post-WaitAny pick)");
+    for (uint32_t pc = 0x82954BE4u - 0x40u; pc < 0x82954BE4u + 0xC0u; pc += 4) {
+      uint32_t code = 0;
+      if (!DiagRd32Safe(pc, &code)) {
+        continue;
+      }
+      sb.Reset();
+      xe::cpu::ppc::DisasmPPC(pc, code, &sb);
+      XELOGW("[dispatcher]   wake {:08X}: {:08X}  {}", pc, code,
+             sb.to_string_view());
+    }
   }
 }
 
