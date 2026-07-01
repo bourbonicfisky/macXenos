@@ -428,6 +428,10 @@ class XThread : public XObject, public cpu::Thread {
   uint32_t last_error();
   void set_last_error(uint32_t error_code);
   void set_name(const std::string_view name);
+  // Returns a copy of the guest thread name taken while holding thread_lock_.
+  // Startup lambdas run on the new thread and must not read thread_name_ while
+  // another thread is inside set_name() reassigning it (frees the old buffer).
+  std::string thread_name_snapshot();
 
   X_STATUS Create();
   X_STATUS Exit(int exit_code);

@@ -878,17 +878,55 @@ void KernelState::TerminateTitle() {
   for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
     if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
       auto thread = it->second;
+#if XE_PLATFORM_MAC
+      auto native_thread = thread->thread();
+      XELOGI(
+          "[thread-diag] TerminateTitle target xthread_id={} handle={:08X} "
+          "native_tid={} native_handle={} running={} guest={}",
+          thread->thread_id(), thread->handle(),
+          native_thread ? native_thread->system_id() : 0,
+          native_thread ? native_thread->native_handle() : nullptr,
+          thread->is_running(), thread->is_guest_thread());
+#endif
 
       if (thread->is_running()) {
         // Need to step the thread to a safe point (returns it to guest code
         // so it's guaranteed to not be holding any locks / in host kernel
         // code / etc). Can't do that properly if we have the lock.
+#if XE_PLATFORM_MAC
+        XELOGI(
+            "[thread-diag] TerminateTitle before suspend xthread_id={} "
+            "handle={:08X} native_tid={} paused={}",
+            thread->thread_id(), thread->handle(),
+            native_thread ? native_thread->system_id() : 0,
+            emulator_->is_paused());
+#endif
         if (!emulator_->is_paused()) {
-          thread->thread()->Suspend();
+          bool suspend_result = thread->thread()->Suspend();
+#if XE_PLATFORM_MAC
+          XELOGI(
+              "[thread-diag] TerminateTitle suspend result xthread_id={} "
+              "handle={:08X} result={}",
+              thread->thread_id(), thread->handle(), suspend_result);
+#endif
         }
 
         global_lock.unlock();
+#if XE_PLATFORM_MAC
+        uint32_t safe_point_pc =
+            processor_->StepToGuestSafePoint(thread->thread_id());
+        XELOGI(
+            "[thread-diag] TerminateTitle safe-point result xthread_id={} "
+            "handle={:08X} pc={:08X} safe_state={}",
+            thread->thread_id(), thread->handle(), safe_point_pc,
+            safe_point_pc != 0);
+        XELOGI(
+            "[thread-diag] TerminateTitle proceeding to Terminate(0) "
+            "xthread_id={} handle={:08X} after_safe_point_pc={:08X}",
+            thread->thread_id(), thread->handle(), safe_point_pc);
+#else
         processor_->StepToGuestSafePoint(thread->thread_id());
+#endif
         thread->Terminate(0);
         global_lock.lock();
       }

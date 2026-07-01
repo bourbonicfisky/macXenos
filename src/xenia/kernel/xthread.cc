@@ -174,12 +174,24 @@ void XThread::set_last_error(uint32_t error_code) {
 void XThread::set_name(const std::string_view name) {
   std::lock_guard<std::mutex> lock(thread_lock_);
   thread_name_ = fmt::format("{} ({:08X})", name, handle());
+#if XE_PLATFORM_MAC
+  XELOGI(
+      "[thread-diag] XThread::set_name caller_tid={} xthread_id={} "
+      "handle={:08X} native_tid={} requested='{}' stored='{}'",
+      xe::threading::current_thread_system_id(), thread_id_, handle(),
+      thread_ ? thread_->system_id() : 0, name, thread_name_);
+#endif
 
   if (thread_) {
     // May be getting set before the thread is created.
     // One the thread is ready it will handle it.
     thread_->set_name(thread_name_);
   }
+}
+
+std::string XThread::thread_name_snapshot() {
+  std::lock_guard<std::mutex> lock(thread_lock_);
+  return thread_name_;
 }
 
 static uint8_t next_cpu = 0;
@@ -449,11 +461,30 @@ X_STATUS XThread::Create() {
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(handle());
 
+    // Snapshot the guest thread name once under thread_lock_. This lambda runs
+    // on the freshly-created thread; reading thread_name_ directly here would
+    // race a concurrent XThread::set_name() reassigning it.
+    const std::string thread_name = thread_name_snapshot();
+
     // Set name immediately, if we have one.
-    thread_->set_name(thread_name_);
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] XThread::Create start naming caller_tid={} "
+        "xthread_id={} handle={:08X} native_tid={} name='{}'",
+        xe::threading::current_thread_system_id(), thread_id_, handle(),
+        thread_ ? thread_->system_id() : 0, thread_name);
+#endif
+    thread_->set_name(thread_name);
 
     // Profiler needs to know about the thread.
-    xe::Profiler::ThreadEnter(thread_name_.c_str());
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] XThread::Create profiler enter caller_tid={} "
+        "xthread_id={} handle={:08X} native_tid={} name='{}'",
+        xe::threading::current_thread_system_id(), thread_id_, handle(),
+        thread_ ? thread_->system_id() : 0, thread_name);
+#endif
+    xe::Profiler::ThreadEnter(thread_name.c_str());
 
     // Execute user code.
     current_xthread_tls_ = this;
@@ -478,7 +509,7 @@ X_STATUS XThread::Create() {
   }
 
   // Set the thread name based on host ID (for easier debugging).
-  if (thread_name_.empty()) {
+  if (thread_name_snapshot().empty()) {
     set_name(fmt::format("XThread{:04X}", thread_->system_id()));
   }
 
@@ -549,6 +580,14 @@ X_STATUS XThread::Exit(int exit_code) {
 
 X_STATUS XThread::Terminate(int exit_code) {
   // TODO(benvanik): inform the profiler that this thread is exiting.
+#if XE_PLATFORM_MAC
+  XELOGI(
+      "[thread-diag] XThread::Terminate caller_tid={} xthread_id={} "
+      "handle={:08X} native_tid={} in_thread={} running={} exit_code={}",
+      xe::threading::current_thread_system_id(), thread_id_, handle(),
+      thread_ ? thread_->system_id() : 0, XThread::IsInThread(this), running_,
+      exit_code);
+#endif
 
   // Set exit code.
   X_KTHREAD* thread = guest_object<X_KTHREAD>();
@@ -572,7 +611,7 @@ X_STATUS XThread::Terminate(int exit_code) {
 
 void XThread::Execute() {
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
-              thread_id_, handle(), thread_name_, thread_->system_id());
+              thread_id_, handle(), thread_name_snapshot(), thread_->system_id());
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
 
@@ -1249,11 +1288,16 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Set thread ID override. This is used by logging.
       xe::threading::set_current_thread_id(thread->handle());
 
+      // Snapshot the name once for stable native-name + profiler use, matching
+      // the Create() startup path (avoids two separate reference reads racing a
+      // concurrent rename).
+      const std::string thread_name = thread->name();
+
       // Set name immediately, if we have one.
-      thread->thread_->set_name(thread->name());
+      thread->thread_->set_name(thread_name);
 
       // Profiler needs to know about the thread.
-      xe::Profiler::ThreadEnter(thread->name().c_str());
+      xe::Profiler::ThreadEnter(thread_name.c_str());
 
       current_xthread_tls_ = thread;
       current_thread_ = thread;
@@ -1304,7 +1348,7 @@ XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size,
 void XHostThread::Execute() {
   XELOGKERNEL(
       "XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)",
-      thread_id_, handle(), thread_name_, thread_->system_id());
+      thread_id_, handle(), thread_name_snapshot(), thread_->system_id());
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
   int ret = host_fn_();

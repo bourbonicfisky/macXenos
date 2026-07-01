@@ -60,6 +60,16 @@ DEFINE_bool(
     "WaitAll still uses the poll. Regression-check broadly before shipping.",
     "Threading");
 
+#if XE_PLATFORM_MAC
+DEFINE_string(
+    macos_thread_cancel_mode, "async",
+    "macOS diagnostic probe for guest-thread teardown. async is current "
+    "behavior. deferred prevents pthread cancellation from landing at arbitrary "
+    "instructions; it may convert heap corruption into a hang if a guest thread "
+    "never reaches a cancellation point. Diagnostic only, not a shippable fix.",
+    "Threading");
+#endif
+
 namespace xe {
 namespace threading {
 
@@ -1133,8 +1143,22 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void Terminate(int exit_code) {
     bool is_current_thread = pthread_self() == thread_;
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] PosixCondition::Terminate entry caller_tid={} "
+        "target_tid={} pthread={} current={} exit_code={}",
+        current_thread_system_id(), system_id(), reinterpret_cast<void*>(thread_),
+        is_current_thread, exit_code);
+#endif
     {
       std::unique_lock lock(state_mutex_);
+#if XE_PLATFORM_MAC
+      XELOGI(
+          "[thread-diag] PosixCondition::Terminate state caller_tid={} "
+          "target_tid={} state={} current={} exit_code={}",
+          current_thread_system_id(), system_id(), static_cast<int>(state_),
+          is_current_thread, exit_code);
+#endif
       if (state_ == State::kFinished) {
         if (is_current_thread) {
           // This is really bad. Some thread must have called Terminate() on us
@@ -1474,6 +1498,14 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 
   void set_name(std::string name) override {
     handle_.WaitStarted();
+#if XE_PLATFORM_MAC
+    // Serialize concurrent renames of the same thread object. The base
+    // Thread::set_name() assigns the name_ std::string without a lock, so a
+    // startup lambda naming itself while another thread runs XThread::set_name
+    // can corrupt that string. handle_.set_name() is independently guarded by
+    // state_mutex_, so this must be a distinct mutex to avoid a self-deadlock.
+    std::lock_guard<std::mutex> name_lock(name_mutex_);
+#endif
     Thread::set_name(name);
     if (name.length() > 15) {
       name = name.substr(0, 15);
@@ -1508,13 +1540,32 @@ class PosixThread final : public PosixConditionHandle<Thread> {
   void Terminate(int exit_code) override { handle_.Terminate(exit_code); }
 
   void WaitSuspended() { handle_.WaitSuspended(); }
+
+#if XE_PLATFORM_MAC
+ private:
+  // Guards set_name() against concurrent renames of this thread object.
+  std::mutex name_mutex_;
+#endif
 };
 
 thread_local PosixThread* current_thread_ = nullptr;
 
 void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #if !XE_PLATFORM_ANDROID
-  if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
+#if XE_PLATFORM_MAC
+  int cancel_type = PTHREAD_CANCEL_ASYNCHRONOUS;
+  if (cvars::macos_thread_cancel_mode == "deferred") {
+    cancel_type = PTHREAD_CANCEL_DEFERRED;
+  } else if (cvars::macos_thread_cancel_mode != "async") {
+    XELOGW("[thread-diag] unknown macos_thread_cancel_mode='{}'; using async",
+           cvars::macos_thread_cancel_mode);
+  }
+  XELOGI("[thread-diag] pthread cancel mode {}",
+         cancel_type == PTHREAD_CANCEL_DEFERRED ? "deferred" : "async");
+#else
+  int cancel_type = PTHREAD_CANCEL_ASYNCHRONOUS;
+#endif
+  if (pthread_setcanceltype(cancel_type, nullptr) != 0) {
     assert_always();
   }
 #endif
