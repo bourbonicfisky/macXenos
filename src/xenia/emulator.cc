@@ -1267,24 +1267,30 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     return processor()->OnUnhandledException(ex);
   }
 
-  if (!(ex->pc() >= code_base && ex->pc() < code_end)) {
-    // Didn't occur in guest code. Let it pass.
+  // Only bail to the host/default handler when this isn't a guest thread at
+  // all. A guest thread that faults outside the mapped [code_base, code_end)
+  // range still has a valid guest context worth dumping: a null/garbage
+  // indirect branch (pc == 0), or a fault in a secondary JIT region the coarse
+  // range check misses. Both used to decline silently here and lose the guest
+  // PC/LR/registers — turning a diagnosable crash into an opaque one.
+  auto current_thread = kernel::XThread::GetCurrentThread();
+  if (!current_thread) {
+    // Host-side fault on a non-guest thread. Let it pass.
     return false;
   }
+  const bool pc_in_code = ex->pc() >= code_base && ex->pc() < code_end;
 
-  // Within range — this is a guest crash. Emit the crash dump BEFORE pausing:
-  // the dump only reads the crashed (current) thread's own context, which does
-  // not require other threads to be suspended, and on macOS Pause() can block
-  // indefinitely (AudioSystem::Pause's worker never acks pause_fence_), which
-  // would otherwise swallow the crash dump and make the failure look like an
-  // idle stall. Pause (to freeze other threads for the dialog) comes after.
+  // Emit the crash dump BEFORE pausing: the dump only reads the crashed
+  // (current) thread's own context, which does not require other threads to be
+  // suspended, and on macOS Pause() can block indefinitely (AudioSystem::Pause's
+  // worker never acks pause_fence_), which would otherwise swallow the crash
+  // dump and make the failure look like an idle stall. Pause (to freeze other
+  // threads for the dialog) comes after.
 
-  // Dump information into the log.
-  auto current_thread = kernel::XThread::GetCurrentThread();
-  assert_not_null(current_thread);
-
-  auto guest_function = code_cache->LookupFunction(ex->pc());
-  assert_not_null(guest_function);
+  // LookupFunction may fail when pc is 0 or in a region the code cache doesn't
+  // index; the guest register/LR/CTR context is still valid and printed below.
+  auto guest_function =
+      pc_in_code ? code_cache->LookupFunction(ex->pc()) : nullptr;
 
   auto context = current_thread->thread_state()->context();
 
@@ -1295,9 +1301,29 @@ bool Emulator::ExceptionCallback(Exception* ex) {
                                current_thread->thread_id()));
   crash_msg.append(
       fmt::format("Thread Handle: 0x{:08X}\n", current_thread->handle()));
-  crash_msg.append(
-      fmt::format("PC: 0x{:08X}\n",
-                  guest_function->MapMachineCodeToGuestAddress(ex->pc())));
+  if (guest_function) {
+    uint32_t guest_pc = guest_function->MapMachineCodeToGuestAddress(ex->pc());
+    crash_msg.append(fmt::format("PC: 0x{:08X}\n", guest_pc));
+    // Raw guest instruction word at the faulting PC (stored big-endian in guest
+    // memory) so the faulting load/store and its base register can be decoded.
+    if (auto* instr_be = memory()->TranslateVirtualBE<uint32_t>(guest_pc)) {
+      crash_msg.append(
+          fmt::format("Faulting instr: 0x{:08X}\n", uint32_t(*instr_be)));
+    }
+  } else {
+    // pc == 0 (null/garbage jump) or a code region the cache can't map. The
+    // guest PC is unknown, but LR below still names who branched here.
+    crash_msg.append(
+        fmt::format("PC: <unmapped>  host_pc=0x{:016X}\n", ex->pc()));
+  }
+  // Caller/branch context: LR is the return address (who called the crashing
+  // function), CTR is the target of the last indirect call/branch (bctrl), CR
+  // is the condition register. Essential for locating the guest call site when
+  // the crashing function has no symbols — and for a null/garbage jump, LR names
+  // the caller that branched into hyperspace.
+  crash_msg.append(fmt::format("LR: 0x{:016X}  CTR: 0x{:016X}  CR: 0x{:08X}\n",
+                               context->lr, context->ctr,
+                               static_cast<uint32_t>(context->cr())));
   if (ex->code() == Exception::Code::kAccessViolation) {
     const char* op_str = "unknown";
     if (ex->access_violation_operation() ==
