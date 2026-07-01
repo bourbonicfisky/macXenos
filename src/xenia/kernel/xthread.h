@@ -516,6 +516,9 @@ class XThread : public XObject, public cpu::Thread {
 
   void DeliverAPCs();
   void RundownAPCs();
+#if !XE_PLATFORM_WIN32
+  void RetainUntilNativeThreadExit();
+#endif
 
   xe::threading::WaitHandle* GetWaitHandle() override { return thread_.get(); }
 

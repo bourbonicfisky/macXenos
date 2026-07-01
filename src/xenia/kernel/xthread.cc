@@ -10,6 +10,7 @@
 #include "xenia/kernel/xthread.h"
 
 #if !XE_PLATFORM_WIN32
+#include <pthread.h>
 #include <signal.h>
 #endif
 
@@ -130,6 +131,27 @@ XThread::~XThread() {
 }
 
 thread_local XThread* current_xthread_tls_ = nullptr;
+
+#if !XE_PLATFORM_WIN32
+namespace {
+
+pthread_key_t xthread_native_exit_release_key;
+pthread_once_t xthread_native_exit_release_key_once = PTHREAD_ONCE_INIT;
+
+void ReleaseRetainedXThreadOnNativeExit(void* value) {
+  if (value) {
+    static_cast<XThread*>(value)->Release();
+  }
+}
+
+void CreateXThreadNativeExitReleaseKey() {
+  int result = pthread_key_create(&xthread_native_exit_release_key,
+                                  ReleaseRetainedXThreadOnNativeExit);
+  assert_zero(result);
+}
+
+}  // namespace
+#endif
 
 bool XThread::IsInThread() { return Thread::IsInThread(); }
 
@@ -571,6 +593,12 @@ X_STATUS XThread::Exit(int exit_code) {
   xe::Profiler::ThreadExit();
 
   running_ = false;
+#if !XE_PLATFORM_WIN32
+  // Thread::Exit() still uses the POSIX thread-local current_thread_ to signal
+  // the native Thread object. If this ReleaseHandle() drops the last guest
+  // handle, keep the XThread and its thread_ wrapper alive until pthread exit.
+  RetainUntilNativeThreadExit();
+#endif
   ReleaseHandle();
 
   // NOTE: this does not return!
@@ -599,6 +627,11 @@ X_STATUS XThread::Terminate(int exit_code) {
 
   running_ = false;
   if (XThread::IsInThread(this)) {
+#if !XE_PLATFORM_WIN32
+    // See XThread::Exit(): Thread::Exit() needs the POSIX thread wrapper after
+    // the guest handle release, so defer object destruction until native exit.
+    RetainUntilNativeThreadExit();
+#endif
     ReleaseHandle();
     xe::threading::Thread::Exit(exit_code);
   } else {
@@ -755,6 +788,26 @@ void XThread::DeliverAPCs() {
 void XThread::RundownAPCs() {
   xboxkrnl::xeRundownApcs(thread_state_->context());
 }
+
+#if !XE_PLATFORM_WIN32
+void XThread::RetainUntilNativeThreadExit() {
+  int once_result =
+      pthread_once(&xthread_native_exit_release_key_once,
+                   CreateXThreadNativeExitReleaseKey);
+  assert_zero(once_result);
+
+  if (pthread_getspecific(xthread_native_exit_release_key) == this) {
+    return;
+  }
+
+  Retain();
+  int set_result = pthread_setspecific(xthread_native_exit_release_key, this);
+  if (set_result != 0) {
+    Release();
+    assert_always("Unable to defer XThread release until native thread exit.");
+  }
+}
+#endif
 
 int32_t XThread::QueryPriority() { return thread_->priority(); }
 
