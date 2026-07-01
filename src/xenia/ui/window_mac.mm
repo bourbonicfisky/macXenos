@@ -45,7 +45,7 @@ static void ShowMacAboutPanel() {
                                              attributes:text_attrs]];
   };
 
-  add_line(@"Mac build of Xenia Canary. Ported by dmg:\n",
+  add_line(@"macXenos — an unofficial macOS build of Xenia Canary. Ported by dmg:\n",
            @"https://www.patreon.com/dmug");
   add_line(@"Original project:\n",
            @"https://github.com/xenia-canary/xenia-canary");
@@ -56,7 +56,7 @@ static void ShowMacAboutPanel() {
            @"https://github.com/xenia-project/game-compatibility/issues");
 
   [NSApp orderFrontStandardAboutPanel:@{
-    NSAboutPanelOptionApplicationName : @"Xenia Canary, Mac Build",
+    NSAboutPanelOptionApplicationName : @"macXenos",
     NSAboutPanelOptionCredits : credits,
   }];
   [NSApp activateIgnoringOtherApps:YES];
@@ -291,7 +291,14 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   NSMenu* app_menu = [[NSMenu alloc] initWithTitle:@""];
   app_menu.autoenablesItems = NO;
 
-  NSString* app_name = [[NSProcessInfo processInfo] processName];
+  // Prefer the bundle's CFBundleName (e.g. "macXenos") so the app menu reads
+  // "About macXenos / Quit macXenos" for the packaged .app. For the bare dev
+  // binary (no bundle) this is empty, so fall back to the process name.
+  NSString* app_name =
+      [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+  if (app_name.length == 0) {
+    app_name = [[NSProcessInfo processInfo] processName];
+  }
 
   NSMenuItem* about =
       [[NSMenuItem alloc] initWithTitle:[@"About " stringByAppendingString:app_name]

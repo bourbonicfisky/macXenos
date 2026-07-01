@@ -5,11 +5,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Xenia Canary</string>
+	<string>macXenos</string>
 	<key>CFBundleDisplayName</key>
-	<string>Xenia Canary</string>
+	<string>macXenos</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.xenia.canary</string>
+	<string>com.greggant.macxenos</string>
 	<key>CFBundleExecutable</key>
 	<string>xenia_canary</string>
 	<key>CFBundleIconFile</key>
@@ -29,7 +29,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Xenia Canary contributors. BSD license.</string>
+	<string>macXenos — unofficial macOS port. Xenia Canary contributors. BSD license.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
 </dict>

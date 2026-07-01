@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # package_mac.sh - Assemble a distributable, Developer-ID-signed macOS app bundle
-# (Xenia Canary.app) and a .dmg from an already-built bare xenia_canary binary.
+# (macXenos.app) and a .dmg from an already-built bare xenia_canary binary.
 #
 # This is a release-time step; it does NOT change the dev build. The bare binary
 # produced by `cmake --build` keeps working as-is. See
@@ -53,7 +53,7 @@ done
 UNIVERSAL=0
 [[ -n "${X86_BIN}" ]] && UNIVERSAL=1
 
-APP_NAME="Xenia Canary"
+APP_NAME="macXenos"
 BUNDLE_EXEC="xenia_canary"
 BIN_DIR="${REPO_ROOT}/build/bin/macOS/${CONFIG}"
 BIN_PATH="${BIN_DIR}/${BUNDLE_EXEC}"
@@ -64,6 +64,7 @@ CONTENTS="${APP_DIR}/Contents"
 PLIST_IN="${REPO_ROOT}/src/xenia/app/Info.plist.in"
 ENTITLEMENTS="${REPO_ROOT}/src/xenia/app/xenia.dist.entitlements"
 ICON_SRC="${REPO_ROOT}/src/xenia/app/xenia.icns"
+CREDITS_SRC="${REPO_ROOT}/src/xenia/app/Credits.rtf"
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -103,6 +104,11 @@ else
 fi
 [[ -f "${ICON_SRC}" ]] && cp "${ICON_SRC}" "${CONTENTS}/Resources/xenia.icns" \
   || log "warning: no icon at ${ICON_SRC}; bundle will use the generic icon"
+# Credits.rtf is auto-loaded by the standard About panel (Patreon/repo links,
+# "Ported by dmg"). RTF (vs HTML) leaves body text uncolored so it stays
+# readable in both light and dark mode.
+[[ -f "${CREDITS_SRC}" ]] && cp "${CREDITS_SRC}" "${CONTENTS}/Resources/Credits.rtf" \
+  || log "warning: no Credits.rtf at ${CREDITS_SRC}; About panel will show no credits"
 
 # Info.plist from template with version substitution.
 sed -e "s/@SHORT_VERSION@/${SHORT_VERSION}/g" \
@@ -170,7 +176,7 @@ JSON
 MVK_VER="$(basename "$(dirname "$(dirname "${MVK_SRC}")")")"
 VKL_VER="$(basename "$(dirname "$(dirname "${VK_LOADER_SRC}")")")"
 cat > "${CONTENTS}/Resources/VERSIONS.txt" <<EOF
-Xenia Canary ${SHORT_VERSION} (${BRANCH} ${COMMIT_SHORT})
+macXenos (unofficial macOS port) — Xenia Canary ${SHORT_VERSION} (${BRANCH} ${COMMIT_SHORT})
 Bundled MoltenVK : ${MVK_SRC} (${MVK_VER})
 Bundled loader   : ${VK_LOADER_SRC} (${VKL_VER})
 EOF
