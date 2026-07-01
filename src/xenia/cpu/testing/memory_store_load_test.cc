@@ -47,6 +47,29 @@ TEST_CASE("STORE_V128_CONSTANT", "[instr]") {
       });
 }
 
+TEST_CASE("STORE_V128_CONSTANT_U64_MOVI_BYTEMASK", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto addr = LoadGPR(b, 4);
+    auto value = b.LoadConstantVec128(vec128q(0x00000000FFFFFFFFULL));
+    b.Store(addr, value);
+    b.Return();
+  });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = test.memory->SystemHeapAlloc(16, 16);
+        ctx->r[4] = addr;
+        std::memset(test.memory->TranslateVirtual(addr), 0, 16);
+      },
+      [&test](PPCContext* ctx) {
+        auto* host =
+            test.memory->TranslateVirtual(static_cast<uint32_t>(ctx->r[4]));
+        vec128_t result;
+        std::memcpy(&result, host, 16);
+        REQUIRE(result == vec128q(0x00000000FFFFFFFFULL));
+        test.memory->SystemHeapFree(static_cast<uint32_t>(ctx->r[4]));
+      });
+}
+
 TEST_CASE("STORE_V128_CONSTANT_BYTE_SWAP", "[instr]") {
   TestFunction test([](HIRBuilder& b) {
     auto addr = LoadGPR(b, 4);

@@ -236,7 +236,7 @@ inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
   const double splat_f64 = val.f64[0];
   if (all_equal_u64) {
     if (uint8_t movi_imm; TryMovi64Imm(val.low, movi_imm)) {
-      e.movi(VReg2D(vreg_idx), movi_imm);
+      e.movi(VReg2D(vreg_idx), splat_u64);
     } else if (IsFmov64Imm(splat_f64)) {
       e.fmov(VReg(vreg_idx).d2, splat_f64);
     } else {
