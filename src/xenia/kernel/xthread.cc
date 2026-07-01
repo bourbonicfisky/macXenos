@@ -196,6 +196,15 @@ void XThread::set_last_error(uint32_t error_code) {
 void XThread::set_name(const std::string_view name) {
   std::lock_guard<std::mutex> lock(thread_lock_);
   thread_name_ = fmt::format("{} ({:08X})", name, handle());
+#if 0  // [thread-diag] Re-enable for thread-name lifetime probes.
+#if XE_PLATFORM_MAC
+  XELOGI(
+      "[thread-diag] XThread::set_name caller_tid={} xthread_id={} "
+      "handle={:08X} native_tid={} requested='{}' stored='{}'",
+      xe::threading::current_thread_system_id(), thread_id_, handle(),
+      thread_ ? thread_->system_id() : 0, name, thread_name_);
+#endif
+#endif
 
   if (thread_) {
     // May be getting set before the thread is created.
@@ -482,9 +491,27 @@ X_STATUS XThread::Create() {
     const std::string thread_name = thread_name_snapshot();
 
     // Set name immediately, if we have one.
+#if 0  // [thread-diag] Re-enable for thread startup lifetime probes.
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] XThread::Create start naming caller_tid={} "
+        "xthread_id={} handle={:08X} native_tid={} name='{}'",
+        xe::threading::current_thread_system_id(), thread_id_, handle(),
+        thread_ ? thread_->system_id() : 0, thread_name);
+#endif
+#endif
     thread_->set_name(thread_name);
 
     // Profiler needs to know about the thread.
+#if 0  // [thread-diag] Re-enable for thread startup lifetime probes.
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] XThread::Create profiler enter caller_tid={} "
+        "xthread_id={} handle={:08X} native_tid={} name='{}'",
+        xe::threading::current_thread_system_id(), thread_id_, handle(),
+        thread_ ? thread_->system_id() : 0, thread_name);
+#endif
+#endif
     xe::Profiler::ThreadEnter(thread_name.c_str());
 
     // Execute user code.
@@ -587,6 +614,16 @@ X_STATUS XThread::Exit(int exit_code) {
 
 X_STATUS XThread::Terminate(int exit_code) {
   // TODO(benvanik): inform the profiler that this thread is exiting.
+#if 0  // [thread-diag] Re-enable for self/external termination probes.
+#if XE_PLATFORM_MAC
+  XELOGI(
+      "[thread-diag] XThread::Terminate caller_tid={} xthread_id={} "
+      "handle={:08X} native_tid={} in_thread={} running={} exit_code={}",
+      xe::threading::current_thread_system_id(), thread_id_, handle(),
+      thread_ ? thread_->system_id() : 0, XThread::IsInThread(this), running_,
+      exit_code);
+#endif
+#endif
 
   // Set exit code.
   X_KTHREAD* thread = guest_object<X_KTHREAD>();

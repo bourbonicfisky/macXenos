@@ -1143,8 +1143,26 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void Terminate(int exit_code) {
     bool is_current_thread = pthread_self() == thread_;
+#if 0  // [thread-diag] Re-enable for self/external termination probes.
+#if XE_PLATFORM_MAC
+    XELOGI(
+        "[thread-diag] PosixCondition::Terminate entry caller_tid={} "
+        "target_tid={} pthread={} current={} exit_code={}",
+        current_thread_system_id(), system_id(),
+        reinterpret_cast<void*>(thread_), is_current_thread, exit_code);
+#endif
+#endif
     {
       std::unique_lock lock(state_mutex_);
+#if 0  // [thread-diag] Re-enable for self/external termination probes.
+#if XE_PLATFORM_MAC
+      XELOGI(
+          "[thread-diag] PosixCondition::Terminate state caller_tid={} "
+          "target_tid={} state={} current={} exit_code={}",
+          current_thread_system_id(), system_id(), static_cast<int>(state_),
+          is_current_thread, exit_code);
+#endif
+#endif
       if (state_ == State::kFinished) {
         if (is_current_thread) {
           // This is really bad. Some thread must have called Terminate() on us
@@ -1546,6 +1564,10 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     XELOGW("Unknown macos_thread_cancel_mode='{}'; using async",
            cvars::macos_thread_cancel_mode);
   }
+#if 0  // [thread-diag] Re-enable for cancel-mode validation probes.
+  XELOGI("[thread-diag] pthread cancel mode {}",
+         cancel_type == PTHREAD_CANCEL_DEFERRED ? "deferred" : "async");
+#endif
 #else
   int cancel_type = PTHREAD_CANCEL_ASYNCHRONOUS;
 #endif
