@@ -22,6 +22,7 @@
 #include "xenia/base/host_thread_context.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 
 namespace xe {
@@ -228,20 +229,39 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       // a 0 fault address makes the write-watch handler decline a recoverable
       // fault and crash via the restore-default path. Decode direction from the
       // ESR WnR bit, mirroring the Linux path, and only fall back to decoding
-      // the faulting instruction if the syndrome is not a Data Abort.
+      // the faulting instruction if the syndrome is not a Data Abort or
+      // Instruction Abort.
       const _STRUCT_ARM_EXCEPTION_STATE64& es = mcontext.__es;
       mac_fault_address = uint64_t(es.__far);
       const uint32_t mac_esr = es.__esr;
-      if (((mac_esr >> 26) & 0b111110) == 0b100100) {
+      const uint32_t mac_esr_ec = (mac_esr >> 26) & 0b111111;
+      const bool is_data_abort = (mac_esr_ec & 0b111110) == 0b100100;
+      const bool is_instruction_abort =
+          (mac_esr_ec & 0b111110) == 0b100000;
+      if (is_data_abort) {
         access_violation_operation =
             (mac_esr & (UINT32_C(1) << 6))
                 ? Exception::AccessViolationOperation::kWrite
                 : Exception::AccessViolationOperation::kRead;
+      } else if (is_instruction_abort || !thread_context.pc) {
+        access_violation_operation =
+            Exception::AccessViolationOperation::kUnknown;
       } else {
         bool instruction_is_store;
-        if (IsArm64LoadPrefetchStore(
-                *reinterpret_cast<const uint32_t*>(thread_context.pc),
-                instruction_is_store)) {
+        uint32_t instruction = 0;
+        size_t pc_region_length = sizeof(instruction);
+        xe::memory::PageAccess pc_access = xe::memory::PageAccess::kNoAccess;
+        const bool can_read_pc =
+            xe::memory::QueryProtect(reinterpret_cast<void*>(thread_context.pc),
+                                     pc_region_length, pc_access) &&
+            pc_region_length >= sizeof(instruction) &&
+            pc_access != xe::memory::PageAccess::kNoAccess;
+        if (can_read_pc) {
+          instruction =
+              *reinterpret_cast<const uint32_t*>(thread_context.pc);
+        }
+        if (can_read_pc &&
+            IsArm64LoadPrefetchStore(instruction, instruction_is_store)) {
           access_violation_operation =
               instruction_is_store ? Exception::AccessViolationOperation::kWrite
                                    : Exception::AccessViolationOperation::kRead;
