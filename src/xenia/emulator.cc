@@ -296,8 +296,10 @@ X_STATUS Emulator::Setup(
     return result;
   }
 
-  // Add inputSystem to UI
-  imgui_drawer_->LoadInputSystem(input_system_.get());
+  // Add inputSystem to UI. Headless tools (trace-dump) have no drawer.
+  if (imgui_drawer_) {
+    imgui_drawer_->LoadInputSystem(input_system_.get());
+  }
 
   XELOGI("{}: Initializing VFS...", __func__);
   // Bring up the virtual filesystem used by the kernel.
