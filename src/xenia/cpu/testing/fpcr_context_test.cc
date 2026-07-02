@@ -91,6 +91,30 @@ TEST_CASE("MAX_MIN_F64_BOTH_CONSTANT", "[instr]") {
            });
 }
 
+// Lowering-path coherence: DOT_PRODUCT with a constant operand must equal
+// the register form. Before the fix, constants materialized into scratch
+// v0/v1 were clobbered by the low-half products before the high-half
+// widening read them (a64 D-P sequences; found by the const-form suite:
+// dp3((2^127 splat), {0,-0,1,-1}) returned 0 instead of 2^127).
+TEST_CASE("DOT_PRODUCT_CONSTANT_OPERAND_FORM", "[instr]") {
+  vec128_t k2_127 = vec128i(0x7F000000);  // 2^127 splat
+  TestFunction test([&](HIRBuilder& b) {
+    StoreVR(b, 3, b.DotProduct3(b.LoadConstantVec128(k2_127), LoadVR(b, 4)));
+    StoreVR(b, 5, b.DotProduct4(LoadVR(b, 4), b.LoadConstantVec128(k2_127)));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->v[4] = vec128i(0x00000000, 0x80000000, 0x3F800000, 0xBF800000);
+      },
+      [](PPCContext* ctx) {
+        // dp3 = 2^127*0 + 2^127*(-0) + 2^127*1 = 2^127, splatted.
+        REQUIRE(ctx->v[3] == vec128i(0x7F000000));
+        // dp4 adds 2^127*(-1): exact sum 0.
+        REQUIRE(ctx->v[5] == vec128i(0x00000000));
+      });
+}
+
 #if XE_ARCH_ARM64
 // D1: VMX float arithmetic must keep flushing denormals (NJM default on)
 // after a host call (POW2 V128 lowers to CallNativeSafe) in the same block.
