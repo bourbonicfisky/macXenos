@@ -38,6 +38,16 @@
 
 DECLARE_bool(clear_memory_page_state);
 
+DEFINE_bool(
+    moltenvk_skip_rectangle_draws, false,
+    "Temporary G1 diagnostic: skip all draws that use the "
+    "rectangle-list-as-triangle-strip vertex shader expansion (the "
+    "geometry-shader-less MoltenVK path). If the wireframe overlay "
+    "disappears while this is set, the rectangle expansion is the source. "
+    "Breaks fullscreen passes / UI compositing while enabled - diagnostic "
+    "use only.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -2417,6 +2427,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     if (!primitive_processing_result.host_draw_vertex_count) {
       // Nothing to draw.
+      return true;
+    }
+    if (cvars::moltenvk_skip_rectangle_draws &&
+        primitive_processing_result.host_vertex_shader_type ==
+            Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+      // Temporary G1 diagnostic - see the moltenvk_skip_rectangle_draws cvar
+      // help. Remove with the extend-moltenvk-primitive-restart-widening
+      // OpenSpec change.
+      static bool logged_skip_once = false;
+      if (!logged_skip_once) {
+        logged_skip_once = true;
+        // XELOGI, not XELOGGPU: GPU logging is Debug-level and filtered out
+        // at the default log level, which would silently hide the evidence.
+        XELOGI(
+            "VulkanCommandProcessor: skipping rectangle-list draws "
+            "(--moltenvk_skip_rectangle_draws diagnostic is enabled)");
+      }
       return true;
     }
     // TODO(Triang3l): Geometry-type-specific vertex shader, vertex shader as

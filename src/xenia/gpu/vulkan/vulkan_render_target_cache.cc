@@ -1558,6 +1558,15 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(
     default:
       return VK_NULL_HANDLE;
   }
+  // Temporary G1 diagnostic (once per cached render pass key, XELOGI so it is
+  // visible at the default log level): which guest MSAA modes the title uses
+  // and which host sample count each maps to. Remove with the
+  // extend-moltenvk-primitive-restart-widening OpenSpec change.
+  XELOGI(
+      "RenderTargetCache: render pass created: guest_msaa={} host_samples={} "
+      "(2x native supported: {})",
+      uint32_t(key.msaa_samples), uint32_t(samples),
+      msaa_2x_attachments_supported_);
 
   VkAttachmentDescription attachments[1 + xenos::kMaxColorRenderTargets];
   if (key.depth_and_color_used & 0b1) {

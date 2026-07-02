@@ -16,6 +16,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -33,6 +34,25 @@
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
+
+DEFINE_bool(
+    moltenvk_disable_centroid_interpolation, false,
+    "Temporary G1 diagnostic: force all pixel shader interpolators to "
+    "center (never centroid) sampling. Centroid interpolation only differs "
+    "from center on partially-covered MSAA edge pixels; if the dark "
+    "edge-line mesh disappears with this set, MoltenVK/Metal centroid "
+    "handling at MSAA edge pixels is the source. Diagnostic use only - "
+    "center sampling can cause texture bleeding at polygon edges the guest "
+    "avoided via centroid.",
+    "GPU");
+DEFINE_bool(
+    moltenvk_force_primitive_restart, true,
+    "On MoltenVK, create strip/fan pipelines with primitiveRestartEnable "
+    "forced on to match Metal's always-enabled primitive restart. Disable "
+    "only for G1 diagnosis (A/B of the 681935cc3 force-on): MoltenVK will "
+    "warn per strip pipeline, and some MoltenVK versions may fail pipeline "
+    "creation (historically observed as a DOA5 round-load stall).",
+    "GPU");
 
 // Shader bytecode.
 namespace shaders {
@@ -408,11 +428,13 @@ VulkanPipelineCache::GetCurrentPixelShaderModification(
 
   modification.pixel.interpolator_mask = interpolator_mask;
   modification.pixel.interpolators_centroid =
-      interpolator_mask &
-      ~xenos::GetInterpolatorSamplingPattern(
-          regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
-          regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
-          regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+      cvars::moltenvk_disable_centroid_interpolation
+          ? 0
+          : interpolator_mask &
+                ~xenos::GetInterpolatorSamplingPattern(
+                    regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
+                    regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+                    regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
 
   if (param_gen_pos < xenos::kMaxInterpolators) {
     modification.pixel.param_gen_enable = 1;
@@ -1262,6 +1284,25 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
     description_out.front_face_clockwise = pa_su_sc_mode_cntl.face != 0;
   } else {
     description_out.polygon_mode = PipelinePolygonMode::kFill;
+  }
+  if (description_out.polygon_mode != PipelinePolygonMode::kFill) {
+    // Temporary G1 diagnostic: retail titles are not expected to request
+    // non-fill rasterization, so if this fires during wireframe-overlay
+    // scenes, the overlay is literal line/point rasterization (dual-mode
+    // polymode decode, the pointPolygons->kLine downgrade, or a corrupted
+    // PA_SU_SC_MODE_CNTL). Remove with the
+    // extend-moltenvk-primitive-restart-widening OpenSpec change.
+    static uint32_t polymode_nonfill_log_count = 0;
+    uint32_t log_index = polymode_nonfill_log_count++;
+    if (log_index < 8 || !(log_index & 1023)) {
+      // XELOGI, not XELOGGPU: GPU logging is Debug-level and filtered out at
+      // the default log level, which would silently hide the evidence.
+      XELOGI(
+          "VulkanPipelineCache: non-FILL polygon mode {} requested (#{}): "
+          "PA_SU_SC_MODE_CNTL=0x{:08X}",
+          uint32_t(description_out.polygon_mode), log_index,
+          pa_su_sc_mode_cntl.value);
+    }
   }
 
   if (render_target_cache_.GetPath() ==
@@ -2703,7 +2744,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   // disable restart); 32-bit buffers can never contain the 0xFFFFFFFF sentinel as
   // a real index. List topologies keep VK_FALSE (restart is N/A and asserted off).
   bool force_primitive_restart = false;
-  if (vulkan_device->properties().driverID == VK_DRIVER_ID_MOLTENVK) {
+  if (cvars::moltenvk_force_primitive_restart &&
+      vulkan_device->properties().driverID == VK_DRIVER_ID_MOLTENVK) {
     switch (description.primitive_topology) {
       case PipelinePrimitiveTopology::kLineStrip:
       case PipelinePrimitiveTopology::kTriangleStrip:

@@ -1387,6 +1387,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
   builder_->addMemberDecoration(
       type_struct_per_vertex, kOutputPerVertexMemberPosition,
       spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::Position));
+  // Member-level Invariant, in addition to the variable-level decoration
+  // below: this is what `invariant gl_Position;` compiles to, and it is what
+  // SPIRV-Cross's MSL backend keys on to emit `[[position, invariant]]`.
+  // Without it, MoltenVK generates plain `[[position]]`, and Apple's
+  // tile-based GPUs may compute different positions in the binning and
+  // rendering passes - producing sub-pixel cracks along every triangle edge
+  // (the macOS "wireframe mesh" G1 artifact).
+  builder_->addMemberDecoration(type_struct_per_vertex,
+                                kOutputPerVertexMemberPosition,
+                                spv::DecorationInvariant);
 
   // Decorate clip/cull arrays only if allocated.
   if (clip_distance_count > 0) {

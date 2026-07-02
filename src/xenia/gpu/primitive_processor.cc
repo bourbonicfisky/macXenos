@@ -10,6 +10,7 @@
 #include "xenia/gpu/primitive_processor.h"
 
 #include <cstring>
+#include <unordered_map>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
@@ -57,6 +58,16 @@ DEFINE_bool(
     "Disable only to confirm the symptom (geometry partially vanishing / "
     "flickering on Metal); has no effect on other backends (gated on the host "
     "being unable to disable primitive restart).",
+    "GPU");
+DEFINE_bool(
+    moltenvk_draw_diagnostics, false,
+    "Temporary G1 diagnostics for hosts that cannot disable primitive restart "
+    "(Metal/MoltenVK): for every indexed draw, log a once-per-signature line "
+    "with the topology, index format, endian, primitive-reset state, "
+    "processing path, and whether a maximum index value (0xFFFF 16-bit / "
+    "0xFFFFFFFF 32-bit) present in the guest buffer reaches the host draw "
+    "unprotected (would be eaten by Metal's always-on primitive restart). "
+    "Scans every indexed draw's guest buffer - diagnostic use only.",
     "GPU");
 DEFINE_bool(
     ignore_32bit_vertex_index_support, false,
@@ -1021,6 +1032,97 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
           }
           cache_transaction.SetNewResult(cacheable);
         }
+      }
+    }
+
+    // Temporary G1 diagnostics (--moltenvk_draw_diagnostics): classify every
+    // indexed draw on hosts with always-on primitive restart (Metal) and
+    // report whether a max index value present in the guest buffer reaches
+    // the host draw unprotected. Remove with the
+    // extend-moltenvk-primitive-restart-widening OpenSpec change.
+    if (cvars::moltenvk_draw_diagnostics &&
+        host_primitive_reset_always_enabled_ &&
+        !(tessellation_enabled &&
+          tessellation_mode == xenos::TessellationMode::kAdaptive)) {
+      bool max_index_present = false;
+      if (guest_index_format == xenos::IndexFormat::kInt16) {
+        // 0xFFFF (all bytes FF) is endian-invariant.
+        auto indices =
+            memory_.TranslatePhysical<const uint16_t*>(guest_index_base);
+        for (uint32_t i = 0; i < guest_draw_vertex_count; ++i) {
+          if (indices[i] == UINT16_MAX) {
+            max_index_present = true;
+            break;
+          }
+        }
+      } else {
+        // A raw 0xFFFFFFFF dword is Metal's 32-bit restart sentinel in any
+        // endianness, and is a legal guest value (24-bit index 0xFFFFFF with
+        // an all-ones ignored top byte).
+        auto indices =
+            memory_.TranslatePhysical<const uint32_t*>(guest_index_base);
+        for (uint32_t i = 0; i < guest_draw_vertex_count; ++i) {
+          if (indices[i] == UINT32_MAX) {
+            max_index_present = true;
+            break;
+          }
+        }
+      }
+      // 0 = no max index in the buffer; 1 = present but safe (an intended
+      // restart sentinel, or preserved by widening/replacement/indirection);
+      // 2 = present and reaches the host draw where Metal will eat it.
+      uint32_t disposition;
+      if (!max_index_present) {
+        disposition = 0;
+      } else if (guest_index_format == xenos::IndexFormat::kInt16) {
+        if (guest_primitive_reset_enabled &&
+            guest_primitive_reset_index_guest_endian == UINT16_MAX) {
+          disposition = 1;  // Intended restart sentinel.
+        } else if (cacheable.host_index_format == xenos::IndexFormat::kInt32) {
+          disposition = 1;  // Widened or replaced to 24-bit-safe 32-bit.
+        } else {
+          disposition = 2;
+        }
+      } else {
+        // 32-bit: host-converted buffers only carry 0xFFFFFFFF as intended
+        // sentinels (ReplaceResetIndex32To24 masks real values to 24 bits);
+        // builtin-indirection paths fetch guest indices in the shader, so
+        // host restart compares builtin indices instead. Only the raw
+        // kGuestDMA bind exposes the all-FF dword to Metal.
+        disposition =
+            cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA
+                ? 2
+                : 1;
+      }
+      uint32_t signature =
+          uint32_t(guest_primitive_type) | (uint32_t(host_primitive_type) << 6)
+          | (uint32_t(guest_index_format) << 12)
+          | (uint32_t(guest_index_endian) << 13)
+          | (uint32_t(guest_primitive_reset_enabled) << 15)
+          | (uint32_t(cacheable.index_buffer_type) << 16)
+          | (uint32_t(cacheable.host_index_format) << 19)
+          | (disposition << 20);
+      // Single GPU-thread access; temporary diagnostic state.
+      static std::unordered_map<uint32_t, uint32_t> signature_counts;
+      uint32_t count = ++signature_counts[signature];
+      if (count == 1 || (disposition == 2 && !(count & 4095))) {
+        static const char* const kDispositionNames[] = {"no-max-index", "SAFE",
+                                                        "UNPROTECTED"};
+        // XELOGI, not XELOGGPU: GPU logging is Debug-level and filtered out
+        // at the default log level, which would silently hide the evidence.
+        XELOGI(
+            "PrimProcDiag: {} guestPrim={} hostPrim={} fmt={} endian={} "
+            "reset={} resetIdx=0x{:X} bufType={} hostFmt={} indices={} "
+            "(signature seen {}x)",
+            kDispositionNames[disposition], uint32_t(guest_primitive_type),
+            uint32_t(host_primitive_type),
+            guest_index_format == xenos::IndexFormat::kInt16 ? 16 : 32,
+            uint32_t(guest_index_endian), guest_primitive_reset_enabled,
+            guest_primitive_reset_index_guest_endian,
+            uint32_t(cacheable.index_buffer_type),
+            cacheable.host_index_format == xenos::IndexFormat::kInt16 ? 16
+                                                                      : 32,
+            guest_draw_vertex_count, count);
       }
     }
   }
