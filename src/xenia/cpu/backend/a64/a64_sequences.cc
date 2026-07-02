@@ -3391,12 +3391,16 @@ struct CONVERT_I32_F32
       e.fmov(e.s0, e.w0);
     }
     SReg src = i.src1.is_constant ? e.s0 : SReg(i.src1.reg().getIdx());
+    e.fcmp(src, src);
     if (i.instr->flags == ROUND_TO_ZERO) {
       e.fcvtzs(i.dest, src);
     } else {
       e.frintx(e.s0, src);
       e.fcvtzs(i.dest, e.s0);
     }
+    // PPC fctiwz: NaN converts to 0x80000000 (fcvtzs yields 0).
+    e.mov(e.w0, 0x80000000u);
+    e.csel(i.dest, e.w0, i.dest, Xbyak_aarch64::Cond::VS);
   }
 };
 struct CONVERT_I32_F64
@@ -3414,6 +3418,7 @@ struct CONVERT_I32_F64
       e.fmov(e.d0, e.x0);
     }
     DReg src = i.src1.is_constant ? e.d0 : DReg(i.src1.reg().getIdx());
+    e.fcmp(src, src);
     if (i.instr->flags == ROUND_TO_ZERO) {
       e.fcvtzs(i.dest, src);
     } else {
@@ -3421,6 +3426,9 @@ struct CONVERT_I32_F64
       e.frintx(e.d0, src);
       e.fcvtzs(i.dest, e.d0);
     }
+    // PPC fctiwz: NaN converts to 0x80000000 (fcvtzs yields 0).
+    e.mov(e.w0, 0x80000000u);
+    e.csel(i.dest, e.w0, i.dest, Xbyak_aarch64::Cond::VS);
   }
 };
 struct CONVERT_I64_F64
@@ -3438,12 +3446,16 @@ struct CONVERT_I64_F64
       e.fmov(e.d0, e.x0);
     }
     DReg src = i.src1.is_constant ? e.d0 : DReg(i.src1.reg().getIdx());
+    e.fcmp(src, src);
     if (i.instr->flags == ROUND_TO_ZERO) {
       e.fcvtzs(i.dest, src);
     } else {
       e.frintx(e.d0, src);
       e.fcvtzs(i.dest, e.d0);
     }
+    // PPC fctidz: NaN converts to the most-negative integer.
+    e.mov(e.x0, 0x8000000000000000ull);
+    e.csel(i.dest, e.x0, i.dest, Xbyak_aarch64::Cond::VS);
   }
 };
 struct CONVERT_F32_I32

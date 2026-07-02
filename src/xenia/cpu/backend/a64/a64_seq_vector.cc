@@ -1672,16 +1672,16 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       LoadV128Const(e, i.dest.reg().getIdx(), c);
       return;
     }
-    // Source shorts at h[4..7] (upper 64 bits).
+    // Source shorts at h[4..7] (upper 64 bits): x=h[5], y=h[4], z=h[7],
+    // w=h[6] (matches the x64 backend / vupkd3d SHORT_4 order).
     int s = SrcVReg(e, i.src1, 0);
     int d = i.dest.reg().getIdx();
-    // Sign-extend upper halfs: sxtl2 h[4..7] → s[0..3] = {w, z, y, x}
+    // Sign-extend upper halves: sxtl2 h[4..7] → s[0..3] = {y, x, w, z}
     e.sxtl2(VReg(0).s4, VReg(s).h8);
     LoadV128Const(e, 1, vec128i(0x40400000u), 0);
     e.add(VReg(0).s4, VReg(0).s4, VReg(1).s4);
-    // Reorder {w,z,y,x} → {x,y,z,w}: rev64 then swap halves.
-    e.rev64(VReg(0).s4, VReg(0).s4);                  // {z,w,x,y}
-    e.ext(VReg(0).b16, VReg(0).b16, VReg(0).b16, 8);  // {x,y,z,w}
+    // Swap within each pair: {y,x,w,z} → {x,y,z,w}.
+    e.rev64(VReg(0).s4, VReg(0).s4);
     EmitMagicFloatOverflowCheck(e, d);
   }
   static void EmitUINT_2101010(A64Emitter& e, const EmitArgType& i) {

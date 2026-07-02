@@ -91,6 +91,49 @@ TEST_CASE("MAX_MIN_F64_BOTH_CONSTANT", "[instr]") {
            });
 }
 
+// Cross-backend oracle findings (divergence suite, 2026-07-02):
+// UNPACK SHORT_4 word order must match the x64 backend / vupkd3d: shorts
+// h[5],h[4],h[7],h[6] of the source map to lanes 0..3 (the a64 backend
+// previously swapped the 64-bit halves), and PPC fctiwz converts NaN to
+// 0x80000000 (both backends previously got this wrong, differently).
+TEST_CASE("UNPACK_SHORT_4_LANE_ORDER", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    StoreVR(b, 3, b.Unpack(LoadVR(b, 4), PACK_TYPE_SHORT_4));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->v[4] = vec128i(0x00000000, 0x80000000, 0x3F800000, 0xBF800000);
+      },
+      [](PPCContext* ctx) {
+        REQUIRE(ctx->v[3] ==
+                vec128i(0x40403F80, 0x40400000, 0x403FBF80, 0x40400000));
+      });
+}
+
+#if XE_ARCH_ARM64
+// arm64-gated: the x64 backend converts NaN to 0x7FFFFFFF via its
+// saturation clamp (recorded as an upstream divergence from PPC fctiwz).
+TEST_CASE("CONVERT_NAN_TO_INT_PPC", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    auto src = b.LoadContext(offsetof(PPCContext, f) + 4 * 8, FLOAT64_TYPE);
+    StoreGPR(b, 3, b.ZeroExtend(b.Convert(src, INT32_TYPE, ROUND_TO_ZERO),
+                                INT64_TYPE));
+    StoreGPR(b, 5, b.Convert(src, INT64_TYPE, ROUND_TO_ZERO));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        uint64_t snan = 0x7FF0000000012345ull;
+        std::memcpy(&ctx->f[4], &snan, sizeof(snan));
+      },
+      [](PPCContext* ctx) {
+        REQUIRE(ctx->r[3] == 0x80000000ull);
+        REQUIRE(ctx->r[5] == 0x8000000000000000ull);
+      });
+}
+#endif  // XE_ARCH_ARM64
+
 // Lowering-path coherence: DOT_PRODUCT with a constant operand must equal
 // the register form. Before the fix, constants materialized into scratch
 // v0/v1 were clobbered by the low-half products before the high-half
