@@ -71,18 +71,20 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   scaled_aspect_x_ = 16;
   scaled_aspect_y_ = 9;
 
-  if (with_presentation && provider_) {
+  if (provider_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
-      app_context_->CallInUIThreadSynchronous([this]() {
-        presenter_ = provider_->CreatePresenter(
-            [this](bool is_responsible, bool statically_from_ui_thread) {
-              OnHostGpuLossFromAnyThread(is_responsible);
-            });
-      });
+      if (with_presentation) {
+        app_context_->CallInUIThreadSynchronous([this]() {
+          presenter_ = provider_->CreatePresenter(
+              [this](bool is_responsible, bool statically_from_ui_thread) {
+                OnHostGpuLossFromAnyThread(is_responsible);
+              });
+        });
+      }
     } else {
-      // May be needed for offscreen use, such as capturing the guest output
-      // image.
+      // Needed for offscreen use even without presentation, such as
+      // capturing the guest output image in trace-dump.
       presenter_ = provider_->CreatePresenter(
           [this](bool is_responsible, bool statically_from_ui_thread) {
             OnHostGpuLossFromAnyThread(is_responsible);

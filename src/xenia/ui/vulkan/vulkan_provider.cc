@@ -93,11 +93,11 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(
     }
   }
 
-  if (with_presentation) {
-    provider->ui_samplers_ = UISamplers::Create(provider->vulkan_device_.get());
-    if (!provider->ui_samplers_) {
-      return nullptr;
-    }
+  // Needed by any presenter, including the surface-less one used for
+  // offscreen guest-output capture (trace-dump), not only for presentation.
+  provider->ui_samplers_ = UISamplers::Create(provider->vulkan_device_.get());
+  if (!provider->ui_samplers_) {
+    return nullptr;
   }
 
   return provider;
