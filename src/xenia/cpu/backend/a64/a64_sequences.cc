@@ -3132,6 +3132,8 @@ EMITTER_OPCODE_TABLE(OPCODE_DID_SATURATE, DID_SATURATE);
 // ============================================================================
 struct MAX_F32 : Sequence<MAX_F32, I<OPCODE_MAX, F32Op, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3140,7 +3142,14 @@ struct MAX_F32 : Sequence<MAX_F32, I<OPCODE_MAX, F32Op, F32Op, F32Op>> {
       c.f = i.src1.constant();
       e.mov(e.w0, static_cast<uint64_t>(c.u));
       e.fmov(e.s0, e.w0);
-      e.fmax(i.dest, e.s0, i.src2.is_constant ? e.s1 : i.src2);
+      if (i.src2.is_constant) {
+        c.f = i.src2.constant();
+        e.mov(e.w1, static_cast<uint64_t>(c.u));
+        e.fmov(e.s1, e.w1);
+        e.fmax(i.dest, e.s0, e.s1);
+      } else {
+        e.fmax(i.dest, e.s0, i.src2);
+      }
     } else if (i.src2.is_constant) {
       union {
         float f;
@@ -3157,6 +3166,8 @@ struct MAX_F32 : Sequence<MAX_F32, I<OPCODE_MAX, F32Op, F32Op, F32Op>> {
 };
 struct MAX_F64 : Sequence<MAX_F64, I<OPCODE_MAX, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3165,7 +3176,14 @@ struct MAX_F64 : Sequence<MAX_F64, I<OPCODE_MAX, F64Op, F64Op, F64Op>> {
       c.d = i.src1.constant();
       e.mov(e.x0, c.u);
       e.fmov(e.d0, e.x0);
-      e.fmax(i.dest, e.d0, i.src2.is_constant ? e.d1 : i.src2);
+      if (i.src2.is_constant) {
+        c.d = i.src2.constant();
+        e.mov(e.x1, c.u);
+        e.fmov(e.d1, e.x1);
+        e.fmax(i.dest, e.d0, e.d1);
+      } else {
+        e.fmax(i.dest, e.d0, i.src2);
+      }
     } else if (i.src2.is_constant) {
       union {
         double d;
@@ -3271,6 +3289,8 @@ struct MIN_I64 : Sequence<MIN_I64, I<OPCODE_MIN, I64Op, I64Op, I64Op>> {
 };
 struct MIN_F32 : Sequence<MIN_F32, I<OPCODE_MIN, F32Op, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3279,7 +3299,14 @@ struct MIN_F32 : Sequence<MIN_F32, I<OPCODE_MIN, F32Op, F32Op, F32Op>> {
       c.f = i.src1.constant();
       e.mov(e.w0, static_cast<uint64_t>(c.u));
       e.fmov(e.s0, e.w0);
-      e.fmin(i.dest, e.s0, i.src2.is_constant ? e.s1 : i.src2);
+      if (i.src2.is_constant) {
+        c.f = i.src2.constant();
+        e.mov(e.w1, static_cast<uint64_t>(c.u));
+        e.fmov(e.s1, e.w1);
+        e.fmin(i.dest, e.s0, e.s1);
+      } else {
+        e.fmin(i.dest, e.s0, i.src2);
+      }
     } else if (i.src2.is_constant) {
       union {
         float f;
@@ -3296,6 +3323,8 @@ struct MIN_F32 : Sequence<MIN_F32, I<OPCODE_MIN, F32Op, F32Op, F32Op>> {
 };
 struct MIN_F64 : Sequence<MIN_F64, I<OPCODE_MIN, F64Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3304,7 +3333,14 @@ struct MIN_F64 : Sequence<MIN_F64, I<OPCODE_MIN, F64Op, F64Op, F64Op>> {
       c.d = i.src1.constant();
       e.mov(e.x0, c.u);
       e.fmov(e.d0, e.x0);
-      e.fmin(i.dest, e.d0, i.src2.is_constant ? e.d1 : i.src2);
+      if (i.src2.is_constant) {
+        c.d = i.src2.constant();
+        e.mov(e.x1, c.u);
+        e.fmov(e.d1, e.x1);
+        e.fmin(i.dest, e.d0, e.d1);
+      } else {
+        e.fmin(i.dest, e.d0, i.src2);
+      }
     } else if (i.src2.is_constant) {
       union {
         double d;
@@ -3343,6 +3379,8 @@ EMITTER_OPCODE_TABLE(OPCODE_MIN, MIN_I8, MIN_I16, MIN_I32, MIN_I64, MIN_F32,
 struct CONVERT_I32_F32
     : Sequence<CONVERT_I32_F32, I<OPCODE_CONVERT, I32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: frintx below rounds per the live FPCR mode.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3364,6 +3402,8 @@ struct CONVERT_I32_F32
 struct CONVERT_I32_F64
     : Sequence<CONVERT_I32_F64, I<OPCODE_CONVERT, I32Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: frintx below rounds per the live FPCR mode.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3386,6 +3426,8 @@ struct CONVERT_I32_F64
 struct CONVERT_I64_F64
     : Sequence<CONVERT_I64_F64, I<OPCODE_CONVERT, I64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: frintx below rounds per the live FPCR mode.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3407,6 +3449,8 @@ struct CONVERT_I64_F64
 struct CONVERT_F32_I32
     : Sequence<CONVERT_F32_I32, I<OPCODE_CONVERT, F32Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: scvtf rounds per the live FPCR at large magnitudes.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       e.mov(e.w0,
             static_cast<uint64_t>(static_cast<uint32_t>(i.src1.constant())));
@@ -3419,6 +3463,8 @@ struct CONVERT_F32_I32
 struct CONVERT_F64_I64
     : Sequence<CONVERT_F64_I64, I<OPCODE_CONVERT, F64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: scvtf rounds per the live FPCR at large magnitudes.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       e.mov(e.x0, static_cast<uint64_t>(i.src1.constant()));
       e.scvtf(i.dest, e.x0);
@@ -3472,6 +3518,9 @@ EMITTER_OPCODE_TABLE(OPCODE_CONVERT, CONVERT_I32_F32, CONVERT_I32_F64,
 // ============================================================================
 struct ROUND_F32 : Sequence<ROUND_F32, I<OPCODE_ROUND, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: ROUND_DYNAMIC's frinti uses the live FPCR mode, and
+    // FZ affects denormal inputs for all variants.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     // Round mode is in i.instr->flags.
     if (i.src1.is_constant) {
       union {
@@ -3505,6 +3554,9 @@ struct ROUND_F32 : Sequence<ROUND_F32, I<OPCODE_ROUND, F32Op, F32Op>> {
 };
 struct ROUND_F64 : Sequence<ROUND_F64, I<OPCODE_ROUND, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR: ROUND_DYNAMIC's frinti uses the live FPCR mode, and
+    // FZ affects denormal inputs for all variants.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3615,6 +3667,8 @@ EMITTER_OPCODE_TABLE(OPCODE_SQRT, SQRT_F32, SQRT_F64, SQRT_V128);
 // ============================================================================
 struct IS_NAN_F32 : Sequence<IS_NAN_F32, I<OPCODE_IS_NAN, I8Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3633,6 +3687,8 @@ struct IS_NAN_F32 : Sequence<IS_NAN_F32, I<OPCODE_IS_NAN, I8Op, F32Op>> {
 };
 struct IS_NAN_F64 : Sequence<IS_NAN_F64, I<OPCODE_IS_NAN, I8Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3656,6 +3712,8 @@ EMITTER_OPCODE_TABLE(OPCODE_IS_NAN, IS_NAN_F32, IS_NAN_F64);
 struct COMPARE_EQ_F32
     : Sequence<COMPARE_EQ_F32, I<OPCODE_COMPARE_EQ, I8Op, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3694,6 +3752,8 @@ struct COMPARE_EQ_F32
 struct COMPARE_EQ_F64
     : Sequence<COMPARE_EQ_F64, I<OPCODE_COMPARE_EQ, I8Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3733,6 +3793,8 @@ struct COMPARE_EQ_F64
 struct COMPARE_NE_F32
     : Sequence<COMPARE_NE_F32, I<OPCODE_COMPARE_NE, I8Op, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3771,6 +3833,8 @@ struct COMPARE_NE_F32
 struct COMPARE_NE_F64
     : Sequence<COMPARE_NE_F64, I<OPCODE_COMPARE_NE, I8Op, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Ensure FPU FPCR for scalar operations.
+    e.ChangeFpcrMode(FPCRMode::Fpu);
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3812,6 +3876,8 @@ struct COMPARE_NE_F64
   struct NAME##_F32                                                  \
       : Sequence<NAME##_F32, I<OPCODE_##NAME, I8Op, F32Op, F32Op>> { \
     static void Emit(A64Emitter& e, const EmitArgType& i) {          \
+      /* Ensure FPU FPCR for scalar operations. */                   \
+      e.ChangeFpcrMode(FPCRMode::Fpu);                               \
       if (i.src1.is_constant) {                                      \
         union {                                                      \
           float f;                                                   \
@@ -3850,6 +3916,8 @@ struct COMPARE_NE_F64
   struct NAME##_F64                                                  \
       : Sequence<NAME##_F64, I<OPCODE_##NAME, I8Op, F64Op, F64Op>> { \
     static void Emit(A64Emitter& e, const EmitArgType& i) {          \
+      /* Ensure FPU FPCR for scalar operations. */                   \
+      e.ChangeFpcrMode(FPCRMode::Fpu);                               \
       if (i.src1.is_constant) {                                      \
         union {                                                      \
           double d;                                                  \
@@ -4435,7 +4503,10 @@ EMITTER_OPCODE_TABLE(OPCODE_SET_ROUNDING_MODE, SET_ROUNDING_MODE);
 
 // PPC frsqrte lookup table implementation (PowerISA Table E-5).
 // Matches the x64 backend's EmitFrsqrteHelper.
-static uint64_t PpcFrsqrte(uint64_t bits) {
+// Called via the guest-to-host thunk (raw_context unused): a raw blr would
+// only preserve the AAPCS lower halves of v8-v15, but the JIT keeps live
+// 128-bit values in the full q registers.
+static uint64_t PpcFrsqrte(void* raw_context, uint64_t bits) {
   uint32_t sign = (uint32_t)(bits >> 63);
   uint32_t exp = (uint32_t)((bits >> 52) & 0x7FF);
   uint64_t mantissa = bits & 0x000FFFFFFFFFFFFFULL;
@@ -4512,27 +4583,26 @@ struct RSQRT_F32 : Sequence<RSQRT_F32, I<OPCODE_RSQRT, F32Op, F32Op>> {
 struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // PPC frsqrte uses a specific lookup table, not a high-precision estimate.
-    // Call PpcFrsqrte directly (pure integer math, no FPCR impact).
-    DReg src = i.src1.is_constant ? e.d0 : DReg(i.src1.reg().getIdx());
+    // Route through the thunk so live q registers survive the host call.
     if (i.src1.is_constant) {
       union {
         double d;
         uint64_t u;
       } c;
       c.d = i.src1.constant();
-      e.mov(e.x0, c.u);
-      e.fmov(e.d0, e.x0);
+      e.mov(e.x1, c.u);
+    } else {
+      e.fmov(e.x1, DReg(i.src1.reg().getIdx()));
     }
-    e.fmov(e.x0, src);
-    e.mov(e.x9, reinterpret_cast<uint64_t>(PpcFrsqrte));
-    e.blr(e.x9);
+    e.CallNativeSafe(reinterpret_cast<void*>(PpcFrsqrte));
     e.fmov(i.dest, e.x0);
   }
 };
 // PPC vrsqrtefp per-lane implementation.
 // Uses the same 32-entry lookup table + interpolation as x64's
 // EmitScalarVRsqrteHelper.
-static uint32_t PpcVrsqrtefpLane(uint32_t bits) {
+// Called via the guest-to-host thunk (raw_context unused); see PpcFrsqrte.
+static uint32_t PpcVrsqrtefpLane(void* raw_context, uint32_t bits) {
   static constexpr uint32_t table[32] = {
       0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
       0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
@@ -4622,18 +4692,17 @@ static uint32_t PpcVrsqrtefpLane(uint32_t bits) {
 
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Call PpcVrsqrtefpLane directly per lane (pure integer math).
+    // Call PpcVrsqrtefpLane per lane via the thunk (preserves live q regs).
     // Save source to stack scratch, accumulate results there, load at end.
     int src_idx = SrcVReg(e, i.src1, 0);
     e.str(QReg(src_idx),
           Xbyak_aarch64::ptr(e.sp,
                              static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
     for (int lane = 0; lane < 4; lane++) {
-      e.ldr(e.w0, Xbyak_aarch64::ptr(
+      e.ldr(e.w1, Xbyak_aarch64::ptr(
                       e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
                                 lane * 4));
-      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
-      e.blr(e.x9);
+      e.CallNativeSafe(reinterpret_cast<void*>(PpcVrsqrtefpLane));
       e.str(e.w0, Xbyak_aarch64::ptr(
                       e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
                                 lane * 4));

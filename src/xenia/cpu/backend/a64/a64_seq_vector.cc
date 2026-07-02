@@ -1165,6 +1165,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitD3DCOLOR(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+    // VMX FPCR for the fmaxnm/fminnm clamps (x64 runs PACK under Vmx).
+    e.ChangeFpcrMode(FPCRMode::Vmx);
     int s = SrcVReg(e, i.src1, 2);
     int d = i.dest.reg().getIdx();
     // Clamp to [3.0f, 3.0f + 255*2^-22].
@@ -1183,6 +1185,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_2(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+    // VMX FPCR for the fmaxnm/fminnm clamps (x64 runs PACK under Vmx).
+    e.ChangeFpcrMode(FPCRMode::Vmx);
     int s = SrcVReg(e, i.src1, 2);
     int d = i.dest.reg().getIdx();
     // Clamp to [PackSHORT_Min, PackSHORT_Max].
@@ -1200,6 +1204,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitSHORT_4(A64Emitter& e, const EmitArgType& i) {
     assert_true(i.src2.value->IsConstantZero());
+    // VMX FPCR for the fmaxnm/fminnm clamps (x64 runs PACK under Vmx).
+    e.ChangeFpcrMode(FPCRMode::Vmx);
     int s = SrcVReg(e, i.src1, 2);
     int d = i.dest.reg().getIdx();
     LoadV128Const(e, 0, vec128i(0x403F8001u), 0);
@@ -1318,6 +1324,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   }
   static void EmitUINT_2101010(A64Emitter& e, const EmitArgType& i) {
     // Inline PACK: clamp magic floats, extract bit fields, shift, OR-fold.
+    // VMX FPCR for the fmaxnm/fminnm clamps (x64 runs PACK under Vmx).
+    e.ChangeFpcrMode(FPCRMode::Vmx);
     int s = SrcVReg(e, i.src1, 2);
     int d = i.dest.reg().getIdx();
 
@@ -1361,6 +1369,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static void EmitULONG_4202020(A64Emitter& e, const EmitArgType& i) {
     // Inline PACK: clamp magic floats, extract bit fields, pack into 64-bit.
     // 20-bit fields cross 32-bit boundaries, so use scalar GPR packing.
+    // VMX FPCR for the fmaxnm/fminnm clamps (x64 runs PACK under Vmx).
+    e.ChangeFpcrMode(FPCRMode::Vmx);
     int s = SrcVReg(e, i.src1, 2);
     int d = i.dest.reg().getIdx();
 
