@@ -651,6 +651,167 @@ const VecOpDef kVecMiscOps[] = {
      }},
 };
 
+// ---------------------------------------------------------------------------
+// Constant-operand-form drivers (lowering-path self-oracle).
+//
+// The same op with the same values must produce identical bits whether an
+// operand arrives in a register or as a compile-time HIR constant — guest
+// code exercises both forms of the same math, and every `is_constant`
+// branch in the backend is a distinct lowering path. Float ops with
+// constant operands DO reach the backend (float constant folding is
+// disabled by default: `permit_float_constant_evaluation`).
+//
+// The constant takes the exact value the register tuple would have had, so
+// every const-form line has a register-form twin (same op, inputs, ISO,
+// rn/njm) emitted by the earlier TEST_CASEs (Catch2 runs cases in
+// declaration order). Detect divergence from one machine's output with:
+//
+//   awk -F'|' '$1=="DIV1"{v=$3; base=v; sub(/_C[0-9]$/,"",base);
+//     key=$2"|"base"|"$4"|"$5"|"$6"|"$7;
+//     if (v==base) reg[key]=$8;
+//     else if (key in reg && reg[key]!=$8) print "FORMDIV: "$0" reg="reg[key]
+//   }' divergence-<arch>.txt
+//
+// Variant suffix: _C1/_C2/_C3 = that operand (1-based) is an HIR constant.
+// Binary/ternary sweeps stride the tuple index by 2 to bound runtime (the
+// register twin exists for every tuple regardless).
+// ---------------------------------------------------------------------------
+
+Value* LoadScalarConst(HIRBuilder& b, SKind k, uint64_t bits) {
+  switch (k) {
+    case SKind::kF64: {
+      double d;
+      std::memcpy(&d, &bits, sizeof(d));
+      return b.LoadConstantFloat64(d);
+    }
+    case SKind::kF32: {
+      float f;
+      uint32_t u = uint32_t(bits);
+      std::memcpy(&f, &u, sizeof(f));
+      return b.LoadConstantFloat32(f);
+    }
+    case SKind::kI32:
+      return b.LoadConstantInt32(int32_t(bits));
+    default:
+      return b.LoadConstantInt64(int64_t(bits));
+  }
+}
+
+void RunScalarConstForm(const ScalarOpDef& d, int const_slot,
+                        const uint64_t* inputs, size_t n) {
+  const int rn = d.rn_sweep ? 0 : -1;
+  char variant[32];
+  std::snprintf(variant, sizeof(variant), "%s_C%d", d.variant,
+                const_slot + 1);
+  const size_t stride = d.arity > 1 ? 2 : 1;
+  for (size_t ii = 0; ii < n; ii += stride) {
+    uint64_t in[3];
+    in[0] = inputs[ii];
+    in[1] = inputs[(ii * 3 + 1) % n];
+    in[2] = inputs[(ii * 5 + 2) % n];
+    const uint64_t cv = in[const_slot];
+    TestFunction test([&d, const_slot, cv, rn](HIRBuilder& b) {
+      if (rn >= 0) {
+        b.SetRoundingMode(b.LoadConstantInt32(rn));
+      }
+      Value* src[3] = {nullptr, nullptr, nullptr};
+      for (int a = 0; a < d.arity; ++a) {
+        src[a] = (a == const_slot) ? LoadScalarConst(b, d.in_kind, cv)
+                                   : LoadScalarInput(b, d.in_kind, a);
+      }
+      StoreScalarResult(b, d.out_kind, d.gen(b, src));
+      b.Return();
+    });
+    uint64_t out = 0;
+    test.Run(
+        [&](PPCContext* ctx) {
+          ctx->r[3] = 0;
+          std::memset(&ctx->f[3], 0, sizeof(double));
+          for (int a = 0; a < d.arity; ++a) {
+            if (KindIsFloatReg(d.in_kind)) {
+              std::memcpy(&ctx->f[4 + a], &in[a], sizeof(uint64_t));
+            } else {
+              ctx->r[4 + a] = in[a];
+            }
+          }
+        },
+        [&](PPCContext* ctx) {
+          if (KindIsFloatReg(d.out_kind)) {
+            std::memcpy(&out, &ctx->f[3], sizeof(uint64_t));
+          } else {
+            out = ctx->r[3];
+          }
+        });
+    std::string in_hex;
+    for (int a = 0; a < d.arity; ++a) {
+      if (a) in_hex += ',';
+      if (KindIsWide(d.in_kind)) {
+        AppendHex64(in_hex, in[a]);
+      } else {
+        AppendHex32(in_hex, uint32_t(in[a]));
+      }
+    }
+    std::string out_hex;
+    if (KindIsWide(d.out_kind)) {
+      AppendHex64(out_hex, out);
+    } else {
+      AppendHex32(out_hex, uint32_t(out));
+    }
+    EmitLine(d.op, variant, Ctx::ISO, rn, /*njm=*/-1, in_hex, out_hex);
+  }
+}
+
+void RunVecConstForm(const VecOpDef& d, int const_slot,
+                     const vec128_t* inputs, size_t n) {
+  static const int kNjmSweep[] = {0, 1};
+  static const int kNjmNA[] = {-1};
+  const int* njms = d.njm_sweep ? kNjmSweep : kNjmNA;
+  size_t njm_count = d.njm_sweep ? 2 : 1;
+  char variant[32];
+  std::snprintf(variant, sizeof(variant), "%s_C%d", d.variant,
+                const_slot + 1);
+  const size_t stride = d.arity > 1 ? 2 : 1;
+  for (size_t ni = 0; ni < njm_count; ++ni) {
+    int njm = njms[ni];
+    for (size_t ii = 0; ii < n; ii += stride) {
+      vec128_t in[3];
+      in[0] = inputs[ii];
+      in[1] = inputs[(ii * 3 + 1) % n];
+      in[2] = inputs[(ii * 5 + 2) % n];
+      const vec128_t cv = in[const_slot];
+      TestFunction test([&d, const_slot, &cv, njm](HIRBuilder& b) {
+        if (njm >= 0) {
+          b.SetNJM(b.LoadConstantInt8(int8_t(njm)));
+        }
+        Value* src[3] = {nullptr, nullptr, nullptr};
+        for (int a = 0; a < d.arity; ++a) {
+          src[a] = (a == const_slot) ? b.LoadConstantVec128(cv)
+                                     : LoadVR(b, 4 + a);
+        }
+        StoreVR(b, 3, d.gen(b, src));
+        b.Return();
+      });
+      vec128_t out = vec128i(0);
+      test.Run(
+          [&](PPCContext* ctx) {
+            ctx->v[3] = vec128i(0);
+            for (int a = 0; a < d.arity; ++a) {
+              ctx->v[4 + a] = in[a];
+            }
+          },
+          [&](PPCContext* ctx) { out = ctx->v[3]; });
+      std::string in_hex;
+      for (int a = 0; a < d.arity; ++a) {
+        if (a) in_hex += ',';
+        AppendVec(in_hex, in[a]);
+      }
+      std::string out_hex;
+      AppendVec(out_hex, out);
+      EmitLine(d.op, variant, Ctx::ISO, /*rn=*/-1, njm, in_hex, out_hex);
+    }
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -679,5 +840,34 @@ TEST_CASE("DIVERGENCE_V128_ARITH", "[.][divergence]") {
 TEST_CASE("DIVERGENCE_V128_MISC", "[.][divergence]") {
   for (const auto& d : kVecMiscOps) {
     RunVecOp(d, kV128Inputs, xe::countof(kV128Inputs));
+  }
+}
+
+// Constant-operand lowering-path forms. Declared AFTER the register-form
+// cases: the awk join (see driver comment) requires register lines first.
+TEST_CASE("DIVERGENCE_CONSTFORM_SCALAR", "[.][divergence]") {
+  for (const auto& d : kScalarF64Ops) {
+    for (int s = 0; s < d.arity; ++s) {
+      RunScalarConstForm(d, s, kF64Inputs, xe::countof(kF64Inputs));
+    }
+  }
+  RunScalarConstForm(kConvertI64F64, 0, kI64Inputs, xe::countof(kI64Inputs));
+  for (const auto& d : kScalarF32Ops) {
+    for (int s = 0; s < d.arity; ++s) {
+      RunScalarConstForm(d, s, kF32Inputs, xe::countof(kF32Inputs));
+    }
+  }
+}
+
+TEST_CASE("DIVERGENCE_CONSTFORM_V128", "[.][divergence]") {
+  for (const auto& d : kVecArithOps) {
+    for (int s = 0; s < d.arity; ++s) {
+      RunVecConstForm(d, s, kV128Inputs, xe::countof(kV128Inputs));
+    }
+  }
+  for (const auto& d : kVecMiscOps) {
+    for (int s = 0; s < d.arity; ++s) {
+      RunVecConstForm(d, s, kV128Inputs, xe::countof(kV128Inputs));
+    }
   }
 }
