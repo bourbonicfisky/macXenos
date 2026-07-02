@@ -118,6 +118,23 @@ class CodeCacheBase : public CodeCache {
       xe::memory::DeallocFixed(indirection_table_base_, kIndirectionTableSize,
                                xe::memory::DeallocationType::kRelease);
     }
+#if XE_PLATFORM_MAC
+    // macOS reserves the generated-code region as a private anonymous MAP_JIT
+    // mapping via AllocFixed (see Initialize), not a shm file view, so mapping_
+    // is never set here and the file-view teardown below is dead. Release it
+    // with DeallocFixed. Without this the fixed kGeneratedCodeExecuteBase
+    // window leaks: a second CodeCache in the same process (e.g. sequential
+    // TestFunctions in xenia-cpu-tests) can't re-reserve it — AllocFixed has no
+    // MAP_FIXED_NOREPLACE on macOS, lands elsewhere, and returns null, so the
+    // backend is left uninitialized (EXC_BAD_ACCESS in TestModule at the
+    // TestFunction #1->#2 boundary). write_base == execute_base on macOS.
+    if (generated_code_execute_base_) {
+      xe::memory::DeallocFixed(generated_code_execute_base_, kGeneratedCodeSize,
+                               xe::memory::DeallocationType::kRelease);
+      generated_code_execute_base_ = nullptr;
+      generated_code_write_base_ = nullptr;
+    }
+#endif  // XE_PLATFORM_MAC
     if (mapping_ != xe::memory::kFileMappingHandleInvalid) {
       if (generated_code_write_base_ &&
           generated_code_write_base_ != generated_code_execute_base_) {
