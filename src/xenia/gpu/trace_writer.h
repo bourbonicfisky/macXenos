@@ -21,11 +21,11 @@
 // function calls (even if they just immediately return) is 0.40-0.60% cpu time
 // total. with inlining they just bloat the caller and negatively impact
 // register allocation for the caller
-#ifdef NDEBUG
-#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 0
-#else
+//
+// TEMPORARY (fix-a64-float-vertex-precision G1 A/B): enabled in Release so
+// F4 frame traces work for the two-machine vertex-data experiment. Revert
+// to the NDEBUG gate with the other G1 diagnostics (widening task 5.6).
 #define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 1
-#endif
 
 namespace xe {
 namespace gpu {
