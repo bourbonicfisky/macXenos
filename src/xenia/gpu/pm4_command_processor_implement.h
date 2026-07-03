@@ -1216,6 +1216,23 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
            int32_t(draw_index) != cvars::replay_draw_include) ||
           skip_range) {
         // Skipped for bisection; packet already fully consumed above.
+      } else if (int32_t(draw_index) == cvars::replay_zfunc_always_draw) {
+        // Diagnostic: bypass the depth test for this draw to distinguish
+        // depth-test failures from rasterization coverage gaps.
+        uint32_t depthcontrol_value =
+            register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL];
+        reg::RB_DEPTHCONTROL depthcontrol_always;
+        depthcontrol_always.value = depthcontrol_value;
+        depthcontrol_always.zfunc = xenos::CompareFunction::kAlways;
+        register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
+            depthcontrol_always.value;
+        draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
+            vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+            is_indexed ? &index_buffer_info : nullptr,
+            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
+                                       vgt_draw_initiator.prim_type));
+        register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
+            depthcontrol_value;
       } else {
         // TODO(Triang3l): Don't drop the draw call completely if the vertex
         // shader has memexport.

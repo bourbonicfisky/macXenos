@@ -38,6 +38,18 @@
 
 DECLARE_bool(clear_memory_page_state);
 
+DEFINE_double(
+    depth_bias_extra, 0.0,
+    "Extra host depth bias constant factor (in minimal-resolvable-depth "
+    "units, i.e. Vulkan depthBiasConstantFactor) added to every guest draw "
+    "with a depth attachment on the host render target path. Biasing "
+    "fragment depth slightly towards the viewer (positive, with the Xbox "
+    "360's inverted depth range) makes GREATER_EQUAL depth tests of "
+    "multi-pass geometry robust against sub-24-bit fixed-function depth "
+    "interpolation differences between the passes' pipelines - on Apple "
+    "GPUs these differences otherwise produce dark triangle-edge lines "
+    "(the cross-title \"wireframe mesh\"). 16 = about two 20e4 depth ULPs.",
+    "GPU");
 DEFINE_bool(
     moltenvk_skip_rectangle_draws, false,
     "Temporary G1 diagnostic: skip all draws that use the "
@@ -4346,6 +4358,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
         xenos::kPolygonOffsetScaleSubpixelUnit *
         float(std::max(render_target_cache_->draw_resolution_scale_x(),
                        render_target_cache_->draw_resolution_scale_y()));
+    depth_bias_constant_factor += float(cvars::depth_bias_extra);
     // std::memcmp instead of != so in case of NaN, every draw won't be
     // invalidating it.
     dynamic_depth_bias_update_needed_ |=

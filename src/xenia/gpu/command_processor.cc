@@ -85,6 +85,12 @@ DEFINE_bool(replay_skip_depth_only, false,
             "diagnostic for prepass-vs-color-pass depth mismatches.",
             "GPU");
 
+DEFINE_int32(replay_zfunc_always_draw, -1,
+             "Draw index whose depth test function is forced to ALWAYS "
+             "during trace playback (diagnostic: distinguishes depth-test "
+             "failures from rasterization coverage gaps). -1 disables.",
+             "GPU");
+
 DEFINE_bool(replay_draw_log, false,
             "Log one line per draw (index, primitive, index count, EDRAM "
             "mode, shader ucode hashes) during trace playback bisection.",
