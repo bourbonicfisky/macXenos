@@ -526,6 +526,11 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     gamma_render_target_as_unorm16_ = false;
 
     depth_float24_round_ = cvars::depth_float24_round;
+    // Requires per-sample shading with MSAA (a SampleId input in the
+    // shaders), so sample-rate shading support is needed.
+    depth_float24_convert_in_pixel_shader_ =
+        cvars::depth_float24_convert_in_pixel_shader &&
+        vulkan_device->properties().sampleRateShading;
 
     // Host depth storing pipeline layout.
     VkDescriptorSetLayout host_depth_store_descriptor_set_layouts[] = {

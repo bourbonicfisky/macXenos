@@ -46,6 +46,14 @@ DEFINE_bool(
     "avoided via centroid.",
     "GPU");
 DEFINE_bool(
+    depth_only_fragment_shader, false,
+    "Attach a minimal empty fragment shader to depth/stencil-only guest "
+    "pipelines instead of omitting the fragment stage entirely. Probe for "
+    "Apple-GPU depth interpolation divergence between fragment-less "
+    "(depth-only fast path) and full pipelines, which breaks EQUAL-class "
+    "depth tests of Z-prepassed geometry (fix-apple-gpu-raster-cracks).",
+    "GPU");
+DEFINE_bool(
     moltenvk_force_primitive_restart, true,
     "On MoltenVK, create strip/fan pipelines with primitiveRestartEnable "
     "forced on to match Metal's always-enabled primitive restart. Disable "
@@ -111,7 +119,7 @@ bool VulkanPipelineCache::Initialize() {
       render_target_cache_.draw_resolution_scale_x(),
       render_target_cache_.draw_resolution_scale_y());
 
-  if (edram_fragment_shader_interlock) {
+  if (edram_fragment_shader_interlock || cvars::depth_only_fragment_shader) {
     std::vector<uint8_t> depth_only_fragment_shader_code =
         shader_translator_->CreateDepthOnlyFragmentShader();
     depth_only_fragment_shader_ = ui::vulkan::util::CreateShaderModule(
@@ -124,6 +132,35 @@ bool VulkanPipelineCache::Initialize() {
           "VulkanPipelineCache: Failed to create the depth/stencil-only "
           "fragment shader for the fragment shader interlock render backend "
           "implementation");
+      return false;
+    }
+  }
+
+  if (!edram_fragment_shader_interlock &&
+      render_target_cache_.depth_float24_convert_in_pixel_shader()) {
+    // Substitute fragment shader for fragment-less depth/stencil-only guest
+    // draws to a kD24FS8 depth buffer - quantizes the fixed-function depth to
+    // the guest 20e4 precision like the guest pixel shaders with the float24
+    // depth output modification do.
+    SpirvShaderTranslator::Modification depth_only_float24_modification(
+        shader_translator_->GetDefaultPixelShaderModification(0));
+    depth_only_float24_modification.pixel.depth_stencil_mode =
+        render_target_cache_.depth_float24_round()
+            ? SpirvShaderTranslator::Modification::DepthStencilMode::
+                  kFloat24Rounding
+            : SpirvShaderTranslator::Modification::DepthStencilMode::
+                  kFloat24Truncating;
+    std::vector<uint8_t> depth_only_float24_code =
+        shader_translator_->CreateDepthOnlyFragmentShader(
+            depth_only_float24_modification.value);
+    depth_only_fragment_shader_float24_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device,
+        reinterpret_cast<const uint32_t*>(depth_only_float24_code.data()),
+        depth_only_float24_code.size());
+    if (depth_only_fragment_shader_float24_ == VK_NULL_HANDLE) {
+      XELOGE(
+          "VulkanPipelineCache: Failed to create the float24-converting "
+          "depth/stencil-only fragment shader");
       return false;
     }
   }
@@ -306,6 +343,8 @@ void VulkanPipelineCache::Shutdown() {
 
   // Destroy all internal shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         depth_only_fragment_shader_float24_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          depth_only_fragment_shader_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          placeholder_pixel_shader_);
@@ -452,10 +491,24 @@ VulkanPipelineCache::GetCurrentPixelShaderModification(
       RenderTargetCache::Path::kHostRenderTargets) {
     using DepthStencilMode =
         SpirvShaderTranslator::Modification::DepthStencilMode;
-    if (shader.implicit_early_z_write_allowed() &&
-        (!shader.writes_color_target(0) ||
-         !draw_util::DoesCoverageDependOnAlpha(
-             regs.Get<reg::RB_COLORCONTROL>()))) {
+    // The float24 depth output conversion is needed whenever the host depth
+    // buffer is 32-bit floating-point while the guest depth format is 24-bit:
+    // for kD24FS8 always, and for kD24S8 on hosts without
+    // VK_FORMAT_D24_UNORM_S8_UINT (where it's drawn to a kD24FS8-keyed host
+    // render target too).
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        regs.Get<reg::RB_DEPTHCONTROL>().z_enable &&
+        (regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+             xenos::DepthRenderTargetFormat::kD24FS8 ||
+         !render_target_cache_.depth_unorm24_vulkan_format_supported())) {
+      modification.pixel.depth_stencil_mode =
+          render_target_cache_.depth_float24_round()
+              ? DepthStencilMode::kFloat24Rounding
+              : DepthStencilMode::kFloat24Truncating;
+    } else if (shader.implicit_early_z_write_allowed() &&
+               (!shader.writes_color_target(0) ||
+                !draw_util::DoesCoverageDependOnAlpha(
+                    regs.Get<reg::RB_COLORCONTROL>()))) {
       modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;
     } else {
       modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
@@ -2665,8 +2718,21 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
         creation_arguments.pixel_shader->shader_module();
     assert_true(shader_stage_fragment.module != VK_NULL_HANDLE);
   } else {
-    if (edram_fragment_shader_interlock) {
+    if (edram_fragment_shader_interlock ||
+        cvars::depth_only_fragment_shader) {
       shader_stage_fragment.module = depth_only_fragment_shader_;
+    }
+    // Fragment-less depth/stencil-only guest draws must quantize the
+    // fixed-function depth to the guest 20e4 precision like guest pixel
+    // shaders with the float24 depth output modification do, so both write
+    // bit-identical values for the same geometry.
+    if (depth_only_fragment_shader_float24_ != VK_NULL_HANDLE &&
+        (description.render_pass_key.depth_and_color_used & 0b1) &&
+        description.render_pass_key.depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8 &&
+        (description.depth_write_enable ||
+         description.depth_compare_op != xenos::CompareFunction::kAlways)) {
+      shader_stage_fragment.module = depth_only_fragment_shader_float24_;
     }
   }
   if (shader_stage_fragment.module == VK_NULL_HANDLE) {

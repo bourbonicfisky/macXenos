@@ -438,6 +438,12 @@ class VulkanPipelineCache {
   // shader interlock when no Xenos pixel shader provided.
   VkShaderModule depth_only_fragment_shader_ = VK_NULL_HANDLE;
 
+  // Depth-only fragment shader writing gl_FragDepth quantized to the guest
+  // 20e4 precision, for fragment-less guest draws to kD24FS8 depth buffers on
+  // the host render target path when
+  // depth_float24_convert_in_pixel_shader is used.
+  VkShaderModule depth_only_fragment_shader_float24_ = VK_NULL_HANDLE;
+
   // Placeholder pixel shader for pipeline hot-swap to reduce stutter.
   // Outputs transparent black while the real shader compiles in background.
   VkShaderModule placeholder_pixel_shader_ = VK_NULL_HANDLE;

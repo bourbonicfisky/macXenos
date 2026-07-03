@@ -80,6 +80,11 @@ DEFINE_int32(replay_draw_skip_last, -1,
              "replay_draw_skip_first.",
              "GPU");
 
+DEFINE_bool(replay_skip_depth_only, false,
+            "Skip kDepthOnly (Z-prepass) draws during trace playback - "
+            "diagnostic for prepass-vs-color-pass depth mismatches.",
+            "GPU");
+
 DEFINE_bool(replay_draw_log, false,
             "Log one line per draw (index, primitive, index count, EDRAM "
             "mode, shader ucode hashes) during trace playback bisection.",

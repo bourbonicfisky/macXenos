@@ -154,6 +154,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     return depth_unorm24_vulkan_format_supported_;
   }
   bool depth_float24_round() const { return depth_float24_round_; }
+  // Whether guest pixel shaders (and a substitute fragment shader for
+  // fragment-less depth-only draws) write gl_FragDepth quantized to the guest
+  // 20e4 precision for kD24FS8 depth buffers, so stored depth values are
+  // always reproduced bit-exactly when the same geometry is rendered again
+  // (Z-prepass and multi-pass EQUAL-class depth tests) even though the host
+  // depth buffer is 32-bit floating-point (host render target path only).
+  bool depth_float24_convert_in_pixel_shader() const {
+    return depth_float24_convert_in_pixel_shader_;
+  }
 
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;
@@ -865,6 +874,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   bool depth_unorm24_vulkan_format_supported_ = false;
   bool depth_float24_round_ = false;
+  bool depth_float24_convert_in_pixel_shader_ = false;
 
   bool msaa_2x_attachments_supported_ = false;
   bool msaa_2x_no_attachments_supported_ = false;

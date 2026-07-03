@@ -34,6 +34,7 @@ DECLARE_int32(replay_draw_last);
 DECLARE_int32(replay_draw_include);
 DECLARE_int32(replay_draw_skip_first);
 DECLARE_int32(replay_draw_skip_last);
+DECLARE_bool(replay_skip_depth_only);
 DECLARE_bool(replay_draw_log);
 
 namespace xe {

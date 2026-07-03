@@ -1151,6 +1151,36 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                uint32_t(vgt_draw_initiator.source_select),
                vs ? vs->ucode_data_hash() : 0,
                ps ? ps->ucode_data_hash() : 0);
+        {
+          auto rb_depthcontrol = register_file_->Get<reg::RB_DEPTHCONTROL>();
+          auto rb_depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
+          auto rb_surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+          XELOGI("  DEPTH z_en={} z_wr={} zfunc={} depth_base={} "
+                 "depth_fmt={} msaa={} pitch={}",
+                 uint32_t(rb_depthcontrol.z_enable),
+                 uint32_t(rb_depthcontrol.z_write_enable),
+                 uint32_t(rb_depthcontrol.zfunc),
+                 uint32_t(rb_depth_info.depth_base),
+                 uint32_t(rb_depth_info.depth_format),
+                 uint32_t(rb_surface_info.msaa_samples),
+                 uint32_t(rb_surface_info.surface_pitch));
+        }
+        if (rb_modecontrol.edram_mode == xenos::EdramMode::kCopy) {
+          auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
+          auto copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+          auto copy_dest_pitch =
+              register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+          XELOGI("  COPY dest={:08X} pitch={} height={} fmt={} src_sel={} "
+                 "sample_sel={} clear_c={} clear_d={}",
+                 register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE],
+                 uint32_t(copy_dest_pitch.copy_dest_pitch),
+                 uint32_t(copy_dest_pitch.copy_dest_height),
+                 uint32_t(copy_dest_info.copy_dest_format),
+                 uint32_t(copy_control.copy_src_select),
+                 uint32_t(copy_control.copy_sample_select),
+                 uint32_t(copy_control.color_clear_enable),
+                 uint32_t(copy_control.depth_clear_enable));
+        }
         for (uint32_t tf = 0; tf < 32; ++tf) {
           xenos::xe_gpu_texture_fetch_t fetch =
               register_file_->GetTextureFetch(tf);
@@ -1158,17 +1188,26 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             continue;
           }
           XELOGI("  FETCH{} dim={} minf={} magf={} mipf={} aniso={} "
-                 "base={:08X} w={} h={}",
+                 "base={:08X} w={} h={} fmt={} tiled={} endian={} pitch={} "
+                 "clampx={} clampy={}",
                  tf, uint32_t(fetch.dimension), uint32_t(fetch.min_filter),
                  uint32_t(fetch.mag_filter), uint32_t(fetch.mip_filter),
                  uint32_t(fetch.aniso_filter),
                  uint32_t(fetch.base_address) << 12,
-                 fetch.size_2d.width + 1, fetch.size_2d.height + 1);
+                 fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+                 uint32_t(fetch.format), uint32_t(fetch.tiled),
+                 uint32_t(fetch.endianness), fetch.pitch << 5,
+                 uint32_t(fetch.clamp_x), uint32_t(fetch.clamp_y));
         }
       }
       bool skip_range = int32_t(draw_index) >= cvars::replay_draw_skip_first &&
                         int32_t(draw_index) <= cvars::replay_draw_skip_last &&
                         cvars::replay_draw_skip_first >= 0;
+      if (cvars::replay_skip_depth_only &&
+          register_file_->Get<reg::RB_MODECONTROL>().edram_mode ==
+              xenos::EdramMode::kDepthOnly) {
+        skip_range = true;
+      }
       if (((int32_t(draw_index) < cvars::replay_draw_first ||
             int32_t(draw_index) > cvars::replay_draw_last) &&
            int32_t(draw_index) != cvars::replay_draw_include) ||

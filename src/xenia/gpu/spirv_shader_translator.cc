@@ -92,14 +92,16 @@ uint64_t SpirvShaderTranslator::GetDefaultPixelShaderModification(
   return shader_modification.value;
 }
 
-std::vector<uint8_t> SpirvShaderTranslator::CreateDepthOnlyFragmentShader() {
+std::vector<uint8_t> SpirvShaderTranslator::CreateDepthOnlyFragmentShader(
+    uint64_t modification_value) {
   is_depth_only_fragment_shader_ = true;
   // TODO(Triang3l): Handle in a nicer way (is_depth_only_fragment_shader_ is a
   // leftover from when a Shader object wasn't used during translation).
   Shader shader(xenos::ShaderType::kPixel, 0, nullptr, 0);
   StringBuffer instruction_disassembly_buffer;
   shader.AnalyzeUcode(instruction_disassembly_buffer);
-  Shader::Translation& translation = *shader.GetOrCreateTranslation(0);
+  Shader::Translation& translation =
+      *shader.GetOrCreateTranslation(modification_value);
   TranslateAnalyzedShader(translation);
   is_depth_only_fragment_shader_ = false;
   return translation.translated_binary();
@@ -727,7 +729,8 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
       builder_->addExecutionMode(function_main_,
                                  spv::ExecutionModeEarlyFragmentTests);
     }
-    if (current_shader().writes_depth() && !edram_fragment_shader_interlock_) {
+    if ((current_shader().writes_depth() || IsDepthStencilModeFloat24()) &&
+        !edram_fragment_shader_interlock_) {
       builder_->addExecutionMode(function_main_,
                                  spv::ExecutionModeDepthReplacing);
     }
@@ -2508,13 +2511,29 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
       edram_fragment_shader_interlock_ || param_gen_needed ||
       (!edram_fragment_shader_interlock_ && !is_depth_only_fragment_shader_ &&
        current_shader().writes_color_target(0) &&
-       !IsExecutionModeEarlyFragmentTests());
+       !IsExecutionModeEarlyFragmentTests()) ||
+      // Float24 depth output conversion sources gl_FragCoord.z when the guest
+      // shader doesn't write oDepth itself.
+      (IsDepthStencilModeFloat24() && !current_shader().writes_depth());
   if (need_frag_coord) {
     input_fragment_coordinates_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_float4_, "gl_FragCoord");
     builder_->addDecoration(input_fragment_coordinates_, spv::DecorationBuiltIn,
                             static_cast<int>(spv::BuiltIn::FragCoord));
     main_interface_.push_back(input_fragment_coordinates_);
+  }
+
+  // Float24 depth output conversion must be done per-sample with MSAA
+  // (otherwise polygon intersections can't be antialiased) - the presence of
+  // a SampleId input in the interface forces per-sample shading.
+  if (IsDepthStencilModeFloat24()) {
+    builder_->addCapability(spv::CapabilitySampleRateShading);
+    spv::Id input_sample_id = builder_->createVariable(
+        spv::NoPrecision, spv::StorageClassInput, type_int_, "gl_SampleID");
+    builder_->addDecoration(input_sample_id, spv::DecorationFlat);
+    builder_->addDecoration(input_sample_id, spv::DecorationBuiltIn,
+                            static_cast<int>(spv::BuiltIn::SampleId));
+    main_interface_.push_back(input_sample_id);
   }
 
   // Is front facing.
@@ -2580,10 +2599,13 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   }
 
   // Fragment depth output (gl_FragDepth) for the FBO path.
-  // Created when the guest pixel shader writes oDepth.
+  // Created when the guest pixel shader writes oDepth, or when the depth must
+  // be re-quantized to the guest 24-bit precision (including for the
+  // depth-only fragment shader used for fragment-less guest draws).
   // FSI manages its own depth and does not need an Output.
-  if (!edram_fragment_shader_interlock_ && !is_depth_only_fragment_shader_ &&
-      current_shader().writes_depth()) {
+  if (!edram_fragment_shader_interlock_ &&
+      ((!is_depth_only_fragment_shader_ && current_shader().writes_depth()) ||
+       IsDepthStencilModeFloat24())) {
     output_fragment_depth_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassOutput, type_float_, "gl_FragDepth");
     builder_->addDecoration(output_fragment_depth_, spv::DecorationBuiltIn,

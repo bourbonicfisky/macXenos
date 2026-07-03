@@ -34,15 +34,28 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 8;
+    static constexpr uint32_t kVersion = 9;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
       // Early fragment tests - enable if alpha test and alpha to coverage are
       // disabled; ignored if anything in the shader blocks early Z writing.
       kEarlyHint,
-      // TODO(Triang3l): Unorm24 (rounding) and float24 (truncating and
-      // rounding) output modes.
+      // Writing gl_FragDepth converted to the closest 32-bit float
+      // representable exactly as a 20e4 float (in the host 0...0.5 domain the
+      // FBO path uses for float24 guest depth), so the depth buffer always
+      // contains values that re-rendering the same geometry reproduces
+      // bit-exactly - host-precision-only differences between passes (such as
+      // a Z-prepass vs. the color pass) otherwise break EQUAL/GEQUAL-class
+      // depth tests on hosts without a native 24-bit depth format (see
+      // depth_float24_convert_in_pixel_shader). Forces per-sample shading
+      // with MSAA. Truncating (rounding towards zero, like the Xenos and
+      // depth_float24_round=false host depth stores).
+      kFloat24Truncating,
+      // Same, but rounding to the nearest even (depth_float24_round=true).
+      kFloat24Rounding,
+      // TODO(Triang3l): Unorm24 (rounding) output mode for guest kD24S8 on
+      // hosts without VK_FORMAT_D24_UNORM_S8_UINT.
     };
 
     struct {
@@ -427,8 +440,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
   }
 
   // Creates a special fragment shader without color outputs - this resets the
-  // state of the translator.
-  std::vector<uint8_t> CreateDepthOnlyFragmentShader();
+  // state of the translator. The modification (a Modification::value) allows
+  // depth/stencil output modes such as kFloat24Truncating / kFloat24Rounding
+  // for depth-only draws on hosts where the depth encoding differs.
+  std::vector<uint8_t> CreateDepthOnlyFragmentShader(
+      uint64_t modification_value = 0);
 
   // Common functions useful not only for the translator, but also for EDRAM
   // emulation via conventional render targets.
@@ -543,6 +559,20 @@ class SpirvShaderTranslator : public ShaderTranslator {
                Modification::DepthStencilMode::kEarlyHint &&
            !edram_fragment_shader_interlock_ &&
            current_shader().implicit_early_z_write_allowed();
+  }
+
+  // Whether the pixel shader must write gl_FragDepth quantized to the guest
+  // 24-bit (20e4) depth precision (FBO path only).
+  bool IsDepthStencilModeFloat24() const {
+    if (!is_pixel_shader() || edram_fragment_shader_interlock_) {
+      return false;
+    }
+    Modification::DepthStencilMode depth_stencil_mode =
+        GetSpirvShaderModification().pixel.depth_stencil_mode;
+    return depth_stencil_mode ==
+               Modification::DepthStencilMode::kFloat24Truncating ||
+           depth_stencil_mode ==
+               Modification::DepthStencilMode::kFloat24Rounding;
   }
 
   uint32_t GetModificationInterpolatorMask() const {
@@ -706,6 +736,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
                      spv::Id lerp_factor = spv::NoResult,
                      spv::Id lerp_first_unsigned = spv::NoResult,
                      spv::Id lerp_first_signed = spv::NoResult);
+  // Software bilinear filtering of the base level of a 2D array layer via four
+  // OpImageFetch calls and explicitly computed weights, as a deterministic
+  // replacement for the host's fixed-function linear sampling (used to work
+  // around sub-texel precision divergence of Apple GPU samplers - see
+  // fix-apple-gpu-raster-cracks). Coordinates are normalized, clamp-to-edge
+  // addressing is assumed.
+  void SampleTextureBilinearEmulated(
+      spv::Id coordinate_x, spv::Id coordinate_y, spv::Id layer_coordinate,
+      spv::Id size_x, spv::Id size_y, spv::Id image_unsigned,
+      spv::Id image_signed, spv::Id is_any_unsigned, spv::Id is_any_signed,
+      spv::Id& result_unsigned_out, spv::Id& result_signed_out);
   // `texture_parameters` need to be set up except for `sampler`, which will be
   // set internally.
   spv::Id QueryTextureLod(spv::Builder::TextureParameters& texture_parameters,

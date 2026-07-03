@@ -1516,28 +1516,63 @@ void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
       output_fragment_depth_ == spv::NoResult) {
     return;
   }
-  if (!current_shader().writes_depth()) {
+  bool shader_writes_depth =
+      !is_depth_only_fragment_shader_ && current_shader().writes_depth();
+  bool convert_to_float24 = IsDepthStencilModeFloat24();
+  if (!shader_writes_depth && !convert_to_float24) {
     return;
   }
-  assert_true(output_or_var_fragment_depth_ != spv::NoResult);
-  // The shader writes depth explicitly, for float24, need to scale it from
-  // guest 0...1 to host 0...0.5 to support reinterpretation round trips as
-  // viewport scaling doesn't apply to oDepth.
-  spv::Id depth_value =
-      builder_->createLoad(output_or_var_fragment_depth_, spv::NoPrecision);
-  spv::Id depth_float24_flag = builder_->createBinOp(
-      spv::OpINotEqual, type_bool_,
-      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
-                            main_system_constant_flags_,
-                            builder_->makeUintConstant(kSysFlag_DepthFloat24)),
-      const_uint_0_);
-  spv::Id depth_scaled = builder_->createBinOp(
-      spv::OpFMul, type_float_, depth_value, builder_->makeFloatConstant(0.5f));
-  spv::Id depth_remapped =
-      builder_->createTriOp(spv::OpSelect, type_float_, depth_float24_flag,
-                            depth_scaled, depth_value);
+  spv::Id depth_value;
+  if (shader_writes_depth) {
+    assert_true(output_or_var_fragment_depth_ != spv::NoResult);
+    // The shader writes depth explicitly, for float24, need to scale it from
+    // guest 0...1 to host 0...0.5 to support reinterpretation round trips as
+    // viewport scaling doesn't apply to oDepth.
+    depth_value =
+        builder_->createLoad(output_or_var_fragment_depth_, spv::NoPrecision);
+    spv::Id depth_float24_flag = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_,
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+            builder_->makeUintConstant(kSysFlag_DepthFloat24)),
+        const_uint_0_);
+    spv::Id depth_scaled =
+        builder_->createBinOp(spv::OpFMul, type_float_, depth_value,
+                              builder_->makeFloatConstant(0.5f));
+    depth_value =
+        builder_->createTriOp(spv::OpSelect, type_float_, depth_float24_flag,
+                              depth_scaled, depth_value);
+  } else {
+    // Take the fixed-function depth. With the float24 modes, per-sample
+    // shading is forced, so gl_FragCoord.z is the sample's depth. It is
+    // already in the host 0...0.5 float24 domain (remapped via the viewport).
+    assert_true(input_fragment_coordinates_ != spv::NoResult);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(2));
+    depth_value = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassInput,
+                                    input_fragment_coordinates_,
+                                    id_vector_temp_),
+        spv::NoPrecision);
+  }
+  if (convert_to_float24) {
+    // Quantize to the nearest 32-bit float exactly representable as a guest
+    // 20e4 depth value (in the host 0...0.5 domain), so re-rendering the same
+    // geometry always reproduces the stored depth bit-exactly - otherwise,
+    // host-precision-only depth differences between passes break EQUAL-class
+    // depth tests (Z-prepassed geometry) on hosts without a native 24-bit
+    // depth buffer.
+    bool round_to_nearest_even =
+        GetSpirvShaderModification().pixel.depth_stencil_mode ==
+        Modification::DepthStencilMode::kFloat24Rounding;
+    spv::Id depth_20e4 = PreClampedDepthTo20e4(
+        *builder_, depth_value, round_to_nearest_even, true,
+        ext_inst_glsl_std_450_);
+    depth_value = Depth20e4To32(*builder_, depth_20e4, 0, true, false,
+                                ext_inst_glsl_std_450_);
+  }
   // Write the depth from the temporary to the system depth output.
-  builder_->createStore(depth_remapped, output_fragment_depth_);
+  builder_->createStore(depth_value, output_fragment_depth_);
 }
 
 spv::Id SpirvShaderTranslator::LoadMsaaSamplesFromFlags() {

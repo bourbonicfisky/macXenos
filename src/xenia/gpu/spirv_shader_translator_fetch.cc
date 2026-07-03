@@ -15,10 +15,25 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/spirv_compatibility.h"
+
+// Probe controls for the Apple-GPU linear-sampling divergence hunt
+// (fix-apple-gpu-raster-cracks): replace the host sampler's linear filtering
+// with shader-side explicit bilinear (4x texelFetch + computed weights) for
+// one pixel-shader fetch slot, optionally restricted to one pixel shader.
+DEFINE_int32(bilinear_emulation_slot, -1,
+             "Pixel-shader texture fetch constant slot whose 2D fetches use "
+             "shader-side explicit bilinear filtering instead of the host "
+             "sampler (-1 = disabled).",
+             "GPU");
+DEFINE_string(bilinear_emulation_ps_hash, "",
+              "If non-empty, restrict bilinear_emulation_slot to the pixel "
+              "shader with this ucode hash (hex).",
+              "GPU");
 
 namespace xe {
 namespace gpu {
@@ -2083,21 +2098,42 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           sample_result_signed = if_data_is_3d.createMergePhi(
               sample_result_signed_3d, sample_result_signed_stacked);
         } else {
-          if (use_computed_lod) {
-            texture_parameters.gradX = gradients_h;
-            texture_parameters.gradY = gradients_v;
+          bool emulate_bilinear = false;
+          if (cvars::bilinear_emulation_slot >= 0 &&
+              uint32_t(cvars::bilinear_emulation_slot) ==
+                  fetch_constant_index &&
+              is_pixel_shader() &&
+              instr.dimension == xenos::FetchOpDimension::k2D &&
+              !instr.attributes.unnormalized_coordinates) {
+            uint64_t ps_hash_filter = strtoull(
+                cvars::bilinear_emulation_ps_hash.c_str(), nullptr, 16);
+            emulate_bilinear =
+                !ps_hash_filter ||
+                ps_hash_filter == current_shader().ucode_data_hash();
           }
-          id_vector_temp_.clear();
-          for (uint32_t i = 0; i < 3; ++i) {
-            id_vector_temp_.push_back(coordinates[i]);
+          if (emulate_bilinear) {
+            SampleTextureBilinearEmulated(
+                coordinates[0], coordinates[1], coordinates[2], size[0],
+                size[1], image_2d_array_or_cube_unsigned,
+                image_2d_array_or_cube_signed, is_any_unsigned, is_any_signed,
+                sample_result_unsigned, sample_result_signed);
+          } else {
+            if (use_computed_lod) {
+              texture_parameters.gradX = gradients_h;
+              texture_parameters.gradY = gradients_v;
+            }
+            id_vector_temp_.clear();
+            for (uint32_t i = 0; i < 3; ++i) {
+              id_vector_temp_.push_back(coordinates[i]);
+            }
+            texture_parameters.coords = builder_->createCompositeConstruct(
+                type_float3_, id_vector_temp_);
+            SampleTexture(texture_parameters, image_operands_mask,
+                          image_2d_array_or_cube_unsigned,
+                          image_2d_array_or_cube_signed, sampler,
+                          is_any_unsigned, is_any_signed,
+                          sample_result_unsigned, sample_result_signed);
           }
-          texture_parameters.coords =
-              builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
-          SampleTexture(texture_parameters, image_operands_mask,
-                        image_2d_array_or_cube_unsigned,
-                        image_2d_array_or_cube_signed, sampler, is_any_unsigned,
-                        is_any_signed, sample_result_unsigned,
-                        sample_result_signed);
         }
 
         // Swizzle the result components manually if needed, to `result`.
@@ -2508,6 +2544,87 @@ void SpirvShaderTranslator::SampleTexture(
     sign_if.makeEndIf();
     // This may overwrite the first lerp endpoint for the sign (such usage of
     // this function is allowed).
+    (i ? result_signed_out : result_unsigned_out) =
+        sign_if.createMergePhi(sign_result, const_float4_0_);
+  }
+}
+
+void SpirvShaderTranslator::SampleTextureBilinearEmulated(
+    spv::Id coordinate_x, spv::Id coordinate_y, spv::Id layer_coordinate,
+    spv::Id size_x, spv::Id size_y, spv::Id image_unsigned,
+    spv::Id image_signed, spv::Id is_any_unsigned, spv::Id is_any_signed,
+    spv::Id& result_unsigned_out, spv::Id& result_signed_out) {
+  spv::Id const_float_half = builder_->makeFloatConstant(0.5f);
+  spv::Id const_float_1 = builder_->makeFloatConstant(1.0f);
+  // Texel-space sample position relative to texel centers, as the
+  // fixed-function bilinear unit sees it: uv * size - 0.5.
+  spv::Id coordinates[2] = {coordinate_x, coordinate_y};
+  spv::Id sizes[2] = {size_x, size_y};
+  spv::Id texel_int_0[2], texel_int_1[2], frac[2];
+  for (uint32_t i = 0; i < 2; ++i) {
+    spv::Id texel = builder_->createNoContractionBinOp(
+        spv::OpFSub, type_float_,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                           coordinates[i], sizes[i]),
+        const_float_half);
+    spv::Id texel_floor = builder_->createUnaryBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor, texel);
+    frac[i] = builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                                 texel, texel_floor);
+    // Clamp-to-edge addressing of the two participating texel columns/rows.
+    spv::Id texel_max = builder_->createNoContractionBinOp(
+        spv::OpFSub, type_float_, sizes[i], const_float_1);
+    spv::Id texel_0 = builder_->createTriBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, texel_floor,
+        const_float_0_, texel_max);
+    spv::Id texel_1 = builder_->createTriBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+        builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
+                                           texel_floor, const_float_1),
+        const_float_0_, texel_max);
+    texel_int_0[i] =
+        builder_->createUnaryOp(spv::OpConvertFToS, type_int_, texel_0);
+    texel_int_1[i] =
+        builder_->createUnaryOp(spv::OpConvertFToS, type_int_, texel_1);
+  }
+  spv::Id layer_int = builder_->createUnaryOp(spv::OpConvertFToS, type_int_,
+                                              layer_coordinate);
+  auto lerp = [this](spv::Id a, spv::Id b, spv::Id f) {
+    return builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float4_, a,
+        builder_->createNoContractionBinOp(
+            spv::OpVectorTimesScalar, type_float4_,
+            builder_->createNoContractionBinOp(spv::OpFSub, type_float4_, b,
+                                               a),
+            f));
+  };
+  for (uint32_t i = 0; i < 2; ++i) {
+    SpirvBuilder::IfBuilder sign_if(i ? is_any_signed : is_any_unsigned,
+                                    spv::SelectionControlDontFlattenMask,
+                                    *builder_);
+    spv::Id sign_result;
+    {
+      spv::Id image = i ? image_signed : image_unsigned;
+      // Fetch the 2x2 texel quad of the base level.
+      spv::Id texels[4];
+      for (uint32_t j = 0; j < 4; ++j) {
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back((j & 1) ? texel_int_1[0] : texel_int_0[0]);
+        id_vector_temp_.push_back((j & 2) ? texel_int_1[1] : texel_int_0[1]);
+        id_vector_temp_.push_back(layer_int);
+        spv::Builder::TextureParameters fetch_parameters = {};
+        fetch_parameters.sampler = image;
+        fetch_parameters.coords =
+            builder_->createCompositeConstruct(type_int3_, id_vector_temp_);
+        fetch_parameters.lod = const_int_0_;
+        texels[j] = builder_->createTextureCall(
+            spv::NoPrecision, type_float4_, false, true, false, false, false,
+            fetch_parameters, spv::ImageOperandsMaskNone);
+      }
+      sign_result = lerp(lerp(texels[0], texels[1], frac[0]),
+                         lerp(texels[2], texels[3], frac[0]), frac[1]);
+    }
+    sign_if.makeEndIf();
     (i ? result_signed_out : result_unsigned_out) =
         sign_if.createMergePhi(sign_result, const_float4_0_);
   }

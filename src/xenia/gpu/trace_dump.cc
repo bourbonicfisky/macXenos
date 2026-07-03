@@ -38,6 +38,12 @@
 
 DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
 DEFINE_path(trace_dump_path, "", "Output path for dumped files.", "GPU");
+DEFINE_string(dump_guest_memory, "",
+              "After playback, dump a guest physical memory range next to the "
+              "output image as <output>.mem.bin. Format: hexaddr,hexlength "
+              "(e.g. 1D06C000,26AC00). Combine with --readback_resolve=full "
+              "to capture resolve destinations.",
+              "GPU");
 
 namespace xe {
 namespace gpu {
@@ -141,6 +147,25 @@ int TraceDump::Run() {
       static_cast<int>(player_->current_frame()->commands.size() - 1));
   player_->WaitOnPlayback();
   EndHostCapture();
+
+  if (!cvars::dump_guest_memory.empty()) {
+    uint32_t dump_address = 0, dump_length = 0;
+    if (std::sscanf(cvars::dump_guest_memory.c_str(), "%x,%x", &dump_address,
+                    &dump_length) == 2 &&
+        dump_length) {
+      const uint8_t* dump_source =
+          emulator_->memory()->TranslatePhysical(dump_address);
+      auto mem_path = base_output_path_;
+      mem_path.replace_extension(".mem.bin");
+      auto mem_file = filesystem::OpenFile(mem_path, "wb");
+      fwrite(dump_source, 1, dump_length, mem_file);
+      fclose(mem_file);
+      XELOGI("Dumped guest memory {:08X}+{:X} to {}", dump_address,
+             dump_length, xe::path_to_utf8(mem_path));
+    } else {
+      XELOGE("dump_guest_memory: expected hexaddr,hexlength");
+    }
+  }
 
   // Capture.
   int result = 0;
