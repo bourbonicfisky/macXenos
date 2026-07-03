@@ -29,6 +29,9 @@
 #include "xenia/memory.h"
 #include "xenia/ui/presenter.h"
 
+DECLARE_int32(replay_draw_first);
+DECLARE_int32(replay_draw_last);
+
 namespace xe {
 
 class ByteStream;
@@ -127,6 +130,10 @@ class CommandProcessor {
   virtual ~CommandProcessor();
   uint32_t counter() const { return counter_; }
   void increment_counter() { counter_++; }
+
+  // Resets the replay_draw_first/last bisection counter; called by
+  // TracePlayer at the start of each playback so draw indices are stable.
+  void ResetTraceDrawIndex() { trace_draw_index_ = 0; }
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
@@ -516,6 +523,10 @@ class CommandProcessor {
   std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
+
+  // Per-playback draw counter for the replay_draw_first/last bisection gate
+  // (reset by TracePlayer at the start of each playback).
+  uint32_t trace_draw_index_ = 0;
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;

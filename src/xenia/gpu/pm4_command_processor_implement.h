@@ -1137,20 +1137,27 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
   if (draw_succeeded) {
     auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
     if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
-      // TODO(Triang3l): Don't drop the draw call completely if the vertex
-      // shader has memexport.
-      // TODO(Triang3l || JoelLinn): Handle this properly in the render
-      // backends.
-      draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
-          vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
-          is_indexed ? &index_buffer_info : nullptr,
-          xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
-                                     vgt_draw_initiator.prim_type));
-      if (!draw_succeeded) {
-        XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
-               vgt_draw_initiator.num_indices,
-               uint32_t(vgt_draw_initiator.prim_type),
-               uint32_t(vgt_draw_initiator.source_select));
+      // Draw-range gate for trace-replay bisection (no effect at defaults).
+      uint32_t draw_index = trace_draw_index_++;
+      if (int32_t(draw_index) < cvars::replay_draw_first ||
+          int32_t(draw_index) > cvars::replay_draw_last) {
+        // Skipped for bisection; packet already fully consumed above.
+      } else {
+        // TODO(Triang3l): Don't drop the draw call completely if the vertex
+        // shader has memexport.
+        // TODO(Triang3l || JoelLinn): Handle this properly in the render
+        // backends.
+        draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
+            vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+            is_indexed ? &index_buffer_info : nullptr,
+            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
+                                       vgt_draw_initiator.prim_type));
+        if (!draw_succeeded) {
+          XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
+                 vgt_draw_initiator.num_indices,
+                 uint32_t(vgt_draw_initiator.prim_type),
+                 uint32_t(vgt_draw_initiator.source_select));
+        }
       }
     }
   }

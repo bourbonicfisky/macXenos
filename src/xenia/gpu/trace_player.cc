@@ -103,6 +103,9 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
     command_processor->ClearCaches();
   }
 
+  // Stable draw indices for the replay_draw_first/last bisection gate.
+  command_processor->ResetTraceDrawIndex();
+
   playback_percent_ = 0;
   auto trace_end = trace_data + trace_size;
 

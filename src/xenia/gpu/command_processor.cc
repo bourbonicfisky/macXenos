@@ -50,6 +50,18 @@ DEFINE_bool(clear_memory_page_state, false,
             "for 'Team Ninja' Games to fix missing character models)",
             "GPU");
 
+DEFINE_int32(replay_draw_first, 0,
+             "First draw index (inclusive, counted per trace playback) to "
+             "actually issue to the backend. Draws outside [replay_draw_first"
+             ", replay_draw_last] are skipped. For bisecting trace replays; "
+             "no effect on live play at defaults.",
+             "GPU");
+
+DEFINE_int32(replay_draw_last, INT32_MAX,
+             "Last draw index (inclusive) to actually issue to the backend "
+             "during trace playback. See replay_draw_first.",
+             "GPU");
+
 DEFINE_string(
     occlusion_query, "fast",
     "Controls hardware occlusion query behavior for EVENT_WRITE_ZPD.\n"
