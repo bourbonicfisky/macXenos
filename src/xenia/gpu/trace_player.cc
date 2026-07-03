@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/trace_player.h"
 
+#include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/registers.h"
@@ -196,6 +197,8 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
         DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
                          edram_snapshot.get(), xenos::kEdramSizeBytes);
         trace_ptr += cmd->encoded_length;
+        XELOGI("TracePlayer: Restoring EDRAM snapshot ({} encoded bytes)",
+               cmd->encoded_length);
         command_processor->RestoreEdramSnapshot(edram_snapshot.get());
         break;
       }

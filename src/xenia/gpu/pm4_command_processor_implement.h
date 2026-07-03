@@ -1155,15 +1155,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
           auto rb_depthcontrol = register_file_->Get<reg::RB_DEPTHCONTROL>();
           auto rb_depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
           auto rb_surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+          auto rb_color_info = register_file_->Get<reg::RB_COLOR_INFO>();
           XELOGI("  DEPTH z_en={} z_wr={} zfunc={} depth_base={} "
-                 "depth_fmt={} msaa={} pitch={}",
+                 "depth_fmt={} msaa={} pitch={} color0_base={} color0_fmt={}",
                  uint32_t(rb_depthcontrol.z_enable),
                  uint32_t(rb_depthcontrol.z_write_enable),
                  uint32_t(rb_depthcontrol.zfunc),
                  uint32_t(rb_depth_info.depth_base),
                  uint32_t(rb_depth_info.depth_format),
                  uint32_t(rb_surface_info.msaa_samples),
-                 uint32_t(rb_surface_info.surface_pitch));
+                 uint32_t(rb_surface_info.surface_pitch),
+                 uint32_t(rb_color_info.color_base),
+                 uint32_t(rb_color_info.color_format));
         }
         if (rb_modecontrol.edram_mode == xenos::EdramMode::kCopy) {
           auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();

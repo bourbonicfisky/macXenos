@@ -44,6 +44,10 @@ DEFINE_string(dump_guest_memory, "",
               "(e.g. 1D06C000,26AC00). Combine with --readback_resolve=full "
               "to capture resolve destinations.",
               "GPU");
+DEFINE_bool(dump_edram, false,
+            "After playback, dump the raw 10 MB EDRAM contents (per-sample, "
+            "tile-major) next to the output image as <output>.edram.bin.",
+            "GPU");
 
 namespace xe {
 namespace gpu {
@@ -147,6 +151,16 @@ int TraceDump::Run() {
       static_cast<int>(player_->current_frame()->commands.size() - 1));
   player_->WaitOnPlayback();
   EndHostCapture();
+
+  if (cvars::dump_edram) {
+    auto edram_path = base_output_path_;
+    edram_path.replace_extension(".edram.bin");
+    if (graphics_system_->command_processor()->DumpEdramToFile(edram_path)) {
+      XELOGI("Dumped EDRAM contents to {}", xe::path_to_utf8(edram_path));
+    } else {
+      XELOGE("Failed to dump EDRAM contents");
+    }
+  }
 
   if (!cvars::dump_guest_memory.empty()) {
     uint32_t dump_address = 0, dump_length = 0;

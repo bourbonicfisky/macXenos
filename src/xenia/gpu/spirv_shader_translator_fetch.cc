@@ -34,6 +34,20 @@ DEFINE_string(bilinear_emulation_ps_hash, "",
               "If non-empty, restrict bilinear_emulation_slot to the pixel "
               "shader with this ucode hash (hex).",
               "GPU");
+DEFINE_double(
+    point_sampling_extra_offset, 0.0,
+    "Extra texel-space offset added to point-sampled (nearest-neighbor) "
+    "texture fetch coordinates, in texels. Point-sampled fetches with "
+    "explicit half-texel instruction offsets (such as manual PCF shadow "
+    "sampling) land exactly on texel boundaries, where the rounding "
+    "convention is implementation-defined and differs between GPUs (the "
+    "Xenos nearest_clamp_policy convention; Apple GPUs pick the opposite "
+    "neighbor to AMD/NVIDIA at exact ties, producing dark self-shadowing "
+    "lines along triangle edges - the cross-title \"wireframe mesh\"). A "
+    "small positive value (e.g. 0.03125 = 1/32 texel) makes the selection "
+    "deterministic and consistent with the desktop convention. Applied only "
+    "when both the magnification and minification filters are point.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -1177,6 +1191,75 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     } else {
       // kTextureFetch or kGetTextureComputedLod.
 
+      // Extra rounding offset for point-sampled fetches - see the
+      // point_sampling_extra_offset cvar (texel-boundary tie-breaking
+      // divergence between GPUs, notably Apple - the cross-title "wireframe
+      // mesh" of dark self-shadowing lines from manual PCF shadow fetches
+      // with exact half-texel offsets, fix-apple-gpu-raster-cracks).
+      spv::Id point_rounding_offset_extra = spv::NoResult;
+      if (instr.opcode == ucode::FetchOpcode::kTextureFetch &&
+          cvars::point_sampling_extra_offset != 0.0) {
+        xenos::TextureFilter mag_filter = instr.attributes.mag_filter;
+        xenos::TextureFilter min_filter = instr.attributes.min_filter;
+        bool mag_maybe_point =
+            mag_filter == xenos::TextureFilter::kPoint ||
+            mag_filter == xenos::TextureFilter::kUseFetchConst;
+        bool min_maybe_point =
+            min_filter == xenos::TextureFilter::kPoint ||
+            min_filter == xenos::TextureFilter::kUseFetchConst;
+        if (mag_maybe_point && min_maybe_point) {
+          spv::Id extra = builder_->makeFloatConstant(
+              float(cvars::point_sampling_extra_offset));
+          spv::Id point_condition = spv::NoResult;
+          if (mag_filter == xenos::TextureFilter::kUseFetchConst ||
+              min_filter == xenos::TextureFilter::kUseFetchConst) {
+            // Runtime check of the fetch constant filters (word 3: mag at
+            // bits 19:20, min at bits 21:22; kPoint == 0).
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(const_int_0_);
+            id_vector_temp_.push_back(builder_->makeIntConstant(
+                int((fetch_constant_word_0_index + 3) >> 2)));
+            id_vector_temp_.push_back(builder_->makeIntConstant(
+                int((fetch_constant_word_0_index + 3) & 3)));
+            spv::Id fetch_constant_word_3 = builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassUniform,
+                                            uniform_fetch_constants_,
+                                            id_vector_temp_),
+                spv::NoPrecision);
+            if (mag_filter == xenos::TextureFilter::kUseFetchConst) {
+              point_condition = builder_->createBinOp(
+                  spv::OpIEqual, type_bool_,
+                  builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
+                                        fetch_constant_word_3,
+                                        builder_->makeUintConstant(19),
+                                        builder_->makeUintConstant(2)),
+                  const_uint_0_);
+            }
+            if (min_filter == xenos::TextureFilter::kUseFetchConst) {
+              spv::Id min_point_condition = builder_->createBinOp(
+                  spv::OpIEqual, type_bool_,
+                  builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
+                                        fetch_constant_word_3,
+                                        builder_->makeUintConstant(21),
+                                        builder_->makeUintConstant(2)),
+                  const_uint_0_);
+              point_condition =
+                  point_condition != spv::NoResult
+                      ? builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
+                                              point_condition,
+                                              min_point_condition)
+                      : min_point_condition;
+            }
+          }
+          if (point_condition != spv::NoResult) {
+            extra = builder_->createTriOp(spv::OpSelect, type_float_,
+                                          point_condition, extra,
+                                          const_float_0_);
+          }
+          point_rounding_offset_extra = extra;
+        }
+      }
+
       // Normalize the XY coordinates, and apply the offset.
       // When a texture is from a resolution-scaled resolve, offsets are in
       // guest texels but the size is in host texels. We need to scale offsets
@@ -1190,6 +1273,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         spv::Id component_offset =
             offset_values[i] ? builder_->makeFloatConstant(offset_values[i])
                              : spv::NoResult;
+        if (point_rounding_offset_extra != spv::NoResult) {
+          component_offset =
+              component_offset != spv::NoResult
+                  ? builder_->createNoContractionBinOp(
+                        spv::OpFAdd, type_float_, component_offset,
+                        point_rounding_offset_extra)
+                  : point_rounding_offset_extra;
+        }
         spv::Id size_component = size[i];
         if (instr.attributes.unnormalized_coordinates) {
           if (component_offset != spv::NoResult) {

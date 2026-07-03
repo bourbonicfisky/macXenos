@@ -137,6 +137,18 @@ void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   render_target_cache_->RestoreEdramSnapshot(snapshot);
 }
 
+bool VulkanCommandProcessor::DumpEdramToFile(
+    const std::filesystem::path& path) {
+  if (!BeginSubmission(true)) {
+    return false;
+  }
+  if (!render_target_cache_->InitializeTraceSubmitDownloads()) {
+    return false;
+  }
+  AwaitAllQueueOperationsCompletion();
+  return render_target_cache_->CompleteEdramDownloadToFile(path);
+}
+
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
   std::ostringstream title;
   title << "Vulkan";
