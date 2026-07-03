@@ -1151,7 +1151,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                uint32_t(vgt_draw_initiator.source_select),
                vs ? vs->ucode_data_hash() : 0,
                ps ? ps->ucode_data_hash() : 0);
-        for (uint32_t tf = 0; tf < 6; ++tf) {
+        for (uint32_t tf = 0; tf < 32; ++tf) {
           xenos::xe_gpu_texture_fetch_t fetch =
               register_file_->GetTextureFetch(tf);
           if (fetch.type != xenos::FetchConstantType::kTexture) {
