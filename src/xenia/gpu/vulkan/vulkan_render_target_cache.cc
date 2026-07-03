@@ -896,6 +896,10 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   const VkDevice device = vulkan_device->device();
 
   edram_snapshot_restore_pool_.reset();
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         edram_snapshot_download_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         edram_snapshot_download_buffer_memory_);
 
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
@@ -2080,6 +2084,67 @@ void VulkanRenderTargetCache::GetEdramBufferUsageMasks(
     default:
       assert_unhandled_case(usage);
   }
+}
+
+bool VulkanRenderTargetCache::InitializeTraceSubmitDownloads() {
+  if (IsDrawResolutionScaled()) {
+    // No 1:1 mapping.
+    return false;
+  }
+  if (edram_snapshot_download_buffer_ == VK_NULL_HANDLE) {
+    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            command_processor_.GetVulkanDevice(), xenos::kEdramSizeBytes,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            ui::vulkan::util::MemoryPurpose::kReadback,
+            edram_snapshot_download_buffer_,
+            edram_snapshot_download_buffer_memory_)) {
+      XELOGE(
+          "VulkanRenderTargetCache: Failed to create the EDRAM snapshot "
+          "download buffer for frame tracing");
+      return false;
+    }
+  }
+  if (GetPath() == Path::kHostRenderTargets) {
+    // Dump all host render targets to edram_buffer_.
+    DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount);
+  }
+  UseEdramBuffer(EdramBufferUsage::kTransferRead);
+  command_processor_.SubmitBarriers(true);
+  VkBufferCopy* download_region =
+      command_processor_.deferred_command_buffer().CmdCopyBufferEmplace(
+          edram_buffer_, edram_snapshot_download_buffer_, 1);
+  download_region->srcOffset = 0;
+  download_region->dstOffset = 0;
+  download_region->size = xenos::kEdramSizeBytes;
+  command_processor_.PushBufferMemoryBarrier(
+      edram_snapshot_download_buffer_, 0, VK_WHOLE_SIZE,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  return true;
+}
+
+void VulkanRenderTargetCache::InitializeTraceCompleteDownloads() {
+  if (edram_snapshot_download_buffer_memory_ == VK_NULL_HANDLE) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  void* download_mapping;
+  if (dfn.vkMapMemory(device, edram_snapshot_download_buffer_memory_, 0,
+                      VK_WHOLE_SIZE, 0, &download_mapping) == VK_SUCCESS) {
+    trace_writer_.WriteEdramSnapshot(download_mapping);
+    dfn.vkUnmapMemory(device, edram_snapshot_download_buffer_memory_);
+  } else {
+    XELOGE(
+        "VulkanRenderTargetCache: Failed to map the EDRAM snapshot download "
+        "buffer");
+  }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         edram_snapshot_download_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         edram_snapshot_download_buffer_memory_);
 }
 
 void VulkanRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {

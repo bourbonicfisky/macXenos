@@ -169,6 +169,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // path, or the EDRAM buffer for the fragment shader interlock path.
   void RestoreEdramSnapshot(const void* snapshot);
 
+  // Dumps the host EDRAM representation to the EDRAM buffer and copies it to
+  // a host-readable download buffer, for writing an EDRAM snapshot to a
+  // trace. Returns whether commands were submitted (then, after awaiting the
+  // GPU, InitializeTraceCompleteDownloads must be called).
+  bool InitializeTraceSubmitDownloads();
+  void InitializeTraceCompleteDownloads();
+
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;
   }
@@ -305,6 +312,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Upload buffers for trace playback EDRAM snapshot restoration.
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool>
       edram_snapshot_restore_pool_;
+  // Download buffer for trace recording EDRAM snapshots.
+  VkBuffer edram_snapshot_download_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory edram_snapshot_download_buffer_memory_ = VK_NULL_HANDLE;
 
   VkPipelineLayout resolve_copy_pipeline_layout_ = VK_NULL_HANDLE;
   static const ResolveCopyShaderCode

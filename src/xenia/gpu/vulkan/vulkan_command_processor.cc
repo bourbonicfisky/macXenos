@@ -3661,13 +3661,17 @@ void VulkanCommandProcessor::InitializeTrace() {
   if (!BeginSubmission(true)) {
     return;
   }
-  // TODO(Triang3l): Write the EDRAM.
+  bool render_target_cache_submitted =
+      render_target_cache_->InitializeTraceSubmitDownloads();
   bool shared_memory_submitted =
       shared_memory_->InitializeTraceSubmitDownloads();
-  if (!shared_memory_submitted) {
+  if (!render_target_cache_submitted && !shared_memory_submitted) {
     return;
   }
   AwaitAllQueueOperationsCompletion();
+  if (render_target_cache_submitted) {
+    render_target_cache_->InitializeTraceCompleteDownloads();
+  }
   if (shared_memory_submitted) {
     shared_memory_->InitializeTraceCompleteDownloads();
   }
