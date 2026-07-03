@@ -16,6 +16,7 @@
 #include "xenia/base/string.h"
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
@@ -100,6 +101,14 @@ int TraceDump::Main(const std::vector<std::string>& args) {
 }
 
 bool TraceDump::Setup() {
+  // Trace replay renders a single frame with pipelines that have never been
+  // created before. With asynchronous pipeline creation, every draw would be
+  // recorded with the transparent-black placeholder pixel shader (the real
+  // pipelines are hot-swapped in only on later frames, which a single-frame
+  // replay doesn't have), producing an all-black dump. Force synchronous
+  // pipeline creation for deterministic replay output.
+  cvars::async_shader_compilation = false;
+
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ = std::make_unique<Emulator>("", "", "", "");
   X_STATUS result = emulator_->Setup(
