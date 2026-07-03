@@ -1139,8 +1139,22 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
     if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
       // Draw-range gate for trace-replay bisection (no effect at defaults).
       uint32_t draw_index = trace_draw_index_++;
-      if (int32_t(draw_index) < cvars::replay_draw_first ||
-          int32_t(draw_index) > cvars::replay_draw_last) {
+      if (cvars::replay_draw_log) {
+        auto vs = active_vertex_shader_;
+        auto ps = active_pixel_shader_;
+        auto rb_modecontrol = register_file_->Get<reg::RB_MODECONTROL>();
+        XELOGI("REPLAYDRAW {} prim={} indices={} edram={} src={} vs={:016X} "
+               "ps={:016X}",
+               draw_index, uint32_t(vgt_draw_initiator.prim_type),
+               vgt_draw_initiator.num_indices,
+               uint32_t(rb_modecontrol.edram_mode),
+               uint32_t(vgt_draw_initiator.source_select),
+               vs ? vs->ucode_data_hash() : 0,
+               ps ? ps->ucode_data_hash() : 0);
+      }
+      if ((int32_t(draw_index) < cvars::replay_draw_first ||
+           int32_t(draw_index) > cvars::replay_draw_last) &&
+          int32_t(draw_index) != cvars::replay_draw_include) {
         // Skipped for bisection; packet already fully consumed above.
       } else {
         // TODO(Triang3l): Don't drop the draw call completely if the vertex

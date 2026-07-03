@@ -62,6 +62,18 @@ DEFINE_int32(replay_draw_last, INT32_MAX,
              "during trace playback. See replay_draw_first.",
              "GPU");
 
+DEFINE_int32(replay_draw_include, -1,
+             "Draw index that is always issued during trace playback even "
+             "when outside [replay_draw_first, replay_draw_last] (e.g. the "
+             "frame's final EDRAM resolve, so scene-window bisection still "
+             "produces displayable output).",
+             "GPU");
+
+DEFINE_bool(replay_draw_log, false,
+            "Log one line per draw (index, primitive, index count, EDRAM "
+            "mode, shader ucode hashes) during trace playback bisection.",
+            "GPU");
+
 DEFINE_string(
     occlusion_query, "fast",
     "Controls hardware occlusion query behavior for EVENT_WRITE_ZPD.\n"
