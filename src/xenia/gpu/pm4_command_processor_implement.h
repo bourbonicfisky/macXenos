@@ -1152,9 +1152,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                vs ? vs->ucode_data_hash() : 0,
                ps ? ps->ucode_data_hash() : 0);
       }
-      if ((int32_t(draw_index) < cvars::replay_draw_first ||
-           int32_t(draw_index) > cvars::replay_draw_last) &&
-          int32_t(draw_index) != cvars::replay_draw_include) {
+      bool skip_range = int32_t(draw_index) >= cvars::replay_draw_skip_first &&
+                        int32_t(draw_index) <= cvars::replay_draw_skip_last &&
+                        cvars::replay_draw_skip_first >= 0;
+      if (((int32_t(draw_index) < cvars::replay_draw_first ||
+            int32_t(draw_index) > cvars::replay_draw_last) &&
+           int32_t(draw_index) != cvars::replay_draw_include) ||
+          skip_range) {
         // Skipped for bisection; packet already fully consumed above.
       } else {
         // TODO(Triang3l): Don't drop the draw call completely if the vertex

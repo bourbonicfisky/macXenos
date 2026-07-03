@@ -69,6 +69,17 @@ DEFINE_int32(replay_draw_include, -1,
              "produces displayable output).",
              "GPU");
 
+DEFINE_int32(replay_draw_skip_first, -1,
+             "First draw index (inclusive) of a range to SKIP during trace "
+             "playback (in addition to the [first, last] window). -1 "
+             "disables. For crack-creator bisection with intact exposure.",
+             "GPU");
+
+DEFINE_int32(replay_draw_skip_last, -1,
+             "Last draw index (inclusive) of the skip range. See "
+             "replay_draw_skip_first.",
+             "GPU");
+
 DEFINE_bool(replay_draw_log, false,
             "Log one line per draw (index, primitive, index count, EDRAM "
             "mode, shader ucode hashes) during trace playback bisection.",
