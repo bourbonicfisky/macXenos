@@ -1151,6 +1151,20 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                uint32_t(vgt_draw_initiator.source_select),
                vs ? vs->ucode_data_hash() : 0,
                ps ? ps->ucode_data_hash() : 0);
+        for (uint32_t tf = 0; tf < 6; ++tf) {
+          xenos::xe_gpu_texture_fetch_t fetch =
+              register_file_->GetTextureFetch(tf);
+          if (fetch.type != xenos::FetchConstantType::kTexture) {
+            continue;
+          }
+          XELOGI("  FETCH{} dim={} minf={} magf={} mipf={} aniso={} "
+                 "base={:08X} w={} h={}",
+                 tf, uint32_t(fetch.dimension), uint32_t(fetch.min_filter),
+                 uint32_t(fetch.mag_filter), uint32_t(fetch.mip_filter),
+                 uint32_t(fetch.aniso_filter),
+                 uint32_t(fetch.base_address) << 12,
+                 fetch.size_2d.width + 1, fetch.size_2d.height + 1);
+        }
       }
       bool skip_range = int32_t(draw_index) >= cvars::replay_draw_skip_first &&
                         int32_t(draw_index) <= cvars::replay_draw_skip_last &&
