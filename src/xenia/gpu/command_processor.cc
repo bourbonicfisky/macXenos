@@ -91,6 +91,23 @@ DEFINE_int32(replay_zfunc_always_draw, -1,
              "failures from rasterization coverage gaps). -1 disables.",
              "GPU");
 
+DEFINE_int32(replay_duplicate_draw_stencil, -1,
+             "Draw index that is issued a SECOND time during trace playback "
+             "with zfunc=LESS, depth writes off, and stencil REPLACE (ref "
+             "0xAB) on depth pass. Any sample whose re-rasterized depth is "
+             "strictly below the just-written depth of the identical draw "
+             "gets stencil-marked - a guest-visible detector of host "
+             "fixed-function depth non-repeatability (diagnostic for the "
+             "Apple wireframe-mesh hunt). -1 disables.",
+             "GPU");
+
+DEFINE_bool(replay_duplicate_draw_depth_only, false,
+            "Make the second instance of replay_duplicate_draw_stencil run "
+            "as a kDepthOnly (fragment-less, Z-prepass-like) draw, to test "
+            "depth rasterization invariance BETWEEN pipeline variants of "
+            "the same geometry rather than within one pipeline.",
+            "GPU");
+
 DEFINE_bool(replay_draw_log, false,
             "Log one line per draw (index, primitive, index count, EDRAM "
             "mode, shader ucode hashes) during trace playback bisection.",

@@ -36,6 +36,8 @@ DECLARE_int32(replay_draw_skip_first);
 DECLARE_int32(replay_draw_skip_last);
 DECLARE_bool(replay_skip_depth_only);
 DECLARE_int32(replay_zfunc_always_draw);
+DECLARE_int32(replay_duplicate_draw_stencil);
+DECLARE_bool(replay_duplicate_draw_depth_only);
 DECLARE_bool(replay_draw_log);
 
 namespace xe {

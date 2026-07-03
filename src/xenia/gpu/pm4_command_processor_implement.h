@@ -1243,6 +1243,57 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             is_indexed ? &index_buffer_info : nullptr,
             xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
                                        vgt_draw_initiator.prim_type));
+        if (draw_succeeded &&
+            int32_t(draw_index) == cvars::replay_duplicate_draw_stencil) {
+          // Diagnostic: re-issue the identical draw with zfunc=LESS, depth
+          // writes off, and stencil REPLACE (ref 0xAB) on depth pass, to
+          // stencil-mark any sample where the re-rasterized depth is
+          // strictly below the just-written depth of the same geometry.
+          uint32_t depthcontrol_value =
+              register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL];
+          uint32_t stencilrefmask_value =
+              register_file_->values[XE_GPU_REG_RB_STENCILREFMASK];
+          uint32_t modecontrol_value =
+              register_file_->values[XE_GPU_REG_RB_MODECONTROL];
+          if (cvars::replay_duplicate_draw_depth_only) {
+            reg::RB_MODECONTROL modecontrol_probe;
+            modecontrol_probe.value = modecontrol_value;
+            modecontrol_probe.edram_mode = xenos::EdramMode::kDepthOnly;
+            register_file_->values[XE_GPU_REG_RB_MODECONTROL] =
+                modecontrol_probe.value;
+          }
+          reg::RB_DEPTHCONTROL depthcontrol_probe;
+          depthcontrol_probe.value = depthcontrol_value;
+          depthcontrol_probe.z_enable = 1;
+          depthcontrol_probe.z_write_enable = 0;
+          depthcontrol_probe.zfunc = xenos::CompareFunction::kLess;
+          depthcontrol_probe.stencil_enable = 1;
+          depthcontrol_probe.backface_enable = 0;
+          depthcontrol_probe.stencilfunc = xenos::CompareFunction::kAlways;
+          depthcontrol_probe.stencilfail = xenos::StencilOp::kKeep;
+          depthcontrol_probe.stencilzfail = xenos::StencilOp::kKeep;
+          depthcontrol_probe.stencilzpass = xenos::StencilOp::kReplace;
+          reg::RB_STENCILREFMASK stencilrefmask_probe;
+          stencilrefmask_probe.value = 0;
+          stencilrefmask_probe.stencilref = 0xAB;
+          stencilrefmask_probe.stencilmask = 0xFF;
+          stencilrefmask_probe.stencilwritemask = 0xFF;
+          register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
+              depthcontrol_probe.value;
+          register_file_->values[XE_GPU_REG_RB_STENCILREFMASK] =
+              stencilrefmask_probe.value;
+          COMMAND_PROCESSOR::IssueDraw(
+              vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+              is_indexed ? &index_buffer_info : nullptr,
+              xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
+                                         vgt_draw_initiator.prim_type));
+          register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
+              depthcontrol_value;
+          register_file_->values[XE_GPU_REG_RB_STENCILREFMASK] =
+              stencilrefmask_value;
+          register_file_->values[XE_GPU_REG_RB_MODECONTROL] =
+              modecontrol_value;
+        }
         if (!draw_succeeded) {
           XELOGE("{}({}, {}, {}): Failed in backend", opcode_name,
                  vgt_draw_initiator.num_indices,
