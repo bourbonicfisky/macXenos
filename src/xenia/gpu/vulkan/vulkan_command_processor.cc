@@ -128,7 +128,14 @@ void VulkanCommandProcessor::InitializeShaderStorage(
                                            std::move(completion_callback));
 }
 
-void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {}
+void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
+  // Starting a new submission because commands like buffer-to-image copies
+  // will be recorded.
+  if (!BeginSubmission(true)) {
+    return;
+  }
+  render_target_cache_->RestoreEdramSnapshot(snapshot);
+}
 
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
   std::ostringstream title;

@@ -2728,11 +2728,30 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     // bit-identical values for the same geometry.
     if (depth_only_fragment_shader_float24_ != VK_NULL_HANDLE &&
         (description.render_pass_key.depth_and_color_used & 0b1) &&
-        description.render_pass_key.depth_format ==
-            xenos::DepthRenderTargetFormat::kD24FS8 &&
+        (description.render_pass_key.depth_format ==
+             xenos::DepthRenderTargetFormat::kD24FS8 ||
+         !render_target_cache_.depth_unorm24_vulkan_format_supported()) &&
         (description.depth_write_enable ||
          description.depth_compare_op != xenos::CompareFunction::kAlways)) {
       shader_stage_fragment.module = depth_only_fragment_shader_float24_;
+      XELOGI(
+          "VulkanPipelineCache: fragment-less pipeline using the "
+          "float24-converting depth-only fragment shader (vs={:016X})",
+          creation_arguments.vertex_shader
+              ? creation_arguments.vertex_shader->shader().ucode_data_hash()
+              : 0);
+    } else if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+               (description.render_pass_key.depth_and_color_used & 0b1)) {
+      XELOGI(
+          "VulkanPipelineCache: fragment-less depth pipeline WITHOUT float24 "
+          "conversion (vs={:016X}, key_depth_format={}, z_write={}, "
+          "zfunc={})",
+          creation_arguments.vertex_shader
+              ? creation_arguments.vertex_shader->shader().ucode_data_hash()
+              : 0,
+          uint32_t(description.render_pass_key.depth_format),
+          uint32_t(description.depth_write_enable),
+          uint32_t(description.depth_compare_op));
     }
   }
   if (shader_stage_fragment.module == VK_NULL_HANDLE) {

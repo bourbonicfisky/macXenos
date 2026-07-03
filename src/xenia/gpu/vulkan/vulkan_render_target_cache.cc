@@ -531,6 +531,14 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     depth_float24_convert_in_pixel_shader_ =
         cvars::depth_float24_convert_in_pixel_shader &&
         vulkan_device->properties().sampleRateShading;
+    XELOGI(
+        "VulkanRenderTargetCache: depth_float24_convert_in_pixel_shader={} "
+        "(cvar={}, sampleRateShading={}), depth_float24_round={}, "
+        "unorm24 depth format supported={}",
+        depth_float24_convert_in_pixel_shader_,
+        cvars::depth_float24_convert_in_pixel_shader,
+        vulkan_device->properties().sampleRateShading, depth_float24_round_,
+        depth_unorm24_vulkan_format_supported());
 
     // Host depth storing pipeline layout.
     VkDescriptorSetLayout host_depth_store_descriptor_set_layouts[] = {
@@ -886,6 +894,8 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  edram_snapshot_restore_pool_.reset();
 
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
@@ -2069,6 +2079,118 @@ void VulkanRenderTargetCache::GetEdramBufferUsageMasks(
       break;
     default:
       assert_unhandled_case(usage);
+  }
+}
+
+void VulkanRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
+  if (IsDrawResolutionScaled()) {
+    // No 1:1 mapping.
+    return;
+  }
+
+  if (!edram_snapshot_restore_pool_) {
+    edram_snapshot_restore_pool_ =
+        std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
+            command_processor_.GetVulkanDevice(),
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, xenos::kEdramSizeBytes);
+  }
+  VkBuffer upload_buffer;
+  VkDeviceSize upload_buffer_offset;
+  uint8_t* upload_buffer_mapping = edram_snapshot_restore_pool_->Request(
+      command_processor_.GetCurrentSubmission(), xenos::kEdramSizeBytes,
+      sizeof(uint32_t), upload_buffer, upload_buffer_offset);
+  if (!upload_buffer_mapping) {
+    XELOGE(
+        "VulkanRenderTargetCache: Failed to get a buffer for restoring a "
+        "EDRAM snapshot");
+    return;
+  }
+
+  DeferredCommandBuffer& command_buffer =
+      command_processor_.deferred_command_buffer();
+
+  switch (GetPath()) {
+    case Path::kHostRenderTargets: {
+      // k_32_FLOAT because it's unambiguous.
+      auto* full_edram_render_target = static_cast<VulkanRenderTarget*>(
+          PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
+              xenos::ColorRenderTargetFormat::k_32_FLOAT));
+      if (!full_edram_render_target) {
+        return;
+      }
+      // Reorder the tile-major EDRAM contents into the rows of the 1280-wide
+      // (16 tiles) x 2048 render target.
+      constexpr uint32_t kPitchTilesAt32bpp = 16;
+      constexpr uint32_t kWidth =
+          kPitchTilesAt32bpp * xenos::kEdramTileWidthSamples;
+      constexpr uint32_t kHeightTileRows =
+          xenos::kEdramTileCount / kPitchTilesAt32bpp;
+      constexpr uint32_t kHeight =
+          kHeightTileRows * xenos::kEdramTileHeightSamples;
+      constexpr uint32_t kSampleRowPitchBytes = sizeof(uint32_t) * kWidth;
+      const uint8_t* snapshot_sample_row =
+          reinterpret_cast<const uint8_t*>(snapshot);
+      for (uint32_t y_tile = 0; y_tile < kHeightTileRows; ++y_tile) {
+        uint8_t* upload_buffer_tile_row_origin =
+            upload_buffer_mapping + xenos::kEdramTileHeightSamples * y_tile *
+                                        kSampleRowPitchBytes;
+        for (uint32_t x_tile = 0; x_tile < kPitchTilesAt32bpp; ++x_tile) {
+          uint8_t* upload_buffer_sample_row =
+              upload_buffer_tile_row_origin +
+              sizeof(uint32_t) * xenos::kEdramTileWidthSamples * x_tile;
+          for (uint32_t sample_row = 0;
+               sample_row < xenos::kEdramTileHeightSamples; ++sample_row) {
+            std::memcpy(upload_buffer_sample_row, snapshot_sample_row,
+                        sizeof(uint32_t) * xenos::kEdramTileWidthSamples);
+            snapshot_sample_row +=
+                sizeof(uint32_t) * xenos::kEdramTileWidthSamples;
+            upload_buffer_sample_row += kSampleRowPitchBytes;
+          }
+        }
+      }
+      command_processor_.PushImageMemoryBarrier(
+          full_edram_render_target->image(),
+          ui::vulkan::util::InitializeSubresourceRange(
+              VK_IMAGE_ASPECT_COLOR_BIT),
+          full_edram_render_target->current_stage_mask(),
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          full_edram_render_target->current_access_mask(),
+          VK_ACCESS_TRANSFER_WRITE_BIT,
+          full_edram_render_target->current_layout(),
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      full_edram_render_target->SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_ACCESS_TRANSFER_WRITE_BIT,
+                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      command_processor_.SubmitBarriers(true);
+      VkBufferImageCopy* copy_region = command_buffer.CmdCopyBufferToImageEmplace(
+          upload_buffer, full_edram_render_target->image(),
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+      copy_region->bufferOffset = upload_buffer_offset;
+      copy_region->bufferRowLength = kWidth;
+      copy_region->bufferImageHeight = kHeight;
+      copy_region->imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copy_region->imageSubresource.mipLevel = 0;
+      copy_region->imageSubresource.baseArrayLayer = 0;
+      copy_region->imageSubresource.layerCount = 1;
+      copy_region->imageOffset = {};
+      copy_region->imageExtent.width = kWidth;
+      copy_region->imageExtent.height = kHeight;
+      copy_region->imageExtent.depth = 1;
+    } break;
+
+    case Path::kPixelShaderInterlock: {
+      std::memcpy(upload_buffer_mapping, snapshot, xenos::kEdramSizeBytes);
+      UseEdramBuffer(EdramBufferUsage::kTransferWrite);
+      command_processor_.SubmitBarriers(true);
+      VkBufferCopy* copy_region = command_buffer.CmdCopyBufferEmplace(
+          upload_buffer, edram_buffer_, 1);
+      copy_region->srcOffset = upload_buffer_offset;
+      copy_region->dstOffset = 0;
+      copy_region->size = xenos::kEdramSizeBytes;
+    } break;
+
+    default:
+      assert_unhandled_case(GetPath());
   }
 }
 

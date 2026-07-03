@@ -164,6 +164,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     return depth_float24_convert_in_pixel_shader_;
   }
 
+  // Uploads a raw EDRAM snapshot (from trace playback) to the host EDRAM
+  // representation - a full-EDRAM render target for the host render target
+  // path, or the EDRAM buffer for the fragment shader interlock path.
+  void RestoreEdramSnapshot(const void* snapshot);
+
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;
   }
@@ -296,6 +301,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       EdramBufferModificationStatus::kUnmodified;
   VkDescriptorPool edram_storage_buffer_descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet edram_storage_buffer_descriptor_set_;
+
+  // Upload buffers for trace playback EDRAM snapshot restoration.
+  std::unique_ptr<ui::vulkan::VulkanUploadBufferPool>
+      edram_snapshot_restore_pool_;
 
   VkPipelineLayout resolve_copy_pipeline_layout_ = VK_NULL_HANDLE;
   static const ResolveCopyShaderCode
