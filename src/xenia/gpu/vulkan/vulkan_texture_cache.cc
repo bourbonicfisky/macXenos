@@ -862,6 +862,14 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
   } else {
     sampler_create_info.maxLod = VK_LOD_CLAMP_NONE;
   }
+  if (cvars::texture_max_lod_clamp_probe) {
+    // Diagnostic: force sampling from the base mip regardless of the
+    // derivative-computed LOD, to attribute cross-GPU divergence along
+    // triangle edges to implicit-LOD (quad derivative / helper invocation)
+    // differences.
+    sampler_create_info.minLod = 0.0f;
+    sampler_create_info.maxLod = 0.25f;
+  }
   // TODO(Triang3l): Custom border colors for CrYCb / YCrCb.
   switch (parameters.border_color) {
     case xenos::BorderColor::k_ABGR_White:

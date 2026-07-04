@@ -149,6 +149,14 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_max_lod_clamp_probe, false,
+    "Diagnostic: clamp all guest texture samplers to the base mip "
+    "(minLod=0, maxLod=0.25), removing implicit-LOD (quad derivative) "
+    "influence from sampling - for attributing cross-GPU divergence along "
+    "triangle edges to LOD selection differences.",
+    "GPU");
+
+DEFINE_bool(
     force_per_sample_shading_probe, false,
     "Diagnostic: add a SampleId input to all translated pixel shaders, "
     "forcing per-sample shading without any depth conversion - isolates "
