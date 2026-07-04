@@ -127,6 +127,16 @@ DEFINE_bool(
     "HACKS");
 
 DEFINE_bool(
+    depth_float24_sample_z_from_derivatives, false,
+    "With depth_float24_convert_in_pixel_shader: reconstruct the per-sample "
+    "depth as z + dFdx(z)*dx + dFdy(z)*dy from the sample position instead "
+    "of trusting gl_FragCoord.z, for hosts where FragCoord.z is not "
+    "evaluated at the sample position under forced sample-rate shading "
+    "(Apple GPUs via MoltenVK: sample pairs receive identical depth, which "
+    "neutralizes Z-prepasses and flattens MSAA depth).",
+    "GPU");
+
+DEFINE_bool(
     force_per_sample_shading_probe, false,
     "Diagnostic: add a SampleId input to all translated pixel shaders, "
     "forcing per-sample shading without any depth conversion - isolates "

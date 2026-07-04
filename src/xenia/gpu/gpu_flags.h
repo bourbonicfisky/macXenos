@@ -48,6 +48,8 @@ DECLARE_bool(gpu_3d_to_2d_texture);
 
 DECLARE_bool(ac6_ground_fix);
 
+DECLARE_bool(depth_float24_sample_z_from_derivatives);
+
 DECLARE_bool(force_per_sample_shading_probe);
 
 DECLARE_int32(vertex_position_quantize_bits);

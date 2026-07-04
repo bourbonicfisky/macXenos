@@ -126,6 +126,7 @@ void SpirvShaderTranslator::Reset() {
   input_fragment_coordinates_ = spv::NoResult;
   input_front_facing_ = spv::NoResult;
   input_sample_mask_ = spv::NoResult;
+  input_sample_position_ = spv::NoResult;
   std::fill(input_output_interpolators_.begin(),
             input_output_interpolators_.end(), spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
@@ -2568,6 +2569,18 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(input_sample_id, spv::DecorationBuiltIn,
                             static_cast<int>(spv::BuiltIn::SampleId));
     main_interface_.push_back(input_sample_id);
+    if (IsDepthStencilModeFloat24() &&
+        cvars::depth_float24_sample_z_from_derivatives &&
+        !current_shader().writes_depth()) {
+      // Per-sample z reconstruction from the pixel-center depth needs the
+      // sample's position within the pixel.
+      input_sample_position_ =
+          builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                   type_float2_, "gl_SamplePosition");
+      builder_->addDecoration(input_sample_position_, spv::DecorationBuiltIn,
+                              static_cast<int>(spv::BuiltIn::SamplePosition));
+      main_interface_.push_back(input_sample_position_);
+    }
   }
 
   // Is front facing.

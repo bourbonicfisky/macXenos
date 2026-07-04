@@ -319,9 +319,21 @@ spv::Id SpirvShaderTranslator::PreClampedDepthTo20e4(
                             builder.makeUintConstant(3),
                             builder.makeUintConstant(1)));
   }
-  return builder.createTriOp(spv::OpBitFieldUExtract, type_uint, biased_f32,
-                             builder.makeUintConstant(3),
-                             builder.makeUintConstant(24));
+  spv::Id result =
+      builder.createTriOp(spv::OpBitFieldUExtract, type_uint, biased_f32,
+                          builder.makeUintConstant(3),
+                          builder.makeUintConstant(24));
+  // Saturate to the largest representable 20e4 value, like the CPU-side
+  // Float32To20e4 - the guest [0, 2) range is exclusive, and values at or
+  // above the threshold (e.g. host 1.0 with the 0...0.5 remap: an unhalved
+  // kD24S8 far plane doubling to exactly 2.0) would otherwise overflow the
+  // exponent rebias and wrap to a tiny value (the far clear becoming 0).
+  return builder.createTriOp(
+      spv::OpSelect, type_uint,
+      builder.createBinOp(
+          spv::OpULessThan, builder.makeBoolType(), f32_scalar,
+          builder.makeUintConstant(UINT32_C(0x3FFFFFF8) - (remap_bias << 23))),
+      result, builder.makeUintConstant(0xFFFFFF));
 }
 
 spv::Id SpirvShaderTranslator::Depth20e4To32(SpirvBuilder& builder,
@@ -1554,6 +1566,38 @@ void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
                                     input_fragment_coordinates_,
                                     id_vector_temp_),
         spv::NoPrecision);
+    if (input_sample_position_ != spv::NoResult) {
+      // On some hosts (Apple GPUs via MoltenVK), gl_FragCoord.z is evaluated
+      // at the pixel center even under forced sample-rate shading, giving
+      // both samples of a pixel the same depth. Reconstruct the sample's
+      // depth from the plane equation: depth is linear in window space, so
+      // z_sample = z + dFdx(z) * (sp.x - 0.5) + dFdy(z) * (sp.y - 0.5) is
+      // exact for a plane (all converted shaders use the same formula, and
+      // the following 20e4 quantization collapses low-bit noise).
+      spv::Id depth_ddx =
+          builder_->createUnaryOp(spv::OpDPdx, type_float_, depth_value);
+      spv::Id depth_ddy =
+          builder_->createUnaryOp(spv::OpDPdy, type_float_, depth_value);
+      spv::Id sample_position = builder_->createLoad(input_sample_position_,
+                                                     spv::NoPrecision);
+      spv::Id const_float_half = builder_->makeFloatConstant(0.5f);
+      spv::Id offset_x = builder_->createNoContractionBinOp(
+          spv::OpFSub, type_float_,
+          builder_->createCompositeExtract(sample_position, type_float_, 0),
+          const_float_half);
+      spv::Id offset_y = builder_->createNoContractionBinOp(
+          spv::OpFSub, type_float_,
+          builder_->createCompositeExtract(sample_position, type_float_, 1),
+          const_float_half);
+      depth_value = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_, depth_value,
+          builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                             depth_ddx, offset_x));
+      depth_value = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_, depth_value,
+          builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                             depth_ddy, offset_y));
+    }
   }
   if (convert_to_float24) {
     // Quantize to the nearest 32-bit float exactly representable as a guest

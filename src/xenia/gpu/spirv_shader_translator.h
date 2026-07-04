@@ -978,6 +978,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id input_front_facing_;
   // PS, only when needed - int[1].
   spv::Id input_sample_mask_;
+  // PS, float24 depth conversion with per-sample z reconstruction - float2.
+  spv::Id input_sample_position_;
 
   // VS output or PS input, only the ones that are needed (spv::NoResult for the
   // unneeded interpolators), indexed by the guest interpolator index - float4.
