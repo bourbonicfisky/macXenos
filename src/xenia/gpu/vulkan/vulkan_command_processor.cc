@@ -4842,6 +4842,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.alpha_to_mask != alpha_to_mask;
   system_constants_.alpha_to_mask = alpha_to_mask;
 
+  // Host viewport depth range for the float24 depth conversion via the NDC
+  // depth varying (window z = offset + ndc_z * scale).
+  float host_depth_range_offset = viewport_info.z_min;
+  float host_depth_range_scale = viewport_info.z_max - viewport_info.z_min;
+  dirty |= system_constants_.host_depth_range_offset != host_depth_range_offset;
+  system_constants_.host_depth_range_offset = host_depth_range_offset;
+  dirty |= system_constants_.host_depth_range_scale != host_depth_range_scale;
+  system_constants_.host_depth_range_scale = host_depth_range_scale;
+
   // FSI ZPD counter.
   uint32_t zpd_fsi_counter_index = UINT32_MAX;
   if (edram_fragment_shader_interlock &&

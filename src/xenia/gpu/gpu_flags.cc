@@ -127,6 +127,18 @@ DEFINE_bool(
     "HACKS");
 
 DEFINE_bool(
+    depth_float24_sample_z_varying, false,
+    "With depth_float24_convert_in_pixel_shader: pass the NDC depth (z/w) "
+    "from "
+    "the vertex shader as a sample-interpolated noperspective varying and "
+    "convert that instead of gl_FragCoord.z - the exact per-sample depth "
+    "even on hosts where FragCoord.z is not per-sample under sample-rate "
+    "shading (Apple GPUs via MoltenVK), without the precision loss of the "
+    "derivative-based reconstruction at steep triangles. Takes precedence "
+    "over depth_float24_sample_z_from_derivatives.",
+    "GPU");
+
+DEFINE_bool(
     depth_float24_sample_z_from_derivatives, false,
     "With depth_float24_convert_in_pixel_shader: reconstruct the per-sample "
     "depth as z + dFdx(z)*dx + dFdy(z)*dy from the sample position instead "

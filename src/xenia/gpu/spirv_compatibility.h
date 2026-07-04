@@ -332,6 +332,8 @@ namespace spv {
 #define DecorationBinding Decoration::Binding
 #define DecorationBuiltIn Decoration::BuiltIn
 #define DecorationFlat Decoration::Flat
+#define DecorationNoPerspective Decoration::NoPerspective
+#define DecorationSample Decoration::Sample
 #define DecorationInvariant Decoration::Invariant
 #define DecorationUniform Decoration::Uniform
 #define DecorationSaturatedConversion Decoration::SaturatedConversion

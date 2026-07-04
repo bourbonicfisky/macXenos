@@ -449,6 +449,22 @@ VulkanPipelineCache::GetCurrentVertexShaderModification(
                      xenos::PrimitiveType::kPointList);
   }
 
+  // NDC depth varying for the paired pixel shader's float24 depth conversion
+  // (same gating as the pixel-side kFloat24* depth-stencil modes; also
+  // written when the pixel shader writes oDepth or is absent - an unconsumed
+  // output is valid, and the fragment-less depth-only float24 shader consumes
+  // it too).
+  if (cvars::depth_float24_sample_z_varying &&
+      render_target_cache_.GetPath() ==
+          RenderTargetCache::Path::kHostRenderTargets &&
+      render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+      regs.Get<reg::RB_DEPTHCONTROL>().z_enable &&
+      (regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+           xenos::DepthRenderTargetFormat::kD24FS8 ||
+       !render_target_cache_.depth_unorm24_vulkan_format_supported())) {
+    modification.vertex.output_ndc_depth = 1;
+  }
+
   return modification;
 }
 

@@ -127,6 +127,8 @@ void SpirvShaderTranslator::Reset() {
   input_front_facing_ = spv::NoResult;
   input_sample_mask_ = spv::NoResult;
   input_sample_position_ = spv::NoResult;
+  output_ndc_depth_ = spv::NoResult;
+  input_ndc_depth_ = spv::NoResult;
   std::fill(input_output_interpolators_.begin(),
             input_output_interpolators_.end(), spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
@@ -296,6 +298,10 @@ void SpirvShaderTranslator::StartTranslation() {
       {"alpha_to_mask", offsetof(SystemConstants, alpha_to_mask), type_uint_},
       {"zpd_fsi_counter_index",
        offsetof(SystemConstants, zpd_fsi_counter_index), type_uint_},
+      {"host_depth_range_offset",
+       offsetof(SystemConstants, host_depth_range_offset), type_float_},
+      {"host_depth_range_scale",
+       offsetof(SystemConstants, host_depth_range_scale), type_float_},
       {"color_exp_bias", offsetof(SystemConstants, color_exp_bias),
        type_float4_},
       {"edram_poly_offset_front_scale",
@@ -1329,6 +1335,22 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     }
   }
 
+  if (shader_modification.vertex.output_ndc_depth) {
+    // NDC depth (z/w of the final host position) for the float24 depth
+    // conversion in the paired pixel shader - interpolated at the sample
+    // position without perspective (depth is linear in screen space), giving
+    // the exact per-sample depth on hosts where gl_FragCoord.z is evaluated
+    // at the pixel center under forced sample-rate shading.
+    output_ndc_depth_ =
+        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
+                                 type_float_, "xe_out_ndc_depth");
+    builder_->addDecoration(output_ndc_depth_, spv::DecorationLocation,
+                            int(kNdcDepthVaryingLocation));
+    builder_->addDecoration(output_ndc_depth_, spv::DecorationNoPerspective);
+    builder_->addDecoration(output_ndc_depth_, spv::DecorationInvariant);
+    main_interface_.push_back(output_ndc_depth_);
+  }
+
   // Create the gl_PerVertex output for used system outputs.
   std::vector<spv::Id> struct_per_vertex_members;
   struct_per_vertex_members.reserve(kOutputPerVertexMemberCount);
@@ -2268,6 +2290,19 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
     position_w = quantize(position_w, type_float_, type_uint_);
   }
 
+  // Write the NDC depth varying for the paired pixel shader's float24 depth
+  // conversion - z/w of the exact values being written to gl_Position, so
+  // noperspective (screen-linear) interpolation of it at any sample position
+  // reproduces the fixed-function depth interpolation.
+  if (output_ndc_depth_ != spv::NoResult) {
+    builder_->createStore(
+        builder_->createNoContractionBinOp(
+            spv::OpFDiv, type_float_,
+            builder_->createCompositeExtract(position_xyz, type_float_, 2),
+            position_w),
+        output_ndc_depth_);
+  }
+
   // Write the point size.
   if (output_point_size_ != spv::NoResult) {
     spv::Id point_size;
@@ -2569,17 +2604,31 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(input_sample_id, spv::DecorationBuiltIn,
                             static_cast<int>(spv::BuiltIn::SampleId));
     main_interface_.push_back(input_sample_id);
-    if (IsDepthStencilModeFloat24() &&
-        cvars::depth_float24_sample_z_from_derivatives &&
-        !current_shader().writes_depth()) {
-      // Per-sample z reconstruction from the pixel-center depth needs the
-      // sample's position within the pixel.
-      input_sample_position_ =
-          builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
-                                   type_float2_, "gl_SamplePosition");
-      builder_->addDecoration(input_sample_position_, spv::DecorationBuiltIn,
-                              static_cast<int>(spv::BuiltIn::SamplePosition));
-      main_interface_.push_back(input_sample_position_);
+    if (IsDepthStencilModeFloat24() && !current_shader().writes_depth()) {
+      if (cvars::depth_float24_sample_z_varying) {
+        // Exact per-sample depth from the vertex shader's NDC depth varying
+        // (sample-interpolated, noperspective) - preferred over
+        // gl_FragCoord.z and its derivative-based reconstruction on hosts
+        // where FragCoord.z is not per-sample under sample-rate shading.
+        input_ndc_depth_ =
+            builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                     type_float_, "xe_in_ndc_depth");
+        builder_->addDecoration(input_ndc_depth_, spv::DecorationLocation,
+                                int(kNdcDepthVaryingLocation));
+        builder_->addDecoration(input_ndc_depth_,
+                                spv::DecorationNoPerspective);
+        builder_->addDecoration(input_ndc_depth_, spv::DecorationSample);
+        main_interface_.push_back(input_ndc_depth_);
+      } else if (cvars::depth_float24_sample_z_from_derivatives) {
+        // Per-sample z reconstruction from the pixel-center depth needs the
+        // sample's position within the pixel.
+        input_sample_position_ =
+            builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                     type_float2_, "gl_SamplePosition");
+        builder_->addDecoration(input_sample_position_, spv::DecorationBuiltIn,
+                                static_cast<int>(spv::BuiltIn::SamplePosition));
+        main_interface_.push_back(input_sample_position_);
+      }
     }
   }
 

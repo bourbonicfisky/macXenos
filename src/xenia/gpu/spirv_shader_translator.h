@@ -34,7 +34,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 9;
+    static constexpr uint32_t kVersion = 10;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -78,6 +78,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
       // If user_clip_plane_count is non-zero, whether they should be cull
       // distances instead of clip distances.
       uint32_t user_clip_plane_cull : 1;
+      // Whether to output the NDC depth (z/w of the final host position) as a
+      // sample-interpolated noperspective varying for the float24 depth
+      // conversion in the paired pixel shader (see
+      // depth_float24_sample_z_varying) - exact per-sample depth on hosts
+      // where gl_FragCoord.z is not per-sample under sample-rate shading.
+      uint32_t output_ndc_depth : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -240,8 +246,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // UINT32_MAX when the draw is outside an active ZPD segment, which is used
     // as a skip writing sentinel to the FSI counter buffer.
     uint32_t zpd_fsi_counter_index;
-    // Align for std140.
-    uint32_t color_exp_bias_padding[2];
+    // Host viewport depth range (window z = offset + ndc_z * scale) for the
+    // float24 depth conversion via the NDC depth varying. Also aligns
+    // color_exp_bias for std140.
+    float host_depth_range_offset;
+    float host_depth_range_scale;
 
     float color_exp_bias[4];
 
@@ -931,6 +940,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramDepthBaseDwordsScaled,
     kSystemConstantAlphaToMask,
     kSystemConstantZpdFsiCounterIndex,
+    kSystemConstantHostDepthRangeOffset,
+    kSystemConstantHostDepthRangeScale,
     kSystemConstantColorExpBias,
     kSystemConstantEdramPolyOffsetFrontScale,
     kSystemConstantEdramPolyOffsetBackScale,
@@ -980,6 +991,16 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id input_sample_mask_;
   // PS, float24 depth conversion with per-sample z reconstruction - float2.
   spv::Id input_sample_position_;
+  // VS - float, the NDC depth (z/w) varying output for the float24 depth
+  // conversion (sample + noperspective interpolation).
+  spv::Id output_ndc_depth_;
+  // PS - float, the NDC depth varying input.
+  spv::Id input_ndc_depth_;
+
+  // Fixed interface location for the NDC depth varying - above interpolators
+  // (0-15), point coordinates and point size, so it never collides with the
+  // compacted dynamic allocation on either side of the interface.
+  static constexpr uint32_t kNdcDepthVaryingLocation = 18;
 
   // VS output or PS input, only the ones that are needed (spv::NoResult for the
   // unneeded interpolators), indexed by the guest interpolator index - float4.

@@ -1555,6 +1555,37 @@ void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
         builder_->createTriOp(spv::OpSelect, type_float_, depth_float24_flag,
                               depth_scaled, depth_value);
   } else {
+    if (input_ndc_depth_ != spv::NoResult) {
+      // The exact per-sample depth: the NDC depth varying from the vertex
+      // shader (z/w of the final host position, sample-interpolated without
+      // perspective = the fixed-function depth interpolation), mapped through
+      // the host viewport depth range.
+      spv::Id ndc_depth =
+          builder_->createLoad(input_ndc_depth_, spv::NoPrecision);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(kSystemConstantHostDepthRangeScale));
+      spv::Id host_depth_range_scale = builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassUniform,
+                                      uniform_system_constants_,
+                                      id_vector_temp_),
+          spv::NoPrecision);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(kSystemConstantHostDepthRangeOffset));
+      spv::Id host_depth_range_offset = builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassUniform,
+                                      uniform_system_constants_,
+                                      id_vector_temp_),
+          spv::NoPrecision);
+      depth_value = builder_->createNoContractionBinOp(
+          spv::OpFAdd, type_float_,
+          builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                             ndc_depth,
+                                             host_depth_range_scale),
+          host_depth_range_offset);
+      // The viewport clamp of gl_FragDepth still applies after this.
+    } else {
     // Take the fixed-function depth. With the float24 modes, per-sample
     // shading is forced, so gl_FragCoord.z is the sample's depth. It is
     // already in the host 0...0.5 float24 domain (remapped via the viewport).
@@ -1597,6 +1628,7 @@ void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
           spv::OpFAdd, type_float_, depth_value,
           builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
                                              depth_ddy, offset_y));
+    }
     }
   }
   if (convert_to_float24) {
