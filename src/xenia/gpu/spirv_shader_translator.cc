@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/spirv_shader_translator.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
@@ -18,6 +19,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/spirv_compatibility.h"
 #include "xenia/gpu/spirv_shader.h"
 
@@ -2235,6 +2237,35 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       spv::OpVectorTimesScalar, type_float3_, ndc_offset, position_w);
   position_xyz = builder_->createNoContractionBinOp(
       spv::OpFAdd, type_float3_, position_xyz, ndc_offset_mul_w);
+
+  // Optionally quantize the final position outputs so logically identical
+  // vertex shaders compiled into different pipelines produce bit-identical
+  // positions even when the host GPU compiler rounds their math differently
+  // per function (exact integer round-to-nearest on the float bit pattern -
+  // the host compiler cannot alter it).
+  uint32_t position_quantize_bits = static_cast<uint32_t>(
+      std::min(INT32_C(22), std::max(INT32_C(0),
+                                     cvars::vertex_position_quantize_bits)));
+  if (position_quantize_bits) {
+    spv::Id quantize_round = builder_->makeUintConstant(
+        uint32_t(1) << (position_quantize_bits - 1));
+    spv::Id quantize_mask = builder_->makeUintConstant(
+        ~((uint32_t(1) << position_quantize_bits) - 1));
+    auto quantize = [&](spv::Id value, spv::Id float_type,
+                        spv::Id uint_type) -> spv::Id {
+      spv::Id bits =
+          builder_->createUnaryOp(spv::OpBitcast, uint_type, value);
+      bits = builder_->createBinOp(
+          spv::OpIAdd, uint_type, bits,
+          SpirvSmearScalarResultOrConstant(quantize_round, uint_type));
+      bits = builder_->createBinOp(
+          spv::OpBitwiseAnd, uint_type, bits,
+          SpirvSmearScalarResultOrConstant(quantize_mask, uint_type));
+      return builder_->createUnaryOp(spv::OpBitcast, float_type, bits);
+    };
+    position_xyz = quantize(position_xyz, type_float3_, type_uint3_);
+    position_w = quantize(position_w, type_float_, type_uint_);
+  }
 
   // Write the point size.
   if (output_point_size_ != spv::NoResult) {

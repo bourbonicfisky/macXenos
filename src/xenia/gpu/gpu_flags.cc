@@ -125,3 +125,16 @@ DEFINE_bool(
     "This fixes(hide) issues with black ground in AC6. Use only in AC6. "
     "Might cause issues in other titles.",
     "HACKS");
+
+DEFINE_int32(
+    vertex_position_quantize_bits, 0,
+    "Round the final vertex position outputs (clip XYZ and W) to a "
+    "2^-(23-N) relative grid by dropping N low mantissa bits "
+    "(round-to-nearest) in all translated vertex shaders. Collapses "
+    "sub-ulp position differences between logically identical vertex "
+    "shaders compiled into different pipelines, emulating the tolerance "
+    "that guest f24 (and host D24) depth quantization provides - for "
+    "hosts whose GPU compilers produce per-function rounding differences "
+    "(Apple/Metal multi-pass depth conflicts). 0 = off; 3 aligns with one "
+    "f24 depth ulp.",
+    "GPU");

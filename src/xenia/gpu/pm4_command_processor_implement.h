@@ -1156,6 +1156,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
           auto rb_depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
           auto rb_surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
           auto rb_color_info = register_file_->Get<reg::RB_COLOR_INFO>();
+          auto pa_su_sc_mode_cntl =
+              register_file_->Get<reg::PA_SU_SC_MODE_CNTL>();
           XELOGI("  DEPTH z_en={} z_wr={} zfunc={} depth_base={} "
                  "depth_fmt={} msaa={} pitch={} color0_base={} color0_fmt={}",
                  uint32_t(rb_depthcontrol.z_enable),
@@ -1167,6 +1169,38 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                  uint32_t(rb_surface_info.surface_pitch),
                  uint32_t(rb_color_info.color_base),
                  uint32_t(rb_color_info.color_format));
+          XELOGI("  POLYOFS front_en={} back_en={} para_en={} "
+                 "front_scale={} front_ofs={} back_scale={} back_ofs={} "
+                 "vtx_window_ofs_en={}",
+                 uint32_t(pa_su_sc_mode_cntl.poly_offset_front_enable),
+                 uint32_t(pa_su_sc_mode_cntl.poly_offset_back_enable),
+                 uint32_t(pa_su_sc_mode_cntl.poly_offset_para_enable),
+                 register_file_->Get<float>(
+                     XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE),
+                 register_file_->Get<float>(
+                     XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET),
+                 register_file_->Get<float>(
+                     XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE),
+                 register_file_->Get<float>(
+                     XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET),
+                 uint32_t(pa_su_sc_mode_cntl.vtx_window_offset_enable));
+          if (is_indexed) {
+            XELOGI("  INDEXBUF base={:08X} len={} count={} fmt={} endian={}",
+                   index_buffer_info.guest_base, index_buffer_info.length,
+                   index_buffer_info.count,
+                   uint32_t(index_buffer_info.format),
+                   uint32_t(index_buffer_info.endianness));
+          }
+          for (uint32_t vf = 0; vf < 96; ++vf) {
+            xenos::xe_gpu_vertex_fetch_t vfetch =
+                register_file_->GetVertexFetch(vf);
+            if (vfetch.type != xenos::FetchConstantType::kVertex ||
+                !vfetch.size) {
+              continue;
+            }
+            XELOGI("  VFETCH{} addr={:08X} size_dw={} endian={}", vf,
+                   vfetch.address << 2, vfetch.size, uint32_t(vfetch.endian));
+          }
         }
         if (rb_modecontrol.edram_mode == xenos::EdramMode::kCopy) {
           auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
