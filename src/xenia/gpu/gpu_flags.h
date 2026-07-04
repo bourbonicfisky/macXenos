@@ -52,6 +52,8 @@ DECLARE_bool(depth_float24_sample_z_varying);
 
 DECLARE_bool(depth_float24_sample_z_from_derivatives);
 
+DECLARE_bool(interpolators_manual_perspective);
+
 DECLARE_bool(texture_computed_lod_in_shader);
 
 DECLARE_int32(texture_lod_force_level);

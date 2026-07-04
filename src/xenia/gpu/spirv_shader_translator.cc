@@ -1299,6 +1299,10 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
       builder_->addDecoration(interpolator, spv::DecorationLocation,
                               int(output_location));
       builder_->addDecoration(interpolator, spv::DecorationInvariant);
+      if (cvars::interpolators_manual_perspective) {
+        // Carries o/w - linear in screen space (see the epilogue scaling).
+        builder_->addDecoration(interpolator, spv::DecorationNoPerspective);
+      }
       main_interface_.push_back(interpolator);
       ++output_location;
     }
@@ -2290,6 +2294,39 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
     position_w = quantize(position_w, type_float_, type_uint_);
   }
 
+  // Manual perspective correction: rescale the guest interpolator outputs to
+  // A = o * (1/w) so their noperspective interpolation is the exact linear
+  // numerator of the perspective ratio; the fragment shader reconstructs
+  // o = A / gl_FragCoord.w. Makes interpolated values AND their quad
+  // derivatives host-invariant (helper-lane evaluation of perspective
+  // varyings at partially covered quads is implementation-defined and
+  // diverges between Apple and AMD GPUs).
+  if (cvars::interpolators_manual_perspective) {
+    uint32_t manual_perspective_interpolators =
+        GetModificationInterpolatorMask();
+    if (manual_perspective_interpolators) {
+      spv::Id position_w_inv = builder_->createNoContractionBinOp(
+          spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
+          position_w);
+      uint32_t interpolator_index;
+      while (xe::bit_scan_forward(manual_perspective_interpolators,
+                                  &interpolator_index)) {
+        manual_perspective_interpolators &=
+            ~(UINT32_C(1) << interpolator_index);
+        spv::Id interpolator = input_output_interpolators_[interpolator_index];
+        if (interpolator == spv::NoResult) {
+          continue;
+        }
+        builder_->createStore(
+            builder_->createNoContractionBinOp(
+                spv::OpVectorTimesScalar, type_float4_,
+                builder_->createLoad(interpolator, spv::NoPrecision),
+                position_w_inv),
+            interpolator);
+      }
+    }
+  }
+
   // Write the NDC depth varying for the paired pixel shader's float24 depth
   // conversion - z/w of the exact values being written to gl_Position, so
   // noperspective (screen-linear) interpolation of it at any sample position
@@ -2544,6 +2581,10 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         input_output_interpolators_[interpolator_index] = interpolator;
         builder_->addDecoration(interpolator, spv::DecorationLocation,
                                 int(input_location));
+        if (cvars::interpolators_manual_perspective) {
+          builder_->addDecoration(interpolator,
+                                  spv::DecorationNoPerspective);
+        }
         if (shader_modification.pixel.interpolators_centroid &
             (UINT32_C(1) << interpolator_index)) {
           builder_->addDecoration(interpolator, spv::DecorationCentroid);
@@ -2585,6 +2626,10 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
       // Shader-computed texture LOD sources gl_FragCoord.w for the
       // host-invariant analytic UV gradients (quotient rule).
       (cvars::texture_computed_lod_in_shader &&
+       !is_depth_only_fragment_shader_) ||
+      // Manual perspective correction divides interpolators by
+      // gl_FragCoord.w in the prologue.
+      (cvars::interpolators_manual_perspective &&
        !is_depth_only_fragment_shader_);
   if (need_frag_coord) {
     input_fragment_coordinates_ = builder_->createVariable(
@@ -2865,18 +2910,42 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
   // references them after only initializing them conditionally, and copy
   // interpolants to GPRs.
   uint32_t interpolator_mask = GetModificationInterpolatorMask();
+  // Manual perspective correction: the interpolators carry the noperspective
+  // linear numerator A = o/w; reconstruct o = A / gl_FragCoord.w
+  // (gl_FragCoord.w is 1/w). See the vertex shader epilogue.
+  spv::Id interpolator_w_clip = spv::NoResult;
+  if (cvars::interpolators_manual_perspective && interpolator_mask) {
+    assert_true(input_fragment_coordinates_ != spv::NoResult);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeIntConstant(3));
+    interpolator_w_clip = builder_->createNoContractionBinOp(
+        spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
+        builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassInput,
+                                        input_fragment_coordinates_,
+                                        id_vector_temp_),
+            spv::NoPrecision));
+  }
   for (uint32_t i = 0; i < register_count(); ++i) {
     if (i == param_gen_interpolator) {
       continue;
     }
+    spv::Id register_value = const_float4_0_;
+    if (i < xenos::kMaxInterpolators &&
+        (interpolator_mask & (UINT32_C(1) << i))) {
+      register_value =
+          builder_->createLoad(input_output_interpolators_[i],
+                               spv::NoPrecision);
+      if (interpolator_w_clip != spv::NoResult) {
+        register_value = builder_->createNoContractionBinOp(
+            spv::OpVectorTimesScalar, type_float4_, register_value,
+            interpolator_w_clip);
+      }
+    }
     id_vector_temp_.clear();
     id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));
     builder_->createStore(
-        (i < xenos::kMaxInterpolators &&
-         (interpolator_mask & (UINT32_C(1) << i)))
-            ? builder_->createLoad(input_output_interpolators_[i],
-                                   spv::NoPrecision)
-            : const_float4_0_,
+        register_value,
         builder_->createAccessChain(spv::StorageClassFunction,
                                     var_main_registers_, id_vector_temp_));
   }

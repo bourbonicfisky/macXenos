@@ -149,6 +149,19 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    interpolators_manual_perspective, false,
+    "Interpolate guest interpolators as noperspective A = o/w (vertex "
+    "shader pre-divides by the final position W) and reconstruct "
+    "o = A / gl_FragCoord.w in the fragment shader prologue. Quad "
+    "derivatives of perspective-interpolated varyings at partially covered "
+    "quads are implementation-defined and differ between Apple and AMD "
+    "GPUs (up to ~1000x at edge pixels - the cross-GPU wireframe mesh via "
+    "texture LOD); noperspective varyings and gl_FragCoord are "
+    "helper-lane-exact on both vendors, making values AND derivatives "
+    "host-invariant.",
+    "GPU");
+
+DEFINE_bool(
     texture_computed_lod_in_shader, false,
     "Convert texture gradients to a scalar LOD with a host-invariant formula "
     "in the shader (1D/2D fetches with computed LOD) instead of passing Grad "
