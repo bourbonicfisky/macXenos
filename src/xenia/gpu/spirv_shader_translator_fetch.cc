@@ -1605,6 +1605,40 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       //   q = gl_FragCoord.w (= 1/w, linear), A = uv * q (linear)
       //   duv/dn = (dA/dn * q - A * dq/dn) / q^2
       //   lod = 0.5 * log2(max(dot(sx, sx), dot(sy, sy))), s in texels.
+      // Match the AMD/Xenos trilinear blend ramp on hosts with a plain
+      // linear ramp (Apple): AMD_weight = saturate((frac - 0.1) / 0.8)
+      // (measured exactly by metal-sampler-repro.m; Apple = frac). Feeding
+      // the remapped lambda to a linear-ramp sampler reproduces AMD's
+      // level pair and blend weight, including the pure-level dead zones
+      // within 0.1 of integer LODs.
+      auto remap_trilinear_lambda = [&](spv::Id lambda) -> spv::Id {
+        if (!cvars::texture_trilinear_ramp_match_amd) {
+          if (cvars::texture_mip_lod_bias_adjust != 0.0) {
+            lambda = builder_->createNoContractionBinOp(
+                spv::OpFAdd, type_float_, lambda,
+                builder_->makeFloatConstant(
+                    float(cvars::texture_mip_lod_bias_adjust)));
+          }
+          return lambda;
+        }
+        spv::Id lambda_floor = builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor, lambda);
+        spv::Id lambda_frac = builder_->createNoContractionBinOp(
+            spv::OpFSub, type_float_, lambda, lambda_floor);
+        spv::Id remapped_frac = builder_->createTriBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450FClamp,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_,
+                builder_->createNoContractionBinOp(
+                    spv::OpFSub, type_float_, lambda_frac,
+                    builder_->makeFloatConstant(0.1f)),
+                builder_->makeFloatConstant(1.25f)),
+            builder_->makeFloatConstant(0.0f),
+            builder_->makeFloatConstant(1.0f));
+        return builder_->createNoContractionBinOp(
+            spv::OpFAdd, type_float_, lambda_floor, remapped_frac);
+      };
+
       // Fully specified per-lane derivative: quad-shuffle the value across
       // the 2x2 quad and difference in a fixed direction chosen by the
       // lane's own pixel parity. OpDPdx*Coarse lets the implementation pick
@@ -1919,8 +1953,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // in getCompTexLOD, so not doing it here too for now. Apply the
           // gradient exponent biases from the word 4 of the fetch constant in
           // the future when it's handled in getCompTexLOD somehow.
+          spv::Id lod_gradient_exponent = lod;
+          if (cvars::texture_mip_lod_bias_adjust != 0.0) {
+            // Metal samplers cannot express VkSamplerCreateInfo::mipLodBias;
+            // apply the cross-vendor mip mapping calibration in-shader.
+            lod_gradient_exponent = builder_->createNoContractionBinOp(
+                spv::OpFAdd, type_float_, lod_gradient_exponent,
+                builder_->makeFloatConstant(
+                    float(cvars::texture_mip_lod_bias_adjust)));
+          }
           spv::Id lod_gradient_scale = builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod);
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
+              lod_gradient_exponent);
           switch (instr.dimension) {
             case xenos::FetchOpDimension::k1D: {
               spv::Id gradient_h_1d, gradient_v_1d;
@@ -2109,7 +2153,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                              : spv::ImageOperandsLodMask;
         spv::Id sample_result_unsigned, sample_result_signed;
         if (!use_computed_lod) {
-          texture_parameters.lod = lod;
+          texture_parameters.lod = remap_trilinear_lambda(lod);
         }
         if (instr.dimension == xenos::FetchOpDimension::k3DOrStacked) {
           // 3D (3 coordinate components, 3 gradient components, single fetch)
@@ -2391,6 +2435,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                       instr.dimension == xenos::FetchOpDimension::k1D ? 1
                                                                       : 2),
                   lod);
+              texture_parameters.lod =
+                  remap_trilinear_lambda(texture_parameters.lod);
               image_operands_mask_2d = spv::ImageOperandsLodMask;
             } else if (use_computed_lod) {
               texture_parameters.gradX = gradients_h;

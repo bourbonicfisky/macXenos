@@ -855,6 +855,10 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
         float(UINT32_C(1) << (uint32_t(parameters.aniso_filter) -
                               uint32_t(xenos::AnisoFilter::kMax_1_1)));
   }
+  // Note: VkSamplerCreateInfo::mipLodBias cannot be used for the
+  // cross-vendor mip mapping calibration (texture_mip_lod_bias_adjust) -
+  // Metal samplers have no LOD bias field and MoltenVK silently drops it;
+  // the bias is applied in-shader in spirv_shader_translator_fetch.cc.
   sampler_create_info.minLod = float(parameters.mip_min_level);
   if (parameters.mip_base_map) {
     assert_false(parameters.mip_linear);

@@ -149,6 +149,25 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_trilinear_ramp_match_amd, false,
+    "Remap the explicit-LOD trilinear blend fraction to the AMD/Xenos ramp "
+    "(weight = saturate((frac - 0.1) / 0.8), measured; Apple GPUs use a "
+    "plain linear ramp) - reproduces AMD's mip pair and blend weight "
+    "including the pure-level dead zones within 0.1 of integer LODs. "
+    "Applies to register-LOD and shader-computed-LOD fetches (combine with "
+    "texture_computed_lod_in_shader for coverage of computed-LOD fetches).",
+    "GPU");
+
+DEFINE_double(
+    texture_mip_lod_bias_adjust, 0.0,
+    "Constant sampler mipLodBias applied to all guest texture samplers, "
+    "calibrating the host GPU's lambda->mip-pair mapping to the Xenos/AMD "
+    "convention (Apple GPUs transition ~0.099 LOD later than AMD at "
+    "identical explicit LOD - the cross-GPU triangle-edge mesh). "
+    "Suggested on Apple GPUs: 0.099.",
+    "GPU");
+
+DEFINE_bool(
     interpolators_manual_perspective, false,
     "Interpolate guest interpolators as noperspective A = o/w (vertex "
     "shader pre-divides by the final position W) and reconstruct "

@@ -52,6 +52,10 @@ DECLARE_bool(depth_float24_sample_z_varying);
 
 DECLARE_bool(depth_float24_sample_z_from_derivatives);
 
+DECLARE_bool(texture_trilinear_ramp_match_amd);
+
+DECLARE_double(texture_mip_lod_bias_adjust);
+
 DECLARE_bool(interpolators_manual_perspective);
 
 DECLARE_bool(texture_computed_lod_in_shader);
