@@ -684,6 +684,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     // filtering for the fetch.
     bool shader_computed_lod =
         cvars::texture_computed_lod_in_shader && use_computed_lod &&
+        !instr.attributes.use_register_gradients &&
         instr.opcode == ucode::FetchOpcode::kTextureFetch &&
         (instr.dimension == xenos::FetchOpDimension::k1D ||
          instr.dimension == xenos::FetchOpDimension::k2D);
@@ -2230,38 +2231,85 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             spv::ImageOperandsMask image_operands_mask_2d =
                 image_operands_mask;
             if (shader_computed_lod) {
-              // Host-invariant scalar LOD from the (already lod-bias-scaled,
-              // normalized) UV gradients:
-              // lod = 0.5 * log2(max(dot(sx, sx), dot(sy, sy))), s = grad *
-              // texture size in texels. The same formula on all hosts makes
-              // per-flat-triangle mip selection bit-consistent across GPUs
-              // (sampler minLod/maxLod clamping still applies).
+              // Host-invariant scalar LOD. The quad derivatives of
+              // perspective-interpolated UVs are implementation-defined at
+              // partially covered quads (helper invocation ratio
+              // evaluation), and both Apple's and AMD's hardware LOD inherit
+              // that divergence - constant per flat triangle, so mips flip
+              // across whole triangles (the cross-GPU wireframe mesh).
+              // Reconstruct the analytic gradients via the quotient rule
+              // from SCREEN-LINEAR quantities, whose finite differences are
+              // plane-exact on any implementation:
+              //   q = gl_FragCoord.w (= 1/w, linear), A = uv * q (linear)
+              //   duv/dn = (dA/dn * q - A * dq/dn) / q^2
+              // Then lod = 0.5 * log2(max(dot(sx, sx), dot(sy, sy))) +
+              // lod_register_bias, s = duv/dn * texture size in texels.
               assert_true(size[0] != spv::NoResult);
-              spv::Id lod_size_x = size[0];
-              spv::Id lod_size_y =
-                  instr.dimension == xenos::FetchOpDimension::k1D
-                      ? builder_->makeFloatConstant(1.0f)
-                      : size[1];
+              assert_true(input_fragment_coordinates_ != spv::NoResult);
+              spv::Id lod_size[2];
+              lod_size[0] = size[0];
+              lod_size[1] = instr.dimension == xenos::FetchOpDimension::k1D
+                                ? builder_->makeFloatConstant(1.0f)
+                                : size[1];
+              id_vector_temp_.clear();
+              id_vector_temp_.push_back(builder_->makeIntConstant(3));
+              spv::Id frag_q = builder_->createLoad(
+                  builder_->createAccessChain(spv::StorageClassInput,
+                                              input_fragment_coordinates_,
+                                              id_vector_temp_),
+                  spv::NoPrecision);
+              builder_->addCapability(spv::CapabilityDerivativeControl);
+              spv::Id dq_dx = builder_->createUnaryOp(spv::OpDPdxCoarse,
+                                                      type_float_, frag_q);
+              spv::Id dq_dy = builder_->createUnaryOp(spv::OpDPdyCoarse,
+                                                      type_float_, frag_q);
+              spv::Id q_squared_inv = builder_->createNoContractionBinOp(
+                  spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
+                  builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                                     frag_q, frag_q));
               spv::Id max_grad_squared = spv::NoResult;
-              for (spv::Id gradients : {gradients_h, gradients_v}) {
-                spv::Id grad_x_texels = builder_->createNoContractionBinOp(
-                    spv::OpFMul, type_float_,
-                    builder_->createCompositeExtract(gradients, type_float_,
-                                                     0),
-                    lod_size_x);
-                spv::Id grad_y_texels = builder_->createNoContractionBinOp(
-                    spv::OpFMul, type_float_,
-                    builder_->createCompositeExtract(gradients, type_float_,
-                                                     1),
-                    lod_size_y);
-                spv::Id grad_squared = builder_->createNoContractionBinOp(
-                    spv::OpFAdd, type_float_,
-                    builder_->createNoContractionBinOp(
-                        spv::OpFMul, type_float_, grad_x_texels,
-                        grad_x_texels),
-                    builder_->createNoContractionBinOp(
-                        spv::OpFMul, type_float_, grad_y_texels,
-                        grad_y_texels));
+              spv::Id dq[2] = {dq_dx, dq_dy};
+              // Per-axis linear numerators A_c = coordinate_c * q and their
+              // derivatives.
+              spv::Id coord_a[2], da_dx[2], da_dy[2];
+              uint32_t lod_component_count =
+                  instr.dimension == xenos::FetchOpDimension::k1D ? 1 : 2;
+              for (uint32_t i = 0; i < lod_component_count; ++i) {
+                coord_a[i] = builder_->createNoContractionBinOp(
+                    spv::OpFMul, type_float_, coordinates[i], frag_q);
+                da_dx[i] = builder_->createUnaryOp(spv::OpDPdxCoarse,
+                                                   type_float_, coord_a[i]);
+                da_dy[i] = builder_->createUnaryOp(spv::OpDPdyCoarse,
+                                                   type_float_, coord_a[i]);
+              }
+              for (uint32_t axis = 0; axis < 2; ++axis) {
+                spv::Id grad_squared = spv::NoResult;
+                for (uint32_t i = 0; i < lod_component_count; ++i) {
+                  spv::Id da = axis ? da_dy[i] : da_dx[i];
+                  // (da * q - a * dq) * inv_q2 * size = texel-space gradient.
+                  spv::Id grad_texels = builder_->createNoContractionBinOp(
+                      spv::OpFMul, type_float_,
+                      builder_->createNoContractionBinOp(
+                          spv::OpFMul, type_float_,
+                          builder_->createNoContractionBinOp(
+                              spv::OpFSub, type_float_,
+                              builder_->createNoContractionBinOp(
+                                  spv::OpFMul, type_float_, da, frag_q),
+                              builder_->createNoContractionBinOp(
+                                  spv::OpFMul, type_float_, coord_a[i],
+                                  dq[axis])),
+                          q_squared_inv),
+                      lod_size[i]);
+                  spv::Id grad_component_squared =
+                      builder_->createNoContractionBinOp(
+                          spv::OpFMul, type_float_, grad_texels, grad_texels);
+                  grad_squared =
+                      grad_squared == spv::NoResult
+                          ? grad_component_squared
+                          : builder_->createNoContractionBinOp(
+                                spv::OpFAdd, type_float_, grad_squared,
+                                grad_component_squared);
+                }
                 max_grad_squared =
                     max_grad_squared == spv::NoResult
                         ? grad_squared
@@ -2269,12 +2317,16 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                               type_float_, ext_inst_glsl_std_450_,
                               GLSLstd450NMax, max_grad_squared, grad_squared);
               }
-              texture_parameters.lod = builder_->createNoContractionBinOp(
+              spv::Id lod_unbiased = builder_->createNoContractionBinOp(
                   spv::OpFMul, type_float_,
                   builder_->makeFloatConstant(0.5f),
                   builder_->createUnaryBuiltinCall(
                       type_float_, ext_inst_glsl_std_450_, GLSLstd450Log2,
                       max_grad_squared));
+              // Add the register/fetch-constant LOD bias (the Grad path
+              // applies it by scaling the gradients by exp2(lod)).
+              texture_parameters.lod = builder_->createNoContractionBinOp(
+                  spv::OpFAdd, type_float_, lod_unbiased, lod);
               image_operands_mask_2d = spv::ImageOperandsLodMask;
             } else if (use_computed_lod) {
               texture_parameters.gradX = gradients_h;

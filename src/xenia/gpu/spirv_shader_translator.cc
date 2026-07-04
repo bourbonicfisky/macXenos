@@ -2581,7 +2581,11 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
        !IsExecutionModeEarlyFragmentTests()) ||
       // Float24 depth output conversion sources gl_FragCoord.z when the guest
       // shader doesn't write oDepth itself.
-      (IsDepthStencilModeFloat24() && !current_shader().writes_depth());
+      (IsDepthStencilModeFloat24() && !current_shader().writes_depth()) ||
+      // Shader-computed texture LOD sources gl_FragCoord.w for the
+      // host-invariant analytic UV gradients (quotient rule).
+      (cvars::texture_computed_lod_in_shader &&
+       !is_depth_only_fragment_shader_);
   if (need_frag_coord) {
     input_fragment_coordinates_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_float4_, "gl_FragCoord");
