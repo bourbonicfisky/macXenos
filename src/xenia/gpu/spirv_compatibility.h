@@ -215,6 +215,7 @@ namespace spv {
 #define OpDPdyFine Op::OpDPdyFine
 #define OpFwidthFine Op::OpFwidthFine
 #define OpDPdxCoarse Op::OpDPdxCoarse
+#define OpGroupNonUniformQuadSwap Op::OpGroupNonUniformQuadSwap
 #define OpDPdyCoarse Op::OpDPdyCoarse
 #define OpFwidthCoarse Op::OpFwidthCoarse
 #define OpEmitVertex Op::OpEmitVertex
@@ -376,6 +377,7 @@ namespace spv {
 #define CapabilityClipDistance Capability::ClipDistance
 #define CapabilityCullDistance Capability::CullDistance
 #define CapabilityDerivativeControl Capability::DerivativeControl
+#define CapabilityGroupNonUniformQuad Capability::GroupNonUniformQuad
 #define CapabilityDenormFlushToZero Capability::DenormFlushToZero
 #define CapabilitySignedZeroInfNanPreserve Capability::SignedZeroInfNanPreserve
 #define CapabilityRoundingModeRTE Capability::RoundingModeRTE

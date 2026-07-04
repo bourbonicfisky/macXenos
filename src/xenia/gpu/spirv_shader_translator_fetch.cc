@@ -1605,6 +1605,60 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       //   q = gl_FragCoord.w (= 1/w, linear), A = uv * q (linear)
       //   duv/dn = (dA/dn * q - A * dq/dn) / q^2
       //   lod = 0.5 * log2(max(dot(sx, sx), dot(sy, sy))), s in texels.
+      // Fully specified per-lane derivative: quad-shuffle the value across
+      // the 2x2 quad and difference in a fixed direction chosen by the
+      // lane's own pixel parity. OpDPdx*Coarse lets the implementation pick
+      // WHICH lane pair to difference - for nonlinear per-lane values (the
+      // reconstructed perspective ratio) different pairs give different
+      // results, and Apple and AMD pick differently (MSL only has dfdx, so
+      // the fine/coarse distinction is lost in translation). Requires
+      // deterministic per-lane values (interpolators_manual_perspective).
+      auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
+        if (!cvars::interpolators_manual_perspective) {
+          builder_->addCapability(spv::CapabilityDerivativeControl);
+          return builder_->createUnaryOp(
+              axis ? spv::OpDPdyCoarse : spv::OpDPdxCoarse, type_float_,
+              value);
+        }
+        builder_->addCapability(spv::CapabilityGroupNonUniformQuad);
+        spv::Id swapped;
+        {
+          std::unique_ptr<spv::Instruction> swap_op =
+              std::make_unique<spv::Instruction>(
+                  builder_->getUniqueId(), type_float_,
+                  spv::OpGroupNonUniformQuadSwap);
+          swap_op->addIdOperand(
+              builder_->makeUintConstant(uint32_t(spv::Scope::Subgroup)));
+          swap_op->addIdOperand(value);
+          swap_op->addIdOperand(builder_->makeUintConstant(axis));
+          swapped = swap_op->getResultId();
+          builder_->getBuildPoint()->addInstruction(std::move(swap_op));
+        }
+        // Even pixel coordinate along the axis: the quad neighbor is at +1,
+        // d = swapped - value; odd: neighbor at -1, d = value - swapped.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(builder_->makeIntConstant(int(axis)));
+        spv::Id axis_coordinate = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassInput,
+                                        input_fragment_coordinates_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        spv::Id axis_odd = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_,
+                builder_->createUnaryOp(spv::OpConvertFToU, type_uint_,
+                                        axis_coordinate),
+                builder_->makeUintConstant(1)),
+            const_uint_0_);
+        return builder_->createTriOp(
+            spv::OpSelect, type_float_, axis_odd,
+            builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                               value, swapped),
+            builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                               swapped, value));
+      };
+
       auto emit_analytic_lod = [&](uint32_t component_count) -> spv::Id {
         assert_true(size[0] != spv::NoResult);
         assert_true(input_fragment_coordinates_ != spv::NoResult);
@@ -1619,12 +1673,9 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                                         input_fragment_coordinates_,
                                         id_vector_temp_),
             spv::NoPrecision);
-        builder_->addCapability(spv::CapabilityDerivativeControl);
         spv::Id dq[2];
-        dq[0] = builder_->createUnaryOp(spv::OpDPdxCoarse, type_float_,
-                                        frag_q);
-        dq[1] = builder_->createUnaryOp(spv::OpDPdyCoarse, type_float_,
-                                        frag_q);
+        dq[0] = quad_derivative(frag_q, 0);
+        dq[1] = quad_derivative(frag_q, 1);
         spv::Id q_squared_inv = builder_->createNoContractionBinOp(
             spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
             builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
@@ -1633,10 +1684,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         for (uint32_t i = 0; i < component_count; ++i) {
           coord_a[i] = builder_->createNoContractionBinOp(
               spv::OpFMul, type_float_, coordinates[i], frag_q);
-          da_dx[i] = builder_->createUnaryOp(spv::OpDPdxCoarse, type_float_,
-                                             coord_a[i]);
-          da_dy[i] = builder_->createUnaryOp(spv::OpDPdyCoarse, type_float_,
-                                             coord_a[i]);
+          da_dx[i] = quad_derivative(coord_a[i], 0);
+          da_dy[i] = quad_derivative(coord_a[i], 1);
         }
         spv::Id max_grad_squared = spv::NoResult;
         for (uint32_t axis = 0; axis < 2; ++axis) {
