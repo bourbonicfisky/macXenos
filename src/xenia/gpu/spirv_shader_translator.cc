@@ -131,6 +131,7 @@ void SpirvShaderTranslator::Reset() {
   input_ndc_depth_ = spv::NoResult;
   output_inv_w_ = spv::NoResult;
   input_inv_w_ = spv::NoResult;
+  input_helper_invocation_ = spv::NoResult;
   std::fill(input_output_interpolators_.begin(),
             input_output_interpolators_.end(), spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
@@ -2666,6 +2667,22 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(input_fragment_coordinates_, spv::DecorationBuiltIn,
                             static_cast<int>(spv::BuiltIn::FragCoord));
     main_interface_.push_back(input_fragment_coordinates_);
+  }
+
+  // Helper-invocation input for replacing helper-lane analytic-LOD inputs
+  // with a covered lane's values before quad differencing (helper-lane
+  // values are only cross-vendor equal to ~ulp, and the quotient rule's
+  // catastrophic cancellation at edge-on triangles amplifies that into
+  // multi-mip LOD divergence at partially covered quads).
+  if (cvars::texture_computed_lod_in_shader &&
+      cvars::texture_lod_covered_lane_inputs &&
+      !is_depth_only_fragment_shader_) {
+    input_helper_invocation_ = builder_->createVariable(
+        spv::NoPrecision, spv::StorageClassInput, type_bool_,
+        "gl_HelperInvocation");
+    builder_->addDecoration(input_helper_invocation_, spv::DecorationBuiltIn,
+                            static_cast<int>(spv::BuiltIn::HelperInvocation));
+    main_interface_.push_back(input_helper_invocation_);
   }
 
   // Float24 depth output conversion must be done per-sample with MSAA

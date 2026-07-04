@@ -1668,6 +1668,65 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             spv::OpFAdd, type_float_, lambda_floor, remapped_frac);
       };
 
+      // Replace a helper (uncovered) lane's value with the first covered
+      // lane's value in the 2x2 quad, so that quad differences never source
+      // helper-lane values. Helper-lane values are only cross-vendor equal
+      // to ~ulp (noperspective extrapolation), and the analytic-LOD
+      // quotient rule catastrophically cancels at edge-on triangles,
+      // amplifying that noise into multi-mip cross-vendor LOD differences
+      // at partially covered quads (alpha-test fragment-ownership flips -
+      // the Apple-vs-AMD mesh). Quad coverage itself is cross-vendor
+      // identical, so the substituted inputs are host-invariant; fully
+      // covered quads are unaffected.
+      auto covered_lane_value = [&](spv::Id value) -> spv::Id {
+        if (input_helper_invocation_ == spv::NoResult) {
+          return value;
+        }
+        builder_->addCapability(spv::CapabilityGroupNonUniformQuad);
+        spv::Id helper = builder_->createLoad(input_helper_invocation_,
+                                              spv::NoPrecision);
+        // Broadcast as float (1.0 = helper) - bool quad-broadcast support
+        // is shakier through SPIRV-Cross/MSL.
+        spv::Id helper_float = builder_->createTriOp(
+            spv::OpSelect, type_float_, helper,
+            builder_->makeFloatConstant(1.0f), const_float_0_);
+        auto quad_broadcast = [&](spv::Id v, uint32_t lane) -> spv::Id {
+          std::unique_ptr<spv::Instruction> broadcast_op =
+              std::make_unique<spv::Instruction>(
+                  builder_->getUniqueId(), type_float_,
+                  spv::OpGroupNonUniformQuadBroadcast);
+          broadcast_op->addIdOperand(
+              builder_->makeUintConstant(uint32_t(spv::Scope::Subgroup)));
+          broadcast_op->addIdOperand(v);
+          broadcast_op->addIdOperand(builder_->makeUintConstant(lane));
+          spv::Id result = broadcast_op->getResultId();
+          builder_->getBuildPoint()->addInstruction(std::move(broadcast_op));
+          return result;
+        };
+        spv::Id lane_value[4], lane_helper[4];
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+          lane_value[lane] = quad_broadcast(value, lane);
+          lane_helper[lane] = quad_broadcast(helper_float, lane);
+        }
+        auto lane_is_helper = [&](uint32_t lane) -> spv::Id {
+          return builder_->createBinOp(spv::OpFOrdNotEqual, type_bool_,
+                                       lane_helper[lane], const_float_0_);
+        };
+        // First covered lane's value (quad-uniform; a quad always has at
+        // least one covered lane).
+        spv::Id covered = builder_->createTriOp(
+            spv::OpSelect, type_float_, lane_is_helper(2), lane_value[3],
+            lane_value[2]);
+        covered = builder_->createTriOp(spv::OpSelect, type_float_,
+                                        lane_is_helper(1), covered,
+                                        lane_value[1]);
+        covered = builder_->createTriOp(spv::OpSelect, type_float_,
+                                        lane_is_helper(0), covered,
+                                        lane_value[0]);
+        return builder_->createTriOp(spv::OpSelect, type_float_, helper,
+                                     covered, value);
+      };
+
       // Fully specified per-lane derivative: quad-shuffle the value across
       // the 2x2 quad and difference in a fixed direction chosen by the
       // lane's own pixel parity. OpDPdx*Coarse lets the implementation pick
@@ -1677,6 +1736,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // the fine/coarse distinction is lost in translation). Requires
       // deterministic per-lane values (interpolators_manual_perspective).
       auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
+        value = covered_lane_value(value);
         if (!cvars::interpolators_manual_perspective) {
           builder_->addCapability(spv::CapabilityDerivativeControl);
           return builder_->createUnaryOp(

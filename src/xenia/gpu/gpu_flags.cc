@@ -212,6 +212,19 @@ DEFINE_bool(
     "for the converted fetches.",
     "GPU");
 
+DEFINE_bool(
+    texture_lod_covered_lane_inputs, false,
+    "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
+    "before quad-differencing the analytic-LOD inputs, replace each helper "
+    "(uncovered) lane's value with the first covered lane's value in the "
+    "2x2 quad. Helper-lane values are only cross-vendor equal to ~ulp, and "
+    "the quotient rule catastrophically cancels at edge-on triangles, "
+    "amplifying that noise into multi-mip LOD differences at partially "
+    "covered quads (Apple-vs-AMD alpha-test ownership flips - the mesh). "
+    "Quad coverage itself is cross-vendor identical, so the corrected "
+    "lambda is host-invariant; fully covered quads are unaffected.",
+    "GPU");
+
 DEFINE_int32(
     texture_lod_force_level, -1,
     "Diagnostic: pin all guest texture samplers to this exact mip level "

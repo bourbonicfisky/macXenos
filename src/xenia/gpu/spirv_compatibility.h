@@ -216,6 +216,7 @@ namespace spv {
 #define OpFwidthFine Op::OpFwidthFine
 #define OpDPdxCoarse Op::OpDPdxCoarse
 #define OpGroupNonUniformQuadSwap Op::OpGroupNonUniformQuadSwap
+#define OpGroupNonUniformQuadBroadcast Op::OpGroupNonUniformQuadBroadcast
 #define OpDPdyCoarse Op::OpDPdyCoarse
 #define OpFwidthCoarse Op::OpFwidthCoarse
 #define OpEmitVertex Op::OpEmitVertex

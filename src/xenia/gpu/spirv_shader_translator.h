@@ -1009,6 +1009,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
   static constexpr uint32_t kInvWVaryingLocation = 19;
   spv::Id output_inv_w_;
   spv::Id input_inv_w_;
+  // PS, texture_lod_covered_lane_inputs - bool (gl_HelperInvocation), for
+  // replacing helper-lane analytic-LOD inputs with a covered lane's values
+  // before quad differencing.
+  spv::Id input_helper_invocation_;
 
   // VS output or PS input, only the ones that are needed (spv::NoResult for the
   // unneeded interpolators), indexed by the guest interpolator index - float4.

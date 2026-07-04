@@ -64,6 +64,8 @@ DECLARE_bool(interpolators_manual_perspective);
 
 DECLARE_bool(texture_computed_lod_in_shader);
 
+DECLARE_bool(texture_lod_covered_lane_inputs);
+
 DECLARE_int32(texture_lod_force_level);
 
 DECLARE_bool(texture_max_lod_clamp_probe);
