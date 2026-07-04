@@ -149,6 +149,18 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_alpha_test_lod_snap, false,
+    "For draws with the fixed-function alpha test enabled, snap the "
+    "shader-computed/register texture LOD to the nearest integer mip. "
+    "Alpha-tested fragment survival flips on the filtered alpha crossing "
+    "the reference, so sampler-internal cross-vendor differences (blend "
+    "weight precision, ramp shape) directly flip fragment ownership at "
+    "triangle edges (the Apple-vs-AMD/Xenos mesh); single-level sampling "
+    "makes the verdict host-invariant. Requires "
+    "texture_computed_lod_in_shader for computed-LOD fetch coverage.",
+    "GPU");
+
+DEFINE_bool(
     texture_decompress_bc, false,
     "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with Xenia's "
     "own compute shaders instead of sampling the compressed blocks - the "

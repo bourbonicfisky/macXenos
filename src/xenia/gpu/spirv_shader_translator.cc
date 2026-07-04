@@ -129,6 +129,8 @@ void SpirvShaderTranslator::Reset() {
   input_sample_position_ = spv::NoResult;
   output_ndc_depth_ = spv::NoResult;
   input_ndc_depth_ = spv::NoResult;
+  output_inv_w_ = spv::NoResult;
+  input_inv_w_ = spv::NoResult;
   std::fill(input_output_interpolators_.begin(),
             input_output_interpolators_.end(), spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
@@ -1355,6 +1357,20 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     main_interface_.push_back(output_ndc_depth_);
   }
 
+  if (cvars::interpolators_manual_perspective) {
+    // 1/w for the per-lane perspective reconstruction in the pixel shader -
+    // a noperspective varying instead of gl_FragCoord.w, which is
+    // vendor-divergent at helper lanes.
+    output_inv_w_ =
+        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
+                                 type_float_, "xe_out_inv_w");
+    builder_->addDecoration(output_inv_w_, spv::DecorationLocation,
+                            int(kInvWVaryingLocation));
+    builder_->addDecoration(output_inv_w_, spv::DecorationNoPerspective);
+    builder_->addDecoration(output_inv_w_, spv::DecorationInvariant);
+    main_interface_.push_back(output_inv_w_);
+  }
+
   // Create the gl_PerVertex output for used system outputs.
   std::vector<spv::Id> struct_per_vertex_members;
   struct_per_vertex_members.reserve(kOutputPerVertexMemberCount);
@@ -2308,6 +2324,9 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       spv::Id position_w_inv = builder_->createNoContractionBinOp(
           spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
           position_w);
+      if (output_inv_w_ != spv::NoResult) {
+        builder_->createStore(position_w_inv, output_inv_w_);
+      }
       uint32_t interpolator_index;
       while (xe::bit_scan_forward(manual_perspective_interpolators,
                                   &interpolator_index)) {
@@ -2591,6 +2610,16 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         }
         main_interface_.push_back(interpolator);
         ++input_location;
+      }
+      if (cvars::interpolators_manual_perspective &&
+          GetModificationInterpolatorMask()) {
+        input_inv_w_ = builder_->createVariable(
+            spv::NoPrecision, spv::StorageClassInput, type_float_,
+            "xe_in_inv_w");
+        builder_->addDecoration(input_inv_w_, spv::DecorationLocation,
+                                int(kInvWVaryingLocation));
+        builder_->addDecoration(input_inv_w_, spv::DecorationNoPerspective);
+        main_interface_.push_back(input_inv_w_);
       }
     }
 
@@ -2915,16 +2944,13 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
   // (gl_FragCoord.w is 1/w). See the vertex shader epilogue.
   spv::Id interpolator_w_clip = spv::NoResult;
   if (cvars::interpolators_manual_perspective && interpolator_mask) {
-    assert_true(input_fragment_coordinates_ != spv::NoResult);
-    id_vector_temp_.clear();
-    id_vector_temp_.push_back(builder_->makeIntConstant(3));
+    // 1/(1/w) from the noperspective 1/w varying - NOT gl_FragCoord.w,
+    // which is vendor-divergent at helper lanes and would poison every quad
+    // derivative built on the reconstructed values.
+    assert_true(input_inv_w_ != spv::NoResult);
     interpolator_w_clip = builder_->createNoContractionBinOp(
         spv::OpFDiv, type_float_, builder_->makeFloatConstant(1.0f),
-        builder_->createLoad(
-            builder_->createAccessChain(spv::StorageClassInput,
-                                        input_fragment_coordinates_,
-                                        id_vector_temp_),
-            spv::NoPrecision));
+        builder_->createLoad(input_inv_w_, spv::NoPrecision));
   }
   for (uint32_t i = 0; i < register_count(); ++i) {
     if (i == param_gen_interpolator) {

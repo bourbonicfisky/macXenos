@@ -1611,6 +1611,35 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // the remapped lambda to a linear-ramp sampler reproduces AMD's
       // level pair and blend weight, including the pure-level dead zones
       // within 0.1 of integer LODs.
+      // For alpha-tested draws, snap the LOD to the nearest integer mip:
+      // fragment survival flips on the filtered alpha crossing the test
+      // reference, and every sampler-internal difference (blend-weight
+      // precision, ramp shape, level-pair choice) lands directly on the
+      // kill verdict - selecting one whole level deterministically makes
+      // the verdict host-invariant (per-level bilinear is cross-vendor
+      // consistent). Runtime-gated on the alpha-test system flags.
+      auto snap_lambda_if_alpha_tested = [&](spv::Id lambda) -> spv::Id {
+        if (!cvars::texture_alpha_test_lod_snap ||
+            is_depth_only_fragment_shader_ || !is_pixel_shader()) {
+          return lambda;
+        }
+        spv::Id alpha_test_active = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+                builder_->makeUintConstant(kSysFlag_AlphaPassIfLess |
+                                           kSysFlag_AlphaPassIfEqual |
+                                           kSysFlag_AlphaPassIfGreater)),
+            builder_->makeUintConstant(kSysFlag_AlphaPassIfLess |
+                                       kSysFlag_AlphaPassIfEqual |
+                                       kSysFlag_AlphaPassIfGreater));
+        spv::Id lambda_snapped = builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven, lambda);
+        return builder_->createTriOp(spv::OpSelect, type_float_,
+                                     alpha_test_active, lambda_snapped,
+                                     lambda);
+      };
+
       auto remap_trilinear_lambda = [&](spv::Id lambda) -> spv::Id {
         if (!cvars::texture_trilinear_ramp_match_amd) {
           if (cvars::texture_mip_lod_bias_adjust != 0.0) {
@@ -1700,13 +1729,21 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         lod_size[0] = size[0];
         lod_size[1] = component_count > 1 ? size[1]
                                           : builder_->makeFloatConstant(1.0f);
-        id_vector_temp_.clear();
-        id_vector_temp_.push_back(builder_->makeIntConstant(3));
-        spv::Id frag_q = builder_->createLoad(
-            builder_->createAccessChain(spv::StorageClassInput,
-                                        input_fragment_coordinates_,
-                                        id_vector_temp_),
-            spv::NoPrecision);
+        spv::Id frag_q;
+        if (input_inv_w_ != spv::NoResult) {
+          // The noperspective 1/w varying: helper-lane-exact on all vendors,
+          // unlike gl_FragCoord.w (measured divergent up to 5.8 at helper
+          // lanes cross-vendor).
+          frag_q = builder_->createLoad(input_inv_w_, spv::NoPrecision);
+        } else {
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeIntConstant(3));
+          frag_q = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassInput,
+                                          input_fragment_coordinates_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+        }
         spv::Id dq[2];
         dq[0] = quad_derivative(frag_q, 0);
         dq[1] = quad_derivative(frag_q, 1);
@@ -2153,7 +2190,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                              : spv::ImageOperandsLodMask;
         spv::Id sample_result_unsigned, sample_result_signed;
         if (!use_computed_lod) {
-          texture_parameters.lod = remap_trilinear_lambda(lod);
+          texture_parameters.lod =
+              snap_lambda_if_alpha_tested(remap_trilinear_lambda(lod));
         }
         if (instr.dimension == xenos::FetchOpDimension::k3DOrStacked) {
           // 3D (3 coordinate components, 3 gradient components, single fetch)
@@ -2435,8 +2473,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                       instr.dimension == xenos::FetchOpDimension::k1D ? 1
                                                                       : 2),
                   lod);
-              texture_parameters.lod =
-                  remap_trilinear_lambda(texture_parameters.lod);
+              texture_parameters.lod = snap_lambda_if_alpha_tested(
+                  remap_trilinear_lambda(texture_parameters.lod));
               image_operands_mask_2d = spv::ImageOperandsLodMask;
             } else if (use_computed_lod) {
               texture_parameters.gradX = gradients_h;

@@ -52,6 +52,8 @@ DECLARE_bool(depth_float24_sample_z_varying);
 
 DECLARE_bool(depth_float24_sample_z_from_derivatives);
 
+DECLARE_bool(texture_alpha_test_lod_snap);
+
 DECLARE_bool(texture_decompress_bc);
 
 DECLARE_bool(texture_trilinear_ramp_match_amd);

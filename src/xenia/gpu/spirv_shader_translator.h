@@ -1001,6 +1001,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // (0-15), point coordinates and point size, so it never collides with the
   // compacted dynamic allocation on either side of the interface.
   static constexpr uint32_t kNdcDepthVaryingLocation = 18;
+  // VS/PS - float, 1/w as a noperspective varying for
+  // interpolators_manual_perspective: gl_FragCoord.w is vendor-divergent at
+  // helper lanes (measured up to 5.8 absolute cross-vendor), while
+  // noperspective varyings are helper-lane-exact on all vendors - so the
+  // per-lane perspective reconstruction must not use the builtin.
+  static constexpr uint32_t kInvWVaryingLocation = 19;
+  spv::Id output_inv_w_;
+  spv::Id input_inv_w_;
 
   // VS output or PS input, only the ones that are needed (spv::NoResult for the
   // unneeded interpolators), indexed by the guest interpolator index - float4.
