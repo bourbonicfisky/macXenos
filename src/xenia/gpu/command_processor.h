@@ -39,6 +39,7 @@ DECLARE_int32(replay_zfunc_always_draw);
 DECLARE_int32(replay_duplicate_draw_stencil);
 DECLARE_bool(replay_duplicate_draw_depth_only);
 DECLARE_bool(replay_draw_log);
+DECLARE_string(replay_inject_memory);
 
 namespace xe {
 

@@ -114,6 +114,15 @@ DEFINE_bool(replay_draw_log, false,
             "GPU");
 
 DEFINE_string(
+    replay_inject_memory, "",
+    "Trace-replay diagnostic: semicolon-separated list of "
+    "hexaddr,afterdraw,filepath - before issuing draw index 'afterdraw', "
+    "copy the file's contents into guest physical memory at hexaddr and "
+    "invalidate caches (e.g. substitute another host's resolved shadow map "
+    "for cross-GPU divergence attribution).",
+    "GPU");
+
+DEFINE_string(
     occlusion_query, "fast",
     "Controls hardware occlusion query behavior for EVENT_WRITE_ZPD.\n"
     "Used for effects like lens flares, object culling, and auto-exposure.\n"

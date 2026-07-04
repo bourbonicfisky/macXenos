@@ -1139,6 +1139,45 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
     if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
       // Draw-range gate for trace-replay bisection (no effect at defaults).
       uint32_t draw_index = trace_draw_index_++;
+      if (!cvars::replay_inject_memory.empty()) {
+        // hexaddr,afterdraw,filepath[;...] - substitute guest memory before
+        // the given draw (cross-GPU divergence attribution diagnostics).
+        static uint32_t injections_done = 0;
+        std::stringstream inject_specs(cvars::replay_inject_memory);
+        std::string inject_spec;
+        uint32_t inject_spec_index = 0;
+        while (std::getline(inject_specs, inject_spec, ';')) {
+          uint32_t inject_spec_bit = uint32_t(1) << inject_spec_index;
+          ++inject_spec_index;
+          uint32_t inject_addr = 0, inject_before_draw = 0;
+          int inject_path_offset = 0;
+          if ((injections_done & inject_spec_bit) ||
+              std::sscanf(inject_spec.c_str(), "%x,%u,%n", &inject_addr,
+                          &inject_before_draw, &inject_path_offset) < 2 ||
+              draw_index != inject_before_draw) {
+            continue;
+          }
+          injections_done |= inject_spec_bit;
+          const char* inject_path = inject_spec.c_str() + inject_path_offset;
+          FILE* inject_file = std::fopen(inject_path, "rb");
+          if (!inject_file) {
+            XELOGE("REPLAY: inject: failed to open {}", inject_path);
+            continue;
+          }
+          std::fseek(inject_file, 0, SEEK_END);
+          long inject_size = std::ftell(inject_file);
+          std::fseek(inject_file, 0, SEEK_SET);
+          if (inject_size > 0) {
+            size_t inject_read = std::fread(
+                memory_->TranslatePhysical(inject_addr), 1,
+                size_t(inject_size), inject_file);
+            TracePlaybackWroteMemory(inject_addr, uint32_t(inject_read));
+            XELOGI("REPLAY: injected {} bytes at {:08X} before draw {}",
+                   inject_read, inject_addr, draw_index);
+          }
+          std::fclose(inject_file);
+        }
+      }
       if (cvars::replay_draw_log) {
         auto vs = active_vertex_shader_;
         auto ps = active_pixel_shader_;
