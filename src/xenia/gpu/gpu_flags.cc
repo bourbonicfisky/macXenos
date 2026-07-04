@@ -149,6 +149,15 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_decompress_bc, false,
+    "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with Xenia's "
+    "own compute shaders instead of sampling the compressed blocks - the "
+    "hardware BC decoders' interpolation precision is vendor-specific "
+    "(notably the BC3/DXT5 3-bit interpolated alpha), which flips "
+    "alpha-test verdicts at threshold-adjacent pixels across GPUs.",
+    "GPU");
+
+DEFINE_bool(
     texture_trilinear_ramp_match_amd, false,
     "Remap the explicit-LOD trilinear blend fraction to the AMD/Xenos ramp "
     "(weight = saturate((frac - 0.1) / 0.8), measured; Apple GPUs use a "

@@ -2175,8 +2175,9 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
-      kLinearFilterFeatures) {
+  if (cvars::texture_decompress_bc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+          kLinearFilterFeatures) {
     host_format_dxt1.format_unsigned.load_shader = kLoadShaderIndexDXT1ToRGBA8;
     host_format_dxt1.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
     host_format_dxt1.format_unsigned.block_compressed = false;
@@ -2189,8 +2190,9 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC2_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC2_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
-      kLinearFilterFeatures) {
+  if (cvars::texture_decompress_bc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+          kLinearFilterFeatures) {
     host_format_dxt2_3.format_unsigned.load_shader =
         kLoadShaderIndexDXT3ToRGBA8;
     host_format_dxt2_3.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -2204,8 +2206,9 @@ bool VulkanTextureCache::Initialize() {
               VK_FORMAT_BC3_UNORM_BLOCK);
   ifn.vkGetPhysicalDeviceFormatProperties(
       physical_device, VK_FORMAT_BC3_UNORM_BLOCK, &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
-      kLinearFilterFeatures) {
+  if (cvars::texture_decompress_bc ||
+      (format_properties.optimalTilingFeatures & kLinearFilterFeatures) !=
+          kLinearFilterFeatures) {
     host_format_dxt4_5.format_unsigned.load_shader =
         kLoadShaderIndexDXT5ToRGBA8;
     host_format_dxt4_5.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
