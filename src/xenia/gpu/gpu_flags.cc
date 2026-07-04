@@ -159,6 +159,14 @@ DEFINE_bool(
     "for the converted fetches.",
     "GPU");
 
+DEFINE_int32(
+    texture_lod_force_level, -1,
+    "Diagnostic: pin all guest texture samplers to this exact mip level "
+    "(minLod = maxLod = N). Comparing single-level renders across GPUs "
+    "separates mip content / BC-decode divergence from LOD selection "
+    "divergence. -1 = off.",
+    "GPU");
+
 DEFINE_bool(
     texture_max_lod_clamp_probe, false,
     "Diagnostic: clamp all guest texture samplers to the base mip "

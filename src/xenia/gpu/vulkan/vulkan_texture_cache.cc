@@ -870,6 +870,14 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
     sampler_create_info.minLod = 0.0f;
     sampler_create_info.maxLod = 0.25f;
   }
+  if (cvars::texture_lod_force_level >= 0) {
+    // Diagnostic: pin sampling to one specific mip level on all textures -
+    // comparing single-level renders across GPUs separates mip CONTENT /
+    // decode divergence (e.g. vendor-specific BC decompression) from LOD
+    // selection divergence.
+    sampler_create_info.minLod = float(cvars::texture_lod_force_level);
+    sampler_create_info.maxLod = float(cvars::texture_lod_force_level) + 0.25f;
+  }
   // TODO(Triang3l): Custom border colors for CrYCb / YCrCb.
   switch (parameters.border_color) {
     case xenos::BorderColor::k_ABGR_White:
