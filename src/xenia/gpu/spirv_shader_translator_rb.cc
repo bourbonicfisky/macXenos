@@ -1601,19 +1601,56 @@ void SpirvShaderTranslator::CompleteFragmentShader_DSV_DepthTo24Bit() {
   }
   if (convert_to_float24) {
     // Quantize to the nearest 32-bit float exactly representable as a guest
-    // 20e4 depth value (in the host 0...0.5 domain), so re-rendering the same
-    // geometry always reproduces the stored depth bit-exactly - otherwise,
-    // host-precision-only depth differences between passes break EQUAL-class
-    // depth tests (Z-prepassed geometry) on hosts without a native 24-bit
-    // depth buffer.
+    // 24-bit depth value, so re-rendering the same geometry always reproduces
+    // the stored depth bit-exactly - otherwise, host-precision-only depth
+    // differences between passes break EQUAL-class depth tests (Z-prepassed
+    // geometry) on hosts without a native 24-bit depth buffer.
+    // kD24FS8 (kSysFlag_DepthFloat24): 20e4 float in the host 0...0.5 domain.
+    // kD24S8 (on hosts without a native D24 format): 24-bit unorm in the
+    // host 0...1 domain - the same grid the guest and the resolve/clear
+    // paths use (UNorm24To32), NOT 20e4 (shadow map class).
     bool round_to_nearest_even =
         GetSpirvShaderModification().pixel.depth_stencil_mode ==
         Modification::DepthStencilMode::kFloat24Rounding;
     spv::Id depth_20e4 = PreClampedDepthTo20e4(
         *builder_, depth_value, round_to_nearest_even, true,
         ext_inst_glsl_std_450_);
-    depth_value = Depth20e4To32(*builder_, depth_20e4, 0, true, false,
-                                ext_inst_glsl_std_450_);
+    spv::Id depth_value_float24 = Depth20e4To32(
+        *builder_, depth_20e4, 0, true, false, ext_inst_glsl_std_450_);
+    // n = floor(z * 16777215.0 + 0.5); z' = float(n + (n >> 23)) / 16777216.0
+    // (matching xenos::UNorm24To32 and the transfer shaders'
+    // rint(z * 16777215.0) encode for exact round trips).
+    spv::Id depth_unorm_scaled = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_,
+        builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float_, depth_value,
+            builder_->makeFloatConstant(16777215.0f)),
+        builder_->makeFloatConstant(0.5f));
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(depth_unorm_scaled);
+    spv::Id depth_unorm24 = builder_->createUnaryOp(
+        spv::OpConvertFToU, type_uint_,
+        builder_->createBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                    GLSLstd450Floor, id_vector_temp_));
+    spv::Id depth_value_unorm24 = builder_->createNoContractionBinOp(
+        spv::OpFMul, type_float_,
+        builder_->createUnaryOp(
+            spv::OpConvertUToF, type_float_,
+            builder_->createBinOp(
+                spv::OpIAdd, type_uint_, depth_unorm24,
+                builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                      depth_unorm24,
+                                      builder_->makeUintConstant(23)))),
+        builder_->makeFloatConstant(1.0f / 16777216.0f));
+    spv::Id depth_format_is_float24 = builder_->createBinOp(
+        spv::OpINotEqual, type_bool_,
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+            builder_->makeUintConstant(kSysFlag_DepthFloat24)),
+        const_uint_0_);
+    depth_value = builder_->createTriOp(
+        spv::OpSelect, type_float_, depth_format_is_float24,
+        depth_value_float24, depth_value_unorm24);
   }
   // Write the depth from the temporary to the system depth output.
   builder_->createStore(depth_value, output_fragment_depth_);
