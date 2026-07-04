@@ -48,6 +48,8 @@ DECLARE_bool(gpu_3d_to_2d_texture);
 
 DECLARE_bool(ac6_ground_fix);
 
+DECLARE_bool(force_per_sample_shading_probe);
+
 DECLARE_int32(vertex_position_quantize_bits);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1

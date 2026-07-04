@@ -2037,12 +2037,18 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
     xenos::DepthRenderTargetFormat format) const {
-  // TODO(Triang3l): Conversion directly in shaders.
+  // With depth_float24_convert_in_pixel_shader, pixel shaders write depth
+  // pre-quantized to the guest 24-bit encoding, so the host D32F depth
+  // round-trips guest storage exactly and the separate host-depth-copy
+  // machinery must be disabled (it would reconvert already-quantized values
+  // and corrupt depth across render-target ownership transfers). Mirrors
+  // D3D12RenderTargetCache::IsHostDepthEncodingDifferent.
   switch (format) {
     case xenos::DepthRenderTargetFormat::kD24S8:
-      return !depth_unorm24_vulkan_format_supported();
+      return !depth_unorm24_vulkan_format_supported() &&
+             !depth_float24_convert_in_pixel_shader_;
     case xenos::DepthRenderTargetFormat::kD24FS8:
-      return true;
+      return !depth_float24_convert_in_pixel_shader_;
   }
   return false;
 }

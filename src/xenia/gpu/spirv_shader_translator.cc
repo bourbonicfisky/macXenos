@@ -2557,7 +2557,10 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   // Float24 depth output conversion must be done per-sample with MSAA
   // (otherwise polygon intersections can't be antialiased) - the presence of
   // a SampleId input in the interface forces per-sample shading.
-  if (IsDepthStencilModeFloat24()) {
+  // force_per_sample_shading_probe isolates the per-sample-shading side
+  // effect of the float24 mode (interpolation/derivative/LOD shifts) from
+  // its depth conversion math for A/B diagnosis.
+  if (IsDepthStencilModeFloat24() || cvars::force_per_sample_shading_probe) {
     builder_->addCapability(spv::CapabilitySampleRateShading);
     spv::Id input_sample_id = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_int_, "gl_SampleID");

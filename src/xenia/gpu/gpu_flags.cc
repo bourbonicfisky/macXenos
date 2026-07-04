@@ -126,6 +126,14 @@ DEFINE_bool(
     "Might cause issues in other titles.",
     "HACKS");
 
+DEFINE_bool(
+    force_per_sample_shading_probe, false,
+    "Diagnostic: add a SampleId input to all translated pixel shaders, "
+    "forcing per-sample shading without any depth conversion - isolates "
+    "the shading-rate side effect of depth_float24_convert_in_pixel_shader "
+    "from its depth quantization math.",
+    "GPU");
+
 DEFINE_int32(
     vertex_position_quantize_bits, 0,
     "Round the final vertex position outputs (clip XYZ and W) to a "
