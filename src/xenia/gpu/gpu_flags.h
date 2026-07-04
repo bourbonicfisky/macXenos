@@ -52,6 +52,8 @@ DECLARE_bool(depth_float24_sample_z_varying);
 
 DECLARE_bool(depth_float24_sample_z_from_derivatives);
 
+DECLARE_bool(texture_computed_lod_in_shader);
+
 DECLARE_bool(texture_max_lod_clamp_probe);
 
 DECLARE_bool(force_per_sample_shading_probe);

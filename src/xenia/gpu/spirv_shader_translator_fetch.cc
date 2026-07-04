@@ -674,6 +674,19 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     bool use_computed_lod =
         instr.attributes.use_computed_lod &&
         (is_pixel_shader() || instr.attributes.use_register_gradients);
+    // Whether to convert the gradients to a scalar LOD in the shader with a
+    // host-invariant formula instead of passing Grad operands - the
+    // gradients-to-LOD function is implementation-defined and differs
+    // between GPUs (per-flat-triangle-constant LOD flipping mips across
+    // adjacent triangles = the cross-GPU "wireframe mesh" of one-mip-off
+    // triangle edges on Apple vs AMD). 1D/2D fetches only; cube and
+    // 3D/stacked keep Grad. Note explicit LOD disables anisotropic
+    // filtering for the fetch.
+    bool shader_computed_lod =
+        cvars::texture_computed_lod_in_shader && use_computed_lod &&
+        instr.opcode == ucode::FetchOpcode::kTextureFetch &&
+        (instr.dimension == xenos::FetchOpDimension::k1D ||
+         instr.dimension == xenos::FetchOpDimension::k2D);
     if (instr.opcode == ucode::FetchOpcode::kGetTextureComputedLod &&
         (!use_computed_lod || instr.attributes.use_register_gradients)) {
       assert_always();
@@ -893,6 +906,11 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // Size needed for normalization (or, for stacked texture layers,
       // denormalization) and for offsets.
       size_needed_components |= offsets_not_zero;
+      if (shader_computed_lod) {
+        // Texel-space gradient scaling for the in-shader LOD formula.
+        size_needed_components |=
+            instr.dimension == xenos::FetchOpDimension::k1D ? 0b0001 : 0b0011;
+      }
       switch (instr.dimension) {
         case xenos::FetchOpDimension::k1D:
           if (instr.attributes.unnormalized_coordinates) {
@@ -2209,7 +2227,56 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 image_2d_array_or_cube_signed, is_any_unsigned, is_any_signed,
                 sample_result_unsigned, sample_result_signed);
           } else {
-            if (use_computed_lod) {
+            spv::ImageOperandsMask image_operands_mask_2d =
+                image_operands_mask;
+            if (shader_computed_lod) {
+              // Host-invariant scalar LOD from the (already lod-bias-scaled,
+              // normalized) UV gradients:
+              // lod = 0.5 * log2(max(dot(sx, sx), dot(sy, sy))), s = grad *
+              // texture size in texels. The same formula on all hosts makes
+              // per-flat-triangle mip selection bit-consistent across GPUs
+              // (sampler minLod/maxLod clamping still applies).
+              assert_true(size[0] != spv::NoResult);
+              spv::Id lod_size_x = size[0];
+              spv::Id lod_size_y =
+                  instr.dimension == xenos::FetchOpDimension::k1D
+                      ? builder_->makeFloatConstant(1.0f)
+                      : size[1];
+              spv::Id max_grad_squared = spv::NoResult;
+              for (spv::Id gradients : {gradients_h, gradients_v}) {
+                spv::Id grad_x_texels = builder_->createNoContractionBinOp(
+                    spv::OpFMul, type_float_,
+                    builder_->createCompositeExtract(gradients, type_float_,
+                                                     0),
+                    lod_size_x);
+                spv::Id grad_y_texels = builder_->createNoContractionBinOp(
+                    spv::OpFMul, type_float_,
+                    builder_->createCompositeExtract(gradients, type_float_,
+                                                     1),
+                    lod_size_y);
+                spv::Id grad_squared = builder_->createNoContractionBinOp(
+                    spv::OpFAdd, type_float_,
+                    builder_->createNoContractionBinOp(
+                        spv::OpFMul, type_float_, grad_x_texels,
+                        grad_x_texels),
+                    builder_->createNoContractionBinOp(
+                        spv::OpFMul, type_float_, grad_y_texels,
+                        grad_y_texels));
+                max_grad_squared =
+                    max_grad_squared == spv::NoResult
+                        ? grad_squared
+                        : builder_->createBinBuiltinCall(
+                              type_float_, ext_inst_glsl_std_450_,
+                              GLSLstd450NMax, max_grad_squared, grad_squared);
+              }
+              texture_parameters.lod = builder_->createNoContractionBinOp(
+                  spv::OpFMul, type_float_,
+                  builder_->makeFloatConstant(0.5f),
+                  builder_->createUnaryBuiltinCall(
+                      type_float_, ext_inst_glsl_std_450_, GLSLstd450Log2,
+                      max_grad_squared));
+              image_operands_mask_2d = spv::ImageOperandsLodMask;
+            } else if (use_computed_lod) {
               texture_parameters.gradX = gradients_h;
               texture_parameters.gradY = gradients_v;
             }
@@ -2219,7 +2286,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             }
             texture_parameters.coords = builder_->createCompositeConstruct(
                 type_float3_, id_vector_temp_);
-            SampleTexture(texture_parameters, image_operands_mask,
+            SampleTexture(texture_parameters, image_operands_mask_2d,
                           image_2d_array_or_cube_unsigned,
                           image_2d_array_or_cube_signed, sampler,
                           is_any_unsigned, is_any_signed,

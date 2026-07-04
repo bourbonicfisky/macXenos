@@ -149,6 +149,17 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_computed_lod_in_shader, false,
+    "Convert texture gradients to a scalar LOD with a host-invariant formula "
+    "in the shader (1D/2D fetches with computed LOD) instead of passing Grad "
+    "operands - the hardware gradients-to-LOD function is "
+    "implementation-defined and flat-triangle-constant, so cross-GPU formula "
+    "differences flip whole triangles to adjacent mips (the Apple-vs-AMD "
+    "wireframe mesh on high-contrast art). Disables anisotropic filtering "
+    "for the converted fetches.",
+    "GPU");
+
+DEFINE_bool(
     texture_max_lod_clamp_probe, false,
     "Diagnostic: clamp all guest texture samplers to the base mip "
     "(minLod=0, maxLod=0.25), removing implicit-LOD (quad derivative) "
