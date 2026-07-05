@@ -39,6 +39,9 @@ DEFINE_bool(disassemble_pm4, false,
             "log all PM4 packets sent to the CP.",
             "GPU");
 
+DEFINE_bool(log_fps, false,
+            "Log the guest frame rate (swap rate) every 5 seconds.", "GPU");
+
 DEFINE_bool(
     log_ringbuffer_kickoff_initiator_bts, false,
     "Only does anything in debug builds, if set will log the pseudo-stacktrace "
@@ -383,6 +386,28 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
     fn();
   } else {
     pending_fns_.push(std::move(fn));
+  }
+}
+
+void CommandProcessor::LogFpsTick() {
+  if (!cvars::log_fps) {
+    return;
+  }
+  ++fps_log_frame_count_;
+  const uint64_t now = Clock::QueryHostTickCount();
+  const uint64_t freq = Clock::QueryHostTickFrequency();
+  if (!fps_log_start_ticks_) {
+    fps_log_start_ticks_ = now;
+    return;
+  }
+  const uint64_t delta = now - fps_log_start_ticks_;
+  if (delta >= freq * 5) {
+    const double seconds = double(delta) / double(freq);
+    XELOGI("FPS: {:.1f} ({} frames / {:.1f} s)",
+           double(fps_log_frame_count_) / seconds, fps_log_frame_count_,
+           seconds);
+    fps_log_frame_count_ = 0;
+    fps_log_start_ticks_ = now;
   }
 }
 

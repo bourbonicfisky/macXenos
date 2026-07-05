@@ -146,6 +146,10 @@ class CommandProcessor {
   // TracePlayer at the start of each playback so draw indices are stable.
   void ResetTraceDrawIndex() { trace_draw_index_ = 0; }
 
+  // Counts a guest swap and logs the frame rate every 5 seconds when
+  // --log_fps is set; called from the shared PM4 XE_SWAP handler.
+  void LogFpsTick();
+
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
 
@@ -540,6 +544,10 @@ class CommandProcessor {
   std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
+
+  // --log_fps window state (guest swaps since the window start).
+  uint64_t fps_log_start_ticks_ = 0;
+  uint32_t fps_log_frame_count_ = 0;
 
   // Per-playback draw counter for the replay_draw_first/last bisection gate
   // (reset by TracePlayer at the start of each playback).
