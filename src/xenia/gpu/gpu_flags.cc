@@ -213,6 +213,16 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_determinism_force_non_apple, false,
+    "Diagnostic: apply the Apple/Xenos texture-determinism stack "
+    "(texture_computed_lod_in_shader, interpolators_manual_perspective, "
+    "texture_alpha_test_lod_snap, texture_mip_lod_bias_adjust) on "
+    "non-Apple GPUs too, for symmetric cross-vendor A/B experiments. "
+    "The stack calibrates Apple GPUs to AMD/Xenos conventions and is "
+    "otherwise inert off Apple hosts.",
+    "GPU");
+
+DEFINE_bool(
     texture_lod_covered_lane_inputs, false,
     "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
     "before quad-differencing the analytic-LOD inputs, replace each helper "

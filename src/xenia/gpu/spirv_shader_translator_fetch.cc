@@ -683,7 +683,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     // 3D/stacked keep Grad. Note explicit LOD disables anisotropic
     // filtering for the fetch.
     bool shader_computed_lod =
-        cvars::texture_computed_lod_in_shader && use_computed_lod &&
+        TextureComputedLodInShader() && use_computed_lod &&
         !instr.attributes.use_register_gradients &&
         instr.opcode == ucode::FetchOpcode::kTextureFetch &&
         (instr.dimension == xenos::FetchOpDimension::k1D ||
@@ -694,7 +694,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     // then fetch with register LOD, so unifying only the fetch path leaves
     // the divergence intact.
     bool shader_computed_lod_query =
-        cvars::texture_computed_lod_in_shader &&
+        TextureComputedLodInShader() &&
         instr.opcode == ucode::FetchOpcode::kGetTextureComputedLod &&
         (instr.dimension == xenos::FetchOpDimension::k1D ||
          instr.dimension == xenos::FetchOpDimension::k2D);
@@ -1619,7 +1619,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // the verdict host-invariant (per-level bilinear is cross-vendor
       // consistent). Runtime-gated on the alpha-test system flags.
       auto snap_lambda_if_alpha_tested = [&](spv::Id lambda) -> spv::Id {
-        if (!cvars::texture_alpha_test_lod_snap ||
+        if (!TextureAlphaTestLodSnap() ||
             is_depth_only_fragment_shader_ || !is_pixel_shader()) {
           return lambda;
         }
@@ -1646,11 +1646,11 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         // hangs AMD-Metal pipeline creation via MoltenVK.
         if (!cvars::texture_trilinear_ramp_match_amd ||
             !features_.apple_gpu) {
-          if (cvars::texture_mip_lod_bias_adjust != 0.0) {
+          if (TextureMipLodBiasAdjust() != 0.0) {
             lambda = builder_->createNoContractionBinOp(
                 spv::OpFAdd, type_float_, lambda,
                 builder_->makeFloatConstant(
-                    float(cvars::texture_mip_lod_bias_adjust)));
+                    float(TextureMipLodBiasAdjust())));
           }
           return lambda;
         }
@@ -1741,7 +1741,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // deterministic per-lane values (interpolators_manual_perspective).
       auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
         value = covered_lane_value(value);
-        if (!cvars::interpolators_manual_perspective) {
+        if (!InterpolatorsManualPerspective()) {
           builder_->addCapability(spv::CapabilityDerivativeControl);
           return builder_->createUnaryOp(
               axis ? spv::OpDPdyCoarse : spv::OpDPdxCoarse, type_float_,
@@ -2102,13 +2102,13 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // gradient exponent biases from the word 4 of the fetch constant in
           // the future when it's handled in getCompTexLOD somehow.
           spv::Id lod_gradient_exponent = lod;
-          if (cvars::texture_mip_lod_bias_adjust != 0.0) {
+          if (TextureMipLodBiasAdjust() != 0.0) {
             // Metal samplers cannot express VkSamplerCreateInfo::mipLodBias;
             // apply the cross-vendor mip mapping calibration in-shader.
             lod_gradient_exponent = builder_->createNoContractionBinOp(
                 spv::OpFAdd, type_float_, lod_gradient_exponent,
                 builder_->makeFloatConstant(
-                    float(cvars::texture_mip_lod_bias_adjust)));
+                    float(TextureMipLodBiasAdjust())));
           }
           spv::Id lod_gradient_scale = builder_->createUnaryBuiltinCall(
               type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,

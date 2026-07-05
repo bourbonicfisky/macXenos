@@ -78,6 +78,28 @@ SpirvShaderTranslator::Features::Features(
   }
 }
 
+bool SpirvShaderTranslator::IsTextureDeterminismHost() const {
+  return features_.apple_gpu || cvars::texture_determinism_force_non_apple;
+}
+
+bool SpirvShaderTranslator::TextureComputedLodInShader() const {
+  return cvars::texture_computed_lod_in_shader && IsTextureDeterminismHost();
+}
+
+bool SpirvShaderTranslator::InterpolatorsManualPerspective() const {
+  return cvars::interpolators_manual_perspective &&
+         IsTextureDeterminismHost();
+}
+
+bool SpirvShaderTranslator::TextureAlphaTestLodSnap() const {
+  return cvars::texture_alpha_test_lod_snap && IsTextureDeterminismHost();
+}
+
+double SpirvShaderTranslator::TextureMipLodBiasAdjust() const {
+  return IsTextureDeterminismHost() ? cvars::texture_mip_lod_bias_adjust
+                                    : 0.0;
+}
+
 uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
     uint32_t dynamic_addressable_register_count,
     Shader::HostVertexShaderType host_vertex_shader_type) const {
@@ -1304,7 +1326,7 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
       builder_->addDecoration(interpolator, spv::DecorationLocation,
                               int(output_location));
       builder_->addDecoration(interpolator, spv::DecorationInvariant);
-      if (cvars::interpolators_manual_perspective) {
+      if (InterpolatorsManualPerspective()) {
         // Carries o/w - linear in screen space (see the epilogue scaling).
         builder_->addDecoration(interpolator, spv::DecorationNoPerspective);
       }
@@ -1360,7 +1382,7 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     main_interface_.push_back(output_ndc_depth_);
   }
 
-  if (cvars::interpolators_manual_perspective) {
+  if (InterpolatorsManualPerspective()) {
     // 1/w for the per-lane perspective reconstruction in the pixel shader -
     // a noperspective varying instead of gl_FragCoord.w, which is
     // vendor-divergent at helper lanes.
@@ -2320,7 +2342,7 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
   // derivatives host-invariant (helper-lane evaluation of perspective
   // varyings at partially covered quads is implementation-defined and
   // diverges between Apple and AMD GPUs).
-  if (cvars::interpolators_manual_perspective) {
+  if (InterpolatorsManualPerspective()) {
     uint32_t manual_perspective_interpolators =
         GetModificationInterpolatorMask();
     if (manual_perspective_interpolators) {
@@ -2603,7 +2625,7 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         input_output_interpolators_[interpolator_index] = interpolator;
         builder_->addDecoration(interpolator, spv::DecorationLocation,
                                 int(input_location));
-        if (cvars::interpolators_manual_perspective) {
+        if (InterpolatorsManualPerspective()) {
           builder_->addDecoration(interpolator,
                                   spv::DecorationNoPerspective);
         }
@@ -2614,7 +2636,7 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         main_interface_.push_back(interpolator);
         ++input_location;
       }
-      if (cvars::interpolators_manual_perspective &&
+      if (InterpolatorsManualPerspective() &&
           GetModificationInterpolatorMask()) {
         input_inv_w_ = builder_->createVariable(
             spv::NoPrecision, spv::StorageClassInput, type_float_,
@@ -2657,11 +2679,11 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
       (IsDepthStencilModeFloat24() && !current_shader().writes_depth()) ||
       // Shader-computed texture LOD sources gl_FragCoord.w for the
       // host-invariant analytic UV gradients (quotient rule).
-      (cvars::texture_computed_lod_in_shader &&
+      (TextureComputedLodInShader() &&
        !is_depth_only_fragment_shader_) ||
       // Manual perspective correction divides interpolators by
       // gl_FragCoord.w in the prologue.
-      (cvars::interpolators_manual_perspective &&
+      (InterpolatorsManualPerspective() &&
        !is_depth_only_fragment_shader_);
   if (need_frag_coord) {
     input_fragment_coordinates_ = builder_->createVariable(
@@ -2676,9 +2698,9 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   // values are only cross-vendor equal to ~ulp, and the quotient rule's
   // catastrophic cancellation at edge-on triangles amplifies that into
   // multi-mip LOD divergence at partially covered quads).
-  if (cvars::texture_computed_lod_in_shader &&
-      cvars::texture_lod_covered_lane_inputs && features_.apple_gpu &&
-      !is_depth_only_fragment_shader_) {
+  if (TextureComputedLodInShader() &&
+      cvars::texture_lod_covered_lane_inputs &&
+      IsTextureDeterminismHost() && !is_depth_only_fragment_shader_) {
     input_helper_invocation_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_bool_,
         "gl_HelperInvocation");
@@ -2962,7 +2984,7 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
   // linear numerator A = o/w; reconstruct o = A / gl_FragCoord.w
   // (gl_FragCoord.w is 1/w). See the vertex shader epilogue.
   spv::Id interpolator_w_clip = spv::NoResult;
-  if (cvars::interpolators_manual_perspective && interpolator_mask) {
+  if (InterpolatorsManualPerspective() && interpolator_mask) {
     // 1/(1/w) from the noperspective 1/w varying - NOT gl_FragCoord.w,
     // which is vendor-divergent at helper lanes and would poison every quad
     // derivative built on the reconstructed values.

@@ -832,6 +832,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
       spv::Id dest_factor);
 
   Features features_;
+
+  // The Apple/Xenos texture-determinism stack calibrates Apple GPUs to the
+  // AMD-lineage Xenos conventions the guest art was authored against; on
+  // other vendors the cvars are inert (unless force-enabled for symmetric
+  // cross-vendor diagnostics).
+  bool IsTextureDeterminismHost() const;
+  bool TextureComputedLodInShader() const;
+  bool InterpolatorsManualPerspective() const;
+  bool TextureAlphaTestLodSnap() const;
+  double TextureMipLodBiasAdjust() const;
+
   bool native_2x_msaa_with_attachments_;
   bool native_2x_msaa_no_attachments_;
   uint32_t draw_resolution_scale_x_;
