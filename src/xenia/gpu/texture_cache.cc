@@ -14,8 +14,17 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/shared_memory.h"
+
+DEFINE_bool(
+    texture_upload_log, false,
+    "Diagnostic: log every texture data upload with XXH3 hashes of the "
+    "guest source ranges (base and mips). Diffing two identical replays' "
+    "logs separates nondeterministic guest-source content from GPU-side "
+    "upload/view races.",
+    "GPU");
 
 DEFINE_int32(
     draw_resolution_scale_x, 1,
@@ -765,6 +774,8 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
             (index_mips_outdated & (1ULL << i)) != 0)) {
       continue;
     }
+    LogTextureUploadHashes(texture, (index_base_outdated & (1ULL << i)) != 0,
+                           (index_mips_outdated & (1ULL << i)) != 0);
 
     // reque for makeuptodatandwatch
     textures[i] = &texture;
@@ -787,6 +798,36 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     }
   }
 }
+void TextureCache::LogTextureUploadHashes(const Texture& texture,
+                                          bool base_outdated,
+                                          bool mips_outdated) {
+  if (!cvars::texture_upload_log) {
+    return;
+  }
+  TextureKey key = texture.key();
+  Memory& memory = shared_memory().guest_memory();
+  uint64_t base_hash = 0, mips_hash = 0;
+  uint32_t base_size = texture.GetGuestBaseSize();
+  uint32_t mips_size = texture.GetGuestMipsSize();
+  if (base_outdated && base_size) {
+    base_hash = XXH3_64bits(
+        memory.TranslatePhysical<const uint8_t*>(key.base_page << 12),
+        base_size);
+  }
+  if (mips_outdated && mips_size) {
+    mips_hash = XXH3_64bits(
+        memory.TranslatePhysical<const uint8_t*>(key.mip_page << 12),
+        mips_size);
+  }
+  XELOGI(
+      "TEXUPLOAD base={:08X}+{} bh={:016X} mips={:08X}+{} mh={:016X} "
+      "fmt={} {}x{} mips_total={}",
+      key.base_page << 12, base_outdated ? base_size : 0, base_hash,
+      key.mip_page << 12, mips_outdated ? mips_size : 0, mips_hash,
+      uint32_t(key.format), key.GetWidth(), key.GetHeight(),
+      key.mip_max_level + 1);
+}
+
 bool TextureCache::LoadTextureData(Texture& texture) {
   // Lockless pre-check: if texture appears up-to-date, skip the lock.
   // This is safe because worst case is a false positive (we acquire lock
@@ -856,6 +897,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
                                              mips_outdated)) {
     return false;
   }
+  LogTextureUploadHashes(texture, base_outdated, mips_outdated);
 
   // Mark the ranges as uploaded and watch them. This is needed for scaled
   // resolves as well to detect when the CPU wants to reuse the memory for a

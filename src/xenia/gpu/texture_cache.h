@@ -528,6 +528,9 @@ class TextureCache {
   const RegisterFile& register_file() const { return register_file_; }
   SharedMemory& shared_memory() const { return shared_memory_; }
 
+  void LogTextureUploadHashes(const Texture& texture, bool base_outdated,
+                              bool mips_outdated);
+
   // May be called for purposes like clearing the cache, as well as in the
   // destructor of the implementation if textures, for instance, have references
   // to the implementation that are used in their destructor, and will become

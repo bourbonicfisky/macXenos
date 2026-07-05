@@ -103,6 +103,11 @@ class SharedMemory {
 
  protected:
   SharedMemory(Memory& memory);
+
+ public:
+  Memory& guest_memory() const { return memory_; }
+
+ protected:
   // Call in implementation-specific initialization.
   bool InitializeCommon();
   void InitializeSparseHostGpuMemory(uint32_t granularity_log2);
