@@ -44,6 +44,15 @@ DEFINE_int32(
     "-1 = off.",
     "GPU");
 DEFINE_int32(
+    bilinear_emulation_result_snap, 0,
+    "With bilinear_emulation_slot: round each component of the filtered "
+    "result to a 1/N grid (e.g. 255 for 8-bit source formats), matching "
+    "Xenos's quantized filtering output. On constant plateaus of the "
+    "source texture this collapses the lerp's +-1ulp noise to the exact "
+    "texel value on all hosts, making threshold comparisons against "
+    "plateau values deterministic. 0 = off.",
+    "GPU");
+DEFINE_int32(
     bilinear_emulation_weight_snap, 0,
     "With bilinear_emulation_slot: snap the bilinear weight fractions to a "
     "1/N grid (round to nearest) before blending, emulating fixed-point "
@@ -3156,6 +3165,24 @@ void SpirvShaderTranslator::SampleTextureBilinearEmulated(
       }
       sign_result = lerp(lerp(texels[0], texels[1], frac[0]),
                          lerp(texels[2], texels[3], frac[0]), frac[1]);
+      if (cvars::bilinear_emulation_result_snap > 0) {
+        // result = round(result * N) / N: quantize the filtered value to
+        // the source format's grid (Xenos-style fixed-point filtering
+        // output) so plateau lerp noise collapses to the exact texel value.
+        spv::Id snap_n = builder_->makeFloatConstant(
+            float(cvars::bilinear_emulation_result_snap));
+        spv::Id snap_inv = builder_->makeFloatConstant(
+            1.0f / float(cvars::bilinear_emulation_result_snap));
+        spv::Id scaled = builder_->createNoContractionBinOp(
+            spv::OpVectorTimesScalar, type_float4_, sign_result, snap_n);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(scaled);
+        spv::Id rounded = builder_->createBuiltinCall(
+            type_float4_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
+            id_vector_temp_);
+        sign_result = builder_->createNoContractionBinOp(
+            spv::OpVectorTimesScalar, type_float4_, rounded, snap_inv);
+      }
     }
     sign_if.makeEndIf();
     (i ? result_signed_out : result_unsigned_out) =
