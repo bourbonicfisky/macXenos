@@ -35,6 +35,15 @@ DEFINE_string(bilinear_emulation_ps_hash, "",
               "shader with this ucode hash (hex).",
               "GPU");
 DEFINE_int32(
+    bilinear_emulation_fixed_texel, -1,
+    "Diagnostic, with bilinear_emulation_slot: fetch texel (N,N) of mip 0 "
+    "instead of using the shader-computed coordinates - removes the "
+    "interpolated UVs from the dataflow entirely. If two hosts still "
+    "disagree with this set, the HOST TEXTURE CONTENT differs (upload "
+    "conversion divergence); if they agree, the UVs carry the divergence. "
+    "-1 = off.",
+    "GPU");
+DEFINE_int32(
     bilinear_emulation_weight_snap, 0,
     "With bilinear_emulation_slot: snap the bilinear weight fractions to a "
     "1/N grid (round to nearest) before blending, emulating fixed-point "
@@ -3049,6 +3058,22 @@ void SpirvShaderTranslator::SampleTextureBilinearEmulated(
     spv::Id& result_unsigned_out, spv::Id& result_signed_out) {
   spv::Id const_float_half = builder_->makeFloatConstant(0.5f);
   spv::Id const_float_1 = builder_->makeFloatConstant(1.0f);
+  if (cvars::bilinear_emulation_fixed_texel >= 0) {
+    // Diagnostic: replace the shader-computed coordinates with a fixed
+    // texel-center position, removing interpolated UVs from the dataflow.
+    spv::Id fixed_norm_x = builder_->createNoContractionBinOp(
+        spv::OpFDiv, type_float_,
+        builder_->makeFloatConstant(
+            float(cvars::bilinear_emulation_fixed_texel) + 0.5f),
+        size_x);
+    spv::Id fixed_norm_y = builder_->createNoContractionBinOp(
+        spv::OpFDiv, type_float_,
+        builder_->makeFloatConstant(
+            float(cvars::bilinear_emulation_fixed_texel) + 0.5f),
+        size_y);
+    coordinate_x = fixed_norm_x;
+    coordinate_y = fixed_norm_y;
+  }
   // Texel-space sample position relative to texel centers, as the
   // fixed-function bilinear unit sees it: uv * size - 0.5.
   spv::Id coordinates[2] = {coordinate_x, coordinate_y};
