@@ -40,6 +40,13 @@ if(XENIA_BUILD_MISC)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE X11 xcb X11-xcb)
   endif()
+  if(APPLE AND NOT XE_TARGET_AARCH64)
+    # The x64 JIT code cache reserves fixed sub-4 GB addresses; shrink
+    # __PAGEZERO like xenia-app (arm64 relocates the cache above 4 GB and
+    # must keep the default - macOS 26 SIGKILLs sub-default __PAGEZERO).
+    target_link_options(xenia-gpu-vulkan-trace-viewer PRIVATE
+      -Wl,-pagezero_size,0x1000)
+  endif()
   xe_target_defaults(xenia-gpu-vulkan-trace-viewer)
 
   # Vulkan trace dump
@@ -67,6 +74,11 @@ if(XENIA_BUILD_MISC)
     target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-cpu-backend-x64)
   elseif(XE_TARGET_AARCH64)
     target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-cpu-backend-a64)
+  endif()
+  if(APPLE AND NOT XE_TARGET_AARCH64)
+    # Same __PAGEZERO shrink as xenia-app / trace-viewer (x64 code cache).
+    target_link_options(xenia-gpu-vulkan-trace-dump PRIVATE
+      -Wl,-pagezero_size,0x1000)
   endif()
   xe_target_defaults(xenia-gpu-vulkan-trace-dump)
 endif()
