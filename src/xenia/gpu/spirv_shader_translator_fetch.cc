@@ -1789,6 +1789,53 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         lod_size[0] = size[0];
         lod_size[1] = component_count > 1 ? size[1]
                                           : builder_->makeFloatConstant(1.0f);
+        if (input_helper_invocation_ != spv::NoResult) {
+          // Covered-lane mode: difference the final per-lane fetch
+          // coordinates directly (quad_derivative applies the covered-lane
+          // substitution). The quotient rule exists to avoid sourcing
+          // helper-lane values, which the substitution already guarantees -
+          // and its (dA*q - A*dq) form catastrophically cancels at edge-on
+          // triangles, amplifying the ~ulp cross-vendor noise of even
+          // covered-lane values into multi-mip LOD differences. Direct
+          // differences of smoothly varying UVs are small-minus-small - no
+          // amplification.
+          spv::Id direct_max_grad_squared = spv::NoResult;
+          for (uint32_t axis = 0; axis < 2; ++axis) {
+            spv::Id grad_squared = spv::NoResult;
+            for (uint32_t i = 0; i < component_count; ++i) {
+              spv::Id grad_texels = builder_->createNoContractionBinOp(
+                  spv::OpFMul, type_float_,
+                  quad_derivative(coordinates[i], axis), lod_size[i]);
+              spv::Id grad_component_squared =
+                  builder_->createNoContractionBinOp(
+                      spv::OpFMul, type_float_, grad_texels, grad_texels);
+              grad_squared =
+                  grad_squared == spv::NoResult
+                      ? grad_component_squared
+                      : builder_->createNoContractionBinOp(
+                            spv::OpFAdd, type_float_, grad_squared,
+                            grad_component_squared);
+            }
+            direct_max_grad_squared =
+                direct_max_grad_squared == spv::NoResult
+                    ? grad_squared
+                    : builder_->createBinBuiltinCall(
+                          type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
+                          direct_max_grad_squared, grad_squared);
+          }
+          // Floor away from zero: log2(0) = -inf would turn the trilinear
+          // remap's frac() into NaN; ~2^-80 quantizes to sampler minLod
+          // anyway.
+          direct_max_grad_squared = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
+              direct_max_grad_squared, builder_->makeFloatConstant(1e-24f));
+          return builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
+              builder_->createUnaryBuiltinCall(type_float_,
+                                               ext_inst_glsl_std_450_,
+                                               GLSLstd450Log2,
+                                               direct_max_grad_squared));
+        }
         spv::Id frag_q;
         if (input_inv_w_ != spv::NoResult) {
           // The noperspective 1/w varying: helper-lane-exact on all vendors,
