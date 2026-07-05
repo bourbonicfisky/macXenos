@@ -272,6 +272,31 @@ class DeferredCommandBuffer {
                 regions, sizeof(VkBufferImageCopy) * region_count);
   }
 
+  VkBufferImageCopy* CmdCopyImageToBufferEmplace(VkImage src_image,
+                                                 VkImageLayout src_image_layout,
+                                                 VkBuffer dst_buffer,
+                                                 uint32_t region_count) {
+    const size_t header_size =
+        xe::align(sizeof(ArgsVkCopyImageToBuffer), alignof(VkBufferImageCopy));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkCopyImageToBuffer,
+                     header_size + sizeof(VkBufferImageCopy) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkCopyImageToBuffer*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_buffer = dst_buffer;
+    args.region_count = region_count;
+    return reinterpret_cast<VkBufferImageCopy*>(args_ptr + header_size);
+  }
+  void CmdVkCopyImageToBuffer(VkImage src_image,
+                              VkImageLayout src_image_layout,
+                              VkBuffer dst_buffer, uint32_t region_count,
+                              const VkBufferImageCopy* regions) {
+    std::memcpy(CmdCopyImageToBufferEmplace(src_image, src_image_layout,
+                                            dst_buffer, region_count),
+                regions, sizeof(VkBufferImageCopy) * region_count);
+  }
+
   void CmdVkFillBuffer(VkBuffer dst_buffer, VkDeviceSize dst_offset,
                        VkDeviceSize size, uint32_t data) {
     auto& args = *reinterpret_cast<ArgsVkFillBuffer*>(
@@ -451,6 +476,7 @@ class DeferredCommandBuffer {
     kVkClearColorImage,
     kVkCopyBuffer,
     kVkCopyBufferToImage,
+    kVkCopyImageToBuffer,
     kVkFillBuffer,
     kVkBlitImage,
     kVkDispatch,
@@ -570,6 +596,15 @@ class DeferredCommandBuffer {
     VkBuffer src_buffer;
     VkImage dst_image;
     VkImageLayout dst_image_layout;
+    uint32_t region_count;
+    // Followed by aligned VkBufferImageCopy[].
+    static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkCopyImageToBuffer {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkBuffer dst_buffer;
     uint32_t region_count;
     // Followed by aligned VkBufferImageCopy[].
     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));

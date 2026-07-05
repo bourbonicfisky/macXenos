@@ -39,6 +39,18 @@ DEFINE_string(
     "cross-host comparison of loaded texture content.",
     "GPU");
 
+DEFINE_string(
+    texture_host_dump_image, "",
+    "Diagnostic: hex guest base address of a texture whose HOST IMAGE "
+    "contents (read back with vkCmdCopyImageToBuffer immediately after the "
+    "buffer-to-image copy at load) are written to texhostimg_<base>_<seq>.bin "
+    "in the current directory at shutdown, in the same buffer layout as "
+    "--texture_host_dump (bytes outside the copied level rectangles are "
+    "zero-filled). A texhost_ vs texhostimg_ difference on one machine "
+    "convicts the buffer-to-image copy path; identical contents exonerate it "
+    "and implicate the image view/sampler.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -450,7 +462,8 @@ void VulkanTextureCache::FlushHostDumps() {
                         &mapping) == VK_SUCCESS &&
         mapping) {
       char file_name[64];
-      std::snprintf(file_name, sizeof(file_name), "texhost_%08X_%u.bin",
+      std::snprintf(file_name, sizeof(file_name), "%s_%08X_%u.bin",
+                    pending.image_side ? "texhostimg" : "texhost",
                     pending.guest_base, pending.sequence);
       if (FILE* file = std::fopen(file_name, "wb")) {
         std::fwrite(mapping, 1, size_t(pending.size), file);
@@ -1692,7 +1705,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         pending.memory = readback_memory;
         pending.size = host_buffer_size;
         pending.guest_base = texture_key.base_page << 12;
-        pending.sequence = uint32_t(host_dump_pending_.size());
+        pending.image_side = false;
+        pending.sequence = 0;
+        for (const HostDumpPending& other : host_dump_pending_) {
+          if (other.image_side == pending.image_side) {
+            ++pending.sequence;
+          }
+        }
         host_dump_pending_.push_back(pending);
         XELOGI(
             "TEXHOSTDUMP queued base={:08X} seq={} size={} {}x{} fmt={} "
@@ -1751,6 +1770,96 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     copy_region.imageExtent.height =
         std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
     copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
+  }
+
+  if (!cvars::texture_host_dump_image.empty() && level_first <= level_last) {
+    uint32_t dump_base = uint32_t(
+        strtoul(cvars::texture_host_dump_image.c_str(), nullptr, 16));
+    if ((texture_key.base_page << 12) == dump_base) {
+      // Read the host image contents back immediately after the
+      // buffer-to-image copy, into a buffer with the same layout as the
+      // scratch buffer - a difference from the --texture_host_dump scratch
+      // contents on the same machine convicts the buffer-to-image copy.
+      // Snapshot the regions first: copy_regions points into the deferred
+      // command stream, which may be reallocated by the commands recorded
+      // below.
+      uint32_t dump_region_count = level_last - level_first + 1;
+      VkBufferImageCopy dump_regions[xenos::kTextureMaxMips];
+      std::memcpy(dump_regions, copy_regions,
+                  sizeof(VkBufferImageCopy) * dump_region_count);
+      VkBuffer readback_buffer;
+      VkDeviceMemory readback_memory;
+      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
+              vulkan_device, host_buffer_size,
+              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer,
+              readback_memory)) {
+        // Zero-fill so bytes outside the copied level rectangles (packed mip
+        // tail padding) are deterministic across machines.
+        command_buffer.CmdVkFillBuffer(readback_buffer, 0, VK_WHOLE_SIZE, 0);
+        VkBufferMemoryBarrier fill_barrier = {};
+        fill_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        fill_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fill_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fill_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fill_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fill_barrier.buffer = readback_buffer;
+        fill_barrier.offset = 0;
+        fill_barrier.size = VK_WHOLE_SIZE;
+        VkImageMemoryBarrier to_src_barrier = {};
+        to_src_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_src_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_src_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_src_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_src_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src_barrier.image = vulkan_texture.image();
+        to_src_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_src_barrier.subresourceRange.baseMipLevel = level_first;
+        to_src_barrier.subresourceRange.levelCount = dump_region_count;
+        to_src_barrier.subresourceRange.baseArrayLayer = 0;
+        to_src_barrier.subresourceRange.layerCount = array_size;
+        command_buffer.CmdVkPipelineBarrier(
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr, 1, &fill_barrier, 1, &to_src_barrier);
+        command_buffer.CmdVkCopyImageToBuffer(
+            vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            readback_buffer, dump_region_count, dump_regions);
+        // Restore the layout the usage tracking expects
+        // (kTransferDestination).
+        VkImageMemoryBarrier to_dst_barrier = to_src_barrier;
+        to_dst_barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_dst_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_dst_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_dst_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        command_buffer.CmdVkPipelineBarrier(
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr, 0, nullptr, 1, &to_dst_barrier);
+        HostDumpPending pending;
+        pending.buffer = readback_buffer;
+        pending.memory = readback_memory;
+        pending.size = host_buffer_size;
+        pending.guest_base = texture_key.base_page << 12;
+        pending.image_side = true;
+        pending.sequence = 0;
+        for (const HostDumpPending& other : host_dump_pending_) {
+          if (other.image_side == pending.image_side) {
+            ++pending.sequence;
+          }
+        }
+        host_dump_pending_.push_back(pending);
+        XELOGI(
+            "TEXHOSTDUMPIMG queued base={:08X} seq={} size={} {}x{} fmt={} "
+            "levels={}..{} base_xpitch_blocks={} base_offset={} "
+            "bytes_per_host_block={}",
+            pending.guest_base, pending.sequence, uint64_t(host_buffer_size),
+            width, height, uint32_t(guest_format), level_first, level_last,
+            host_layout_base.x_pitch_blocks,
+            uint64_t(host_layout_base.offset_bytes),
+            load_shader_info.bytes_per_host_block);
+      }
+    }
   }
 
   // Generate mip levels for scaled resolve textures via blit.

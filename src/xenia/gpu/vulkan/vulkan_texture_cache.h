@@ -216,15 +216,19 @@ class VulkanTextureCache final : public TextureCache {
     kLoadDescriptorSetCount,
   };
 
-  // --texture_host_dump diagnostic: pending readbacks of the converted
-  // (post-load-shader) host buffer contents, written to disk once the GPU
-  // is idle (destructor).
+  // --texture_host_dump / --texture_host_dump_image diagnostic: pending
+  // readbacks of the converted (post-load-shader) host buffer contents, or of
+  // the host image contents right after the buffer-to-image copy, written to
+  // disk once the GPU is idle (destructor).
   struct HostDumpPending {
     VkBuffer buffer;
     VkDeviceMemory memory;
     VkDeviceSize size;
     uint32_t guest_base;
     uint32_t sequence;
+    // True if read back from the VkImage (texhostimg_ prefix) rather than
+    // from the scratch buffer (texhost_ prefix).
+    bool image_side;
   };
   std::vector<HostDumpPending> host_dump_pending_;
   void FlushHostDumps();
