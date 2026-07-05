@@ -1181,6 +1181,10 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
   if (key.scaled_resolve && key.mip_max_level > 0) {
     image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   }
+  // The --texture_host_dump_image readback requires transfer-source usage.
+  if (!cvars::texture_host_dump_image.empty()) {
+    image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  }
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_create_info.queueFamilyIndexCount = 0;
   image_create_info.pQueueFamilyIndices = nullptr;
