@@ -34,6 +34,14 @@ DEFINE_string(bilinear_emulation_ps_hash, "",
               "If non-empty, restrict bilinear_emulation_slot to the pixel "
               "shader with this ucode hash (hex).",
               "GPU");
+DEFINE_int32(
+    bilinear_emulation_weight_snap, 0,
+    "With bilinear_emulation_slot: snap the bilinear weight fractions to a "
+    "1/N grid (round to nearest) before blending, emulating fixed-point "
+    "hardware filter weights (Xenos-class: 32). Coarse weights absorb "
+    "sub-lsb cross-vendor differences in the interpolated UVs before they "
+    "can flip threshold decisions downstream. 0 = full-precision weights.",
+    "GPU");
 DEFINE_double(
     point_sampling_extra_offset, 0.0,
     "Extra texel-space offset added to point-sampled (nearest-neighbor) "
@@ -3056,6 +3064,21 @@ void SpirvShaderTranslator::SampleTextureBilinearEmulated(
         type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor, texel);
     frac[i] = builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
                                                  texel, texel_floor);
+    if (cvars::bilinear_emulation_weight_snap > 0) {
+      // frac = round(frac * N) / N: fixed-point filter weights.
+      spv::Id snap_n = builder_->makeFloatConstant(
+          float(cvars::bilinear_emulation_weight_snap));
+      spv::Id snap_inv = builder_->makeFloatConstant(
+          1.0f / float(cvars::bilinear_emulation_weight_snap));
+      spv::Id scaled = builder_->createNoContractionBinOp(
+          spv::OpFMul, type_float_, frac[i], snap_n);
+      spv::Id rounded = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor,
+          builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, scaled,
+                                             const_float_half));
+      frac[i] = builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                                   rounded, snap_inv);
+    }
     // Clamp-to-edge addressing of the two participating texel columns/rows.
     spv::Id texel_max = builder_->createNoContractionBinOp(
         spv::OpFSub, type_float_, sizes[i], const_float_1);
