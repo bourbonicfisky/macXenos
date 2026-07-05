@@ -44,6 +44,12 @@ DEFINE_int32(
     "-1 = off.",
     "GPU");
 DEFINE_int32(
+    bilinear_emulation_fixed_texel_y, -1,
+    "With bilinear_emulation_fixed_texel: use this as the Y texel index "
+    "(fixed_texel becomes X-only), for 2D sweeps of the host texture "
+    "content. -1 = use the same value as bilinear_emulation_fixed_texel.",
+    "GPU");
+DEFINE_int32(
     bilinear_emulation_result_snap, 0,
     "With bilinear_emulation_slot: round each component of the filtered "
     "result to a 1/N grid (e.g. 255 for 8-bit source formats), matching "
@@ -3078,7 +3084,10 @@ void SpirvShaderTranslator::SampleTextureBilinearEmulated(
     spv::Id fixed_norm_y = builder_->createNoContractionBinOp(
         spv::OpFDiv, type_float_,
         builder_->makeFloatConstant(
-            float(cvars::bilinear_emulation_fixed_texel) + 0.5f),
+            float(cvars::bilinear_emulation_fixed_texel_y >= 0
+                      ? cvars::bilinear_emulation_fixed_texel_y
+                      : cvars::bilinear_emulation_fixed_texel) +
+            0.5f),
         size_y);
     coordinate_x = fixed_norm_x;
     coordinate_y = fixed_norm_y;
