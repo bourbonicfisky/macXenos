@@ -149,7 +149,7 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_alpha_test_lod_snap, false,
+    texture_alpha_test_lod_snap, true,
     "For draws with the fixed-function alpha test enabled, snap the "
     "shader-computed/register texture LOD to the nearest integer mip. "
     "Alpha-tested fragment survival flips on the filtered alpha crossing "
@@ -189,7 +189,7 @@ DEFINE_double(
     "GPU");
 
 DEFINE_bool(
-    interpolators_manual_perspective, false,
+    interpolators_manual_perspective, true,
     "Interpolate guest interpolators as noperspective A = o/w (vertex "
     "shader pre-divides by the final position W) and reconstruct "
     "o = A / gl_FragCoord.w in the fragment shader prologue. Quad "
@@ -202,7 +202,7 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_computed_lod_in_shader, false,
+    texture_computed_lod_in_shader, true,
     "Convert texture gradients to a scalar LOD with a host-invariant formula "
     "in the shader (1D/2D fetches with computed LOD) instead of passing Grad "
     "operands - the hardware gradients-to-LOD function is "
@@ -247,7 +247,7 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_lod_covered_lane_inputs, false,
+    texture_lod_covered_lane_inputs, true,
     "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
     "before quad-differencing the analytic-LOD inputs, replace each helper "
     "(uncovered) lane's value with the first covered lane's value in the "
