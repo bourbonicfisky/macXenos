@@ -91,6 +91,15 @@ DEFINE_int32(replay_zfunc_always_draw, -1,
              "failures from rasterization coverage gaps). -1 disables.",
              "GPU");
 
+DEFINE_int32(replay_solid_draw, -1,
+             "Draw index whose RT0 blending is forced to REPLACE "
+             "(src ONE, dst ZERO, ADD) and whose fixed-function alpha test / "
+             "alpha-to-mask are disabled during trace playback (diagnostic: "
+             "any pixel the draw rasterizes shows its raw fragment color, "
+             "distinguishing absent fragments - cull/clip/coverage - from "
+             "zero-alpha blend contributions). -1 disables.",
+             "GPU");
+
 DEFINE_int32(replay_duplicate_draw_stencil, -1,
              "Draw index that is issued a SECOND time during trace playback "
              "with zfunc=LESS, depth writes off, and stencil REPLACE (ref "

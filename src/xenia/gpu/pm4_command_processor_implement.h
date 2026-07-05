@@ -1289,16 +1289,45 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
            int32_t(draw_index) != cvars::replay_draw_include) ||
           skip_range) {
         // Skipped for bisection; packet already fully consumed above.
-      } else if (int32_t(draw_index) == cvars::replay_zfunc_always_draw) {
-        // Diagnostic: bypass the depth test for this draw to distinguish
-        // depth-test failures from rasterization coverage gaps.
+      } else if (int32_t(draw_index) == cvars::replay_zfunc_always_draw ||
+                 int32_t(draw_index) == cvars::replay_solid_draw) {
+        // Diagnostics (composable): zfunc-always bypasses the depth test to
+        // distinguish depth-test failures from rasterization coverage gaps;
+        // solid-draw forces RT0 blending to REPLACE and disables the
+        // fixed-function alpha test / alpha-to-mask so any rasterized pixel
+        // shows the raw fragment color (absent fragments - cull/clip/
+        // coverage - stay unchanged).
         uint32_t depthcontrol_value =
             register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL];
-        reg::RB_DEPTHCONTROL depthcontrol_always;
-        depthcontrol_always.value = depthcontrol_value;
-        depthcontrol_always.zfunc = xenos::CompareFunction::kAlways;
-        register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
-            depthcontrol_always.value;
+        uint32_t blendcontrol_value =
+            register_file_->values[XE_GPU_REG_RB_BLENDCONTROL0];
+        uint32_t colorcontrol_value =
+            register_file_->values[XE_GPU_REG_RB_COLORCONTROL];
+        if (int32_t(draw_index) == cvars::replay_zfunc_always_draw) {
+          reg::RB_DEPTHCONTROL depthcontrol_always;
+          depthcontrol_always.value = depthcontrol_value;
+          depthcontrol_always.zfunc = xenos::CompareFunction::kAlways;
+          register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
+              depthcontrol_always.value;
+        }
+        if (int32_t(draw_index) == cvars::replay_solid_draw) {
+          reg::RB_BLENDCONTROL blendcontrol_replace;
+          blendcontrol_replace.value = 0;
+          blendcontrol_replace.color_srcblend = xenos::BlendFactor::kOne;
+          blendcontrol_replace.color_comb_fcn = xenos::BlendOp::kAdd;
+          blendcontrol_replace.color_destblend = xenos::BlendFactor::kZero;
+          blendcontrol_replace.alpha_srcblend = xenos::BlendFactor::kOne;
+          blendcontrol_replace.alpha_comb_fcn = xenos::BlendOp::kAdd;
+          blendcontrol_replace.alpha_destblend = xenos::BlendFactor::kZero;
+          register_file_->values[XE_GPU_REG_RB_BLENDCONTROL0] =
+              blendcontrol_replace.value;
+          reg::RB_COLORCONTROL colorcontrol_no_kill;
+          colorcontrol_no_kill.value = colorcontrol_value;
+          colorcontrol_no_kill.alpha_test_enable = 0;
+          colorcontrol_no_kill.alpha_to_mask_enable = 0;
+          register_file_->values[XE_GPU_REG_RB_COLORCONTROL] =
+              colorcontrol_no_kill.value;
+        }
         draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
             vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
             is_indexed ? &index_buffer_info : nullptr,
@@ -1306,6 +1335,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                                        vgt_draw_initiator.prim_type));
         register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] =
             depthcontrol_value;
+        register_file_->values[XE_GPU_REG_RB_BLENDCONTROL0] =
+            blendcontrol_value;
+        register_file_->values[XE_GPU_REG_RB_COLORCONTROL] =
+            colorcontrol_value;
       } else {
         // TODO(Triang3l): Don't drop the draw call completely if the vertex
         // shader has memexport.
