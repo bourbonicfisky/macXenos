@@ -216,6 +216,19 @@ class VulkanTextureCache final : public TextureCache {
     kLoadDescriptorSetCount,
   };
 
+  // --texture_host_dump diagnostic: pending readbacks of the converted
+  // (post-load-shader) host buffer contents, written to disk once the GPU
+  // is idle (destructor).
+  struct HostDumpPending {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+    uint32_t guest_base;
+    uint32_t sequence;
+  };
+  std::vector<HostDumpPending> host_dump_pending_;
+  void FlushHostDumps();
+
   struct HostFormat {
     LoadShaderIndex load_shader;
     // Do NOT add integer formats to this - they are not filterable, can only be

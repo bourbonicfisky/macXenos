@@ -30,6 +30,15 @@
 
 DECLARE_bool(tiled_shared_memory);
 
+DEFINE_string(
+    texture_host_dump, "",
+    "Diagnostic: hex guest base address of a texture whose CONVERTED host "
+    "buffer contents (output of the texture load compute shader, before the "
+    "copy to the host image) are read back and written to "
+    "texhost_<base>_<seq>.bin in the current directory at shutdown. For "
+    "cross-host comparison of loaded texture content.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -427,11 +436,43 @@ constexpr VulkanTextureCache::HostFormatPair
         xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB,
         true};
 
+void VulkanTextureCache::FlushHostDumps() {
+  if (host_dump_pending_.empty()) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (const HostDumpPending& pending : host_dump_pending_) {
+    void* mapping = nullptr;
+    if (dfn.vkMapMemory(device, pending.memory, 0, VK_WHOLE_SIZE, 0,
+                        &mapping) == VK_SUCCESS &&
+        mapping) {
+      char file_name[64];
+      std::snprintf(file_name, sizeof(file_name), "texhost_%08X_%u.bin",
+                    pending.guest_base, pending.sequence);
+      if (FILE* file = std::fopen(file_name, "wb")) {
+        std::fwrite(mapping, 1, size_t(pending.size), file);
+        std::fclose(file);
+        XELOGI("TEXHOSTDUMP wrote {} ({} bytes)", file_name,
+               uint64_t(pending.size));
+      }
+      dfn.vkUnmapMemory(device, pending.memory);
+    }
+    dfn.vkDestroyBuffer(device, pending.buffer, nullptr);
+    dfn.vkFreeMemory(device, pending.memory, nullptr);
+  }
+  host_dump_pending_.clear();
+}
+
 VulkanTextureCache::~VulkanTextureCache() {
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  FlushHostDumps();
 
   for (const std::pair<const SamplerParameters, Sampler>& sampler_pair :
        samplers_) {
@@ -1626,6 +1667,45 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         texture_dst_access_mask, texture_old_layout, texture_new_layout);
   }
   command_processor_.SubmitBarriers(true);
+  if (!cvars::texture_host_dump.empty()) {
+    uint32_t dump_base =
+        uint32_t(strtoul(cvars::texture_host_dump.c_str(), nullptr, 16));
+    if ((texture_key.base_page << 12) == dump_base) {
+      // The scratch buffer holds the converted host texel data and is
+      // currently visible to transfer reads - copy it to a host-visible
+      // readback buffer written to disk at shutdown.
+      VkBuffer readback_buffer;
+      VkDeviceMemory readback_memory;
+      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
+              vulkan_device, host_buffer_size,
+              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer,
+              readback_memory)) {
+        VkBufferCopy dump_copy_region;
+        dump_copy_region.srcOffset = 0;
+        dump_copy_region.dstOffset = 0;
+        dump_copy_region.size = host_buffer_size;
+        command_buffer.CmdVkCopyBuffer(scratch_buffer, readback_buffer, 1,
+                                       &dump_copy_region);
+        HostDumpPending pending;
+        pending.buffer = readback_buffer;
+        pending.memory = readback_memory;
+        pending.size = host_buffer_size;
+        pending.guest_base = texture_key.base_page << 12;
+        pending.sequence = uint32_t(host_dump_pending_.size());
+        host_dump_pending_.push_back(pending);
+        XELOGI(
+            "TEXHOSTDUMP queued base={:08X} seq={} size={} {}x{} fmt={} "
+            "levels={}..{} base_xpitch_blocks={} base_offset={} "
+            "bytes_per_host_block={}",
+            pending.guest_base, pending.sequence, uint64_t(host_buffer_size),
+            width, height, uint32_t(guest_format), level_first, level_last,
+            host_layout_base.x_pitch_blocks,
+            uint64_t(host_layout_base.offset_bytes),
+            load_shader_info.bytes_per_host_block);
+      }
+    }
+  }
   VkBufferImageCopy* copy_regions = command_buffer.CmdCopyBufferToImageEmplace(
       scratch_buffer, vulkan_texture.image(),
       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, level_last - level_first + 1);
