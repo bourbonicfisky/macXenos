@@ -1619,8 +1619,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // the verdict host-invariant (per-level bilinear is cross-vendor
       // consistent). Runtime-gated on the alpha-test system flags.
       auto snap_lambda_if_alpha_tested = [&](spv::Id lambda) -> spv::Id {
-        if (!TextureAlphaTestLodSnap() ||
-            is_depth_only_fragment_shader_ || !is_pixel_shader()) {
+        if (is_depth_only_fragment_shader_ || !is_pixel_shader()) {
+          return lambda;
+        }
+        if (cvars::texture_lod_snap_all && IsTextureDeterminismHost()) {
+          return builder_->createUnaryBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
+              lambda);
+        }
+        if (!TextureAlphaTestLodSnap()) {
           return lambda;
         }
         spv::Id alpha_test_active = builder_->createBinOp(

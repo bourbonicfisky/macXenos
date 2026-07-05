@@ -213,6 +213,17 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_lod_snap_all, false,
+    "Probe: snap the shader-computed LOD to the nearest integer mip for "
+    "ALL fetches, not only alpha-tested draws. Both Apple and AMD evaluate "
+    "helper-lane perspective ratios with vendor wobble at partially "
+    "covered quads (measured: ~2e-2 p90 deviation from the exact plane "
+    "ratio on both, mutually divergent) - snapping collapses the wobble "
+    "to a deterministic level choice except within rounding distance of "
+    "mip boundaries.",
+    "GPU");
+
+DEFINE_bool(
     texture_lod_plane_inputs, false,
     "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
     "difference the raw per-lane fetch coordinates directly for the "
