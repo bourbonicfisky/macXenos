@@ -1641,7 +1641,11 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       };
 
       auto remap_trilinear_lambda = [&](spv::Id lambda) -> spv::Id {
-        if (!cvars::texture_trilinear_ramp_match_amd) {
+        // Apple-only: the remap emulates the AMD/Xenos ramp on Apple's
+        // plain-linear ramp; on AMD it double-applies, and its emission
+        // hangs AMD-Metal pipeline creation via MoltenVK.
+        if (!cvars::texture_trilinear_ramp_match_amd ||
+            !features_.apple_gpu) {
           if (cvars::texture_mip_lod_bias_adjust != 0.0) {
             lambda = builder_->createNoContractionBinOp(
                 spv::OpFAdd, type_float_, lambda,

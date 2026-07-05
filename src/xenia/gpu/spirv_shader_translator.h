@@ -411,6 +411,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
     bool fragment_shader_sample_interlock;
 
     bool demote_to_helper_invocation;
+
+    // Apple GPU via MoltenVK (vendor 0x106B) - gates Apple-calibration
+    // paths (trilinear ramp remap, covered-lane LOD inputs) that are
+    // wrong or hazardous on other vendors (the ramp remap double-applies
+    // on AMD and its pipeline creation hangs AMD-Metal).
+    bool apple_gpu;
   };
 
   SpirvShaderTranslator(const Features& features,

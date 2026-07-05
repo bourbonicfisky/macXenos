@@ -39,7 +39,8 @@ SpirvShaderTranslator::Features::Features(bool all)
       denorm_flush_to_zero_float32(all),
       rounding_mode_rte_float32(all),
       fragment_shader_sample_interlock(all),
-      demote_to_helper_invocation(all) {}
+      demote_to_helper_invocation(all),
+      apple_gpu(all) {}
 
 SpirvShaderTranslator::Features::Features(
     const ui::vulkan::VulkanDevice* const vulkan_device)
@@ -63,7 +64,8 @@ SpirvShaderTranslator::Features::Features(
       fragment_shader_sample_interlock(
           vulkan_device->properties().fragmentShaderSampleInterlock),
       demote_to_helper_invocation(
-          vulkan_device->properties().shaderDemoteToHelperInvocation) {
+          vulkan_device->properties().shaderDemoteToHelperInvocation),
+      apple_gpu(vulkan_device->properties().vendorID == 0x106B) {
   const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
   if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
     spirv_version = spv::Spv_1_5;
@@ -2675,7 +2677,7 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   // catastrophic cancellation at edge-on triangles amplifies that into
   // multi-mip LOD divergence at partially covered quads).
   if (cvars::texture_computed_lod_in_shader &&
-      cvars::texture_lod_covered_lane_inputs &&
+      cvars::texture_lod_covered_lane_inputs && features_.apple_gpu &&
       !is_depth_only_fragment_shader_) {
     input_helper_invocation_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_bool_,
