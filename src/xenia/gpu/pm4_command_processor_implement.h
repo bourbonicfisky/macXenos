@@ -1139,6 +1139,26 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
     if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
       // Draw-range gate for trace-replay bisection (no effect at defaults).
       uint32_t draw_index = trace_draw_index_++;
+      // Sub-draw index window for one draw (diagnostic: isolate strip
+      // segments/triangles without guest memory injection, which has
+      // page-granular cache-invalidation side effects on neighbors).
+      bool window_skip_draw = false;
+      if (is_indexed && !cvars::replay_index_window.empty()) {
+        uint32_t window_draw = 0, window_start = 0, window_count = 0;
+        if (std::sscanf(cvars::replay_index_window.c_str(), "%u,%u,%u",
+                        &window_draw, &window_start, &window_count) == 3 &&
+            draw_index == window_draw) {
+          uint32_t index_size_bytes =
+              index_buffer_info.format == xenos::IndexFormat::kInt16
+                  ? sizeof(uint16_t)
+                  : sizeof(uint32_t);
+          index_buffer_info.guest_base += window_start * index_size_bytes;
+          index_buffer_info.length -= window_start * index_size_bytes;
+          index_buffer_info.count = window_count;
+          vgt_draw_initiator.num_indices = window_count;
+          window_skip_draw = window_count == 0;
+        }
+      }
       if (!cvars::replay_inject_memory.empty()) {
         // hexaddr,afterdraw,filepath[;...] - substitute guest memory before
         // the given draw (cross-GPU divergence attribution diagnostics).
@@ -1282,6 +1302,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
       if (cvars::replay_skip_depth_only &&
           register_file_->Get<reg::RB_MODECONTROL>().edram_mode ==
               xenos::EdramMode::kDepthOnly) {
+        skip_range = true;
+      }
+      if (window_skip_draw) {
         skip_range = true;
       }
       if (((int32_t(draw_index) < cvars::replay_draw_first ||

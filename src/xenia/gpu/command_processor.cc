@@ -91,6 +91,12 @@ DEFINE_int32(replay_zfunc_always_draw, -1,
              "failures from rasterization coverage gaps). -1 disables.",
              "GPU");
 
+DEFINE_string(replay_index_window, "",
+              "draw,start,count - restrict one draw during trace playback to "
+              "a window of its index buffer (diagnostic: isolate strip "
+              "segments/triangles; count=0 skips the draw). Empty disables.",
+              "GPU");
+
 DEFINE_int32(replay_solid_draw, -1,
              "Draw index whose RT0 blending is forced to REPLACE "
              "(src ONE, dst ZERO, ADD) and whose fixed-function alpha test / "
