@@ -1739,8 +1739,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // results, and Apple and AMD pick differently (MSL only has dfdx, so
       // the fine/coarse distinction is lost in translation). Requires
       // deterministic per-lane values (interpolators_manual_perspective).
+      bool plane_exact_lod_inputs =
+          cvars::texture_lod_plane_inputs && InterpolatorsManualPerspective();
       auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
-        value = covered_lane_value(value);
+        if (!plane_exact_lod_inputs) {
+          value = covered_lane_value(value);
+        }
         if (!InterpolatorsManualPerspective()) {
           builder_->addCapability(spv::CapabilityDerivativeControl);
           return builder_->createUnaryOp(
@@ -1793,10 +1797,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         lod_size[0] = size[0];
         lod_size[1] = component_count > 1 ? size[1]
                                           : builder_->makeFloatConstant(1.0f);
-        if (input_helper_invocation_ != spv::NoResult) {
-          // Covered-lane mode: difference the final per-lane fetch
-          // coordinates directly (quad_derivative applies the covered-lane
-          // substitution). The quotient rule exists to avoid sourcing
+        if (input_helper_invocation_ != spv::NoResult ||
+            plane_exact_lod_inputs) {
+          // Covered-lane or plane-exact mode: difference the final per-lane
+          // fetch coordinates directly (quad_derivative applies the
+          // covered-lane substitution in covered-lane mode; in plane-exact
+          // mode raw per-lane values are used - under manual perspective
+          // they derive from noperspective varyings, helper-lane
+          // plane-exact on all vendors, so the differences equal the
+          // AMD/Xenos hardware plane-true gradients at partial quads). The quotient rule exists to avoid sourcing
           // helper-lane values, which the substitution already guarantees -
           // and its (dA*q - A*dq) form catastrophically cancels at edge-on
           // triangles, amplifying the ~ulp cross-vendor noise of even

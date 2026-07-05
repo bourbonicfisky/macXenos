@@ -213,6 +213,19 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_lod_plane_inputs, false,
+    "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
+    "difference the raw per-lane fetch coordinates directly for the "
+    "analytic LOD, without covered-lane substitution. Under manual "
+    "perspective the per-lane UVs derive from noperspective varyings, "
+    "which are helper-lane plane-exact on all vendors - so these "
+    "differences equal the AMD/Xenos hardware's plane-true gradients "
+    "at partially covered quads, where covered-lane substitution "
+    "diverges from AMD by construction. Takes precedence over "
+    "texture_lod_covered_lane_inputs.",
+    "GPU");
+
+DEFINE_bool(
     texture_determinism_force_non_apple, false,
     "Diagnostic: apply the Apple/Xenos texture-determinism stack "
     "(texture_computed_lod_in_shader, interpolators_manual_perspective, "

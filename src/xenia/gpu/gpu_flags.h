@@ -66,6 +66,8 @@ DECLARE_bool(texture_computed_lod_in_shader);
 
 DECLARE_bool(texture_lod_covered_lane_inputs);
 
+DECLARE_bool(texture_lod_plane_inputs);
+
 DECLARE_bool(texture_determinism_force_non_apple);
 
 DECLARE_int32(texture_lod_force_level);
