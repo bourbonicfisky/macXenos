@@ -13,6 +13,7 @@
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -23,6 +24,9 @@
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#if __has_include("version.h")
+#include "version.h"  // XE_BUILD_COMMIT / XE_BUILD_BRANCH (generated)
+#endif
 #if !defined(NDEBUG)
 
 #define XE_ENABLE_GPU_REG_WRITE_LOGGING 1
@@ -130,6 +134,16 @@ DEFINE_bool(replay_draw_log, false,
             "Log one line per draw (index, primitive, index count, EDRAM "
             "mode, shader ucode hashes) during trace playback bisection.",
             "GPU");
+
+DEFINE_string(
+    capture_dir, "",
+    "Headless trace-analysis capture directory. When set during trace "
+    "playback, writes one structured JSON row per draw to "
+    "<dir>/manifest.jsonl (byte-stable per-draw guest/register state for "
+    "cross-machine and cross-build divergence compare) plus run/build/device "
+    "provenance to <dir>/capture_meta.json. Empty disables (default output "
+    "unchanged).",
+    "GPU");
 
 DEFINE_string(
     replay_inject_memory, "",
@@ -1508,6 +1522,68 @@ void CommandProcessor::CommitZPDReport(ZPDReport& report,
   uint32_t saturated_delta = XenosZPDReport::SaturateSampleCount(delta_value);
   uint32_t end_value = report.begin_value + saturated_delta;
   zpd_slot_values_[report.slot_base] = end_value;
+}
+
+void CommandProcessor::WriteCaptureMeta(
+    const std::filesystem::path& capture_dir) {
+  // Provenance that is EXPECTED to differ between runs (build, device,
+  // driver) lives here, NOT in the byte-stable per-draw manifest (design D4),
+  // so strict manifest comparison stays meaningful.
+  std::filesystem::path meta_path = capture_dir / "capture_meta.json";
+  FILE* f = xe::filesystem::OpenFile(meta_path, "wb");
+  if (!f) {
+    XELOGE("capture_dir: failed to open {}", meta_path.string());
+    return;
+  }
+#if defined(NDEBUG)
+  const char* build_config = "Release";
+#else
+  const char* build_config = "Debug";
+#endif
+#if defined(XE_BUILD_COMMIT)
+  const char* build_commit = XE_BUILD_COMMIT;
+  const char* build_branch = XE_BUILD_BRANCH;
+#else
+  const char* build_commit = "unknown";
+  const char* build_branch = "unknown";
+#endif
+  std::string device_json = GetCaptureDeviceInfoJson();
+  if (device_json.empty()) {
+    device_json = "null";
+  }
+  std::string meta = fmt::format(
+      "{{\"schema\":1,\"build_commit\":\"{}\",\"build_branch\":\"{}\","
+      "\"build_config\":\"{}\",\"device\":{}}}\n",
+      build_commit, build_branch, build_config, device_json);
+  fwrite(meta.data(), 1, meta.size(), f);
+  fclose(f);
+}
+
+void CommandProcessor::WriteCaptureManifestRow(const std::string& json_row) {
+  if (cvars::capture_dir.empty()) {
+    return;
+  }
+  if (!capture_meta_written_) {
+    std::filesystem::path capture_dir =
+        std::filesystem::path(cvars::capture_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(capture_dir, ec);
+    WriteCaptureMeta(capture_dir);
+    std::filesystem::path manifest_path = capture_dir / "manifest.jsonl";
+    capture_manifest_file_ = xe::filesystem::OpenFile(manifest_path, "wb");
+    if (!capture_manifest_file_) {
+      XELOGE("capture_dir: failed to open {}", manifest_path.string());
+    }
+    // Set regardless of success so we do not retry the open every draw.
+    capture_meta_written_ = true;
+  }
+  if (capture_manifest_file_) {
+    fwrite(json_row.data(), 1, json_row.size(), capture_manifest_file_);
+    fputc('\n', capture_manifest_file_);
+    // Flush per row: trace-dump in the two-machine workflow is wrapped in a
+    // perl alarm and may be SIGALRM-killed before stdio buffers drain.
+    fflush(capture_manifest_file_);
+  }
 }
 
 bool CommandProcessor::IsZPDReportCurrent(const ZPDReport& report) const {

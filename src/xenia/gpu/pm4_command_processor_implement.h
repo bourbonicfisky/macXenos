@@ -1313,6 +1313,89 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                  uint32_t(fetch.clamp_x), uint32_t(fetch.clamp_y));
         }
       }
+      if (!cvars::capture_dir.empty()) {
+        // Structured per-draw manifest row (design D1): the same guest/
+        // register state as replay_draw_log, emitted as one byte-stable JSON
+        // line into <capture_dir>/manifest.jsonl. Floats are written as raw
+        // register bits (hex), not decimal, so the row is byte-identical
+        // across machines/arch (the D4 determinism gate depends on this).
+        auto vs = active_vertex_shader_;
+        auto ps = active_pixel_shader_;
+        auto rb_modecontrol = register_file_->Get<reg::RB_MODECONTROL>();
+        auto rb_depthcontrol = register_file_->Get<reg::RB_DEPTHCONTROL>();
+        auto rb_depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
+        auto rb_surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+        auto rb_color_info = register_file_->Get<reg::RB_COLOR_INFO>();
+        auto pa_su_sc_mode_cntl = register_file_->Get<reg::PA_SU_SC_MODE_CNTL>();
+        auto fbits = [&](uint32_t reg) -> uint32_t {
+          return register_file_->values[reg];
+        };
+        std::string row = fmt::format(
+            "{{\"draw\":{},\"prim\":{},\"indices\":{},\"edram\":{},\"src\":{}",
+            draw_index, uint32_t(vgt_draw_initiator.prim_type),
+            uint32_t(vgt_draw_initiator.num_indices),
+            uint32_t(rb_modecontrol.edram_mode),
+            uint32_t(vgt_draw_initiator.source_select));
+        row += fmt::format(",\"vs\":\"{:016X}\",\"ps\":\"{:016X}\"",
+                           vs ? vs->ucode_data_hash() : 0,
+                           ps ? ps->ucode_data_hash() : 0);
+        row += fmt::format(
+            ",\"depth\":{{\"z_en\":{},\"z_wr\":{},\"zfunc\":{},\"base\":{},"
+            "\"fmt\":{}}}",
+            uint32_t(rb_depthcontrol.z_enable),
+            uint32_t(rb_depthcontrol.z_write_enable),
+            uint32_t(rb_depthcontrol.zfunc),
+            uint32_t(rb_depth_info.depth_base),
+            uint32_t(rb_depth_info.depth_format));
+        row += fmt::format(
+            ",\"surface\":{{\"msaa\":{},\"pitch\":{}}},"
+            "\"color0\":{{\"base\":{},\"fmt\":{}}}",
+            uint32_t(rb_surface_info.msaa_samples),
+            uint32_t(rb_surface_info.surface_pitch),
+            uint32_t(rb_color_info.color_base),
+            uint32_t(rb_color_info.color_format));
+        row += fmt::format(
+            ",\"polyofs\":{{\"front_en\":{},\"back_en\":{},\"para_en\":{},"
+            "\"front_scale\":\"{:08X}\",\"front_ofs\":\"{:08X}\","
+            "\"back_scale\":\"{:08X}\",\"back_ofs\":\"{:08X}\","
+            "\"vtx_win_ofs_en\":{}}}",
+            uint32_t(pa_su_sc_mode_cntl.poly_offset_front_enable),
+            uint32_t(pa_su_sc_mode_cntl.poly_offset_back_enable),
+            uint32_t(pa_su_sc_mode_cntl.poly_offset_para_enable),
+            fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE),
+            fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET),
+            fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE),
+            fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET),
+            uint32_t(pa_su_sc_mode_cntl.vtx_window_offset_enable));
+        if (is_indexed) {
+          row += fmt::format(
+              ",\"index\":{{\"base\":\"{:08X}\",\"len\":{},\"count\":{},"
+              "\"fmt\":{},\"endian\":{}}}",
+              index_buffer_info.guest_base, index_buffer_info.length,
+              index_buffer_info.count, uint32_t(index_buffer_info.format),
+              uint32_t(index_buffer_info.endianness));
+        }
+        row += ",\"fetch\":[";
+        bool first_fetch = true;
+        for (uint32_t tf = 0; tf < 32; ++tf) {
+          xenos::xe_gpu_texture_fetch_t fetch =
+              register_file_->GetTextureFetch(tf);
+          if (fetch.type != xenos::FetchConstantType::kTexture) {
+            continue;
+          }
+          row += fmt::format(
+              "{}{{\"slot\":{},\"base\":\"{:08X}\",\"w\":{},\"h\":{},"
+              "\"fmt\":{},\"tiled\":{},\"endian\":{},\"pitch\":{}}}",
+              first_fetch ? "" : ",", tf,
+              uint32_t(fetch.base_address) << 12, fetch.size_2d.width + 1,
+              fetch.size_2d.height + 1, uint32_t(fetch.format),
+              uint32_t(fetch.tiled), uint32_t(fetch.endianness),
+              fetch.pitch << 5);
+          first_fetch = false;
+        }
+        row += "]}";
+        WriteCaptureManifestRow(row);
+      }
       bool skip_range = int32_t(draw_index) >= cvars::replay_draw_skip_first &&
                         int32_t(draw_index) <= cvars::replay_draw_skip_last &&
                         cvars::replay_draw_skip_first >= 0;

@@ -161,6 +161,22 @@ bool VulkanCommandProcessor::DumpEdramToFile(
   return render_target_cache_->CompleteEdramDownloadToFile(path);
 }
 
+std::string VulkanCommandProcessor::GetCaptureDeviceInfoJson() const {
+  // Provenance for capture_meta.json (design D4): device + driver identity,
+  // which is expected to differ across the M4 / Mac Pro A/B and must stay out
+  // of the byte-stable per-draw manifest.
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  if (!vulkan_device) {
+    return std::string();
+  }
+  const ui::vulkan::VulkanDevice::Properties& props =
+      vulkan_device->properties();
+  return fmt::format(
+      "{{\"device_name\":\"{}\",\"api_version\":{},\"driver_version\":{}}}",
+      props.deviceName, uint32_t(props.apiVersion),
+      uint32_t(props.driverVersion));
+}
+
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
   std::ostringstream title;
   title << "Vulkan";

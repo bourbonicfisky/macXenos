@@ -152,6 +152,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
   bool DumpEdramToFile(const std::filesystem::path& path) override;
+  std::string GetCaptureDeviceInfoJson() const override;
 
   void PollCompletedSubmission() override;
 

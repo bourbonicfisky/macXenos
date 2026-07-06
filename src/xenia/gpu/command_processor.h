@@ -42,6 +42,7 @@ DECLARE_bool(replay_duplicate_draw_depth_only);
 DECLARE_bool(replay_draw_log);
 DECLARE_string(replay_inject_memory);
 DECLARE_string(replay_index_window);
+DECLARE_string(capture_dir);
 
 namespace xe {
 
@@ -552,6 +553,24 @@ class CommandProcessor {
   // Per-playback draw counter for the replay_draw_first/last bisection gate
   // (reset by TracePlayer at the start of each playback).
   uint32_t trace_draw_index_ = 0;
+
+  // Headless trace-analysis capture (--capture_dir). manifest.jsonl is
+  // lazily opened on the first captured draw; capture_meta.json (run/build/
+  // device provenance) is written once at the same point. Both are closed
+  // when the command processor shuts down.
+  FILE* capture_manifest_file_ = nullptr;
+  bool capture_meta_written_ = false;
+  // Appends one byte-stable JSON row to <capture_dir>/manifest.jsonl,
+  // opening the file and emitting capture_meta.json on first use. No-op when
+  // --capture_dir is empty.
+  void WriteCaptureManifestRow(const std::string& json_row);
+  // Emits <capture_dir>/capture_meta.json (commit/build/device provenance
+  // kept OUT of the byte-stable per-draw stream, per design D4).
+  void WriteCaptureMeta(const std::filesystem::path& capture_dir);
+  // Backend device/driver provenance for capture_meta.json (a JSON object, or
+  // "" for none). Overridden by backends that know their device (e.g. Vulkan
+  // emits device name + apiVersion + driverVersion / MoltenVK version).
+  virtual std::string GetCaptureDeviceInfoJson() const { return std::string(); }
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;
