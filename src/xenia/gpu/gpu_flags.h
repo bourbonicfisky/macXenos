@@ -86,6 +86,8 @@ DECLARE_int32(ps_debug_export_instr);
 
 DECLARE_int32(ps_debug_export_reg);
 
+DECLARE_int32(ps_debug_export_lod);
+
 DECLARE_string(ps_debug_export_ps_hash);
 
 DECLARE_double(ps_debug_export_scale);

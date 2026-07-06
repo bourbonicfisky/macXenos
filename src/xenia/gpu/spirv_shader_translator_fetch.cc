@@ -1836,6 +1836,93 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                                                swapped, value));
       };
 
+      // --ps_debug_export_lod diagnostic: capture the analytic LOD and its
+      // per-axis texel gradients into guest color output 0, to measure the
+      // Apple analytic-LOD collapse (gradient magnitude loss) directly and
+      // localize which quad axis loses its gradient at partially covered
+      // quads.
+      auto emit_lod_probe = [&](spv::Id lambda, spv::Id axis_gsq_x,
+                                spv::Id axis_gsq_y) {
+        if (cvars::ps_debug_export_lod < 0 || !is_pixel_shader() ||
+            cvars::ps_debug_export_ps_hash.empty() ||
+            strtoull(cvars::ps_debug_export_ps_hash.c_str(), nullptr, 16) !=
+                current_shader().ucode_data_hash()) {
+          return;
+        }
+        if (var_ps_debug_export_ == spv::NoResult) {
+          var_ps_debug_export_ = builder_->createVariable(
+              spv::NoPrecision, spv::StorageClassFunction, type_float4_,
+              "xe_var_ps_debug_export", const_float4_0_);
+        }
+        auto sqrt_scaled = [&](spv::Id gsq) -> spv::Id {
+          return builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_,
+              builder_->createUnaryBuiltinCall(type_float_,
+                                               ext_inst_glsl_std_450_,
+                                               GLSLstd450Sqrt, gsq),
+              builder_->makeFloatConstant(1.0f / 32.0f));
+        };
+        spv::Id lambda_mapped = builder_->createNoContractionBinOp(
+            spv::OpFAdd, type_float_,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, lambda,
+                builder_->makeFloatConstant(1.0f / 16.0f)),
+            builder_->makeFloatConstant(0.5f));
+        spv::Id probe_r, probe_g, probe_b;
+        if (cvars::ps_debug_export_lod == 2) {
+          probe_r = sqrt_scaled(axis_gsq_x);
+          probe_g = sqrt_scaled(axis_gsq_y);
+          probe_b = lambda_mapped;
+        } else {
+          probe_r = sqrt_scaled(builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, axis_gsq_x,
+              axis_gsq_y));
+          probe_g = lambda_mapped;
+          // Fraction of the 2x2 quad that is a helper (uncovered) lane: the
+          // covered-lane substitution zeroes any quad difference whose
+          // partner is a helper, so a high fraction predicts collapse.
+          probe_b = const_float_0_;
+          if (input_helper_invocation_ != spv::NoResult) {
+            builder_->addCapability(spv::CapabilityGroupNonUniformQuad);
+            spv::Id helper_float = builder_->createTriOp(
+                spv::OpSelect, type_float_,
+                builder_->createLoad(input_helper_invocation_,
+                                     spv::NoPrecision),
+                const_float_1_, const_float_0_);
+            spv::Id helper_sum = spv::NoResult;
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+              std::unique_ptr<spv::Instruction> broadcast_op =
+                  std::make_unique<spv::Instruction>(
+                      builder_->getUniqueId(), type_float_,
+                      spv::OpGroupNonUniformQuadBroadcast);
+              broadcast_op->addIdOperand(
+                  builder_->makeUintConstant(uint32_t(spv::Scope::Subgroup)));
+              broadcast_op->addIdOperand(helper_float);
+              broadcast_op->addIdOperand(builder_->makeUintConstant(lane));
+              spv::Id lane_helper = broadcast_op->getResultId();
+              builder_->getBuildPoint()->addInstruction(
+                  std::move(broadcast_op));
+              helper_sum =
+                  helper_sum == spv::NoResult
+                      ? lane_helper
+                      : builder_->createNoContractionBinOp(
+                            spv::OpFAdd, type_float_, helper_sum, lane_helper);
+            }
+            probe_b = builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, helper_sum,
+                builder_->makeFloatConstant(0.25f));
+          }
+        }
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(probe_r);
+        id_vector_temp_.push_back(probe_g);
+        id_vector_temp_.push_back(probe_b);
+        id_vector_temp_.push_back(const_float_1_);
+        builder_->createStore(
+            builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
+            var_ps_debug_export_);
+      };
+
       auto emit_analytic_lod = [&](uint32_t component_count) -> spv::Id {
         assert_true(size[0] != spv::NoResult);
         assert_true(input_fragment_coordinates_ != spv::NoResult);
@@ -1859,6 +1946,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // differences of smoothly varying UVs are small-minus-small - no
           // amplification.
           spv::Id direct_max_grad_squared = spv::NoResult;
+          spv::Id direct_axis_grad_squared[2] = {spv::NoResult, spv::NoResult};
           for (uint32_t axis = 0; axis < 2; ++axis) {
             spv::Id grad_squared = spv::NoResult;
             for (uint32_t i = 0; i < component_count; ++i) {
@@ -1875,6 +1963,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                             spv::OpFAdd, type_float_, grad_squared,
                             grad_component_squared);
             }
+            direct_axis_grad_squared[axis] = grad_squared;
             direct_max_grad_squared =
                 direct_max_grad_squared == spv::NoResult
                     ? grad_squared
@@ -1888,12 +1977,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           direct_max_grad_squared = builder_->createBinBuiltinCall(
               type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
               direct_max_grad_squared, builder_->makeFloatConstant(1e-24f));
-          return builder_->createNoContractionBinOp(
+          spv::Id direct_lambda = builder_->createNoContractionBinOp(
               spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
               builder_->createUnaryBuiltinCall(type_float_,
                                                ext_inst_glsl_std_450_,
                                                GLSLstd450Log2,
                                                direct_max_grad_squared));
+          emit_lod_probe(direct_lambda, direct_axis_grad_squared[0],
+                         direct_axis_grad_squared[1]);
+          return direct_lambda;
         }
         spv::Id frag_q;
         if (input_inv_w_ != spv::NoResult) {
@@ -1925,6 +2017,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           da_dy[i] = quad_derivative(coord_a[i], 1);
         }
         spv::Id max_grad_squared = spv::NoResult;
+        spv::Id quotient_axis_grad_squared[2] = {spv::NoResult, spv::NoResult};
         for (uint32_t axis = 0; axis < 2; ++axis) {
           spv::Id grad_squared = spv::NoResult;
           for (uint32_t i = 0; i < component_count; ++i) {
@@ -1951,6 +2044,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                           spv::OpFAdd, type_float_, grad_squared,
                           grad_component_squared);
           }
+          quotient_axis_grad_squared[axis] = grad_squared;
           max_grad_squared =
               max_grad_squared == spv::NoResult
                   ? grad_squared
@@ -1958,12 +2052,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                         type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
                         max_grad_squared, grad_squared);
         }
-        return builder_->createNoContractionBinOp(
+        spv::Id quotient_lambda = builder_->createNoContractionBinOp(
             spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
             builder_->createUnaryBuiltinCall(type_float_,
                                              ext_inst_glsl_std_450_,
-                                             GLSLstd450Log2,
-                                             max_grad_squared));
+                                             GLSLstd450Log2, max_grad_squared));
+        emit_lod_probe(quotient_lambda, quotient_axis_grad_squared[0],
+                       quotient_axis_grad_squared[1]);
+        return quotient_lambda;
       };
 
       if (instr.opcode == ucode::FetchOpcode::kGetTextureComputedLod) {

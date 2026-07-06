@@ -322,6 +322,18 @@ DEFINE_int32(ps_debug_export_reg, 0,
              "(rN) to capture.",
              "GPU");
 
+DEFINE_int32(
+    ps_debug_export_lod, -1,
+    "Diagnostic, with ps_debug_export_ps_hash: capture the shader-computed "
+    "analytic texture LOD of the matching pixel shader's computed-LOD "
+    "fetches into guest color output 0 (readback through the render "
+    "target). 1 = R:max texel-gradient magnitude/32, G:lambda/16+0.5, "
+    "B:helper-neighbor fraction of the 2x2 quad; 2 = R:axis-X gradient/32, "
+    "G:axis-Y gradient/32, B:lambda/16+0.5. Isolates whether the Apple "
+    "analytic-LOD collapse is a gradient magnitude loss and which axis "
+    "loses it. -1 = off.",
+    "GPU");
+
 DEFINE_string(ps_debug_export_ps_hash, "",
               "See ps_debug_export_instr: hex ucode hash of the pixel shader "
               "to instrument (required - empty disables the export).",
