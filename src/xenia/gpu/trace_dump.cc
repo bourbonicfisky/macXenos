@@ -17,6 +17,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
@@ -48,6 +49,20 @@ DEFINE_bool(dump_edram, false,
             "After playback, dump the raw 10 MB EDRAM contents (per-sample, "
             "tile-major) next to the output image as <output>.edram.bin.",
             "GPU");
+DEFINE_string(decode, "",
+              "Offline decode mode (no replay): decode every draw_*.edram.bin "
+              "in the given capture directory into color_drawNNNNNN.png using "
+              "params from its manifest.jsonl, then exit. Runs the EDRAM "
+              "offset self-test first.",
+              "GPU");
+DEFINE_uint64(decode_width, 0,
+              "--decode: color decode width in pixels (0 = manifest surface "
+              "pitch).",
+              "GPU");
+DEFINE_uint64(decode_height, 0,
+              "--decode: color decode height in pixels (0 = 720).", "GPU");
+DEFINE_uint64(decode_sample, 0,
+              "--decode: MSAA sample index to decode (0..samples-1).", "GPU");
 
 namespace xe {
 namespace gpu {
@@ -59,6 +74,14 @@ TraceDump::TraceDump() = default;
 TraceDump::~TraceDump() = default;
 
 int TraceDump::Main(const std::vector<std::string>& args) {
+  // Offline decode mode: no emulator/replay -- just decode a capture directory.
+  if (!cvars::decode.empty()) {
+    int decoded = DecodeCaptureDirectory(
+        std::filesystem::path(cvars::decode), uint32_t(cvars::decode_width),
+        uint32_t(cvars::decode_height), uint32_t(cvars::decode_sample));
+    return decoded >= 0 ? 0 : 1;
+  }
+
   // Grab path from the flag or unnamed argument.
   std::filesystem::path path;
   std::filesystem::path output_path;
