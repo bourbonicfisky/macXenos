@@ -418,6 +418,27 @@ uint4_xe XeR4G4B4A4ToA4R4G4B4(uint4_xe packed_texels) {
          ((packed_texels & 0xF000F000u) >> 12u);
 }
 
+// Expansion of two packed 16-bit 4:4:4:4 texels to two R8G8B8A8 texels, with
+// the same channel placement that XeR4G4B4A4ToB4G4R4A4 produces for the
+// B4G4R4A4_UNORM_PACK16 host format (for hosts without 4-bit formats, such as
+// Metal on non-Apple GPUs via MoltenVK).
+uint4_xe XeR4G4B4A4ToR8G8B8A8(uint2_xe packed_texels) {
+  uint4_xe texels =
+      (packed_texels.xxyy >> uint4_xe(0u, 16u, 0u, 16u)) & 0xFFFFu;
+  uint4_xe r = (texels >> 4u) & 0xFu;
+  uint4_xe g = texels & 0xFu;
+  uint4_xe b = (texels >> 12u) & 0xFu;
+  uint4_xe a = (texels >> 8u) & 0xFu;
+  return (r * 17u) | ((g * 17u) << 8u) | ((b * 17u) << 16u) |
+         ((a * 17u) << 24u);
+}
+void XeR4G4B4A4ToR8G8B8A8(uint4_xe packed_texels,
+                          out_param_xe(uint4_xe, out_01),
+                          out_param_xe(uint4_xe, out_23)) {
+  out_01 = XeR4G4B4A4ToR8G8B8A8(packed_texels.xy);
+  out_23 = XeR4G4B4A4ToR8G8B8A8(packed_texels.zw);
+}
+
 // RRRRR GGGGG BBBBBB to GGGGG BBBBBB RRRRR (use RBGA swizzle when reading).
 uint4_xe XeR5G5B6ToB5G6R5WithRBGASwizzle(uint4_xe packed_texels) {
   return ((packed_texels & 0x001F001Fu) << 11u) |

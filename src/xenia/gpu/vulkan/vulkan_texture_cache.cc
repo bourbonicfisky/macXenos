@@ -109,6 +109,8 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r16_unorm_float_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r4g4b4a4_a4r4g4b4_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r4g4b4a4_a4r4g4b4_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r4g4b4a4_r8g8b8a8_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r4g4b4a4_r8g8b8a8_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r5g5b5a1_b5g5r5a1_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r5g5b5a1_b5g5r5a1_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs.h"
@@ -2476,6 +2478,30 @@ bool VulkanTextureCache::Initialize() {
   VkFormatProperties format_properties;
   // TODO(Triang3l): k_2_10_10_10 signed -> filterable R16G16B16A16_SFLOAT
   // (enough storage precision, possibly unwanted filtering precision change).
+  // k_4_4_4_4: B4G4R4A4_UNORM_PACK16 is optional in Vulkan and is typically
+  // unavailable on Metal for non-Apple GPUs (MoltenVK on AMD / Intel Macs).
+  // Without a fallback the format would be dropped entirely and such textures
+  // would be bound as the null texture (in Just Cause 2, the terrain material
+  // tables are k_4_4_4_4 - snow was missing on the whole map). Expand to
+  // R8G8B8A8_UNORM instead.
+  // TODO(Triang3l): The same fallback for kLoadShaderIndexDXT3AAs1111ToARGB4
+  // (k_DXT3A_AS_1_1_1_1) which also targets B4G4R4A4_UNORM_PACK16.
+  {
+    HostFormatPair& host_format_4444 =
+        host_formats_[uint32_t(xenos::TextureFormat::k_4_4_4_4)];
+    assert_true(host_format_4444.format_unsigned.format ==
+                VK_FORMAT_B4G4R4A4_UNORM_PACK16);
+    ifn.vkGetPhysicalDeviceFormatProperties(physical_device,
+                                            VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+                                            &format_properties);
+    if (!(format_properties.optimalTilingFeatures &
+          VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+      host_format_4444.format_unsigned.load_shader =
+          kLoadShaderIndexRGBA4ToRGBA8;
+      host_format_4444.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
+      host_format_4444.format_unsigned.block_compressed = false;
+    }
+  }
   // k_Cr_Y1_Cb_Y0_REP, k_Y1_Cr_Y0_Cb_REP.
   HostFormatPair& host_format_gbgr =
       host_formats_[uint32_t(xenos::TextureFormat::k_Cr_Y1_Cb_Y0_REP)];
@@ -2902,6 +2928,9 @@ bool VulkanTextureCache::Initialize() {
   load_shader_code[kLoadShaderIndexRGBA4ToARGB4] =
       std::make_pair(shaders::texture_load_r4g4b4a4_a4r4g4b4_cs,
                      sizeof(shaders::texture_load_r4g4b4a4_a4r4g4b4_cs));
+  load_shader_code[kLoadShaderIndexRGBA4ToRGBA8] =
+      std::make_pair(shaders::texture_load_r4g4b4a4_r8g8b8a8_cs,
+                     sizeof(shaders::texture_load_r4g4b4a4_r8g8b8a8_cs));
   load_shader_code[kLoadShaderIndexGBGR8ToRGB8] =
       std::make_pair(shaders::texture_load_gbgr8_rgb8_cs,
                      sizeof(shaders::texture_load_gbgr8_rgb8_cs));
@@ -2998,6 +3027,9 @@ bool VulkanTextureCache::Initialize() {
     load_shader_code_scaled[kLoadShaderIndexRGBA4ToARGB4] = std::make_pair(
         shaders::texture_load_r4g4b4a4_a4r4g4b4_scaled_cs,
         sizeof(shaders::texture_load_r4g4b4a4_a4r4g4b4_scaled_cs));
+    load_shader_code_scaled[kLoadShaderIndexRGBA4ToRGBA8] = std::make_pair(
+        shaders::texture_load_r4g4b4a4_r8g8b8a8_scaled_cs,
+        sizeof(shaders::texture_load_r4g4b4a4_r8g8b8a8_scaled_cs));
     load_shader_code_scaled[kLoadShaderIndexR10G11B11ToRGBA16] = std::make_pair(
         shaders::texture_load_r10g11b11_rgba16_scaled_cs,
         sizeof(shaders::texture_load_r10g11b11_rgba16_scaled_cs));
