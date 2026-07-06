@@ -43,6 +43,8 @@ DECLARE_bool(replay_draw_log);
 DECLARE_string(replay_inject_memory);
 DECLARE_string(replay_index_window);
 DECLARE_string(capture_dir);
+DECLARE_string(capture_draw_range);
+DECLARE_string(capture_edram_at);
 
 namespace xe {
 
@@ -571,6 +573,14 @@ class CommandProcessor {
   // "" for none). Overridden by backends that know their device (e.g. Vulkan
   // emits device name + apiVersion + driverVersion / MoltenVK version).
   virtual std::string GetCaptureDeviceInfoJson() const { return std::string(); }
+  // True if this draw index is selected for an EDRAM snapshot by
+  // --capture_draw_range and/or --capture_edram_at. No-op-fast when both are
+  // empty.
+  bool IsCaptureEdramDraw(uint32_t draw_index) const;
+  // Snapshots raw EDRAM to <capture_dir>/draw_NNNNNN.edram.bin (via the
+  // backend DumpEdramToFile) if this draw is selected. May perturb (design
+  // D3): forces a submission + queue drain.
+  void MaybeCaptureEdramSnapshot(uint32_t draw_index);
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;

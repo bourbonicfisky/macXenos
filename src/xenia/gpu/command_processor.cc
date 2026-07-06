@@ -146,6 +146,22 @@ DEFINE_string(
     "GPU");
 
 DEFINE_string(
+    capture_draw_range, "",
+    "With --capture_dir: 'A..B' - snapshot raw EDRAM to "
+    "<dir>/draw_NNNNNN.edram.bin AFTER each issued draw in the inclusive "
+    "index range [A,B]. Selective and opt-in; the snapshot forces a "
+    "submission + queue drain (NOT passive - may perturb, per design D3). "
+    "Empty disables EDRAM snapshots.",
+    "GPU");
+
+DEFINE_string(
+    capture_edram_at, "",
+    "With --capture_dir: comma-separated explicit draw indices (e.g. "
+    "'101,108,115') to snapshot raw EDRAM after, in addition to any "
+    "--capture_draw_range. Empty disables.",
+    "GPU");
+
+DEFINE_string(
     replay_inject_memory, "",
     "Trace-replay diagnostic: semicolon-separated list of "
     "hexaddr,afterdraw,filepath - before issuing draw index 'afterdraw', "
@@ -1557,6 +1573,47 @@ void CommandProcessor::WriteCaptureMeta(
       build_commit, build_branch, build_config, device_json);
   fwrite(meta.data(), 1, meta.size(), f);
   fclose(f);
+}
+
+bool CommandProcessor::IsCaptureEdramDraw(uint32_t draw_index) const {
+  if (cvars::capture_dir.empty()) {
+    return false;
+  }
+  int32_t idx = int32_t(draw_index);
+  // Inclusive range "A..B".
+  if (!cvars::capture_draw_range.empty()) {
+    int32_t a = 0, b = 0;
+    if (std::sscanf(cvars::capture_draw_range.c_str(), "%d..%d", &a, &b) == 2 &&
+        idx >= a && idx <= b) {
+      return true;
+    }
+  }
+  // Explicit comma-separated list "i,j,k".
+  if (!cvars::capture_edram_at.empty()) {
+    std::stringstream list(cvars::capture_edram_at);
+    std::string item;
+    while (std::getline(list, item, ',')) {
+      if (!item.empty() && std::atoi(item.c_str()) == idx) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void CommandProcessor::MaybeCaptureEdramSnapshot(uint32_t draw_index) {
+  if (!IsCaptureEdramDraw(draw_index)) {
+    return;
+  }
+  std::filesystem::path capture_dir = std::filesystem::path(cvars::capture_dir);
+  std::error_code ec;
+  std::filesystem::create_directories(capture_dir, ec);
+  std::filesystem::path snapshot_path =
+      capture_dir / fmt::format("draw_{:06d}.edram.bin", draw_index);
+  if (!DumpEdramToFile(snapshot_path)) {
+    XELOGE("capture_dir: EDRAM snapshot unsupported/failed for draw {}",
+           draw_index);
+  }
 }
 
 void CommandProcessor::WriteCaptureManifestRow(const std::string& json_row) {

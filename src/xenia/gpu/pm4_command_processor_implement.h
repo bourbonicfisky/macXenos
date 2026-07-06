@@ -1530,6 +1530,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                  uint32_t(vgt_draw_initiator.source_select));
         }
       }
+      // Selective EDRAM snapshot AFTER this draw issued (design D3, §2):
+      // writes <capture_dir>/draw_NNNNNN.edram.bin for draws chosen by
+      // --capture_draw_range / --capture_edram_at. May perturb (forces a
+      // submission + queue drain); no-op when not selected.
+      COMMAND_PROCESSOR::MaybeCaptureEdramSnapshot(draw_index);
     }
   }
 
