@@ -687,6 +687,13 @@ bool ShaderTranslator::TranslateAnalyzedShader(
 
   PostTranslation();
 
+  // Dump the host (translated) binary + disassembly for offline inspection
+  // (e.g. cross-compiling the exact runtime SPIR-V to MSL). Guarded by the
+  // same dump_shaders path used for ucode dumps above.
+  if (!cvars::dump_shaders.empty() && translation.is_valid()) {
+    translation.Dump(cvars::dump_shaders, "host");
+  }
+
   // In case is_valid_ is modified by PostTranslation, reload.
   return translation.is_valid_;
 }
