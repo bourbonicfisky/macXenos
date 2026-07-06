@@ -541,13 +541,36 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
           fclose(df);
         }
         // Byte-exact raw depth24 channel (little-endian uint32 per pixel,
-        // row-major) -- this is what the compare oracle diffs cross-machine;
-        // the PNG above is only for eyeballing.
+        // row-major). Correct for unorm24 (kD24S8); for float24 (kD24FS8) the
+        // low mantissa bits are host-nondeterministic, so the compare oracle
+        // uses the depthf32 channel below with a tolerance instead. Kept for
+        // exact integer work / provenance.
         std::filesystem::path dbin =
             capture_dir / fmt::format("depth_draw{:06d}.depth24.bin", draw_index);
         if (FILE* db = xe::filesystem::OpenFile(dbin, "wb")) {
           fwrite(depth24.data(), sizeof(uint32_t), depth24.size(), db);
           fclose(db);
+        }
+        // Full-precision decoded depth value (float32 per pixel). This is what
+        // the compare oracle diffs with a tolerance: float24 z-interpolation is
+        // not bit-exact across GPU vendors, so a byte-exact depth diff drowns
+        // real coverage divergence in mantissa noise. Ranges differ by format
+        // (unorm24 -> [0,1], float24 -> [0,2)) but each side uses the same
+        // format, so a relative/absolute epsilon separates noise from coverage.
+        std::vector<float> depthf(depth24.size());
+        bool is_f24 =
+            xenos::DepthRenderTargetFormat(depth_fmt) ==
+            xenos::DepthRenderTargetFormat::kD24FS8;
+        for (size_t i = 0; i < depth24.size(); ++i) {
+          depthf[i] = is_f24 ? XeFloat20e4ToFloat(depth24[i])
+                             : float(depth24[i]) / float(0xFFFFFF);
+        }
+        std::filesystem::path fbin =
+            capture_dir /
+            fmt::format("depth_draw{:06d}.depthf32.bin", draw_index);
+        if (FILE* fb = xe::filesystem::OpenFile(fbin, "wb")) {
+          fwrite(depthf.data(), sizeof(float), depthf.size(), fb);
+          fclose(fb);
         }
       }
     }
