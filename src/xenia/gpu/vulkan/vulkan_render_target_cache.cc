@@ -526,17 +526,30 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     gamma_render_target_as_unorm16_ = false;
 
     depth_float24_round_ = cvars::depth_float24_round;
+    // Auto-enable the f24 depth conversion on hosts that lack a native 24-bit
+    // unorm depth format (Apple/MoltenVK falls back to D32_SFLOAT, whose extra
+    // low-order bits diverge between the guest depth prepass and color pass and
+    // fail the depth test along shared triangle edges -> the "wireframe mesh"
+    // cracks). Hosts with native D24 are unaffected. An explicit
+    // depth_float24_convert_in_pixel_shader=true still force-enables; setting
+    // depth_float24_convert_auto=false is the opt-out escape hatch.
+    bool depth_float24_convert_auto =
+        cvars::depth_float24_convert_auto &&
+        !depth_unorm24_vulkan_format_supported();
+    bool depth_float24_convert_wanted =
+        cvars::depth_float24_convert_in_pixel_shader ||
+        depth_float24_convert_auto;
     // Requires per-sample shading with MSAA (a SampleId input in the
     // shaders), so sample-rate shading support is needed.
     depth_float24_convert_in_pixel_shader_ =
-        cvars::depth_float24_convert_in_pixel_shader &&
+        depth_float24_convert_wanted &&
         vulkan_device->properties().sampleRateShading;
     XELOGI(
         "VulkanRenderTargetCache: depth_float24_convert_in_pixel_shader={} "
-        "(cvar={}, sampleRateShading={}), depth_float24_round={}, "
+        "(cvar={}, auto={}, sampleRateShading={}), depth_float24_round={}, "
         "unorm24 depth format supported={}",
         depth_float24_convert_in_pixel_shader_,
-        cvars::depth_float24_convert_in_pixel_shader,
+        cvars::depth_float24_convert_in_pixel_shader, depth_float24_convert_auto,
         vulkan_device->properties().sampleRateShading, depth_float24_round_,
         depth_unorm24_vulkan_format_supported());
 

@@ -138,6 +138,21 @@ DEFINE_bool(
     "interlock / rasterizer-ordered view), this is ignored because 24-bit "
     "depth is always used directly.",
     "GPU");
+
+DEFINE_bool(
+    depth_float24_convert_auto, true,
+    "Automatically enable depth_float24_convert_in_pixel_shader on hosts that "
+    "lack a native 24-bit unorm depth format (notably Apple GPUs via MoltenVK, "
+    "which fall back to 32-bit float depth). Without a native 24-bit format the "
+    "guest depth prepass and color pass retain divergent low-order bits, so "
+    "fragments fail the guest depth test along shared triangle edges, producing "
+    "the cross-title \"wireframe mesh\" crack overlay. On such hosts this "
+    "quantizes guest depth to 20e4 in the pixel shader so both passes agree. "
+    "Hosts with a native 24-bit depth format are unaffected. Set to false to "
+    "opt out of the automatic behavior (the escape hatch if it regresses a "
+    "title); depth_float24_convert_in_pixel_shader=true still force-enables it "
+    "everywhere regardless of this flag.",
+    "GPU");
 DEFINE_bool(
     draw_resolution_scaled_texture_offsets, true,
     "Apply offsets from texture fetch instructions taking resolution scale "
