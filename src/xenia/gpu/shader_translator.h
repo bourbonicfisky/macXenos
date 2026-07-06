@@ -138,6 +138,12 @@ class ShaderTranslator {
       const ParsedAluInstruction& instr,
       uint8_t memexport_eM_potentially_written_before) {}
 
+  // Ucode instruction slot (the index shown in ucode disassembly) of the
+  // ALU/fetch instruction currently being translated, for diagnostics.
+  uint32_t current_translated_instruction_offset() const {
+    return current_translated_instruction_offset_;
+  }
+
  private:
   void TranslateControlFlowInstruction(const ucode::ControlFlowInstruction& cf);
   void TranslateExecInstructions(const ParsedExecInstruction& instr);
@@ -156,6 +162,9 @@ class ShaderTranslator {
 
   // Kept for supporting vfetch_mini.
   ucode::VertexFetchInstruction previous_vfetch_full_;
+
+  // See current_translated_instruction_offset().
+  uint32_t current_translated_instruction_offset_ = UINT32_MAX;
 };
 
 }  // namespace gpu

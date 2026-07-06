@@ -166,6 +166,7 @@ void SpirvShaderTranslator::Reset() {
 
   main_interface_.clear();
   var_main_registers_ = spv::NoResult;
+  var_ps_debug_export_ = spv::NoResult;
   var_main_memexport_address_ = spv::NoResult;
   for (size_t memexport_eM_index = 0;
        memexport_eM_index < xe::countof(var_main_memexport_data_);

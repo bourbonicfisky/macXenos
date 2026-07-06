@@ -80,6 +80,12 @@ DECLARE_bool(force_per_sample_shading_probe);
 
 DECLARE_int32(vertex_position_quantize_bits);
 
+DECLARE_int32(ps_debug_export_instr);
+
+DECLARE_int32(ps_debug_export_reg);
+
+DECLARE_string(ps_debug_export_ps_hash);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

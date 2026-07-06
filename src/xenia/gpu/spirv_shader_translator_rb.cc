@@ -439,6 +439,25 @@ spv::Id SpirvShaderTranslator::Depth20e4To32(SpirvBuilder& builder,
 }
 
 void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+  if (var_ps_debug_export_ != spv::NoResult &&
+      output_or_var_fragment_data_[0] != spv::NoResult) {
+    // --ps_debug_export_instr diagnostic: replace guest color output 0 with
+    // the captured register value, and mark it written so it survives the
+    // color-written tracking.
+    builder_->createStore(
+        builder_->createLoad(var_ps_debug_export_, spv::NoPrecision),
+        output_or_var_fragment_data_[0]);
+    if (var_main_fsi_color_written_ != spv::NoResult) {
+      builder_->createStore(
+          builder_->createBinOp(
+              spv::OpBitwiseOr, type_uint_,
+              builder_->createLoad(var_main_fsi_color_written_,
+                                   spv::NoPrecision),
+              builder_->makeUintConstant(0b1)),
+          var_main_fsi_color_written_);
+    }
+  }
+
   // Loaded if needed.
   spv::Id msaa_samples = spv::NoResult;
 

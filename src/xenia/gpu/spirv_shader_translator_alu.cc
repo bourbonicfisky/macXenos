@@ -9,14 +9,17 @@
 
 #include "xenia/gpu/spirv_shader_translator.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/math.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/spirv_compatibility.h"
 
 DEFINE_int32(
@@ -135,6 +138,35 @@ void SpirvShaderTranslator::ProcessAluInstruction(
 
   StoreResult(instr.vector_and_constant_result, vector_result);
   StoreResult(instr.scalar_result, scalar_result);
+
+  if (cvars::ps_debug_export_instr >= 0 && is_pixel_shader() &&
+      uint32_t(cvars::ps_debug_export_instr) ==
+          current_translated_instruction_offset() &&
+      !cvars::ps_debug_export_ps_hash.empty() &&
+      strtoull(cvars::ps_debug_export_ps_hash.c_str(), nullptr, 16) ==
+          current_shader().ucode_data_hash() &&
+      var_main_registers_ != spv::NoResult) {
+    // --ps_debug_export_instr diagnostic: capture the selected register right
+    // after this instruction (in the same predication context), for replacing
+    // guest color output 0 at the end of the shader.
+    EnsureBuildPointAvailable();
+    if (var_ps_debug_export_ == spv::NoResult) {
+      var_ps_debug_export_ = builder_->createVariable(
+          spv::NoPrecision, spv::StorageClassFunction, type_float4_,
+          "xe_var_ps_debug_export", const_float4_0_);
+    }
+    uint32_t debug_export_reg =
+        std::min(uint32_t(std::max(cvars::ps_debug_export_reg, 0)),
+                 register_count() ? register_count() - 1 : 0);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(int(debug_export_reg)));
+    spv::Id debug_export_reg_ptr = builder_->createAccessChain(
+        spv::StorageClassFunction, var_main_registers_, id_vector_temp_);
+    builder_->createStore(
+        builder_->createLoad(debug_export_reg_ptr, spv::NoPrecision),
+        var_ps_debug_export_);
+  }
 
   if (predicate_written_vector || predicate_written_scalar) {
     cf_exec_predicate_written_ = true;

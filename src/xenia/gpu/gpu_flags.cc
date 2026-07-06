@@ -295,3 +295,23 @@ DEFINE_int32(
     "(Apple/Metal multi-pass depth conflicts). 0 = off; 3 aligns with one "
     "f24 depth ulp.",
     "GPU");
+
+DEFINE_int32(
+    ps_debug_export_instr, -1,
+    "Diagnostic, with ps_debug_export_ps_hash: ucode instruction slot index "
+    "(the number shown in ucode disassembly) after which the register "
+    "selected by ps_debug_export_reg is captured in the matching pixel "
+    "shader; the captured value replaces guest color output 0 at the end of "
+    "the shader, so intermediate ALU dataflow can be read back through the "
+    "render target. -1 = off.",
+    "GPU");
+
+DEFINE_int32(ps_debug_export_reg, 0,
+             "See ps_debug_export_instr: index of the temporary register "
+             "(rN) to capture.",
+             "GPU");
+
+DEFINE_string(ps_debug_export_ps_hash, "",
+              "See ps_debug_export_instr: hex ucode hash of the pixel shader "
+              "to instrument (required - empty disables the export).",
+              "GPU");

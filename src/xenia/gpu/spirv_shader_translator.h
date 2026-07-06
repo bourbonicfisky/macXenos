@@ -1112,6 +1112,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id var_main_tfetch_gradients_v_;
   // float4[register_count()].
   spv::Id var_main_registers_;
+  // --ps_debug_export_instr diagnostic: float4 holding the captured register
+  // value, written over color output 0 at the end of the fragment shader.
+  spv::Id var_ps_debug_export_ = spv::NoResult;
   // Memory export variables are created only when needed.
   // float4.
   spv::Id var_main_memexport_address_;

@@ -916,6 +916,7 @@ void ShaderTranslator::TranslateExecInstructions(
   for (uint32_t instr_offset = instr.instruction_address;
        instr_offset < instr.instruction_address + instr.instruction_count;
        ++instr_offset, sequence >>= 2) {
+    current_translated_instruction_offset_ = instr_offset;
     const uint32_t* op_ptr = ucode_dwords + instr_offset * 3;
     if (sequence & 0b01) {
       auto& op = *reinterpret_cast<const FetchInstruction*>(op_ptr);
