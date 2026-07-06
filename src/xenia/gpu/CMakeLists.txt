@@ -9,6 +9,11 @@ target_include_directories(xenia-gpu PRIVATE
 target_link_libraries(xenia-gpu PUBLIC dxbc fmt glslang-spirv snappy xxhash xenia-base xenia-ui)
 xe_target_defaults(xenia-gpu)
 
+if(XENIA_BUILD_TESTS)
+  set(CMAKE_FOLDER "tests")
+  add_subdirectory(testing)
+endif()
+
 if(XENIA_BUILD_MISC)
   # Shader compiler tool
   add_executable(xenia-gpu-shader-compiler
