@@ -682,6 +682,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // must be called with absolute values of operands - use GetAbsoluteOperand!
   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
                                  spv::Id operand_1_abs);
+  // --alu_transcendental_snap_bits diagnostic: round a scalar float to the
+  // given number of mantissa bits (round-to-nearest via biased-representation
+  // increment) so host-implementation-defined transcendental precision
+  // (rcp/rsq/sqrt) collapses to a host-invariant grid. Returns the value
+  // unchanged when the cvar is unset.
+  spv::Id SnapTranscendental(spv::Id value);
   // Conditionally discard the current fragment. Changes the build point.
   void KillPixel(spv::Id condition,
                  uint8_t memexport_eM_potentially_written_before);

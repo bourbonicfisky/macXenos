@@ -1278,6 +1278,22 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                  uint32_t(copy_control.color_clear_enable),
                  uint32_t(copy_control.depth_clear_enable));
         }
+        for (uint32_t ci = 240; ci < 260; ++ci) {
+          // Both potential ALU constant banks (VS base c0, PS base c256) -
+          // which one the pixel shader actually addresses depends on the SQ
+          // program config; dump both for offline ALU analysis.
+          uint32_t reg_lo = XE_GPU_REG_SHADER_CONSTANT_000_X + ci * 4;
+          uint32_t reg_hi = XE_GPU_REG_SHADER_CONSTANT_000_X + (256 + ci) * 4;
+          XELOGI("  FCONST c{} lo=({},{},{},{}) hi=({},{},{},{})", ci,
+                 register_file_->Get<float>(reg_lo),
+                 register_file_->Get<float>(reg_lo + 1),
+                 register_file_->Get<float>(reg_lo + 2),
+                 register_file_->Get<float>(reg_lo + 3),
+                 register_file_->Get<float>(reg_hi),
+                 register_file_->Get<float>(reg_hi + 1),
+                 register_file_->Get<float>(reg_hi + 2),
+                 register_file_->Get<float>(reg_hi + 3));
+        }
         for (uint32_t tf = 0; tf < 32; ++tf) {
           xenos::xe_gpu_texture_fetch_t fetch =
               register_file_->GetTextureFetch(tf);

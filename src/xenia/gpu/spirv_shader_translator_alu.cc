@@ -15,11 +15,44 @@
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/spirv_compatibility.h"
 
+DEFINE_int32(
+    alu_transcendental_snap_bits, 0,
+    "Diagnostic: round the results of guest rcp/rsq/sqrt scalar ALU "
+    "instructions to this many float mantissa bits (0 = off, max 22). The "
+    "precision of these operations is implementation-defined on the host "
+    "GPU, and vendor differences amplified through dependent branching or "
+    "table-fetch indexing cause cross-host material selection divergence; "
+    "snapping collapses sub-ULP-class differences to a host-invariant grid "
+    "(Xenos-era hardware provided roughly 22 mantissa bits on these ops).",
+    "GPU");
+
 namespace xe {
 namespace gpu {
+
+spv::Id SpirvShaderTranslator::SnapTranscendental(spv::Id value) {
+  int32_t snap_bits = cvars::alu_transcendental_snap_bits;
+  if (snap_bits <= 0 || snap_bits >= 23) {
+    return value;
+  }
+  EnsureBuildPointAvailable();
+  // Round-to-nearest at the target mantissa granularity by adding half a step
+  // in the biased integer representation (carry into the exponent is the
+  // correct rounding behavior); infinity and NaN payloads survive the mask.
+  uint32_t drop_bits = 23 - uint32_t(snap_bits);
+  spv::Id value_uint =
+      builder_->createUnaryOp(spv::OpBitcast, type_uint_, value);
+  value_uint = builder_->createBinOp(
+      spv::OpIAdd, type_uint_, value_uint,
+      builder_->makeUintConstant(UINT32_C(1) << (drop_bits - 1)));
+  value_uint = builder_->createBinOp(
+      spv::OpBitwiseAnd, type_uint_, value_uint,
+      builder_->makeUintConstant(~((UINT32_C(1) << drop_bits) - 1)));
+  return builder_->createUnaryOp(spv::OpBitcast, type_float_, value_uint);
+}
 
 spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value,
                                                       spv::Id operand_0_abs,
@@ -1106,12 +1139,18 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
     case ucode::AluScalarOpcode::kRsq:
     case ucode::AluScalarOpcode::kSqrt:
     case ucode::AluScalarOpcode::kSin:
-    case ucode::AluScalarOpcode::kCos:
-      return builder_->createUnaryBuiltinCall(
+    case ucode::AluScalarOpcode::kCos: {
+      spv::Id result = builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_,
           GLSLstd450(kOps[size_t(instr.scalar_opcode)]),
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
                                0b0001));
+      if (instr.scalar_opcode == ucode::AluScalarOpcode::kRsq ||
+          instr.scalar_opcode == ucode::AluScalarOpcode::kSqrt) {
+        result = SnapTranscendental(result);
+      }
+      return result;
+    }
     case ucode::AluScalarOpcode::kLogc: {
       spv::Id result = builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_, GLSLstd450Log2,
@@ -1124,10 +1163,10 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
           builder_->makeFloatConstant(-FLT_MAX), result);
     }
     case ucode::AluScalarOpcode::kRcpc: {
-      spv::Id result = builder_->createNoContractionBinOp(
+      spv::Id result = SnapTranscendental(builder_->createNoContractionBinOp(
           spv::OpFDiv, type_float_, const_float_1_,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
-                               0b0001));
+                               0b0001)));
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
@@ -1140,10 +1179,10 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
           builder_->makeFloatConstant(FLT_MAX), result);
     }
     case ucode::AluScalarOpcode::kRcpf: {
-      spv::Id result = builder_->createNoContractionBinOp(
+      spv::Id result = SnapTranscendental(builder_->createNoContractionBinOp(
           spv::OpFDiv, type_float_, const_float_1_,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
-                               0b0001));
+                               0b0001)));
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
@@ -1160,16 +1199,16 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
       return builder_->createUnaryOp(spv::OpBitcast, type_float_, result);
     }
     case ucode::AluScalarOpcode::kRcp: {
-      return builder_->createNoContractionBinOp(
+      return SnapTranscendental(builder_->createNoContractionBinOp(
           spv::OpFDiv, type_float_, const_float_1_,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
-                               0b0001));
+                               0b0001)));
     }
     case ucode::AluScalarOpcode::kRsqc: {
-      spv::Id result = builder_->createUnaryBuiltinCall(
+      spv::Id result = SnapTranscendental(builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_, GLSLstd450InverseSqrt,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
-                               0b0001));
+                               0b0001)));
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
@@ -1182,10 +1221,10 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
           builder_->makeFloatConstant(FLT_MAX), result);
     }
     case ucode::AluScalarOpcode::kRsqf: {
-      spv::Id result = builder_->createUnaryBuiltinCall(
+      spv::Id result = SnapTranscendental(builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_, GLSLstd450InverseSqrt,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
-                               0b0001));
+                               0b0001)));
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
