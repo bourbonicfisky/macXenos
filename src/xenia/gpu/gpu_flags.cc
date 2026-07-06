@@ -315,3 +315,9 @@ DEFINE_string(ps_debug_export_ps_hash, "",
               "See ps_debug_export_instr: hex ucode hash of the pixel shader "
               "to instrument (required - empty disables the export).",
               "GPU");
+
+DEFINE_double(ps_debug_export_scale, 1.0,
+              "See ps_debug_export_instr: multiplier applied to the captured "
+              "register before it is written to color output 0, for reading "
+              "values much smaller than the render target's LSB.",
+              "GPU");

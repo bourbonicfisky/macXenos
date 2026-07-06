@@ -163,9 +163,14 @@ void SpirvShaderTranslator::ProcessAluInstruction(
         builder_->makeIntConstant(int(debug_export_reg)));
     spv::Id debug_export_reg_ptr = builder_->createAccessChain(
         spv::StorageClassFunction, var_main_registers_, id_vector_temp_);
-    builder_->createStore(
-        builder_->createLoad(debug_export_reg_ptr, spv::NoPrecision),
-        var_ps_debug_export_);
+    spv::Id debug_export_value =
+        builder_->createLoad(debug_export_reg_ptr, spv::NoPrecision);
+    if (cvars::ps_debug_export_scale != 1.0) {
+      debug_export_value = builder_->createNoContractionBinOp(
+          spv::OpVectorTimesScalar, type_float4_, debug_export_value,
+          builder_->makeFloatConstant(float(cvars::ps_debug_export_scale)));
+    }
+    builder_->createStore(debug_export_value, var_ps_debug_export_);
   }
 
   if (predicate_written_vector || predicate_written_scalar) {
