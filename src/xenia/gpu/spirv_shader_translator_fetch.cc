@@ -1791,7 +1791,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         if (!plane_exact_lod_inputs && !quotient_lod_inputs) {
           value = covered_lane_value(value);
         }
-        if (!InterpolatorsManualPerspective()) {
+        if (!InterpolatorsManualPerspective() ||
+            cvars::texture_lod_hw_derivatives) {
+          // Probe / candidate lever: use the hardware coarse derivative
+          // instead of the manual OpGroupNonUniformQuadSwap + FragCoord-parity
+          // difference. The manual path was chosen for cross-vendor
+          // determinism, but if Apple's subgroup quad layout does not match
+          // the assumed 2x2 (so QuadSwap returns the wrong neighbor), the
+          // hardware derivative may be correct where the manual one balloons.
           builder_->addCapability(spv::CapabilityDerivativeControl);
           return builder_->createUnaryOp(
               axis ? spv::OpDPdyCoarse : spv::OpDPdxCoarse, type_float_,

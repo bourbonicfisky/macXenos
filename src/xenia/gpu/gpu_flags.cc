@@ -237,6 +237,16 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_lod_hw_derivatives, false,
+    "Probe / candidate lever: compute the shader analytic-LOD quad "
+    "derivatives with hardware OpDPdxCoarse/OpDPdyCoarse instead of the "
+    "manual OpGroupNonUniformQuadSwap + gl_FragCoord-parity difference, even "
+    "under interpolators_manual_perspective. Tests whether the Apple "
+    "analytic-LOD gradient blow-up at covered quads is a subgroup-quad "
+    "layout / QuadSwap-neighbor problem.",
+    "GPU");
+
+DEFINE_bool(
     texture_lod_quotient_inputs, false,
     "Probe: with texture_computed_lod_in_shader + "
     "interpolators_manual_perspective, compute the analytic LOD via the "
