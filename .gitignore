@@ -91,6 +91,15 @@ node_modules/.bin/
 # coverage/etc
 /scratch/
 
+# GPU trace captures — NEVER commit. Commercial .xtr traces embed guest
+# physical memory (game code, textures, assets); decoded EDRAM snapshots and
+# framebuffer PNGs embed game imagery. The local commercial corpus lives at
+# $XENIA_TRACE_CORPUS (see tools/gpu_trace_analysis/README.md), outside the repo.
+*.xtr
+*.edram.bin
+manifest.jsonl
+capture_meta.json
+
 /build/
 /build-arm64/
 /build-x64/
