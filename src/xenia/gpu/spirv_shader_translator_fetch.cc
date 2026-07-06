@@ -1878,7 +1878,41 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 builder_->makeFloatConstant(1.0f / 16.0f)),
             builder_->makeFloatConstant(0.5f));
         spv::Id probe_r, probe_g, probe_b;
-        if (cvars::ps_debug_export_lod == 2) {
+        if (cvars::ps_debug_export_lod == 3) {
+          // Formula-vs-hardware de-risk: compare the shader-analytic lambda to
+          // the hardware LOD (OpImageQueryLod, unclamped component [1]) at the
+          // SAME coordinates on the SAME GPU. Isolates "does the analytic
+          // formula reproduce hardware LOD" from every derivative / stack
+          // confound. R = analytic lambda, G = hardware-query lambda,
+          // B = (analytic - hardware) centred at 0.5. 2D fetches only.
+          // (createTextureQueryCall adds Capability::ImageQuery itself.)
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(coordinates[0]);
+          id_vector_temp_.push_back(coordinates[1]);
+          texture_parameters.coords = builder_->createCompositeConstruct(
+              type_float2_, id_vector_temp_);
+          texture_parameters.sampler = builder_->createBinOp(
+              spv::OpSampledImage,
+              builder_->makeSampledImageType(
+                  builder_->getTypeId(image_2d_array_or_cube_unsigned)),
+              image_2d_array_or_cube_unsigned, sampler);
+          spv::Id hw_lod = builder_->createCompositeExtract(
+              builder_->createTextureQueryCall(spv::OpImageQueryLod,
+                                               texture_parameters, false),
+              type_float_, 1);
+          auto map16 = [&](spv::Id v) -> spv::Id {
+            return builder_->createNoContractionBinOp(
+                spv::OpFAdd, type_float_,
+                builder_->createNoContractionBinOp(
+                    spv::OpFMul, type_float_, v,
+                    builder_->makeFloatConstant(1.0f / 16.0f)),
+                builder_->makeFloatConstant(0.5f));
+          };
+          probe_r = lambda_mapped;
+          probe_g = map16(hw_lod);
+          probe_b = map16(builder_->createNoContractionBinOp(
+              spv::OpFSub, type_float_, lambda, hw_lod));
+        } else if (cvars::ps_debug_export_lod == 2) {
           probe_r = sqrt_scaled(axis_gsq_x);
           probe_g = sqrt_scaled(axis_gsq_y);
           probe_b = lambda_mapped;

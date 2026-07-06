@@ -339,7 +339,10 @@ DEFINE_int32(
     "fetches into guest color output 0 (readback through the render "
     "target). 1 = R:max texel-gradient magnitude/32, G:lambda/16+0.5, "
     "B:helper-neighbor fraction of the 2x2 quad; 2 = R:axis-X gradient/32, "
-    "G:axis-Y gradient/32, B:lambda/16+0.5. Isolates whether the Apple "
+    "G:axis-Y gradient/32, B:lambda/16+0.5; 3 = analytic-vs-hardware de-risk: "
+    "R:analytic lambda/16+0.5, G:hardware OpImageQueryLod lambda/16+0.5, "
+    "B:(analytic-hardware)/16+0.5 (same coords/GPU -> isolates whether the "
+    "analytic FORMULA reproduces hardware LOD). Isolates whether the Apple "
     "analytic-LOD collapse is a gradient magnitude loss and which axis "
     "loses it. -1 = off.",
     "GPU");
