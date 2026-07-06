@@ -334,6 +334,14 @@ DEFINE_int32(
     "loses it. -1 = off.",
     "GPU");
 
+DEFINE_int32(
+    ps_debug_export_lod_tf, -1,
+    "See ps_debug_export_lod: restrict the LOD capture to the fetch whose "
+    "texture fetch-constant index equals this value (a pixel shader samples "
+    "several textures with different gradients; without this the last fetch "
+    "wins). -1 = capture every computed-LOD fetch (last stored wins).",
+    "GPU");
+
 DEFINE_string(ps_debug_export_ps_hash, "",
               "See ps_debug_export_instr: hex ucode hash of the pixel shader "
               "to instrument (required - empty disables the export).",

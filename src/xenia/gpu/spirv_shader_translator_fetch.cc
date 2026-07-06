@@ -1846,7 +1846,9 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         if (cvars::ps_debug_export_lod < 0 || !is_pixel_shader() ||
             cvars::ps_debug_export_ps_hash.empty() ||
             strtoull(cvars::ps_debug_export_ps_hash.c_str(), nullptr, 16) !=
-                current_shader().ucode_data_hash()) {
+                current_shader().ucode_data_hash() ||
+            (cvars::ps_debug_export_lod_tf >= 0 &&
+             uint32_t(cvars::ps_debug_export_lod_tf) != fetch_constant_index)) {
           return;
         }
         if (var_ps_debug_export_ == spv::NoResult) {
