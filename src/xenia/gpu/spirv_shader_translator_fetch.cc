@@ -1871,11 +1871,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                                                GLSLstd450Sqrt, gsq),
               builder_->makeFloatConstant(1.0f / 32.0f));
         };
+        // Encoding scale: E = lambda/(2*range) + 0.5. range=8 -> the historical
+        // 1/16 scale; widen to see past the +/-range clamp at the horizon.
+        float lod_enc_scale =
+            1.0f / (2.0f * float(cvars::ps_debug_export_lod_range));
         spv::Id lambda_mapped = builder_->createNoContractionBinOp(
             spv::OpFAdd, type_float_,
             builder_->createNoContractionBinOp(
                 spv::OpFMul, type_float_, lambda,
-                builder_->makeFloatConstant(1.0f / 16.0f)),
+                builder_->makeFloatConstant(lod_enc_scale)),
             builder_->makeFloatConstant(0.5f));
         spv::Id probe_r, probe_g, probe_b;
         if (cvars::ps_debug_export_lod == 3) {
@@ -1905,7 +1909,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 spv::OpFAdd, type_float_,
                 builder_->createNoContractionBinOp(
                     spv::OpFMul, type_float_, v,
-                    builder_->makeFloatConstant(1.0f / 16.0f)),
+                    builder_->makeFloatConstant(lod_enc_scale)),
                 builder_->makeFloatConstant(0.5f));
           };
           probe_r = lambda_mapped;

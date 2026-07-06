@@ -91,6 +91,7 @@ DECLARE_int32(ps_debug_export_reg);
 DECLARE_int32(ps_debug_export_lod);
 
 DECLARE_int32(ps_debug_export_lod_tf);
+DECLARE_double(ps_debug_export_lod_range);
 
 DECLARE_string(ps_debug_export_ps_hash);
 

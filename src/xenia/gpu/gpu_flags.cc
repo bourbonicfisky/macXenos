@@ -355,6 +355,15 @@ DEFINE_int32(
     "wins). -1 = capture every computed-LOD fetch (last stored wins).",
     "GPU");
 
+DEFINE_double(
+    ps_debug_export_lod_range, 8.0,
+    "See ps_debug_export_lod: half-range (in mips) of the lambda encoding. "
+    "Encoded value E = lambda/(2*range) + 0.5, so lambda in [-range,+range] "
+    "maps to [0,1]. Default 8 matches the historical /16 scale; widen (e.g. "
+    "16) to see whether horizon LODs genuinely agree or are merely clamped at "
+    "the +8 ceiling.",
+    "GPU");
+
 DEFINE_string(ps_debug_export_ps_hash, "",
               "See ps_debug_export_instr: hex ucode hash of the pixel shader "
               "to instrument (required - empty disables the export).",
