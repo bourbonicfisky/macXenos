@@ -165,6 +165,19 @@ void SpirvShaderTranslator::ProcessAluInstruction(
         spv::StorageClassFunction, var_main_registers_, id_vector_temp_);
     spv::Id debug_export_value =
         builder_->createLoad(debug_export_reg_ptr, spv::NoPrecision);
+    if (cvars::ps_debug_export_component >= 0 &&
+        cvars::ps_debug_export_component <= 3) {
+      spv::Id component = builder_->createCompositeExtract(
+          debug_export_value, type_float_,
+          uint32_t(cvars::ps_debug_export_component));
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(component);
+      id_vector_temp_.push_back(component);
+      id_vector_temp_.push_back(component);
+      id_vector_temp_.push_back(const_float_1_);
+      debug_export_value =
+          builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+    }
     if (cvars::ps_debug_export_scale != 1.0) {
       debug_export_value = builder_->createNoContractionBinOp(
           spv::OpVectorTimesScalar, type_float4_, debug_export_value,

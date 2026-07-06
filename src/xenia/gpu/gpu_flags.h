@@ -88,6 +88,8 @@ DECLARE_string(ps_debug_export_ps_hash);
 
 DECLARE_double(ps_debug_export_scale);
 
+DECLARE_int32(ps_debug_export_component);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

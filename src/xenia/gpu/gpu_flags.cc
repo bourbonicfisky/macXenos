@@ -321,3 +321,9 @@ DEFINE_double(ps_debug_export_scale, 1.0,
               "register before it is written to color output 0, for reading "
               "values much smaller than the render target's LSB.",
               "GPU");
+
+DEFINE_int32(ps_debug_export_component, -1,
+             "See ps_debug_export_instr: -1 = export the register as-is; "
+             "0-3 = broadcast that component (x/y/z/w) to RGB, making the "
+             "w component readable through the color output.",
+             "GPU");
