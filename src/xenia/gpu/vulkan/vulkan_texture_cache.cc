@@ -51,6 +51,20 @@ DEFINE_string(
     "and implicate the image view/sampler.",
     "GPU");
 
+DEFINE_string(
+    texture_host_dump_sample, "",
+    "Diagnostic, requires --texture_host_dump_image with the same value: hex "
+    "guest base address of a texture whose base level is additionally read "
+    "back through the SHADER SAMPLING path - a y-flipped nearest-filter "
+    "vkCmdBlitImage into a temporary image (MoltenVK implements flipped "
+    "blits by rendering with the source bound as a sampled texture, "
+    "bypassing this app's descriptors), then a transfer readback of the "
+    "temporary image, written to texhostsmp_<base>_<seq>.bin (base level "
+    "only, tightly packed, rows bottom-up). Differing from texhostimg_ "
+    "means shader reads of the texture disagree with transfer reads at the "
+    "Metal level.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -461,10 +475,12 @@ void VulkanTextureCache::FlushHostDumps() {
     if (dfn.vkMapMemory(device, pending.memory, 0, VK_WHOLE_SIZE, 0,
                         &mapping) == VK_SUCCESS &&
         mapping) {
+      static const char* const kKindPrefixes[] = {"texhost", "texhostimg",
+                                                  "texhostsmp"};
       char file_name[64];
       std::snprintf(file_name, sizeof(file_name), "%s_%08X_%u.bin",
-                    pending.image_side ? "texhostimg" : "texhost",
-                    pending.guest_base, pending.sequence);
+                    kKindPrefixes[pending.kind], pending.guest_base,
+                    pending.sequence);
       if (FILE* file = std::fopen(file_name, "wb")) {
         std::fwrite(mapping, 1, size_t(pending.size), file);
         std::fclose(file);
@@ -475,6 +491,10 @@ void VulkanTextureCache::FlushHostDumps() {
     }
     dfn.vkDestroyBuffer(device, pending.buffer, nullptr);
     dfn.vkFreeMemory(device, pending.memory, nullptr);
+    if (pending.temp_image != VK_NULL_HANDLE) {
+      vmaDestroyImage(vma_allocator_, pending.temp_image,
+                      pending.temp_allocation);
+    }
   }
   host_dump_pending_.clear();
 }
@@ -1705,14 +1725,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         command_buffer.CmdVkCopyBuffer(scratch_buffer, readback_buffer, 1,
                                        &dump_copy_region);
         HostDumpPending pending;
+        pending.kind = 0;
         pending.buffer = readback_buffer;
         pending.memory = readback_memory;
         pending.size = host_buffer_size;
         pending.guest_base = texture_key.base_page << 12;
-        pending.image_side = false;
         pending.sequence = 0;
         for (const HostDumpPending& other : host_dump_pending_) {
-          if (other.image_side == pending.image_side) {
+          if (other.kind == pending.kind) {
             ++pending.sequence;
           }
         }
@@ -1830,6 +1850,144 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         command_buffer.CmdVkCopyImageToBuffer(
             vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             readback_buffer, dump_region_count, dump_regions);
+        if (!cvars::texture_host_dump_sample.empty() && level_first == 0 &&
+            uint32_t(strtoul(cvars::texture_host_dump_sample.c_str(), nullptr,
+                             16)) == (texture_key.base_page << 12)) {
+          // Additionally read the base level back through the shader
+          // sampling path: a y-flipped nearest blit is implemented by
+          // MoltenVK as a render sampling the source texture, so the blit
+          // target receives what SHADERS see, while the transfer readback
+          // above received what the transfer path sees.
+          uint32_t sample_width = width * texture_resolution_scale_x;
+          uint32_t sample_height = height * texture_resolution_scale_y;
+          VkDeviceSize sample_buffer_size =
+              VkDeviceSize(load_shader_info.bytes_per_host_block) *
+              sample_width * sample_height;
+          VkImageCreateInfo sample_image_create_info = {};
+          sample_image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+          sample_image_create_info.imageType = VK_IMAGE_TYPE_2D;
+          sample_image_create_info.format = host_format.format;
+          sample_image_create_info.extent.width = sample_width;
+          sample_image_create_info.extent.height = sample_height;
+          sample_image_create_info.extent.depth = 1;
+          sample_image_create_info.mipLevels = 1;
+          sample_image_create_info.arrayLayers = 1;
+          sample_image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+          sample_image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+          sample_image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+          sample_image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+          sample_image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+          VmaAllocationCreateInfo sample_allocation_create_info = {};
+          sample_allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO;
+          VkImage sample_image;
+          VmaAllocation sample_allocation;
+          VkBuffer sample_readback_buffer;
+          VkDeviceMemory sample_readback_memory;
+          if (vmaCreateImage(vma_allocator_, &sample_image_create_info,
+                             &sample_allocation_create_info, &sample_image,
+                             &sample_allocation, nullptr) == VK_SUCCESS) {
+            if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
+                    vulkan_device, sample_buffer_size,
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    ui::vulkan::util::MemoryPurpose::kReadback,
+                    sample_readback_buffer, sample_readback_memory)) {
+              VkImageMemoryBarrier sample_to_dst_barrier = {};
+              sample_to_dst_barrier.sType =
+                  VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+              sample_to_dst_barrier.srcAccessMask = 0;
+              sample_to_dst_barrier.dstAccessMask =
+                  VK_ACCESS_TRANSFER_WRITE_BIT;
+              sample_to_dst_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+              sample_to_dst_barrier.newLayout =
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+              sample_to_dst_barrier.srcQueueFamilyIndex =
+                  VK_QUEUE_FAMILY_IGNORED;
+              sample_to_dst_barrier.dstQueueFamilyIndex =
+                  VK_QUEUE_FAMILY_IGNORED;
+              sample_to_dst_barrier.image = sample_image;
+              sample_to_dst_barrier.subresourceRange =
+                  ui::vulkan::util::InitializeSubresourceRange();
+              command_buffer.CmdVkPipelineBarrier(
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                  &sample_to_dst_barrier);
+              VkImageBlit sample_blit = {};
+              sample_blit.srcSubresource.aspectMask =
+                  VK_IMAGE_ASPECT_COLOR_BIT;
+              sample_blit.srcSubresource.mipLevel = 0;
+              sample_blit.srcSubresource.baseArrayLayer = 0;
+              sample_blit.srcSubresource.layerCount = 1;
+              // Y-flipped source rectangle: forces the MoltenVK sampling
+              // (render) path instead of the blit-encoder copy path.
+              sample_blit.srcOffsets[0] = {0, int32_t(sample_height), 0};
+              sample_blit.srcOffsets[1] = {int32_t(sample_width), 0, 1};
+              sample_blit.dstSubresource.aspectMask =
+                  VK_IMAGE_ASPECT_COLOR_BIT;
+              sample_blit.dstSubresource.mipLevel = 0;
+              sample_blit.dstSubresource.baseArrayLayer = 0;
+              sample_blit.dstSubresource.layerCount = 1;
+              sample_blit.dstOffsets[0] = {0, 0, 0};
+              sample_blit.dstOffsets[1] = {int32_t(sample_width),
+                                           int32_t(sample_height), 1};
+              command_buffer.CmdVkBlitImage(
+                  vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  sample_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                  &sample_blit, VK_FILTER_NEAREST);
+              VkImageMemoryBarrier sample_to_src_barrier =
+                  sample_to_dst_barrier;
+              sample_to_src_barrier.srcAccessMask =
+                  VK_ACCESS_TRANSFER_WRITE_BIT;
+              sample_to_src_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+              sample_to_src_barrier.oldLayout =
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+              sample_to_src_barrier.newLayout =
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+              command_buffer.CmdVkPipelineBarrier(
+                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                  &sample_to_src_barrier);
+              VkBufferImageCopy sample_copy = {};
+              sample_copy.bufferOffset = 0;
+              sample_copy.bufferRowLength = sample_width;
+              sample_copy.bufferImageHeight = sample_height;
+              sample_copy.imageSubresource.aspectMask =
+                  VK_IMAGE_ASPECT_COLOR_BIT;
+              sample_copy.imageSubresource.mipLevel = 0;
+              sample_copy.imageSubresource.baseArrayLayer = 0;
+              sample_copy.imageSubresource.layerCount = 1;
+              sample_copy.imageExtent.width = sample_width;
+              sample_copy.imageExtent.height = sample_height;
+              sample_copy.imageExtent.depth = 1;
+              command_buffer.CmdVkCopyImageToBuffer(
+                  sample_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  sample_readback_buffer, 1, &sample_copy);
+              HostDumpPending sample_pending;
+              sample_pending.kind = 2;
+              sample_pending.buffer = sample_readback_buffer;
+              sample_pending.memory = sample_readback_memory;
+              sample_pending.size = sample_buffer_size;
+              sample_pending.guest_base = texture_key.base_page << 12;
+              sample_pending.temp_image = sample_image;
+              sample_pending.temp_allocation = sample_allocation;
+              sample_pending.sequence = 0;
+              for (const HostDumpPending& other : host_dump_pending_) {
+                if (other.kind == sample_pending.kind) {
+                  ++sample_pending.sequence;
+                }
+              }
+              host_dump_pending_.push_back(sample_pending);
+              XELOGI(
+                  "TEXHOSTDUMPSMP queued base={:08X} seq={} size={} {}x{} "
+                  "fmt={} (base level, y-flipped)",
+                  sample_pending.guest_base, sample_pending.sequence,
+                  uint64_t(sample_buffer_size), sample_width, sample_height,
+                  uint32_t(guest_format));
+            } else {
+              vmaDestroyImage(vma_allocator_, sample_image, sample_allocation);
+            }
+          }
+        }
         // Restore the layout the usage tracking expects
         // (kTransferDestination).
         VkImageMemoryBarrier to_dst_barrier = to_src_barrier;
@@ -1841,14 +1999,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
             0, nullptr, 0, nullptr, 1, &to_dst_barrier);
         HostDumpPending pending;
+        pending.kind = 1;
         pending.buffer = readback_buffer;
         pending.memory = readback_memory;
         pending.size = host_buffer_size;
         pending.guest_base = texture_key.base_page << 12;
-        pending.image_side = true;
         pending.sequence = 0;
         for (const HostDumpPending& other : host_dump_pending_) {
-          if (other.image_side == pending.image_side) {
+          if (other.kind == pending.kind) {
             ++pending.sequence;
           }
         }

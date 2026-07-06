@@ -221,14 +221,18 @@ class VulkanTextureCache final : public TextureCache {
   // the host image contents right after the buffer-to-image copy, written to
   // disk once the GPU is idle (destructor).
   struct HostDumpPending {
+    // 0 = scratch buffer (texhost_), 1 = image transfer readback
+    // (texhostimg_), 2 = image sampled-path readback via flipped blit
+    // (texhostsmp_, rows in bottom-up order).
+    uint32_t kind;
     VkBuffer buffer;
     VkDeviceMemory memory;
     VkDeviceSize size;
     uint32_t guest_base;
     uint32_t sequence;
-    // True if read back from the VkImage (texhostimg_ prefix) rather than
-    // from the scratch buffer (texhost_ prefix).
-    bool image_side;
+    // kind 2 only: the temporary blit target image, destroyed at flush.
+    VkImage temp_image = VK_NULL_HANDLE;
+    VmaAllocation temp_allocation = VK_NULL_HANDLE;
   };
   std::vector<HostDumpPending> host_dump_pending_;
   void FlushHostDumps();
