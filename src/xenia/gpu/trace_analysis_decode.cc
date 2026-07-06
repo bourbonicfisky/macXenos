@@ -245,8 +245,47 @@ bool RunEdramDecodeSelfTest() {
       }
     }
   }
-  XELOGI("EDRAM decode self-test PASS ({} configs, bijective offsets)",
-         int(sizeof(cases) / sizeof(cases[0])));
+  // Full color decode round-trip: write a unique value per pixel at its
+  // offset, decode, require exact recovery (proves re-tile == input, not just
+  // offset uniqueness).
+  {
+    const uint32_t w = 96, h = 40, base = 5;
+    uint32_t pitch = XeEdramPitchTiles(w, uint32_t(xenos::MsaaSamples::k1X));
+    std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(
+            x, y, base, pitch, uint32_t(xenos::MsaaSamples::k1X), false, 0, 0);
+        uint32_t v = uint32_t(x & 0xFF) | (uint32_t(y & 0xFF) << 8) |
+                     (uint32_t((x ^ y) & 0xFF) << 16) | (0xFFu << 24);
+        std::memcpy(edram.data() + off, &v, sizeof(v));
+      }
+    }
+    DecodedImage img;
+    if (!DecodeEdramColor32bpp(edram.data(), edram.size(), base, pitch,
+                               uint32_t(xenos::MsaaSamples::k1X),
+                               xenos::ColorRenderTargetFormat::k_8_8_8_8, w, h,
+                               0, &img)) {
+      XELOGE("EDRAM decode self-test FAIL: color decode returned false");
+      return false;
+    }
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        size_t p = (size_t(y) * w + x) * 4;
+        if (img.rgba[p + 0] != uint8_t(x) || img.rgba[p + 1] != uint8_t(y) ||
+            img.rgba[p + 2] != uint8_t(x ^ y) || img.rgba[p + 3] != 0xFF) {
+          XELOGE("EDRAM decode self-test FAIL: color round-trip mismatch at "
+                 "({},{})", x, y);
+          return false;
+        }
+      }
+    }
+  }
+
+  XELOGI(
+      "EDRAM decode self-test PASS ({} offset configs + color decode "
+      "round-trip)",
+      int(sizeof(cases) / sizeof(cases[0])));
   return true;
 }
 

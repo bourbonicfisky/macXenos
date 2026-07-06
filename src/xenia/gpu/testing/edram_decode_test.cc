@@ -9,6 +9,9 @@
 
 #include "xenia/gpu/trace_analysis_decode.h"
 
+#include <cstring>
+#include <vector>
+
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/xenos.h"
 
@@ -52,6 +55,43 @@ TEST_CASE("EDRAM offsets are bijective (round-trip self-test)",
           "[edram_decode]") {
   // Same coverage the in-tool decode runs before every capture-decode.
   REQUIRE(RunEdramDecodeSelfTest());
+}
+
+TEST_CASE("EDRAM 32bpp color decode round-trips synthetic EDRAM",
+          "[edram_decode]") {
+  // Tier-0 D7 guard: write a unique k_8_8_8_8 value at each pixel's computed
+  // offset in a synthetic EDRAM, decode, and require exact recovery -- proves
+  // the decoder re-tiles precisely what the offset formula placed.
+  const uint32_t w = 96, h = 40;                 // spans multiple 80x16 tiles
+  const uint32_t base = 5, pitch = XeEdramPitchTiles(w, k1X);
+  std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      uint32_t off = XeEdramSnapshotOffsetBytes(x, y, base, pitch, k1X, false,
+                                                0, 0);
+      REQUIRE(off + 4 <= edram.size());
+      // Pack (x,y) into RGBA so each pixel is unique and channel order is
+      // checkable: R=x, G=y, B=x^y, A=0xFF.
+      uint32_t v = uint32_t(x & 0xFF) | (uint32_t(y & 0xFF) << 8) |
+                   (uint32_t((x ^ y) & 0xFF) << 16) | (0xFFu << 24);
+      std::memcpy(edram.data() + off, &v, sizeof(v));
+    }
+  }
+  DecodedImage img;
+  REQUIRE(DecodeEdramColor32bpp(edram.data(), edram.size(), base, pitch, k1X,
+                                xenos::ColorRenderTargetFormat::k_8_8_8_8, w, h,
+                                0, &img));
+  REQUIRE(img.width == w);
+  REQUIRE(img.height == h);
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      size_t p = (size_t(y) * w + x) * 4;
+      REQUIRE(img.rgba[p + 0] == uint8_t(x));
+      REQUIRE(img.rgba[p + 1] == uint8_t(y));
+      REQUIRE(img.rgba[p + 2] == uint8_t(x ^ y));
+      REQUIRE(img.rgba[p + 3] == 0xFF);
+    }
+  }
 }
 
 TEST_CASE("EDRAM depth half-tile swap", "[edram_decode]") {
