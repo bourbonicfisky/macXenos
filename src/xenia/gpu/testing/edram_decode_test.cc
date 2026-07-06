@@ -94,6 +94,39 @@ TEST_CASE("EDRAM 32bpp color decode round-trips synthetic EDRAM",
   }
 }
 
+TEST_CASE("EDRAM depth24 channel round-trips synthetic EDRAM",
+          "[edram_decode]") {
+  // The compare oracle diffs the raw depth24 channel byte-exact, so guard
+  // that DecodeEdramDepth recovers the exact 24-bit depth the offset formula
+  // placed (independent of the 8-bit grayscale PNG). Write a unique
+  // depth/stencil word per pixel at its depth offset; require depth24 back.
+  const uint32_t w = 96, h = 40;
+  const uint32_t base = 3, pitch = XeEdramPitchTiles(w, k1X);
+  std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      uint32_t off = XeEdramSnapshotOffsetBytes(x, y, base, pitch, k1X,
+                                                /*is_depth=*/true, 0, 0);
+      REQUIRE(off + 4 <= edram.size());
+      // depth in the high 24 bits, stencil in the low 8; make depth24 unique.
+      uint32_t depth24 = (x << 12) | y;
+      uint32_t word = (depth24 << 8) | 0xAB;
+      std::memcpy(edram.data() + off, &word, sizeof(word));
+    }
+  }
+  DecodedImage img;
+  std::vector<uint32_t> depth24;
+  REQUIRE(DecodeEdramDepth(edram.data(), edram.size(), base, pitch, k1X,
+                           xenos::DepthRenderTargetFormat::kD24S8, w, h, 0,
+                           &img, &depth24));
+  REQUIRE(depth24.size() == size_t(w) * h);
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      REQUIRE(depth24[size_t(y) * w + x] == ((x << 12) | y));
+    }
+  }
+}
+
 TEST_CASE("EDRAM depth half-tile swap", "[edram_decode]") {
   // Depth tiles swap 40-sample halves; x=0 maps into the upper half.
   uint32_t color = XeEdramSnapshotOffsetBytes(0, 0, 0, 16, k1X, false, 0, 0);

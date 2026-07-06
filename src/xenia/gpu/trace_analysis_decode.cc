@@ -152,14 +152,17 @@ bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
                       uint32_t base_tiles, uint32_t pitch_tiles,
                       uint32_t msaa_samples,
                       xenos::DepthRenderTargetFormat format, uint32_t width,
-                      uint32_t height, uint32_t sample_index,
-                      DecodedImage* out) {
+                      uint32_t height, uint32_t sample_index, DecodedImage* out,
+                      std::vector<uint32_t>* out_depth24) {
   if (!edram || !out || !width || !height) {
     return false;
   }
   out->width = width;
   out->height = height;
   out->rgba.assign(size_t(width) * height * 4, 0);
+  if (out_depth24) {
+    out_depth24->assign(size_t(width) * height, 0);
+  }
   for (uint32_t y = 0; y < height; ++y) {
     for (uint32_t x = 0; x < width; ++x) {
       uint32_t off = XeEdramSnapshotOffsetBytes(
@@ -174,6 +177,9 @@ bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
       // Xenos EDRAM depth/stencil word: depth in the high 24 bits, stencil in
       // the low 8.
       uint32_t depth24 = v >> 8;
+      if (out_depth24) {
+        (*out_depth24)[px] = depth24;
+      }
       uint8_t gray;
       if (format == xenos::DepthRenderTargetFormat::kD24FS8) {
         float d = XeFloat20e4ToFloat(depth24);          // [0, 2)
@@ -282,8 +288,44 @@ bool RunEdramDecodeSelfTest() {
     }
   }
 
+  // Depth24 round-trip: the compare oracle diffs the raw depth24 channel
+  // byte-exact, so prove DecodeEdramDepth recovers the exact 24-bit depth the
+  // offset formula placed (independent of the 8-bit grayscale PNG).
+  {
+    const uint32_t w = 96, h = 40, base = 3;
+    uint32_t pitch = XeEdramPitchTiles(w, uint32_t(xenos::MsaaSamples::k1X));
+    std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(
+            x, y, base, pitch, uint32_t(xenos::MsaaSamples::k1X),
+            /*is_depth=*/true, 0, 0);
+        uint32_t word = (((x << 12) | y) << 8) | 0xAB;  // depth24<<8 | stencil
+        std::memcpy(edram.data() + off, &word, sizeof(word));
+      }
+    }
+    DecodedImage dimg;
+    std::vector<uint32_t> depth24;
+    if (!DecodeEdramDepth(edram.data(), edram.size(), base, pitch,
+                          uint32_t(xenos::MsaaSamples::k1X),
+                          xenos::DepthRenderTargetFormat::kD24S8, w, h, 0, &dimg,
+                          &depth24)) {
+      XELOGE("EDRAM decode self-test FAIL: depth decode returned false");
+      return false;
+    }
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        if (depth24[size_t(y) * w + x] != ((x << 12) | y)) {
+          XELOGE("EDRAM decode self-test FAIL: depth24 round-trip mismatch at "
+                 "({},{})", x, y);
+          return false;
+        }
+      }
+    }
+  }
+
   XELOGI(
-      "EDRAM decode self-test PASS ({} offset configs + color decode "
+      "EDRAM decode self-test PASS ({} offset configs + color & depth24 "
       "round-trip)",
       int(sizeof(cases) / sizeof(cases[0])));
   return true;
@@ -484,9 +526,10 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
     // Depth, when the draw had depth testing enabled (same EDRAM snapshot).
     if (depth_en) {
       DecodedImage dimg;
+      std::vector<uint32_t> depth24;
       if (DecodeEdramDepth(edram.data(), edram.size(), depth_base, pitch_tiles,
                            msaa, xenos::DepthRenderTargetFormat(depth_fmt),
-                           dec_w, dec_h, sample_index, &dimg)) {
+                           dec_w, dec_h, sample_index, &dimg, &depth24)) {
         std::filesystem::path dpng =
             capture_dir / fmt::format("depth_draw{:06d}.png", draw_index);
         if (FILE* df = xe::filesystem::OpenFile(dpng, "wb")) {
@@ -496,6 +539,15 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
           stbi_write_png_to_func(cb, df, int(dimg.width), int(dimg.height), 4,
                                  dimg.rgba.data(), int(dimg.width * 4));
           fclose(df);
+        }
+        // Byte-exact raw depth24 channel (little-endian uint32 per pixel,
+        // row-major) -- this is what the compare oracle diffs cross-machine;
+        // the PNG above is only for eyeballing.
+        std::filesystem::path dbin =
+            capture_dir / fmt::format("depth_draw{:06d}.depth24.bin", draw_index);
+        if (FILE* db = xe::filesystem::OpenFile(dbin, "wb")) {
+          fwrite(depth24.data(), sizeof(uint32_t), depth24.size(), db);
+          fclose(db);
         }
       }
     }

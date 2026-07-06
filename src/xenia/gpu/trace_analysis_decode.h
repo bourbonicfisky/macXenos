@@ -59,11 +59,19 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
 // Decodes a depth render target from an EDRAM snapshot into an RGBA8 grayscale
 // visualization (depth as luminance) for one MSAA sample. `format` selects
 // unorm24 (kD24S8) vs float24 20e4 (kD24FS8). Returns false on bad params.
+//
+// When `out_depth24` is non-null it is additionally filled with the raw
+// per-pixel 24-bit depth value (0..0xFFFFFF, row-major width*height) BEFORE any
+// luminance quantization. This is the byte-exact channel the compare oracle
+// diffs cross-machine: an 8-bit grayscale PNG loses 16 bits and would report
+// false matches, so a depth-determinism check (design D4 for depth) needs the
+// unquantized value.
 bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
                       uint32_t base_tiles, uint32_t pitch_tiles,
                       uint32_t msaa_samples,
                       xenos::DepthRenderTargetFormat format, uint32_t width,
-                      uint32_t height, uint32_t sample_index, DecodedImage* out);
+                      uint32_t height, uint32_t sample_index, DecodedImage* out,
+                      std::vector<uint32_t>* out_depth24 = nullptr);
 
 // Round-trip drift guard (design: Tier 0). Verifies the offset formula is a
 // bijection over a covered region for representative (msaa, format, depth)
