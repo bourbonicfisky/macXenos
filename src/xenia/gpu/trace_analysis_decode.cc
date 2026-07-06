@@ -124,6 +124,72 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
   return true;
 }
 
+// Mirrors pixel_formats.xesli XeFloat20e4To32 (remap_to_0_to_0_5=false):
+// converts a 24-bit 20e4 float to a real float in [0, 2).
+static float XeFloat20e4ToFloat(uint32_t f24) {
+  if (f24 == 0) {
+    return 0.0f;
+  }
+  uint32_t mantissa = f24 & 0xFFFFFu;
+  uint32_t exponent = f24 >> 20u;
+  if (exponent == 0u) {
+    // Denormalized: normalize (first_one_bit_high over the 20-bit mantissa).
+    int hb = 19;
+    while (hb >= 0 && !((mantissa >> hb) & 1u)) {
+      --hb;
+    }
+    uint32_t lzcnt = 20u - uint32_t(hb);
+    exponent = 1u - lzcnt;
+    mantissa = (mantissa << lzcnt) & 0xFFFFFu;
+  }
+  uint32_t f32bits = ((exponent + 112u) << 23u) | (mantissa << 3u);
+  float f;
+  std::memcpy(&f, &f32bits, sizeof(f));
+  return f;
+}
+
+bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
+                      uint32_t base_tiles, uint32_t pitch_tiles,
+                      uint32_t msaa_samples,
+                      xenos::DepthRenderTargetFormat format, uint32_t width,
+                      uint32_t height, uint32_t sample_index,
+                      DecodedImage* out) {
+  if (!edram || !out || !width || !height) {
+    return false;
+  }
+  out->width = width;
+  out->height = height;
+  out->rgba.assign(size_t(width) * height * 4, 0);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      uint32_t off = XeEdramSnapshotOffsetBytes(
+          x, y, base_tiles, pitch_tiles, msaa_samples, /*is_depth=*/true,
+          /*format_ints_log2=*/0u, sample_index);
+      size_t px = size_t(y) * width + x;
+      if (off + 4 > edram_size) {
+        continue;
+      }
+      uint32_t v;
+      std::memcpy(&v, edram + off, sizeof(v));
+      // Xenos EDRAM depth/stencil word: depth in the high 24 bits, stencil in
+      // the low 8.
+      uint32_t depth24 = v >> 8;
+      uint8_t gray;
+      if (format == xenos::DepthRenderTargetFormat::kD24FS8) {
+        float d = XeFloat20e4ToFloat(depth24);          // [0, 2)
+        float n = d * 0.5f;                             // -> [0, 1)
+        n = n < 0.0f ? 0.0f : (n > 1.0f ? 1.0f : n);
+        gray = uint8_t(n * 255.0f + 0.5f);
+      } else {
+        // unorm24 -> take the top 8 bits.
+        gray = uint8_t(depth24 >> 16);
+      }
+      WriteRgba(out->rgba, px, gray, gray, gray, 0xFF);
+    }
+  }
+  return true;
+}
+
 bool RunEdramDecodeSelfTest() {
   // The offset formula must be a bijection over the samples it covers, or the
   // decode (and every downstream pixel compare) is silently wrong. Fill a
@@ -313,11 +379,16 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
     }
     std::string color0 = ExtractObject(*row, "color0");
     std::string surface = ExtractObject(*row, "surface");
+    std::string depth = ExtractObject(*row, "depth");
     uint32_t base = 0, fmt = 0, msaa = 0, pitch = 0;
+    uint32_t depth_base = 0, depth_fmt = 0, depth_en = 0;
     ExtractUint(color0, "base", &base);
     ExtractUint(color0, "fmt", &fmt);
     ExtractUint(surface, "msaa", &msaa);
     ExtractUint(surface, "pitch", &pitch);
+    ExtractUint(depth, "base", &depth_base);
+    ExtractUint(depth, "fmt", &depth_fmt);
+    ExtractUint(depth, "z_en", &depth_en);
 
     // Load the snapshot.
     FILE* sf = xe::filesystem::OpenFile(entry.path(), "rb");
@@ -369,6 +440,25 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
           "fmt={})",
           fname, png_path.filename().string(), img.width, img.height, base,
           pitch_tiles, msaa, fmt);
+    }
+
+    // Depth, when the draw had depth testing enabled (same EDRAM snapshot).
+    if (depth_en) {
+      DecodedImage dimg;
+      if (DecodeEdramDepth(edram.data(), edram.size(), depth_base, pitch_tiles,
+                           msaa, xenos::DepthRenderTargetFormat(depth_fmt),
+                           dec_w, dec_h, sample_index, &dimg)) {
+        std::filesystem::path dpng =
+            capture_dir / fmt::format("depth_draw{:06d}.png", draw_index);
+        if (FILE* df = xe::filesystem::OpenFile(dpng, "wb")) {
+          auto cb = [](void* ctx, void* data, int size) {
+            fwrite(data, 1, size_t(size), reinterpret_cast<FILE*>(ctx));
+          };
+          stbi_write_png_to_func(cb, df, int(dimg.width), int(dimg.height), 4,
+                                 dimg.rgba.data(), int(dimg.width * 4));
+          fclose(df);
+        }
+      }
     }
   }
   XELOGI("--decode: decoded {} snapshot(s) in {}", decoded,

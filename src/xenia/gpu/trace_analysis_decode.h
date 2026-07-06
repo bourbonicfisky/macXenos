@@ -56,6 +56,15 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
                            uint32_t width, uint32_t height,
                            uint32_t sample_index, DecodedImage* out);
 
+// Decodes a depth render target from an EDRAM snapshot into an RGBA8 grayscale
+// visualization (depth as luminance) for one MSAA sample. `format` selects
+// unorm24 (kD24S8) vs float24 20e4 (kD24FS8). Returns false on bad params.
+bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
+                      uint32_t base_tiles, uint32_t pitch_tiles,
+                      uint32_t msaa_samples,
+                      xenos::DepthRenderTargetFormat format, uint32_t width,
+                      uint32_t height, uint32_t sample_index, DecodedImage* out);
+
 // Round-trip drift guard (design: Tier 0). Verifies the offset formula is a
 // bijection over a covered region for representative (msaa, format, depth)
 // combinations -- i.e. capture -> offset -> re-tile == input. Returns true on
