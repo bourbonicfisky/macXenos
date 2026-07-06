@@ -1780,8 +1780,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // deterministic per-lane values (interpolators_manual_perspective).
       bool plane_exact_lod_inputs =
           cvars::texture_lod_plane_inputs && InterpolatorsManualPerspective();
+      // Quotient-rule probe: route the analytic LOD through the linear-A/q
+      // quotient path with RAW per-lane values (the historical
+      // no-HelperInvocation fallback), bypassing both the direct-differencing
+      // branch and the covered-lane substitution inside quad_derivative -
+      // substituted lanes would zero dA and dq and collapse the quotient too.
+      bool quotient_lod_inputs = cvars::texture_lod_quotient_inputs &&
+                                 InterpolatorsManualPerspective();
       auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
-        if (!plane_exact_lod_inputs) {
+        if (!plane_exact_lod_inputs && !quotient_lod_inputs) {
           value = covered_lane_value(value);
         }
         if (!InterpolatorsManualPerspective()) {
@@ -1836,8 +1843,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         lod_size[0] = size[0];
         lod_size[1] = component_count > 1 ? size[1]
                                           : builder_->makeFloatConstant(1.0f);
-        if (input_helper_invocation_ != spv::NoResult ||
-            plane_exact_lod_inputs) {
+        if (!quotient_lod_inputs && (input_helper_invocation_ != spv::NoResult ||
+                                     plane_exact_lod_inputs)) {
           // Covered-lane or plane-exact mode: difference the final per-lane
           // fetch coordinates directly (quad_derivative applies the
           // covered-lane substitution in covered-lane mode; in plane-exact

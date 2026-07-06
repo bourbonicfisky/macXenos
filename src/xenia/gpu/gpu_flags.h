@@ -70,6 +70,8 @@ DECLARE_bool(texture_lod_snap_all);
 
 DECLARE_bool(texture_lod_plane_inputs);
 
+DECLARE_bool(texture_lod_quotient_inputs);
+
 DECLARE_bool(texture_determinism_force_non_apple);
 
 DECLARE_int32(texture_lod_force_level);

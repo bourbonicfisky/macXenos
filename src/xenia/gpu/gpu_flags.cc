@@ -237,6 +237,17 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    texture_lod_quotient_inputs, false,
+    "Probe: with texture_computed_lod_in_shader + "
+    "interpolators_manual_perspective, compute the analytic LOD via the "
+    "quotient rule on the linear A = uv*q and q = 1/w varyings with RAW "
+    "per-lane values (the historical no-HelperInvocation fallback), "
+    "bypassing covered-lane substitution and direct differencing. Takes "
+    "precedence over texture_lod_plane_inputs and "
+    "texture_lod_covered_lane_inputs.",
+    "GPU");
+
+DEFINE_bool(
     texture_determinism_force_non_apple, false,
     "Diagnostic: apply the Apple/Xenos texture-determinism stack "
     "(texture_computed_lod_in_shader, interpolators_manual_perspective, "
