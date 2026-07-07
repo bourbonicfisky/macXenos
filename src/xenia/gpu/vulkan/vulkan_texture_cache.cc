@@ -950,13 +950,24 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
     sampler_create_info.minLod = 0.0f;
     sampler_create_info.maxLod = 0.25f;
   }
-  if (cvars::texture_lod_force_level >= 0) {
-    // Diagnostic: pin sampling to one specific mip level on all textures -
-    // comparing single-level renders across GPUs separates mip CONTENT /
-    // decode divergence (e.g. vendor-specific BC decompression) from LOD
-    // selection divergence.
-    sampler_create_info.minLod = float(cvars::texture_lod_force_level);
-    sampler_create_info.maxLod = float(cvars::texture_lod_force_level) + 0.25f;
+  int32_t forced_lod_level = cvars::texture_lod_force_level;
+  if (forced_lod_level < 0 && cvars::apple_texture_lod_force_base &&
+      command_processor_.GetVulkanDevice()->properties().vendorID == 0x106B) {
+    // Apple default: pin the base mip. Apple's per-triangle quad-derivative LOD
+    // diverges across triangle edges into a mip-seam "crosshatch" on character
+    // skin; abolishing mip selection removes it at near-zero cost (vs the
+    // in-shader analytic LOD). Trades mip minification (distant shimmer) for
+    // clean surfaces. Overridable via apple_texture_lod_force_base=false or an
+    // explicit texture_lod_force_level.
+    forced_lod_level = 0;
+  }
+  if (forced_lod_level >= 0) {
+    // Diagnostic / Apple base-mip pin: sampling from one specific mip level on
+    // all textures - comparing single-level renders across GPUs also separates
+    // mip CONTENT / decode divergence (e.g. vendor-specific BC decompression)
+    // from LOD selection divergence.
+    sampler_create_info.minLod = float(forced_lod_level);
+    sampler_create_info.maxLod = float(forced_lod_level) + 0.25f;
   }
   // TODO(Triang3l): Custom border colors for CrYCb / YCrCb.
   switch (parameters.border_color) {

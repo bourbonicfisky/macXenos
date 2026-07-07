@@ -351,6 +351,19 @@ DEFINE_int32(
     "GPU");
 
 DEFINE_bool(
+    apple_texture_lod_force_base, true,
+    "On Apple GPUs, pin texture sampling to the base mip (level 0) by default. "
+    "Apple's per-triangle quad-derivative LOD diverges across triangle edges, "
+    "producing a mip-seam \"crosshatch\" net on character skin in many titles "
+    "(USF4/RDR/TMNT). Pinning the base mip removes it at near-zero cost - much "
+    "cheaper than the in-shader analytic LOD - trading mip minification "
+    "(some distant-texture shimmer) for clean surfaces, which suits close-camera "
+    "content. Applied only on Apple hosts. An explicit texture_lod_force_level "
+    ">= 0 overrides this; set this false to restore normal mip selection on "
+    "Apple.",
+    "GPU");
+
+DEFINE_bool(
     texture_max_lod_clamp_probe, false,
     "Diagnostic: clamp all guest texture samplers to the base mip "
     "(minLod=0, maxLod=0.25), removing implicit-LOD (quad derivative) "

@@ -86,6 +86,7 @@ DECLARE_int32(texture_lod_primitive_id_analytic_tf);
 DECLARE_bool(texture_determinism_force_non_apple);
 
 DECLARE_int32(texture_lod_force_level);
+DECLARE_bool(apple_texture_lod_force_base);
 
 DECLARE_bool(texture_max_lod_clamp_probe);
 

@@ -140,7 +140,7 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    depth_float24_convert_auto, true,
+    depth_float24_convert_auto, false,
     "Automatically enable depth_float24_convert_in_pixel_shader on hosts that "
     "lack a native 24-bit unorm depth format (notably Apple GPUs via MoltenVK, "
     "which fall back to 32-bit float depth). Without a native 24-bit format the "
@@ -153,6 +153,15 @@ DEFINE_bool(
     "title); depth_float24_convert_in_pixel_shader=true still force-enables it "
     "everywhere regardless of this flag.",
     "GPU");
+// Was default-on; on Apple/MoltenVK it forces per-sample fragment shading (a
+// large default-on GPU cost - ~2x in-fight fps in USF4 when disabled) to fix a
+// depth-crack class. Defaulted off for perf; migrate configs holding the old
+// default. Escape hatch: depth_float24_convert_in_pixel_shader=true, or set
+// this true, re-enables it for titles that regress.
+// Dated one hour after the stack migrations (2026070712): an earlier build
+// already stamped some configs 2026070712, and ApplyUpdates fires only on
+// dates strictly greater than the config's, so this must be later to reach them.
+UPDATE_from_bool(depth_float24_convert_auto, 2026, 7, 7, 13, true);
 DEFINE_bool(
     draw_resolution_scaled_texture_offsets, true,
     "Apply offsets from texture fetch instructions taking resolution scale "
