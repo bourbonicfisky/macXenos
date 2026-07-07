@@ -149,7 +149,7 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_alpha_test_lod_snap, true,
+    texture_alpha_test_lod_snap, false,
     "For draws with the fixed-function alpha test enabled, snap the "
     "shader-computed/register texture LOD to the nearest integer mip. "
     "Alpha-tested fragment survival flips on the filtered alpha crossing "
@@ -159,6 +159,10 @@ DEFINE_bool(
     "makes the verdict host-invariant. Requires "
     "texture_computed_lod_in_shader for computed-LOD fetch coverage.",
     "GPU");
+// The Apple texture-determinism stack was defaulted on (a45a63eb0); it is now
+// opt-in. Migrate configs that still hold the old default off, preserving any
+// explicit user override.
+UPDATE_from_bool(texture_alpha_test_lod_snap, 2026, 7, 7, 12, true);
 
 DEFINE_bool(
     texture_decompress_bc, false,
@@ -180,17 +184,19 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_double(
-    texture_mip_lod_bias_adjust, 0.099,
+    texture_mip_lod_bias_adjust, 0.0,
     "Constant sampler mipLodBias applied to all guest texture samplers, "
     "calibrating the host GPU's lambda->mip-pair mapping to the Xenos/AMD "
     "convention (Apple GPUs transition ~0.099 LOD later than AMD at "
     "identical explicit LOD - the cross-GPU triangle-edge mesh). "
-    "Default 0.099 (the Apple calibration); applied only on the "
-    "texture-determinism host (Apple, or force-enabled), inert elsewhere.",
+    "Default 0.0 (neutral); the 0.099 Apple calibration is opt-in and applied "
+    "only on the texture-determinism host (Apple, or force-enabled), inert "
+    "elsewhere.",
     "GPU");
+UPDATE_from_double(texture_mip_lod_bias_adjust, 2026, 7, 7, 12, 0.099);
 
 DEFINE_bool(
-    interpolators_manual_perspective, true,
+    interpolators_manual_perspective, false,
     "Interpolate guest interpolators as noperspective A = o/w (vertex "
     "shader pre-divides by the final position W) and reconstruct "
     "o = A / gl_FragCoord.w in the fragment shader prologue. Quad "
@@ -201,9 +207,10 @@ DEFINE_bool(
     "helper-lane-exact on both vendors, making values AND derivatives "
     "host-invariant.",
     "GPU");
+UPDATE_from_bool(interpolators_manual_perspective, 2026, 7, 7, 12, true);
 
 DEFINE_bool(
-    texture_computed_lod_in_shader, true,
+    texture_computed_lod_in_shader, false,
     "Convert texture gradients to a scalar LOD with a host-invariant formula "
     "in the shader (1D/2D fetches with computed LOD) instead of passing Grad "
     "operands - the hardware gradients-to-LOD function is "
@@ -212,6 +219,7 @@ DEFINE_bool(
     "wireframe mesh on high-contrast art). Disables anisotropic filtering "
     "for the converted fetches.",
     "GPU");
+UPDATE_from_bool(texture_computed_lod_in_shader, 2026, 7, 7, 12, true);
 
 DEFINE_bool(
     texture_lod_snap_all, false,
@@ -284,6 +292,10 @@ DEFINE_int32(texture_lod_vertex_analytic_interp, 0,
 
 DEFINE_bool(
     texture_lod_primitive_id_analytic, false,
+    "EXPERIMENTAL / research only - not a shipping rendering path. Enabling it "
+    "allocates a 256 MiB device ring and adds a per-vertex SSBO write plus "
+    "per-fragment index/SSBO loads; it fixes only the narrow desert/character- "
+    "seam LOD-scatter and is not calibrated for general content. "
     "Apple analytic per-triangle texture-LOD gradient sourced via "
     "gl_PrimitiveID + the per-vertex SSBO (no PerVertexKHR / MoltenVK fork). "
     "The VS writes {A=uv/w, W=1/w, ndc.xy} per vertex; the PS reads its "
@@ -292,6 +304,15 @@ DEFINE_bool(
     "scatter that dashes the ground on non-plane-exact Apple interpolation. "
     "fix-apple-lod-primitive-id-analytic-gradient.",
     "GPU");
+// One-time reset of an experimental rendering path. Unlike the stack cvars
+// above (migrated only from their old default, preserving explicit overrides),
+// this UNCONDITIONALLY resets texture_lod_primitive_id_analytic to its default
+// (off) for any config predating this date - the heavy 256 MiB analytic path
+// was only ever meant for investigation and should not persist from a debug
+// session as a silent perf cost. Configs written after this date (i.e. anyone
+// who deliberately re-enables it later) are unaffected. This is a deliberate
+// exception for an experimental path, NOT a general policy for opt-in cvars.
+UPDATE_from_any(texture_lod_primitive_id_analytic, 2026, 7, 7, 12);
 DEFINE_int32(texture_lod_primitive_id_analytic_tf, -1,
              "See texture_lod_primitive_id_analytic: fetch-constant index to "
              "apply the primitive-id analytic LOD to (-1 = all).",
@@ -299,16 +320,16 @@ DEFINE_int32(texture_lod_primitive_id_analytic_tf, -1,
 
 DEFINE_bool(
     texture_determinism_force_non_apple, false,
-    "Diagnostic: apply the Apple/Xenos texture-determinism stack "
-    "(texture_computed_lod_in_shader, interpolators_manual_perspective, "
-    "texture_alpha_test_lod_snap, texture_mip_lod_bias_adjust) on "
-    "non-Apple GPUs too, for symmetric cross-vendor A/B experiments. "
-    "The stack calibrates Apple GPUs to AMD/Xenos conventions and is "
-    "otherwise inert off Apple hosts.",
+    "Diagnostic: treat non-Apple GPUs as a texture-determinism host so the "
+    "individually-enabled stack cvars (texture_computed_lod_in_shader, "
+    "interpolators_manual_perspective, texture_alpha_test_lod_snap, "
+    "texture_mip_lod_bias_adjust) also take effect off Apple, for symmetric "
+    "cross-vendor A/B experiments. The stack defaults OFF everywhere (opt-in); "
+    "this only widens the host gate, it does not enable any layer on its own.",
     "GPU");
 
 DEFINE_bool(
-    texture_lod_covered_lane_inputs, true,
+    texture_lod_covered_lane_inputs, false,
     "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
     "before quad-differencing the analytic-LOD inputs, replace each helper "
     "(uncovered) lane's value with the first covered lane's value in the "
@@ -319,6 +340,7 @@ DEFINE_bool(
     "Quad coverage itself is cross-vendor identical, so the corrected "
     "lambda is host-invariant; fully covered quads are unaffected.",
     "GPU");
+UPDATE_from_bool(texture_lod_covered_lane_inputs, 2026, 7, 7, 12, true);
 
 DEFINE_int32(
     texture_lod_force_level, -1,
