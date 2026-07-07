@@ -180,12 +180,13 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_double(
-    texture_mip_lod_bias_adjust, 0.0,
+    texture_mip_lod_bias_adjust, 0.099,
     "Constant sampler mipLodBias applied to all guest texture samplers, "
     "calibrating the host GPU's lambda->mip-pair mapping to the Xenos/AMD "
     "convention (Apple GPUs transition ~0.099 LOD later than AMD at "
     "identical explicit LOD - the cross-GPU triangle-edge mesh). "
-    "Suggested on Apple GPUs: 0.099.",
+    "Default 0.099 (the Apple calibration); applied only on the "
+    "texture-determinism host (Apple, or force-enabled), inert elsewhere.",
     "GPU");
 
 DEFINE_bool(
@@ -256,6 +257,45 @@ DEFINE_bool(
     "precedence over texture_lod_plane_inputs and "
     "texture_lod_covered_lane_inputs.",
     "GPU");
+
+DEFINE_bool(
+    texture_lod_vertex_analytic, false,
+    "Apple analytic-per-triangle texture LOD (Route 1, "
+    "VK_KHR_fragment_shader_barycentric): with "
+    "texture_computed_lod_in_shader + interpolators_manual_perspective, "
+    "compute the screen-space UV gradient analytically from the triangle's "
+    "three vertices' per-vertex (A = uv/w, W = 1/w, NDC position) read via "
+    "PerVertexKHR, instead of the 2x2-quad derivative that scatters on Apple "
+    "(numerator A not plane-exact under noperspective interpolation). The "
+    "per-triangle-constant gradient has zero per-quad scatter by "
+    "construction, collapsing the seam/lattice. SPIKE: sources the gradient "
+    "from interpolator texture_lod_vertex_analytic_interp components .xy and "
+    "applies it to the fetch whose constant index is "
+    "texture_lod_vertex_analytic_tf.",
+    "GPU");
+DEFINE_int32(texture_lod_vertex_analytic_tf, 0,
+             "See texture_lod_vertex_analytic: fetch-constant index to apply "
+             "the analytic gradient to (-1 = all computed-LOD fetches).",
+             "GPU");
+DEFINE_int32(texture_lod_vertex_analytic_interp, 0,
+             "See texture_lod_vertex_analytic: source interpolator index whose "
+             ".xy carries the fetch's uv (specimen ground PS: 0).",
+             "GPU");
+
+DEFINE_bool(
+    texture_lod_primitive_id_analytic, false,
+    "Apple analytic per-triangle texture-LOD gradient sourced via "
+    "gl_PrimitiveID + the per-vertex SSBO (no PerVertexKHR / MoltenVK fork). "
+    "The VS writes {A=uv/w, W=1/w, ndc.xy} per vertex; the PS reads its "
+    "triangle's three vertices by primitive-id and computes a "
+    "per-triangle-constant (plane-exact) LOD, removing the per-quad LOD "
+    "scatter that dashes the ground on non-plane-exact Apple interpolation. "
+    "fix-apple-lod-primitive-id-analytic-gradient.",
+    "GPU");
+DEFINE_int32(texture_lod_primitive_id_analytic_tf, -1,
+             "See texture_lod_primitive_id_analytic: fetch-constant index to "
+             "apply the primitive-id analytic LOD to (-1 = all).",
+             "GPU");
 
 DEFINE_bool(
     texture_determinism_force_non_apple, false,
@@ -342,10 +382,24 @@ DEFINE_int32(
     "G:axis-Y gradient/32, B:lambda/16+0.5; 3 = analytic-vs-hardware de-risk: "
     "R:analytic lambda/16+0.5, G:hardware OpImageQueryLod lambda/16+0.5, "
     "B:(analytic-hardware)/16+0.5 (same coords/GPU -> isolates whether the "
-    "analytic FORMULA reproduces hardware LOD). Isolates whether the Apple "
+    "analytic FORMULA reproduces hardware LOD); 4 = plane-exactness walk (uses "
+    "ps_debug_export_scale as gain): R:q(=inv_w)*scale, G:0.5+scale*d(q)/dx, "
+    "B:0.5+scale*d(o)/dx where o=A/q is the reconstructed perspective UV -> "
+    "shows whether the ballooning UV finite difference is inherited from the "
+    "denominator q (G scatters) or appears only in o (numerator A not "
+    "plane-exact). Isolates whether the Apple "
     "analytic-LOD collapse is a gradient magnitude loss and which axis "
-    "loses it. -1 = off.",
+    "loses it; 5 = exact-bits export: pack the full IEEE-754 word of the "
+    "quantity selected by ps_debug_export_bits into RGBA8 (byte 0->R .. byte "
+    "3->A, each value/255) so the interpolated value can be compared bit-exact "
+    "cross-machine / used offline (untile, reassemble uint, bitcast to float). "
+    "-1 = off.",
     "GPU");
+DEFINE_int32(ps_debug_export_bits, 0,
+             "See ps_debug_export_lod=5: which quantity to bit-pack. "
+             "0=A.x (o.x*W), 1=A.y, 2=W(=1/w), 3=o.x (reconstructed UV), "
+             "4=o.y.",
+             "GPU");
 
 DEFINE_int32(
     ps_debug_export_lod_tf, -1,

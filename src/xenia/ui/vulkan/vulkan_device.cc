@@ -181,6 +181,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   bool ext_EXT_fragment_shader_interlock = false;
   bool ext_1_3_EXT_shader_demote_to_helper_invocation = false;
   bool ext_EXT_non_seamless_cube_map = false;
+  bool ext_KHR_fragment_shader_barycentric = false;
   if (with_gpu_emulation) {
     // #15.
     XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(KHR_sampler_mirror_clamp_to_edge, 1,
@@ -204,6 +205,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           EXT_shader_demote_to_helper_invocation, 1, 3)
       // #423.
       XE_UI_VULKAN_LOCAL_EXTENSION(EXT_non_seamless_cube_map)
+      // #204.
+      XE_UI_VULKAN_LOCAL_EXTENSION(KHR_fragment_shader_barycentric)
     }
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
       // #237.
@@ -311,6 +314,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT,
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT>
       features_EXT_non_seamless_cube_map;
+  VulkanFeatures<
+      VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR>
+      features_KHR_fragment_shader_barycentric;
 
   if (get_physical_device_properties2_supported) {
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
@@ -346,6 +353,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (ext_EXT_non_seamless_cube_map) {
       features_EXT_non_seamless_cube_map.Link(supported_features_2,
                                               device_create_info);
+    }
+    if (ext_KHR_fragment_shader_barycentric) {
+      features_KHR_fragment_shader_barycentric.Link(supported_features_2,
+                                                    device_create_info);
     }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
@@ -714,6 +725,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (with_gpu_emulation) {
       XE_UI_VULKAN_FEATURE_2(features_EXT_non_seamless_cube_map,
                              nonSeamlessCubeMap)
+    }
+  }
+
+  if (ext_KHR_fragment_shader_barycentric) {
+    if (with_gpu_emulation) {
+      XE_UI_VULKAN_FEATURE_2(features_KHR_fragment_shader_barycentric,
+                             fragmentShaderBarycentric)
     }
   }
 

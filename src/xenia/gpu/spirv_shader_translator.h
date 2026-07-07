@@ -297,6 +297,16 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
+
+    // Base record offset into the primitive-id analytic-LOD per-vertex SSBO for
+    // the current draw (per-draw slice; isolates draws + avoids the cross-draw
+    // VS-write / FS-read race). Units: records (5 floats: A.xy, W, ndc.xy).
+    // Padded to a vec4 for std140.
+    uint32_t lod_vtx_base;
+    // Slice size (records) for the current draw; bounds the VS write / FS read
+    // so an out-of-range vertex index falls back instead of corrupting the ring.
+    uint32_t lod_vtx_reserve;
+    uint32_t lod_vtx_pad[2];
   };
 
   // Separate constant buffer for user clip planes
@@ -980,6 +990,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramRTKeepMask,
     kSystemConstantEdramRTClamp,
     kSystemConstantEdramBlendConstant,
+    kSystemConstantLodVtxBase,
+    kSystemConstantLodVtxReserve,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_clip_plane_constants_;
@@ -988,6 +1000,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id uniform_fetch_constants_;
 
   spv::Id buffers_shared_memory_;
+  // Primitive-id analytic-LOD per-vertex SSBO (binding 3), float runtime array;
+  // VS writes {A.xy, W, ndc.xy}, FS reads it by gl_PrimitiveID. Gated on
+  // ps_debug_export_lod==6 (prototype).
+  spv::Id buffer_lod_vtx_;
   spv::Id buffer_edram_;
   spv::Id buffer_zpd_fsi_counter_;
 
@@ -1032,10 +1048,26 @@ class SpirvShaderTranslator : public ShaderTranslator {
   static constexpr uint32_t kInvWVaryingLocation = 19;
   spv::Id output_inv_w_;
   spv::Id input_inv_w_;
+  // texture_lod_vertex_analytic (Route 1, VK_KHR_fragment_shader_barycentric):
+  // per-vertex (A.xy, W) and NDC position, read in the PS via PerVertexKHR to
+  // build the per-triangle-constant analytic UV gradient. VS outputs normal
+  // varyings; the PS inputs are decorated PerVertexKHR (array of 3 provoking
+  // vertices).
+  static constexpr uint32_t kBaryAwVaryingLocation = 20;
+  static constexpr uint32_t kBaryPosVaryingLocation = 21;
+  spv::Id output_bary_aw_;
+  spv::Id output_bary_pos_;
+  spv::Id input_bary_aw_;
+  spv::Id input_bary_pos_;
   // PS, texture_lod_covered_lane_inputs - bool (gl_HelperInvocation), for
   // replacing helper-lane analytic-LOD inputs with a covered lane's values
   // before quad differencing.
   spv::Id input_helper_invocation_;
+  // PS, ps_debug_export_lod==6 capability probe - int (gl_PrimitiveID in the
+  // fragment stage). Tests whether MoltenVK/SPIRV-Cross accepts FS PrimitiveId
+  // (Geometry capability) without a geometry shader -> would unblock the
+  // primitive-id + SSBO deferred-fetch analytic-LOD fix.
+  spv::Id input_fs_primitive_id_;
 
   // VS output or PS input, only the ones that are needed (spv::NoResult for the
   // unneeded interpolators), indexed by the guest interpolator index - float4.

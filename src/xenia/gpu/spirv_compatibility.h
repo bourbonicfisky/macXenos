@@ -390,6 +390,7 @@ namespace spv {
 #define CapabilityDemoteToHelperInvocationEXT \
   Capability::DemoteToHelperInvocationEXT
 #define CapabilityStencilExportEXT Capability::StencilExportEXT
+#define CapabilityFragmentBarycentricKHR Capability::FragmentBarycentricKHR
 
 // Backward compatibility for AddressingModel
 #define AddressingModelLogical AddressingModel::Logical
@@ -445,6 +446,7 @@ namespace spv {
 #define DecorationCentroid Decoration::Centroid
 #define DecorationSpecId Decoration::SpecId
 #define DecorationNonReadable Decoration::NonReadable
+#define DecorationPerVertexKHR Decoration::PerVertexKHR
 
 // Backward compatibility for LoopControl
 #define LoopControlDontUnrollMask LoopControlMask::DontUnroll

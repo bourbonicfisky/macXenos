@@ -396,7 +396,7 @@ bool VulkanCommandProcessor::SetupContext() {
       render_target_cache_->GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
   VkDescriptorSetLayoutBinding
-      shared_memory_and_edram_descriptor_set_layout_bindings[3];
+      shared_memory_and_edram_descriptor_set_layout_bindings[4];
   shared_memory_and_edram_descriptor_set_layout_bindings[0].binding = 0;
   shared_memory_and_edram_descriptor_set_layout_bindings[0].descriptorType =
       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -439,6 +439,20 @@ bool VulkanCommandProcessor::SetupContext() {
     shared_memory_and_edram_descriptor_set_layout_create_info.bindingCount = 3;
   } else {
     shared_memory_and_edram_descriptor_set_layout_create_info.bindingCount = 1;
+  }
+  // Primitive-id analytic-LOD per-vertex SSBO - binding 3, all guest stages.
+  {
+    uint32_t lod_binding_slot =
+        shared_memory_and_edram_descriptor_set_layout_create_info.bindingCount;
+    VkDescriptorSetLayoutBinding& lod_binding =
+        shared_memory_and_edram_descriptor_set_layout_bindings[lod_binding_slot];
+    lod_binding.binding = 3;
+    lod_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    lod_binding.descriptorCount = 1;
+    lod_binding.stageFlags = guest_shader_stages;
+    lod_binding.pImmutableSamplers = nullptr;
+    shared_memory_and_edram_descriptor_set_layout_create_info.bindingCount =
+        lod_binding_slot + 1;
   }
   if (dfn.vkCreateDescriptorSetLayout(
           device, &shared_memory_and_edram_descriptor_set_layout_create_info,
@@ -486,12 +500,29 @@ bool VulkanCommandProcessor::SetupContext() {
     }
   }
 
+  // Primitive-id analytic-LOD per-vertex SSBO (binding 3, persistent). Only
+  // allocate the full ring when the analytic path (or its mode-6 debug probe)
+  // is enabled; otherwise create a minimal placeholder so descriptor set
+  // binding 3 stays valid (the shader never declares/accesses it when the
+  // feature is off) without wasting device memory on every title.
+  lod_vtx_enabled_ = cvars::texture_lod_primitive_id_analytic ||
+                     cvars::ps_debug_export_lod == 6;
+  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device,
+          VkDeviceSize(lod_vtx_enabled_ ? kLodVtxBufferBytes : 256u),
+          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+          ui::vulkan::util::MemoryPurpose::kDeviceLocal, lod_vtx_buffer_,
+          lod_vtx_buffer_memory_)) {
+    XELOGE("Failed to create the primitive-id analytic-LOD vertex buffer");
+    return false;
+  }
+
   // Shared memory, EDRAM, and ZPD FSI counter common bindings.
   VkDescriptorPoolSize descriptor_pool_sizes[1];
   descriptor_pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   descriptor_pool_sizes[0].descriptorCount =
       shared_memory_binding_count +
-      2u * uint32_t(edram_fragment_shader_interlock);
+      2u * uint32_t(edram_fragment_shader_interlock) + 1u;  // +1 LOD vtx
   VkDescriptorPoolCreateInfo descriptor_pool_create_info;
   descriptor_pool_create_info.sType =
       VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -538,7 +569,7 @@ bool VulkanCommandProcessor::SetupContext() {
         shared_memory_binding_range * i;
     shared_memory_descriptor_buffer_info.range = shared_memory_binding_range;
   }
-  VkWriteDescriptorSet write_descriptor_sets[3];
+  VkWriteDescriptorSet write_descriptor_sets[4];
   VkWriteDescriptorSet& write_descriptor_set_shared_memory =
       write_descriptor_sets[0];
   write_descriptor_set_shared_memory.sType =
@@ -597,8 +628,31 @@ bool VulkanCommandProcessor::SetupContext() {
         &zpd_fsi_counter_descriptor_buffer_info;
     write_descriptor_set_zpd_fsi_counter_init.pTexelBufferView = nullptr;
   }
-  dfn.vkUpdateDescriptorSets(device,
-                             1 + 2 * uint32_t(edram_fragment_shader_interlock),
+  // Primitive-id analytic-LOD per-vertex SSBO - binding 3.
+  uint32_t write_descriptor_set_count =
+      1 + 2 * uint32_t(edram_fragment_shader_interlock);
+  VkDescriptorBufferInfo lod_vtx_descriptor_buffer_info;
+  lod_vtx_descriptor_buffer_info.buffer = lod_vtx_buffer_;
+  lod_vtx_descriptor_buffer_info.offset = 0;
+  lod_vtx_descriptor_buffer_info.range = VK_WHOLE_SIZE;
+  {
+    VkWriteDescriptorSet& write_descriptor_set_lod_vtx =
+        write_descriptor_sets[write_descriptor_set_count];
+    write_descriptor_set_lod_vtx.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_descriptor_set_lod_vtx.pNext = nullptr;
+    write_descriptor_set_lod_vtx.dstSet =
+        shared_memory_and_edram_descriptor_set_;
+    write_descriptor_set_lod_vtx.dstBinding = 3;
+    write_descriptor_set_lod_vtx.dstArrayElement = 0;
+    write_descriptor_set_lod_vtx.descriptorCount = 1;
+    write_descriptor_set_lod_vtx.descriptorType =
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write_descriptor_set_lod_vtx.pImageInfo = nullptr;
+    write_descriptor_set_lod_vtx.pBufferInfo = &lod_vtx_descriptor_buffer_info;
+    write_descriptor_set_lod_vtx.pTexelBufferView = nullptr;
+    ++write_descriptor_set_count;
+  }
+  dfn.vkUpdateDescriptorSets(device, write_descriptor_set_count,
                              write_descriptor_sets, 0, nullptr);
   if (edram_fragment_shader_interlock) {
     zpd_fsi_counter_descriptor_buffer_ = zpd_fsi_counter_sink_buffer_;
@@ -1250,6 +1304,11 @@ void VulkanCommandProcessor::ShutdownContext() {
     ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBufferView, device,
                                            gamma_ramp_buffer_view);
   }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         lod_vtx_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         lod_vtx_buffer_memory_);
+
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
                                          gamma_ramp_upload_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
@@ -4688,14 +4747,59 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.flags != flags;
   system_constants_.flags = flags;
 
-  // Index buffer address for loading in the shaders.
-  if (flags &
-      (SpirvShaderTranslator::kSysFlag_VertexIndexLoad |
-       SpirvShaderTranslator::kSysFlag_ComputeOrPrimitiveVertexIndexLoad)) {
+  // Index buffer address for loading in the shaders. Populated unconditionally
+  // (not just under the vertex-index-load flags) so the fragment stage can
+  // resolve gl_PrimitiveID -> guest vertex indices for the primitive-id
+  // analytic-LOD path when the index buffer is kGuestDMA (in shared memory).
+  // Existing consumers remain flag-guarded, so this is behaviorally inert for
+  // them.
+  {
     dirty |= system_constants_.vertex_index_load_address !=
              primitive_processing_result.guest_index_base;
     system_constants_.vertex_index_load_address =
         primitive_processing_result.guest_index_base;
+  }
+
+  // Primitive-id analytic-LOD per-vertex SSBO: hand this draw a fresh slice of
+  // the ring so its VS writes never collide with another draw's live records
+  // (isolates draws and dodges the cross-draw VS-write / FS-read race). The VS
+  // writes at base + gl_VertexIndex. For an indexed triangle-list draw (VGT_MIN
+  // = 0) the indices are 0..V-1 with V <= host_draw_vertex_count, so the slice
+  // spans host_draw_vertex_count records (+pad). VGT_MAX_VTX_INDX is an unset
+  // 0xFFFFFF sentinel here and must NOT be used to size the slice (it forced a
+  // whole-buffer reservation -> wrap every draw -> draws overwrote each other).
+  // lod_vtx_reserve bounds the VS write / FS read so an out-of-range index
+  // falls back instead of corrupting the next slice. Wrap on overflow.
+  {
+    // Guest vertex indices here are large (draws index a shared vertex buffer)
+    // and VGT_MAX is an unset sentinel, so reserve a fixed slice that covers the
+    // measured index range (< 65536; see the mode-6 index-validity probe). The
+    // VS writes at base + gl_VertexIndex; distinct non-overlapping slices give
+    // each draw its own region. (Production: size from a real per-draw max index
+    // instead of this fixed cap.)
+    // The FS resolves gl_PrimitiveID -> guest vertex indices as
+    // 3*primID+corner into the guest DMA index buffer. That mapping is only
+    // valid for a triangle-list host topology whose guest index buffer is
+    // bound directly (kGuestDMA) - guest indices then equal host indices. For
+    // any other topology or a host-converted/built-in index buffer, disable
+    // the analytic path for this draw (reserve = 0) so the FS falls back
+    // instead of misindexing. reserve == 0 is the FS "inactive" sentinel.
+    bool analytic_eligible =
+        lod_vtx_enabled_ &&
+        primitive_processing_result.host_primitive_type ==
+            xenos::PrimitiveType::kTriangleList &&
+        primitive_processing_result.index_buffer_type ==
+            PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA;
+    uint32_t reserve = analytic_eligible ? 65536u : 0u;
+    reserve = std::min(reserve, kLodVtxRecordCount);
+    if (reserve && lod_vtx_next_ + reserve > kLodVtxRecordCount) {
+      lod_vtx_next_ = 0;
+    }
+    dirty |= system_constants_.lod_vtx_base != lod_vtx_next_;
+    system_constants_.lod_vtx_base = lod_vtx_next_;
+    dirty |= system_constants_.lod_vtx_reserve != reserve;
+    system_constants_.lod_vtx_reserve = reserve;
+    lod_vtx_next_ += reserve;
   }
 
   // Index or tessellation edge factor buffer endianness.

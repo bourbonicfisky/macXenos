@@ -542,6 +542,19 @@ class VulkanCommandProcessor final : public CommandProcessor {
   VkBuffer zpd_fsi_counter_descriptor_buffer_ = VK_NULL_HANDLE;
   VkDeviceSize zpd_fsi_counter_descriptor_range_ = 0;
 
+  // Primitive-id analytic-LOD per-vertex SSBO (binding 3 of the shared-memory
+  // + EDRAM set). Persistent, device-local; holds {A.xy, W, ndc.xy} per vertex,
+  // sliced per draw via the lod_vtx_base system constant to isolate draws and
+  // avoid the cross-draw VS-write / FS-read race. Prototype for
+  // fix-apple-lod-primitive-id-analytic-gradient.
+  VkBuffer lod_vtx_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory lod_vtx_buffer_memory_ = VK_NULL_HANDLE;
+  static constexpr uint32_t kLodVtxRecordFloats = 5;  // A.xy, W, ndc.xy
+  static constexpr uint32_t kLodVtxBufferBytes = 256u << 20;
+  static constexpr uint32_t kLodVtxRecordCount = kLodVtxBufferBytes / (5u * 4u);
+  uint32_t lod_vtx_next_ = 0;  // running per-draw record base
+  bool lod_vtx_enabled_ = false;  // full ring allocated / analytic path live
+
   ui::vulkan::VulkanGPUCompletionTimeline completion_timeline_;
   bool submission_open_ = false;
   // In case vkQueueSubmit fails after something like a successful

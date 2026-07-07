@@ -155,7 +155,13 @@ void SpirvShaderTranslator::Reset() {
   input_ndc_depth_ = spv::NoResult;
   output_inv_w_ = spv::NoResult;
   input_inv_w_ = spv::NoResult;
+  output_bary_aw_ = spv::NoResult;
+  output_bary_pos_ = spv::NoResult;
+  input_bary_aw_ = spv::NoResult;
+  input_bary_pos_ = spv::NoResult;
   input_helper_invocation_ = spv::NoResult;
+  input_fs_primitive_id_ = spv::NoResult;
+  buffer_lod_vtx_ = spv::NoResult;
   std::fill(input_output_interpolators_.begin(),
             input_output_interpolators_.end(), spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
@@ -356,6 +362,9 @@ void SpirvShaderTranslator::StartTranslation() {
        type_float4_array_4},
       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant),
        type_float4_},
+      {"lod_vtx_base", offsetof(SystemConstants, lod_vtx_base), type_uint_},
+      {"lod_vtx_reserve", offsetof(SystemConstants, lod_vtx_reserve),
+       type_uint_},
   };
   id_vector_temp_.clear();
   id_vector_temp_.reserve(xe::countof(system_constants));
@@ -525,6 +534,39 @@ void SpirvShaderTranslator::StartTranslation() {
     builder_->addDecoration(buffers_shared_memory_, spv::DecorationBinding, 0);
     if (features_.spirv_version >= spv::Spv_1_4) {
       main_interface_.push_back(buffers_shared_memory_);
+    }
+  }
+
+  // Primitive-id analytic-LOD per-vertex SSBO (binding 3), a writable float
+  // runtime array. fix-apple-lod-primitive-id-analytic-gradient. Only on the
+  // texture-determinism host (Apple, or forced) - the analytic path needs the
+  // manual-perspective input_inv_w_ varying, which is determinism-host-gated,
+  // so on other hosts the buffer would be created but never used.
+  if ((cvars::ps_debug_export_lod == 6 ||
+       cvars::texture_lod_primitive_id_analytic) &&
+      IsTextureDeterminismHost()) {
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeRuntimeArray(type_float_));
+    builder_->addDecoration(id_vector_temp_.back(), spv::DecorationArrayStride,
+                            sizeof(float));
+    spv::Id type_lod_vtx =
+        builder_->makeStructType(id_vector_temp_, "XeLodVtx");
+    builder_->addMemberName(type_lod_vtx, 0, "lod_vtx");
+    builder_->addMemberDecoration(type_lod_vtx, 0, spv::DecorationOffset, 0);
+    builder_->addDecoration(type_lod_vtx,
+                            features_.spirv_version >= spv::Spv_1_3
+                                ? spv::DecorationBlock
+                                : spv::DecorationBufferBlock);
+    buffer_lod_vtx_ = builder_->createVariable(
+        spv::NoPrecision,
+        features_.spirv_version >= spv::Spv_1_3 ? spv::StorageClassStorageBuffer
+                                                : spv::StorageClassUniform,
+        type_lod_vtx, "xe_lod_vtx");
+    builder_->addDecoration(buffer_lod_vtx_, spv::DecorationDescriptorSet,
+                            int(kDescriptorSetSharedMemoryAndEdram));
+    builder_->addDecoration(buffer_lod_vtx_, spv::DecorationBinding, 3);
+    if (features_.spirv_version >= spv::Spv_1_4) {
+      main_interface_.push_back(buffer_lod_vtx_);
     }
   }
 
@@ -1395,6 +1437,27 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     builder_->addDecoration(output_inv_w_, spv::DecorationNoPerspective);
     builder_->addDecoration(output_inv_w_, spv::DecorationInvariant);
     main_interface_.push_back(output_inv_w_);
+  }
+
+  if (cvars::texture_lod_vertex_analytic && InterpolatorsManualPerspective()) {
+    // Per-triangle analytic LOD gradient source: (A.xy, W) and NDC xy, output
+    // as ordinary varyings and read per-vertex in the PS via PerVertexKHR.
+    // Invariant so the three vertices' values match bit-for-bit across the
+    // pipelines that draw the shared triangle edges.
+    output_bary_aw_ =
+        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
+                                 type_float4_, "xe_out_bary_aw");
+    builder_->addDecoration(output_bary_aw_, spv::DecorationLocation,
+                            int(kBaryAwVaryingLocation));
+    builder_->addDecoration(output_bary_aw_, spv::DecorationInvariant);
+    main_interface_.push_back(output_bary_aw_);
+    output_bary_pos_ =
+        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
+                                 type_float4_, "xe_out_bary_pos");
+    builder_->addDecoration(output_bary_pos_, spv::DecorationLocation,
+                            int(kBaryPosVaryingLocation));
+    builder_->addDecoration(output_bary_pos_, spv::DecorationInvariant);
+    main_interface_.push_back(output_bary_pos_);
   }
 
   // Create the gl_PerVertex output for used system outputs.
@@ -2369,6 +2432,119 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
                 position_w_inv),
             interpolator);
       }
+      // Analytic-per-triangle LOD source varyings (read per-vertex in the PS):
+      // A.xy (= o*W, from the rescaled source interpolator), W (= 1/w), and NDC
+      // xy (= clip.xy * 1/w). position_xyz here is the final host clip position.
+      if (output_bary_aw_ != spv::NoResult) {
+        uint32_t interp_index = uint32_t(
+            std::max(0, cvars::texture_lod_vertex_analytic_interp));
+        spv::Id a_vec =
+            (interp_index < xenos::kMaxInterpolators &&
+             input_output_interpolators_[interp_index] != spv::NoResult)
+                ? builder_->createLoad(
+                      input_output_interpolators_[interp_index],
+                      spv::NoPrecision)
+                : const_float4_0_;
+        spv::Id ax = builder_->createCompositeExtract(a_vec, type_float_, 0);
+        spv::Id ay = builder_->createCompositeExtract(a_vec, type_float_, 1);
+        spv::Id ndc_x = builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float_,
+            builder_->createCompositeExtract(position_xyz, type_float_, 0),
+            position_w_inv);
+        spv::Id ndc_y = builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float_,
+            builder_->createCompositeExtract(position_xyz, type_float_, 1),
+            position_w_inv);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(ax);
+        id_vector_temp_.push_back(ay);
+        id_vector_temp_.push_back(position_w_inv);
+        id_vector_temp_.push_back(const_float_0_);
+        builder_->createStore(
+            builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
+            output_bary_aw_);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(ndc_x);
+        id_vector_temp_.push_back(ndc_y);
+        id_vector_temp_.push_back(const_float_0_);
+        id_vector_temp_.push_back(const_float_0_);
+        builder_->createStore(
+            builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
+            output_bary_pos_);
+      }
+      // Prototype (fix-apple-lod-primitive-id-analytic-gradient): mirror the
+      // per-vertex analytic-LOD inputs into the primitive-id SSBO at record
+      // (lod_vtx_base + gl_VertexIndex): {A.xy, W, ndc.xy}. The FS reads these
+      // by gl_PrimitiveID to compute a per-triangle-constant LOD gradient.
+      if (buffer_lod_vtx_ != spv::NoResult &&
+          input_vertex_index_ != spv::NoResult) {
+        uint32_t interp_index =
+            uint32_t(std::max(0, cvars::texture_lod_vertex_analytic_interp));
+        spv::Id a_vec =
+            (interp_index < xenos::kMaxInterpolators &&
+             input_output_interpolators_[interp_index] != spv::NoResult)
+                ? builder_->createLoad(input_output_interpolators_[interp_index],
+                                       spv::NoPrecision)
+                : const_float4_0_;
+        spv::Id vals[5] = {
+            builder_->createCompositeExtract(a_vec, type_float_, 0),
+            builder_->createCompositeExtract(a_vec, type_float_, 1),
+            position_w_inv,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_,
+                builder_->createCompositeExtract(position_xyz, type_float_, 0),
+                position_w_inv),
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_,
+                builder_->createCompositeExtract(position_xyz, type_float_, 1),
+                position_w_inv)};
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantLodVtxBase));
+        spv::Id base = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        spv::Id vidx = builder_->createUnaryOp(
+            spv::OpBitcast, type_uint_,
+            builder_->createLoad(input_vertex_index_, spv::NoPrecision));
+        spv::Id rec = builder_->createBinOp(
+            spv::OpIMul, type_uint_,
+            builder_->createBinOp(spv::OpIAdd, type_uint_, base, vidx),
+            builder_->makeUintConstant(5));
+        spv::StorageClass lod_sc = features_.spirv_version >= spv::Spv_1_3
+                                       ? spv::StorageClassStorageBuffer
+                                       : spv::StorageClassUniform;
+        // Only write when this draw was handed a live ring slice
+        // (lod_vtx_reserve != 0). Ineligible draws (non-triangle-list, or a
+        // host-converted index buffer) get reserve = 0 and MUST NOT write, or
+        // they would clobber the slice the next eligible draw reuses.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantLodVtxReserve));
+        spv::Id reserve = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        SpirvBuilder::IfBuilder if_reserve(
+            builder_->createBinOp(spv::OpINotEqual, type_bool_, reserve,
+                                  const_uint_0_),
+            spv::SelectionControlDontFlattenMask, *builder_);
+        for (uint32_t f = 0; f < 5; ++f) {
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(const_int_0_);
+          id_vector_temp_.push_back(builder_->createUnaryOp(
+              spv::OpBitcast, type_int_,
+              builder_->createBinOp(spv::OpIAdd, type_uint_, rec,
+                                    builder_->makeUintConstant(f))));
+          builder_->createStore(vals[f],
+                                builder_->createAccessChain(
+                                    lod_sc, buffer_lod_vtx_, id_vector_temp_));
+        }
+        if_reserve.makeEndIf();
+      }
     }
   }
 
@@ -2647,6 +2823,30 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
         builder_->addDecoration(input_inv_w_, spv::DecorationNoPerspective);
         main_interface_.push_back(input_inv_w_);
       }
+      if (cvars::texture_lod_vertex_analytic &&
+          InterpolatorsManualPerspective() &&
+          GetModificationInterpolatorMask()) {
+        // Per-vertex analytic-LOD sources: arrays of 3 (the provoking
+        // triangle's vertices), read via VK_KHR_fragment_shader_barycentric.
+        builder_->addExtension("SPV_KHR_fragment_shader_barycentric");
+        builder_->addCapability(spv::CapabilityFragmentBarycentricKHR);
+        spv::Id type_bary_array = builder_->makeArrayType(
+            type_float4_, builder_->makeUintConstant(3), 0);
+        input_bary_aw_ = builder_->createVariable(
+            spv::NoPrecision, spv::StorageClassInput, type_bary_array,
+            "xe_in_bary_aw");
+        builder_->addDecoration(input_bary_aw_, spv::DecorationLocation,
+                                int(kBaryAwVaryingLocation));
+        builder_->addDecoration(input_bary_aw_, spv::DecorationPerVertexKHR);
+        main_interface_.push_back(input_bary_aw_);
+        input_bary_pos_ = builder_->createVariable(
+            spv::NoPrecision, spv::StorageClassInput, type_bary_array,
+            "xe_in_bary_pos");
+        builder_->addDecoration(input_bary_pos_, spv::DecorationLocation,
+                                int(kBaryPosVaryingLocation));
+        builder_->addDecoration(input_bary_pos_, spv::DecorationPerVertexKHR);
+        main_interface_.push_back(input_bary_pos_);
+      }
     }
 
     // Point coordinate input.
@@ -2775,6 +2975,27 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(input_sample_mask_, spv::DecorationBuiltIn,
                             static_cast<int>(spv::BuiltIn::SampleMask));
     main_interface_.push_back(input_sample_mask_);
+  }
+
+  // Capability probe (ps_debug_export_lod == 6): declare gl_PrimitiveID as a
+  // fragment-shader input. SPIR-V requires the Geometry (or Tessellation)
+  // capability for BuiltIn PrimitiveId under the Fragment execution model; the
+  // open question is whether MoltenVK/SPIRV-Cross accepts a fragment module
+  // declaring CapabilityGeometry (mapping PrimitiveId -> Metal [[primitive_id]])
+  // when the geometryShader *feature* is unavailable. If pipelines build, the
+  // primitive-id + SSBO deferred-fetch analytic-LOD fix is viable with no
+  // MoltenVK fork. See fetch translator ps_debug_export_lod==6.
+  if ((cvars::ps_debug_export_lod == 6 ||
+       cvars::texture_lod_primitive_id_analytic) &&
+      IsTextureDeterminismHost()) {
+    builder_->addCapability(spv::CapabilityGeometry);
+    input_fs_primitive_id_ =
+        builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                 type_int_, "gl_PrimitiveID");
+    builder_->addDecoration(input_fs_primitive_id_, spv::DecorationFlat);
+    builder_->addDecoration(input_fs_primitive_id_, spv::DecorationBuiltIn,
+                            static_cast<int>(spv::BuiltIn::PrimitiveId));
+    main_interface_.push_back(input_fs_primitive_id_);
   }
 
   if (!is_depth_only_fragment_shader_) {

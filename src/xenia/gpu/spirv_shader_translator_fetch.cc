@@ -1849,7 +1849,11 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // localize which quad axis loses its gradient at partially covered
       // quads.
       auto emit_lod_probe = [&](spv::Id lambda, spv::Id axis_gsq_x,
-                                spv::Id axis_gsq_y) {
+                                spv::Id axis_gsq_y,
+                                spv::Id probe_q = spv::NoResult,
+                                spv::Id probe_dq_x = spv::NoResult,
+                                spv::Id probe_o_diff_x = spv::NoResult,
+                                spv::Id probe_bits_value = spv::NoResult) {
         if (cvars::ps_debug_export_lod < 0 || !is_pixel_shader() ||
             cvars::ps_debug_export_ps_hash.empty() ||
             strtoull(cvars::ps_debug_export_ps_hash.c_str(), nullptr, 16) !=
@@ -1882,7 +1886,285 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                 builder_->makeFloatConstant(lod_enc_scale)),
             builder_->makeFloatConstant(0.5f));
         spv::Id probe_r, probe_g, probe_b;
-        if (cvars::ps_debug_export_lod == 3) {
+        spv::Id probe_a = const_float_1_;
+        if (cvars::ps_debug_export_lod == 6) {
+          // Primitive-id probe. ps_debug_export_bits selects the sub-test:
+          //   0: hash gl_PrimitiveID per triangle (capability + real-data proof)
+          //   1: FS index-load validity - resolve primitiveID -> 3 guest vertex
+          //      indices from shared memory (kGuestDMA, 16-bit) and export GREEN
+          //      if they form a valid distinct triangle, RED otherwise.
+          //   2: export idx0 as 24-bit for exact spot-checks.
+          spv::Id pid = (input_fs_primitive_id_ != spv::NoResult)
+                            ? builder_->createLoad(input_fs_primitive_id_,
+                                                   spv::NoPrecision)
+                            : builder_->makeIntConstant(0);
+          spv::Id pid_u = builder_->createUnaryOp(spv::OpBitcast, type_uint_,
+                                                  pid);
+          if (cvars::ps_debug_export_bits == 0) {
+            auto chan = [&](uint32_t mul) -> spv::Id {
+              spv::Id v = builder_->createBinOp(
+                  spv::OpBitwiseAnd, type_uint_,
+                  builder_->createBinOp(spv::OpIMul, type_uint_, pid_u,
+                                        builder_->makeUintConstant(mul)),
+                  builder_->makeUintConstant(255));
+              return builder_->createNoContractionBinOp(
+                  spv::OpFMul, type_float_,
+                  builder_->createUnaryOp(spv::OpConvertUToF, type_float_, v),
+                  builder_->makeFloatConstant(1.0f / 255.0f));
+            };
+            probe_r = chan(37);
+            probe_g = chan(59);
+            probe_b = chan(97);
+          } else {
+            // Load the guest index-buffer base + endian from system constants.
+            auto sysconst_uint = [&](int index) -> spv::Id {
+              id_vector_temp_.clear();
+              id_vector_temp_.push_back(builder_->makeIntConstant(index));
+              return builder_->createLoad(
+                  builder_->createAccessChain(spv::StorageClassUniform,
+                                              uniform_system_constants_,
+                                              id_vector_temp_),
+                  spv::NoPrecision);
+            };
+            spv::Id load_addr = sysconst_uint(kSystemConstantVertexIndexLoadAddress);
+            spv::Id endian = sysconst_uint(kSystemConstantVertexIndexEndian);
+            // Replicate the VS 16-bit guest-index load for corner c of the
+            // triangle: guest_index = endian_swap(index_buffer[3*pid + c]).
+            auto load_index = [&](uint32_t corner) -> spv::Id {
+              spv::Id elem = builder_->createBinOp(
+                  spv::OpIAdd, type_uint_,
+                  builder_->createBinOp(spv::OpIMul, type_uint_, pid_u,
+                                        builder_->makeUintConstant(3)),
+                  builder_->makeUintConstant(corner));
+              // 16-bit indices: byte address = load_addr + elem*2.
+              spv::Id byte_addr = builder_->createBinOp(
+                  spv::OpIAdd, type_uint_, load_addr,
+                  builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_,
+                                        elem, builder_->makeUintConstant(1)));
+              spv::Id dword = LoadUint32FromSharedMemory(builder_->createUnaryOp(
+                  spv::OpBitcast, type_int_,
+                  builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                        byte_addr,
+                                        builder_->makeUintConstant(2))));
+              // Extract the 16-bit half selected by bit 1 of the byte address.
+              spv::Id idx16 = builder_->createTriOp(
+                  spv::OpBitFieldUExtract, type_uint_, dword,
+                  builder_->createBinOp(
+                      spv::OpShiftLeftLogical, type_uint_,
+                      builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                            byte_addr,
+                                            builder_->makeUintConstant(2)),
+                      builder_->makeUintConstant(3)),
+                  builder_->makeUintConstant(16));
+              // Return the raw little-endian uint16 exactly as Vulkan delivers
+              // it as gl_VertexIndex (the VS SSBO write key). Do NOT apply the
+              // guest 8in16 endian swap here: the VS keys the per-vertex record
+              // by raw gl_VertexIndex, so the FS read key must match byte-for-
+              // byte. Swapping produces a different (usually out-of-draw) slot.
+              (void)endian;
+              return idx16;
+            };
+            spv::Id i0 = load_index(0), i1 = load_index(1), i2 = load_index(2);
+            if (cvars::ps_debug_export_bits == 2) {
+              // Export idx0 as 24-bit (R=low, G=mid, B=high).
+              auto byte = [&](spv::Id v, uint32_t b) -> spv::Id {
+                return builder_->createNoContractionBinOp(
+                    spv::OpFMul, type_float_,
+                    builder_->createUnaryOp(
+                        spv::OpConvertUToF, type_float_,
+                        builder_->createTriOp(
+                            spv::OpBitFieldUExtract, type_uint_, v,
+                            builder_->makeUintConstant(b * 8),
+                            builder_->makeUintConstant(8))),
+                    builder_->makeFloatConstant(1.0f / 255.0f));
+              };
+              probe_r = byte(i0, 0);
+              probe_g = byte(i0, 1);
+              probe_b = byte(i0, 2);
+            } else if (cvars::ps_debug_export_bits == 3 &&
+                       buffer_lod_vtx_ != spv::NoResult) {
+              // SSBO write->read round-trip: fetch W + ndc for the 3 vertices
+              // from the per-vertex buffer and validate geometric sanity
+              // (W>0 finite, ndc in range, nonzero triangle area) -> green.
+              spv::Id base_rec = sysconst_uint(kSystemConstantLodVtxBase);
+              spv::StorageClass lod_sc = features_.spirv_version >= spv::Spv_1_3
+                                             ? spv::StorageClassStorageBuffer
+                                             : spv::StorageClassUniform;
+              auto fetch = [&](spv::Id v, uint32_t f) -> spv::Id {
+                spv::Id rec = builder_->createBinOp(
+                    spv::OpIAdd, type_uint_,
+                    builder_->createBinOp(
+                        spv::OpIMul, type_uint_,
+                        builder_->createBinOp(spv::OpIAdd, type_uint_, base_rec,
+                                              v),
+                        builder_->makeUintConstant(5)),
+                    builder_->makeUintConstant(f));
+                id_vector_temp_.clear();
+                id_vector_temp_.push_back(const_int_0_);
+                id_vector_temp_.push_back(
+                    builder_->createUnaryOp(spv::OpBitcast, type_int_, rec));
+                return builder_->createLoad(
+                    builder_->createAccessChain(lod_sc, buffer_lod_vtx_,
+                                                id_vector_temp_),
+                    spv::NoPrecision);
+              };
+              spv::Id vtx[3] = {i0, i1, i2};
+              spv::Id W[3], nx[3], ny[3];
+              for (uint32_t k = 0; k < 3; ++k) {
+                W[k] = fetch(vtx[k], 2);
+                nx[k] = fetch(vtx[k], 3);
+                ny[k] = fetch(vtx[k], 4);
+              }
+              auto sub = [&](spv::Id a, spv::Id b) {
+                return builder_->createNoContractionBinOp(spv::OpFSub,
+                                                          type_float_, a, b);
+              };
+              auto mul = [&](spv::Id a, spv::Id b) {
+                return builder_->createNoContractionBinOp(spv::OpFMul,
+                                                          type_float_, a, b);
+              };
+              auto absf = [&](spv::Id a) {
+                return builder_->createUnaryBuiltinCall(
+                    type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, a);
+              };
+              auto gt = [&](spv::Id a, float b) {
+                return builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_,
+                                             a, builder_->makeFloatConstant(b));
+              };
+              auto abslt = [&](spv::Id a, float b) {
+                return builder_->createBinOp(spv::OpFOrdLessThan, type_bool_,
+                                             absf(a),
+                                             builder_->makeFloatConstant(b));
+              };
+              auto andb = [&](spv::Id a, spv::Id b) {
+                return builder_->createBinOp(spv::OpLogicalAnd, type_bool_, a,
+                                             b);
+              };
+              // W>0 and finite for all 3 vertices (fetched from the record the
+              // VS wrote this draw). |W| < 1e9 rejects uninitialized/garbage.
+              spv::Id valid = gt(W[0], 0.0f);
+              valid = andb(valid, gt(W[1], 0.0f));
+              valid = andb(valid, gt(W[2], 0.0f));
+              valid = andb(valid, abslt(W[0], 1.0e9f));
+              valid = andb(valid, abslt(W[1], 1.0e9f));
+              valid = andb(valid, abslt(W[2], 1.0e9f));
+              // NDC within a generous clip range.
+              for (uint32_t k = 0; k < 3; ++k) {
+                valid = andb(valid, abslt(nx[k], 8.0f));
+                valid = andb(valid, abslt(ny[k], 8.0f));
+              }
+              // Nonzero triangle area in NDC (edges e1=v1-v0, e2=v2-v0).
+              spv::Id e1x = sub(nx[1], nx[0]), e1y = sub(ny[1], ny[0]);
+              spv::Id e2x = sub(nx[2], nx[0]), e2y = sub(ny[2], ny[0]);
+              spv::Id area = absf(sub(mul(e1x, e2y), mul(e1y, e2x)));
+              valid = andb(valid, gt(area, 1.0e-12f));
+              // Green = round-trip valid, red = invalid/unwritten slot.
+              spv::Id one = builder_->makeFloatConstant(1.0f);
+              spv::Id zero = builder_->makeFloatConstant(0.0f);
+              probe_r = builder_->createTriOp(spv::OpSelect, type_float_, valid,
+                                              zero, one);
+              probe_g = builder_->createTriOp(spv::OpSelect, type_float_, valid,
+                                              one, zero);
+              probe_b = zero;
+            } else {
+              // Validity: 3 distinct indices, all < 65536 -> green, else red.
+              auto ne = [&](spv::Id a, spv::Id b) {
+                return builder_->createBinOp(spv::OpINotEqual, type_bool_, a, b);
+              };
+              auto lt64k = [&](spv::Id v) {
+                return builder_->createBinOp(
+                    spv::OpULessThan, type_bool_, v,
+                    builder_->makeUintConstant(65536));
+              };
+              spv::Id valid = ne(i0, i1);
+              for (spv::Id c : {ne(i1, i2), ne(i0, i2), lt64k(i0), lt64k(i1),
+                                lt64k(i2)}) {
+                valid = builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
+                                              valid, c);
+              }
+              probe_r = builder_->createTriOp(spv::OpSelect, type_float_, valid,
+                                              const_float_0_, const_float_1_);
+              probe_g = builder_->createTriOp(spv::OpSelect, type_float_, valid,
+                                              const_float_1_, const_float_0_);
+              probe_b = const_float_0_;
+            }
+          }
+        } else if (cvars::ps_debug_export_lod == 5) {
+          // High-precision fixed-point export: emit a chosen screen-linear
+          // quantity (ps_debug_export_bits: 0=A.x,1=A.y,2=W,3=o.x,4=o.y) as a
+          // 24-bit fixed-point value over [0, range) spread across R,G,B (low,
+          // mid, high byte). range = ps_debug_export_lod_range. ~range/2^24
+          // resolution — far finer than a 256^2 texel — and uses only the three
+          // linear RGB channels (the target's alpha byte is forced opaque, and
+          // raw IEEE export would lose the exponent). Lets the offline reference
+          // renderer reconstruct the fix's per-pixel inputs; validated
+          // end-to-end by reproducing the real dashes render from M4's own LOD.
+          spv::Id value = (probe_bits_value != spv::NoResult) ? probe_bits_value
+                                                              : const_float_0_;
+          float range = float(cvars::ps_debug_export_lod_range);
+          // norm = clamp(value/range, 0, 1)
+          spv::Id norm = builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, value,
+              builder_->makeFloatConstant(1.0f / range));
+          norm = builder_->createTriBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450FClamp, norm,
+              const_float_0_, const_float_1_);
+          // fixed = round(norm * (2^24 - 1))  as uint
+          spv::Id fixed = builder_->createUnaryOp(
+              spv::OpConvertFToU, type_uint_,
+              builder_->createUnaryBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450Round,
+                  builder_->createNoContractionBinOp(
+                      spv::OpFMul, type_float_, norm,
+                      builder_->makeFloatConstant(16777215.0f))));
+          auto byte_chan = [&](uint32_t byte_index) -> spv::Id {
+            spv::Id b = builder_->createTriOp(
+                spv::OpBitFieldUExtract, type_uint_, fixed,
+                builder_->makeUintConstant(byte_index * 8),
+                builder_->makeUintConstant(8));
+            return builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_,
+                builder_->createUnaryOp(spv::OpConvertUToF, type_float_, b),
+                builder_->makeFloatConstant(1.0f / 255.0f));
+          };
+          probe_r = byte_chan(0);  // low byte
+          probe_g = byte_chan(1);  // mid byte
+          probe_b = byte_chan(2);  // high byte
+        } else if (cvars::ps_debug_export_lod == 4) {
+          // Plane-exactness walk: decompose WHY the reconstructed perspective
+          // UV o = A/q has a ballooning per-quad finite difference on Apple.
+          //   R = q (=inv_w) itself           -> is the denominator smooth?
+          //   G = d(q)/dx  (signed, centred)  -> is q plane-linear (small,
+          //                                      constant across covered quads)?
+          //   B = d(o)/dx  (signed, centred)  -> the ballooning quantity that
+          //                                      feeds the texel gradient / lambda.
+          // If R,G are smooth/small across the ground while B scatters quad to
+          // quad, the instability is NOT inherited from q -> it is the
+          // numerator varying A (uv/w) failing plane-exact interpolation, i.e.
+          // a fixed-function hardware property, not shader-reachable. If G also
+          // scatters, q itself is non-plane-exact. Gain via ps_debug_export_scale.
+          // Per-channel base gains bring the expected USF4-ground magnitudes
+          // (q~1e-2, dq~1e-4, do~1e-2) to ~0.5; ps_debug_export_scale trims.
+          float g = float(cvars::ps_debug_export_scale);
+          auto scaled = [&](spv::Id v, float base) -> spv::Id {
+            return builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, v,
+                builder_->makeFloatConstant(base * g));
+          };
+          auto scaled_centred = [&](spv::Id v, float base) -> spv::Id {
+            return builder_->createNoContractionBinOp(
+                spv::OpFAdd, type_float_, scaled(v, base),
+                builder_->makeFloatConstant(0.5f));
+          };
+          probe_r = (probe_q != spv::NoResult) ? scaled(probe_q, 16.0f)
+                                               : const_float_0_;
+          probe_g = (probe_dq_x != spv::NoResult)
+                        ? scaled_centred(probe_dq_x, 2048.0f)
+                        : const_float_0_;
+          probe_b = (probe_o_diff_x != spv::NoResult)
+                        ? scaled_centred(probe_o_diff_x, 8.0f)
+                        : const_float_0_;
+        } else if (cvars::ps_debug_export_lod == 3) {
           // Formula-vs-hardware de-risk: compare the shader-analytic lambda to
           // the hardware LOD (OpImageQueryLod, unclamped component [1]) at the
           // SAME coordinates on the SAME GPU. Isolates "does the analytic
@@ -1964,7 +2246,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         id_vector_temp_.push_back(probe_r);
         id_vector_temp_.push_back(probe_g);
         id_vector_temp_.push_back(probe_b);
-        id_vector_temp_.push_back(const_float_1_);
+        id_vector_temp_.push_back(probe_a);
         builder_->createStore(
             builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
             var_ps_debug_export_);
@@ -1977,6 +2259,312 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         lod_size[0] = size[0];
         lod_size[1] = component_count > 1 ? size[1]
                                           : builder_->makeFloatConstant(1.0f);
+        // Primitive-id analytic path (fix-apple-lod-primitive-id-analytic-
+        // gradient): source the three vertices' (A = uv/w, W = 1/w, ndc.xy)
+        // from the per-vertex SSBO (binding 3) indexed by gl_PrimitiveID +
+        // index buffer, and compute the same per-triangle-constant gradient as
+        // the PerVertexKHR path but with no PerVertexKHR (MoltenVK-compatible).
+        if (cvars::texture_lod_primitive_id_analytic &&
+            buffer_lod_vtx_ != spv::NoResult &&
+            input_fs_primitive_id_ != spv::NoResult &&
+            input_inv_w_ != spv::NoResult && component_count <= 2 &&
+            (cvars::texture_lod_primitive_id_analytic_tf < 0 ||
+             uint32_t(cvars::texture_lod_primitive_id_analytic_tf) ==
+                 fetch_constant_index)) {
+          auto fmul = [&](spv::Id a, spv::Id b) {
+            return builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                                      a, b);
+          };
+          auto fsub = [&](spv::Id a, spv::Id b) {
+            return builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                                      a, b);
+          };
+          auto sysconst_uint = [&](int index) -> spv::Id {
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(builder_->makeIntConstant(index));
+            return builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassUniform,
+                                            uniform_system_constants_,
+                                            id_vector_temp_),
+                spv::NoPrecision);
+          };
+          spv::Id pid_u = builder_->createUnaryOp(
+              spv::OpBitcast, type_uint_,
+              builder_->createLoad(input_fs_primitive_id_, spv::NoPrecision));
+          spv::Id load_addr =
+              sysconst_uint(kSystemConstantVertexIndexLoadAddress);
+          spv::Id endian = sysconst_uint(kSystemConstantVertexIndexEndian);
+          spv::Id base_rec = sysconst_uint(kSystemConstantLodVtxBase);
+          // primitive p, corner c -> guest vertex index (16-bit kGuestDMA).
+          auto load_index = [&](uint32_t corner) -> spv::Id {
+            spv::Id elem = builder_->createBinOp(
+                spv::OpIAdd, type_uint_,
+                builder_->createBinOp(spv::OpIMul, type_uint_, pid_u,
+                                      builder_->makeUintConstant(3)),
+                builder_->makeUintConstant(corner));
+            spv::Id byte_addr = builder_->createBinOp(
+                spv::OpIAdd, type_uint_, load_addr,
+                builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, elem,
+                                      builder_->makeUintConstant(1)));
+            spv::Id dword = LoadUint32FromSharedMemory(builder_->createUnaryOp(
+                spv::OpBitcast, type_int_,
+                builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                      byte_addr,
+                                      builder_->makeUintConstant(2))));
+            spv::Id idx16 = builder_->createTriOp(
+                spv::OpBitFieldUExtract, type_uint_, dword,
+                builder_->createBinOp(
+                    spv::OpShiftLeftLogical, type_uint_,
+                    builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
+                                          byte_addr,
+                                          builder_->makeUintConstant(2)),
+                    builder_->makeUintConstant(3)),
+                builder_->makeUintConstant(16));
+            // Raw little-endian uint16 == gl_VertexIndex (VS SSBO write key).
+            // No guest endian swap here: the write key is raw gl_VertexIndex,
+            // so the read key must match it byte-for-byte or it addresses a
+            // different vertex's record (0% round-trip with distinct slices).
+            (void)endian;
+            return idx16;
+          };
+          spv::StorageClass lod_sc = features_.spirv_version >= spv::Spv_1_3
+                                         ? spv::StorageClassStorageBuffer
+                                         : spv::StorageClassUniform;
+          auto fetch = [&](spv::Id v, uint32_t f) -> spv::Id {
+            spv::Id rec = builder_->createBinOp(
+                spv::OpIAdd, type_uint_,
+                builder_->createBinOp(
+                    spv::OpIMul, type_uint_,
+                    builder_->createBinOp(spv::OpIAdd, type_uint_, base_rec, v),
+                    builder_->makeUintConstant(5)),
+                builder_->makeUintConstant(f));
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(const_int_0_);
+            id_vector_temp_.push_back(
+                builder_->createUnaryOp(spv::OpBitcast, type_int_, rec));
+            return builder_->createLoad(
+                builder_->createAccessChain(lod_sc, buffer_lod_vtx_,
+                                            id_vector_temp_),
+                spv::NoPrecision);
+          };
+          spv::Id vidx[3] = {load_index(0), load_index(1), load_index(2)};
+          spv::Id A[3][2], W3[3], nx[3], ny[3];
+          for (uint32_t i = 0; i < 3; ++i) {
+            A[i][0] = fetch(vidx[i], 0);
+            A[i][1] = fetch(vidx[i], 1);
+            W3[i] = fetch(vidx[i], 2);
+            nx[i] = fetch(vidx[i], 3);
+            ny[i] = fetch(vidx[i], 4);
+          }
+          spv::Id e1x = fsub(nx[1], nx[0]), e1y = fsub(ny[1], ny[0]);
+          spv::Id e2x = fsub(nx[2], nx[0]), e2y = fsub(ny[2], ny[0]);
+          // Degenerate-triangle guard (task 3.4): clamp the NDC-area determinant
+          // away from zero, preserving sign, so a near-zero-area (edge-on /
+          // horizon-sliver) triangle produces a large-but-finite gradient
+          // instead of Inf/NaN -> coarsest-mip dark dash. eps is in NDC^2.
+          spv::Id det = fsub(fmul(e1x, e2y), fmul(e1y, e2x));
+          spv::Id det_abs = builder_->createUnaryBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, det);
+          spv::Id det_sign = builder_->createUnaryBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450FSign, det);
+          // sign(0)=0 -> bias to +1 so we never divide by zero.
+          det_sign = builder_->createTriOp(
+              spv::OpSelect, type_float_,
+              builder_->createBinOp(spv::OpFOrdEqual, type_bool_, det_sign,
+                                    const_float_0_),
+              const_float_1_, det_sign);
+          spv::Id det_safe = fmul(
+              det_sign,
+              builder_->createBinBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450FMax, det_abs,
+                  builder_->makeFloatConstant(1.0e-9f)));
+          spv::Id inv_det = builder_->createNoContractionBinOp(
+              spv::OpFDiv, type_float_, const_float_1_, det_safe);
+          auto grad2 = [&](spv::Id f0, spv::Id f1, spv::Id f2, spv::Id& gx,
+                           spv::Id& gy) {
+            spv::Id df1 = fsub(f1, f0), df2 = fsub(f2, f0);
+            gx = fmul(fsub(fmul(df1, e2y), fmul(df2, e1y)), inv_det);
+            gy = fmul(fsub(fmul(df2, e1x), fmul(df1, e2x)), inv_det);
+          };
+          spv::Id w_cur = builder_->createLoad(input_inv_w_, spv::NoPrecision);
+          spv::Id inv_w2 = builder_->createNoContractionBinOp(
+              spv::OpFDiv, type_float_, const_float_1_, fmul(w_cur, w_cur));
+          spv::Id gw_x, gw_y;
+          grad2(W3[0], W3[1], W3[2], gw_x, gw_y);
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeIntConstant(
+              kSystemConstantPointScreenDiameterToNdcRadius));
+          spv::Id sd2ndc = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassUniform,
+                                          uniform_system_constants_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+          spv::Id npp[2] = {
+              fmul(builder_->makeFloatConstant(2.0f),
+                   builder_->createCompositeExtract(sd2ndc, type_float_, 0)),
+              fmul(builder_->makeFloatConstant(2.0f),
+                   builder_->createCompositeExtract(sd2ndc, type_float_, 1))};
+          spv::Id axis_gsq[2] = {spv::NoResult, spv::NoResult};
+          for (uint32_t c = 0; c < component_count; ++c) {
+            spv::Id ga_x, ga_y;
+            grad2(A[0][c], A[1][c], A[2][c], ga_x, ga_y);
+            spv::Id a_cur = fmul(coordinates[c], w_cur);
+            spv::Id ga_axis[2] = {ga_x, ga_y}, gw_axis[2] = {gw_x, gw_y};
+            for (uint32_t axis = 0; axis < 2; ++axis) {
+              spv::Id go = fmul(
+                  fsub(fmul(ga_axis[axis], w_cur), fmul(a_cur, gw_axis[axis])),
+                  inv_w2);
+              spv::Id gtex = fmul(fmul(go, npp[axis]), lod_size[c]);
+              spv::Id gsq = fmul(gtex, gtex);
+              axis_gsq[axis] =
+                  axis_gsq[axis] == spv::NoResult
+                      ? gsq
+                      : builder_->createNoContractionBinOp(
+                            spv::OpFAdd, type_float_, axis_gsq[axis], gsq);
+            }
+          }
+          spv::Id max_gsq = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, axis_gsq[0],
+              axis_gsq[1]);
+          max_gsq = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, max_gsq,
+              builder_->makeFloatConstant(1e-24f));
+          spv::Id lambda = builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
+              builder_->createUnaryBuiltinCall(type_float_,
+                                               ext_inst_glsl_std_450_,
+                                               GLSLstd450Log2, max_gsq));
+          // Unwritten/garbage-slot guard (task 3.4): a valid per-vertex record
+          // has W = 1/w > 0. If any of the three fetched W is non-positive the
+          // record was never written (or is stale) for this vertex, so the
+          // gradient is meaningless -> fall back to lambda 0 (mip 0, sharp) on
+          // the affected sliver rather than emitting a coarse-mip dark dash.
+          spv::Id w_valid = builder_->createBinOp(
+              spv::OpLogicalAnd, type_bool_,
+              builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_, W3[0],
+                                    const_float_0_),
+              builder_->createBinOp(
+                  spv::OpLogicalAnd, type_bool_,
+                  builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_,
+                                        W3[1], const_float_0_),
+                  builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_,
+                                        W3[2], const_float_0_)));
+          // Draw eligibility: reserve == 0 means this draw was NOT handed a ring
+          // slice (non-triangle-list / host-converted index buffer), so the
+          // SSBO records are not this draw's - fall back rather than misindex.
+          spv::Id reserve_nz = builder_->createBinOp(
+              spv::OpINotEqual, type_bool_,
+              sysconst_uint(kSystemConstantLodVtxReserve), const_uint_0_);
+          w_valid =
+              builder_->createBinOp(spv::OpLogicalAnd, type_bool_, w_valid,
+                                    reserve_nz);
+          lambda = builder_->createTriOp(spv::OpSelect, type_float_, w_valid,
+                                         lambda, const_float_0_);
+          emit_lod_probe(lambda, axis_gsq[0], axis_gsq[1]);
+          return lambda;
+        }
+        // Route 1: analytic per-triangle screen-space UV gradient from the
+        // three vertices' per-vertex (A = uv/w, W = 1/w, NDC xy), read via
+        // PerVertexKHR. Quad-independent -> zero per-quad scatter, so Apple's
+        // non-plane-exact numerator-A interpolation cannot reach the LOD.
+        if (cvars::texture_lod_vertex_analytic &&
+            input_bary_aw_ != spv::NoResult &&
+            input_bary_pos_ != spv::NoResult && input_inv_w_ != spv::NoResult &&
+            component_count <= 2 &&
+            (cvars::texture_lod_vertex_analytic_tf < 0 ||
+             uint32_t(cvars::texture_lod_vertex_analytic_tf) ==
+                 fetch_constant_index)) {
+          auto fmul = [&](spv::Id a, spv::Id b) {
+            return builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                                      a, b);
+          };
+          auto fsub = [&](spv::Id a, spv::Id b) {
+            return builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
+                                                      a, b);
+          };
+          auto comp = [&](spv::Id v, uint32_t c) {
+            return builder_->createCompositeExtract(v, type_float_, c);
+          };
+          auto vtx = [&](spv::Id arr, uint32_t i) {
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(builder_->makeUintConstant(i));
+            return builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassInput, arr,
+                                            id_vector_temp_),
+                spv::NoPrecision);
+          };
+          spv::Id aw[3], pos[3];
+          for (uint32_t i = 0; i < 3; ++i) {
+            aw[i] = vtx(input_bary_aw_, i);
+            pos[i] = vtx(input_bary_pos_, i);
+          }
+          // Edge vectors in NDC and the shared plane determinant.
+          spv::Id e1x = fsub(comp(pos[1], 0), comp(pos[0], 0));
+          spv::Id e1y = fsub(comp(pos[1], 1), comp(pos[0], 1));
+          spv::Id e2x = fsub(comp(pos[2], 0), comp(pos[0], 0));
+          spv::Id e2y = fsub(comp(pos[2], 1), comp(pos[0], 1));
+          spv::Id inv_det = builder_->createNoContractionBinOp(
+              spv::OpFDiv, type_float_, const_float_1_,
+              fsub(fmul(e1x, e2y), fmul(e1y, e2x)));
+          // grad of a screen-affine field f (values f0,f1,f2) -> (d/dndc_x,
+          // d/dndc_y), constant over the triangle.
+          auto grad2 = [&](spv::Id f0, spv::Id f1, spv::Id f2, spv::Id& gx,
+                           spv::Id& gy) {
+            spv::Id df1 = fsub(f1, f0), df2 = fsub(f2, f0);
+            gx = fmul(fsub(fmul(df1, e2y), fmul(df2, e1y)), inv_det);
+            gy = fmul(fsub(fmul(df2, e1x), fmul(df1, e2x)), inv_det);
+          };
+          spv::Id w_cur = builder_->createLoad(input_inv_w_, spv::NoPrecision);
+          spv::Id inv_w2 = builder_->createNoContractionBinOp(
+              spv::OpFDiv, type_float_, const_float_1_, fmul(w_cur, w_cur));
+          spv::Id gw_x, gw_y;
+          grad2(comp(aw[0], 2), comp(aw[1], 2), comp(aw[2], 2), gw_x, gw_y);
+          // NDC->pixel scale: 2 * point_screen_diameter_to_ndc_radius per axis.
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeIntConstant(
+              kSystemConstantPointScreenDiameterToNdcRadius));
+          spv::Id sd2ndc = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassUniform,
+                                          uniform_system_constants_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+          spv::Id npp[2] = {
+              fmul(builder_->makeFloatConstant(2.0f), comp(sd2ndc, 0)),
+              fmul(builder_->makeFloatConstant(2.0f), comp(sd2ndc, 1))};
+          spv::Id axis_gsq[2] = {spv::NoResult, spv::NoResult};
+          for (uint32_t c = 0; c < component_count; ++c) {
+            spv::Id ga_x, ga_y;
+            grad2(comp(aw[0], c), comp(aw[1], c), comp(aw[2], c), ga_x, ga_y);
+            spv::Id a_cur = fmul(coordinates[c], w_cur);
+            spv::Id ga_axis[2] = {ga_x, ga_y}, gw_axis[2] = {gw_x, gw_y};
+            for (uint32_t axis = 0; axis < 2; ++axis) {
+              // d(o.c)/d(ndc_axis) = (gA*W - A*gW)/W^2 ; then ->pixel->texels.
+              spv::Id go = fmul(
+                  fsub(fmul(ga_axis[axis], w_cur), fmul(a_cur, gw_axis[axis])),
+                  inv_w2);
+              spv::Id gtex = fmul(fmul(go, npp[axis]), lod_size[c]);
+              spv::Id gsq = fmul(gtex, gtex);
+              axis_gsq[axis] =
+                  axis_gsq[axis] == spv::NoResult
+                      ? gsq
+                      : builder_->createNoContractionBinOp(
+                            spv::OpFAdd, type_float_, axis_gsq[axis], gsq);
+            }
+          }
+          spv::Id max_gsq = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, axis_gsq[0],
+              axis_gsq[1]);
+          max_gsq = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, max_gsq,
+              builder_->makeFloatConstant(1e-24f));
+          spv::Id lambda = builder_->createNoContractionBinOp(
+              spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
+              builder_->createUnaryBuiltinCall(type_float_,
+                                               ext_inst_glsl_std_450_,
+                                               GLSLstd450Log2, max_gsq));
+          emit_lod_probe(lambda, axis_gsq[0], axis_gsq[1]);
+          return lambda;
+        }
         if (!quotient_lod_inputs && (input_helper_invocation_ != spv::NoResult ||
                                      plane_exact_lod_inputs)) {
           // Covered-lane or plane-exact mode: difference the final per-lane
@@ -2030,8 +2618,68 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                                                ext_inst_glsl_std_450_,
                                                GLSLstd450Log2,
                                                direct_max_grad_squared));
+          spv::Id probe_q = spv::NoResult, probe_dq_x = spv::NoResult,
+                  probe_o_diff_x = spv::NoResult, probe_bits_value = spv::NoResult;
+          if (cvars::ps_debug_export_lod == 4) {
+            if (input_inv_w_ != spv::NoResult) {
+              probe_q = builder_->createLoad(input_inv_w_, spv::NoPrecision);
+            } else {
+              id_vector_temp_.clear();
+              id_vector_temp_.push_back(builder_->makeIntConstant(3));
+              probe_q = builder_->createLoad(
+                  builder_->createAccessChain(spv::StorageClassInput,
+                                              input_fragment_coordinates_,
+                                              id_vector_temp_),
+                  spv::NoPrecision);
+            }
+            probe_dq_x = quad_derivative(probe_q, 0);
+            probe_o_diff_x = quad_derivative(coordinates[0], 0);
+          } else if (cvars::ps_debug_export_lod == 5) {
+            // Exact-bits quantity: reconstruct the fix's per-pixel inputs.
+            // coordinates[i] = o = A/W (reconstructed UV); W = 1/w varying.
+            spv::Id w_bits;
+            if (input_inv_w_ != spv::NoResult) {
+              w_bits = builder_->createLoad(input_inv_w_, spv::NoPrecision);
+            } else {
+              id_vector_temp_.clear();
+              id_vector_temp_.push_back(builder_->makeIntConstant(3));
+              w_bits = builder_->createLoad(
+                  builder_->createAccessChain(spv::StorageClassInput,
+                                              input_fragment_coordinates_,
+                                              id_vector_temp_),
+                  spv::NoPrecision);
+            }
+            auto mul = [&](spv::Id a, spv::Id b) {
+              return builder_->createNoContractionBinOp(spv::OpFMul,
+                                                        type_float_, a, b);
+            };
+            switch (cvars::ps_debug_export_bits) {
+              case 0:  // A.x = o.x * W
+                probe_bits_value = mul(coordinates[0], w_bits);
+                break;
+              case 1:  // A.y = o.y * W
+                probe_bits_value =
+                    component_count > 1 ? mul(coordinates[1], w_bits)
+                                        : const_float_0_;
+                break;
+              case 2:  // W = 1/w
+                probe_bits_value = w_bits;
+                break;
+              case 3:  // o.x
+                probe_bits_value = coordinates[0];
+                break;
+              case 4:  // o.y
+                probe_bits_value =
+                    component_count > 1 ? coordinates[1] : const_float_0_;
+                break;
+              default:
+                probe_bits_value = coordinates[0];
+                break;
+            }
+          }
           emit_lod_probe(direct_lambda, direct_axis_grad_squared[0],
-                         direct_axis_grad_squared[1]);
+                         direct_axis_grad_squared[1], probe_q, probe_dq_x,
+                         probe_o_diff_x, probe_bits_value);
           return direct_lambda;
         }
         spv::Id frag_q;

@@ -74,6 +74,15 @@ DECLARE_bool(texture_lod_hw_derivatives);
 
 DECLARE_bool(texture_lod_quotient_inputs);
 
+DECLARE_int32(ps_debug_export_bits);
+
+DECLARE_bool(texture_lod_vertex_analytic);
+DECLARE_int32(texture_lod_vertex_analytic_tf);
+DECLARE_int32(texture_lod_vertex_analytic_interp);
+
+DECLARE_bool(texture_lod_primitive_id_analytic);
+DECLARE_int32(texture_lod_primitive_id_analytic_tf);
+
 DECLARE_bool(texture_determinism_force_non_apple);
 
 DECLARE_int32(texture_lod_force_level);

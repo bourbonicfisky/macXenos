@@ -162,6 +162,13 @@ class VulkanDevice {
     // VK_EXT_non_seamless_cube_map (#423)
 
     bool nonSeamlessCubeMap = false;
+
+    // VK_KHR_fragment_shader_barycentric (#204) - lets a pixel shader read all
+    // three provoking vertices' per-vertex values (PerVertexKHR), used by the
+    // Apple analytic-per-triangle texture-LOD gradient to bypass the divergent
+    // 2x2-quad derivative.
+
+    bool fragmentShaderBarycentric = false;
   };
 
   // Properties of the core API and enabled extensions, and enabled features.
