@@ -50,6 +50,16 @@ DEFINE_bool(
     "own defaults (for regression bisection). Does not change rendering output "
     "(no resolution scaling, no anti-aliasing).",
     "Vulkan");
+DEFINE_bool(
+    mvk_metal_argument_buffers, true,
+    "On Apple GPUs, enable MoltenVK Metal argument buffers "
+    "(MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1) by default. Lowers per-draw "
+    "descriptor overhead - measured ~10% higher in-fight fps in USF4 on M4 "
+    "(~44 -> ~48-51). Part of the curated mvk_config_defaults set; an explicit "
+    "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS in the environment still wins. Set "
+    "to false if a title shows descriptor-related visual corruption - argument "
+    "buffers change Metal descriptor handling and can glitch on some content.",
+    "Vulkan");
 #endif
 
 namespace xe {
@@ -81,10 +91,6 @@ static void ApplyMoltenVKConfigDefaults() {
       // MVKConfigLogLevel: 0=NONE 1=ERROR 2=WARNING 3=INFO 4=DEBUG. WARNING
       // keeps errors + driver warnings without the verbose INFO startup dump.
       {"MVK_CONFIG_LOG_LEVEL", "2"},
-      // Note: MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS is intentionally NOT set
-      // here. It affects descriptor handling under pressure and is left as an
-      // env-driven A/B candidate until proven neutral-or-better on the working
-      // titles.
   };
   for (const auto& knob : kKnobs) {
     if (getenv(knob.first)) {
@@ -93,6 +99,18 @@ static void ApplyMoltenVKConfigDefaults() {
     }
     setenv(knob.first, knob.second, 1);
     XELOGI("MoltenVK config: {}={} applied", knob.first, knob.second);
+  }
+  // Metal argument buffers: lower per-draw descriptor overhead (~10% higher
+  // in-fight fps measured in USF4 on M4). Gated on its own cvar so it can be
+  // turned off without dropping the rest of the curated set if a title shows
+  // descriptor-related corruption; an explicit environment value still wins.
+  if (getenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS")) {
+    XELOGI(
+        "MoltenVK config: MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS inherited from "
+        "environment");
+  } else if (cvars::mvk_metal_argument_buffers) {
+    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 1);
+    XELOGI("MoltenVK config: MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 applied");
   }
 }
 
