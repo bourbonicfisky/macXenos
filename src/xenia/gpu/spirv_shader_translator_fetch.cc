@@ -21,51 +21,6 @@
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/spirv_compatibility.h"
 
-// Probe controls for the Apple-GPU linear-sampling divergence hunt
-// (fix-apple-gpu-raster-cracks): replace the host sampler's linear filtering
-// with shader-side explicit bilinear (4x texelFetch + computed weights) for
-// one pixel-shader fetch slot, optionally restricted to one pixel shader.
-DEFINE_int32(bilinear_emulation_slot, -1,
-             "Pixel-shader texture fetch constant slot whose 2D fetches use "
-             "shader-side explicit bilinear filtering instead of the host "
-             "sampler (-1 = disabled).",
-             "GPU");
-DEFINE_string(bilinear_emulation_ps_hash, "",
-              "If non-empty, restrict bilinear_emulation_slot to the pixel "
-              "shader with this ucode hash (hex).",
-              "GPU");
-DEFINE_int32(
-    bilinear_emulation_fixed_texel, -1,
-    "Diagnostic, with bilinear_emulation_slot: fetch texel (N,N) of mip 0 "
-    "instead of using the shader-computed coordinates - removes the "
-    "interpolated UVs from the dataflow entirely. If two hosts still "
-    "disagree with this set, the HOST TEXTURE CONTENT differs (upload "
-    "conversion divergence); if they agree, the UVs carry the divergence. "
-    "-1 = off.",
-    "GPU");
-DEFINE_int32(
-    bilinear_emulation_fixed_texel_y, -1,
-    "With bilinear_emulation_fixed_texel: use this as the Y texel index "
-    "(fixed_texel becomes X-only), for 2D sweeps of the host texture "
-    "content. -1 = use the same value as bilinear_emulation_fixed_texel.",
-    "GPU");
-DEFINE_int32(
-    bilinear_emulation_result_snap, 0,
-    "With bilinear_emulation_slot: round each component of the filtered "
-    "result to a 1/N grid (e.g. 255 for 8-bit source formats), matching "
-    "Xenos's quantized filtering output. On constant plateaus of the "
-    "source texture this collapses the lerp's +-1ulp noise to the exact "
-    "texel value on all hosts, making threshold comparisons against "
-    "plateau values deterministic. 0 = off.",
-    "GPU");
-DEFINE_int32(
-    bilinear_emulation_weight_snap, 0,
-    "With bilinear_emulation_slot: snap the bilinear weight fractions to a "
-    "1/N grid (round to nearest) before blending, emulating fixed-point "
-    "hardware filter weights (Xenos-class: 32). Coarse weights absorb "
-    "sub-lsb cross-vendor differences in the interpolated UVs before they "
-    "can flip threshold decisions downstream. 0 = full-precision weights.",
-    "GPU");
 DEFINE_double(
     point_sampling_extra_offset, 0.0,
     "Extra texel-space offset added to point-sampled (nearest-neighbor) "
@@ -1654,11 +1609,6 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         if (is_depth_only_fragment_shader_ || !is_pixel_shader()) {
           return lambda;
         }
-        if (cvars::texture_lod_snap_all && IsTextureDeterminismHost()) {
-          return builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
-              lambda);
-        }
         if (!TextureAlphaTestLodSnap()) {
           return lambda;
         }
@@ -1778,27 +1728,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // results, and Apple and AMD pick differently (MSL only has dfdx, so
       // the fine/coarse distinction is lost in translation). Requires
       // deterministic per-lane values (interpolators_manual_perspective).
-      bool plane_exact_lod_inputs =
-          cvars::texture_lod_plane_inputs && InterpolatorsManualPerspective();
-      // Quotient-rule probe: route the analytic LOD through the linear-A/q
-      // quotient path with RAW per-lane values (the historical
-      // no-HelperInvocation fallback), bypassing both the direct-differencing
-      // branch and the covered-lane substitution inside quad_derivative -
-      // substituted lanes would zero dA and dq and collapse the quotient too.
-      bool quotient_lod_inputs = cvars::texture_lod_quotient_inputs &&
-                                 InterpolatorsManualPerspective();
       auto quad_derivative = [&](spv::Id value, uint32_t axis) -> spv::Id {
-        if (!plane_exact_lod_inputs && !quotient_lod_inputs) {
-          value = covered_lane_value(value);
-        }
-        if (!InterpolatorsManualPerspective() ||
-            cvars::texture_lod_hw_derivatives) {
-          // Probe / candidate lever: use the hardware coarse derivative
-          // instead of the manual OpGroupNonUniformQuadSwap + FragCoord-parity
-          // difference. The manual path was chosen for cross-vendor
-          // determinism, but if Apple's subgroup quad layout does not match
-          // the assumed 2x2 (so QuadSwap returns the wrong neighbor), the
-          // hardware derivative may be correct where the manual one balloons.
+        value = covered_lane_value(value);
+        if (!InterpolatorsManualPerspective()) {
+          // No manual perspective: no deterministic per-lane values to
+          // difference manually, so fall back to the hardware coarse
+          // derivative.
           builder_->addCapability(spv::CapabilityDerivativeControl);
           return builder_->createUnaryOp(
               axis ? spv::OpDPdyCoarse : spv::OpDPdxCoarse, type_float_,
@@ -2463,110 +2398,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           emit_lod_probe(lambda, axis_gsq[0], axis_gsq[1]);
           return lambda;
         }
-        // Route 1: analytic per-triangle screen-space UV gradient from the
-        // three vertices' per-vertex (A = uv/w, W = 1/w, NDC xy), read via
-        // PerVertexKHR. Quad-independent -> zero per-quad scatter, so Apple's
-        // non-plane-exact numerator-A interpolation cannot reach the LOD.
-        if (cvars::texture_lod_vertex_analytic &&
-            input_bary_aw_ != spv::NoResult &&
-            input_bary_pos_ != spv::NoResult && input_inv_w_ != spv::NoResult &&
-            component_count <= 2 &&
-            (cvars::texture_lod_vertex_analytic_tf < 0 ||
-             uint32_t(cvars::texture_lod_vertex_analytic_tf) ==
-                 fetch_constant_index)) {
-          auto fmul = [&](spv::Id a, spv::Id b) {
-            return builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
-                                                      a, b);
-          };
-          auto fsub = [&](spv::Id a, spv::Id b) {
-            return builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
-                                                      a, b);
-          };
-          auto comp = [&](spv::Id v, uint32_t c) {
-            return builder_->createCompositeExtract(v, type_float_, c);
-          };
-          auto vtx = [&](spv::Id arr, uint32_t i) {
-            id_vector_temp_.clear();
-            id_vector_temp_.push_back(builder_->makeUintConstant(i));
-            return builder_->createLoad(
-                builder_->createAccessChain(spv::StorageClassInput, arr,
-                                            id_vector_temp_),
-                spv::NoPrecision);
-          };
-          spv::Id aw[3], pos[3];
-          for (uint32_t i = 0; i < 3; ++i) {
-            aw[i] = vtx(input_bary_aw_, i);
-            pos[i] = vtx(input_bary_pos_, i);
-          }
-          // Edge vectors in NDC and the shared plane determinant.
-          spv::Id e1x = fsub(comp(pos[1], 0), comp(pos[0], 0));
-          spv::Id e1y = fsub(comp(pos[1], 1), comp(pos[0], 1));
-          spv::Id e2x = fsub(comp(pos[2], 0), comp(pos[0], 0));
-          spv::Id e2y = fsub(comp(pos[2], 1), comp(pos[0], 1));
-          spv::Id inv_det = builder_->createNoContractionBinOp(
-              spv::OpFDiv, type_float_, const_float_1_,
-              fsub(fmul(e1x, e2y), fmul(e1y, e2x)));
-          // grad of a screen-affine field f (values f0,f1,f2) -> (d/dndc_x,
-          // d/dndc_y), constant over the triangle.
-          auto grad2 = [&](spv::Id f0, spv::Id f1, spv::Id f2, spv::Id& gx,
-                           spv::Id& gy) {
-            spv::Id df1 = fsub(f1, f0), df2 = fsub(f2, f0);
-            gx = fmul(fsub(fmul(df1, e2y), fmul(df2, e1y)), inv_det);
-            gy = fmul(fsub(fmul(df2, e1x), fmul(df1, e2x)), inv_det);
-          };
-          spv::Id w_cur = builder_->createLoad(input_inv_w_, spv::NoPrecision);
-          spv::Id inv_w2 = builder_->createNoContractionBinOp(
-              spv::OpFDiv, type_float_, const_float_1_, fmul(w_cur, w_cur));
-          spv::Id gw_x, gw_y;
-          grad2(comp(aw[0], 2), comp(aw[1], 2), comp(aw[2], 2), gw_x, gw_y);
-          // NDC->pixel scale: 2 * point_screen_diameter_to_ndc_radius per axis.
-          id_vector_temp_.clear();
-          id_vector_temp_.push_back(builder_->makeIntConstant(
-              kSystemConstantPointScreenDiameterToNdcRadius));
-          spv::Id sd2ndc = builder_->createLoad(
-              builder_->createAccessChain(spv::StorageClassUniform,
-                                          uniform_system_constants_,
-                                          id_vector_temp_),
-              spv::NoPrecision);
-          spv::Id npp[2] = {
-              fmul(builder_->makeFloatConstant(2.0f), comp(sd2ndc, 0)),
-              fmul(builder_->makeFloatConstant(2.0f), comp(sd2ndc, 1))};
-          spv::Id axis_gsq[2] = {spv::NoResult, spv::NoResult};
-          for (uint32_t c = 0; c < component_count; ++c) {
-            spv::Id ga_x, ga_y;
-            grad2(comp(aw[0], c), comp(aw[1], c), comp(aw[2], c), ga_x, ga_y);
-            spv::Id a_cur = fmul(coordinates[c], w_cur);
-            spv::Id ga_axis[2] = {ga_x, ga_y}, gw_axis[2] = {gw_x, gw_y};
-            for (uint32_t axis = 0; axis < 2; ++axis) {
-              // d(o.c)/d(ndc_axis) = (gA*W - A*gW)/W^2 ; then ->pixel->texels.
-              spv::Id go = fmul(
-                  fsub(fmul(ga_axis[axis], w_cur), fmul(a_cur, gw_axis[axis])),
-                  inv_w2);
-              spv::Id gtex = fmul(fmul(go, npp[axis]), lod_size[c]);
-              spv::Id gsq = fmul(gtex, gtex);
-              axis_gsq[axis] =
-                  axis_gsq[axis] == spv::NoResult
-                      ? gsq
-                      : builder_->createNoContractionBinOp(
-                            spv::OpFAdd, type_float_, axis_gsq[axis], gsq);
-            }
-          }
-          spv::Id max_gsq = builder_->createBinBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, axis_gsq[0],
-              axis_gsq[1]);
-          max_gsq = builder_->createBinBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax, max_gsq,
-              builder_->makeFloatConstant(1e-24f));
-          spv::Id lambda = builder_->createNoContractionBinOp(
-              spv::OpFMul, type_float_, builder_->makeFloatConstant(0.5f),
-              builder_->createUnaryBuiltinCall(type_float_,
-                                               ext_inst_glsl_std_450_,
-                                               GLSLstd450Log2, max_gsq));
-          emit_lod_probe(lambda, axis_gsq[0], axis_gsq[1]);
-          return lambda;
-        }
-        if (!quotient_lod_inputs && (input_helper_invocation_ != spv::NoResult ||
-                                     plane_exact_lod_inputs)) {
+        if (input_helper_invocation_ != spv::NoResult) {
           // Covered-lane or plane-exact mode: difference the final per-lane
           // fetch coordinates directly (quad_derivative applies the
           // covered-lane substitution in covered-lane mode; in plane-exact
@@ -3398,26 +3230,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           sample_result_signed = if_data_is_3d.createMergePhi(
               sample_result_signed_3d, sample_result_signed_stacked);
         } else {
-          bool emulate_bilinear = false;
-          if (cvars::bilinear_emulation_slot >= 0 &&
-              uint32_t(cvars::bilinear_emulation_slot) ==
-                  fetch_constant_index &&
-              is_pixel_shader() &&
-              instr.dimension == xenos::FetchOpDimension::k2D &&
-              !instr.attributes.unnormalized_coordinates) {
-            uint64_t ps_hash_filter = strtoull(
-                cvars::bilinear_emulation_ps_hash.c_str(), nullptr, 16);
-            emulate_bilinear =
-                !ps_hash_filter ||
-                ps_hash_filter == current_shader().ucode_data_hash();
-          }
-          if (emulate_bilinear) {
-            SampleTextureBilinearEmulated(
-                coordinates[0], coordinates[1], coordinates[2], size[0],
-                size[1], image_2d_array_or_cube_unsigned,
-                image_2d_array_or_cube_signed, is_any_unsigned, is_any_signed,
-                sample_result_unsigned, sample_result_signed);
-          } else {
+          {
             spv::ImageOperandsMask image_operands_mask_2d =
                 image_operands_mask;
             if (shader_computed_lod) {
@@ -3859,139 +3672,6 @@ void SpirvShaderTranslator::SampleTexture(
     sign_if.makeEndIf();
     // This may overwrite the first lerp endpoint for the sign (such usage of
     // this function is allowed).
-    (i ? result_signed_out : result_unsigned_out) =
-        sign_if.createMergePhi(sign_result, const_float4_0_);
-  }
-}
-
-void SpirvShaderTranslator::SampleTextureBilinearEmulated(
-    spv::Id coordinate_x, spv::Id coordinate_y, spv::Id layer_coordinate,
-    spv::Id size_x, spv::Id size_y, spv::Id image_unsigned,
-    spv::Id image_signed, spv::Id is_any_unsigned, spv::Id is_any_signed,
-    spv::Id& result_unsigned_out, spv::Id& result_signed_out) {
-  spv::Id const_float_half = builder_->makeFloatConstant(0.5f);
-  spv::Id const_float_1 = builder_->makeFloatConstant(1.0f);
-  if (cvars::bilinear_emulation_fixed_texel >= 0) {
-    // Diagnostic: replace the shader-computed coordinates with a fixed
-    // texel-center position, removing interpolated UVs from the dataflow.
-    spv::Id fixed_norm_x = builder_->createNoContractionBinOp(
-        spv::OpFDiv, type_float_,
-        builder_->makeFloatConstant(
-            float(cvars::bilinear_emulation_fixed_texel) + 0.5f),
-        size_x);
-    spv::Id fixed_norm_y = builder_->createNoContractionBinOp(
-        spv::OpFDiv, type_float_,
-        builder_->makeFloatConstant(
-            float(cvars::bilinear_emulation_fixed_texel_y >= 0
-                      ? cvars::bilinear_emulation_fixed_texel_y
-                      : cvars::bilinear_emulation_fixed_texel) +
-            0.5f),
-        size_y);
-    coordinate_x = fixed_norm_x;
-    coordinate_y = fixed_norm_y;
-  }
-  // Texel-space sample position relative to texel centers, as the
-  // fixed-function bilinear unit sees it: uv * size - 0.5.
-  spv::Id coordinates[2] = {coordinate_x, coordinate_y};
-  spv::Id sizes[2] = {size_x, size_y};
-  spv::Id texel_int_0[2], texel_int_1[2], frac[2];
-  for (uint32_t i = 0; i < 2; ++i) {
-    spv::Id texel = builder_->createNoContractionBinOp(
-        spv::OpFSub, type_float_,
-        builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
-                                           coordinates[i], sizes[i]),
-        const_float_half);
-    spv::Id texel_floor = builder_->createUnaryBuiltinCall(
-        type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor, texel);
-    frac[i] = builder_->createNoContractionBinOp(spv::OpFSub, type_float_,
-                                                 texel, texel_floor);
-    if (cvars::bilinear_emulation_weight_snap > 0) {
-      // frac = round(frac * N) / N: fixed-point filter weights.
-      spv::Id snap_n = builder_->makeFloatConstant(
-          float(cvars::bilinear_emulation_weight_snap));
-      spv::Id snap_inv = builder_->makeFloatConstant(
-          1.0f / float(cvars::bilinear_emulation_weight_snap));
-      spv::Id scaled = builder_->createNoContractionBinOp(
-          spv::OpFMul, type_float_, frac[i], snap_n);
-      spv::Id rounded = builder_->createUnaryBuiltinCall(
-          type_float_, ext_inst_glsl_std_450_, GLSLstd450Floor,
-          builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, scaled,
-                                             const_float_half));
-      frac[i] = builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
-                                                   rounded, snap_inv);
-    }
-    // Clamp-to-edge addressing of the two participating texel columns/rows.
-    spv::Id texel_max = builder_->createNoContractionBinOp(
-        spv::OpFSub, type_float_, sizes[i], const_float_1);
-    spv::Id texel_0 = builder_->createTriBuiltinCall(
-        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, texel_floor,
-        const_float_0_, texel_max);
-    spv::Id texel_1 = builder_->createTriBuiltinCall(
-        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
-        builder_->createNoContractionBinOp(spv::OpFAdd, type_float_,
-                                           texel_floor, const_float_1),
-        const_float_0_, texel_max);
-    texel_int_0[i] =
-        builder_->createUnaryOp(spv::OpConvertFToS, type_int_, texel_0);
-    texel_int_1[i] =
-        builder_->createUnaryOp(spv::OpConvertFToS, type_int_, texel_1);
-  }
-  spv::Id layer_int = builder_->createUnaryOp(spv::OpConvertFToS, type_int_,
-                                              layer_coordinate);
-  auto lerp = [this](spv::Id a, spv::Id b, spv::Id f) {
-    return builder_->createNoContractionBinOp(
-        spv::OpFAdd, type_float4_, a,
-        builder_->createNoContractionBinOp(
-            spv::OpVectorTimesScalar, type_float4_,
-            builder_->createNoContractionBinOp(spv::OpFSub, type_float4_, b,
-                                               a),
-            f));
-  };
-  for (uint32_t i = 0; i < 2; ++i) {
-    SpirvBuilder::IfBuilder sign_if(i ? is_any_signed : is_any_unsigned,
-                                    spv::SelectionControlDontFlattenMask,
-                                    *builder_);
-    spv::Id sign_result;
-    {
-      spv::Id image = i ? image_signed : image_unsigned;
-      // Fetch the 2x2 texel quad of the base level.
-      spv::Id texels[4];
-      for (uint32_t j = 0; j < 4; ++j) {
-        id_vector_temp_.clear();
-        id_vector_temp_.push_back((j & 1) ? texel_int_1[0] : texel_int_0[0]);
-        id_vector_temp_.push_back((j & 2) ? texel_int_1[1] : texel_int_0[1]);
-        id_vector_temp_.push_back(layer_int);
-        spv::Builder::TextureParameters fetch_parameters = {};
-        fetch_parameters.sampler = image;
-        fetch_parameters.coords =
-            builder_->createCompositeConstruct(type_int3_, id_vector_temp_);
-        fetch_parameters.lod = const_int_0_;
-        texels[j] = builder_->createTextureCall(
-            spv::NoPrecision, type_float4_, false, true, false, false, false,
-            fetch_parameters, spv::ImageOperandsMaskNone);
-      }
-      sign_result = lerp(lerp(texels[0], texels[1], frac[0]),
-                         lerp(texels[2], texels[3], frac[0]), frac[1]);
-      if (cvars::bilinear_emulation_result_snap > 0) {
-        // result = round(result * N) / N: quantize the filtered value to
-        // the source format's grid (Xenos-style fixed-point filtering
-        // output) so plateau lerp noise collapses to the exact texel value.
-        spv::Id snap_n = builder_->makeFloatConstant(
-            float(cvars::bilinear_emulation_result_snap));
-        spv::Id snap_inv = builder_->makeFloatConstant(
-            1.0f / float(cvars::bilinear_emulation_result_snap));
-        spv::Id scaled = builder_->createNoContractionBinOp(
-            spv::OpVectorTimesScalar, type_float4_, sign_result, snap_n);
-        id_vector_temp_.clear();
-        id_vector_temp_.push_back(scaled);
-        spv::Id rounded = builder_->createBuiltinCall(
-            type_float4_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
-            id_vector_temp_);
-        sign_result = builder_->createNoContractionBinOp(
-            spv::OpVectorTimesScalar, type_float4_, rounded, snap_inv);
-      }
-    }
-    sign_if.makeEndIf();
     (i ? result_signed_out : result_unsigned_out) =
         sign_if.createMergePhi(sign_result, const_float4_0_);
   }

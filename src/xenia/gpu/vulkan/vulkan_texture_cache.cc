@@ -942,14 +942,6 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
   } else {
     sampler_create_info.maxLod = VK_LOD_CLAMP_NONE;
   }
-  if (cvars::texture_max_lod_clamp_probe) {
-    // Diagnostic: force sampling from the base mip regardless of the
-    // derivative-computed LOD, to attribute cross-GPU divergence along
-    // triangle edges to implicit-LOD (quad derivative / helper invocation)
-    // differences.
-    sampler_create_info.minLod = 0.0f;
-    sampler_create_info.maxLod = 0.25f;
-  }
   int32_t forced_lod_level = cvars::texture_lod_force_level;
   if (forced_lod_level < 0 && cvars::apple_texture_lod_force_base &&
       command_processor_.GetVulkanDevice()->properties().vendorID == 0x106B) {

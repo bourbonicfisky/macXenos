@@ -66,33 +66,18 @@ DECLARE_bool(texture_computed_lod_in_shader);
 
 DECLARE_bool(texture_lod_covered_lane_inputs);
 
-DECLARE_bool(texture_lod_snap_all);
-
-DECLARE_bool(texture_lod_plane_inputs);
-
-DECLARE_bool(texture_lod_hw_derivatives);
-
-DECLARE_bool(texture_lod_quotient_inputs);
-
 DECLARE_int32(ps_debug_export_bits);
-
-DECLARE_bool(texture_lod_vertex_analytic);
-DECLARE_int32(texture_lod_vertex_analytic_tf);
-DECLARE_int32(texture_lod_vertex_analytic_interp);
 
 DECLARE_bool(texture_lod_primitive_id_analytic);
 DECLARE_int32(texture_lod_primitive_id_analytic_tf);
+DECLARE_int32(texture_lod_primitive_id_analytic_interp);
 
 DECLARE_bool(texture_determinism_force_non_apple);
 
 DECLARE_int32(texture_lod_force_level);
 DECLARE_bool(apple_texture_lod_force_base);
 
-DECLARE_bool(texture_max_lod_clamp_probe);
-
 DECLARE_bool(force_per_sample_shading_probe);
-
-DECLARE_int32(vertex_position_quantize_bits);
 
 DECLARE_int32(ps_debug_export_instr);
 

@@ -692,12 +692,6 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // must be called with absolute values of operands - use GetAbsoluteOperand!
   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
                                  spv::Id operand_1_abs);
-  // --alu_transcendental_snap_bits diagnostic: round a scalar float to the
-  // given number of mantissa bits (round-to-nearest via biased-representation
-  // increment) so host-implementation-defined transcendental precision
-  // (rcp/rsq/sqrt) collapses to a host-invariant grid. Returns the value
-  // unchanged when the cvar is unset.
-  spv::Id SnapTranscendental(spv::Id value);
   // Conditionally discard the current fragment. Changes the build point.
   void KillPixel(spv::Id condition,
                  uint8_t memexport_eM_potentially_written_before);
@@ -767,17 +761,6 @@ class SpirvShaderTranslator : public ShaderTranslator {
                      spv::Id lerp_factor = spv::NoResult,
                      spv::Id lerp_first_unsigned = spv::NoResult,
                      spv::Id lerp_first_signed = spv::NoResult);
-  // Software bilinear filtering of the base level of a 2D array layer via four
-  // OpImageFetch calls and explicitly computed weights, as a deterministic
-  // replacement for the host's fixed-function linear sampling (used to work
-  // around sub-texel precision divergence of Apple GPU samplers - see
-  // fix-apple-gpu-raster-cracks). Coordinates are normalized, clamp-to-edge
-  // addressing is assumed.
-  void SampleTextureBilinearEmulated(
-      spv::Id coordinate_x, spv::Id coordinate_y, spv::Id layer_coordinate,
-      spv::Id size_x, spv::Id size_y, spv::Id image_unsigned,
-      spv::Id image_signed, spv::Id is_any_unsigned, spv::Id is_any_signed,
-      spv::Id& result_unsigned_out, spv::Id& result_signed_out);
   // `texture_parameters` need to be set up except for `sampler`, which will be
   // set internally.
   spv::Id QueryTextureLod(spv::Builder::TextureParameters& texture_parameters,
@@ -1048,17 +1031,6 @@ class SpirvShaderTranslator : public ShaderTranslator {
   static constexpr uint32_t kInvWVaryingLocation = 19;
   spv::Id output_inv_w_;
   spv::Id input_inv_w_;
-  // texture_lod_vertex_analytic (Route 1, VK_KHR_fragment_shader_barycentric):
-  // per-vertex (A.xy, W) and NDC position, read in the PS via PerVertexKHR to
-  // build the per-triangle-constant analytic UV gradient. VS outputs normal
-  // varyings; the PS inputs are decorated PerVertexKHR (array of 3 provoking
-  // vertices).
-  static constexpr uint32_t kBaryAwVaryingLocation = 20;
-  static constexpr uint32_t kBaryPosVaryingLocation = 21;
-  spv::Id output_bary_aw_;
-  spv::Id output_bary_pos_;
-  spv::Id input_bary_aw_;
-  spv::Id input_bary_pos_;
   // PS, texture_lod_covered_lane_inputs - bool (gl_HelperInvocation), for
   // replacing helper-lane analytic-LOD inputs with a covered lane's values
   // before quad differencing.

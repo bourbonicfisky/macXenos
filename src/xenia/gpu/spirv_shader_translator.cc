@@ -155,10 +155,6 @@ void SpirvShaderTranslator::Reset() {
   input_ndc_depth_ = spv::NoResult;
   output_inv_w_ = spv::NoResult;
   input_inv_w_ = spv::NoResult;
-  output_bary_aw_ = spv::NoResult;
-  output_bary_pos_ = spv::NoResult;
-  input_bary_aw_ = spv::NoResult;
-  input_bary_pos_ = spv::NoResult;
   input_helper_invocation_ = spv::NoResult;
   input_fs_primitive_id_ = spv::NoResult;
   buffer_lod_vtx_ = spv::NoResult;
@@ -1439,26 +1435,6 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     main_interface_.push_back(output_inv_w_);
   }
 
-  if (cvars::texture_lod_vertex_analytic && InterpolatorsManualPerspective()) {
-    // Per-triangle analytic LOD gradient source: (A.xy, W) and NDC xy, output
-    // as ordinary varyings and read per-vertex in the PS via PerVertexKHR.
-    // Invariant so the three vertices' values match bit-for-bit across the
-    // pipelines that draw the shared triangle edges.
-    output_bary_aw_ =
-        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
-                                 type_float4_, "xe_out_bary_aw");
-    builder_->addDecoration(output_bary_aw_, spv::DecorationLocation,
-                            int(kBaryAwVaryingLocation));
-    builder_->addDecoration(output_bary_aw_, spv::DecorationInvariant);
-    main_interface_.push_back(output_bary_aw_);
-    output_bary_pos_ =
-        builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
-                                 type_float4_, "xe_out_bary_pos");
-    builder_->addDecoration(output_bary_pos_, spv::DecorationLocation,
-                            int(kBaryPosVaryingLocation));
-    builder_->addDecoration(output_bary_pos_, spv::DecorationInvariant);
-    main_interface_.push_back(output_bary_pos_);
-  }
 
   // Create the gl_PerVertex output for used system outputs.
   std::vector<spv::Id> struct_per_vertex_members;
@@ -2370,35 +2346,6 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
   position_xyz = builder_->createNoContractionBinOp(
       spv::OpFAdd, type_float3_, position_xyz, ndc_offset_mul_w);
 
-  // Optionally quantize the final position outputs so logically identical
-  // vertex shaders compiled into different pipelines produce bit-identical
-  // positions even when the host GPU compiler rounds their math differently
-  // per function (exact integer round-to-nearest on the float bit pattern -
-  // the host compiler cannot alter it).
-  uint32_t position_quantize_bits = static_cast<uint32_t>(
-      std::min(INT32_C(22), std::max(INT32_C(0),
-                                     cvars::vertex_position_quantize_bits)));
-  if (position_quantize_bits) {
-    spv::Id quantize_round = builder_->makeUintConstant(
-        uint32_t(1) << (position_quantize_bits - 1));
-    spv::Id quantize_mask = builder_->makeUintConstant(
-        ~((uint32_t(1) << position_quantize_bits) - 1));
-    auto quantize = [&](spv::Id value, spv::Id float_type,
-                        spv::Id uint_type) -> spv::Id {
-      spv::Id bits =
-          builder_->createUnaryOp(spv::OpBitcast, uint_type, value);
-      bits = builder_->createBinOp(
-          spv::OpIAdd, uint_type, bits,
-          SpirvSmearScalarResultOrConstant(quantize_round, uint_type));
-      bits = builder_->createBinOp(
-          spv::OpBitwiseAnd, uint_type, bits,
-          SpirvSmearScalarResultOrConstant(quantize_mask, uint_type));
-      return builder_->createUnaryOp(spv::OpBitcast, float_type, bits);
-    };
-    position_xyz = quantize(position_xyz, type_float3_, type_uint3_);
-    position_w = quantize(position_w, type_float_, type_uint_);
-  }
-
   // Manual perspective correction: rescale the guest interpolator outputs to
   // A = o * (1/w) so their noperspective interpolation is the exact linear
   // numerator of the perspective ratio; the fragment shader reconstructs
@@ -2435,43 +2382,6 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       // Analytic-per-triangle LOD source varyings (read per-vertex in the PS):
       // A.xy (= o*W, from the rescaled source interpolator), W (= 1/w), and NDC
       // xy (= clip.xy * 1/w). position_xyz here is the final host clip position.
-      if (output_bary_aw_ != spv::NoResult) {
-        uint32_t interp_index = uint32_t(
-            std::max(0, cvars::texture_lod_vertex_analytic_interp));
-        spv::Id a_vec =
-            (interp_index < xenos::kMaxInterpolators &&
-             input_output_interpolators_[interp_index] != spv::NoResult)
-                ? builder_->createLoad(
-                      input_output_interpolators_[interp_index],
-                      spv::NoPrecision)
-                : const_float4_0_;
-        spv::Id ax = builder_->createCompositeExtract(a_vec, type_float_, 0);
-        spv::Id ay = builder_->createCompositeExtract(a_vec, type_float_, 1);
-        spv::Id ndc_x = builder_->createNoContractionBinOp(
-            spv::OpFMul, type_float_,
-            builder_->createCompositeExtract(position_xyz, type_float_, 0),
-            position_w_inv);
-        spv::Id ndc_y = builder_->createNoContractionBinOp(
-            spv::OpFMul, type_float_,
-            builder_->createCompositeExtract(position_xyz, type_float_, 1),
-            position_w_inv);
-        id_vector_temp_.clear();
-        id_vector_temp_.push_back(ax);
-        id_vector_temp_.push_back(ay);
-        id_vector_temp_.push_back(position_w_inv);
-        id_vector_temp_.push_back(const_float_0_);
-        builder_->createStore(
-            builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
-            output_bary_aw_);
-        id_vector_temp_.clear();
-        id_vector_temp_.push_back(ndc_x);
-        id_vector_temp_.push_back(ndc_y);
-        id_vector_temp_.push_back(const_float_0_);
-        id_vector_temp_.push_back(const_float_0_);
-        builder_->createStore(
-            builder_->createCompositeConstruct(type_float4_, id_vector_temp_),
-            output_bary_pos_);
-      }
       // Prototype (fix-apple-lod-primitive-id-analytic-gradient): mirror the
       // per-vertex analytic-LOD inputs into the primitive-id SSBO at record
       // (lod_vtx_base + gl_VertexIndex): {A.xy, W, ndc.xy}. The FS reads these
@@ -2479,7 +2389,7 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       if (buffer_lod_vtx_ != spv::NoResult &&
           input_vertex_index_ != spv::NoResult) {
         uint32_t interp_index =
-            uint32_t(std::max(0, cvars::texture_lod_vertex_analytic_interp));
+            uint32_t(std::max(0, cvars::texture_lod_primitive_id_analytic_interp));
         spv::Id a_vec =
             (interp_index < xenos::kMaxInterpolators &&
              input_output_interpolators_[interp_index] != spv::NoResult)
@@ -2822,30 +2732,6 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
                                 int(kInvWVaryingLocation));
         builder_->addDecoration(input_inv_w_, spv::DecorationNoPerspective);
         main_interface_.push_back(input_inv_w_);
-      }
-      if (cvars::texture_lod_vertex_analytic &&
-          InterpolatorsManualPerspective() &&
-          GetModificationInterpolatorMask()) {
-        // Per-vertex analytic-LOD sources: arrays of 3 (the provoking
-        // triangle's vertices), read via VK_KHR_fragment_shader_barycentric.
-        builder_->addExtension("SPV_KHR_fragment_shader_barycentric");
-        builder_->addCapability(spv::CapabilityFragmentBarycentricKHR);
-        spv::Id type_bary_array = builder_->makeArrayType(
-            type_float4_, builder_->makeUintConstant(3), 0);
-        input_bary_aw_ = builder_->createVariable(
-            spv::NoPrecision, spv::StorageClassInput, type_bary_array,
-            "xe_in_bary_aw");
-        builder_->addDecoration(input_bary_aw_, spv::DecorationLocation,
-                                int(kBaryAwVaryingLocation));
-        builder_->addDecoration(input_bary_aw_, spv::DecorationPerVertexKHR);
-        main_interface_.push_back(input_bary_aw_);
-        input_bary_pos_ = builder_->createVariable(
-            spv::NoPrecision, spv::StorageClassInput, type_bary_array,
-            "xe_in_bary_pos");
-        builder_->addDecoration(input_bary_pos_, spv::DecorationLocation,
-                                int(kBaryPosVaryingLocation));
-        builder_->addDecoration(input_bary_pos_, spv::DecorationPerVertexKHR);
-        main_interface_.push_back(input_bary_pos_);
       }
     }
 

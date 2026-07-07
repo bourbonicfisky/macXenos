@@ -221,73 +221,9 @@ DEFINE_bool(
     "GPU");
 UPDATE_from_bool(texture_computed_lod_in_shader, 2026, 7, 7, 12, true);
 
-DEFINE_bool(
-    texture_lod_snap_all, false,
-    "Probe: snap the shader-computed LOD to the nearest integer mip for "
-    "ALL fetches, not only alpha-tested draws. Both Apple and AMD evaluate "
-    "helper-lane perspective ratios with vendor wobble at partially "
-    "covered quads (measured: ~2e-2 p90 deviation from the exact plane "
-    "ratio on both, mutually divergent) - snapping collapses the wobble "
-    "to a deterministic level choice except within rounding distance of "
-    "mip boundaries.",
-    "GPU");
-
-DEFINE_bool(
-    texture_lod_plane_inputs, false,
-    "With texture_computed_lod_in_shader + interpolators_manual_perspective: "
-    "difference the raw per-lane fetch coordinates directly for the "
-    "analytic LOD, without covered-lane substitution. Under manual "
-    "perspective the per-lane UVs derive from noperspective varyings, "
-    "which are helper-lane plane-exact on all vendors - so these "
-    "differences equal the AMD/Xenos hardware's plane-true gradients "
-    "at partially covered quads, where covered-lane substitution "
-    "diverges from AMD by construction. Takes precedence over "
-    "texture_lod_covered_lane_inputs.",
-    "GPU");
-
-DEFINE_bool(
-    texture_lod_hw_derivatives, false,
-    "Probe / candidate lever: compute the shader analytic-LOD quad "
-    "derivatives with hardware OpDPdxCoarse/OpDPdyCoarse instead of the "
-    "manual OpGroupNonUniformQuadSwap + gl_FragCoord-parity difference, even "
-    "under interpolators_manual_perspective. Tests whether the Apple "
-    "analytic-LOD gradient blow-up at covered quads is a subgroup-quad "
-    "layout / QuadSwap-neighbor problem.",
-    "GPU");
-
-DEFINE_bool(
-    texture_lod_quotient_inputs, false,
-    "Probe: with texture_computed_lod_in_shader + "
-    "interpolators_manual_perspective, compute the analytic LOD via the "
-    "quotient rule on the linear A = uv*q and q = 1/w varyings with RAW "
-    "per-lane values (the historical no-HelperInvocation fallback), "
-    "bypassing covered-lane substitution and direct differencing. Takes "
-    "precedence over texture_lod_plane_inputs and "
-    "texture_lod_covered_lane_inputs.",
-    "GPU");
-
-DEFINE_bool(
-    texture_lod_vertex_analytic, false,
-    "Apple analytic-per-triangle texture LOD (Route 1, "
-    "VK_KHR_fragment_shader_barycentric): with "
-    "texture_computed_lod_in_shader + interpolators_manual_perspective, "
-    "compute the screen-space UV gradient analytically from the triangle's "
-    "three vertices' per-vertex (A = uv/w, W = 1/w, NDC position) read via "
-    "PerVertexKHR, instead of the 2x2-quad derivative that scatters on Apple "
-    "(numerator A not plane-exact under noperspective interpolation). The "
-    "per-triangle-constant gradient has zero per-quad scatter by "
-    "construction, collapsing the seam/lattice. SPIKE: sources the gradient "
-    "from interpolator texture_lod_vertex_analytic_interp components .xy and "
-    "applies it to the fetch whose constant index is "
-    "texture_lod_vertex_analytic_tf.",
-    "GPU");
-DEFINE_int32(texture_lod_vertex_analytic_tf, 0,
-             "See texture_lod_vertex_analytic: fetch-constant index to apply "
-             "the analytic gradient to (-1 = all computed-LOD fetches).",
-             "GPU");
-DEFINE_int32(texture_lod_vertex_analytic_interp, 0,
-             "See texture_lod_vertex_analytic: source interpolator index whose "
-             ".xy carries the fetch's uv (specimen ground PS: 0).",
+DEFINE_int32(texture_lod_primitive_id_analytic_interp, 0,
+             "See texture_lod_primitive_id_analytic: source interpolator "
+             "index whose .xy carries the fetch's uv (specimen ground PS: 0).",
              "GPU");
 
 DEFINE_bool(
@@ -364,32 +300,11 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_max_lod_clamp_probe, false,
-    "Diagnostic: clamp all guest texture samplers to the base mip "
-    "(minLod=0, maxLod=0.25), removing implicit-LOD (quad derivative) "
-    "influence from sampling - for attributing cross-GPU divergence along "
-    "triangle edges to LOD selection differences.",
-    "GPU");
-
-DEFINE_bool(
     force_per_sample_shading_probe, false,
     "Diagnostic: add a SampleId input to all translated pixel shaders, "
     "forcing per-sample shading without any depth conversion - isolates "
     "the shading-rate side effect of depth_float24_convert_in_pixel_shader "
     "from its depth quantization math.",
-    "GPU");
-
-DEFINE_int32(
-    vertex_position_quantize_bits, 0,
-    "Round the final vertex position outputs (clip XYZ and W) to a "
-    "2^-(23-N) relative grid by dropping N low mantissa bits "
-    "(round-to-nearest) in all translated vertex shaders. Collapses "
-    "sub-ulp position differences between logically identical vertex "
-    "shaders compiled into different pipelines, emulating the tolerance "
-    "that guest f24 (and host D24) depth quantization provides - for "
-    "hosts whose GPU compilers produce per-function rounding differences "
-    "(Apple/Metal multi-pass depth conflicts). 0 = off; 3 aligns with one "
-    "f24 depth ulp.",
     "GPU");
 
 DEFINE_int32(
