@@ -21,6 +21,7 @@
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
+#include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/user_module.h"
@@ -58,10 +59,12 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: pipeline cache init failed");
     return false;
   }
+  render_target_cache_ = std::make_unique<MetalRenderTargetCache>(device);
   return true;
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  render_target_cache_.reset();
   pipeline_cache_.reset();
   CommandProcessor::ShutdownContext();
 }
@@ -85,46 +88,76 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
-  uint32_t width = frontbuffer_width ? frontbuffer_width : 1280;
-  uint32_t height = frontbuffer_height ? frontbuffer_height : 720;
   uint32_t count = swap_count_++;
-  if (count == 0 || (count % 60) == 0) {
-    XELOGI("MetalCommandProcessor: IssueSwap #{} ({}x{}, ptr {:08X})", count,
-           width, height, frontbuffer_ptr);
+
+  // Present the IssueDraw-produced render target if one exists this frame;
+  // otherwise fall back to the cycling test pattern (so no-draw frames still
+  // show liveness). Copy the source into the presenter's mailbox texture.
+  id<MTLTexture> source_rt = nil;
+  uint32_t present_width = 1280;
+  uint32_t present_height = 720;
+  if (frame_has_render_ && render_target_cache_ &&
+      render_target_cache_->color_target()) {
+    source_rt = (__bridge id<MTLTexture>)render_target_cache_->color_target();
+    present_width = render_target_cache_->width();
+    present_height = render_target_cache_->height();
   }
-  // Cycle a color so motion is obvious on-device.
+  if (count == 0 || (count % 60) == 0) {
+    XELOGI("MetalCommandProcessor: IssueSwap #{} ({}x{}, ptr {:08X}, {})", count,
+           present_width, present_height, frontbuffer_ptr,
+           source_rt ? "render target" : "test pattern");
+  }
+
+  // Test-pattern color (used only when there's no render target this frame).
   double t = double(count % 120) / 120.0;
-  double r = t;
-  double g = 1.0 - t;
-  double b = 0.5;
+  double pattern_r = t;
+  double pattern_g = 1.0 - t;
+  double pattern_b = 0.5;
 
   auto refresher =
       [&](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
     auto& metal_context =
         static_cast<xe::ui::metal::MetalGuestOutputRefreshContext&>(context);
-    id<MTLTexture> texture =
+    id<MTLTexture> mailbox =
         (__bridge id<MTLTexture>)metal_context.target_texture();
-    if (!texture) {
+    if (!mailbox) {
       return false;
     }
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
-    MTLRenderPassDescriptor* pass =
-        [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = texture;
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(r, g, b, 1.0);
-    id<MTLRenderCommandEncoder> encoder =
-        [command_buffer renderCommandEncoderWithDescriptor:pass];
-    [encoder endEncoding];
+    if (source_rt) {
+      // Copy the rendered target into the mailbox (same size + format).
+      id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+      [blit copyFromTexture:source_rt
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(present_width, present_height, 1)
+                  toTexture:mailbox
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+      [blit endEncoding];
+    } else {
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.colorAttachments[0].texture = mailbox;
+      pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      pass.colorAttachments[0].clearColor =
+          MTLClearColorMake(pattern_r, pattern_g, pattern_b, 1.0);
+      id<MTLRenderCommandEncoder> encoder =
+          [command_buffer renderCommandEncoderWithDescriptor:pass];
+      [encoder endEncoding];
+    }
     [command_buffer commit];
     // The presenter samples this texture from the UI thread later; make sure
     // the write is done before we report the frame ready.
     [command_buffer waitUntilCompleted];
     return true;
   };
-  presenter->RefreshGuestOutput(width, height, /*aspect_x=*/16,
+  presenter->RefreshGuestOutput(present_width, present_height, /*aspect_x=*/16,
                                 /*aspect_y=*/9, refresher);
+  frame_has_render_ = false;
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -141,6 +174,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  // Bring-up slice: no geometry yet. On the first draw of a frame, establish a
+  // real color render target and clear it to a distinctly synthetic color, so
+  // IssueSwap can present an IssueDraw-produced RT (proving the RT lifecycle +
+  // RT -> present copy) rather than a fabricated swap-time color. Real pipeline
+  // binding + geometry is the next slice.
+  if (!render_target_cache_) {
+    return true;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  if (!provider || !provider->command_queue()) {
+    return true;
+  }
+  void* rt = render_target_cache_->EnsureColorTarget(1280, 720);
+  if (!rt) {
+    return true;
+  }
+  if (!frame_has_render_) {
+    id<MTLCommandQueue> queue =
+        (__bridge id<MTLCommandQueue>)provider->command_queue();
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    MTLRenderPassDescriptor* pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    // Synthetic dark green: unmistakably "our render target", not the game.
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.20, 0.08, 1.0);
+    id<MTLRenderCommandEncoder> encoder =
+        [command_buffer renderCommandEncoderWithDescriptor:pass];
+    [encoder endEncoding];
+    [command_buffer commit];
+    frame_has_render_ = true;
+  }
   return true;
 }
 

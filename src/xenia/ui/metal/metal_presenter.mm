@@ -125,10 +125,12 @@ void* MetalPresenter::EnsureGuestOutputTexture(uint32_t index, uint32_t width,
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                    width:width
                                   height:height
                                mipmapped:NO];
+  // BGRA8 matches the backend's color render target so IssueSwap can copy it in
+  // directly, and the drawable so the present blit is format-clean.
   // Written by the producer's refresher (render target) and sampled by the
   // present blit (shader read).
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;

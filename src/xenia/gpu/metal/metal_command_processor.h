@@ -22,6 +22,7 @@ namespace gpu {
 namespace metal {
 
 class MetalPipelineCache;
+class MetalRenderTargetCache;
 
 // Phase 2b skeleton command processor. Overrides the same pure-virtual surface
 // as the other backends; the draw/copy/shader paths are stubs for now (behaves
@@ -64,6 +65,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void InitializeTrace() override;
 
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
+  std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
+
+  // Set when IssueDraw has produced a real render target this frame, so
+  // IssueSwap presents that RT instead of the bring-up test pattern. Reset each
+  // swap.
+  bool frame_has_render_ = false;
 
   // Number of swaps issued; drives the bring-up test pattern color so on-device
   // it's visually obvious that frames are flowing through the guest-output path.
