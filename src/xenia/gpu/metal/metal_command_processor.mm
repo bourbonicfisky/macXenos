@@ -320,6 +320,44 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   [encoder setCullMode:MTLCullModeNone];
+
+  // Diagnostic magenta triangle (no argument buffers). Proves draws into this
+  // encoder reach the RT independently of the guest-shader binding.
+  id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
+  if (!debug_triangle_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      vertex float4 dbg_vs(uint vid [[vertex_id]]) {
+        float2 p[3] = { float2(-0.9, -0.9), float2(0.9, -0.9), float2(0.0, 0.9) };
+        return float4(p[vid], 0.0, 1.0);
+      }
+      fragment float4 dbg_fs() { return float4(1.0, 0.0, 1.0, 1.0); }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
+    if (lib) {
+      MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"dbg_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"dbg_fs"];
+      d.colorAttachments[0].pixelFormat =
+          (MTLPixelFormat)MetalRenderTargetCache::kColorFormat;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&err];
+      if (ps) {
+        debug_triangle_pipeline_ = (__bridge_retained void*)ps;
+      } else {
+        XELOGE("MetalCommandProcessor: debug pipeline failed: {}",
+               err ? [[err localizedDescription] UTF8String] : "?");
+      }
+    }
+  }
+  if (debug_triangle_pipeline_) {
+    [encoder setRenderPipelineState:
+                 (__bridge id<MTLRenderPipelineState>)debug_triangle_pipeline_];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  }
+
   frame_command_buffer_ = (__bridge_retained void*)command_buffer;
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
@@ -457,6 +495,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
+    }
+    // Diagnostic: dump the position transform for the first indexed triangle
+    // draws (the "real geometry" ones) to catch off-screen / degenerate output.
+    if (index_buffer_info && prim_type == xenos::PrimitiveType::kTriangleList &&
+        draw_count_ < 8) {
+      XELOGI(
+          "MetalCommandProcessor: tri draw {} idx viewport off=({},{}) "
+          "ext=({},{}) z=({},{}) ndc_scale=({},{},{}) ndc_off=({},{},{})",
+          draw_count_, viewport_info.xy_offset[0], viewport_info.xy_offset[1],
+          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
+          viewport_info.z_min, viewport_info.z_max, viewport_info.ndc_scale[0],
+          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
+          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
+          viewport_info.ndc_offset[2]);
     }
     // Position-relevant flags.
     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();

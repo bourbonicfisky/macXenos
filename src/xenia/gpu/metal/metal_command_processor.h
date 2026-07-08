@@ -99,6 +99,13 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;
 
+  // Bring-up diagnostic: a hardcoded magenta triangle drawn into the RT each
+  // frame with a trivial pipeline (no argument buffers). If it shows but guest
+  // geometry doesn't, the render-pass-into-RT path works and the problem is the
+  // guest shader binding / positions; if even it doesn't show, the encoder/RT
+  // draw path itself is broken.
+  void* debug_triangle_pipeline_ = nullptr;
+
   // Set when at least one draw rendered into the RT this frame, so IssueSwap
   // presents the RT rather than the bring-up test pattern. Reset each swap.
   bool frame_has_render_ = false;
