@@ -1266,6 +1266,7 @@ void KernelState::CollectPcSample() {
         fs.guest_address = key;
       }
       fs.count++;
+      ts.func_counts[key]++;
     }
   }
   {
@@ -1311,10 +1312,36 @@ void KernelState::StopAndDumpPcSampler() {
   XELOGI("=== jit pc sampler (--jit_sampler): {} ticks, {} in-JIT samples ===",
          pc_sampler_ticks_, total_jit);
   XELOGI("  per thread (in_jit% = fraction of samples running guest JIT code):");
+  size_t thread_detail_shown = 0;
   for (const PcThreadStat& t : threads) {
     XELOGI("  {}{} id={:08X}: samples={} in_jit={} ({:.1f}%)",
            t.guest ? "[guest] " : "[host]  ", t.name, t.thread_id, t.total,
            t.in_jit, t.total ? 100.0 * double(t.in_jit) / double(t.total) : 0.0);
+    // For the meaningfully-hot threads (top few by in_jit), break out this
+    // thread's OWN top functions so the pegged thread's code isn't blended into
+    // the global list below. % is the function's share of this thread's in-JIT.
+    if (t.in_jit > 0 && thread_detail_shown < 8) {
+      ++thread_detail_shown;
+      std::vector<std::pair<uint32_t, uint64_t>> fns(t.func_counts.begin(),
+                                                     t.func_counts.end());
+      std::sort(fns.begin(), fns.end(),
+                [](const std::pair<uint32_t, uint64_t>& a,
+                   const std::pair<uint32_t, uint64_t>& b) {
+                  return a.second > b.second;
+                });
+      size_t fshown = 0;
+      for (const auto& p : fns) {
+        if (fshown++ >= 6) {
+          break;
+        }
+        auto it = pc_func_hist_.find(p.first);
+        const std::string& nm =
+            it != pc_func_hist_.end() ? it->second.name : std::string();
+        XELOGI("        {:5.1f}%  {} (guest {:08X}) samples={}",
+               100.0 * double(p.second) / double(t.in_jit),
+               nm.empty() ? "<unnamed>" : nm, p.first, p.second);
+      }
+    }
   }
   XELOGI("  top guest functions by in-JIT sample share:");
   size_t shown = 0;

@@ -20,6 +20,12 @@ DEFINE_string(
 DEFINE_bool(disassemble_functions, false,
             "Disassemble functions during generation.", "CPU");
 
+DEFINE_string(dump_ppc_functions, "",
+              "Comma-separated hex guest addresses (e.g. 8233CFA0,826E8BE8); "
+              "log the PPC source disassembly of matching functions when they "
+              "are generated. For classifying PC-sampler hotspots.",
+              "CPU");
+
 DEFINE_bool(trace_functions, false, "Generate tracing for function statistics.",
             "CPU");
 DEFINE_bool(trace_function_coverage, false,

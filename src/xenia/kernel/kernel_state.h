@@ -427,6 +427,9 @@ class KernelState {
     bool guest = false;
     uint64_t total = 0;    // samples where the thread existed
     uint64_t in_jit = 0;   // samples with PC inside the JIT code cache
+    // Per-thread in-JIT function histogram (key: guest addr) so the hottest
+    // thread's own top functions can be isolated from the blended global list.
+    std::unordered_map<uint32_t, uint64_t> func_counts;
   };
   void PcSamplerLoop();
   void CollectPcSample();

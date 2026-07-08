@@ -9,9 +9,12 @@
 
 #include "xenia/cpu/ppc/ppc_translator.h"
 
+#include <cstdlib>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/reset_scope.h"
@@ -177,6 +180,40 @@ void PPCTranslator::DumpHIR(GuestFunction* function, PPCHIRBuilder* builder) {
     }
   }
 }
+namespace {
+// True if |address| appears in the --dump_ppc_functions comma-separated hex
+// list. Parsed per call (only when the cvar is set; generation is one-time per
+// function, so this is not hot).
+bool ShouldDumpPpcFunction(uint32_t address) {
+  const std::string& list = cvars::dump_ppc_functions;
+  if (list.empty()) {
+    return false;
+  }
+  size_t pos = 0;
+  while (pos <= list.size()) {
+    size_t comma = list.find(',', pos);
+    size_t len = (comma == std::string::npos ? list.size() : comma) - pos;
+    std::string tok = list.substr(pos, len);
+    size_t b = tok.find_first_not_of(" \t");
+    size_t e = tok.find_last_not_of(" \t");
+    if (b != std::string::npos) {
+      tok = tok.substr(b, e - b + 1);
+      if (tok.rfind("0x", 0) == 0 || tok.rfind("0X", 0) == 0) {
+        tok = tok.substr(2);
+      }
+      if (uint32_t(std::strtoul(tok.c_str(), nullptr, 16)) == address) {
+        return true;
+      }
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    pos = comma + 1;
+  }
+  return false;
+}
+}  // namespace
+
 bool PPCTranslator::Translate(GuestFunction* function,
                               uint32_t debug_info_flags) {
   SCOPE_profile_cpu_f("cpu");
@@ -202,6 +239,14 @@ bool PPCTranslator::Translate(GuestFunction* function,
   }
   if (cvars::trace_function_data) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionData;
+  }
+  const bool dump_this_ppc = ShouldDumpPpcFunction(function->address());
+  if (dump_this_ppc) {
+    // Dump both the guest PPC source AND our emitted host arm64 for targeted
+    // hotspots, so codegen quality (host instrs per guest op) is inspectable
+    // without the --disassemble_functions firehose.
+    debug_info_flags |= DebugInfoFlags::kDebugInfoDisasmSource;
+    debug_info_flags |= DebugInfoFlags::kDebugInfoDisasmMachineCode;
   }
   std::unique_ptr<FunctionDebugInfo> debug_info;
   if (debug_info_flags) {
@@ -241,6 +286,12 @@ bool PPCTranslator::Translate(GuestFunction* function,
     string_buffer_.Reset();
   }
 
+  // Targeted PPC dump for --dump_ppc_functions (classify PC-sampler hotspots).
+  if (dump_this_ppc && debug_info && debug_info->source_disasm()) {
+    XELOGI("[dump_ppc] {:08X} '{}':\n{}", function->address(),
+           function->name(), debug_info->source_disasm());
+  }
+
   // Emit function.
   uint32_t emit_flags = 0;
   if (debug_info) {
@@ -275,6 +326,15 @@ bool PPCTranslator::Translate(GuestFunction* function,
   if (!assembler_->Assemble(function, builder_.get(), debug_info_flags,
                             std::move(debug_info))) {
     return false;
+  }
+
+  // Targeted host-arm64 dump for --dump_ppc_functions. Assemble stashed the
+  // machine-code disasm on the function's debug info; log it next to the PPC
+  // source so per-op codegen quality can be compared directly.
+  if (dump_this_ppc && function->debug_info() &&
+      function->debug_info()->machine_code_disasm()) {
+    XELOGI("[dump_ppc] {:08X} '{}' host arm64:\n{}", function->address(),
+           function->name(), function->debug_info()->machine_code_disasm());
   }
 
   return true;
