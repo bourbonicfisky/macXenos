@@ -856,7 +856,7 @@ if(APPLE AND XENIA_GPU_METAL)
     INTERFACE_INCLUDE_DIRECTORIES
       "${_xe_msc_root}/include;${_xe_msc_root}/include/metal_irconverter;${_xe_msc_root}/include/metal_irconverter_runtime"
     INTERFACE_COMPILE_DEFINITIONS
-      "METAL_SHADER_CONVERTER_AVAILABLE;IR_RUNTIME_METALCPP")
+      "METAL_SHADER_CONVERTER_AVAILABLE")
 
   # --- dxilconv (built from the DXC fork) -----------------------------------
   set(_xe_dxilconv_root "${CMAKE_CURRENT_SOURCE_DIR}/DirectXShaderCompiler")

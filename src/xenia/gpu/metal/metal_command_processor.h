@@ -23,6 +23,8 @@ namespace metal {
 
 class MetalPipelineCache;
 class MetalRenderTargetCache;
+class MetalSharedMemory;
+class MetalUploadArena;
 
 // Phase 2b skeleton command processor. Overrides the same pure-virtual surface
 // as the other backends; the draw/copy/shader paths are stubs for now (behaves
@@ -64,17 +66,50 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void InitializeTrace() override;
 
+  // --- Draw path helpers (metal_command_processor.mm) ---
+
+  // Creates the bindless heaps, the fixed system view table (shared-memory SRV),
+  // the null buffer/texture/sampler, and the per-frame upload arena.
+  bool InitializeDrawResources(void* device);
+  void ShutdownDrawResources();
+
+  // Opens the frame command buffer + render encoder (render pass into the color
+  // RT, cleared once), if not already open. Returns the encoder (id<MTL...>) or
+  // nullptr on failure.
+  void* BeginFrameEncoder();
+  // Ends the encoder and commits + waits on the frame command buffer.
+  void EndFrameEncoder();
+
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
+  std::unique_ptr<MetalSharedMemory> shared_memory_;
+  std::unique_ptr<MetalUploadArena> upload_arena_;
 
-  // Set when IssueDraw has produced a real render target this frame, so
-  // IssueSwap presents that RT instead of the bring-up test pattern. Reset each
-  // swap.
+  // Bindless / fixed-resource infrastructure for the MSC argument buffer. All
+  // are id<...> held as retained void*.
+  void* view_bindless_heap_ = nullptr;     // id<MTLBuffer> of IRDescriptorTableEntry
+  void* sampler_bindless_heap_ = nullptr;  // id<MTLBuffer> of IRDescriptorTableEntry
+  void* system_view_tables_ = nullptr;     // id<MTLBuffer> of IRDescriptorTableEntry
+  void* null_buffer_ = nullptr;            // id<MTLBuffer> stand-in for inactive CBVs
+  void* null_texture_ = nullptr;           // id<MTLTexture> 1x1, for unbound samples
+  void* null_sampler_ = nullptr;           // id<MTLSamplerState>
+
+  // Frame command buffer / render encoder (id<...>), open across a frame's draws.
+  void* frame_command_buffer_ = nullptr;
+  void* frame_render_encoder_ = nullptr;
+  bool frame_open_ = false;
+
+  // Set when at least one draw rendered into the RT this frame, so IssueSwap
+  // presents the RT rather than the bring-up test pattern. Reset each swap.
   bool frame_has_render_ = false;
 
   // Number of swaps issued; drives the bring-up test pattern color so on-device
   // it's visually obvious that frames are flowing through the guest-output path.
   uint32_t swap_count_ = 0;
+  // Draws successfully encoded (across the whole run) — logged periodically so
+  // on-device we can tell real geometry submission from the clear-only path.
+  uint32_t draw_count_ = 0;
+  uint32_t draw_skip_count_ = 0;
 };
 
 }  // namespace metal

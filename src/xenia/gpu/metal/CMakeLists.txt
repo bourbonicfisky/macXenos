@@ -36,6 +36,9 @@ add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_pipeline_cache.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_render_target_cache.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_memory.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_upload_arena.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/ir_runtime_impl.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
 )
 target_include_directories(xenia-gpu-metal-backend PUBLIC ${PROJECT_SOURCE_DIR}/src)
