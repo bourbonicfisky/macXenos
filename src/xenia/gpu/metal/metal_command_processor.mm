@@ -202,16 +202,26 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   null_buffer_ = (__bridge_retained void*)null_buffer;
 
   // 1x1 null texture + default sampler so unbound bindless samples are safe.
+  // Bring-up diagnostic: fill it mid-gray (not black) so geometry that samples
+  // still-unimplemented textures shows up as visible gray shapes instead of
+  // rendering black — proving the geometry is there and the gap is the texture
+  // cache. (Turns black post-process composites gray.)
   MTLTextureDescriptor* null_desc = [MTLTextureDescriptor
       texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                    width:1
                                   height:1
                                mipmapped:NO];
   null_desc.usage = MTLTextureUsageShaderRead;
+  null_desc.storageMode = MTLStorageModeShared;
   id<MTLTexture> null_texture = [device newTextureWithDescriptor:null_desc];
   if (!null_texture) {
     return false;
   }
+  uint8_t gray_pixel[4] = {128, 128, 128, 255};
+  [null_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                  mipmapLevel:0
+                    withBytes:gray_pixel
+                  bytesPerRow:4];
   null_texture_ = (__bridge_retained void*)null_texture;
   id<MTLSamplerState> null_sampler =
       [device newSamplerStateWithDescriptor:[[MTLSamplerDescriptor alloc] init]];
@@ -320,44 +330,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   [encoder setCullMode:MTLCullModeNone];
-
-  // Diagnostic magenta triangle (no argument buffers). Proves draws into this
-  // encoder reach the RT independently of the guest-shader binding.
-  id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
-  if (!debug_triangle_pipeline_) {
-    NSString* src = @R"METAL(
-      #include <metal_stdlib>
-      using namespace metal;
-      vertex float4 dbg_vs(uint vid [[vertex_id]]) {
-        float2 p[3] = { float2(-0.9, -0.9), float2(0.9, -0.9), float2(0.0, 0.9) };
-        return float4(p[vid], 0.0, 1.0);
-      }
-      fragment float4 dbg_fs() { return float4(1.0, 0.0, 1.0, 1.0); }
-    )METAL";
-    NSError* err = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
-    if (lib) {
-      MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
-      d.vertexFunction = [lib newFunctionWithName:@"dbg_vs"];
-      d.fragmentFunction = [lib newFunctionWithName:@"dbg_fs"];
-      d.colorAttachments[0].pixelFormat =
-          (MTLPixelFormat)MetalRenderTargetCache::kColorFormat;
-      id<MTLRenderPipelineState> ps =
-          [device newRenderPipelineStateWithDescriptor:d error:&err];
-      if (ps) {
-        debug_triangle_pipeline_ = (__bridge_retained void*)ps;
-      } else {
-        XELOGE("MetalCommandProcessor: debug pipeline failed: {}",
-               err ? [[err localizedDescription] UTF8String] : "?");
-      }
-    }
-  }
-  if (debug_triangle_pipeline_) {
-    [encoder setRenderPipelineState:
-                 (__bridge id<MTLRenderPipelineState>)debug_triangle_pipeline_];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-  }
-
   frame_command_buffer_ = (__bridge_retained void*)command_buffer;
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
