@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_command_processor.h"
 
+#import <Metal/Metal.h>
+
 // Headers required by the PM4 execute-loop template included at the bottom of
 // this file (mirrors the generic set vulkan_command_processor.cc pulls in).
 #include "xenia/base/logging.h"
@@ -22,7 +24,9 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/ui/metal/metal_presenter.h"
 #include "xenia/ui/metal/metal_provider.h"
+#include "xenia/ui/presenter.h"
 
 namespace xe {
 namespace gpu {
@@ -64,7 +68,64 @@ void MetalCommandProcessor::ShutdownContext() {
 
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
-                                      uint32_t frontbuffer_height) {}
+                                      uint32_t frontbuffer_height) {
+  // Bring-up slice: prove the guest -> swap -> present path end-to-end before
+  // any real render target exists. We don't yet read the guest frontbuffer; we
+  // just fill the mailbox texture with a per-frame test color so the window
+  // visibly cycles (blue -> cycling color) when frames flow.
+  ui::Presenter* presenter = graphics_system_->presenter();
+  if (!presenter) {
+    return;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  if (!provider || !provider->command_queue()) {
+    return;
+  }
+  id<MTLCommandQueue> queue =
+      (__bridge id<MTLCommandQueue>)provider->command_queue();
+
+  uint32_t width = frontbuffer_width ? frontbuffer_width : 1280;
+  uint32_t height = frontbuffer_height ? frontbuffer_height : 720;
+  uint32_t count = swap_count_++;
+  if (count == 0 || (count % 60) == 0) {
+    XELOGI("MetalCommandProcessor: IssueSwap #{} ({}x{}, ptr {:08X})", count,
+           width, height, frontbuffer_ptr);
+  }
+  // Cycle a color so motion is obvious on-device.
+  double t = double(count % 120) / 120.0;
+  double r = t;
+  double g = 1.0 - t;
+  double b = 0.5;
+
+  auto refresher =
+      [&](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+    auto& metal_context =
+        static_cast<xe::ui::metal::MetalGuestOutputRefreshContext&>(context);
+    id<MTLTexture> texture =
+        (__bridge id<MTLTexture>)metal_context.target_texture();
+    if (!texture) {
+      return false;
+    }
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    MTLRenderPassDescriptor* pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = texture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(r, g, b, 1.0);
+    id<MTLRenderCommandEncoder> encoder =
+        [command_buffer renderCommandEncoderWithDescriptor:pass];
+    [encoder endEncoding];
+    [command_buffer commit];
+    // The presenter samples this texture from the UI thread later; make sure
+    // the write is done before we report the frame ready.
+    [command_buffer waitUntilCompleted];
+    return true;
+  };
+  presenter->RefreshGuestOutput(width, height, /*aspect_x=*/16,
+                                /*aspect_y=*/9, refresher);
+}
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
                                           uint32_t guest_address,

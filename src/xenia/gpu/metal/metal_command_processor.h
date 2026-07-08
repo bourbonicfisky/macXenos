@@ -64,6 +64,10 @@ class MetalCommandProcessor : public CommandProcessor {
   void InitializeTrace() override;
 
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
+
+  // Number of swaps issued; drives the bring-up test pattern color so on-device
+  // it's visually obvious that frames are flowing through the guest-output path.
+  uint32_t swap_count_ = 0;
 };
 
 }  // namespace metal

@@ -33,7 +33,7 @@ xe_target_defaults(xenia-gpu-metal-shader-translate-spike)
 # lean; links xenia-gpu (CommandProcessor base) and xenia-ui.
 add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_graphics_system.cc
-  ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_pipeline_cache.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
 )

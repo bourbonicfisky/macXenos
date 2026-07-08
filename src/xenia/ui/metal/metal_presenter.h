@@ -10,6 +10,7 @@
 #ifndef XENIA_UI_METAL_METAL_PRESENTER_H_
 #define XENIA_UI_METAL_METAL_PRESENTER_H_
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,23 @@
 namespace xe {
 namespace ui {
 namespace metal {
+
+// Refresh context handed to the guest-output refresher (the command processor's
+// IssueSwap). Exposes the mailbox MTLTexture the producer must fill with the
+// current frontbuffer. Derives from the base context so the refresher can
+// static_cast to reach target_texture(). Metal objects stay opaque (void*).
+class MetalGuestOutputRefreshContext : public Presenter::GuestOutputRefreshContext {
+ public:
+  MetalGuestOutputRefreshContext(bool& is_8bpc_out_ref, void* target_texture)
+      : GuestOutputRefreshContext(is_8bpc_out_ref),
+        target_texture_(target_texture) {}
+
+  // id<MTLTexture> to write the current frontbuffer into. Not owned.
+  void* target_texture() const { return target_texture_; }
+
+ private:
+  void* target_texture_;
+};
 
 // Phase 2b.3 Metal presenter. Owns a CAMetalLayer connection and presents a
 // cleared drawable each frame. Guest-output blitting (showing the actual game
@@ -63,6 +81,15 @@ class MetalPresenter : public Presenter {
         device_(device),
         command_queue_(command_queue) {}
 
+  // Ensures the mailbox texture at `index` is an `width`x`height` RGBA8 render
+  // target usable as a shader input. Recreated on size change. Returns the
+  // id<MTLTexture> (as void*), or nullptr on failure.
+  void* EnsureGuestOutputTexture(uint32_t index, uint32_t width,
+                                 uint32_t height);
+  // Lazily builds the fullscreen-blit pipeline (samples the guest output into
+  // the drawable). Returns false on compile failure.
+  bool EnsureBlitPipeline();
+
   // id<MTLDevice> / id<MTLCommandQueue>, owned by the provider.
   void* device_ = nullptr;
   void* command_queue_ = nullptr;
@@ -74,6 +101,17 @@ class MetalPresenter : public Presenter {
   void* metal_layer_ = nullptr;
   uint32_t surface_width_ = 0;
   uint32_t surface_height_ = 0;
+
+  // Guest-output mailbox images (id<MTLTexture>, retained), one per mailbox
+  // slot, plus their current sizes so we can detect a resolution change.
+  std::array<void*, kGuestOutputMailboxSize> guest_output_textures_{};
+  std::array<uint32_t, kGuestOutputMailboxSize> guest_output_texture_widths_{};
+  std::array<uint32_t, kGuestOutputMailboxSize> guest_output_texture_heights_{};
+
+  // Fullscreen textured-blit pipeline + sampler (id<MTLRenderPipelineState> /
+  // id<MTLSamplerState>, retained), built on first guest-output paint.
+  void* blit_pipeline_state_ = nullptr;
+  void* blit_sampler_ = nullptr;
 };
 
 }  // namespace metal
