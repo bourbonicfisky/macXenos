@@ -14,6 +14,11 @@ if(XENIA_BUILD_TESTS)
   add_subdirectory(testing)
 endif()
 
+# Experimental native-Metal shader path (Apple only, opt-in).
+if(APPLE AND XENIA_GPU_METAL)
+  add_subdirectory(metal)
+endif()
+
 if(XENIA_BUILD_MISC)
   # Shader compiler tool
   add_executable(xenia-gpu-shader-compiler

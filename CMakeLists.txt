@@ -40,6 +40,9 @@ message(STATUS "Target architecture: XE_TARGET_AARCH64=${XE_TARGET_AARCH64} XE_T
 # Options
 option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
+# Experimental native-Metal shader path (Apple only). Off by default: it triggers
+# the heavy nested-LLVM dxilconv build. See openspec/changes/reduce-apple-gpu-frametime.
+option(XENIA_GPU_METAL "Build the experimental native Metal shader path (Apple)" OFF)
 
 # Toggle profiler
 add_compile_definitions(XE_OPTION_PROFILING=0)

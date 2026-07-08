@@ -834,3 +834,114 @@ if(WIN32)
 endif()
 target_link_libraries(libavformat PRIVATE libavutil libavcodec)
 ffmpeg_common(libavformat)
+
+# ==============================================================================
+# Metal Shader Converter and dxilconv (Apple only, experimental)
+# Native-Metal shader path: DXBC -> DXIL (dxilconv) -> metallib (Metal Shader
+# Converter). Opt-in via -DXENIA_GPU_METAL=ON; the dxilconv target is a heavy
+# nested-LLVM build. See openspec/changes/reduce-apple-gpu-frametime.
+# ==============================================================================
+if(APPLE AND XENIA_GPU_METAL)
+  # --- Metal Shader Converter (prebuilt Apple dylib) ------------------------
+  set(_xe_msc_root "${CMAKE_CURRENT_SOURCE_DIR}/metal-shader-converter")
+  set(_xe_msc_dylib "${_xe_msc_root}/lib/libmetalirconverter.dylib")
+  if(NOT EXISTS "${_xe_msc_dylib}")
+    message(FATAL_ERROR "Metal Shader Converter dylib not found at ${_xe_msc_dylib}")
+  endif()
+  add_library(xenia-third-party-metal-shader-converter SHARED IMPORTED GLOBAL)
+  set_target_properties(xenia-third-party-metal-shader-converter PROPERTIES
+    IMPORTED_CONFIGURATIONS "Release"
+    IMPORTED_LOCATION "${_xe_msc_dylib}"
+    IMPORTED_LOCATION_RELEASE "${_xe_msc_dylib}"
+    INTERFACE_INCLUDE_DIRECTORIES
+      "${_xe_msc_root}/include;${_xe_msc_root}/include/metal_irconverter;${_xe_msc_root}/include/metal_irconverter_runtime"
+    INTERFACE_COMPILE_DEFINITIONS
+      "METAL_SHADER_CONVERTER_AVAILABLE;IR_RUNTIME_METALCPP")
+
+  # --- dxilconv (built from the DXC fork) -----------------------------------
+  set(_xe_dxilconv_root "${CMAKE_CURRENT_SOURCE_DIR}/DirectXShaderCompiler")
+  set(_xe_dxilconv_headers_root "${CMAKE_CURRENT_SOURCE_DIR}/DirectX-Headers/include")
+
+  # The fork force-enables SPIR-V codegen on non-Windows, defeating
+  # -DENABLE_SPIRV_CODEGEN=OFF and requiring SPIRV-Tools submodules dxilconv does
+  # not need. Self-apply the opt-out patch if the submodule is at unpatched HEAD
+  # (idempotent; avoids committing to the fork for the spike).
+  file(READ "${_xe_dxilconv_root}/CMakeLists.txt" _xe_dxc_cml)
+  string(FIND "${_xe_dxc_cml}" "XE_DXILCONV_NO_SPIRV" _xe_dxc_patched)
+  if(_xe_dxc_patched EQUAL -1)
+    message(STATUS "Applying dxc-fork-spirv-optout.patch to DirectXShaderCompiler")
+    execute_process(
+      COMMAND git -C "${_xe_dxilconv_root}" apply
+              "${PROJECT_SOURCE_DIR}/openspec/changes/reduce-apple-gpu-frametime/dxc-fork-spirv-optout.patch"
+      RESULT_VARIABLE _xe_dxc_patch_rc)
+    if(NOT _xe_dxc_patch_rc EQUAL 0)
+      message(FATAL_ERROR "Failed to apply dxc-fork-spirv-optout.patch (rc=${_xe_dxc_patch_rc})")
+    endif()
+  endif()
+
+  if(XE_TARGET_X86_64)
+    set(_xe_dxilconv_build_dir "${_xe_dxilconv_root}/build_dxilconv_macos_x86_64")
+    set(_xe_dxilconv_arch "x86_64")
+    set(_xe_dxilconv_triple "x86_64-apple-darwin")
+  else()
+    set(_xe_dxilconv_build_dir "${_xe_dxilconv_root}/build_dxilconv_macos")
+    set(_xe_dxilconv_arch "arm64")
+    set(_xe_dxilconv_triple "arm64-apple-darwin")
+  endif()
+  set(_xe_dxilconv_dylib "${_xe_dxilconv_build_dir}/lib/libdxilconv.dylib")
+  # CMake's bare --parallel becomes an unbounded make -j with Unix Makefiles on
+  # some hosts; DXC spawns large native TableGen tools, so keep it bounded.
+  set(_xe_dxilconv_build_jobs 2)
+
+  add_custom_command(
+    OUTPUT "${_xe_dxilconv_dylib}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_xe_dxilconv_build_dir}"
+    COMMAND "${CMAKE_COMMAND}" -G "Unix Makefiles"
+            -S "${_xe_dxilconv_root}" -B "${_xe_dxilconv_build_dir}"
+            "-DD3D12_INCLUDE_DIR=${_xe_dxilconv_headers_root}/directx"
+            "-DDXGI_INCLUDE_DIR=${_xe_dxilconv_headers_root}/directx"
+            "-DWSL_INCLUDE_DIR=${_xe_dxilconv_headers_root}/wsl"
+            -DCMAKE_BUILD_TYPE=Release
+            "-DCMAKE_OSX_ARCHITECTURES=${_xe_dxilconv_arch}"
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            -DLLVM_TARGETS_TO_BUILD=None
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=
+            "-DLLVM_DEFAULT_TARGET_TRIPLE=${_xe_dxilconv_triple}"
+            -DLLVM_INSTALL_TOOLCHAIN_ONLY=ON -DLLVM_INCLUDE_TOOLS=OFF
+            -DLLVM_BUILD_TOOLS=OFF -DLLVM_ENABLE_THREADS=ON -DLLVM_ENABLE_PIC=ON
+            -DLLVM_BUILD_32_BITS=OFF -DBUILD_SHARED_LIBS=OFF
+            -DLLVM_OPTIMIZED_TABLEGEN=ON -DLLVM_USE_INTEL_JITEVENTS=OFF
+            -DLLVM_ENABLE_ZLIB=ON -DLLVM_ENABLE_TERMINFO=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF -DCLANG_BUILD_EXAMPLES=OFF
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_DOCS=OFF -DCLANG_INCLUDE_TESTS=OFF
+            -DHLSL_INCLUDE_TESTS=OFF -DENABLE_SPIRV_CODEGEN=OFF
+            -DXE_DXILCONV_NO_SPIRV=ON -DSPIRV_BUILD_TESTS=OFF
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF
+            -DLLVM_ENABLE_BINDINGS=OFF -DLLVM_ENABLE_EH=ON -DLLVM_ENABLE_RTTI=ON
+            -DLLVM_REQUIRES_EH=ON -DLLVM_REQUIRES_RTTI=ON
+            -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++
+            -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON
+            -DCMAKE_CXX_EXTENSIONS=OFF "-DCMAKE_C_FLAGS="
+            "-DCMAKE_CXX_FLAGS=-stdlib=libc++ -Wno-unknown-warning-option -Wno-deprecated-declarations -Wno-deprecated -Wno-deprecated-literal-operator -Wno-invalid-specialization -Wno-nontrivial-memcall"
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    COMMAND "${CMAKE_COMMAND}" --build "${_xe_dxilconv_build_dir}"
+            --target dxilconv --config Release --parallel ${_xe_dxilconv_build_jobs}
+    DEPENDS
+      "${_xe_dxilconv_root}/projects/dxilconv/include/DxbcConverter.h"
+      "${_xe_dxilconv_root}/projects/dxilconv/tools/dxilconv/dxilconv_unix.cpp"
+      "${_xe_dxilconv_root}/projects/dxilconv/tools/dxbc2dxil/dxbc2dxil_unix.cpp"
+    COMMENT "Building dxilconv (DXBC->DXIL) for the native Metal shader path"
+    VERBATIM)
+  add_custom_target(xenia-third-party-dxilconv-build
+    DEPENDS "${_xe_dxilconv_dylib}")
+
+  add_library(xenia-third-party-dxilconv SHARED IMPORTED GLOBAL)
+  add_dependencies(xenia-third-party-dxilconv xenia-third-party-dxilconv-build)
+  set_target_properties(xenia-third-party-dxilconv PROPERTIES
+    IMPORTED_CONFIGURATIONS "Release"
+    IMPORTED_LOCATION "${_xe_dxilconv_dylib}"
+    IMPORTED_LOCATION_RELEASE "${_xe_dxilconv_dylib}"
+    INTERFACE_INCLUDE_DIRECTORIES
+      "${_xe_dxilconv_root}/include;${_xe_dxilconv_root}/projects/dxilconv/include")
+endif()
