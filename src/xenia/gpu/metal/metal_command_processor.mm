@@ -381,7 +381,7 @@ static void* GetDebugSolidPipeline(
     NSString* src = @R"METAL(
       #include <metal_stdlib>
       using namespace metal;
-      fragment float4 solid_fs() { return float4(1.0, 0.85, 0.0, 1.0); }
+      fragment float4 solid_fs(constant float4& c [[buffer(8)]]) { return c; }
     )METAL";
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
@@ -737,6 +737,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  if (kDebugSolidFragment) {
+    // Per-vertex-shader color so distinct draw types show as distinct regions:
+    // many colors = real structured scene geometry, one flat color = a single
+    // fullscreen quad covering everything.
+    uintptr_t p = reinterpret_cast<uintptr_t>(vs_translation->metal_function());
+    uint32_t h = uint32_t(p * 2654435761u);
+    float debug_color[4] = {0.2f + 0.8f * ((h & 0xFF) / 255.0f),
+                            0.2f + 0.8f * (((h >> 8) & 0xFF) / 255.0f),
+                            0.2f + 0.8f * (((h >> 16) & 0xFF) / 255.0f), 1.0f};
+    [encoder setFragmentBytes:debug_color length:sizeof(debug_color) atIndex:8];
+  }
   id<MTLBuffer> ab_buffer = (__bridge id<MTLBuffer>)ab_alloc.buffer;
   [encoder setVertexBuffer:ab_buffer
                     offset:ab_alloc.offset
