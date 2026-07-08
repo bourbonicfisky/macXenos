@@ -509,7 +509,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         prim_type == xenos::PrimitiveType::kLineStrip) {
       flags |= DxbcShaderTranslator::kSysFlag_PrimitiveLine;
     }
+    // Alpha test: the compare function is a 3-bit (less|equal|greater) mask in
+    // the flags. Leaving it 0 means kNever -> the pixel shader discards EVERY
+    // fragment. When alpha test is disabled it must be kAlways (pass all).
+    auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+    xenos::CompareFunction alpha_test_function =
+        rb_colorcontrol.alpha_test_enable ? rb_colorcontrol.alpha_func
+                                          : xenos::CompareFunction::kAlways;
+    flags |= uint32_t(alpha_test_function)
+             << DxbcShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
     system_constants.flags = flags;
+    system_constants.alpha_test_reference =
+        regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
     // Index/vfetch helpers used by the vertex shader.
     xenos::Endian index_endian =
         index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone;
