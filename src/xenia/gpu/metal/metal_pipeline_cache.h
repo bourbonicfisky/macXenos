@@ -46,6 +46,15 @@ class MetalPipelineCache {
   // the translation produced a usable function. Idempotent per translation.
   bool TranslateShader(MetalShader::MetalTranslation& translation);
 
+  // Builds (or returns the cached) id<MTLRenderPipelineState> for a translated
+  // vertex + pixel function pair and the given attachment formats. The format
+  // values are MTLPixelFormat. Returns null on failure. The pixel translation
+  // may be null (depth-only). Both translations must already have functions.
+  void* GetOrCreateRenderPipelineState(MetalShader::MetalTranslation* vertex,
+                                       MetalShader::MetalTranslation* pixel,
+                                       uint64_t color_pixel_format,
+                                       uint64_t depth_pixel_format);
+
   DxbcShaderTranslator* shader_translator() const {
     return shader_translator_.get();
   }
@@ -59,6 +68,10 @@ class MetalPipelineCache {
 
   // Owns the loaded shaders, keyed by ucode hash.
   std::unordered_map<uint64_t, MetalShader*> shaders_;
+
+  // Owns id<MTLRenderPipelineState> (retained), keyed by function+format hash.
+  // A null value caches a known-failed combination.
+  std::unordered_map<uint64_t, void*> render_pipeline_states_;
 };
 
 }  // namespace metal

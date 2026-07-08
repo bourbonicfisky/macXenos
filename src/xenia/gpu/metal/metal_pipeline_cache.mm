@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 
+#import <Metal/Metal.h>
+
 #include <string>
 #include <utility>
 
@@ -45,6 +47,14 @@ bool MetalPipelineCache::Initialize() {
 }
 
 void MetalPipelineCache::Shutdown() {
+  for (auto& pair : render_pipeline_states_) {
+    if (pair.second) {
+      id<MTLRenderPipelineState> state =
+          (__bridge_transfer id<MTLRenderPipelineState>)pair.second;
+      (void)state;
+    }
+  }
+  render_pipeline_states_.clear();
   for (auto& pair : shaders_) {
     delete pair.second;
   }
@@ -117,12 +127,58 @@ bool MetalPipelineCache::TranslateShader(
            shader.ucode_data_hash());
     return false;
   }
-
-  XELOGGPU("MetalPipelineCache: translated shader {:016X} ({} -> {} metallib bytes)",
-           shader.ucode_data_hash(),
-           shader.type() == xenos::ShaderType::kVertex ? "VS" : "PS",
-           uint32_t(metallib.size()));
   return true;
+}
+
+void* MetalPipelineCache::GetOrCreateRenderPipelineState(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, uint64_t color_pixel_format,
+    uint64_t depth_pixel_format) {
+  if (!vertex || !vertex->has_metal_function()) {
+    return nullptr;
+  }
+
+  // Key on the identity of the host functions plus the attachment formats. The
+  // functions are stable for a given translation, so their pointers are a valid
+  // identity within one run.
+  struct KeyBytes {
+    void* vs;
+    void* ps;
+    uint64_t color;
+    uint64_t depth;
+  } key_bytes{vertex->metal_function(),
+              pixel ? pixel->metal_function() : nullptr, color_pixel_format,
+              depth_pixel_format};
+  uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
+  auto it = render_pipeline_states_.find(key);
+  if (it != render_pipeline_states_.end()) {
+    return it->second;
+  }
+
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLRenderPipelineDescriptor* desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
+  if (pixel && pixel->has_metal_function()) {
+    desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
+  }
+  desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
+  if (depth_pixel_format != MTLPixelFormatInvalid) {
+    desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+  }
+
+  NSError* error = nil;
+  id<MTLRenderPipelineState> state =
+      [device newRenderPipelineStateWithDescriptor:desc error:&error];
+  if (!state) {
+    XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
+           error ? [[error localizedDescription] UTF8String] : "unknown");
+    render_pipeline_states_.emplace(key, nullptr);
+    return nullptr;
+  }
+  void* state_ptr = (__bridge_retained void*)state;
+  render_pipeline_states_.emplace(key, state_ptr);
+  return state_ptr;
 }
 
 }  // namespace metal
