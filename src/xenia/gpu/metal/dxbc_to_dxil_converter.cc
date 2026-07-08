@@ -18,11 +18,30 @@
 // pulls in the WinAdapter COM shim (__EMULATE_UUID, CoTaskMemFree=free, etc.).
 #include "DxbcConverter.h"
 
-// On the emulated-UUID path the linker needs the IUnknown uuid definition in
-// exactly one translation unit of the consumer.
+// On the emulated-UUID path (non-Windows) libdxilconv does not export its COM
+// shim symbols, so the consumer must supply them in exactly one translation
+// unit: UuidStrHash (whose algorithm MUST match the one compiled into the dylib,
+// WinAdapter.cpp, or __uuidof() values won't match the dylib's internal IIDs),
+// the IUnknown uuid definition, and the CLSID value (declaration-only in the
+// header for non-Windows).
 #if !defined(_WIN32) && defined(__EMULATE_UUID)
+size_t UuidStrHash(const char* k) {
+  long h = 0;
+  while (*k) {
+    h = (h << 4) + *(k++);
+    long g = h & 0xF0000000L;
+    if (g != 0) h ^= g >> 24;
+    h &= ~g;
+  }
+  return h;
+}
 DEFINE_CROSS_PLATFORM_UUIDOF(IUnknown)
 #endif
+
+namespace {
+const CLSID kClsidDxbcConverter = {
+    0x4900391e, 0xb752, 0x4edd, {0xa8, 0x85, 0x6f, 0xb7, 0x6e, 0x25, 0xad, 0xdb}};
+}  // namespace
 
 namespace xe {
 namespace gpu {
@@ -80,7 +99,7 @@ bool DxbcToDxilConverter::Initialize(std::string* error_out) {
   // A create/release round-trip proves the library is present and the CLSID is
   // registered before any shader depends on it.
   IDxbcConverter* probe = nullptr;
-  HRESULT hr = DxcCreateInstance(CLSID_DxbcConverter, __uuidof(IDxbcConverter),
+  HRESULT hr = DxcCreateInstance(kClsidDxbcConverter, __uuidof(IDxbcConverter),
                                  reinterpret_cast<void**>(&probe));
   if (hr != S_OK || !probe) {
     is_available_ = false;
@@ -105,7 +124,7 @@ IDxbcConverter* DxbcToDxilConverter::GetThreadConverter(std::string* error_out) 
   if (tls.converter) {
     return tls.converter;
   }
-  HRESULT hr = DxcCreateInstance(CLSID_DxbcConverter, __uuidof(IDxbcConverter),
+  HRESULT hr = DxcCreateInstance(kClsidDxbcConverter, __uuidof(IDxbcConverter),
                                  reinterpret_cast<void**>(&tls.converter));
   if (hr != S_OK || !tls.converter) {
     tls.converter = nullptr;
