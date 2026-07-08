@@ -93,6 +93,15 @@ static int32_t GuestThreadQosClass(bool main_thread, int32_t guest_priority) {
 }
 #endif  // XE_PLATFORM_MAC
 
+DEFINE_bool(
+    guest_wait_profile, false,
+    "CPU-perf analysis (Layer 1 Piece B): per-guest-thread wait attribution. "
+    "Counts and times object blocking (event/mutant/semaphore/timer) vs "
+    "Sleep(0)/yield spin-polling, and records which objects each thread blocks "
+    "on. Dumped to the log at emulator shutdown. Default off (zero steady-state "
+    "cost). Use it to find WHAT a dependency-bound guest thread waits on.",
+    "CPU");
+
 #if 0
 DEFINE_int64(stack_size_multiplier_hack, 1,
              "A hack for games with setjmp/longjmp issues.", "Kernel");
@@ -1182,8 +1191,17 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
 
   timeout_ms = Clock::ScaleGuestDurationMillis(timeout_ms);
   if (alertable) {
+    const bool prof = cvars::guest_wait_profile;
+    const auto sleep_start = prof ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
     auto result =
         xe::threading::AlertableSleep(std::chrono::milliseconds(timeout_ms));
+    if (prof) {
+      NoteAlertableSleep(
+          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - sleep_start)
+                       .count()));
+    }
     switch (result) {
       default:
       case xe::threading::SleepResult::kSuccess:
@@ -1196,6 +1214,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
       if (cvars::spin0_sleep_us > 0) {
         // Diagnostic override: fixed NanoSleep on every Sleep(0) (A/B knob).
         xe::threading::NanoSleep(cvars::spin0_sleep_us * 1000);
+        NoteBackoffSleep(uint64_t(cvars::spin0_sleep_us) * 1000);
       } else {
 #if XE_PLATFORM_MAC
         // Adaptive busy-poll backoff (macOS ship fix), applied to ALL Sleep(0)
@@ -1220,28 +1239,133 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
           spin0_last_ms = now_ms;
           if (++spin0_run <= kSpin0YieldBurst) {
             xe::threading::MaybeYield();
+            NoteYield();
           } else {
             xe::threading::NanoSleep(backoff_us * 1000);
+            NoteBackoffSleep(uint64_t(backoff_us) * 1000);
           }
         } else if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
           xe::threading::NanoSleep(100);
+          NoteBackoffSleep(100);
         } else {
           xe::threading::MaybeYield();
+          NoteYield();
         }
 #else
         if (priority_ <= xe::threading::ThreadPriority::kBelowNormal) {
           xe::threading::NanoSleep(100);
+          NoteBackoffSleep(100);
         } else {
           xe::threading::MaybeYield();
+          NoteYield();
         }
 #endif
       }
     } else {
       xe::threading::Sleep(std::chrono::milliseconds(timeout_ms));
+      NoteTimedDelay(uint64_t(timeout_ms) * 1000000ull);
     }
   }
 
   return X_STATUS_SUCCESS;
+}
+
+namespace {
+const char* XObjectTypeName(XObject::Type type) {
+  switch (type) {
+    case XObject::Type::Event:
+      return "Event";
+    case XObject::Type::Mutant:
+      return "Mutant";
+    case XObject::Type::Semaphore:
+      return "Semaphore";
+    case XObject::Type::Timer:
+      return "Timer";
+    case XObject::Type::Thread:
+      return "Thread";
+    case XObject::Type::File:
+      return "File";
+    case XObject::Type::IOCompletion:
+      return "IOCompletion";
+    case XObject::Type::NotifyListener:
+      return "NotifyListener";
+    default:
+      return "Object";
+  }
+}
+}  // namespace
+
+void XThread::NoteObjectWait(XObject* object, uint64_t blocked_ns,
+                             bool timed_out) {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  guest_wait_stats_.object_wait_count.fetch_add(1, std::memory_order_relaxed);
+  guest_wait_stats_.object_wait_ns.fetch_add(blocked_ns,
+                                             std::memory_order_relaxed);
+  if (timed_out) {
+    guest_wait_stats_.object_timeout_count.fetch_add(1,
+                                                     std::memory_order_relaxed);
+  }
+  if (!object) {
+    return;
+  }
+  const uint64_t key =
+      (uint64_t(static_cast<uint32_t>(object->type())) << 32) |
+      uint32_t(object->handle());
+  std::lock_guard<std::mutex> lock(thread_lock_);
+  auto& agg = object_wait_breakdown_[key];
+  if (agg.label.empty()) {
+    const std::string& name = object->name();
+    agg.label = fmt::format("{}:{:08X}{}{}", XObjectTypeName(object->type()),
+                            uint32_t(object->handle()),
+                            name.empty() ? "" : " ", name);
+  }
+  agg.count++;
+  agg.ns += blocked_ns;
+}
+
+void XThread::NoteYield() {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  guest_wait_stats_.yield_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void XThread::NoteBackoffSleep(uint64_t requested_ns) {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  guest_wait_stats_.backoff_count.fetch_add(1, std::memory_order_relaxed);
+  guest_wait_stats_.backoff_ns.fetch_add(requested_ns,
+                                         std::memory_order_relaxed);
+}
+
+void XThread::NoteTimedDelay(uint64_t requested_ns) {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  guest_wait_stats_.timed_delay_count.fetch_add(1, std::memory_order_relaxed);
+  guest_wait_stats_.timed_delay_ns.fetch_add(requested_ns,
+                                             std::memory_order_relaxed);
+}
+
+void XThread::NoteAlertableSleep(uint64_t slept_ns) {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  guest_wait_stats_.alertable_count.fetch_add(1, std::memory_order_relaxed);
+  guest_wait_stats_.alertable_ns.fetch_add(slept_ns, std::memory_order_relaxed);
+}
+
+std::vector<XThread::ObjWaitAgg> XThread::CopyObjectWaitBreakdown() {
+  std::vector<ObjWaitAgg> out;
+  std::lock_guard<std::mutex> lock(thread_lock_);
+  out.reserve(object_wait_breakdown_.size());
+  for (auto& kv : object_wait_breakdown_) {
+    out.push_back(kv.second);
+  }
+  return out;
 }
 
 struct ThreadSavedState {

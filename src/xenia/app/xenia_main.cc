@@ -559,6 +559,15 @@ bool EmulatorApp::OnInitialize() {
 void EmulatorApp::OnDestroy() {
   ShutdownEmulatorThreadFromUIThread();
 
+  // CPU-perf analysis (Layer 1 Piece B): dump the guest wait profile (no-op
+  // unless --guest_wait_profile) while guest threads are still registered. The
+  // app exits via std::quick_exit() below, which runs no destructors, so the
+  // dump must be triggered explicitly here rather than from ~Emulator().
+  if (emulator_ && emulator_->kernel_state()) {
+    emulator_->kernel_state()->StopAndDumpPcSampler();
+    emulator_->kernel_state()->DumpGuestWaitProfile();
+  }
+
   if (cvars::discord) {
     discord::DiscordPresence::Shutdown();
   }

@@ -179,6 +179,13 @@ Emulator::~Emulator() {
   audio_system_.reset();
   audio_media_player_.reset();
 
+  // Dump the guest wait profile (no-op unless --guest_wait_profile) while guest
+  // threads are still registered, before the kernel tears them down.
+  if (kernel_state_) {
+    kernel_state_->StopAndDumpPcSampler();
+    kernel_state_->DumpGuestWaitProfile();
+  }
+
   kernel_state_.reset();
   file_system_.reset();
 

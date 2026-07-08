@@ -12,6 +12,8 @@
 
 #include <atomic>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "xenia/base/mutex.h"
 #if !XE_PLATFORM_WIN32
@@ -467,6 +469,44 @@ class XThread : public XObject, public cpu::Thread {
   // simply restored to base_priority.
   void BoostOnWake(int32_t increment);
 
+  // --- Guest wait profiling (macOS CPU-perf analysis suite, Layer 1 Piece B).
+  // Behind --guest_wait_profile (default off; every Note* early-returns when
+  // off, so zero steady-state cost). Distinguishes real object blocking from
+  // Sleep(0)/yield spin-polling, so a dependency-bound guest thread (see the
+  // JC2 finding) can be attributed to WHAT it waits on, not just WHERE its code
+  // runs. Counters are per-thread atomics written by the owning thread; the
+  // object breakdown map is guarded by thread_lock_. Read at shutdown by
+  // KernelState::DumpGuestWaitProfile().
+  struct GuestWaitStats {
+    std::atomic<uint64_t> object_wait_count{0};
+    std::atomic<uint64_t> object_wait_ns{0};    // measured actual blocked time
+    std::atomic<uint64_t> object_timeout_count{0};
+    std::atomic<uint64_t> yield_count{0};        // Sleep(0) -> MaybeYield
+    std::atomic<uint64_t> backoff_count{0};      // Sleep(0) -> NanoSleep backoff
+    std::atomic<uint64_t> backoff_ns{0};         // requested backoff ns
+    std::atomic<uint64_t> timed_delay_count{0};  // Sleep(ms)
+    std::atomic<uint64_t> timed_delay_ns{0};     // requested delay ns
+    std::atomic<uint64_t> alertable_count{0};
+    std::atomic<uint64_t> alertable_ns{0};       // measured alertable sleep ns
+  };
+  struct ObjWaitAgg {
+    uint64_t count = 0;
+    uint64_t ns = 0;
+    std::string label;
+  };
+
+  // Attribute a completed object wait (event/mutant/semaphore/timer/...) to this
+  // thread. |object| is the waited-on XObject; |blocked_ns| the measured block.
+  void NoteObjectWait(XObject* object, uint64_t blocked_ns, bool timed_out);
+  void NoteYield();
+  void NoteBackoffSleep(uint64_t requested_ns);
+  void NoteTimedDelay(uint64_t requested_ns);
+  void NoteAlertableSleep(uint64_t slept_ns);
+
+  const GuestWaitStats& guest_wait_stats() const { return guest_wait_stats_; }
+  // Snapshot of per-object wait aggregates, taken under thread_lock_.
+  std::vector<ObjWaitAgg> CopyObjectWaitBreakdown();
+
   // Xbox thread IDs:
   // 0 - core 0, thread 0 - user
   // 1 - core 0, thread 1 - user
@@ -543,6 +583,11 @@ class XThread : public XObject, public cpu::Thread {
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
   uint64_t quantum_start_ms_ = 0;  // host uptime (ms) when quantum last reset
+
+  // Guest wait profiling (see the public Note*/guest_wait_stats accessors).
+  GuestWaitStats guest_wait_stats_;
+  // key = (uint64_t(XObject::Type) << 32) | X_HANDLE. Guarded by thread_lock_.
+  std::unordered_map<uint64_t, ObjWaitAgg> object_wait_breakdown_;
 
 #if !XE_PLATFORM_WIN32
   // Condition variable for thread self-suspension.

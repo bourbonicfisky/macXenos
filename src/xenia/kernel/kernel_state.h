@@ -11,9 +11,13 @@
 #define XENIA_KERNEL_KERNEL_STATE_H_
 
 #include <bitset>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <list>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "xenia/base/bit_map.h"
@@ -264,6 +268,28 @@ class KernelState {
 
   void RegisterThread(XThread* thread);
   void UnregisterThread(XThread* thread);
+
+  // CPU-perf analysis (Layer 1 Piece B): dump per-guest-thread wait attribution
+  // (object blocking vs Sleep(0)/yield spin-polling, and which objects each
+  // thread blocks on) to the log. No-op unless --guest_wait_profile is set.
+  // Called at emulator shutdown. Guest threads unregister and are destroyed on
+  // title teardown *before* this runs, so their stats are folded into
+  // exited_wait_snapshots_ as they leave threads_by_id_ (see
+  // AccumulateWaitProfile); this merges those with any still-live threads.
+  void DumpGuestWaitProfile();
+  // Fold a thread's final wait stats into exited_wait_snapshots_ just before it
+  // is removed from threads_by_id_ (called from every removal site while the
+  // thread object is still alive). No-op unless --guest_wait_profile is set.
+  void AccumulateWaitProfile(XThread* thread);
+
+  // CPU-perf analysis (Layer 1 Piece A): statistical PC sampler. Spawns an
+  // out-of-band thread that periodically suspends each registered thread, reads
+  // its PC, maps it back to a guest function via CodeCache::LookupFunction, and
+  // builds a per-function + per-thread on-CPU histogram. Answers WHERE the
+  // compute-bound threads run (the wait profiler answers WHAT they wait on).
+  // No-op unless --jit_sampler is set. Start early; stop+dump at shutdown.
+  void StartPcSampler();
+  void StopAndDumpPcSampler();
   void OnThreadExecute(XThread* thread);
   void OnThreadExit(XThread* thread);
   object_ref<XThread> GetThreadByID(uint32_t thread_id);
@@ -359,6 +385,59 @@ class KernelState {
   KernelVersion kernel_version_;
 
   xe::global_critical_region global_critical_region_;
+
+  // --- Guest wait profiling (--guest_wait_profile) accumulator. ---
+  // A guest thread's live wait counters live on the XThread and die with it on
+  // title teardown; these self-contained snapshots preserve them for the
+  // shutdown dump.
+  struct GuestWaitObjectAgg {
+    std::string label;
+    uint64_t count = 0;
+    uint64_t ns = 0;
+  };
+  struct GuestWaitSnapshot {
+    std::string name;
+    uint32_t thread_id = 0;
+    bool guest = false;
+    uint64_t object_wait_count = 0;
+    uint64_t object_wait_ns = 0;
+    uint64_t object_timeout_count = 0;
+    uint64_t yield_count = 0;
+    uint64_t backoff_count = 0;
+    uint64_t backoff_ns = 0;
+    uint64_t timed_delay_count = 0;
+    uint64_t timed_delay_ns = 0;
+    uint64_t alertable_count = 0;
+    uint64_t alertable_ns = 0;
+    std::vector<GuestWaitObjectAgg> objects;
+  };
+  GuestWaitSnapshot MakeWaitSnapshot(XThread* thread);
+  std::mutex wait_profile_mutex_;
+  std::vector<GuestWaitSnapshot> exited_wait_snapshots_;
+
+  // --- PC sampler (--jit_sampler) state. ---
+  struct PcFuncStat {
+    std::string name;
+    uint32_t guest_address = 0;
+    uint64_t count = 0;
+  };
+  struct PcThreadStat {
+    std::string name;
+    uint32_t thread_id = 0;
+    bool guest = false;
+    uint64_t total = 0;    // samples where the thread existed
+    uint64_t in_jit = 0;   // samples with PC inside the JIT code cache
+  };
+  void PcSamplerLoop();
+  void CollectPcSample();
+  std::thread pc_sampler_thread_;
+  std::atomic<bool> pc_sampler_running_{false};
+  bool pc_sampler_dumped_ = false;
+  std::mutex pc_sampler_mutex_;
+  std::unordered_map<uint32_t, PcFuncStat> pc_func_hist_;    // key: guest addr
+  std::unordered_map<uint32_t, PcThreadStat> pc_thread_hist_;  // key: thread id
+  std::unordered_map<uint32_t, std::string> pc_thread_names_;  // sampler-only
+  uint64_t pc_sampler_ticks_ = 0;
 
   // Must be guarded by the global critical region.
   util::ObjectTable object_table_;

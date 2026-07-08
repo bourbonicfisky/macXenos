@@ -24,8 +24,20 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
+DECLARE_bool(guest_wait_profile);  // defined in xthread.cc
+
 namespace xe {
 namespace kernel {
+
+// Attribute a completed object wait to the calling guest thread, if profiling
+// is on (--guest_wait_profile). |waited_ns| is measured host block time.
+static void ProfileObjectWait(XObject* object, uint64_t waited_ns,
+                              bool timed_out) {
+  auto current_thread = XThread::GetCurrentThread();
+  if (current_thread) {
+    current_thread->NoteObjectWait(object, waited_ns, timed_out);
+  }
+}
 
 XObject::XObject(Type type)
     : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
@@ -201,8 +213,19 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  const bool prof = cvars::guest_wait_profile;
+  const auto wait_start = prof ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  if (prof) {
+    const uint64_t waited_ns =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - wait_start)
+                     .count());
+    ProfileObjectWait(this, waited_ns,
+                      result == xe::threading::WaitResult::kTimeout);
+  }
 
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
@@ -235,9 +258,20 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  const bool prof = cvars::guest_wait_profile;
+  const auto wait_start = prof ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
   auto result = xe::threading::SignalAndWait(
       signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
       alertable ? true : false, timeout_ms);
+  if (prof) {
+    const uint64_t waited_ns =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - wait_start)
+                     .count());
+    ProfileObjectWait(wait_object, waited_ns,
+                      result == xe::threading::WaitResult::kTimeout);
+  }
 
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
@@ -280,6 +314,9 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
 
   X_STATUS status;
   uint32_t boost_increment = 0;
+  const bool prof = cvars::guest_wait_profile;
+  const auto wait_start = prof ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
   if (wait_type) {
     auto result = xe::threading::WaitAny(wait_handles, count,
                                          alertable ? true : false, timeout_ms);
@@ -331,6 +368,16 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         status = X_STATUS_ABANDONED_WAIT_0;
         break;
     }
+  }
+
+  if (prof && count > 0) {
+    const uint64_t waited_ns =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - wait_start)
+                     .count());
+    // Attribute a multi-wait to its first object as a representative; the
+    // per-thread aggregate counts capture the blocking regardless.
+    ProfileObjectWait(objects[0], waited_ns, status == X_STATUS_TIMEOUT);
   }
 
   // Apply priority boost if the thread actually blocked (not on

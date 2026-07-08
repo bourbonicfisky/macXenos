@@ -11,9 +11,25 @@
 
 #include "xenia/kernel/kernel_state.h"
 
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <vector>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
+
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/thread_act.h>
+#include <pthread.h>
+#endif
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -39,6 +55,20 @@ DEFINE_uint32(kernel_build_version, 1888, "Define current kernel version",
               "Kernel");
 
 DECLARE_string(cl);
+DECLARE_bool(guest_wait_profile);  // defined in xthread.cc
+
+DEFINE_bool(
+    jit_sampler, false,
+    "CPU-perf analysis (Layer 1 Piece A): statistical PC sampler. Periodically "
+    "suspends each guest/host thread, reads its PC, and maps it back to a guest "
+    "function via CodeCache::LookupFunction, building a per-function + "
+    "per-thread on-CPU histogram dumped at shutdown. Answers WHERE the "
+    "compute-bound threads run. macOS only; default off.",
+    "CPU");
+DEFINE_int32(jit_sampler_hz, 1000,
+             "PC sampler frequency in Hz when --jit_sampler is set (clamped "
+             "1..4000). Lower it if the sampler perturbs the measurement.",
+             "CPU");
 
 namespace xe {
 namespace kernel {
@@ -77,9 +107,22 @@ KernelState::KernelState(Emulator* emulator)
       kMemoryProtectRead | kMemoryProtectWrite);
 
   xenia_assert(fixed_alloc_worked);
+
+  // NB: the PC sampler is NOT started here. It starts lazily when the first
+  // guest thread registers (see RegisterThread), so it never suspends threads
+  // during the fragile emulator setup / title-launch sequence.
 }
 
 KernelState::~KernelState() {
+  // Safety net: make sure the PC sampler thread is stopped and joined before
+  // its std::thread member is destroyed (a joinable std::thread dtor calls
+  // std::terminate). StopAndDumpPcSampler normally does this at shutdown; this
+  // covers any path that skipped it.
+  pc_sampler_running_.store(false, std::memory_order_relaxed);
+  if (pc_sampler_thread_.joinable()) {
+    pc_sampler_thread_.join();
+  }
+
   SetExecutableModule(nullptr);
 
   if (dispatch_thread_running_) {
@@ -945,6 +988,8 @@ void KernelState::TerminateTitle() {
         global_lock.lock();
       }
 
+      // Preserve wait stats before the guest thread leaves the registry.
+      AccumulateWaitProfile(thread);
       // Erase it from the thread list.
       it = threads_by_id_.erase(it);
     } else {
@@ -968,6 +1013,7 @@ void KernelState::TerminateTitle() {
   executable_module_ = nullptr;
 
   if (XThread::IsInThread()) {
+    AccumulateWaitProfile(XThread::GetCurrentThread());
     threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
 
     // Now commit suicide (using Terminate, because we can't call into guest
@@ -980,14 +1026,308 @@ void KernelState::TerminateTitle() {
 void KernelState::RegisterThread(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   threads_by_id_[thread->thread_id()] = thread;
+  // Start the PC sampler once real guest execution begins (no-op unless
+  // --jit_sampler, and only starts once). Deferring to here keeps it out of the
+  // emulator setup / title-launch window entirely.
+  if (thread->is_guest_thread()) {
+    StartPcSampler();
+  }
 }
 
 void KernelState::UnregisterThread(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = threads_by_id_.find(thread->thread_id());
   if (it != threads_by_id_.end()) {
+    // Preserve the thread's wait stats before it leaves the registry (and is
+    // subsequently destroyed) so the shutdown dump can still see it.
+    AccumulateWaitProfile(it->second);
     threads_by_id_.erase(it);
   }
+}
+
+KernelState::GuestWaitSnapshot KernelState::MakeWaitSnapshot(XThread* thread) {
+  GuestWaitSnapshot s;
+  s.name = thread->thread_name_snapshot();
+  s.thread_id = thread->thread_id();
+  s.guest = thread->is_guest_thread();
+  const auto& w = thread->guest_wait_stats();
+  s.object_wait_count = w.object_wait_count.load();
+  s.object_wait_ns = w.object_wait_ns.load();
+  s.object_timeout_count = w.object_timeout_count.load();
+  s.yield_count = w.yield_count.load();
+  s.backoff_count = w.backoff_count.load();
+  s.backoff_ns = w.backoff_ns.load();
+  s.timed_delay_count = w.timed_delay_count.load();
+  s.timed_delay_ns = w.timed_delay_ns.load();
+  s.alertable_count = w.alertable_count.load();
+  s.alertable_ns = w.alertable_ns.load();
+  for (const auto& agg : thread->CopyObjectWaitBreakdown()) {
+    s.objects.push_back({agg.label, agg.count, agg.ns});
+  }
+  return s;
+}
+
+void KernelState::AccumulateWaitProfile(XThread* thread) {
+  if (!cvars::guest_wait_profile || !thread) {
+    return;
+  }
+  auto snapshot = MakeWaitSnapshot(thread);
+  std::lock_guard<std::mutex> lock(wait_profile_mutex_);
+  exited_wait_snapshots_.push_back(std::move(snapshot));
+}
+
+void KernelState::DumpGuestWaitProfile() {
+  if (!cvars::guest_wait_profile) {
+    return;
+  }
+  // Merge threads that already left the registry (guest title threads, folded
+  // into exited_wait_snapshots_ at teardown) with any still-live threads (the
+  // persistent host workers).
+  std::vector<GuestWaitSnapshot> all;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (auto& kv : threads_by_id_) {
+      all.push_back(MakeWaitSnapshot(kv.second));
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(wait_profile_mutex_);
+    for (const auto& s : exited_wait_snapshots_) {
+      all.push_back(s);
+    }
+  }
+
+  // Rank by total blocked/backoff time so the hot dependency-bound thread (the
+  // JC2 lever) sorts to the top.
+  std::sort(all.begin(), all.end(),
+            [](const GuestWaitSnapshot& a, const GuestWaitSnapshot& b) {
+              const uint64_t ka = a.object_wait_ns + a.backoff_ns;
+              const uint64_t kb = b.object_wait_ns + b.backoff_ns;
+              if (ka != kb) {
+                return ka > kb;
+              }
+              return a.yield_count > b.yield_count;
+            });
+
+  XELOGI("=== guest wait profile (--guest_wait_profile): {} threads ===",
+         all.size());
+  XELOGI(
+      "  per thread: obj=object-blocking waits, yield=Sleep(0)->sched_yield, "
+      "backoff=Sleep(0)->NanoSleep, timed=Sleep(ms), alert=alertable");
+  for (const auto& s : all) {
+    XELOGI(
+        "{}{} id={:08X}: obj(count={} time={:.1f}ms timeouts={}) "
+        "yield={} backoff(count={} time={:.1f}ms) "
+        "timed(count={} time={:.1f}ms) alert(count={} time={:.1f}ms)",
+        s.guest ? "[guest] " : "[host]  ", s.name, s.thread_id,
+        s.object_wait_count, s.object_wait_ns / 1e6, s.object_timeout_count,
+        s.yield_count, s.backoff_count, s.backoff_ns / 1e6, s.timed_delay_count,
+        s.timed_delay_ns / 1e6, s.alertable_count, s.alertable_ns / 1e6);
+    auto objects = s.objects;
+    std::sort(objects.begin(), objects.end(),
+              [](const GuestWaitObjectAgg& a, const GuestWaitObjectAgg& b) {
+                return a.ns > b.ns;
+              });
+    size_t shown = 0;
+    for (const auto& agg : objects) {
+      if (shown++ >= 6) {
+        break;
+      }
+      XELOGI("      waited-on {} count={} time={:.1f}ms", agg.label, agg.count,
+             agg.ns / 1e6);
+    }
+  }
+  XELOGI("=== end guest wait profile ===");
+}
+
+void KernelState::StartPcSampler() {
+#if XE_PLATFORM_MAC
+  if (!cvars::jit_sampler) {
+    return;
+  }
+  if (pc_sampler_running_.exchange(true)) {
+    return;  // already running
+  }
+  pc_sampler_thread_ = std::thread(&KernelState::PcSamplerLoop, this);
+#endif  // XE_PLATFORM_MAC
+}
+
+void KernelState::PcSamplerLoop() {
+#if XE_PLATFORM_MAC
+  const int hz = std::max(1, std::min(4000, cvars::jit_sampler_hz));
+  const auto period = std::chrono::microseconds(1000000 / hz);
+  while (pc_sampler_running_.load(std::memory_order_relaxed)) {
+    CollectPcSample();
+    std::this_thread::sleep_for(period);
+  }
+#endif  // XE_PLATFORM_MAC
+}
+
+void KernelState::CollectPcSample() {
+#if XE_PLATFORM_MAC
+  cpu::Processor* processor = processor_;
+  if (!processor) {
+    return;
+  }
+  cpu::backend::Backend* backend = processor->backend();
+  if (!backend) {
+    return;
+  }
+  cpu::backend::CodeCache* code_cache = backend->code_cache();
+  if (!code_cache) {
+    return;
+  }
+  const uint64_t code_base = code_cache->execute_base_address();
+  const uint64_t code_end = code_base + code_cache->total_size();
+
+  // Phase 1: snapshot each thread's Mach port under the global lock. Only the
+  // (integer) port, id and guest flag are copied; names are cached lazily so the
+  // steady-state path takes no allocation while holding the lock.
+  struct Target {
+    mach_port_t port;
+    uint32_t thread_id;
+    bool guest;
+  };
+  std::vector<Target> targets;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    targets.reserve(threads_by_id_.size());
+    for (auto& kv : threads_by_id_) {
+      XThread* thread = kv.second;
+      auto* host = thread->thread();
+      if (!host) {
+        continue;
+      }
+      pthread_t pth = reinterpret_cast<pthread_t>(host->native_handle());
+      if (!pth) {
+        continue;
+      }
+      mach_port_t port = pthread_mach_thread_np(pth);
+      if (port == MACH_PORT_NULL) {
+        continue;
+      }
+      const uint32_t id = thread->thread_id();
+      if (pc_thread_names_.find(id) == pc_thread_names_.end()) {
+        pc_thread_names_[id] = thread->thread_name_snapshot();
+      }
+      targets.push_back({port, id, thread->is_guest_thread()});
+    }
+  }
+
+  // Phase 2: suspend/read/resume with NO lock held and NO allocation between
+  // suspend and resume (only thread_get_state, a syscall, runs in that window);
+  // aggregate afterwards, when nothing is suspended.
+  for (const Target& t : targets) {
+    uint64_t pc = 0;
+    bool got = false;
+    if (thread_suspend(t.port) == KERN_SUCCESS) {
+#if XE_ARCH_ARM64
+      arm_thread_state64_t state;
+      mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+      if (thread_get_state(t.port, ARM_THREAD_STATE64,
+                           reinterpret_cast<thread_state_t>(&state),
+                           &count) == KERN_SUCCESS) {
+        pc = arm_thread_state64_get_pc(state);
+        got = true;
+      }
+#else
+      x86_thread_state64_t state;
+      mach_msg_type_number_t count = x86_THREAD_STATE64_COUNT;
+      if (thread_get_state(t.port, x86_THREAD_STATE64,
+                           reinterpret_cast<thread_state_t>(&state),
+                           &count) == KERN_SUCCESS) {
+        pc = state.__rip;
+        got = true;
+      }
+#endif
+      thread_resume(t.port);
+    }
+    if (!got) {
+      continue;
+    }
+
+    const bool in_jit = pc >= code_base && pc < code_end;
+    cpu::GuestFunction* fn = in_jit ? code_cache->LookupFunction(pc) : nullptr;
+
+    std::lock_guard<std::mutex> lock(pc_sampler_mutex_);
+    PcThreadStat& ts = pc_thread_hist_[t.thread_id];
+    if (ts.total == 0) {
+      ts.name = pc_thread_names_[t.thread_id];
+      ts.thread_id = t.thread_id;
+      ts.guest = t.guest;
+    }
+    ts.total++;
+    if (in_jit) {
+      ts.in_jit++;
+      const uint32_t key = fn ? fn->address() : 0;
+      PcFuncStat& fs = pc_func_hist_[key];
+      if (fs.count == 0) {
+        fs.name = fn ? fn->name() : "<jit-unmapped>";
+        fs.guest_address = key;
+      }
+      fs.count++;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(pc_sampler_mutex_);
+    pc_sampler_ticks_++;
+  }
+#endif  // XE_PLATFORM_MAC
+}
+
+void KernelState::StopAndDumpPcSampler() {
+#if XE_PLATFORM_MAC
+  if (!cvars::jit_sampler || pc_sampler_dumped_) {
+    return;
+  }
+  pc_sampler_dumped_ = true;
+  pc_sampler_running_.store(false, std::memory_order_relaxed);
+  if (pc_sampler_thread_.joinable()) {
+    pc_sampler_thread_.join();
+  }
+
+  std::lock_guard<std::mutex> lock(pc_sampler_mutex_);
+  std::vector<PcThreadStat> threads;
+  threads.reserve(pc_thread_hist_.size());
+  for (auto& kv : pc_thread_hist_) {
+    threads.push_back(kv.second);
+  }
+  std::sort(threads.begin(), threads.end(),
+            [](const PcThreadStat& a, const PcThreadStat& b) {
+              return a.in_jit > b.in_jit;
+            });
+  std::vector<PcFuncStat> funcs;
+  funcs.reserve(pc_func_hist_.size());
+  uint64_t total_jit = 0;
+  for (auto& kv : pc_func_hist_) {
+    funcs.push_back(kv.second);
+    total_jit += kv.second.count;
+  }
+  std::sort(funcs.begin(), funcs.end(),
+            [](const PcFuncStat& a, const PcFuncStat& b) {
+              return a.count > b.count;
+            });
+
+  XELOGI("=== jit pc sampler (--jit_sampler): {} ticks, {} in-JIT samples ===",
+         pc_sampler_ticks_, total_jit);
+  XELOGI("  per thread (in_jit% = fraction of samples running guest JIT code):");
+  for (const PcThreadStat& t : threads) {
+    XELOGI("  {}{} id={:08X}: samples={} in_jit={} ({:.1f}%)",
+           t.guest ? "[guest] " : "[host]  ", t.name, t.thread_id, t.total,
+           t.in_jit, t.total ? 100.0 * double(t.in_jit) / double(t.total) : 0.0);
+  }
+  XELOGI("  top guest functions by in-JIT sample share:");
+  size_t shown = 0;
+  for (const PcFuncStat& f : funcs) {
+    if (shown++ >= 30) {
+      break;
+    }
+    XELOGI("    {:5.1f}%  {} (guest {:08X}) samples={}",
+           total_jit ? 100.0 * double(f.count) / double(total_jit) : 0.0,
+           f.name.empty() ? "<unnamed>" : f.name, f.guest_address, f.count);
+  }
+  XELOGI("=== end jit pc sampler ===");
+#endif  // XE_PLATFORM_MAC
 }
 
 void KernelState::OnThreadExecute(XThread* thread) {
