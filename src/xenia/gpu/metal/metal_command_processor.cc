@@ -9,6 +9,19 @@
 
 #include "xenia/gpu/metal/metal_command_processor.h"
 
+// Headers required by the PM4 execute-loop template included at the bottom of
+// this file (mirrors the generic set vulkan_command_processor.cc pulls in).
+#include "xenia/base/logging.h"
+#include "xenia/base/profiling.h"
+#include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/packet_disassembler.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/shader.h"
+#include "xenia/gpu/xenos.h"
+#include "xenia/gpu/xenos_zpd_report.h"
+#include "xenia/kernel/user_module.h"
+
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -52,6 +65,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 bool MetalCommandProcessor::IssueCopy() { return true; }
 
 void MetalCommandProcessor::InitializeTrace() {}
+
+// Compile this backend's own copy of the PM4 execute loop, statically bound to
+// MetalCommandProcessor so its Issue*/LoadShader overrides are the ones called
+// (mirrors the vulkan/d3d12 backends; included inside the namespace).
+#define COMMAND_PROCESSOR MetalCommandProcessor
+#include "../pm4_command_processor_implement.h"
 
 }  // namespace metal
 }  // namespace gpu

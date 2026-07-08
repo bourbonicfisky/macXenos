@@ -23,6 +23,15 @@ namespace metal {
 // as the other backends; the draw/copy/shader paths are stubs for now (behaves
 // like the null backend) and are implemented in later phases.
 class MetalCommandProcessor : public CommandProcessor {
+ protected:
+  // Give this backend its own statically-bound PM4 packet chain so the execute
+  // loop calls MetalCommandProcessor's Issue*/LoadShader overrides instead of
+  // the base CommandProcessor stubs (whose IssueDraw returns false and logs
+  // "Failed in backend" for every draw). Mirrors the vulkan/d3d12 backends.
+#define OVERRIDING_BASE_CMDPROCESSOR
+#include "../pm4_command_processor_declare.h"
+#undef OVERRIDING_BASE_CMDPROCESSOR
+
  public:
   MetalCommandProcessor(MetalGraphicsSystem* graphics_system,
                         kernel::KernelState* kernel_state);
