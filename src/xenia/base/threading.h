@@ -428,6 +428,12 @@ class Thread : public WaitHandle {
     size_t stack_size = 4_MiB;
     bool create_suspended = false;
     int32_t initial_priority = 0;
+    // macOS only: Apple QoS class for the new thread (0 = none/default,
+    // 1 = user_initiated, 2 = user_interactive). Applied via
+    // pthread_attr_set_qos_class_np at creation; such threads then skip the
+    // SCHED_FIFO priority mapping so QoS governs P/E-core placement. Ignored on
+    // other platforms.
+    int32_t qos_class = 0;
   };
 
   // Creates a thread with the given parameters and calls the start routine from

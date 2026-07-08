@@ -19,6 +19,9 @@
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/resource.h>
+#if XE_PLATFORM_MAC
+#include <pthread/qos.h>
+#endif
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <algorithm>
@@ -824,6 +827,21 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         return false;
       }
     }
+#if XE_PLATFORM_MAC
+    // macOS: assign an Apple QoS class at creation so the scheduler can keep the
+    // thread on performance cores. Doing this at creation (vs a post-start
+    // pthread_set_qos_class_self_np) is what actually sticks, because once the
+    // thread is placed in SCHED_FIFO by the priority mapping it is opted out of
+    // QoS management (self-tag then returns EPERM). QoS-managed threads skip the
+    // SCHED_FIFO mapping in set_priority() below.
+    if (params.qos_class != 0) {
+      qos_class_t qos = params.qos_class == 2 ? QOS_CLASS_USER_INTERACTIVE
+                                              : QOS_CLASS_USER_INITIATED;
+      if (pthread_attr_set_qos_class_np(&attr, qos, 0) == 0) {
+        qos_managed_ = true;
+      }
+    }
+#endif
     if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
       pthread_attr_destroy(&attr);
       return false;
@@ -1014,6 +1032,14 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   }
 
   void set_priority(int new_priority) const {
+#if XE_PLATFORM_MAC
+    // A thread given an Apple QoS class at creation must not be moved into
+    // SCHED_FIFO: an explicit scheduling policy opts it out of QoS management on
+    // Darwin, undoing the P-core hint. Let QoS govern its placement.
+    if (qos_managed_) {
+      return;
+    }
+#endif
     WaitStarted();
     if (!fifo_failed_) {
       // Try real-time SCHED_FIFO for best priority control.
@@ -1233,6 +1259,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   pthread_t thread_;
   pid_t tid_ = 0;                     // Kernel TID for setpriority() fallback
   mutable bool fifo_failed_ = false;  // True after SCHED_FIFO was rejected
+  bool qos_managed_ = false;  // macOS: Apple QoS assigned at creation; skip
+                              // SCHED_FIFO so QoS governs core placement.
   bool signaled_;
   int exit_code_;
   State state_;             // Protected by state_mutex_

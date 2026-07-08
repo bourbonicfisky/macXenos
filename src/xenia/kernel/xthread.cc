@@ -32,6 +32,67 @@ UPDATE_from_bool(ignore_thread_priorities, 2026, 4, 9, 12, true);
 DEFINE_bool(ignore_thread_affinities, true,
             "Ignores game-specified thread affinities.", "Kernel");
 
+#if XE_PLATFORM_MAC
+// macOS-only guest-thread QoS scheduling policy. On Apple Silicon the scheduler
+// parks the emulator's busiest guest thread on efficiency cores (measured: the
+// JC2 critical thread ran ~0% on P-cores) because Xenia sets no QoS class. These
+// cvars let selected guest CPU threads self-tag an Apple QoS class so the
+// scheduler keeps them on performance cores. Default is off; a policy only
+// becomes a default after a before/after FPS win with no guard-title regression
+// (see the apply-macos-guest-thread-qos change).
+DEFINE_string(
+    guest_thread_qos, "off",
+    "macOS only: Apple QoS scheduling policy for guest CPU threads. "
+    "'off' (default, no QoS calls) | 'all' (every guest XThread) | 'main' "
+    "(entry-point thread only) | 'priority' (guest priority >= "
+    "guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved "
+    "but not yet implemented.",
+    "CPU");
+DEFINE_string(guest_thread_qos_class, "user_initiated",
+              "macOS only: QoS class applied when guest_thread_qos selects a "
+              "thread: 'user_initiated' (default) | 'user_interactive'.",
+              "CPU");
+DEFINE_int32(guest_thread_qos_priority_threshold, 1,
+             "macOS only: with guest_thread_qos=priority, tag guest threads "
+             "whose guest priority is >= this value.",
+             "CPU");
+
+// Map the guest_thread_qos policy to an Apple QoS class code for a guest thread
+// (0 = none, 1 = user_initiated, 2 = user_interactive). Applied at thread
+// creation via CreationParameters::qos_class in Create() below. It must be set
+// at creation, not self-tagged after start: once a guest thread is placed in
+// SCHED_FIFO by the priority mapping it is opted out of QoS management and a
+// self-tag returns EPERM. Only XThreads run this, so GPU-command / host worker
+// threads are never affected. hot-after-warmup is not implemented (would need a
+// monitor plus pthread_override_qos_class_start_np).
+static int32_t GuestThreadQosClass(bool main_thread, int32_t guest_priority) {
+  const std::string& policy = cvars::guest_thread_qos;
+  bool selected;
+  if (policy == "all") {
+    selected = true;
+  } else if (policy == "main") {
+    selected = main_thread;
+  } else if (policy == "priority") {
+    selected = guest_priority >= cvars::guest_thread_qos_priority_threshold;
+  } else {
+    if (policy == "hot") {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        XELOGW(
+            "guest_thread_qos=hot is not implemented yet; no QoS applied. Use "
+            "all/main/priority.");
+      }
+    }
+    return 0;  // "off" (default), "hot", or unknown -> no QoS.
+  }
+  if (!selected) {
+    return 0;
+  }
+  return cvars::guest_thread_qos_class == "user_interactive" ? 2 : 1;
+}
+#endif  // XE_PLATFORM_MAC
+
 #if 0
 DEFINE_int64(stack_size_multiplier_hack, 1,
              "A hack for games with setjmp/longjmp issues.", "Kernel");
@@ -481,6 +542,12 @@ X_STATUS XThread::Create() {
   params.create_suspended = true;
 
   params.stack_size = 16_MiB;  // Allocate a big host stack.
+#if XE_PLATFORM_MAC
+  // Assign an Apple QoS class (when the guest_thread_qos policy selects this
+  // thread) at creation so the scheduler can keep it on P-cores; such threads
+  // also skip the SCHED_FIFO mapping that would otherwise disable QoS.
+  params.qos_class = GuestThreadQosClass(main_thread(), priority());
+#endif
   thread_ = xe::threading::Thread::Create(params, [this]() {
     // Set thread ID override. This is used by logging.
     xe::threading::set_current_thread_id(handle());
