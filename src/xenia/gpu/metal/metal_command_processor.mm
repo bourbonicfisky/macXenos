@@ -527,18 +527,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           break;
         }
       }
+      // Vertex float-constant count + first used vec4, to verify b1 is sane
+      // (not zero/garbage, which would compute black / off-screen).
+      uint32_t vs_float_count = 0;
+      for (uint32_t i = 0; i < 4; ++i) {
+        vs_float_count += xe::bit_count(vs_map.float_bitmap[i]);
+      }
+      float first_vec4[4] = {0, 0, 0, 0};
+      for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t idx;
+        uint64_t bm = vs_map.float_bitmap[i];
+        if (xe::bit_scan_forward(bm, &idx)) {
+          std::memcpy(
+              first_vec4,
+              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (idx << 2)],
+              sizeof(first_vec4));
+          break;
+        }
+      }
       XELOGI(
-          "MetalCommandProcessor: TRI {} vp off=({},{}) ext=({},{}) z=({},{}) "
-          "ndc_s=({},{},{}) ndc_o=({},{},{}) flags={:X} ps_xlat={} vf0 "
-          "addr={:08X} size={} type={}",
-          tri_log_count_, viewport_info.xy_offset[0], viewport_info.xy_offset[1],
-          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
-          viewport_info.z_min, viewport_info.z_max, viewport_info.ndc_scale[0],
-          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
-          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
-          viewport_info.ndc_offset[2], system_constants.flags,
-          ps_translation != nullptr, vf0.address << 2, vf0.size << 2,
-          uint32_t(vf0.type));
+          "MetalCommandProcessor: TRI {} ext=({},{}) ndc_s=({},{},{}) "
+          "ndc_o=({},{},{}) flags={:X} ps_xlat={} vf0 addr={:08X} size={} "
+          "vs_floats={} first=({},{},{},{})",
+          tri_log_count_, viewport_info.xy_extent[0], viewport_info.xy_extent[1],
+          viewport_info.ndc_scale[0], viewport_info.ndc_scale[1],
+          viewport_info.ndc_scale[2], viewport_info.ndc_offset[0],
+          viewport_info.ndc_offset[1], viewport_info.ndc_offset[2],
+          system_constants.flags, ps_translation != nullptr, vf0.address << 2,
+          vf0.size << 2, vs_float_count, first_vec4[0], first_vec4[1],
+          first_vec4[2], first_vec4[3]);
     }
   }
   if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {
