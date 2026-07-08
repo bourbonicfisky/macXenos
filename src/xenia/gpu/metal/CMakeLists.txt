@@ -27,3 +27,22 @@ target_link_libraries(xenia-gpu-metal-shader-translate-spike PRIVATE
   "-framework Metal"
 )
 xe_target_defaults(xenia-gpu-metal-shader-translate-spike)
+
+# Phase 2b backend skeleton: the GraphicsSystem/CommandProcessor that register the
+# "metal" backend. Separate from the shader-translation lib so the spike stays
+# lean; links xenia-gpu (CommandProcessor base) and xenia-ui.
+add_library(xenia-gpu-metal-backend STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_graphics_system.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.cc
+)
+target_include_directories(xenia-gpu-metal-backend PUBLIC ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(xenia-gpu-metal-backend PUBLIC
+  xenia-base
+  xenia-gpu
+  xenia-gpu-metal
+  xenia-ui
+  xxhash
+  "-framework Foundation"
+  "-framework Metal"
+)
+xe_target_defaults(xenia-gpu-metal-backend)

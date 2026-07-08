@@ -43,6 +43,9 @@ option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler,
 # Experimental native-Metal shader path (Apple only). Off by default: it triggers
 # the heavy nested-LLVM dxilconv build. See openspec/changes/reduce-apple-gpu-frametime.
 option(XENIA_GPU_METAL "Build the experimental native Metal shader path (Apple)" OFF)
+if(XENIA_GPU_METAL)
+  add_compile_definitions(XE_GPU_METAL=1)
+endif()
 
 # Toggle profiler
 add_compile_definitions(XE_OPTION_PROFILING=0)

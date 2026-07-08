@@ -109,6 +109,11 @@ target_link_libraries(xenia-app PRIVATE
   glslang-spirv
 )
 
+# Experimental native-Metal backend (Apple only, opt-in via XENIA_GPU_METAL).
+if(APPLE AND XENIA_GPU_METAL)
+  target_link_libraries(xenia-app PRIVATE xenia-gpu-metal-backend)
+endif()
+
 # Non-Android specific (always true for Windows/Linux)
 target_link_libraries(xenia-app PRIVATE
   xenia-app-discord

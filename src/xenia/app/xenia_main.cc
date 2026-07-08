@@ -54,6 +54,9 @@
 #if XE_PLATFORM_WIN32
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #endif  // XE_PLATFORM_WIN32
+#if XE_GPU_METAL
+#include "xenia/gpu/metal/metal_graphics_system.h"
+#endif  // XE_GPU_METAL
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
@@ -410,6 +413,9 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
 #endif  // XE_PLATFORM_WIN32
   factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
+#if XE_GPU_METAL
+  factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
+#endif  // XE_GPU_METAL
   std::unique_ptr<gpu::GraphicsSystem> gpu_implementation =
       factory.Create(gpu_implementation_name);
   if (!gpu_implementation) {
