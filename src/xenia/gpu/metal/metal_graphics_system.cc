@@ -9,7 +9,9 @@
 
 #include "xenia/gpu/metal/metal_graphics_system.h"
 
+#include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/ui/metal/metal_provider.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -32,9 +34,17 @@ X_STATUS MetalGraphicsSystem::Setup(cpu::Processor* processor,
                                     kernel::KernelState* kernel_state,
                                     ui::WindowedAppContext* app_context,
                                     bool with_presentation) {
-  // No graphics provider yet: like the null backend on macOS, run without a
-  // presenter until the Metal provider/present path (phase 2b.3) is wired.
-  provider_ = nullptr;
+  if (with_presentation) {
+    // Metal provider owns the device + command queue and vends the presenter
+    // that clears and presents the CAMetalLayer drawable each frame.
+    provider_ = xe::ui::metal::MetalProvider::Create();
+    if (!provider_) {
+      XELOGE("MetalGraphicsSystem: failed to create Metal provider");
+      return X_STATUS_UNSUCCESSFUL;
+    }
+  } else {
+    provider_ = nullptr;
+  }
   return GraphicsSystem::Setup(processor, kernel_state, app_context,
                                with_presentation);
 }

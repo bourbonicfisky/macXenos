@@ -41,6 +41,7 @@ target_link_libraries(xenia-gpu-metal-backend PUBLIC
   xenia-gpu
   xenia-gpu-metal
   xenia-ui
+  xenia-ui-metal
   xxhash
   "-framework Foundation"
   "-framework Metal"
