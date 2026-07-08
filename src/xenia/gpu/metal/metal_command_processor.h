@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <memory>
+#include <unordered_map>
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
@@ -99,12 +100,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;
 
-  // Bring-up diagnostic: a hardcoded magenta triangle drawn into the RT each
-  // frame with a trivial pipeline (no argument buffers). If it shows but guest
-  // geometry doesn't, the render-pass-into-RT path works and the problem is the
-  // guest shader binding / positions; if even it doesn't show, the encoder/RT
-  // draw path itself is broken.
-  void* debug_triangle_pipeline_ = nullptr;
+  // Bring-up diagnostic: pair the real guest vertex function with a hardcoded
+  // solid-color fragment function to isolate vertex-side (positions/constants)
+  // from pixel-side (guest PS / textures). debug_solid_fragment_ is the shared
+  // id<MTLFunction>; pipelines are cached by guest vertex-function pointer.
+  void* debug_solid_fragment_ = nullptr;
+  std::unordered_map<void*, void*> debug_solid_pipelines_;
 
   // Set when at least one draw rendered into the RT this frame, so IssueSwap
   // presents the RT rather than the bring-up test pattern. Reset each swap.

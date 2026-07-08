@@ -362,6 +362,49 @@ Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+// Bring-up diagnostic toggle: replace the guest pixel shader with a solid color
+// so we can tell whether the vertex side (positions/constants) is producing
+// visible geometry independent of the guest pixel shader / textures.
+static constexpr bool kDebugSolidFragment = true;
+
+// Returns a cached id<MTLRenderPipelineState> pairing the given guest vertex
+// function with a hardcoded solid-color fragment function.
+static void* GetDebugSolidPipeline(
+    void* device_ptr, void* vs_function, void*& debug_solid_fragment,
+    std::unordered_map<void*, void*>& cache) {
+  auto it = cache.find(vs_function);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_ptr;
+  if (!debug_solid_fragment) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      fragment float4 solid_fs() { return float4(1.0, 0.85, 0.0, 1.0); }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
+    id<MTLFunction> fs = lib ? [lib newFunctionWithName:@"solid_fs"] : nil;
+    if (!fs) {
+      cache.emplace(vs_function, nullptr);
+      return nullptr;
+    }
+    debug_solid_fragment = (__bridge_retained void*)fs;
+  }
+  MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+  d.vertexFunction = (__bridge id<MTLFunction>)vs_function;
+  d.fragmentFunction = (__bridge id<MTLFunction>)debug_solid_fragment;
+  d.colorAttachments[0].pixelFormat =
+      (MTLPixelFormat)MetalRenderTargetCache::kColorFormat;
+  NSError* err = nil;
+  id<MTLRenderPipelineState> ps =
+      [device newRenderPipelineStateWithDescriptor:d error:&err];
+  void* ps_ptr = ps ? (__bridge_retained void*)ps : nullptr;
+  cache.emplace(vs_function, ps_ptr);
+  return ps_ptr;
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -416,9 +459,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  void* pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
-      vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
-      MTLPixelFormatInvalid);
+  void* pipeline;
+  if (kDebugSolidFragment) {
+    pipeline = GetDebugSolidPipeline(
+        static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
+            ->device(),
+        vs_translation->metal_function(), debug_solid_fragment_,
+        debug_solid_pipelines_);
+  } else {
+    pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
+        vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
+        MTLPixelFormatInvalid);
+  }
   if (!pipeline) {
     ++draw_skip_count_;
     return true;
