@@ -496,20 +496,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
     }
-    // Diagnostic: dump the position transform for the first indexed triangle
-    // draws (the "real geometry" ones) to catch off-screen / degenerate output.
-    if (index_buffer_info && prim_type == xenos::PrimitiveType::kTriangleList &&
-        draw_count_ < 8) {
-      XELOGI(
-          "MetalCommandProcessor: tri draw {} idx viewport off=({},{}) "
-          "ext=({},{}) z=({},{}) ndc_scale=({},{},{}) ndc_off=({},{},{})",
-          draw_count_, viewport_info.xy_offset[0], viewport_info.xy_offset[1],
-          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
-          viewport_info.z_min, viewport_info.z_max, viewport_info.ndc_scale[0],
-          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
-          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
-          viewport_info.ndc_offset[2]);
-    }
     // Position-relevant flags.
     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
     uint32_t flags = 0;
@@ -542,6 +528,34 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.znear = viewport_info.z_min;
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
+    }
+    // Diagnostic: dump the position transform + first vfetch for the first
+    // indexed triangle-list draws (the "real geometry" ones), regardless of
+    // when they occur, to catch off-screen / degenerate output.
+    if (index_buffer_info && prim_type == xenos::PrimitiveType::kTriangleList &&
+        tri_log_count_ < 12) {
+      ++tri_log_count_;
+      xenos::xe_gpu_vertex_fetch_t vf0{};
+      for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
+        uint32_t b = vs_map.vertex_fetch_bitmap[i];
+        uint32_t j;
+        if (xe::bit_scan_forward(b, &j)) {
+          vf0 = regs.GetVertexFetch(i * 32 + j);
+          break;
+        }
+      }
+      XELOGI(
+          "MetalCommandProcessor: TRI {} vp off=({},{}) ext=({},{}) z=({},{}) "
+          "ndc_s=({},{},{}) ndc_o=({},{},{}) flags={:X} ps_xlat={} vf0 "
+          "addr={:08X} size={} type={}",
+          tri_log_count_, viewport_info.xy_offset[0], viewport_info.xy_offset[1],
+          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
+          viewport_info.z_min, viewport_info.z_max, viewport_info.ndc_scale[0],
+          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
+          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
+          viewport_info.ndc_offset[2], system_constants.flags,
+          ps_translation != nullptr, vf0.address << 2, vf0.size << 2,
+          uint32_t(vf0.type));
     }
   }
   if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {

@@ -117,6 +117,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
   uint32_t draw_skip_count_ = 0;
+  // How many indexed triangle-list draws we've dumped diagnostics for.
+  uint32_t tri_log_count_ = 0;
 };
 
 }  // namespace metal
