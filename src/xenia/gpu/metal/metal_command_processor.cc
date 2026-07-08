@@ -18,9 +18,11 @@
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/ui/metal/metal_provider.h"
 
 namespace xe {
 namespace gpu {
@@ -37,10 +39,26 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
 void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {}
 
 bool MetalCommandProcessor::SetupContext() {
-  return CommandProcessor::SetupContext();
+  if (!CommandProcessor::SetupContext()) {
+    return false;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  void* device = provider ? provider->device() : nullptr;
+  if (!device) {
+    XELOGE("MetalCommandProcessor: no Metal device from provider");
+    return false;
+  }
+  pipeline_cache_ = std::make_unique<MetalPipelineCache>(device);
+  if (!pipeline_cache_->Initialize()) {
+    XELOGE("MetalCommandProcessor: pipeline cache init failed");
+    return false;
+  }
+  return true;
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  pipeline_cache_.reset();
   CommandProcessor::ShutdownContext();
 }
 
@@ -52,7 +70,10 @@ Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
                                           uint32_t guest_address,
                                           const uint32_t* host_address,
                                           uint32_t dword_count) {
-  return nullptr;
+  if (!pipeline_cache_) {
+    return nullptr;
+  }
+  return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,

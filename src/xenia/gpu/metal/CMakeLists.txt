@@ -34,6 +34,8 @@ xe_target_defaults(xenia-gpu-metal-shader-translate-spike)
 add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_graphics_system.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_pipeline_cache.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
 )
 target_include_directories(xenia-gpu-metal-backend PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(xenia-gpu-metal-backend PUBLIC

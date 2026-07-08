@@ -10,6 +10,8 @@
 #ifndef XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
+#include <memory>
+
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/xenos.h"
@@ -18,6 +20,8 @@
 namespace xe {
 namespace gpu {
 namespace metal {
+
+class MetalPipelineCache;
 
 // Phase 2b skeleton command processor. Overrides the same pure-virtual surface
 // as the other backends; the draw/copy/shader paths are stubs for now (behaves
@@ -58,6 +62,8 @@ class MetalCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
 
   void InitializeTrace() override;
+
+  std::unique_ptr<MetalPipelineCache> pipeline_cache_;
 };
 
 }  // namespace metal
