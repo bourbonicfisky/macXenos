@@ -32,6 +32,10 @@ xe_target_defaults(xenia-gpu-metal-shader-translate-spike)
 # "metal" backend. Separate from the shader-translation lib so the spike stays
 # lean; links xenia-gpu (CommandProcessor base) and xenia-ui.
 add_library(xenia-gpu-metal-backend STATIC
+  # NOTE: the shared DXBC geometry-shader generator (gpu/dxbc_geometry_shader.cc,
+  # point/rect/quad expansion for the MSC geometry-emulation path) is compiled into
+  # xenia-gpu via xe_platform_sources' directory glob; do NOT add it here or the
+  # symbol duplicates. The Metal backend gets it by linking xenia-gpu.
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_graphics_system.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_command_processor.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_pipeline_cache.mm
