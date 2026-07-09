@@ -15,6 +15,8 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 // Headers required by the PM4 execute-loop template included at the bottom of
@@ -552,6 +554,51 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   if (pixel_shader && !pixel_shader->is_ucode_analyzed()) {
     pixel_shader->AnalyzeUcode(ucode_disasm);
+  }
+
+  // DIAGNOSTIC (MRT-vs-single-RT proof, openspec reduce-apple-gpu-frametime):
+  // log each unique render-target configuration once — the active color-target
+  // set (normalized mask folds RB_MODECONTROL + RB_COLOR_MASK + the PS's static
+  // writes) with each RT's EDRAM tile base + format, plus the bound depth
+  // base/format. Decides whether the multi-target RT cache must bind multiple
+  // simultaneous attachments (true MRT) or distinct per-pass single targets.
+  {
+    uint32_t normalized_color_mask =
+        pixel_shader ? draw_util::GetNormalizedColorMask(
+                           regs, pixel_shader->writes_color_targets())
+                     : 0;
+    reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
+    bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
+    auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+    // Unique-config key: color mask + each active RT's info + depth info.
+    uint64_t cfg_key = normalized_color_mask;
+    uint32_t color_rt_count = 0;
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!(normalized_color_mask & (0b1111u << (4 * i)))) continue;
+      ++color_rt_count;
+      cfg_key = cfg_key * 1000003u ^
+                regs[reg::RB_COLOR_INFO::rt_register_indices[i]];
+    }
+    cfg_key = cfg_key * 1000003u ^
+              (depth_bound ? (uint64_t(rb_depth_info.value) | (1ull << 32)) : 0);
+    static std::unordered_set<uint64_t> s_seen_rt_configs;
+    if (s_seen_rt_configs.insert(cfg_key).second) {
+      std::string rt_desc;
+      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+        if (!(normalized_color_mask & (0b1111u << (4 * i)))) continue;
+        auto ci = regs.Get<reg::RB_COLOR_INFO>(
+            reg::RB_COLOR_INFO::rt_register_indices[i]);
+        rt_desc += fmt::format(" RT{}[base={} fmt={} mask={:X}]", i,
+                               uint32_t(ci.color_base),
+                               uint32_t(ci.color_format),
+                               (normalized_color_mask >> (4 * i)) & 0b1111);
+      }
+      XELOGI(
+          "MetalRTConfig: colors={}{}{} depth={} (base={} fmt={}) ncm={:04X}",
+          color_rt_count, rt_desc.empty() ? " (none)" : "", rt_desc,
+          depth_bound, uint32_t(rb_depth_info.depth_base),
+          uint32_t(rb_depth_info.depth_format), normalized_color_mask);
+    }
   }
 
   // Translate to MTLFunctions (cached per modification).
