@@ -207,11 +207,15 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // still-unimplemented textures shows up as visible gray shapes instead of
   // rendering black — proving the geometry is there and the gap is the texture
   // cache. (Turns black post-process composites gray.)
-  MTLTextureDescriptor* null_desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                   width:1
-                                  height:1
-                               mipmapped:NO];
+  // MUST be a 2D ARRAY texture (see MetalTextureCache): the guest shaders sample
+  // texture2d_array, so a plain 2D null texture would sample as garbage.
+  MTLTextureDescriptor* null_desc = [[MTLTextureDescriptor alloc] init];
+  null_desc.textureType = MTLTextureType2DArray;
+  null_desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
+  null_desc.width = 1;
+  null_desc.height = 1;
+  null_desc.arrayLength = 1;
+  null_desc.mipmapLevelCount = 1;
   null_desc.usage = MTLTextureUsageShaderRead;
   null_desc.storageMode = MTLStorageModeShared;
   id<MTLTexture> null_texture = [device newTextureWithDescriptor:null_desc];
@@ -221,8 +225,10 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   uint8_t gray_pixel[4] = {128, 128, 128, 255};
   [null_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
                   mipmapLevel:0
+                        slice:0
                     withBytes:gray_pixel
-                  bytesPerRow:4];
+                  bytesPerRow:4
+                bytesPerImage:0];
   null_texture_ = (__bridge_retained void*)null_texture;
   id<MTLSamplerState> null_sampler =
       [device newSamplerStateWithDescriptor:[[MTLSamplerDescriptor alloc] init]];

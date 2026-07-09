@@ -245,11 +245,16 @@ uint32_t MetalTextureCache::GetTextureSlot(
   }
 
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
-  MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:plan.host_format
-                                   width:width
-                                  height:height
-                               mipmapped:NO];
+  // MUST be a 2D ARRAY texture: our DXBC translator emits texture2d_array reads
+  // and MSC is compiled with IRCompatibilityFlagForceTextureArray, so a plain
+  // 2D texture sampled through an array read returns garbage (flat sampling).
+  MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+  desc.textureType = MTLTextureType2DArray;
+  desc.pixelFormat = plan.host_format;
+  desc.width = width;
+  desc.height = height;
+  desc.arrayLength = 1;
+  desc.mipmapLevelCount = 1;
   desc.usage = MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModeShared;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
@@ -257,11 +262,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
     return 0;
   }
   // For BC formats bytesPerRow is a row of blocks; MTLRegion is still in texels
-  // and Metal handles partial edge blocks.
+  // and Metal handles partial edge blocks. Slice 0 of the single array layer.
   [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
              mipmapLevel:0
+                   slice:0
                withBytes:linear.data()
-             bytesPerRow:blocks_w * bpb];
+             bytesPerRow:blocks_w * bpb
+           bytesPerImage:0];
 
   // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output
   // channel) when sampling. Bake it into a swizzled texture VIEW so the shader
@@ -278,7 +285,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         GuestSwizzleComponentToMetal((guest_swizzle >> 9) & 0b111));
     id<MTLTexture> view =
         [texture newTextureViewWithPixelFormat:plan.host_format
-                                   textureType:MTLTextureType2D
+                                   textureType:MTLTextureType2DArray
                                         levels:NSMakeRange(0, 1)
                                         slices:NSMakeRange(0, 1)
                                        swizzle:channels];
