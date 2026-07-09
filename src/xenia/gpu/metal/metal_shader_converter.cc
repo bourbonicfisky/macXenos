@@ -348,6 +348,15 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
   // generated GS as a mesh stage; both must be compiled with emulation enabled and
   // the guest input topology set so MSC sizes the mesh threadgroups correctly.
   IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
+  // The guest VS becomes the Metal OBJECT stage, which the geometry-emulation
+  // runtime links against a SEPARATE stage-in function (synthesized below). Put
+  // the compiler in separate-stage-in mode before the compile so the object
+  // shader is generated to consume a linked stage-in rather than Metal vertex
+  // fetch. (No effect on the GS/mesh stage.)
+  if (stage == Stage::kVertex) {
+    IRCompilerSetStageInGenerationMode(
+        compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);
+  }
   IRInputTopology topology = ToIRTopology(input_topology);
   if (topology != IRInputTopologyUndefined) {
     IRCompilerSetInputTopology(compiler, topology);
@@ -414,12 +423,30 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
             vs_info.info_1_0.vertex_output_size_in_bytes;
         IRShaderReflectionReleaseVertexInfo(&vs_info);
       }
-      // NOTE: XeniOS also synthesizes a stage-in function here
-      // (IRMetalLibSynthesizeStageInFunction) because its VS fetches vertices via
-      // stage-in inputs. Our VS uses IN-SHADER vfetch from shared memory (zero
-      // vertex inputs), so whether a (possibly empty) stage-in library is required
-      // by the geometry-emulation pipeline is the key on-device validation point;
-      // left empty here and revisited when the pipeline is wired (next commit).
+      // Synthesize the stage-in function the geometry-emulation runtime REQUIRES.
+      // IRRuntimeNewGeometryEmulationPipeline dereferences
+      // descriptor->stageInLibrary unconditionally (grabs function 0), so a null
+      // stage-in library crashes — it is not an optional field. Our guest VS
+      // fetches vertices in-shader (zero vertex inputs), so we hand MSC a
+      // zero-element input layout; MSC still emits a valid (empty-input) stage-in
+      // object that links to the VS object stage. Mirrors XeniOS's zero-input case
+      // (metal_pipeline_cache.cc BuildStageInInputLayout -> numElements=0). The
+      // compiler was put in separate-stage-in mode before the compile above.
+      IRVersionedInputLayoutDescriptor input_layout = {};
+      input_layout.version = IRInputLayoutDescriptorVersion_1;
+      input_layout.desc_1_0.numElements = 0;
+      IRMetalLibBinary* stage_in_lib = IRMetalLibBinaryCreate();
+      if (stage_in_lib) {
+        if (IRMetalLibSynthesizeStageInFunction(compiler, reflection,
+                                                &input_layout, stage_in_lib)) {
+          size_t stage_in_size = IRMetalLibGetBytecodeSize(stage_in_lib);
+          if (stage_in_size) {
+            result.stage_in_metallib.resize(stage_in_size);
+            IRMetalLibGetBytecode(stage_in_lib, result.stage_in_metallib.data());
+          }
+        }
+        IRMetalLibBinaryDestroy(stage_in_lib);
+      }
     } else {
       IRVersionedGSInfo gs_info = {};
       gs_info.version = IRReflectionVersion_1_0;
@@ -436,6 +463,17 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
   }
   if (result.function_name.empty()) {
     result.function_name = (stage == Stage::kVertex) ? "vertexMain" : "main";
+  }
+
+  // A geometry-emulation vertex (object) stage without a stage-in library cannot
+  // build a pipeline (the runtime would crash on the null library), so treat an
+  // empty synthesis as a hard failure rather than deferring it to pipeline build.
+  if (stage == Stage::kVertex && result.stage_in_metallib.empty()) {
+    result.error = "failed to synthesize the geometry-emulation stage-in function";
+    IRObjectDestroy(metal_object);
+    IRCompilerDestroy(compiler);
+    IRObjectDestroy(dxil_object);
+    return false;
   }
 
   result.success = true;
