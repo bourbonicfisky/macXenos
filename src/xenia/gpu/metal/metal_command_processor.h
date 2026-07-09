@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
@@ -128,13 +129,31 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Frame command buffer / render encoder (id<...>). The command buffer lives
   // for the whole frame (committed at IssueSwap); the render encoder is opened
-  // and closed multiple times as resolves split the frame into passes.
+  // and closed multiple times as resolves and render-target changes split the
+  // frame into passes.
   void* frame_command_buffer_ = nullptr;
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
-  // Set by a resolve so the next BeginFrameEncoder clears the color+depth RT
-  // (starts a fresh pass) instead of loading the previous pass's contents.
-  bool reopen_clear_ = false;
+
+  // Render-target binding for the NEXT encoder open, set by IssueDraw from the
+  // guest registers (RB_COLOR_INFO RT0 / RB_DEPTH_INFO) before calling
+  // BeginFrameEncoder. has_color==false is a depth-only (e.g. shadow) pass.
+  bool pending_has_color_ = false;
+  uint32_t pending_color_base_ = 0;    // EDRAM tile base.
+  uint32_t pending_color_format_ = 0;  // xenos::ColorRenderTargetFormat.
+  bool pending_has_depth_ = false;
+  uint32_t pending_depth_base_ = 0;  // EDRAM tile base.
+  // What the currently-open encoder is bound to (valid while frame_open_); a
+  // draw whose pending config differs closes the encoder and opens a new pass.
+  bool encoder_has_color_ = false;
+  uint32_t encoder_color_key_ = 0;  // (base << 4) | format.
+  bool encoder_has_depth_ = false;
+  uint32_t encoder_depth_base_ = 0;
+  // Targets already cleared this frame: each (color-key / depth-base) target
+  // clears on its FIRST use in a frame and loads afterwards, so multi-pass
+  // accumulation into the same logical target (HUD over composite) is kept
+  // while distinct targets stop bleeding into each other.
+  std::unordered_set<uint64_t> frame_cleared_targets_;
 
   // Bring-up diagnostic: pair the real guest vertex function with a hardcoded
   // solid-color fragment function to isolate vertex-side (positions/constants)

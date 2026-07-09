@@ -12,6 +12,7 @@
 #import <Metal/Metal.h>
 
 #include "xenia/base/logging.h"
+#include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
@@ -20,20 +21,66 @@ namespace metal {
 const uint64_t MetalRenderTargetCache::kColorFormat = MTLPixelFormatBGRA8Unorm;
 const uint64_t MetalRenderTargetCache::kDepthFormat = MTLPixelFormatDepth32Float;
 
+namespace {
+// Guest color format -> host MTLPixelFormat. BGRA8 for the 8888 formats
+// (matches the present blit; GAMMA is treated as linear for now — a known
+// approximation, revisit with sRGB handling); real float/packed formats get
+// float/packed targets so render data survives (k_32_FLOAT into BGRA8 was
+// destroying JC2's lighting inputs).
+MTLPixelFormat ColorGuestFormatToMetal(uint32_t guest_format) {
+  switch (static_cast<xenos::ColorRenderTargetFormat>(guest_format)) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+      return MTLPixelFormatBGRA8Unorm;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      return MTLPixelFormatRGB10A2Unorm;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      return MTLPixelFormatRGBA16Float;
+    case xenos::ColorRenderTargetFormat::k_16_16:
+      return MTLPixelFormatRG16Snorm;
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+      return MTLPixelFormatRGBA16Snorm;
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+      return MTLPixelFormatRG16Float;
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      return MTLPixelFormatRGBA16Float;
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+      return MTLPixelFormatR32Float;
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return MTLPixelFormatRG32Float;
+    default:
+      return MTLPixelFormatBGRA8Unorm;
+  }
+}
+}  // namespace
+
+uint32_t MetalRenderTargetCache::ColorTargetKey(uint32_t edram_base,
+                                                uint32_t guest_format) {
+  return (edram_base << 12) | uint32_t(ColorGuestFormatToMetal(guest_format));
+}
+
 MetalRenderTargetCache::MetalRenderTargetCache(void* device)
     : device_(device) {}
 
 MetalRenderTargetCache::~MetalRenderTargetCache() {
-  if (color_target_) {
-    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)color_target_;
-    (void)released;
-    color_target_ = nullptr;
+  for (auto& pair : color_targets_) {
+    if (pair.second.texture) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)pair.second.texture;
+      (void)released;
+    }
   }
-  if (depth_target_) {
-    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)depth_target_;
-    (void)released;
-    depth_target_ = nullptr;
+  color_targets_.clear();
+  for (auto& pair : depth_targets_) {
+    if (pair.second.texture) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)pair.second.texture;
+      (void)released;
+    }
   }
+  depth_targets_.clear();
   for (auto& pair : resolve_snapshots_) {
     if (pair.second.texture) {
       id<MTLTexture> released =
@@ -89,21 +136,16 @@ void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
   return it != resolve_snapshots_.end() ? it->second.texture : nullptr;
 }
 
-void* MetalRenderTargetCache::EnsureDepthTarget(uint32_t width,
-                                                uint32_t height) {
-  if (depth_target_ && depth_width_ == width && depth_height_ == height) {
-    return depth_target_;
-  }
-  if (depth_target_) {
-    id<MTLTexture> old = (__bridge_transfer id<MTLTexture>)depth_target_;
-    (void)old;
-    depth_target_ = nullptr;
+void* MetalRenderTargetCache::GetDepthTarget(uint32_t edram_base) {
+  auto it = depth_targets_.find(edram_base);
+  if (it != depth_targets_.end()) {
+    return it->second.texture;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
       texture2DDescriptorWithPixelFormat:(MTLPixelFormat)kDepthFormat
-                                   width:width
-                                  height:height
+                                   width:kDepthWidth
+                                  height:kDepthHeight
                                mipmapped:NO];
   // ShaderRead so the depth-resolve conversion pass can sample it (depth2d) to
   // produce the R32Float snapshot deferred lighting reads back.
@@ -111,46 +153,87 @@ void* MetalRenderTargetCache::EnsureDepthTarget(uint32_t width,
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
-    XELOGE("MetalRenderTargetCache: failed to create {}x{} depth target", width,
-           height);
+    XELOGE("MetalRenderTargetCache: failed to create depth target base={}",
+           edram_base);
     return nullptr;
   }
-  depth_target_ = (__bridge_retained void*)texture;
-  depth_width_ = width;
-  depth_height_ = height;
-  return depth_target_;
+  Target target;
+  target.texture = (__bridge_retained void*)texture;
+  target.pixel_format = kDepthFormat;
+  depth_targets_.emplace(edram_base, target);
+  XELOGI("MetalRenderTargetCache: new depth target base={}", edram_base);
+  return target.texture;
 }
 
-void* MetalRenderTargetCache::EnsureColorTarget(uint32_t width,
-                                                uint32_t height) {
-  if (color_target_ && width_ == width && height_ == height) {
-    return color_target_;
+void* MetalRenderTargetCache::FindDepthTarget(uint32_t edram_base) const {
+  auto it = depth_targets_.find(edram_base);
+  return it != depth_targets_.end() ? it->second.texture : nullptr;
+}
+
+void* MetalRenderTargetCache::GetColorTarget(uint32_t edram_base,
+                                             uint32_t guest_format,
+                                             uint64_t* pixel_format_out) {
+  // Key by (EDRAM base, HOST pixel format), mirroring the mainline resource-
+  // format keying: k_8_8_8_8 and k_8_8_8_8_GAMMA are the same EDRAM bits and
+  // must share one texture (draws bind GAMMA, resolves often declare non-GAMMA
+  // of the same target), while genuinely different storage (k_32_FLOAT) stays
+  // distinct.
+  MTLPixelFormat host_format = ColorGuestFormatToMetal(guest_format);
+  uint32_t key = ColorTargetKey(edram_base, guest_format);
+  auto it = color_targets_.find(key);
+  if (it != color_targets_.end()) {
+    if (pixel_format_out) {
+      *pixel_format_out = it->second.pixel_format;
+    }
+    if (it->second.pixel_format == kColorFormat) {
+      presentable_color_target_ = it->second.texture;
+    }
+    return it->second.texture;
   }
-  if (color_target_) {
-    id<MTLTexture> old = (__bridge_transfer id<MTLTexture>)color_target_;
-    (void)old;
-    color_target_ = nullptr;
-  }
+  MTLPixelFormat pixel_format = host_format;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:(MTLPixelFormat)kColorFormat
-                                   width:width
-                                  height:height
+      texture2DDescriptorWithPixelFormat:pixel_format
+                                   width:kColorWidth
+                                  height:kColorHeight
                                mipmapped:NO];
-  // Rendered into by IssueDraw and copied out to the presenter mailbox by
-  // IssueSwap.
+  // Rendered into by IssueDraw; blitted to resolve snapshots by IssueCopy and
+  // (BGRA8 only) to the presenter mailbox by IssueSwap.
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
-    XELOGE("MetalRenderTargetCache: failed to create {}x{} color target", width,
-           height);
+    XELOGE("MetalRenderTargetCache: failed to create color target base={} fmt={}",
+           edram_base, guest_format);
     return nullptr;
   }
-  color_target_ = (__bridge_retained void*)texture;
-  width_ = width;
-  height_ = height;
-  return color_target_;
+  Target target;
+  target.texture = (__bridge_retained void*)texture;
+  target.pixel_format = uint64_t(pixel_format);
+  color_targets_.emplace(key, target);
+  if (pixel_format_out) {
+    *pixel_format_out = target.pixel_format;
+  }
+  if (target.pixel_format == kColorFormat) {
+    presentable_color_target_ = target.texture;
+  }
+  XELOGI("MetalRenderTargetCache: new color target base={} fmt={} mtl={}",
+         edram_base, guest_format, uint32_t(pixel_format));
+  return target.texture;
+}
+
+void* MetalRenderTargetCache::FindColorTarget(uint32_t edram_base,
+                                              uint32_t guest_format,
+                                              uint64_t* pixel_format_out) const {
+  uint32_t key = ColorTargetKey(edram_base, guest_format);
+  auto it = color_targets_.find(key);
+  if (it == color_targets_.end()) {
+    return nullptr;
+  }
+  if (pixel_format_out) {
+    *pixel_format_out = it->second.pixel_format;
+  }
+  return it->second.texture;
 }
 
 }  // namespace metal

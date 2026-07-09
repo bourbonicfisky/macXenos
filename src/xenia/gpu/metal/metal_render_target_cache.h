@@ -18,11 +18,16 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
-// Minimal render-target cache for the Metal backend bring-up. For now it owns a
-// single color MTLTexture that IssueDraw renders into and IssueSwap presents,
-// bypassing the guest frontbuffer / EDRAM-copy path (that arrives once real
-// draws land). Metal objects are held as opaque void* (retained) so the header
-// stays plain C++.
+// Render-target cache for the Metal backend bring-up. Guest passes bind at most
+// ONE color + one depth target at a time (proven for JC2 — no simultaneous MRT),
+// but sequentially reinterpret a few EDRAM tile bases under different formats
+// (k_8_8_8_8 / _GAMMA / k_32_FLOAT color; several depth buffers incl. the
+// shadow map). Targets are therefore keyed by (EDRAM tile base, guest format):
+// distinct logical targets get distinct Metal textures with a format-appropriate
+// pixel format, which stops float lighting data being quantized into BGRA8 and
+// stops the shadow depth pass corrupting the scene depth. No EDRAM aliasing /
+// ownership transfer between keys yet (each pass fully re-renders its target).
+// Metal objects are held as opaque void* (retained) so the header stays C++.
 class MetalRenderTargetCache {
  public:
   // MTLPixelFormatBGRA8Unorm — matches the drawable and the present blit so a
@@ -31,19 +36,43 @@ class MetalRenderTargetCache {
   // MTLPixelFormatDepth32Float — depth-only (no stencil yet) for 3D ordering.
   static const uint64_t kDepthFormat;
 
+  // Fixed bring-up target extents. Wide enough for the guest scene pitch (720p
+  // titles), tall enough for the 1024x1024 shadow map — and IDENTICAL for color
+  // and depth: Metal requires all attachments of a render pass to share the
+  // same dimensions (mismatched 720-tall color with 1024-tall depth silently
+  // broke every pass with Release validation off).
+  static constexpr uint32_t kColorWidth = 1280;
+  static constexpr uint32_t kColorHeight = 1024;
+  static constexpr uint32_t kDepthWidth = 1280;
+  static constexpr uint32_t kDepthHeight = 1024;
+
   explicit MetalRenderTargetCache(void* device);
   ~MetalRenderTargetCache();
 
-  // Ensures the color target is exactly width x height, (re)creating on change.
-  // Returns the id<MTLTexture> as void*, or nullptr on failure.
-  void* EnsureColorTarget(uint32_t width, uint32_t height);
-  // Ensures a matching depth target exists at width x height.
-  void* EnsureDepthTarget(uint32_t width, uint32_t height);
+  // Identity of the color target (EDRAM base, guest format) resolves to: keyed
+  // by the HOST pixel format, so guest formats sharing EDRAM bits (8888 vs
+  // 8888_GAMMA) share one texture. Used by the command processor to detect
+  // same-target passes (encoder reuse + per-frame clear tracking).
+  static uint32_t ColorTargetKey(uint32_t edram_base, uint32_t guest_format);
 
-  void* color_target() const { return color_target_; }
-  void* depth_target() const { return depth_target_; }
-  uint32_t width() const { return width_; }
-  uint32_t height() const { return height_; }
+  // Returns (creating on first use) the color target for the given EDRAM tile
+  // base + guest xenos::ColorRenderTargetFormat, as id<MTLTexture> void*.
+  // pixel_format_out receives the target's MTLPixelFormat. Null on failure.
+  void* GetColorTarget(uint32_t edram_base, uint32_t guest_format,
+                       uint64_t* pixel_format_out);
+  // Returns the color target for the key only if it already exists.
+  void* FindColorTarget(uint32_t edram_base, uint32_t guest_format,
+                        uint64_t* pixel_format_out) const;
+  // Returns (creating on first use) the Depth32Float target for the EDRAM base.
+  void* GetDepthTarget(uint32_t edram_base);
+  void* FindDepthTarget(uint32_t edram_base) const;
+
+  // The most recent BGRA8 color target drawn into — the only presentable kind
+  // (the present blit requires the mailbox's BGRA8). For the pre-resolve
+  // fallback present path (splash/menus before any frontbuffer snapshot).
+  void* presentable_color_target() const { return presentable_color_target_; }
+  uint32_t width() const { return kColorWidth; }
+  uint32_t height() const { return kColorHeight; }
 
   // RT-as-texture bridge. A resolve (IssueCopy) blits the color RT into a
   // per-destination "snapshot" texture keyed by the guest resolve destination
@@ -64,13 +93,17 @@ class MetalRenderTargetCache {
   void* GetResolveSnapshot(uint32_t dest_base) const;
 
  private:
-  void* device_;                  // id<MTLDevice>, not owned.
-  void* color_target_ = nullptr;  // id<MTLTexture>, retained.
-  void* depth_target_ = nullptr;  // id<MTLTexture>, retained.
-  uint32_t width_ = 0;
-  uint32_t height_ = 0;
-  uint32_t depth_width_ = 0;
-  uint32_t depth_height_ = 0;
+  struct Target {
+    void* texture = nullptr;  // id<MTLTexture>, retained.
+    uint64_t pixel_format = 0;
+  };
+
+  void* device_;  // id<MTLDevice>, not owned.
+
+  // Color targets keyed by (edram_base << 4) | guest_format; depth by base.
+  std::unordered_map<uint32_t, Target> color_targets_;
+  std::unordered_map<uint32_t, Target> depth_targets_;
+  void* presentable_color_target_ = nullptr;  // borrowed from color_targets_.
 
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.

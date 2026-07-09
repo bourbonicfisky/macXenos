@@ -299,15 +299,17 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   if (pixel && pixel->has_metal_function()) {
     desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
   }
-  desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
+  if (color_pixel_format != MTLPixelFormatInvalid) {
+    desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
+    // RT0 blending + write mask from RB_BLENDCONTROL0 / RB_COLOR_MASK. Without
+    // this, transparent draws (e.g. alpha-0 fade overlays) wrote opaque and
+    // showed as black boxes.
+    ApplyRt0BlendState(desc.colorAttachments[0], blend_control,
+                       color_write_mask);
+  }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
   }
-
-  // RT0 blending + write mask from RB_BLENDCONTROL0 / RB_COLOR_MASK. Without this,
-  // transparent draws (e.g. alpha-0 fade overlays) wrote opaque and showed as
-  // black boxes.
-  ApplyRt0BlendState(desc.colorAttachments[0], blend_control, color_write_mask);
 
   NSError* error = nil;
   id<MTLRenderPipelineState> state =
@@ -529,13 +531,16 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLMeshRenderPipelineDescriptor* desc =
       [[MTLMeshRenderPipelineDescriptor alloc] init];
-  desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
+  if (color_pixel_format != MTLPixelFormatInvalid) {
+    desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
+    ApplyRt0BlendState(desc.colorAttachments[0], blend_control,
+                       color_write_mask);
+  }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
   }
   desc.rasterSampleCount = 1;
   desc.alphaToCoverageEnabled = NO;
-  ApplyRt0BlendState(desc.colorAttachments[0], blend_control, color_write_mask);
 
   id<MTLFunction> ps_fn = (__bridge id<MTLFunction>)pixel->metal_function();
   std::string pixel_function_name = ps_fn.name ? [ps_fn.name UTF8String] : "";

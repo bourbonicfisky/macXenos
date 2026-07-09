@@ -356,26 +356,53 @@ void MetalCommandProcessor::ShutdownContext() {
 static constexpr bool kDepthEnabled = true;
 
 void* MetalCommandProcessor::BeginFrameEncoder() {
+  bool want_color = pending_has_color_;
+  bool want_depth = kDepthEnabled && pending_has_depth_;
+  // Host-format-based key: guest formats sharing EDRAM bits (8888 vs GAMMA)
+  // are the SAME target — switching between them must neither reopen the pass
+  // nor re-clear the shared texture.
+  uint32_t want_color_key = MetalRenderTargetCache::ColorTargetKey(
+      pending_color_base_, pending_color_format_);
   if (frame_open_) {
-    return frame_render_encoder_;
+    // Reuse the open encoder only if it targets the same (color, depth) pair;
+    // otherwise this draw starts a different guest pass — close and reopen.
+    bool matches = encoder_has_color_ == want_color &&
+                   (!want_color || encoder_color_key_ == want_color_key) &&
+                   encoder_has_depth_ == want_depth &&
+                   (!want_depth || encoder_depth_base_ == pending_depth_base_);
+    if (matches) {
+      return frame_render_encoder_;
+    }
+    EndRenderEncoder();
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   if (!provider || !provider->command_queue() || !render_target_cache_) {
     return nullptr;
   }
-  void* rt = render_target_cache_->EnsureColorTarget(1280, 720);
-  if (!rt) {
+  uint64_t color_pixel_format = 0;
+  void* rt = want_color ? render_target_cache_->GetColorTarget(
+                              pending_color_base_, pending_color_format_,
+                              &color_pixel_format)
+                        : nullptr;
+  if (want_color && !rt) {
     return nullptr;
   }
   void* depth =
-      kDepthEnabled ? render_target_cache_->EnsureDepthTarget(1280, 720) : nullptr;
+      want_depth ? render_target_cache_->GetDepthTarget(pending_depth_base_)
+                 : nullptr;
+  if (!rt && !depth) {
+    // Nothing to attach (the caller should have skipped such draws).
+    return nullptr;
+  }
   // The command buffer lives for the whole frame; create it (and reset the
-  // per-frame upload arena) on the first encoder open of the frame.
+  // per-frame upload arena + per-frame clear tracking) on the first encoder
+  // open of the frame.
   id<MTLCommandBuffer> command_buffer;
   bool new_frame = frame_command_buffer_ == nullptr;
   if (new_frame) {
     upload_arena_->Reset();
+    frame_cleared_targets_.clear();
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     command_buffer = [queue commandBuffer];
@@ -383,39 +410,35 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   } else {
     command_buffer = (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
   }
-  // Clear at the start of a frame and after every resolve (a pass boundary);
-  // otherwise load so the passes' draws accumulate into the RT.
-  // Only clear on a genuine new frame; on mid-frame reopens LOAD the retained
-  // shared-RT content. JC2's final HUD pass re-renders into the already-composited
-  // front-buffer base and expects to draw OVER the resolved scene; clearing at
-  // every resolve boundary (the old reopen_clear_ behavior) threw the whole scene
-  // away, leaving only the clear color + HUD in the present. Loading fixes that.
-  // KNOWN LIMITATION: this is blunt — passes that render UNRELATED targets into
-  // the shared RT now over-accumulate (mild bleed on some frames). The correct
-  // model honors the guest's actual clears via EDRAM-tile<->RAM-base tracking;
-  // until that lands, load-and-accumulate is the net-better default. reopen_clear_
-  // is retained (still cleared below) for when that model arrives.
-  bool clear = new_frame;
-  reopen_clear_ = false;
+  // Per-target clear policy: each logical target clears on its FIRST use in a
+  // frame and loads afterwards. Same-target multi-pass accumulation (JC2's HUD
+  // drawn over the composited front buffer after its resolve) keeps working,
+  // while distinct targets no longer bleed into each other through a shared
+  // texture (each has its own now).
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
-  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
-  pass.colorAttachments[0].loadAction =
-      clear ? MTLLoadActionClear : MTLLoadActionLoad;
-  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  // Dark green base: if a draw lands nothing, we still see "our RT".
-  pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.20, 0.08, 1.0);
-  // Depth attachment: cleared at each pass boundary to the GUEST's depth-clear
-  // value (RB_DEPTH_CLEAR, 24-bit depth in the high bits), not a fixed 1.0.
-  // Reverse-z titles (JC2 menus) clear to 0 and test "greater"; a hardcoded 1.0
-  // made every fragment fail z>=1.0 -> black. Reading the guest value serves both
-  // directions.
+  if (rt) {
+    bool clear_color =
+        frame_cleared_targets_.insert(0x1'00000000ull | want_color_key).second;
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
+    pass.colorAttachments[0].loadAction =
+        clear_color ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+  }
+  // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
+  // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
+  // menus) clear to 0 and test "greater"; a hardcoded 1.0 made every fragment
+  // fail z>=1.0 -> black. Reading the guest value serves both directions.
   if (depth) {
+    bool clear_depth =
+        frame_cleared_targets_.insert(0x2'00000000ull | pending_depth_base_)
+            .second;
     uint32_t rb_depth_clear = (*register_file_)[XE_GPU_REG_RB_DEPTH_CLEAR];
     double clear_depth_value = double(rb_depth_clear >> 8) / double(0xFFFFFF);
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction =
-        clear ? MTLLoadActionClear : MTLLoadActionLoad;
+        clear_depth ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = clear_depth_value;
   }
@@ -424,6 +447,10 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   [encoder setCullMode:MTLCullModeNone];
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
+  encoder_has_color_ = want_color;
+  encoder_color_key_ = want_color_key;
+  encoder_has_depth_ = want_depth;
+  encoder_depth_base_ = pending_depth_base_;
   return frame_render_encoder_;
 }
 
@@ -446,7 +473,6 @@ void MetalCommandProcessor::EndFrameEncoder() {
   id<MTLCommandBuffer> command_buffer =
       (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
   frame_command_buffer_ = nullptr;
-  reopen_clear_ = false;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
 }
@@ -556,48 +582,72 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     pixel_shader->AnalyzeUcode(ucode_disasm);
   }
 
-  // DIAGNOSTIC (MRT-vs-single-RT proof, openspec reduce-apple-gpu-frametime):
-  // log each unique render-target configuration once — the active color-target
-  // set (normalized mask folds RB_MODECONTROL + RB_COLOR_MASK + the PS's static
-  // writes) with each RT's EDRAM tile base + format, plus the bound depth
-  // base/format. Decides whether the multi-target RT cache must bind multiple
-  // simultaneous attachments (true MRT) or distinct per-pass single targets.
-  {
-    uint32_t normalized_color_mask =
-        pixel_shader ? draw_util::GetNormalizedColorMask(
-                           regs, pixel_shader->writes_color_targets())
-                     : 0;
-    reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
-    bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
-    auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
-    // Unique-config key: color mask + each active RT's info + depth info.
-    uint64_t cfg_key = normalized_color_mask;
-    uint32_t color_rt_count = 0;
-    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-      if (!(normalized_color_mask & (0b1111u << (4 * i)))) continue;
-      ++color_rt_count;
-      cfg_key = cfg_key * 1000003u ^
-                regs[reg::RB_COLOR_INFO::rt_register_indices[i]];
+  // --- Guest render-target binding (single color + depth; JC2 proven to never
+  // bind simultaneous MRT — see the RTConfig diagnostic below). The normalized
+  // color mask folds RB_MODECONTROL + RB_COLOR_MASK + the PS's static writes;
+  // RT0's EDRAM tile base + format and RB_DEPTH_INFO's base key the per-target
+  // textures in the RT cache. ---
+  uint32_t normalized_color_mask =
+      pixel_shader ? draw_util::GetNormalizedColorMask(
+                         regs, pixel_shader->writes_color_targets())
+                   : 0;
+  reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
+  bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
+  auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  bool color_bound = (normalized_color_mask & 0b1111u) != 0;
+  auto rt0_info = regs.Get<reg::RB_COLOR_INFO>(
+      reg::RB_COLOR_INFO::rt_register_indices[0]);
+  if (normalized_color_mask & ~0b1111u) {
+    // A draw binding RT1..3 — not seen in JC2 (single-RT proven); render RT0
+    // only and log so a title that does use MRT is visible immediately.
+    static bool s_mrt_logged = false;
+    if (!s_mrt_logged) {
+      s_mrt_logged = true;
+      XELOGW("MetalCommandProcessor: draw binds multiple color RTs (ncm={:04X})"
+             " — only RT0 is rendered",
+             normalized_color_mask);
     }
-    cfg_key = cfg_key * 1000003u ^
-              (depth_bound ? (uint64_t(rb_depth_info.value) | (1ull << 32)) : 0);
+  }
+  {
+    // Log each unique RT configuration once (kept from the MRT-proof pass; it
+    // is the ground truth for the per-target model).
+    uint64_t cfg_key =
+        (uint64_t(normalized_color_mask) << 33) ^
+        (color_bound ? regs[reg::RB_COLOR_INFO::rt_register_indices[0]] : 0) ^
+        (depth_bound ? (uint64_t(rb_depth_info.value) | (1ull << 32)) : 0);
     static std::unordered_set<uint64_t> s_seen_rt_configs;
     if (s_seen_rt_configs.insert(cfg_key).second) {
-      std::string rt_desc;
-      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-        if (!(normalized_color_mask & (0b1111u << (4 * i)))) continue;
-        auto ci = regs.Get<reg::RB_COLOR_INFO>(
-            reg::RB_COLOR_INFO::rt_register_indices[i]);
-        rt_desc += fmt::format(" RT{}[base={} fmt={} mask={:X}]", i,
-                               uint32_t(ci.color_base),
-                               uint32_t(ci.color_format),
-                               (normalized_color_mask >> (4 * i)) & 0b1111);
-      }
       XELOGI(
-          "MetalRTConfig: colors={}{}{} depth={} (base={} fmt={}) ncm={:04X}",
-          color_rt_count, rt_desc.empty() ? " (none)" : "", rt_desc,
+          "MetalRTConfig: color={} (base={} fmt={} mask={:X}) depth={} (base={} "
+          "fmt={}) ncm={:04X}",
+          color_bound, uint32_t(rt0_info.color_base),
+          uint32_t(rt0_info.color_format), normalized_color_mask & 0b1111,
           depth_bound, uint32_t(rb_depth_info.depth_base),
           uint32_t(rb_depth_info.depth_format), normalized_color_mask);
+    }
+  }
+  if (!color_bound && !(kDepthEnabled && depth_bound)) {
+    // Writes neither color nor depth — nothing to render (memexport draws are
+    // not supported by this backend yet).
+    ++draw_skip_count_;
+    return true;
+  }
+  // Stage the binding for BeginFrameEncoder (it reopens the encoder when this
+  // differs from the open pass).
+  pending_has_color_ = color_bound;
+  pending_color_base_ = rt0_info.color_base;
+  pending_color_format_ = uint32_t(rt0_info.color_format);
+  pending_has_depth_ = depth_bound;
+  pending_depth_base_ = rb_depth_info.depth_base;
+  // The host pixel format of the bound color target (creates the texture on
+  // first use), for pipeline creation below.
+  uint64_t color_pixel_format = uint64_t(MTLPixelFormatInvalid);
+  if (color_bound) {
+    if (!render_target_cache_->GetColorTarget(pending_color_base_,
+                                              pending_color_format_,
+                                              &color_pixel_format)) {
+      ++draw_skip_count_;
+      return true;
     }
   }
 
@@ -699,23 +749,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         debug_solid_pipelines_);
   } else if (use_geometry_emulation) {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
-    uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
+    uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateGeometryPipelineState(
         vs_translation, ps_translation, geometry_type,
         DxbcShaderTranslator::Modification(vs_mod),
-        DxbcShaderTranslator::Modification(ps_mod_value),
-        MetalRenderTargetCache::kColorFormat,
-        kDepthEnabled ? MetalRenderTargetCache::kDepthFormat
-                      : uint64_t(MTLPixelFormatInvalid),
+        DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_format,
+        (kDepthEnabled && depth_bound) ? MetalRenderTargetCache::kDepthFormat
+                                       : uint64_t(MTLPixelFormatInvalid),
         blend_control, color_write_mask, &gs_vertex_size,
         &gs_max_input_primitives);
   } else {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
-    uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
+    uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
-        vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
-        kDepthEnabled ? MetalRenderTargetCache::kDepthFormat
-                      : uint64_t(MTLPixelFormatInvalid),
+        vs_translation, ps_translation, color_pixel_format,
+        (kDepthEnabled && depth_bound) ? MetalRenderTargetCache::kDepthFormat
+                                       : uint64_t(MTLPixelFormatInvalid),
         blend_control, color_write_mask);
   }
   if (!pipeline) {
@@ -988,13 +1037,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
-  if (kDepthEnabled) {
-    // Normalized depth control disables depth entirely when the pass isn't a
-    // depth pass (edram_mode not kColorDepth/kDepthOnly) and collapses redundant
-    // "always, no write" to disabled — so 2D/menu draws don't get depth-tested
-    // against a buffer they never meant to use.
-    void* depth_state = GetOrCreateDepthStencilState(
-        draw_util::GetNormalizedDepthControl(*register_file_).value);
+  if (kDepthEnabled && depth_bound) {
+    // Only when the pass has a depth attachment — setting a depth-test state on
+    // an encoder without one is a Metal validation error. norm_depth already
+    // collapsed "always, no write" to disabled.
+    void* depth_state = GetOrCreateDepthStencilState(norm_depth.value);
     if (depth_state) {
       [encoder
           setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
@@ -1340,11 +1387,11 @@ bool MetalCommandProcessor::IssueCopy() {
     return true;
   }
   // RT-as-texture bridge. A color resolve is the boundary of a render pass: blit
-  // what we've drawn into the shared color RT out into a per-destination snapshot
-  // texture and register it at the resolve's guest base, so a later deferred /
-  // composite pass that fetches this base samples the real rendered pixels (its
-  // guest RAM is never populated by our backend). Then flag the next pass to
-  // start from a fresh clear.
+  // what the pass drew into ITS color target (looked up by the resolve's EDRAM
+  // base + format — the same key the draws bound it with) out into a
+  // per-destination snapshot texture registered at the resolve's guest base, so
+  // a later deferred / composite pass that fetches this base samples the real
+  // rendered pixels (its guest RAM is never populated by our backend).
   if (!resolve_info.IsCopyingDepth() && resolve_info.copy_dest_extent_length) {
     last_color_resolve_base_ = resolve_info.copy_dest_base;
     last_color_resolve_start_ = resolve_info.copy_dest_extent_start;
@@ -1359,10 +1406,17 @@ bool MetalCommandProcessor::IssueCopy() {
       // buffer (Metal orders the blit after the render encoder and before the
       // later composite encoder that samples the snapshot).
       EndRenderEncoder();
-      void* snap = render_target_cache_->EnsureResolveSnapshot(
-          resolve_info.copy_dest_base, rw, rh,
-          MetalRenderTargetCache::kColorFormat);
-      void* color_rt = render_target_cache_->color_target();
+      // The snapshot's pixel format mirrors the source target's so the blit is
+      // format-compatible (an R32Float lighting target snapshots as R32Float,
+      // sampled as float by the texture cache).
+      uint64_t src_pixel_format = 0;
+      void* color_rt = render_target_cache_->FindColorTarget(
+          resolve_info.color_original_base, resolve_info.color_edram_info.format,
+          &src_pixel_format);
+      void* snap = color_rt ? render_target_cache_->EnsureResolveSnapshot(
+                                  resolve_info.copy_dest_base, rw, rh,
+                                  src_pixel_format)
+                            : nullptr;
       if (snap && color_rt) {
         uint32_t cw = render_target_cache_->width();
         uint32_t ch = render_target_cache_->height();
@@ -1383,8 +1437,16 @@ bool MetalCommandProcessor::IssueCopy() {
         [blit endEncoding];
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
                                                 rw, rh);
+      } else {
+        static uint32_t s_missing_color_rt_logs = 0;
+        if (s_missing_color_rt_logs++ < 8) {
+          XELOGW(
+              "MetalCommandProcessor: color resolve base={} fmt={} has no "
+              "rendered target",
+              resolve_info.color_original_base,
+              uint32_t(resolve_info.color_edram_info.format));
+        }
       }
-      reopen_clear_ = true;
     }
   } else if (resolve_info.IsCopyingDepth() &&
              resolve_info.copy_dest_extent_length) {
@@ -1392,20 +1454,24 @@ bool MetalCommandProcessor::IssueCopy() {
     // reconstruct position (JC2/Sonic sample fmt 22/23 -> we returned null ->
     // black lighting). Our depth RT is Depth32Float, which Metal only samples as
     // depth2d while MSC shaders declare texture2d_array<float>; convert it to an
-    // R32Float snapshot with a small fullscreen pass, and register that.
+    // R32Float snapshot with a small fullscreen pass, and register that. The
+    // source is the depth target the pass rendered (by the resolve's EDRAM
+    // base), e.g. the shadow map and the scene depth are distinct textures.
     uint32_t rw = resolve_info.coordinate_info.width_div_8 * 8;
     uint32_t rh = resolve_info.height_div_8 * 8;
     if (rw && rh && kDepthEnabled && render_target_cache_ && texture_cache_ &&
         frame_command_buffer_) {
       EndRenderEncoder();
-      void* snap = render_target_cache_->EnsureResolveSnapshot(
-          resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
-      void* depth_rt = render_target_cache_->depth_target();
+      void* depth_rt = render_target_cache_->FindDepthTarget(
+          resolve_info.depth_original_base);
+      void* snap = depth_rt ? render_target_cache_->EnsureResolveSnapshot(
+                                  resolve_info.copy_dest_base, rw, rh,
+                                  MTLPixelFormatR32Float)
+                            : nullptr;
       if (snap && depth_rt && ConvertDepthToSnapshot(depth_rt, snap, rw, rh)) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
                                                 rw, rh);
       }
-      reopen_clear_ = true;
     }
   }
   static uint32_t s_copy_count = 0;
@@ -1426,10 +1492,12 @@ void MetalCommandProcessor::InitializeTrace() {}
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
-  // Flush the frame's draws into the render target before presenting it.
-  if (frame_open_) {
-    EndFrameEncoder();
-  }
+  // Flush the frame's draws + resolve blits before presenting. Unconditional:
+  // when the frame's LAST GPU work is a resolve (or a skipped draw), the render
+  // encoder is already closed (frame_open_ false) but the frame command buffer
+  // still holds every draw and snapshot blit — gating the commit on frame_open_
+  // silently discarded the whole frame (uniform magenta present).
+  EndFrameEncoder();
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
@@ -1482,10 +1550,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     present_width = uint32_t(source_rt.width);
     present_height = uint32_t(source_rt.height);
   } else if (frame_has_render_ && render_target_cache_ &&
-             render_target_cache_->color_target()) {
-    source_rt = (__bridge id<MTLTexture>)render_target_cache_->color_target();
-    present_width = render_target_cache_->width();
-    present_height = render_target_cache_->height();
+             render_target_cache_->presentable_color_target()) {
+    // Pre-resolve fallback (splash/menus before any frontbuffer snapshot): the
+    // most recent BGRA8 color target drawn into. Present the guest frontbuffer
+    // extent, not the (taller, shadow-map-capable) texture extent.
+    source_rt = (__bridge id<MTLTexture>)
+                    render_target_cache_->presentable_color_target();
+    present_width = frontbuffer_width ? frontbuffer_width : 1280;
+    present_height = frontbuffer_height ? frontbuffer_height : 720;
   }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
