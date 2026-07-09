@@ -112,15 +112,13 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
       return true;
     case xenos::PrimitiveType::kRectangleList:
       // 3 guest vertices define a rectangle whose 4th corner (v3 = v0 + v2 - v1)
-      // the guest GPU synthesizes. Drawing the 3 verts as ONE triangle is NOT a
-      // valid approximation for JC2: its deferred composite/lighting/post passes
-      // are true 4-corner rectangles, so a single triangle covers only HALF the
-      // screen (the diagonal split) and samples with degenerate 3-corner UVs —
-      // this is the confirmed gameplay-corruption blocker. The correct fix is
-      // kRectangleListAsTriangleStrip VS expansion (synthesize v3, emit a
-      // 4-vertex strip), which the DXBC translator does not yet implement. Until
-      // it does, SKIP rect-lists (render nothing) rather than draw half a screen
-      // of garbage. See openspec reduce-apple-gpu-frametime handoff.
+      // the guest GPU synthesizes. IssueDraw expands rect-lists through MSC
+      // geometry emulation (the GS emits the true 4-corner rect) BEFORE reaching
+      // MapPrimitiveType, so this is only hit as the fallback when the device
+      // lacks mesh-shader support (or there's no pixel shader). Drawing 3 verts as
+      // one triangle covers only half the screen with degenerate UVs, so skip
+      // (render nothing) rather than draw garbage. See openspec
+      // reduce-apple-gpu-frametime handoff.
       return false;
     case xenos::PrimitiveType::kTriangleFan:
       // No host triangle-fan primitive; IssueDraw expands it to a triangle list
@@ -204,6 +202,11 @@ bool MetalCommandProcessor::SetupContext() {
 
 bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_ptr;
+
+  // Mesh-shader support gates the geometry-emulation (rectangle/point/quad) path.
+  // Apple Silicon is Apple7+; Mac2 covers AMD on macOS. Mirrors XeniOS.
+  mesh_shader_supported_ = [device supportsFamily:MTLGPUFamilyApple7] ||
+                           [device supportsFamily:MTLGPUFamilyMac2];
 
   upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, kUploadArenaSize);
   if (!upload_arena_->Initialize()) {
@@ -507,16 +510,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return IssueCopy();
   }
 
-  // A skipped draw is not an error (the base loop treats false as failure); we
-  // return true and just render nothing so the game keeps advancing.
-  MTLPrimitiveType mtl_prim;
-  if (!MapPrimitiveType(prim_type, &mtl_prim)) {
-    ++draw_skip_count_;
-    return true;
-  }
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
   auto* pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
   if (!vertex_shader || !pipeline_cache_ || !upload_arena_) {
+    ++draw_skip_count_;
+    return true;
+  }
+
+  // Rectangle lists (JC2's deferred composite/lighting/post passes are true
+  // 4-corner rects) can't be drawn as plain triangles; expand them via MSC
+  // geometry emulation, which needs a mesh-shader-capable device and a pixel
+  // shader for the fragment stage. Point lists can join this path later; for now
+  // only rect-list is routed here (everything else still goes through the plain
+  // primitive map, which skips unsupported types).
+  PipelineGeometryShader geometry_type = PipelineGeometryShader::kNone;
+  if (prim_type == xenos::PrimitiveType::kRectangleList) {
+    geometry_type = PipelineGeometryShader::kRectangleList;
+  }
+  bool use_geometry_emulation = geometry_type != PipelineGeometryShader::kNone &&
+                                mesh_shader_supported_ && pixel_shader != nullptr;
+
+  // A skipped draw is not an error (the base loop treats false as failure); we
+  // return true and just render nothing so the game keeps advancing.
+  MTLPrimitiveType mtl_prim = MTLPrimitiveTypeTriangle;
+  if (!use_geometry_emulation && !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++draw_skip_count_;
     return true;
   }
@@ -579,6 +596,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
   MetalShader::MetalTranslation* ps_translation = nullptr;
+  uint64_t ps_mod_value = 0;
   if (pixel_shader) {
     DxbcShaderTranslator::Modification ps_mod_decoded(
         pipeline_cache_->shader_translator()->GetDefaultPixelShaderModification(
@@ -607,6 +625,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
         xenos::BlendFactor::kOne;
     uint64_t ps_mod = ps_mod_decoded.value;
+    ps_mod_value = ps_mod;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
         pixel_shader->GetOrCreateTranslation(ps_mod));
     if (!pipeline_cache_->TranslateShader(*ps_translation)) {
@@ -615,12 +634,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   void* pipeline;
+  // Geometry-emulation config (VS output size + GS max input primitives per mesh
+  // threadgroup), filled by the geometry pipeline and passed to the draw call.
+  uint32_t gs_vertex_size = 0;
+  uint32_t gs_max_input_primitives = 0;
   if (kDebugSolidFragment) {
     pipeline = GetDebugSolidPipeline(
         static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
             ->device(),
         vs_translation->metal_function(), debug_solid_fragment_,
         debug_solid_pipelines_);
+  } else if (use_geometry_emulation) {
+    uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
+    uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
+    pipeline = pipeline_cache_->GetOrCreateGeometryPipelineState(
+        vs_translation, ps_translation, geometry_type,
+        DxbcShaderTranslator::Modification(vs_mod),
+        DxbcShaderTranslator::Modification(ps_mod_value),
+        MetalRenderTargetCache::kColorFormat,
+        kDepthEnabled ? MetalRenderTargetCache::kDepthFormat
+                      : uint64_t(MTLPixelFormatInvalid),
+        blend_control, color_write_mask, &gs_vertex_size,
+        &gs_max_input_primitives);
   } else {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
     uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
@@ -921,28 +956,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder setFragmentBytes:debug_color length:sizeof(debug_color) atIndex:8];
   }
   id<MTLBuffer> ab_buffer = (__bridge id<MTLBuffer>)ab_alloc.buffer;
-  [encoder setVertexBuffer:ab_buffer
-                    offset:ab_alloc.offset
-                   atIndex:kIRArgumentBufferBindPoint];
-  [encoder setFragmentBuffer:ab_buffer
-                      offset:ab_alloc.offset
-                     atIndex:kIRArgumentBufferBindPoint];
-  [encoder setVertexBuffer:view_heap offset:0 atIndex:kIRDescriptorHeapBindPoint];
-  [encoder setFragmentBuffer:view_heap
-                      offset:0
-                     atIndex:kIRDescriptorHeapBindPoint];
-  [encoder setVertexBuffer:sampler_heap
-                    offset:0
-                   atIndex:kIRSamplerHeapBindPoint];
-  [encoder setFragmentBuffer:sampler_heap
-                      offset:0
-                     atIndex:kIRSamplerHeapBindPoint];
+  // Geometry emulation runs the guest VS as the OBJECT stage and the generated GS
+  // as the MESH stage, so the argument buffer + bindless heaps bind to
+  // object/mesh instead of vertex. The fragment stage is unchanged.
+  auto bind_arg_buffer = [&](id<MTLBuffer> buf, NSUInteger off, NSUInteger idx) {
+    if (use_geometry_emulation) {
+      [encoder setObjectBuffer:buf offset:off atIndex:idx];
+      [encoder setMeshBuffer:buf offset:off atIndex:idx];
+    } else {
+      [encoder setVertexBuffer:buf offset:off atIndex:idx];
+    }
+    [encoder setFragmentBuffer:buf offset:off atIndex:idx];
+  };
+  bind_arg_buffer(ab_buffer, ab_alloc.offset, kIRArgumentBufferBindPoint);
+  bind_arg_buffer(view_heap, 0, kIRDescriptorHeapBindPoint);
+  bind_arg_buffer(sampler_heap, 0, kIRSamplerHeapBindPoint);
+  if (use_geometry_emulation) {
+    // MSC manual: the object stage expects an IRRuntimeVertexBuffers table at
+    // kIRVertexBufferBindPoint. Our guest VS fetches in-shader from shared memory
+    // (zero stage-in inputs), so a zeroed table satisfies the binding without
+    // supplying any real vertex streams.
+    IRRuntimeVertexBuffers vertex_buffers = {};
+    [encoder setObjectBytes:vertex_buffers
+                     length:sizeof(vertex_buffers)
+                    atIndex:kIRVertexBufferBindPoint];
+  }
 
   // Residency for everything the shaders reach through gpuAddresses.
   id<MTLBuffer> shared_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
-  MTLRenderStages stages = MTLRenderStageVertex | MTLRenderStageFragment;
+  MTLRenderStages stages =
+      use_geometry_emulation
+          ? (MTLRenderStageObject | MTLRenderStageMesh | MTLRenderStageFragment)
+          : (MTLRenderStageVertex | MTLRenderStageFragment);
   [encoder useResource:shared_buffer usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:ab_buffer usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:view_heap usage:MTLResourceUsageRead stages:stages];
@@ -957,6 +1004,51 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   // --- Draw. ---
+  // Rectangle-list (and later point/quad) geometry emulation: the guest VS runs
+  // as the object stage and a generated GS as the mesh stage; the runtime
+  // dispatches the object+mesh threadgroups. rect-list maps to a triangle input
+  // topology (the GS synthesizes the 4th corner). See openspec
+  // reduce-apple-gpu-frametime handoff.
+  if (use_geometry_emulation) {
+    IRRuntimeGeometryPipelineConfig geometry_config = {};
+    geometry_config.gsVertexSizeInBytes = gs_vertex_size;
+    geometry_config.gsMaxInputPrimitivesPerMeshThreadgroup =
+        gs_max_input_primitives;
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      uint32_t index_size =
+          index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
+      uint32_t total = index_count * index_size;
+      const void* guest_indices =
+          memory_->TranslatePhysical(index_buffer_info->guest_base);
+      MetalUploadAllocation index_alloc{};
+      if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
+        ++draw_skip_count_;
+        return true;
+      }
+      SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
+                      index_buffer_info->format, index_buffer_info->endianness);
+      id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
+      [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+      MTLIndexType index_type =
+          index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+      // The runtime reads the index buffer by gpuAddress; our data lives at the
+      // arena byte offset, expressed here as an element start index.
+      uint32_t start_index = uint32_t(index_alloc.offset / index_size);
+      IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
+          encoder, IRRuntimePrimitiveTypeTriangle, index_type, index_buffer,
+          geometry_config, /*instanceCount=*/1, index_count, start_index,
+          /*baseVertex=*/0, /*baseInstance=*/0);
+    } else {
+      IRRuntimeDrawPrimitivesGeometryEmulation(
+          encoder, IRRuntimePrimitiveTypeTriangle, geometry_config,
+          /*instanceCount=*/1, index_count, /*baseVertex=*/0,
+          /*baseInstance=*/0);
+    }
+    frame_has_render_ = true;
+    ++draw_count_;
+    return true;
+  }
+
   // Triangle fans have no host primitive on Metal: expand to a triangle list
   // with a generated 32-bit index buffer. Fan (v0, v1, v2, v3, ...) becomes
   // triangles (v0,v1,v2), (v0,v2,v3), ... indexing the same vertices, so it

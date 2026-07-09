@@ -117,6 +117,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // RB_DEPTHCONTROL.
   std::unordered_map<uint32_t, void*> depth_stencil_states_;
 
+  // Whether the device supports mesh shaders (Apple7 / Mac2 family), a
+  // prerequisite for the MSC geometry-emulation path that expands
+  // rectangle/point/quad lists. Set in InitializeDrawResources.
+  bool mesh_shader_supported_ = false;
+
   // id<MTLRenderPipelineState> for the depth->R32Float conversion pass, built on
   // first depth resolve (see ConvertDepthToSnapshot).
   void* depth_convert_pipeline_ = nullptr;

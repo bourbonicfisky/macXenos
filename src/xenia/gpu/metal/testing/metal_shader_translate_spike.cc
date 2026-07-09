@@ -52,11 +52,20 @@ static bool WriteFile(const std::string& path, const std::vector<uint8_t>& d) {
 
 int SpikeMain(const std::vector<std::string>& args) {
   if (args.size() < 4) {
-    std::printf("usage: %s <shader.dxbc> vs|ps <out.metallib>\n", args[0].c_str());
+    std::printf("usage: %s <shader.dxbc> vs|ps|vsgeo <out.metallib>\n",
+                args[0].c_str());
     return 2;
   }
   const std::string& dxbc_path = args[1];
-  const bool is_vertex = args[2] == "vs";
+  const std::string& mode = args[2];
+  const bool is_vertex = mode == "vs";
+  // vsgeo: run the vertex stage through the geometry-emulation path (object stage
+  // + synthesized stage-in) and assert a non-empty stage-in metallib. This is the
+  // decisive off-device check for the rect-list geometry-emulation pipeline: the
+  // MSC runtime dereferences the stage-in library unconditionally, so if
+  // synthesis (IRMetalLibSynthesizeStageInFunction, numElements=0) came back empty
+  // the pipeline would crash on device. Validates without the emulator/Processor.
+  const bool is_vertex_geometry = mode == "vsgeo";
   const std::string& out_path = args[3];
 
   std::vector<uint8_t> dxbc;
@@ -83,6 +92,44 @@ int SpikeMain(const std::vector<std::string>& args) {
     std::printf("FAIL: metal converter init: %s\n", error.c_str());
     return 1;
   }
+  if (is_vertex_geometry) {
+    MetalShaderConverter::GeometryEmulationResult geo;
+    if (!metal_converter.ConvertForGeometryEmulation(
+            MetalShaderConverter::Stage::kVertex, dxil,
+            MetalShaderConverter::InputTopology::kTriangle, geo)) {
+      std::printf("FAIL: geometry-emulation VS convert: %s\n", geo.error.c_str());
+      return 1;
+    }
+    if (geo.metallib.size() < 4 ||
+        std::memcmp(geo.metallib.data(), "MTLB", 4) != 0) {
+      std::printf("FAIL: object-stage output is not a metallib (bad magic)\n");
+      return 1;
+    }
+    if (geo.stage_in_metallib.empty()) {
+      std::printf("FAIL: stage-in synthesis produced no metallib\n");
+      return 1;
+    }
+    if (geo.stage_in_metallib.size() < 4 ||
+        std::memcmp(geo.stage_in_metallib.data(), "MTLB", 4) != 0) {
+      std::printf("FAIL: stage-in output is not a metallib (bad magic)\n");
+      return 1;
+    }
+    if (geo.vertex_output_size_in_bytes == 0) {
+      std::printf("FAIL: VS reflection returned zero output size\n");
+      return 1;
+    }
+    if (!WriteFile(out_path, geo.metallib)) {
+      std::printf("FAIL: cannot write %s\n", out_path.c_str());
+      return 1;
+    }
+    std::printf(
+        "OK: geometry-emulation VS: object metallib %zu bytes, stage-in %zu "
+        "bytes (MTLB), vs_output_size=%u -> %s\n",
+        geo.metallib.size(), geo.stage_in_metallib.size(),
+        geo.vertex_output_size_in_bytes, out_path.c_str());
+    return 0;
+  }
+
   std::vector<uint8_t> metallib;
   auto stage = is_vertex ? MetalShaderConverter::Stage::kVertex
                          : MetalShaderConverter::Stage::kFragment;
