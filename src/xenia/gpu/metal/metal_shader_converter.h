@@ -29,7 +29,28 @@ namespace metal {
 // it is usable offline.
 class MetalShaderConverter {
  public:
-  enum class Stage { kVertex, kFragment };
+  enum class Stage { kVertex, kFragment, kGeometry };
+
+  // Input topology for geometry/tessellation emulation, mirroring IRInputTopology
+  // (kept ABI-free in the public header so callers don't include the IR headers).
+  enum class InputTopology { kUndefined, kPoint, kLine, kTriangle, kPatch };
+
+  // Result of a geometry-emulation conversion. The Metal geometry path compiles a
+  // guest VS (object stage) + a generated GS (mesh stage) into an object+mesh
+  // pipeline; building IRRuntimeNewGeometryEmulationPipeline needs the reflection
+  // captured here (VS output size, GS max input primitives) plus, for the VS, the
+  // synthesized stage-in function.
+  struct GeometryEmulationResult {
+    bool success = false;
+    std::vector<uint8_t> metallib;           // object (VS) or mesh (GS) AIR.
+    std::vector<uint8_t> stage_in_metallib;  // VS stage-in AIR (empty for GS).
+    std::string function_name;
+    uint32_t vertex_output_size_in_bytes = 0;                 // VS reflection.
+    uint32_t gs_max_input_primitives_per_mesh_threadgroup = 0;  // GS reflection.
+    bool has_mesh_stage = false;
+    bool has_geometry_stage = false;
+    std::string error;
+  };
 
   MetalShaderConverter() = default;
   ~MetalShaderConverter();
@@ -44,6 +65,15 @@ class MetalShaderConverter {
   bool Convert(Stage stage, const std::vector<uint8_t>& dxil,
                std::vector<uint8_t>& metallib_out,
                std::string* error_out = nullptr);
+
+  // Compiles a DXIL container with geometry+tessellation emulation enabled and
+  // captures the reflection needed to build a geometry-emulation pipeline. Used by
+  // the point/rectangle/quad primitive-expansion path (guest VS as object stage,
+  // generated GS as mesh stage). stage must be kVertex or kGeometry.
+  bool ConvertForGeometryEmulation(Stage stage,
+                                   const std::vector<uint8_t>& dxil,
+                                   InputTopology input_topology,
+                                   GeometryEmulationResult& result);
 
  private:
   // Constructs the root signature mirroring DxbcShaderTranslator::CbufferRegister

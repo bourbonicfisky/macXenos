@@ -30,8 +30,47 @@ IRShaderStage ToIRStage(MetalShaderConverter::Stage stage) {
       return IRShaderStageVertex;
     case MetalShaderConverter::Stage::kFragment:
       return IRShaderStageFragment;
+    case MetalShaderConverter::Stage::kGeometry:
+      return IRShaderStageGeometry;
   }
   return IRShaderStageInvalid;
+}
+
+IRInputTopology ToIRTopology(MetalShaderConverter::InputTopology topology) {
+  switch (topology) {
+    case MetalShaderConverter::InputTopology::kPoint:
+      return IRInputTopologyPoint;
+    case MetalShaderConverter::InputTopology::kLine:
+      return IRInputTopologyLine;
+    case MetalShaderConverter::InputTopology::kTriangle:
+      return IRInputTopologyTriangle;
+    case MetalShaderConverter::InputTopology::kPatch:
+      return IRInputTopologyPatch;
+    case MetalShaderConverter::InputTopology::kUndefined:
+      break;
+  }
+  return IRInputTopologyUndefined;
+}
+
+// Copies the AIR bytecode for one stage out of a compiled IRObject. Returns false
+// if the stage isn't present or is empty.
+bool ExtractMetalLib(IRObject* metal_object, IRShaderStage stage,
+                     std::vector<uint8_t>& out) {
+  IRMetalLibBinary* metallib = IRMetalLibBinaryCreate();
+  if (!metallib) {
+    return false;
+  }
+  bool ok = false;
+  if (IRObjectGetMetalLibBinary(metal_object, stage, metallib)) {
+    size_t size = IRMetalLibGetBytecodeSize(metallib);
+    if (size != 0) {
+      out.resize(size);
+      IRMetalLibGetBytecode(metallib, out.data());
+      ok = true;
+    }
+  }
+  IRMetalLibBinaryDestroy(metallib);
+  return ok;
 }
 
 }  // namespace
@@ -264,6 +303,146 @@ bool MetalShaderConverter::Convert(Stage stage,
   IRCompilerDestroy(compiler);
   IRObjectDestroy(dxil_object);
   return ok;
+}
+
+bool MetalShaderConverter::ConvertForGeometryEmulation(
+    Stage stage, const std::vector<uint8_t>& dxil, InputTopology input_topology,
+    GeometryEmulationResult& result) {
+  result = GeometryEmulationResult{};
+  if (stage != Stage::kVertex && stage != Stage::kGeometry) {
+    result.error = "geometry emulation only converts the vertex or geometry stage";
+    return false;
+  }
+  if (!root_signature_) {
+    result.error = "MetalShaderConverter not initialized";
+    return false;
+  }
+  if (dxil.empty()) {
+    result.error = "empty DXIL input";
+    return false;
+  }
+
+  IRObject* dxil_object =
+      IRObjectCreateFromDXIL(dxil.data(), dxil.size(), IRBytecodeOwnershipNone);
+  if (!dxil_object) {
+    result.error = "IRObjectCreateFromDXIL failed";
+    return false;
+  }
+  IRCompiler* compiler = IRCompilerCreate();
+  if (!compiler) {
+    IRObjectDestroy(dxil_object);
+    result.error = "IRCompilerCreate failed";
+    return false;
+  }
+
+  IRCompilerSetCompatibilityFlags(
+      compiler, static_cast<IRCompatibilityFlags>(
+                    IRCompatibilityFlagForceTextureArray |
+                    IRCompatibilityFlagBoundsCheck |
+                    IRCompatibilityFlagVertexPositionInfToNan));
+  IRCompilerIgnoreRootSignature(compiler, true);
+  IRCompilerSetFunctionConstantResourceSpace(compiler,
+                                             kFunctionConstantRegisterSpace);
+  IRCompilerSetGlobalRootSignature(compiler, root_signature_);
+  // The primitive-expansion path runs the guest VS as an object stage feeding a
+  // generated GS as a mesh stage; both must be compiled with emulation enabled and
+  // the guest input topology set so MSC sizes the mesh threadgroups correctly.
+  IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
+  IRInputTopology topology = ToIRTopology(input_topology);
+  if (topology != IRInputTopologyUndefined) {
+    IRCompilerSetInputTopology(compiler, topology);
+  }
+
+  IRError* error = nullptr;
+  IRObject* metal_object =
+      IRCompilerAllocCompileAndLink(compiler, nullptr, dxil_object, &error);
+  if (error) {
+    const char* payload = reinterpret_cast<const char*>(IRErrorGetPayload(error));
+    result.error =
+        std::string("MSC geometry compile failed: ") + (payload ? payload : "?");
+    IRErrorDestroy(error);
+    IRCompilerDestroy(compiler);
+    IRObjectDestroy(dxil_object);
+    return false;
+  }
+  if (!metal_object) {
+    result.error = "MSC returned null object without error";
+    IRCompilerDestroy(compiler);
+    IRObjectDestroy(dxil_object);
+    return false;
+  }
+
+  // Pick the stage whose AIR + reflection we keep. The guest VS emits a vertex
+  // (object) stage; the generated GS emits a mesh stage (or a geometry stage on
+  // older toolchains).
+  IRShaderStage reflect_stage = IRShaderStageInvalid;
+  if (stage == Stage::kGeometry) {
+    result.has_mesh_stage =
+        ExtractMetalLib(metal_object, IRShaderStageMesh, result.metallib);
+    if (result.has_mesh_stage) {
+      reflect_stage = IRShaderStageMesh;
+    } else if (ExtractMetalLib(metal_object, IRShaderStageGeometry,
+                               result.metallib)) {
+      result.has_geometry_stage = true;
+      reflect_stage = IRShaderStageGeometry;
+    }
+  } else {
+    if (ExtractMetalLib(metal_object, IRShaderStageVertex, result.metallib)) {
+      reflect_stage = IRShaderStageVertex;
+    }
+  }
+  if (reflect_stage == IRShaderStageInvalid || result.metallib.empty()) {
+    result.error = "geometry emulation produced no metallib for the stage";
+    IRObjectDestroy(metal_object);
+    IRCompilerDestroy(compiler);
+    IRObjectDestroy(dxil_object);
+    return false;
+  }
+
+  IRShaderReflection* reflection = IRShaderReflectionCreate();
+  if (reflection && IRObjectGetReflection(metal_object, reflect_stage, reflection)) {
+    const char* entry = IRShaderReflectionGetEntryPointFunctionName(reflection);
+    if (entry) {
+      result.function_name = entry;
+    }
+    if (reflect_stage == IRShaderStageVertex) {
+      IRVersionedVSInfo vs_info = {};
+      vs_info.version = IRReflectionVersion_1_0;
+      if (IRShaderReflectionCopyVertexInfo(reflection, IRReflectionVersion_1_0,
+                                           &vs_info)) {
+        result.vertex_output_size_in_bytes =
+            vs_info.info_1_0.vertex_output_size_in_bytes;
+        IRShaderReflectionReleaseVertexInfo(&vs_info);
+      }
+      // NOTE: XeniOS also synthesizes a stage-in function here
+      // (IRMetalLibSynthesizeStageInFunction) because its VS fetches vertices via
+      // stage-in inputs. Our VS uses IN-SHADER vfetch from shared memory (zero
+      // vertex inputs), so whether a (possibly empty) stage-in library is required
+      // by the geometry-emulation pipeline is the key on-device validation point;
+      // left empty here and revisited when the pipeline is wired (next commit).
+    } else {
+      IRVersionedGSInfo gs_info = {};
+      gs_info.version = IRReflectionVersion_1_0;
+      if (IRShaderReflectionCopyGeometryInfo(reflection, IRReflectionVersion_1_0,
+                                             &gs_info)) {
+        result.gs_max_input_primitives_per_mesh_threadgroup =
+            gs_info.info_1_0.max_input_primitives_per_mesh_threadgroup;
+        IRShaderReflectionReleaseGeometryInfo(&gs_info);
+      }
+    }
+  }
+  if (reflection) {
+    IRShaderReflectionDestroy(reflection);
+  }
+  if (result.function_name.empty()) {
+    result.function_name = (stage == Stage::kVertex) ? "vertexMain" : "main";
+  }
+
+  result.success = true;
+  IRObjectDestroy(metal_object);
+  IRCompilerDestroy(compiler);
+  IRObjectDestroy(dxil_object);
+  return true;
 }
 
 }  // namespace metal
