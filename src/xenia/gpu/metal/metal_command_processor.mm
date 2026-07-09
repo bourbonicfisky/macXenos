@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -207,6 +208,11 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // Apple Silicon is Apple7+; Mac2 covers AMD on macOS. Mirrors XeniOS.
   mesh_shader_supported_ = [device supportsFamily:MTLGPUFamilyApple7] ||
                            [device supportsFamily:MTLGPUFamilyMac2];
+  // Diagnostic A/B: XE_METAL_DISABLE_GEO=1 forces the rect-list SKIP fallback so
+  // the geometry-emulation output can be compared against no-geometry.
+  if (std::getenv("XE_METAL_DISABLE_GEO")) {
+    mesh_shader_supported_ = false;
+  }
 
   upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, kUploadArenaSize);
   if (!upload_arena_->Initialize()) {
@@ -666,6 +672,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         blend_control, color_write_mask);
   }
   if (!pipeline) {
+    if (use_geometry_emulation) {
+      ++geo_pipeline_fail_count_;
+    }
     ++draw_skip_count_;
     return true;
   }
@@ -1046,6 +1055,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     frame_has_render_ = true;
     ++draw_count_;
+    ++geo_draw_count_;
     return true;
   }
 
@@ -1412,11 +1422,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
         "MetalCommandProcessor: IssueSwap #{} (RT {}x{}, guest fb {}x{}, ptr "
-        "{:08X}, {}; draws {} skipped {})",
+        "{:08X}, {}; draws {} skipped {}; geo-draws {} geo-pipeline-fails {})",
         count, present_width, present_height, frontbuffer_width,
         frontbuffer_height, frontbuffer_ptr,
         source_rt ? "render target" : "test pattern", draw_count_,
-        draw_skip_count_);
+        draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
   }
 
   double t = double(count % 120) / 120.0;

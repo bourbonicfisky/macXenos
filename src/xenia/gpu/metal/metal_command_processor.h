@@ -154,6 +154,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
   uint32_t draw_skip_count_ = 0;
+  // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
+  // path, and times the geometry pipeline failed to build (fell through to skip).
+  uint32_t geo_draw_count_ = 0;
+  uint32_t geo_pipeline_fail_count_ = 0;
   // How many indexed triangle-list draws we've dumped diagnostics for.
   uint32_t tri_log_count_ = 0;
   // Most recent color-resolve (IssueCopy) destination range in guest memory, for

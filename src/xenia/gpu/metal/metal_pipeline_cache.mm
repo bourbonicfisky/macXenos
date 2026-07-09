@@ -563,6 +563,13 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     return nullptr;
   }
 
+  XELOGI(
+      "MetalPipelineCache: built geometry pipeline (type={}, gs_vertex_size={}, "
+      "gs_max_input_primitives={}, vs_fn='{}', gs_fn='{}')",
+      uint32_t(geometry_type), vstage->vertex_output_size,
+      gstage->max_input_primitives, vstage->function_name,
+      gstage->function_name);
+
   GeometryPipeline state;
   state.pipeline = (__bridge_retained void*)pipeline;
   state.gs_vertex_size = vstage->vertex_output_size;
