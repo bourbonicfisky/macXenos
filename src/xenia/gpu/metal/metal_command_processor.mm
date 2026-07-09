@@ -854,7 +854,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   return true;
 }
 
-bool MetalCommandProcessor::IssueCopy() { return true; }
+bool MetalCommandProcessor::IssueCopy() {
+  // Resolve/copy is still a stub (no EDRAM->guest resolve). Count invocations so
+  // we can tell whether the game relies on resolved render targets (which would
+  // explain black surfaces sampled as textures with all-zero guest memory).
+  static uint32_t s_copy_count = 0;
+  if ((s_copy_count++ % 300) == 0) {
+    XELOGI("MetalCommandProcessor::IssueCopy stub invoked (count={})",
+             s_copy_count);
+  }
+  return true;
+}
 
 void MetalCommandProcessor::InitializeTrace() {}
 

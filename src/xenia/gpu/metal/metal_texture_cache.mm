@@ -62,6 +62,34 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
   }
 }
 
+// Map one guest 3-bit swizzle component (X/Y/Z/W/0/1, values 6/7 clamped to
+// 0/1) to a Metal swizzle channel. Our host formats (RGBA8, BC1/2/3_RGBA) all
+// store channels in identity RGBA order, so the host-format swizzle is identity
+// and the guest fetch swizzle maps straight through.
+MTLTextureSwizzle GuestSwizzleComponentToMetal(uint32_t comp) {
+  switch (comp) {
+    case 0:
+      return MTLTextureSwizzleRed;
+    case 1:
+      return MTLTextureSwizzleGreen;
+    case 2:
+      return MTLTextureSwizzleBlue;
+    case 3:
+      return MTLTextureSwizzleAlpha;
+    case 4:
+    case 6:  // 6/7 are invalid; clamp to constant 0/1 like GuestToHostSwizzle.
+      return MTLTextureSwizzleZero;
+    default:  // 5, 7
+      return MTLTextureSwizzleOne;
+  }
+}
+
+// True if the 12-bit guest swizzle is the identity RGBA mapping (xyzw), so no
+// swizzled view is needed.
+bool GuestSwizzleIsIdentity(uint32_t guest_swizzle) {
+  return (guest_swizzle & 0xFFF) == ((0u) | (1u << 3) | (2u << 6) | (3u << 9));
+}
+
 // Convert a block (or texel) of `bytes` from the guest endianness to host
 // little-endian in place. Guest 32bpp is k8in32; guest DXT is normally k8in16
 // (each 16-bit word byte-swapped), but honor whatever the fetch declares.
@@ -100,8 +128,8 @@ MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
   view_heap_contents_ = [heap contents];
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
   bc_supported_ = [mtl_device supportsBCTextureCompression];
-  XELOGGPU("MetalTextureCache: BC (DXT) texture compression {}",
-           bc_supported_ ? "supported" : "UNSUPPORTED (DXT stays gray)");
+  XELOGI("MetalTextureCache: BC (DXT) texture compression {}",
+         bc_supported_ ? "supported" : "UNSUPPORTED (DXT stays gray)");
 }
 
 MetalTextureCache::~MetalTextureCache() {
@@ -194,6 +222,28 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
+  // Bring-up diagnostic: a texture that decodes to all-zero bytes renders pure
+  // black. The most likely source is a render-target-backed surface (e.g. the
+  // resolved scene) whose guest memory we never populated because IssueCopy is
+  // still a stub. Flag it so we can tell "black texture" from a shader bug.
+  static uint32_t s_tex_log = 0;
+  bool all_zero = true;
+  for (uint8_t b : linear) {
+    if (b) {
+      all_zero = false;
+      break;
+    }
+  }
+  if (s_tex_log < 24) {
+    ++s_tex_log;
+    XELOGI(
+        "MetalTex: fmt={} {}x{} base={:08X} pitch_t={} tiled={} endian={} "
+        "swz={:03X} slot={} {}",
+        uint32_t(fetch.format), width, height, base, pitch_texels, tiled,
+        uint32_t(endian), fetch.swizzle & 0xFFF, next_slot_,
+        all_zero ? "ALL-ZERO(black)" : "hasdata");
+  }
+
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
       texture2DDescriptorWithPixelFormat:plan.host_format
@@ -213,10 +263,36 @@ uint32_t MetalTextureCache::GetTextureSlot(
                withBytes:linear.data()
              bytesPerRow:blocks_w * bpb];
 
+  // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output
+  // channel) when sampling. Bake it into a swizzled texture VIEW so the shader
+  // reads the correct channels (matches the Vulkan backend's host_swizzle). A
+  // wrong swizzle here reads alpha from the wrong channel, and alpha-test then
+  // discards the whole draw.
+  uint32_t guest_swizzle = fetch.swizzle & 0xFFF;
+  id<MTLTexture> sampled = texture;
+  if (!GuestSwizzleIsIdentity(guest_swizzle)) {
+    MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
+        GuestSwizzleComponentToMetal((guest_swizzle >> 0) & 0b111),
+        GuestSwizzleComponentToMetal((guest_swizzle >> 3) & 0b111),
+        GuestSwizzleComponentToMetal((guest_swizzle >> 6) & 0b111),
+        GuestSwizzleComponentToMetal((guest_swizzle >> 9) & 0b111));
+    id<MTLTexture> view =
+        [texture newTextureViewWithPixelFormat:plan.host_format
+                                   textureType:MTLTextureType2D
+                                        levels:NSMakeRange(0, 1)
+                                        slices:NSMakeRange(0, 1)
+                                       swizzle:channels];
+    if (view) {
+      sampled = view;
+    }
+  }
+
   uint32_t slot = next_slot_++;
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  IRDescriptorTableSetTexture(&entries[slot], texture, 0.0f, 0);
-  void* texture_ptr = (__bridge_retained void*)texture;
+  IRDescriptorTableSetTexture(&entries[slot], sampled, 0.0f, 0);
+  // Retain the sampled view (or the base texture if identity) for the descriptor
+  // and residency. A view keeps its base alive, so this covers both.
+  void* texture_ptr = (__bridge_retained void*)sampled;
   cache_.emplace(key, Entry{texture_ptr, slot});
   active_textures_.push_back(texture_ptr);
   return slot;
