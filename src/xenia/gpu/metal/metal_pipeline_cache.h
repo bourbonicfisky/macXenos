@@ -53,7 +53,9 @@ class MetalPipelineCache {
   void* GetOrCreateRenderPipelineState(MetalShader::MetalTranslation* vertex,
                                        MetalShader::MetalTranslation* pixel,
                                        uint64_t color_pixel_format,
-                                       uint64_t depth_pixel_format);
+                                       uint64_t depth_pixel_format,
+                                       uint32_t blend_control,
+                                       uint32_t color_write_mask);
 
   DxbcShaderTranslator* shader_translator() const {
     return shader_translator_.get();

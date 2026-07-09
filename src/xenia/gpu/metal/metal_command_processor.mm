@@ -487,9 +487,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         vs_translation->metal_function(), debug_solid_fragment_,
         debug_solid_pipelines_);
   } else {
+    uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
+    uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
-        MTLPixelFormatInvalid);
+        MTLPixelFormatInvalid, blend_control, color_write_mask);
   }
   if (!pipeline) {
     ++draw_skip_count_;

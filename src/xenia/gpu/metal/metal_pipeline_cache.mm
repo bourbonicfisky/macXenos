@@ -16,6 +16,8 @@
 
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/ui/graphics_provider.h"
 
 namespace xe {
@@ -130,10 +132,67 @@ bool MetalPipelineCache::TranslateShader(
   return true;
 }
 
+namespace {
+MTLBlendFactor ToMetalBlendFactor(xenos::BlendFactor factor) {
+  switch (factor) {
+    case xenos::BlendFactor::kZero:
+      return MTLBlendFactorZero;
+    case xenos::BlendFactor::kOne:
+      return MTLBlendFactorOne;
+    case xenos::BlendFactor::kSrcColor:
+      return MTLBlendFactorSourceColor;
+    case xenos::BlendFactor::kOneMinusSrcColor:
+      return MTLBlendFactorOneMinusSourceColor;
+    case xenos::BlendFactor::kSrcAlpha:
+      return MTLBlendFactorSourceAlpha;
+    case xenos::BlendFactor::kOneMinusSrcAlpha:
+      return MTLBlendFactorOneMinusSourceAlpha;
+    case xenos::BlendFactor::kDstColor:
+      return MTLBlendFactorDestinationColor;
+    case xenos::BlendFactor::kOneMinusDstColor:
+      return MTLBlendFactorOneMinusDestinationColor;
+    case xenos::BlendFactor::kDstAlpha:
+      return MTLBlendFactorDestinationAlpha;
+    case xenos::BlendFactor::kOneMinusDstAlpha:
+      return MTLBlendFactorOneMinusDestinationAlpha;
+    case xenos::BlendFactor::kConstantColor:
+      return MTLBlendFactorBlendColor;
+    case xenos::BlendFactor::kOneMinusConstantColor:
+      return MTLBlendFactorOneMinusBlendColor;
+    case xenos::BlendFactor::kConstantAlpha:
+      return MTLBlendFactorBlendAlpha;
+    case xenos::BlendFactor::kOneMinusConstantAlpha:
+      return MTLBlendFactorOneMinusBlendAlpha;
+    case xenos::BlendFactor::kSrcAlphaSaturate:
+      return MTLBlendFactorSourceAlphaSaturated;
+    default:
+      return MTLBlendFactorOne;
+  }
+}
+
+MTLBlendOperation ToMetalBlendOp(xenos::BlendOp op) {
+  switch (op) {
+    case xenos::BlendOp::kAdd:
+      return MTLBlendOperationAdd;
+    case xenos::BlendOp::kSubtract:
+      return MTLBlendOperationSubtract;
+    case xenos::BlendOp::kMin:
+      return MTLBlendOperationMin;
+    case xenos::BlendOp::kMax:
+      return MTLBlendOperationMax;
+    case xenos::BlendOp::kRevSubtract:
+      return MTLBlendOperationReverseSubtract;
+    default:
+      return MTLBlendOperationAdd;
+  }
+}
+}  // namespace
+
 void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     MetalShader::MetalTranslation* vertex,
     MetalShader::MetalTranslation* pixel, uint64_t color_pixel_format,
-    uint64_t depth_pixel_format) {
+    uint64_t depth_pixel_format, uint32_t blend_control,
+    uint32_t color_write_mask) {
   if (!vertex || !vertex->has_metal_function()) {
     return nullptr;
   }
@@ -146,9 +205,11 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     void* ps;
     uint64_t color;
     uint64_t depth;
+    uint32_t blend;
+    uint32_t write_mask;
   } key_bytes{vertex->metal_function(),
               pixel ? pixel->metal_function() : nullptr, color_pixel_format,
-              depth_pixel_format};
+              depth_pixel_format, blend_control, color_write_mask};
   uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
   auto it = render_pipeline_states_.find(key);
   if (it != render_pipeline_states_.end()) {
@@ -166,6 +227,29 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
   }
+
+  // RT0 blending from RB_BLENDCONTROL0. Blending is always enabled and the
+  // factors applied verbatim; the no-op case (One*src + Zero*dst, Add) yields
+  // opaque output, so this is safe for non-blended draws too. Without this,
+  // transparent draws (e.g. alpha-0 fade overlays) wrote opaque and showed as
+  // black boxes.
+  reg::RB_BLENDCONTROL bc;
+  bc.value = blend_control;
+  MTLRenderPipelineColorAttachmentDescriptor* rt0 = desc.colorAttachments[0];
+  rt0.blendingEnabled = YES;
+  rt0.sourceRGBBlendFactor = ToMetalBlendFactor(bc.color_srcblend);
+  rt0.destinationRGBBlendFactor = ToMetalBlendFactor(bc.color_destblend);
+  rt0.rgbBlendOperation = ToMetalBlendOp(bc.color_comb_fcn);
+  rt0.sourceAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_srcblend);
+  rt0.destinationAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_destblend);
+  rt0.alphaBlendOperation = ToMetalBlendOp(bc.alpha_comb_fcn);
+  // Per-channel write mask for RT0 (bits 0..3 = R,G,B,A).
+  MTLColorWriteMask write_mask = MTLColorWriteMaskNone;
+  if (color_write_mask & 0b0001) write_mask |= MTLColorWriteMaskRed;
+  if (color_write_mask & 0b0010) write_mask |= MTLColorWriteMaskGreen;
+  if (color_write_mask & 0b0100) write_mask |= MTLColorWriteMaskBlue;
+  if (color_write_mask & 0b1000) write_mask |= MTLColorWriteMaskAlpha;
+  rt0.writeMask = write_mask;
 
   NSError* error = nil;
   id<MTLRenderPipelineState> state =
