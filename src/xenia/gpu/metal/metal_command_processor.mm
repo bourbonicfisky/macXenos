@@ -31,6 +31,7 @@
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
+#include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/gpu/xenos_zpd_report.h"
@@ -272,10 +273,14 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   IRDescriptorTableSetBuffer(&system_entries[kSystemViewNullUAV],
                              [null_buffer gpuAddress], 256);
   system_view_tables_ = (__bridge_retained void*)system_view;
+
+  texture_cache_ = std::make_unique<MetalTextureCache>(
+      device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
   return true;
 }
 
 void MetalCommandProcessor::ShutdownDrawResources() {
+  texture_cache_.reset();  // references view_bindless_heap_, free first.
   auto release = [](void*& p) {
     if (p) {
       id obj = (__bridge_transfer id)p;
@@ -365,7 +370,7 @@ Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
 // Bring-up diagnostic toggle: replace the guest pixel shader with a solid color
 // so we can tell whether the vertex side (positions/constants) is producing
 // visible geometry independent of the guest pixel shader / textures.
-static constexpr bool kDebugSolidFragment = true;
+static constexpr bool kDebugSolidFragment = false;
 
 // Returns a cached id<MTLRenderPipelineState> pairing the given guest vertex
 // function with a hardcoded solid-color fragment function.
@@ -669,21 +674,33 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
-  // Descriptor indices (b4). For bring-up all textures/samplers map to bindless
-  // slot 0 (the null texture/sampler), so a zero-filled buffer is correct.
+  // Descriptor indices (b4): for each texture binding, resolve its guest fetch
+  // constant to a bindless view-heap slot (real texture, or 0=null/gray if the
+  // format isn't supported yet). Samplers stay at slot 0 (the null sampler).
+  texture_cache_->ResetActive();
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
     uint32_t count = 1;
     if (shader) {
       count = std::max<uint32_t>(
-          uint32_t(shader->texture_bindings().size() +
+          uint32_t(shader->GetTextureBindingsAfterTranslation().size() +
                    shader->GetSamplerBindingsAfterTranslation().size()),
           1u);
     }
     if (!upload_arena_->Allocate(count * sizeof(uint32_t), 256, out)) {
       return false;
     }
-    std::memset(out->cpu_ptr, 0, count * sizeof(uint32_t));
+    auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
+    std::memset(indices, 0, count * sizeof(uint32_t));
+    if (shader) {
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        if (binding.bindless_descriptor_index < count) {
+          indices[binding.bindless_descriptor_index] =
+              texture_cache_->GetTextureSlot(
+                  regs.GetTextureFetch(binding.fetch_constant));
+        }
+      }
+    }
     return true;
   };
   MetalUploadAllocation desc_idx_vertex_alloc{};
@@ -778,6 +795,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   [encoder useResource:system_view usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:null_buffer usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:null_texture usage:MTLResourceUsageRead stages:stages];
+  for (void* tex : texture_cache_->active_textures()) {
+    [encoder useResource:(__bridge id<MTLTexture>)tex
+                   usage:MTLResourceUsageRead
+                  stages:stages];
+  }
 
   // --- Draw. ---
   if (index_buffer_info && index_buffer_info->guest_base) {

@@ -25,6 +25,7 @@ namespace metal {
 class MetalPipelineCache;
 class MetalRenderTargetCache;
 class MetalSharedMemory;
+class MetalTextureCache;
 class MetalUploadArena;
 
 // Phase 2b skeleton command processor. Overrides the same pure-virtual surface
@@ -84,6 +85,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
+  std::unique_ptr<MetalTextureCache> texture_cache_;
   std::unique_ptr<MetalUploadArena> upload_arena_;
 
   // Bindless / fixed-resource infrastructure for the MSC argument buffer. All
