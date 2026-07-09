@@ -26,6 +26,8 @@ class MetalRenderTargetCache {
   // MTLPixelFormatBGRA8Unorm — matches the drawable and the present blit so a
   // straight copy into the presenter's mailbox works.
   static const uint64_t kColorFormat;
+  // MTLPixelFormatDepth32Float — depth-only (no stencil yet) for 3D ordering.
+  static const uint64_t kDepthFormat;
 
   explicit MetalRenderTargetCache(void* device);
   ~MetalRenderTargetCache();
@@ -33,16 +35,22 @@ class MetalRenderTargetCache {
   // Ensures the color target is exactly width x height, (re)creating on change.
   // Returns the id<MTLTexture> as void*, or nullptr on failure.
   void* EnsureColorTarget(uint32_t width, uint32_t height);
+  // Ensures a matching depth target exists at width x height.
+  void* EnsureDepthTarget(uint32_t width, uint32_t height);
 
   void* color_target() const { return color_target_; }
+  void* depth_target() const { return depth_target_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
 
  private:
   void* device_;                  // id<MTLDevice>, not owned.
   void* color_target_ = nullptr;  // id<MTLTexture>, retained.
+  void* depth_target_ = nullptr;  // id<MTLTexture>, retained.
   uint32_t width_ = 0;
   uint32_t height_ = 0;
+  uint32_t depth_width_ = 0;
+  uint32_t depth_height_ = 0;
 };
 
 }  // namespace metal

@@ -75,6 +75,10 @@ class MetalCommandProcessor : public CommandProcessor {
   bool InitializeDrawResources(void* device);
   void ShutdownDrawResources();
 
+  // Returns a cached id<MTLDepthStencilState> for the given RB_DEPTHCONTROL
+  // value (depth-only; stencil not yet implemented), creating it on first use.
+  void* GetOrCreateDepthStencilState(uint32_t depth_control);
+
   // Opens the frame command buffer + render encoder (render pass into the color
   // RT, cleared once), if not already open. Returns the encoder (id<MTL...>) or
   // nullptr on failure.
@@ -96,6 +100,10 @@ class MetalCommandProcessor : public CommandProcessor {
   void* null_buffer_ = nullptr;            // id<MTLBuffer> stand-in for inactive CBVs
   void* null_texture_ = nullptr;           // id<MTLTexture> 1x1, for unbound samples
   void* null_sampler_ = nullptr;           // id<MTLSamplerState>
+
+  // Cache of id<MTLDepthStencilState> keyed by the depth-relevant bits of
+  // RB_DEPTHCONTROL.
+  std::unordered_map<uint32_t, void*> depth_stencil_states_;
 
   // Frame command buffer / render encoder (id<...>), open across a frame's draws.
   void* frame_command_buffer_ = nullptr;

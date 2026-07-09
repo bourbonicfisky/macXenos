@@ -300,6 +300,10 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   release(null_buffer_);
   release(null_texture_);
   release(null_sampler_);
+  for (auto& pair : depth_stencil_states_) {
+    release(pair.second);
+  }
+  depth_stencil_states_.clear();
   upload_arena_.reset();
 }
 
@@ -327,6 +331,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (!rt) {
     return nullptr;
   }
+  void* depth = render_target_cache_->EnsureDepthTarget(1280, 720);
   upload_arena_->Reset();
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
@@ -338,6 +343,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   // Dark green base: if a draw lands nothing, we still see "our RT".
   pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.20, 0.08, 1.0);
+  // Depth attachment: cleared to 1.0 (far) once per frame. Bring-up assumes
+  // standard (near=0..far=1) depth; reverse-z titles will need the guest clear.
+  if (depth) {
+    pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = 1.0;
+  }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   [encoder setCullMode:MTLCullModeNone];
@@ -491,7 +504,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
-        MTLPixelFormatInvalid, blend_control, color_write_mask);
+        MetalRenderTargetCache::kDepthFormat, blend_control, color_write_mask);
   }
   if (!pipeline) {
     ++draw_skip_count_;
@@ -777,6 +790,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  void* depth_state = GetOrCreateDepthStencilState(
+      regs.Get<reg::RB_DEPTHCONTROL>().value);
+  if (depth_state) {
+    [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
+  }
   if (kDebugSolidFragment) {
     // Per-vertex-shader color so distinct draw types show as distinct regions:
     // many colors = real structured scene geometry, one flat color = a single
@@ -862,6 +880,58 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   return true;
 }
 
+static MTLCompareFunction ToMetalCompareFunction(xenos::CompareFunction f) {
+  switch (f) {
+    case xenos::CompareFunction::kNever:
+      return MTLCompareFunctionNever;
+    case xenos::CompareFunction::kLess:
+      return MTLCompareFunctionLess;
+    case xenos::CompareFunction::kEqual:
+      return MTLCompareFunctionEqual;
+    case xenos::CompareFunction::kLessEqual:
+      return MTLCompareFunctionLessEqual;
+    case xenos::CompareFunction::kGreater:
+      return MTLCompareFunctionGreater;
+    case xenos::CompareFunction::kNotEqual:
+      return MTLCompareFunctionNotEqual;
+    case xenos::CompareFunction::kGreaterEqual:
+      return MTLCompareFunctionGreaterEqual;
+    default:
+      return MTLCompareFunctionAlways;
+  }
+}
+
+// Builds (and caches) an MTLDepthStencilState from RB_DEPTHCONTROL. Stencil is
+// not implemented yet; only z_enable / z_write_enable / zfunc are honored. When
+// depth test is disabled the state passes everything and writes nothing.
+void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control) {
+  // Only the depth-relevant bits matter for the key (mask out stencil fields).
+  reg::RB_DEPTHCONTROL dc;
+  dc.value = depth_control;
+  uint32_t key = (dc.z_enable ? 1u : 0u) | (dc.z_write_enable ? 2u : 0u) |
+                 (uint32_t(dc.zfunc) << 2);
+  auto it = depth_stencil_states_.find(key);
+  if (it != depth_stencil_states_.end()) {
+    return it->second;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  if (!provider) {
+    return nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
+  MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
+  desc.depthCompareFunction = dc.z_enable
+                                  ? ToMetalCompareFunction(dc.zfunc)
+                                  : MTLCompareFunctionAlways;
+  desc.depthWriteEnabled = dc.z_enable && dc.z_write_enable;
+  id<MTLDepthStencilState> state =
+      [device newDepthStencilStateWithDescriptor:desc];
+  void* state_ptr = (__bridge_retained void*)state;
+  depth_stencil_states_.emplace(key, state_ptr);
+  return state_ptr;
+}
+
 bool MetalCommandProcessor::IssueCopy() {
   // Resolve/copy is still a stub (no EDRAM->guest resolve). Count invocations so
   // we can tell whether the game relies on resolved render targets (which would
@@ -910,9 +980,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
-        "MetalCommandProcessor: IssueSwap #{} ({}x{}, ptr {:08X}, {}; draws {} "
-        "skipped {})",
-        count, present_width, present_height, frontbuffer_ptr,
+        "MetalCommandProcessor: IssueSwap #{} (RT {}x{}, guest fb {}x{}, ptr "
+        "{:08X}, {}; draws {} skipped {})",
+        count, present_width, present_height, frontbuffer_width,
+        frontbuffer_height, frontbuffer_ptr,
         source_rt ? "render target" : "test pattern", draw_count_,
         draw_skip_count_);
   }
