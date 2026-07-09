@@ -318,6 +318,14 @@ void MetalCommandProcessor::ShutdownContext() {
   CommandProcessor::ShutdownContext();
 }
 
+// Depth buffer is GATED OFF for now. When enabled it clears depth to 1.0 (far)
+// assuming standard 0..1 depth, but many Xbox 360 titles use reverse-z (clear 0,
+// "greater" test), so the fixed clear discards everything and 2D/menus go black.
+// Re-enable only once the guest depth-clear value + z-direction are emulated
+// (read from the guest's depth clear, not assumed). Keeps the pipeline's depth
+// attachment format and the render pass consistent (both on or both off).
+static constexpr bool kDepthEnabled = false;
+
 void* MetalCommandProcessor::BeginFrameEncoder() {
   if (frame_open_) {
     return frame_render_encoder_;
@@ -331,7 +339,8 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (!rt) {
     return nullptr;
   }
-  void* depth = render_target_cache_->EnsureDepthTarget(1280, 720);
+  void* depth =
+      kDepthEnabled ? render_target_cache_->EnsureDepthTarget(1280, 720) : nullptr;
   upload_arena_->Reset();
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
@@ -504,7 +513,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     uint32_t color_write_mask = regs.Get<reg::RB_COLOR_MASK>().value & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, MetalRenderTargetCache::kColorFormat,
-        MetalRenderTargetCache::kDepthFormat, blend_control, color_write_mask);
+        kDepthEnabled ? MetalRenderTargetCache::kDepthFormat
+                      : uint64_t(MTLPixelFormatInvalid),
+        blend_control, color_write_mask);
   }
   if (!pipeline) {
     ++draw_skip_count_;
@@ -790,10 +801,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
-  void* depth_state = GetOrCreateDepthStencilState(
-      regs.Get<reg::RB_DEPTHCONTROL>().value);
-  if (depth_state) {
-    [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
+  if (kDepthEnabled) {
+    void* depth_state =
+        GetOrCreateDepthStencilState(regs.Get<reg::RB_DEPTHCONTROL>().value);
+    if (depth_state) {
+      [encoder
+          setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
+    }
   }
   if (kDebugSolidFragment) {
     // Per-vertex-shader color so distinct draw types show as distinct regions:
