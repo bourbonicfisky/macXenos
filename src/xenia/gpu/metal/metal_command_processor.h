@@ -130,6 +130,12 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t draw_skip_count_ = 0;
   // How many indexed triangle-list draws we've dumped diagnostics for.
   uint32_t tri_log_count_ = 0;
+  // Most recent color-resolve (IssueCopy) destination range in guest memory, for
+  // the RT-as-texture bridge: a texture fetch whose base lands here is asking for
+  // the scene we rendered into the color RT.
+  uint32_t last_color_resolve_base_ = 0;
+  uint32_t last_color_resolve_start_ = 0;
+  uint32_t last_color_resolve_length_ = 0;
 };
 
 }  // namespace metal

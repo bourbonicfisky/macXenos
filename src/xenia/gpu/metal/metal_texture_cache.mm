@@ -42,12 +42,26 @@ struct FormatPlan {
   uint32_t block_log2;   // log2(bytes_per_block), for the tiled addresser.
   uint32_t block_texels;  // 1 (uncompressed) or 4 (DXT).
   MTLPixelFormat host_format;
+  // If true, the untiled 16bpp k_4_4_4_4 texels are CPU-expanded to RGBA8 before
+  // upload (host_format is RGBA8Unorm) so the same swizzle path as k_8_8_8_8
+  // applies. Avoids the channel-reorder load shader XeniOS/Vulkan use.
+  bool decode_4444 = false;
+  // If true, the untiled 16bpp single-channel k_16 texels are expanded to RGBA8
+  // (high byte -> R=G=B, A=255); the fetch swizzle (typically R,R,R,1) selects R.
+  bool decode_r16 = false;
 };
 
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
   switch (format) {
     case xenos::TextureFormat::k_8_8_8_8:
       return {true, false, 4, 2, 1, MTLPixelFormatRGBA8Unorm};
+    case xenos::TextureFormat::k_4_4_4_4:
+      // 16bpp RGBA4, decoded to RGBA8 on the CPU (see decode_4444). block_log2 =
+      // log2(2 source bytes) = 1.
+      return {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm, true, false};
+    case xenos::TextureFormat::k_16:
+      // 16bpp single channel, decoded to RGBA8 grayscale (see decode_r16).
+      return {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm, false, true};
     case xenos::TextureFormat::k_DXT1:
     case xenos::TextureFormat::k_DXT1_AS_16_16_16_16:
       return {bc_supported, true, 8, 3, 4, MTLPixelFormatBC1_RGBA};
@@ -144,24 +158,46 @@ MetalTextureCache::~MetalTextureCache() {
 
 uint32_t MetalTextureCache::GetTextureSlot(
     const xenos::xe_gpu_texture_fetch_t& fetch) {
+  // Diagnostic: log why a fetch resolves to the null (gray) texture. The
+  // gameplay gray screen is a composite pass sampling slot 0; this shows the
+  // fetch (base/format/dimension) so we know whether it's an unsupported format,
+  // a non-2D dimension, or a resolve-backed base with no data.
+  static uint32_t s_null_log = 0;
+  auto log_null = [&](const char* reason) {
+    if (s_null_log < 300) {
+      ++s_null_log;
+      XELOGI(
+          "MetalTex NULL ({}): type={} dim={} fmt={} base={:08X} {}x{} "
+          "tiled={} swz={:03X}",
+          reason, uint32_t(fetch.type), uint32_t(fetch.dimension),
+          uint32_t(fetch.format), fetch.base_address << 12,
+          fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+          uint32_t(fetch.tiled), fetch.swizzle & 0xFFF);
+    }
+  };
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return 0;
   }
-  // Bring-up: 2D only.
-  if (fetch.dimension != xenos::DataDimension::k2DOrStacked) {
+  // 2D (or stacked) and 3D are handled; 3D is sampled as its slice 0 as a 2D
+  // texture (the guest gpu_3d_to_2d_texture behavior). 1D/cube are skipped.
+  bool is_3d = fetch.dimension == xenos::DataDimension::k3D;
+  if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d) {
+    log_null("dim");
     return 0;
   }
   FormatPlan plan = PlanForFormat(fetch.format, bc_supported_);
   if (!plan.supported) {
+    log_null("fmt");
     return 0;
   }
 
-  uint32_t width = fetch.size_2d.width + 1;
-  uint32_t height = fetch.size_2d.height + 1;
+  uint32_t width = (is_3d ? fetch.size_3d.width : fetch.size_2d.width) + 1;
+  uint32_t height = (is_3d ? fetch.size_3d.height : fetch.size_2d.height) + 1;
   uint32_t base = fetch.base_address << 12;
   uint32_t pitch_texels = fetch.pitch << 5;  // guest pitch is texels/32.
   if (!base || !width || !height || width > 8192 || height > 8192 ||
       base >= kPhysicalSize) {
+    log_null("bounds");
     return 0;
   }
   if (!pitch_texels) {
@@ -222,6 +258,36 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
+  // Data + row stride handed to Metal. k_4_4_4_4 is CPU-expanded here from its
+  // 16bpp linear form to RGBA8 (each 4-bit channel -> 8 bits via *17), in the
+  // guest's channel order (ascending nibble -> ascending byte), so the same
+  // fetch-swizzle-view path as k_8_8_8_8 makes channels correct.
+  const uint8_t* upload_data = linear.data();
+  uint32_t upload_bytes_per_row = blocks_w * bpb;
+  std::vector<uint8_t> decoded;
+  if (plan.decode_4444 || plan.decode_r16) {
+    decoded.resize(size_t(width) * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        size_t si = (size_t(y) * blocks_w + x) * bpb;
+        uint16_t v = uint16_t(linear[si] | (linear[si + 1] << 8));
+        uint8_t* o = &decoded[(size_t(y) * width + x) * 4];
+        if (plan.decode_r16) {
+          uint8_t r = uint8_t(v >> 8);  // high byte, unorm
+          o[0] = o[1] = o[2] = r;
+          o[3] = 255;
+        } else {  // decode_4444
+          o[0] = uint8_t(((v >> 0) & 0xF) * 17);
+          o[1] = uint8_t(((v >> 4) & 0xF) * 17);
+          o[2] = uint8_t(((v >> 8) & 0xF) * 17);
+          o[3] = uint8_t(((v >> 12) & 0xF) * 17);
+        }
+      }
+    }
+    upload_data = decoded.data();
+    upload_bytes_per_row = width * 4;
+  }
+
   // Bring-up diagnostic: a texture that decodes to all-zero bytes renders pure
   // black. The most likely source is a render-target-backed surface (e.g. the
   // resolved scene) whose guest memory we never populated because IssueCopy is
@@ -266,8 +332,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
   [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
              mipmapLevel:0
                    slice:0
-               withBytes:linear.data()
-             bytesPerRow:blocks_w * bpb
+               withBytes:upload_data
+             bytesPerRow:upload_bytes_per_row
            bytesPerImage:0];
 
   // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output

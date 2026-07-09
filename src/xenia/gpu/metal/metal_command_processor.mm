@@ -442,6 +442,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  // An EDRAM "copy mode" draw is not geometry — it's a resolve (EDRAM ->
+  // guest). The D3D12/Vulkan backends dispatch this from IssueDraw; without the
+  // check our backend treated resolves as normal draws and IssueCopy never fired
+  // (the gameplay gray screen: the scene is resolved to a guest texture we never
+  // populate, so the composite samples the null/gray texture).
+  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode ==
+      xenos::EdramMode::kCopy) {
+    return IssueCopy();
+  }
+
   // A skipped draw is not an error (the base loop treats false as failure); we
   // return true and just render nothing so the game keeps advancing.
   MTLPrimitiveType mtl_prim;
@@ -978,13 +988,36 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control
 }
 
 bool MetalCommandProcessor::IssueCopy() {
-  // Resolve/copy is still a stub (no EDRAM->guest resolve). Count invocations so
-  // we can tell whether the game relies on resolved render targets (which would
-  // explain black surfaces sampled as textures with all-zero guest memory).
+  // First slice of the EDRAM->guest resolve (the gameplay gray-screen blocker):
+  // decode the resolve with the reusable draw_util helper and record the guest
+  // destination base so the texture cache can bridge it to our color RT. No data
+  // is copied yet -- this pass logs what JC2 resolves so the RT-as-texture bridge
+  // can be built against real addresses/formats.
+  draw_util::ResolveInfo resolve_info;
+  if (!draw_util::GetResolveInfo(*register_file_, *memory_, trace_writer_,
+                                 /*draw_resolution_scale_x=*/1,
+                                 /*draw_resolution_scale_y=*/1,
+                                 /*fixed_rg16_truncated_to_minus_1_to_1=*/false,
+                                 /*fixed_rgba16_truncated_to_minus_1_to_1=*/false,
+                                 resolve_info)) {
+    return true;
+  }
+  // Record the most recent color-resolve destination range for the RT-as-texture
+  // bridge (a texture fetch whose base lands in this range wants our color RT).
+  if (!resolve_info.IsCopyingDepth() && resolve_info.copy_dest_extent_length) {
+    last_color_resolve_base_ = resolve_info.copy_dest_base;
+    last_color_resolve_start_ = resolve_info.copy_dest_extent_start;
+    last_color_resolve_length_ = resolve_info.copy_dest_extent_length;
+  }
   static uint32_t s_copy_count = 0;
-  if ((s_copy_count++ % 300) == 0) {
-    XELOGI("MetalCommandProcessor::IssueCopy stub invoked (count={})",
-             s_copy_count);
+  if (s_copy_count++ < 48) {
+    XELOGI(
+        "MetalCommandProcessor::IssueCopy dest_base={:08X} extent=[{:08X}+{}] "
+        "depth={} fmt={} w_div8={} h_div8={}",
+        resolve_info.copy_dest_base, resolve_info.copy_dest_extent_start,
+        resolve_info.copy_dest_extent_length, resolve_info.IsCopyingDepth(),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+        resolve_info.coordinate_info.width_div_8, resolve_info.height_div_8);
   }
   return true;
 }
