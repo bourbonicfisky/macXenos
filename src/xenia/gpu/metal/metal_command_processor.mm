@@ -550,6 +550,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     system_constants.flags = flags;
     system_constants.alpha_test_reference =
         regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
+    // Color exponent bias multiplies the pixel output; its neutral value is
+    // 1.0 (2^0), NOT 0 -- a zeroed struct here would multiply every color by
+    // zero and render pure black. (Full per-RT bias from RB_COLOR_INFO later.)
+    for (uint32_t i = 0; i < 4; ++i) {
+      system_constants.color_exp_bias[i] = 1.0f;
+    }
     // Index/vfetch helpers used by the vertex shader.
     xenos::Endian index_endian =
         index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone;
