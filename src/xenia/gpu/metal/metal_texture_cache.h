@@ -25,11 +25,12 @@ namespace metal {
 // a host MTLTexture (CPU-untiled) and assigns it a slot in the bindless view
 // heap, returning that slot so the draw path can write it into the b4
 // descriptor-indices cbuffer. Supports only what's needed to get the first real
-// textures on screen: 2D k_8_8_8_8, linear or tiled. Everything else returns
-// slot 0 (the null/gray texture).
+// textures on screen: 2D k_8_8_8_8 and DXT1/DXT2_3/DXT4_5 (hardware BC on
+// Apple Silicon), linear or tiled. Everything else returns slot 0 (the
+// null/gray texture).
 //
 // Deliberately NOT the proper xe::gpu::TextureCache subclass (no shared-memory
-// watches, no LRU, no mips, no DXT, no format table, re-parses each draw but
+// watches, no LRU, no mips, no format table, re-parses each draw but
 // caches the host texture by guest key). It exists to prove the texture path;
 // the real TextureCache subclass (needs a SharedMemory subclass first) is the
 // productionization step.
@@ -60,6 +61,7 @@ class MetalTextureCache {
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
   uint32_t view_heap_slots_;
   uint32_t next_slot_ = 1;  // 0 == null texture.
+  bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
 
   struct Entry {
     void* texture;  // id<MTLTexture>, retained.
