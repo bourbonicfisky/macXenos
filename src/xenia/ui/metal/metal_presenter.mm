@@ -162,7 +162,12 @@ bool MetalPresenter::EnsureBlitPipeline() {
       float2 t = float2((vid << 1) & 2, vid & 2);  // (0,0),(2,0),(0,2)
       VOut o;
       o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-      o.uv = float2(t.x, 2.0 - t.y) * 0.5;         // flip Y
+      // Fullscreen TRIANGLE: the vertices sit at t=(0,0),(2,0),(0,2) so the
+      // visible [-1,1]^2 square must sample uv across the full 0..1 range. Use
+      // the raw t (0..2) for u and 1-t for the Y-flip; multiplying by 0.5 (as an
+      // earlier version did) compresses uv to 0..0.5 -> only the bottom-left
+      // quarter of the guest image shows, magnified 2x.
+      o.uv = float2(t.x, 1.0 - t.y);               // flip Y, full 0..1 coverage
       return o;
     }
     fragment float4 blit_fs(VOut in [[stage_in]],

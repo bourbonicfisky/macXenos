@@ -468,11 +468,45 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Translate to MTLFunctions (cached per modification).
   auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
-  uint64_t vs_mod =
+
+  // Interpolator mask + PsParamGen destination: which VS-output interpolators
+  // (texcoords etc.) the PS consumes, and whether the PS needs the
+  // auto-generated pixel-position/point-coord register. This MUST be threaded
+  // into BOTH shader modifications and MUST match between them, or the DXBC
+  // translator wires VS outputs to PS inputs wrong -> scrambled/scaled texcoords
+  // (the splash quad sampled only a sub-rect of its texture = the on-screen
+  // zoom). Mirrors the D3D12 backend's UpdateBindings path exactly.
+  uint32_t ps_param_gen_pos = UINT32_MAX;
+  uint32_t interpolator_mask =
+      pixel_shader ? (vertex_shader->writes_interpolators() &
+                      pixel_shader->GetInterpolatorInputMask(
+                          sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(),
+                          ps_param_gen_pos))
+                   : 0;
+
+  DxbcShaderTranslator::Modification vs_mod_decoded(
       pipeline_cache_->shader_translator()->GetDefaultVertexShaderModification(
           vertex_shader->GetDynamicAddressableRegisterCount(
               sq_program_cntl.vs_num_reg),
-          Shader::HostVertexShaderType::kVertex);
+          Shader::HostVertexShaderType::kVertex));
+  vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
+  {
+    auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+    uint32_t user_clip_planes =
+        pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+    vs_mod_decoded.vertex.user_clip_plane_count =
+        xe::bit_count(user_clip_planes);
+    vs_mod_decoded.vertex.user_clip_plane_cull =
+        uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
+    vs_mod_decoded.vertex.vertex_kill_and = uint32_t(
+        (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b100) &&
+        !pa_cl_clip_cntl.vtx_kill_or);
+    vs_mod_decoded.vertex.output_point_size = uint32_t(
+        (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b001) &&
+        regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+            xenos::PrimitiveType::kPointList);
+  }
+  uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
   if (!pipeline_cache_->TranslateShader(*vs_translation)) {
@@ -485,6 +519,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         pipeline_cache_->shader_translator()->GetDefaultPixelShaderModification(
             pixel_shader->GetDynamicAddressableRegisterCount(
                 sq_program_cntl.ps_num_reg)));
+    ps_mod_decoded.pixel.interpolator_mask = interpolator_mask;
+    ps_mod_decoded.pixel.interpolators_centroid =
+        interpolator_mask &
+        ~xenos::GetInterpolatorSamplingPattern(
+            regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
+            regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+            regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+    if (ps_param_gen_pos < xenos::kMaxInterpolators) {
+      ps_mod_decoded.pixel.param_gen_enable = 1;
+      ps_mod_decoded.pixel.param_gen_interpolator = ps_param_gen_pos;
+      ps_mod_decoded.pixel.param_gen_point =
+          uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
+                   xenos::PrimitiveType::kPointList);
+    }
     // The RT0 MIN/MAX-blend premultiply factors default to kZero in a zeroed
     // modification, which forces RT0 rgb/a to 0 (pure black) in the non-ROV
     // output path. The neutral value is kOne (no premultiply); MIN/MAX blend
@@ -554,8 +602,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Viewport -> ndc_scale/offset (position-critical: zeroing collapses output).
     draw_util::ViewportInfo viewport_info;
     draw_util::GetViewportInfoArgs vp_args;
+    // x_max/y_max is the maximum host viewport extent, NOT the render-target
+    // size. Both reference backends pass the device max (D3D12:
+    // D3D12_VIEWPORT_BOUNDS_MAX, Vulkan: maxViewportDimensions) and let the
+    // render target clip an oversized guest viewport. Passing 1280x720 here
+    // instead made GetHostViewportInfo *rescale* (zoom-crop) any guest viewport
+    // wider/taller than the RT into it — the splash-screen "zoom". Use the max
+    // guest RT extent (8192, already the clip-disabled cap and within Metal's
+    // 16384 viewport limit) so guest content beyond 1280x720 is clipped, not
+    // scaled.
     vp_args.Setup(1, 1, divisors::MagicDiv(1), divisors::MagicDiv(1),
-                  /*origin_bottom_left=*/true, 1280, 720,
+                  /*origin_bottom_left=*/true,
+                  xenos::kTexture2DCubeMaxWidthHeight,
+                  xenos::kTexture2DCubeMaxWidthHeight,
                   /*allow_reverse_z=*/true, regs.Get<reg::RB_DEPTHCONTROL>(),
                   /*convert_z_to_float24=*/false,
                   /*full_float24_in_0_to_1=*/false,
@@ -616,50 +675,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
     }
-    // Diagnostic: dump the position transform + first vfetch for the first
-    // indexed triangle-list draws (the "real geometry" ones), regardless of
-    // when they occur, to catch off-screen / degenerate output.
-    if (index_buffer_info && prim_type == xenos::PrimitiveType::kTriangleList &&
-        tri_log_count_ < 12) {
+    // Bring-up diagnostic: log the transform of the first few draws of the
+    // session (any primitive type) to catch off-screen / degenerate output.
+    if (tri_log_count_ < 12) {
       ++tri_log_count_;
-      xenos::xe_gpu_vertex_fetch_t vf0{};
-      for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
-        uint32_t b = vs_map.vertex_fetch_bitmap[i];
-        uint32_t j;
-        if (xe::bit_scan_forward(b, &j)) {
-          vf0 = regs.GetVertexFetch(i * 32 + j);
-          break;
-        }
-      }
-      // Vertex float-constant count + first used vec4, to verify b1 is sane
-      // (not zero/garbage, which would compute black / off-screen).
-      uint32_t vs_float_count = 0;
-      for (uint32_t i = 0; i < 4; ++i) {
-        vs_float_count += xe::bit_count(vs_map.float_bitmap[i]);
-      }
-      float first_vec4[4] = {0, 0, 0, 0};
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint32_t idx;
-        uint64_t bm = vs_map.float_bitmap[i];
-        if (xe::bit_scan_forward(bm, &idx)) {
-          std::memcpy(
-              first_vec4,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (idx << 2)],
-              sizeof(first_vec4));
-          break;
-        }
-      }
       XELOGI(
-          "MetalCommandProcessor: TRI {} ext=({},{}) ndc_s=({},{},{}) "
-          "ndc_o=({},{},{}) flags={:X} ps_xlat={} vf0 addr={:08X} size={} "
-          "vs_floats={} first=({},{},{},{})",
-          tri_log_count_, viewport_info.xy_extent[0], viewport_info.xy_extent[1],
-          viewport_info.ndc_scale[0], viewport_info.ndc_scale[1],
-          viewport_info.ndc_scale[2], viewport_info.ndc_offset[0],
-          viewport_info.ndc_offset[1], viewport_info.ndc_offset[2],
-          system_constants.flags, ps_translation != nullptr, vf0.address << 2,
-          vf0.size << 2, vs_float_count, first_vec4[0], first_vec4[1],
-          first_vec4[2], first_vec4[3]);
+          "MetalCommandProcessor: DRAW {} prim={} idx={} clipdis={} imask={:X} "
+          "pgen={} ext=({},{}) ndc_s=({},{},{}) ndc_o=({},{},{}) flags={:X} "
+          "ps_xlat={}",
+          tri_log_count_, uint32_t(prim_type), index_buffer_info != nullptr,
+          uint32_t(regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable),
+          interpolator_mask, ps_param_gen_pos, viewport_info.xy_extent[0],
+          viewport_info.xy_extent[1], viewport_info.ndc_scale[0],
+          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
+          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
+          viewport_info.ndc_offset[2], system_constants.flags,
+          ps_translation != nullptr);
     }
   }
   if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {
