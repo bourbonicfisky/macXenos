@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 namespace xe {
 namespace gpu {
@@ -52,8 +53,13 @@ class MetalRenderTargetCache {
   // and the texture cache's ForceTextureArray reads). Persists across frames;
   // its contents are overwritten in place by each resolve. Returns nullptr on
   // allocation failure.
+  // pixel_format is an MTLPixelFormat: kColorFormat for color resolves (filled by
+  // a blit) or MTLPixelFormatR32Float for the depth-conversion snapshot (filled
+  // by the depth->color conversion pass). The texture is created 2D-array +
+  // ShaderRead|RenderTarget so it can be both a conversion-pass target and a
+  // sampled texture.
   void* EnsureResolveSnapshot(uint32_t dest_base, uint32_t width,
-                              uint32_t height);
+                              uint32_t height, uint64_t pixel_format);
   // Returns the snapshot texture registered for dest_base, or nullptr.
   void* GetResolveSnapshot(uint32_t dest_base) const;
 
@@ -70,6 +76,7 @@ class MetalRenderTargetCache {
     void* texture;  // id<MTLTexture>, retained.
     uint32_t width;
     uint32_t height;
+    uint64_t pixel_format;
   };
   std::unordered_map<uint32_t, Snapshot> resolve_snapshots_;
 };

@@ -91,6 +91,13 @@ class MetalCommandProcessor : public CommandProcessor {
   // Ends any open encoder, then commits + waits on the frame command buffer.
   void EndFrameEncoder();
 
+  // Depth-resolve bridge: runs a fullscreen pass that samples the Depth32Float
+  // depth texture (as depth2d) and writes its value into the R32Float snapshot
+  // texture, so deferred lighting can sample the depth as texture2d_array<float>.
+  // Builds the conversion pipeline on first use. Returns false on failure.
+  bool ConvertDepthToSnapshot(void* depth_texture, void* dest_snapshot,
+                              uint32_t width, uint32_t height);
+
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
@@ -109,6 +116,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // Cache of id<MTLDepthStencilState> keyed by the depth-relevant bits of
   // RB_DEPTHCONTROL.
   std::unordered_map<uint32_t, void*> depth_stencil_states_;
+
+  // id<MTLRenderPipelineState> for the depth->R32Float conversion pass, built on
+  // first depth resolve (see ConvertDepthToSnapshot).
+  void* depth_convert_pipeline_ = nullptr;
 
   // Frame command buffer / render encoder (id<...>). The command buffer lives
   // for the whole frame (committed at IssueSwap); the render encoder is opened

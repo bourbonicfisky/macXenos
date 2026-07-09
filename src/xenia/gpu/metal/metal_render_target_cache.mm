@@ -46,10 +46,12 @@ MetalRenderTargetCache::~MetalRenderTargetCache() {
 
 void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
                                                     uint32_t width,
-                                                    uint32_t height) {
+                                                    uint32_t height,
+                                                    uint64_t pixel_format) {
   auto it = resolve_snapshots_.find(dest_base);
   if (it != resolve_snapshots_.end() && it->second.texture &&
-      it->second.width >= width && it->second.height >= height) {
+      it->second.width >= width && it->second.height >= height &&
+      it->second.pixel_format == pixel_format) {
     return it->second.texture;
   }
   if (it != resolve_snapshots_.end() && it->second.texture) {
@@ -59,15 +61,17 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-  // 2D array + BGRA8 so the texture cache (ForceTextureArray reads) can sample
-  // it and the resolve blit from the BGRA8 color RT is a straight format-match.
+  // 2D array so the texture cache (ForceTextureArray reads) can sample it.
+  // ShaderRead|RenderTarget: a color snapshot is a blit destination + sampled;
+  // the depth-conversion snapshot is a render target of the conversion pass +
+  // sampled.
   desc.textureType = MTLTextureType2DArray;
-  desc.pixelFormat = (MTLPixelFormat)kColorFormat;
+  desc.pixelFormat = (MTLPixelFormat)pixel_format;
   desc.width = width;
   desc.height = height;
   desc.arrayLength = 1;
   desc.mipmapLevelCount = 1;
-  desc.usage = MTLTextureUsageShaderRead;
+  desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
@@ -76,7 +80,7 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     return nullptr;
   }
   resolve_snapshots_[dest_base] =
-      Snapshot{(__bridge_retained void*)texture, width, height};
+      Snapshot{(__bridge_retained void*)texture, width, height, pixel_format};
   return resolve_snapshots_[dest_base].texture;
 }
 
@@ -101,7 +105,9 @@ void* MetalRenderTargetCache::EnsureDepthTarget(uint32_t width,
                                    width:width
                                   height:height
                                mipmapped:NO];
-  desc.usage = MTLTextureUsageRenderTarget;
+  // ShaderRead so the depth-resolve conversion pass can sample it (depth2d) to
+  // produce the R32Float snapshot deferred lighting reads back.
+  desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {

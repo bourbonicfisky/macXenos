@@ -285,7 +285,10 @@ void EmulatorWindow::OnEmulatorInitialized() {
   UpdateLifecycleMenuState();
   // When the user can see that the emulator isn't initializing anymore (the
   // menu isn't disabled), enter fullscreen if requested.
-  if (cvars::fullscreen) {
+  // Metal-backend bring-up: auto-fullscreen-on-launch is disabled because the
+  // config persists fullscreen=true on exit, making it impossible to escape while
+  // iterating. Toggle fullscreen manually instead. TODO: revert before upstream.
+  if (false && cvars::fullscreen) {
     SetFullscreen(true);
   }
 

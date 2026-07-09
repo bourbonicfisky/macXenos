@@ -111,15 +111,17 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
       *out = MTLPrimitiveTypeTriangleStrip;
       return true;
     case xenos::PrimitiveType::kRectangleList:
-      // 3 guest vertices per rectangle. The common fullscreen idiom is a single
-      // oversized covering triangle, for which drawing the 3 verts as a triangle
-      // is exact (this is what most post/composite/backdrop passes use, and
-      // skipping them left our green RT-clear showing through). A true 4-corner
-      // rectangle would need the 4th vertex synthesized in the vertex shader
-      // (kRectangleListAsTriangleStrip) — TODO; a covering triangle is the right
-      // first cut and unblocks the fullscreen passes.
-      *out = MTLPrimitiveTypeTriangle;
-      return true;
+      // 3 guest vertices define a rectangle whose 4th corner (v3 = v0 + v2 - v1)
+      // the guest GPU synthesizes. Drawing the 3 verts as ONE triangle is NOT a
+      // valid approximation for JC2: its deferred composite/lighting/post passes
+      // are true 4-corner rectangles, so a single triangle covers only HALF the
+      // screen (the diagonal split) and samples with degenerate 3-corner UVs —
+      // this is the confirmed gameplay-corruption blocker. The correct fix is
+      // kRectangleListAsTriangleStrip VS expansion (synthesize v3, emit a
+      // 4-vertex strip), which the DXBC translator does not yet implement. Until
+      // it does, SKIP rect-lists (render nothing) rather than draw half a screen
+      // of garbage. See openspec reduce-apple-gpu-frametime handoff.
+      return false;
     case xenos::PrimitiveType::kTriangleFan:
       // No host triangle-fan primitive; IssueDraw expands it to a triangle list
       // with a generated index buffer. Report the target host primitive here.
@@ -372,7 +374,17 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   }
   // Clear at the start of a frame and after every resolve (a pass boundary);
   // otherwise load so the passes' draws accumulate into the RT.
-  bool clear = new_frame || reopen_clear_;
+  // Only clear on a genuine new frame; on mid-frame reopens LOAD the retained
+  // shared-RT content. JC2's final HUD pass re-renders into the already-composited
+  // front-buffer base and expects to draw OVER the resolved scene; clearing at
+  // every resolve boundary (the old reopen_clear_ behavior) threw the whole scene
+  // away, leaving only the clear color + HUD in the present. Loading fixes that.
+  // KNOWN LIMITATION: this is blunt — passes that render UNRELATED targets into
+  // the shared RT now over-accumulate (mild bleed on some frames). The correct
+  // model honors the guest's actual clears via EDRAM-tile<->RAM-base tracking;
+  // until that lands, load-and-accumulate is the net-better default. reopen_clear_
+  // is retained (still cleared below) for when that model arrives.
+  bool clear = new_frame;
   reopen_clear_ = false;
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1093,6 +1105,76 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control
   return state_ptr;
 }
 
+bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
+                                                   void* dest_snapshot,
+                                                   uint32_t width,
+                                                   uint32_t height) {
+  if (!frame_command_buffer_) {
+    return false;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  if (!provider) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
+  if (!depth_convert_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct VOut { float4 pos [[position]]; float2 uv; };
+      vertex VOut xe_depth_convert_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        o.uv = float2(t.x, 1.0 - t.y);
+        return o;
+      }
+      fragment float xe_depth_convert_fs(VOut in [[stage_in]],
+                                         depth2d<float> d [[texture(0)]]) {
+        constexpr sampler s(coord::normalized, filter::nearest,
+                            address::clamp_to_edge);
+        return d.sample(s, in.uv);
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
+    if (!lib) {
+      XELOGE("MetalCommandProcessor: depth-convert library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction = [lib newFunctionWithName:@"xe_depth_convert_vs"];
+    d.fragmentFunction = [lib newFunctionWithName:@"xe_depth_convert_fs"];
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+    id<MTLRenderPipelineState> ps =
+        [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) {
+      XELOGE("MetalCommandProcessor: depth-convert pipeline failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    depth_convert_pipeline_ = (__bridge_retained void*)ps;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest_snapshot;
+  pass.colorAttachments[0].slice = 0;
+  pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      depth_convert_pipeline_];
+  MTLViewport vp{0.0, 0.0, double(width), double(height), 0.0, 1.0};
+  [encoder setViewport:vp];
+  [encoder setFragmentTexture:(__bridge id<MTLTexture>)depth_texture atIndex:0];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder endEncoding];
+  return true;
+}
+
 bool MetalCommandProcessor::IssueCopy() {
   // First slice of the EDRAM->guest resolve (the gameplay gray-screen blocker):
   // decode the resolve with the reusable draw_util helper and record the guest
@@ -1129,7 +1211,8 @@ bool MetalCommandProcessor::IssueCopy() {
       // later composite encoder that samples the snapshot).
       EndRenderEncoder();
       void* snap = render_target_cache_->EnsureResolveSnapshot(
-          resolve_info.copy_dest_base, rw, rh);
+          resolve_info.copy_dest_base, rw, rh,
+          MetalRenderTargetCache::kColorFormat);
       void* color_rt = render_target_cache_->color_target();
       if (snap && color_rt) {
         uint32_t cw = render_target_cache_->width();
@@ -1149,6 +1232,27 @@ bool MetalCommandProcessor::IssueCopy() {
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
+        texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
+                                                rw, rh);
+      }
+      reopen_clear_ = true;
+    }
+  } else if (resolve_info.IsCopyingDepth() &&
+             resolve_info.copy_dest_extent_length) {
+    // Depth resolve: deferred lighting samples the depth buffer as a texture to
+    // reconstruct position (JC2/Sonic sample fmt 22/23 -> we returned null ->
+    // black lighting). Our depth RT is Depth32Float, which Metal only samples as
+    // depth2d while MSC shaders declare texture2d_array<float>; convert it to an
+    // R32Float snapshot with a small fullscreen pass, and register that.
+    uint32_t rw = resolve_info.coordinate_info.width_div_8 * 8;
+    uint32_t rh = resolve_info.height_div_8 * 8;
+    if (rw && rh && kDepthEnabled && render_target_cache_ && texture_cache_ &&
+        frame_command_buffer_) {
+      EndRenderEncoder();
+      void* snap = render_target_cache_->EnsureResolveSnapshot(
+          resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
+      void* depth_rt = render_target_cache_->depth_target();
+      if (snap && depth_rt && ConvertDepthToSnapshot(depth_rt, snap, rw, rh)) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
                                                 rw, rh);
       }
