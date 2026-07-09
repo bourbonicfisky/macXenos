@@ -340,7 +340,7 @@ void MetalCommandProcessor::ShutdownContext() {
 // Re-enable only once the guest depth-clear value + z-direction are emulated
 // (read from the guest's depth clear, not assumed). Keeps the pipeline's depth
 // attachment format and the render pass consistent (both on or both off).
-static constexpr bool kDepthEnabled = false;
+static constexpr bool kDepthEnabled = true;
 
 void* MetalCommandProcessor::BeginFrameEncoder() {
   if (frame_open_) {
@@ -382,14 +382,19 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   // Dark green base: if a draw lands nothing, we still see "our RT".
   pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.20, 0.08, 1.0);
-  // Depth attachment: cleared to 1.0 (far) at each pass boundary. Bring-up
-  // assumes standard (near=0..far=1) depth; reverse-z titles need the guest clear.
+  // Depth attachment: cleared at each pass boundary to the GUEST's depth-clear
+  // value (RB_DEPTH_CLEAR, 24-bit depth in the high bits), not a fixed 1.0.
+  // Reverse-z titles (JC2 menus) clear to 0 and test "greater"; a hardcoded 1.0
+  // made every fragment fail z>=1.0 -> black. Reading the guest value serves both
+  // directions.
   if (depth) {
+    uint32_t rb_depth_clear = (*register_file_)[XE_GPU_REG_RB_DEPTH_CLEAR];
+    double clear_depth_value = double(rb_depth_clear >> 8) / double(0xFFFFFF);
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction =
         clear ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
-    pass.depthAttachment.clearDepth = 1.0;
+    pass.depthAttachment.clearDepth = clear_depth_value;
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
@@ -881,8 +886,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
   if (kDepthEnabled) {
-    void* depth_state =
-        GetOrCreateDepthStencilState(regs.Get<reg::RB_DEPTHCONTROL>().value);
+    // Normalized depth control disables depth entirely when the pass isn't a
+    // depth pass (edram_mode not kColorDepth/kDepthOnly) and collapses redundant
+    // "always, no write" to disabled — so 2D/menu draws don't get depth-tested
+    // against a buffer they never meant to use.
+    void* depth_state = GetOrCreateDepthStencilState(
+        draw_util::GetNormalizedDepthControl(*register_file_).value);
     if (depth_state) {
       [encoder
           setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
