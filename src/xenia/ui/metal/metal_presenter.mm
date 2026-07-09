@@ -59,9 +59,62 @@ Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
 }
 
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
-  // Debug-only front-buffer capture; not implemented for the clear+present
-  // skeleton (no guest output yet).
-  return false;
+  // Read back the most recently refreshed guest output mailbox texture (used by
+  // the headless trace dump to dump the rendered frame). Consume the mailbox to
+  // pin the ready image, blit it (Private BGRA8) into a shared staging buffer,
+  // then copy into the RawImage as R8 G8 B8 X8 (swapping B/R from BGRA).
+  void* tex_ptr = nullptr;
+  uint32_t width = 0, height = 0;
+  {
+    uint32_t mailbox_index = UINT32_MAX;
+    std::unique_lock<std::mutex> consumer_lock(
+        ConsumeGuestOutput(mailbox_index, nullptr, nullptr));
+    if (mailbox_index != UINT32_MAX &&
+        mailbox_index < guest_output_textures_.size()) {
+      tex_ptr = guest_output_textures_[mailbox_index];
+      width = guest_output_texture_widths_[mailbox_index];
+      height = guest_output_texture_heights_[mailbox_index];
+    }
+  }
+  if (!tex_ptr || !width || !height) {
+    return false;
+  }
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)tex_ptr;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)command_queue_;
+  size_t row_bytes = size_t(width) * 4;
+  id<MTLBuffer> staging =
+      [device newBufferWithLength:row_bytes * height
+                          options:MTLResourceStorageModeShared];
+  if (!staging) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+  [blit copyFromTexture:texture
+             sourceSlice:0
+             sourceLevel:0
+            sourceOrigin:MTLOriginMake(0, 0, 0)
+              sourceSize:MTLSizeMake(width, height, 1)
+                toBuffer:staging
+       destinationOffset:0
+  destinationBytesPerRow:row_bytes
+destinationBytesPerImage:row_bytes * height];
+  [blit endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+  image_out.width = width;
+  image_out.height = height;
+  image_out.stride = row_bytes;
+  image_out.data.resize(row_bytes * height);
+  const uint8_t* src = static_cast<const uint8_t*>(staging.contents);
+  for (size_t i = 0; i < size_t(width) * height; ++i) {
+    image_out.data[i * 4 + 0] = src[i * 4 + 2];  // B -> R
+    image_out.data[i * 4 + 1] = src[i * 4 + 1];  // G
+    image_out.data[i * 4 + 2] = src[i * 4 + 0];  // R -> B
+    image_out.data[i * 4 + 3] = 255;
+  }
+  return true;
 }
 
 Presenter::SurfacePaintConnectResult

@@ -34,16 +34,17 @@ X_STATUS MetalGraphicsSystem::Setup(cpu::Processor* processor,
                                     kernel::KernelState* kernel_state,
                                     ui::WindowedAppContext* app_context,
                                     bool with_presentation) {
-  if (with_presentation) {
-    // Metal provider owns the device + command queue and vends the presenter
-    // that clears and presents the CAMetalLayer drawable each frame.
-    provider_ = xe::ui::metal::MetalProvider::Create();
-    if (!provider_) {
-      XELOGE("MetalGraphicsSystem: failed to create Metal provider");
-      return X_STATUS_UNSUCCESSFUL;
-    }
-  } else {
-    provider_ = nullptr;
+  // The provider owns the Metal device + command queue and is needed for
+  // rendering even WITHOUT presentation (e.g. the headless trace dump, which
+  // renders offscreen and reads back via the presenter's CaptureGuestOutput).
+  // The device needs no window; only the on-screen presenter depends on
+  // with_presentation, and the base GraphicsSystem::Setup handles that (creating
+  // an offscreen presenter when there's no app context). Mirrors the Vulkan
+  // backend, which always creates its provider.
+  provider_ = xe::ui::metal::MetalProvider::Create();
+  if (!provider_) {
+    XELOGE("MetalGraphicsSystem: failed to create Metal provider");
+    return X_STATUS_UNSUCCESSFUL;
   }
   return GraphicsSystem::Setup(processor, kernel_state, app_context,
                                with_presentation);

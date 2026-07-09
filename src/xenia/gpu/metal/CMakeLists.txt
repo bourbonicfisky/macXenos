@@ -54,3 +54,35 @@ target_link_libraries(xenia-gpu-metal-backend PUBLIC
   "-framework Metal"
 )
 xe_target_defaults(xenia-gpu-metal-backend)
+
+# Metal trace dump: headless trace replay through the Metal backend, so captured
+# guest frames can be re-rendered + dumped off-device for fast render-path
+# iteration. Mirrors xenia-gpu-vulkan-trace-dump.
+add_executable(xenia-gpu-metal-trace-dump
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_trace_dump_main.cc
+)
+if(WIN32)
+  target_sources(xenia-gpu-metal-trace-dump PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
+else()
+  target_sources(xenia-gpu-metal-trace-dump PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
+endif()
+target_include_directories(xenia-gpu-metal-trace-dump PRIVATE
+  ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE
+  xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+  xenia-gpu xenia-gpu-metal xenia-gpu-metal-backend xenia-hid xenia-hid-nop
+  xenia-kernel xenia-patcher xenia-ui xenia-ui-metal xenia-vfs
+  aes_128 capstone fmt imgui libavcodec libavutil mspack snappy xxhash
+)
+if(XE_TARGET_X86_64)
+  target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-x64)
+  if(APPLE)
+    target_link_options(xenia-gpu-metal-trace-dump PRIVATE
+      -Wl,-pagezero_size,0x1000)
+  endif()
+elseif(XE_TARGET_AARCH64)
+  target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-a64)
+endif()
+xe_target_defaults(xenia-gpu-metal-trace-dump)
