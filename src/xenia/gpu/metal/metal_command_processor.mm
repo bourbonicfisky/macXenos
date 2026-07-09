@@ -1408,7 +1408,28 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   void* fb_snapshot = render_target_cache_
                           ? render_target_cache_->GetResolveSnapshot(frontbuffer_ptr)
                           : nullptr;
-  if (fb_snapshot) {
+  // Diagnostic: XE_METAL_PRESENT_BASE=<hex guest base> presents that resolved
+  // snapshot instead of the frontbuffer, to inspect an intermediate scene RT
+  // (G-buffer / pre-tonemap / bloom) via the dumped image.
+  if (const char* dbg_base = std::getenv("XE_METAL_PRESENT_BASE")) {
+    uint32_t base = uint32_t(std::strtoul(dbg_base, nullptr, 16));
+    void* snap = render_target_cache_
+                     ? render_target_cache_->GetResolveSnapshot(base)
+                     : nullptr;
+    if (snap) {
+      source_rt = (__bridge id<MTLTexture>)snap;
+      present_width = uint32_t(source_rt.width);
+      present_height = uint32_t(source_rt.height);
+      XELOGI("MetalCommandProcessor: DEBUG presenting snapshot base {:08X} ({}x{})",
+             base, present_width, present_height);
+    } else {
+      XELOGW("MetalCommandProcessor: DEBUG present base {:08X} has no snapshot",
+             base);
+    }
+  }
+  if (source_rt) {
+    // already selected by the debug override
+  } else if (fb_snapshot) {
     source_rt = (__bridge id<MTLTexture>)fb_snapshot;
     // Use the snapshot's real extent so the present blit can't overrun it.
     present_width = uint32_t(source_rt.width);
