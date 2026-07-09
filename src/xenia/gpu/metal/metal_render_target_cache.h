@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_RENDER_TARGET_CACHE_H_
 
 #include <cstdint>
+#include <unordered_map>
 
 namespace xe {
 namespace gpu {
@@ -43,6 +44,19 @@ class MetalRenderTargetCache {
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
 
+  // RT-as-texture bridge. A resolve (IssueCopy) blits the color RT into a
+  // per-destination "snapshot" texture keyed by the guest resolve destination
+  // base; the texture cache then samples that snapshot when a later deferred /
+  // composite pass fetches the same base (whose guest RAM we never populate).
+  // The snapshot is a BGRA8 2D-array texture (matches the color RT for the blit
+  // and the texture cache's ForceTextureArray reads). Persists across frames;
+  // its contents are overwritten in place by each resolve. Returns nullptr on
+  // allocation failure.
+  void* EnsureResolveSnapshot(uint32_t dest_base, uint32_t width,
+                              uint32_t height);
+  // Returns the snapshot texture registered for dest_base, or nullptr.
+  void* GetResolveSnapshot(uint32_t dest_base) const;
+
  private:
   void* device_;                  // id<MTLDevice>, not owned.
   void* color_target_ = nullptr;  // id<MTLTexture>, retained.
@@ -51,6 +65,13 @@ class MetalRenderTargetCache {
   uint32_t height_ = 0;
   uint32_t depth_width_ = 0;
   uint32_t depth_height_ = 0;
+
+  struct Snapshot {
+    void* texture;  // id<MTLTexture>, retained.
+    uint32_t width;
+    uint32_t height;
+  };
+  std::unordered_map<uint32_t, Snapshot> resolve_snapshots_;
 };
 
 }  // namespace metal

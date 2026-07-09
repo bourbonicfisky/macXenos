@@ -79,11 +79,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // value (depth-only; stencil not yet implemented), creating it on first use.
   void* GetOrCreateDepthStencilState(uint32_t depth_control);
 
-  // Opens the frame command buffer + render encoder (render pass into the color
-  // RT, cleared once), if not already open. Returns the encoder (id<MTL...>) or
-  // nullptr on failure.
+  // Opens the frame command buffer (lazily, once per frame) and a render encoder
+  // into the color RT if one isn't already open. The render pass clears on the
+  // first open of a frame and after each resolve (a pass boundary, see
+  // reopen_clear_); otherwise it loads so multiple draws accumulate. Returns the
+  // encoder (id<MTL...>) or nullptr on failure.
   void* BeginFrameEncoder();
-  // Ends the encoder and commits + waits on the frame command buffer.
+  // Ends the current render encoder only (keeps the frame command buffer open so
+  // a resolve blit / the next pass can be encoded on it).
+  void EndRenderEncoder();
+  // Ends any open encoder, then commits + waits on the frame command buffer.
   void EndFrameEncoder();
 
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
@@ -105,10 +110,15 @@ class MetalCommandProcessor : public CommandProcessor {
   // RB_DEPTHCONTROL.
   std::unordered_map<uint32_t, void*> depth_stencil_states_;
 
-  // Frame command buffer / render encoder (id<...>), open across a frame's draws.
+  // Frame command buffer / render encoder (id<...>). The command buffer lives
+  // for the whole frame (committed at IssueSwap); the render encoder is opened
+  // and closed multiple times as resolves split the frame into passes.
   void* frame_command_buffer_ = nullptr;
   void* frame_render_encoder_ = nullptr;
-  bool frame_open_ = false;
+  bool frame_open_ = false;  // a render encoder is currently open.
+  // Set by a resolve so the next BeginFrameEncoder clears the color+depth RT
+  // (starts a fresh pass) instead of loading the previous pass's contents.
+  bool reopen_clear_ = false;
 
   // Bring-up diagnostic: pair the real guest vertex function with a hardcoded
   // solid-color fragment function to isolate vertex-side (positions/constants)

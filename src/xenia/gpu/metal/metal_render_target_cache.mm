@@ -34,6 +34,55 @@ MetalRenderTargetCache::~MetalRenderTargetCache() {
     (void)released;
     depth_target_ = nullptr;
   }
+  for (auto& pair : resolve_snapshots_) {
+    if (pair.second.texture) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)pair.second.texture;
+      (void)released;
+    }
+  }
+  resolve_snapshots_.clear();
+}
+
+void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
+                                                    uint32_t width,
+                                                    uint32_t height) {
+  auto it = resolve_snapshots_.find(dest_base);
+  if (it != resolve_snapshots_.end() && it->second.texture &&
+      it->second.width >= width && it->second.height >= height) {
+    return it->second.texture;
+  }
+  if (it != resolve_snapshots_.end() && it->second.texture) {
+    id<MTLTexture> old = (__bridge_transfer id<MTLTexture>)it->second.texture;
+    (void)old;
+    it->second.texture = nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+  // 2D array + BGRA8 so the texture cache (ForceTextureArray reads) can sample
+  // it and the resolve blit from the BGRA8 color RT is a straight format-match.
+  desc.textureType = MTLTextureType2DArray;
+  desc.pixelFormat = (MTLPixelFormat)kColorFormat;
+  desc.width = width;
+  desc.height = height;
+  desc.arrayLength = 1;
+  desc.mipmapLevelCount = 1;
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  if (!texture) {
+    XELOGE("MetalRenderTargetCache: failed to create {}x{} resolve snapshot",
+           width, height);
+    return nullptr;
+  }
+  resolve_snapshots_[dest_base] =
+      Snapshot{(__bridge_retained void*)texture, width, height};
+  return resolve_snapshots_[dest_base].texture;
+}
+
+void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
+  auto it = resolve_snapshots_.find(dest_base);
+  return it != resolve_snapshots_.end() ? it->second.texture : nullptr;
 }
 
 void* MetalRenderTargetCache::EnsureDepthTarget(uint32_t width,

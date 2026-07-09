@@ -178,6 +178,16 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return 0;
   }
+  // RT-as-texture bridge: if this fetch targets a base a resolve blitted a color
+  // RT snapshot into, sample that snapshot (real rendered pixels) rather than the
+  // unpopulated guest memory. This is what feeds the deferred/composite passes.
+  {
+    auto rit = resolved_targets_.find(fetch.base_address << 12);
+    if (rit != resolved_targets_.end() && rit->second.texture) {
+      active_textures_.push_back(rit->second.texture);
+      return rit->second.slot;
+    }
+  }
   // 2D (or stacked) and 3D are handled; 3D is sampled as its slice 0 as a 2D
   // texture (the guest gpu_3d_to_2d_texture behavior). 1D/cube are skipped.
   bool is_3d = fetch.dimension == xenos::DataDimension::k3D;
@@ -369,6 +379,31 @@ uint32_t MetalTextureCache::GetTextureSlot(
   cache_.emplace(key, Entry{texture_ptr, slot});
   active_textures_.push_back(texture_ptr);
   return slot;
+}
+
+void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
+                                               uint32_t width,
+                                               uint32_t height) {
+  if (!texture) {
+    return;
+  }
+  auto it = resolved_targets_.find(base);
+  if (it != resolved_targets_.end() && it->second.texture == texture) {
+    // Same snapshot texture (contents update in place) -> slot already valid.
+    it->second.width = width;
+    it->second.height = height;
+    return;
+  }
+  if (next_slot_ >= view_heap_slots_) {
+    return;
+  }
+  uint32_t slot = next_slot_++;
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+  IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
+  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot};
+  XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
+         width, height, slot);
 }
 
 }  // namespace metal

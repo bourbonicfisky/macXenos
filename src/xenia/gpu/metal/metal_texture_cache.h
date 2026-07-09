@@ -49,6 +49,15 @@ class MetalTextureCache {
   // resolved host texture in the active list for residency.
   uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch);
 
+  // RT-as-texture bridge: register a resolved render-target snapshot (owned by
+  // the render-target cache) at its guest resolve destination base. A later
+  // texture fetch whose base matches samples that snapshot instead of the
+  // (never-populated) guest memory, feeding deferred / composite passes. The
+  // slot is allocated once per base and reused; the snapshot's contents update
+  // in place, so re-registering the same base/texture is a cheap no-op.
+  void RegisterResolvedTarget(uint32_t base, void* texture, uint32_t width,
+                              uint32_t height);
+
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }
@@ -69,6 +78,15 @@ class MetalTextureCache {
   };
   std::unordered_map<uint64_t, Entry> cache_;
   std::vector<void*> active_textures_;
+
+  struct ResolvedTarget {
+    void* texture;  // id<MTLTexture>, owned by the render-target cache.
+    uint32_t width;
+    uint32_t height;
+    uint32_t slot;
+  };
+  // Keyed by guest resolve destination base (fetch.base_address << 12).
+  std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
 };
 
 }  // namespace metal

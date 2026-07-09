@@ -341,46 +341,68 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   }
   void* depth =
       kDepthEnabled ? render_target_cache_->EnsureDepthTarget(1280, 720) : nullptr;
-  upload_arena_->Reset();
-  id<MTLCommandQueue> queue =
-      (__bridge id<MTLCommandQueue>)provider->command_queue();
-  id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+  // The command buffer lives for the whole frame; create it (and reset the
+  // per-frame upload arena) on the first encoder open of the frame.
+  id<MTLCommandBuffer> command_buffer;
+  bool new_frame = frame_command_buffer_ == nullptr;
+  if (new_frame) {
+    upload_arena_->Reset();
+    id<MTLCommandQueue> queue =
+        (__bridge id<MTLCommandQueue>)provider->command_queue();
+    command_buffer = [queue commandBuffer];
+    frame_command_buffer_ = (__bridge_retained void*)command_buffer;
+  } else {
+    command_buffer = (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+  }
+  // Clear at the start of a frame and after every resolve (a pass boundary);
+  // otherwise load so the passes' draws accumulate into the RT.
+  bool clear = new_frame || reopen_clear_;
+  reopen_clear_ = false;
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
-  pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+  pass.colorAttachments[0].loadAction =
+      clear ? MTLLoadActionClear : MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   // Dark green base: if a draw lands nothing, we still see "our RT".
   pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.20, 0.08, 1.0);
-  // Depth attachment: cleared to 1.0 (far) once per frame. Bring-up assumes
-  // standard (near=0..far=1) depth; reverse-z titles will need the guest clear.
+  // Depth attachment: cleared to 1.0 (far) at each pass boundary. Bring-up
+  // assumes standard (near=0..far=1) depth; reverse-z titles need the guest clear.
   if (depth) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
-    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.loadAction =
+        clear ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = 1.0;
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   [encoder setCullMode:MTLCullModeNone];
-  frame_command_buffer_ = (__bridge_retained void*)command_buffer;
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
   return frame_render_encoder_;
 }
 
-void MetalCommandProcessor::EndFrameEncoder() {
+void MetalCommandProcessor::EndRenderEncoder() {
   if (!frame_open_) {
     return;
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
-  id<MTLCommandBuffer> command_buffer =
-      (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
   frame_render_encoder_ = nullptr;
-  frame_command_buffer_ = nullptr;
   frame_open_ = false;
   [encoder endEncoding];
+}
+
+void MetalCommandProcessor::EndFrameEncoder() {
+  EndRenderEncoder();
+  if (!frame_command_buffer_) {
+    return;
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
+  frame_command_buffer_ = nullptr;
+  reopen_clear_ = false;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
 }
@@ -1002,12 +1024,52 @@ bool MetalCommandProcessor::IssueCopy() {
                                  resolve_info)) {
     return true;
   }
-  // Record the most recent color-resolve destination range for the RT-as-texture
-  // bridge (a texture fetch whose base lands in this range wants our color RT).
+  // RT-as-texture bridge. A color resolve is the boundary of a render pass: blit
+  // what we've drawn into the shared color RT out into a per-destination snapshot
+  // texture and register it at the resolve's guest base, so a later deferred /
+  // composite pass that fetches this base samples the real rendered pixels (its
+  // guest RAM is never populated by our backend). Then flag the next pass to
+  // start from a fresh clear.
   if (!resolve_info.IsCopyingDepth() && resolve_info.copy_dest_extent_length) {
     last_color_resolve_base_ = resolve_info.copy_dest_base;
     last_color_resolve_start_ = resolve_info.copy_dest_extent_start;
     last_color_resolve_length_ = resolve_info.copy_dest_extent_length;
+
+    uint32_t rw = resolve_info.coordinate_info.width_div_8 * 8;
+    uint32_t rh = resolve_info.height_div_8 * 8;
+    if (rw && rh && render_target_cache_ && texture_cache_ &&
+        frame_command_buffer_) {
+      // Close the current pass's encoder so its stores are visible to the blit,
+      // then copy the color RT region into the snapshot on the frame command
+      // buffer (Metal orders the blit after the render encoder and before the
+      // later composite encoder that samples the snapshot).
+      EndRenderEncoder();
+      void* snap = render_target_cache_->EnsureResolveSnapshot(
+          resolve_info.copy_dest_base, rw, rh);
+      void* color_rt = render_target_cache_->color_target();
+      if (snap && color_rt) {
+        uint32_t cw = render_target_cache_->width();
+        uint32_t ch = render_target_cache_->height();
+        uint32_t bw = rw < cw ? rw : cw;
+        uint32_t bh = rh < ch ? rh : ch;
+        id<MTLCommandBuffer> cb =
+            (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:(__bridge id<MTLTexture>)color_rt
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(bw, bh, 1)
+                    toTexture:(__bridge id<MTLTexture>)snap
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
+                                                rw, rh);
+      }
+      reopen_clear_ = true;
+    }
   }
   static uint32_t s_copy_count = 0;
   if (s_copy_count++ < 48) {
@@ -1050,8 +1112,19 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   id<MTLTexture> source_rt = nil;
   uint32_t present_width = 1280;
   uint32_t present_height = 720;
-  if (frame_has_render_ && render_target_cache_ &&
-      render_target_cache_->color_target()) {
+  // Prefer the snapshot the composite pass resolved into the frontbuffer base:
+  // it's the guaranteed final image (the live shared RT may have been re-cleared
+  // by a HUD pass drawn after the composite resolve).
+  void* fb_snapshot = render_target_cache_
+                          ? render_target_cache_->GetResolveSnapshot(frontbuffer_ptr)
+                          : nullptr;
+  if (fb_snapshot) {
+    source_rt = (__bridge id<MTLTexture>)fb_snapshot;
+    // Use the snapshot's real extent so the present blit can't overrun it.
+    present_width = uint32_t(source_rt.width);
+    present_height = uint32_t(source_rt.height);
+  } else if (frame_has_render_ && render_target_cache_ &&
+             render_target_cache_->color_target()) {
     source_rt = (__bridge id<MTLTexture>)render_target_cache_->color_target();
     present_width = render_target_cache_->width();
     present_height = render_target_cache_->height();
