@@ -158,16 +158,18 @@ bool MetalPresenter::EnsureBlitPipeline() {
     #include <metal_stdlib>
     using namespace metal;
     struct VOut { float4 pos [[position]]; float2 uv; };
-    vertex VOut blit_vs(uint vid [[vertex_id]]) {
-      float2 t = float2((vid << 1) & 2, vid & 2);  // (0,0),(2,0),(0,2)
+    // 4-vertex triangle-strip QUAD (not an oversized fullscreen triangle): a
+    // triangle would overhang the aspect-ratio bars and sample out-of-range uv
+    // there instead of leaving them as the clear color. Corners c = (0,0),(1,0),
+    // (0,1),(1,1). `scale` (<=1 on one axis) shrinks the quad to preserve the
+    // guest display aspect ratio; the vacated area shows the clear color as
+    // letterbox/pillarbox bars.
+    vertex VOut blit_vs(uint vid [[vertex_id]],
+                        constant float2& scale [[buffer(0)]]) {
+      float2 c = float2(vid & 1, (vid >> 1) & 1);
       VOut o;
-      o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-      // Fullscreen TRIANGLE: the vertices sit at t=(0,0),(2,0),(0,2) so the
-      // visible [-1,1]^2 square must sample uv across the full 0..1 range. Use
-      // the raw t (0..2) for u and 1-t for the Y-flip; multiplying by 0.5 (as an
-      // earlier version did) compresses uv to 0..0.5 -> only the bottom-left
-      // quarter of the guest image shows, magnified 2x.
-      o.uv = float2(t.x, 1.0 - t.y);               // flip Y, full 0..1 coverage
+      o.pos = float4((c * 2.0 - 1.0) * scale, 0.0, 1.0);
+      o.uv = float2(c.x, 1.0 - c.y);               // flip Y
       return o;
     }
     fragment float4 blit_fs(VOut in [[stage_in]],
@@ -272,25 +274,40 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     pass.colorAttachments[0].texture = drawable.texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    // Distinct dark blue so a working Metal present is visually unmistakable
-    // from the black of the null/stub path (also the letterbox fill when the
-    // guest output doesn't cover the whole drawable).
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.05, 0.15, 1.0);
+    // Black letterbox/pillarbox bars around the aspect-corrected guest image.
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 
     id<MTLRenderCommandEncoder> encoder =
         [command_buffer renderCommandEncoderWithDescriptor:pass];
     if (guest_output_texture && EnsureBlitPipeline()) {
-      // Stretch the guest output over the whole drawable for now (aspect-ratio
-      // letterboxing via GetGuestOutputPaintFlow comes with the full paint path).
+      // Fit the guest image into the drawable preserving its display aspect
+      // ratio: shrink the blit quad on the axis the drawable is "too long" on,
+      // leaving the clear color as bars. Compare drawable aspect (actual pixels)
+      // to the guest display aspect.
+      float scale[2] = {1.0f, 1.0f};
+      uint32_t out_w = uint32_t(drawable.texture.width);
+      uint32_t out_h = uint32_t(drawable.texture.height);
+      uint32_t dar_x = guest_output_properties.display_aspect_ratio_x;
+      uint32_t dar_y = guest_output_properties.display_aspect_ratio_y;
+      if (out_w && out_h && dar_x && dar_y) {
+        double image_aspect = double(dar_x) / double(dar_y);
+        double surface_aspect = double(out_w) / double(out_h);
+        if (surface_aspect > image_aspect) {
+          scale[0] = float(image_aspect / surface_aspect);  // pillarbox
+        } else {
+          scale[1] = float(surface_aspect / image_aspect);  // letterbox
+        }
+      }
       [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                           blit_pipeline_state_];
+      [encoder setVertexBytes:scale length:sizeof(scale) atIndex:0];
       [encoder setFragmentTexture:guest_output_texture atIndex:0];
       [encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)
                                            blit_sampler_
                               atIndex:0];
-      [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+      [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                   vertexStart:0
-                  vertexCount:3];
+                  vertexCount:4];
     }
     [encoder endEncoding];
 
