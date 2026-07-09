@@ -453,10 +453,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   MetalShader::MetalTranslation* ps_translation = nullptr;
   if (pixel_shader) {
-    uint64_t ps_mod = pipeline_cache_->shader_translator()
-                          ->GetDefaultPixelShaderModification(
-                              pixel_shader->GetDynamicAddressableRegisterCount(
-                                  sq_program_cntl.ps_num_reg));
+    DxbcShaderTranslator::Modification ps_mod_decoded(
+        pipeline_cache_->shader_translator()->GetDefaultPixelShaderModification(
+            pixel_shader->GetDynamicAddressableRegisterCount(
+                sq_program_cntl.ps_num_reg)));
+    // The RT0 MIN/MAX-blend premultiply factors default to kZero in a zeroed
+    // modification, which forces RT0 rgb/a to 0 (pure black) in the non-ROV
+    // output path. The neutral value is kOne (no premultiply); MIN/MAX blend
+    // handling comes with the blend state later.
+    ps_mod_decoded.pixel.rt0_blend_rgb_factor_for_premult =
+        xenos::BlendFactor::kOne;
+    ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
+        xenos::BlendFactor::kOne;
+    uint64_t ps_mod = ps_mod_decoded.value;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
         pixel_shader->GetOrCreateTranslation(ps_mod));
     if (!pipeline_cache_->TranslateShader(*ps_translation)) {
