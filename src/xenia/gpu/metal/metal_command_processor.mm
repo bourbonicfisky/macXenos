@@ -110,8 +110,23 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
     case xenos::PrimitiveType::kTriangleStrip:
       *out = MTLPrimitiveTypeTriangleStrip;
       return true;
+    case xenos::PrimitiveType::kRectangleList:
+      // 3 guest vertices per rectangle. The common fullscreen idiom is a single
+      // oversized covering triangle, for which drawing the 3 verts as a triangle
+      // is exact (this is what most post/composite/backdrop passes use, and
+      // skipping them left our green RT-clear showing through). A true 4-corner
+      // rectangle would need the 4th vertex synthesized in the vertex shader
+      // (kRectangleListAsTriangleStrip) — TODO; a covering triangle is the right
+      // first cut and unblocks the fullscreen passes.
+      *out = MTLPrimitiveTypeTriangle;
+      return true;
+    case xenos::PrimitiveType::kTriangleFan:
+      // No host triangle-fan primitive; IssueDraw expands it to a triangle list
+      // with a generated index buffer. Report the target host primitive here.
+      *out = MTLPrimitiveTypeTriangle;
+      return true;
     default:
-      // Fans, quads, rectangles, patches need primitive-processor conversion or
+      // Quads, line loops, patches need primitive-processor conversion or
       // geometry emulation — skipped in the bring-up slice.
       return false;
   }
@@ -120,7 +135,8 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
 bool IsPolygonalPrimitive(xenos::PrimitiveType type) {
   return type == xenos::PrimitiveType::kTriangleList ||
          type == xenos::PrimitiveType::kTriangleStrip ||
-         type == xenos::PrimitiveType::kTriangleFan;
+         type == xenos::PrimitiveType::kTriangleFan ||
+         type == xenos::PrimitiveType::kRectangleList;
 }
 
 // Byte-swaps guest indices into a host (little-endian) copy for Metal.
@@ -920,6 +936,65 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   // --- Draw. ---
+  // Triangle fans have no host primitive on Metal: expand to a triangle list
+  // with a generated 32-bit index buffer. Fan (v0, v1, v2, v3, ...) becomes
+  // triangles (v0,v1,v2), (v0,v2,v3), ... indexing the same vertices, so it
+  // works whether the guest draw is indexed or sequential (auto).
+  if (prim_type == xenos::PrimitiveType::kTriangleFan) {
+    if (index_count < 3) {
+      ++draw_skip_count_;
+      return true;
+    }
+    uint32_t host_index_count = (index_count - 2) * 3;
+    MetalUploadAllocation fan_alloc{};
+    if (!upload_arena_->Allocate(host_index_count * sizeof(uint32_t), 16,
+                                 &fan_alloc)) {
+      ++draw_skip_count_;
+      return true;
+    }
+    // Source vertex indices: the (endian-swapped) guest index buffer, or the
+    // sequential 0..N-1 for an auto draw.
+    std::vector<uint32_t> src(index_count);
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      const void* gi = memory_->TranslatePhysical(index_buffer_info->guest_base);
+      if (!gi) {
+        ++draw_skip_count_;
+        return true;
+      }
+      bool i32 = index_buffer_info->format == xenos::IndexFormat::kInt32;
+      xenos::Endian ie = index_buffer_info->endianness;
+      for (uint32_t i = 0; i < index_count; ++i) {
+        if (i32) {
+          uint32_t v = static_cast<const uint32_t*>(gi)[i];
+          src[i] = ie == xenos::Endian::kNone ? v : xe::byte_swap(v);
+        } else {
+          uint16_t v = static_cast<const uint16_t*>(gi)[i];
+          bool swap = ie == xenos::Endian::k8in16 || ie == xenos::Endian::k8in32;
+          src[i] = swap ? xe::byte_swap(v) : v;
+        }
+      }
+    } else {
+      for (uint32_t i = 0; i < index_count; ++i) {
+        src[i] = i;
+      }
+    }
+    uint32_t* host_idx = static_cast<uint32_t*>(fan_alloc.cpu_ptr);
+    uint32_t o = 0;
+    for (uint32_t i = 1; i + 1 < index_count; ++i) {
+      host_idx[o++] = src[0];
+      host_idx[o++] = src[i];
+      host_idx[o++] = src[i + 1];
+    }
+    id<MTLBuffer> fan_ib = (__bridge id<MTLBuffer>)fan_alloc.buffer;
+    [encoder useResource:fan_ib usage:MTLResourceUsageRead stages:stages];
+    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangle,
+                                   host_index_count, MTLIndexTypeUInt32, fan_ib,
+                                   fan_alloc.offset, /*instanceCount=*/1,
+                                   /*baseVertex=*/0, /*baseInstance=*/0);
+    frame_has_render_ = true;
+    ++draw_count_;
+    return true;
+  }
   if (index_buffer_info && index_buffer_info->guest_base) {
     uint32_t index_size =
         index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
