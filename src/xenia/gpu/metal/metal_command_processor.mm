@@ -507,6 +507,11 @@ void MetalCommandProcessor::EndFrameEncoder() {
   frame_command_buffer_ = nullptr;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
+  // The committed work has consumed the shared buffer's current contents;
+  // later uploads may safely rewrite any range.
+  if (shared_memory_) {
+    shared_memory_->ResetFrameRanges();
+  }
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -958,7 +963,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           fetch.type != xenos::FetchConstantType::kInvalidVertex) {
         continue;
       }
-      shared_memory_->UploadRange(fetch.address << 2, fetch.size << 2);
+      if (shared_memory_->UploadRange(fetch.address << 2, fetch.size << 2)) {
+        // Intra-frame dynamic vertex rewrite (UI glyph rings, particles): the
+        // draws encoded so far must consume the OLD data, so flush the frame's
+        // GPU work before this upload lands. (All draws otherwise read the
+        // buffer's final state at commit — the text-smear / stretched-wedge
+        // corruption.)
+        EndFrameEncoder();
+        shared_memory_->UploadRange(fetch.address << 2, fetch.size << 2);
+        static uint32_t s_hazard_flushes = 0;
+        if (s_hazard_flushes++ < 8) {
+          XELOGI(
+              "MetalCommandProcessor: shared-memory hazard flush at {:08X}+{}",
+              fetch.address << 2, fetch.size << 2);
+        }
+      }
     }
   }
 

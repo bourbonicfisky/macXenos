@@ -50,22 +50,38 @@ bool MetalSharedMemory::Initialize() {
   return true;
 }
 
-void MetalSharedMemory::UploadRange(uint32_t guest_address, uint32_t length) {
+bool MetalSharedMemory::UploadRange(uint32_t guest_address, uint32_t length) {
   if (!buffer_contents_ || !length) {
-    return;
+    return false;
   }
   uint64_t end = uint64_t(guest_address) + length;
   if (guest_address >= kBufferSize) {
-    return;
+    return false;
   }
   if (end > kBufferSize) {
     length = uint32_t(kBufferSize - guest_address);
   }
   const void* guest = memory_->TranslatePhysical(guest_address);
   if (!guest) {
-    return;
+    return false;
+  }
+  // Unchanged content is never a hazard (common: static geometry re-requested
+  // every draw) — and needs no copy.
+  if (std::memcmp(buffer_contents_ + guest_address, guest, length) == 0) {
+    frame_ranges_.emplace_back(guest_address, uint32_t(end));
+    return false;
+  }
+  // Changed content inside a range already consumed this frame: the caller
+  // must flush before this upload lands (all draws read the final buffer
+  // state at commit).
+  for (const auto& range : frame_ranges_) {
+    if (guest_address < range.second && uint32_t(end) > range.first) {
+      return true;
+    }
   }
   std::memcpy(buffer_contents_ + guest_address, guest, length);
+  frame_ranges_.emplace_back(guest_address, uint32_t(end));
+  return false;
 }
 
 }  // namespace metal

@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 
 #include <cstdint>
+#include <vector>
 
 namespace xe {
 class Memory;
@@ -40,8 +41,18 @@ class MetalSharedMemory {
   bool Initialize();
 
   // Copies [guest_address, guest_address + length) from guest physical memory
-  // into the shared buffer at the same offset. Clamped to the buffer size.
-  void UploadRange(uint32_t guest_address, uint32_t length);
+  // into the shared buffer at the same offset (clamped to the buffer size),
+  // tracking ranges uploaded since the last ResetFrameRanges(). Returns TRUE
+  // (without copying) when the guest data DIFFERS from the buffer inside a
+  // range an earlier draw this frame already consumed — the intra-frame
+  // dynamic vertex-buffer rewrite hazard (UI glyph rings etc.): because all
+  // draws execute against the buffer's final state at frame commit, the caller
+  // must flush the pending GPU work first, ResetFrameRanges(), and call again.
+  // Identical content never reports a hazard (and skips the copy).
+  bool UploadRange(uint32_t guest_address, uint32_t length);
+
+  // Forgets the this-frame uploaded-range set (call after a GPU flush).
+  void ResetFrameRanges() { frame_ranges_.clear(); }
 
   // id<MTLBuffer> (shared storage), not owned by the caller.
   void* GetBuffer() const { return buffer_; }
@@ -51,6 +62,8 @@ class MetalSharedMemory {
   Memory* memory_;      // guest memory, not owned.
   void* buffer_ = nullptr;  // id<MTLBuffer>, retained.
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
+  // Ranges uploaded since the last flush, for hazard detection.
+  std::vector<std::pair<uint32_t, uint32_t>> frame_ranges_;
 };
 
 }  // namespace metal
