@@ -72,8 +72,10 @@ void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
 
 MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
   if (texture_) {
-    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)texture_;
-    (void)released;
+    // Defer, don't free: in-flight encoders may still reference this texture
+    // (see the class comment). The cache drains after the frame's GPU work
+    // completes.
+    cache_.deferred_texture_releases_.push_back(texture_);
     texture_ = nullptr;
   }
 }
@@ -102,12 +104,13 @@ void MetalRenderTargetCache::Shutdown() {
     }
   }
   resolve_snapshots_.clear();
-  DrainDeferredReleases();
   presentable_color_target_ = nullptr;
-  // Destroys all MetalRenderTargets (releasing their textures), then the
-  // common ownership state.
+  // Destroys all MetalRenderTargets (retiring their textures to the deferred
+  // list), then the common ownership state; drain LAST so those retirements
+  // are actually freed.
   DestroyAllRenderTargets(true);
   ShutdownCommon();
+  DrainDeferredReleases();
 }
 
 void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
@@ -169,7 +172,7 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   XELOGI("MetalRenderTargetCache: new RT {} ({}x{} mtl={})", key.GetDebugName(),
          width, height, uint32_t(pixel_format));
   ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
-  return new MetalRenderTarget(key, (__bridge_retained void*)texture,
+  return new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
                                uint64_t(pixel_format));
 }
 

@@ -714,6 +714,30 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       stringWithFormat:@"draws@%u rt=%016llX", draw_count_,
                        (unsigned long long)want_key];
   [encoder setCullMode:MTLCullModeNone];
+  // Residency sweep: make EVERY texture any live bindless slot can reach
+  // resident on this encoder in one batched call. The per-draw useResource
+  // loop covers only that draw's own fetches; a shader indexing any OTHER
+  // live slot (stale descriptor index, prior-generation snapshot slot) reads
+  // a non-resident texture -> GPU page fault (the attributed 'draws@N'
+  // faults). Textures created after this sweep are covered by the per-draw
+  // loop as before.
+  if (texture_cache_) {
+    resident_sweep_scratch_.clear();
+    texture_cache_->AppendAllTextures(resident_sweep_scratch_);
+    if (!resident_sweep_scratch_.empty()) {
+      MTLRenderStages sweep_stages =
+          MTLRenderStageVertex | MTLRenderStageFragment;
+      if (mesh_shader_supported_) {
+        sweep_stages |= MTLRenderStageObject | MTLRenderStageMesh;
+      }
+      // void* -> id<MTLTexture> in place (toll-free bridge array).
+      [encoder useResources:reinterpret_cast<id<MTLResource> const*>(
+                                resident_sweep_scratch_.data())
+                      count:resident_sweep_scratch_.size()
+                      usage:MTLResourceUsageRead
+                     stages:sweep_stages];
+    }
+  }
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
   encoder_attachment_key_ = want_key;
@@ -748,9 +772,16 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // reads on-screen as a "GPU freeze" though the process is alive. Surface it
   // WITH per-encoder attribution (encoders are labeled at open).
   if (command_buffer.status == MTLCommandBufferStatusError) {
+    // First 32 in full, then a heartbeat every 256th so the log always shows
+    // whether faulting is ONGOING (a hard 32-cap went silent mid-session and
+    // hid whether the driver recovered).
     static uint32_t s_cb_errors = 0;
-    if (s_cb_errors++ < 32) {
+    ++s_cb_errors;
+    if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
       LogCommandBufferFault(command_buffer, "frame commit", swap_count_);
+      if (s_cb_errors > 32) {
+        XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
+      }
     }
   }
   // The frame's GPU work is done: snapshot textures retired mid-frame (grown)

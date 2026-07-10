@@ -174,14 +174,24 @@ class MetalRenderTargetCache final : public RenderTargetCache {
  private:
   class MetalRenderTarget final : public RenderTarget {
    public:
-    MetalRenderTarget(RenderTargetKey key, void* texture,
-                      uint64_t pixel_format)
-        : RenderTarget(key), texture_(texture), pixel_format_(pixel_format) {}
+    MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,
+                      void* texture, uint64_t pixel_format)
+        : RenderTarget(key),
+          cache_(cache),
+          texture_(texture),
+          pixel_format_(pixel_format) {}
+    // Destruction retires the texture to the cache's deferred-release list:
+    // the base class can destroy render targets mid-frame while the open
+    // frame command buffer still references the texture (attachment of an
+    // earlier encoder, transfer/snapshot-resolve source) — an immediate
+    // release GPU-page-faults those encoders when they execute (the
+    // attributed 'rtcache:resolve-color-snapshot' fault).
     ~MetalRenderTarget();
     void* texture() const { return texture_; }  // id<MTLTexture>, retained.
     uint64_t pixel_format() const { return pixel_format_; }
 
    private:
+    MetalRenderTargetCache& cache_;
     void* texture_;
     uint64_t pixel_format_;
   };

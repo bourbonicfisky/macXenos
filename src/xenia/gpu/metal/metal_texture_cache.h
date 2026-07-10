@@ -63,6 +63,13 @@ class MetalTextureCache {
   const std::vector<void*>& active_textures() const { return active_textures_; }
   void ResetActive() { active_textures_.clear(); }
 
+  // Appends EVERY live texture a bindless slot can reach (guest cache entries
+  // + resolved targets) for the per-encoder residency sweep: a shader indexing
+  // a slot whose texture was only made resident on an EARLIER encoder (stale
+  // descriptor index, prior-generation slot) page-faults otherwise — the
+  // attributed live faults ('draws@N' encoders) are exactly this class.
+  void AppendAllTextures(std::vector<void*>& out) const;
+
   // Returns bindless slots retired this frame (a resolved target got a new
   // texture generation -> new slot) to the free list. Safe only after the
   // frame's GPU work has completed: earlier draws still referenced the retired

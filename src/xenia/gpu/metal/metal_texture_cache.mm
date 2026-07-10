@@ -435,6 +435,19 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
          width, height, slot);
 }
 
+void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
+  for (const auto& pair : cache_) {
+    if (pair.second.texture) {
+      out.push_back(pair.second.texture);
+    }
+  }
+  for (const auto& pair : resolved_targets_) {
+    if (pair.second.texture) {
+      out.push_back(pair.second.texture);
+    }
+  }
+}
+
 uint32_t MetalTextureCache::AllocateSlot() {
   if (!free_slots_.empty()) {
     uint32_t slot = free_slots_.back();

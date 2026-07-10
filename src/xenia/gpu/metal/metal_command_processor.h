@@ -222,6 +222,9 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
+  // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
+  std::vector<void*> resident_sweep_scratch_;
+
   // Auto-exposure death-spiral guard: JC2's exposure feedback loop reads the
   // small luminance-pyramid writebacks from RAM. Our resolve occasionally
   // delivers an ALL-ZERO tile (failed owner lookup / stale snapshot / clear
