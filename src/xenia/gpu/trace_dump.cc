@@ -169,6 +169,18 @@ bool TraceDump::Load(const std::filesystem::path& trace_file_path) {
 
 int TraceDump::Run() {
   BeginHostCapture();
+  XELOGI("TraceDump: {} frames parsed; frame 0 has {} commands",
+         player_->frame_count(),
+         player_->frame_count()
+             ? player_->frame(0)->commands.size()
+             : 0);
+  if (!player_->frame_count() || player_->frame(0)->commands.empty()) {
+    XELOGE(
+        "TraceDump: trace has no draw commands (captured while the GPU was "
+        "idle, e.g. a static menu that only redraws on change) -- capture "
+        "during animation/transitions instead");
+    return 1;
+  }
   player_->SeekFrame(0);
   player_->SeekCommand(
       static_cast<int>(player_->current_frame()->commands.size() - 1));
