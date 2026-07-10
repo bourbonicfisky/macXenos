@@ -388,10 +388,19 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     return;
   }
   auto it = resolved_targets_.find(base);
-  if (it != resolved_targets_.end() && it->second.texture == texture) {
-    // Same snapshot texture (contents update in place) -> slot already valid.
+  if (it != resolved_targets_.end()) {
+    // Reuse the base's slot: update the descriptor IN PLACE when the snapshot
+    // texture was recreated. Allocating a new slot per re-registration
+    // (~2/frame) exhausted the 4096-slot heap minutes into gameplay — black
+    // samples, then a frozen present.
     it->second.width = width;
     it->second.height = height;
+    if (it->second.texture != texture) {
+      it->second.texture = texture;
+      auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+      IRDescriptorTableSetTexture(&entries[it->second.slot],
+                                  (__bridge id<MTLTexture>)texture, 0.0f, 0);
+    }
     return;
   }
   if (next_slot_ >= view_heap_slots_) {

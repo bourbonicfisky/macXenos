@@ -1327,7 +1327,14 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   if (width >= 1280 && height < 720) {
     height = 720;
   }
-  auto it = resolve_snapshots_.find(dest_base);
+  // Key by (base, format): JC2 resolves color (BGRA8) and depth (R32F) to
+  // the same guest base — a single-slot map destroyed/recreated the snapshot
+  // EVERY resolve, and each new texture burned a bindless view slot until
+  // the heap ran dry a few minutes into gameplay (black samples, then a
+  // frozen present).
+  uint64_t snap_key = (uint64_t(dest_base) << 1) |
+                      (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0);
+  auto it = resolve_snapshots_.find(snap_key);
   if (it != resolve_snapshots_.end() && it->second.texture &&
       it->second.width >= width && it->second.height >= height &&
       it->second.pixel_format == pixel_format) {
@@ -1356,13 +1363,20 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     return nullptr;
   }
   ClearTextureAtCreation((__bridge void*)texture, /*is_depth=*/false);
-  resolve_snapshots_[dest_base] =
+  resolve_snapshots_[snap_key] =
       Snapshot{(__bridge_retained void*)texture, width, height, pixel_format};
-  return resolve_snapshots_[dest_base].texture;
+  return resolve_snapshots_[snap_key].texture;
 }
 
 void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
-  auto it = resolve_snapshots_.find(dest_base);
+  // Composite key: base<<1 | is_r32f. Callers (present, RT-as-texture
+  // bridge) want the COLOR snapshot; fall back to depth only if that's all
+  // there is.
+  auto it = resolve_snapshots_.find(uint64_t(dest_base) << 1);
+  if (it != resolve_snapshots_.end() && it->second.texture) {
+    return it->second.texture;
+  }
+  it = resolve_snapshots_.find((uint64_t(dest_base) << 1) | 1);
   return it != resolve_snapshots_.end() ? it->second.texture : nullptr;
 }
 
@@ -1370,12 +1384,13 @@ void* MetalRenderTargetCache::FindContainingSnapshot(
     uint32_t dest_base, uint32_t* y_offset_out) const {
   for (const auto& pair : resolve_snapshots_) {
     const Snapshot& snap = pair.second;
-    if (!snap.texture || dest_base <= pair.first) {
+    uint32_t snap_base = uint32_t(pair.first >> 1);
+    if (!snap.texture || dest_base <= snap_base) {
       continue;
     }
     uint32_t row_bytes = snap.width * 4;
     uint32_t extent = row_bytes * snap.height;
-    uint32_t offset = dest_base - pair.first;
+    uint32_t offset = dest_base - snap_base;
     if (offset < extent && (offset % row_bytes) == 0) {
       if (y_offset_out) {
         *y_offset_out = offset / row_bytes;

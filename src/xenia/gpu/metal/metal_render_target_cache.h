@@ -244,7 +244,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint32_t height;
     uint64_t pixel_format;
   };
-  std::unordered_map<uint32_t, Snapshot> resolve_snapshots_;
+  // Keyed by (dest_base << 1) | is_r32f — color and depth snapshots at the
+  // same guest base coexist (JC2 resolves both to one base).
+  std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;
