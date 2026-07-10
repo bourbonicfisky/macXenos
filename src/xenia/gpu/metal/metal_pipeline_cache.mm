@@ -40,9 +40,16 @@ bool MetalPipelineCache::Initialize() {
   // Match the shader-spike configuration: Apple vendor, bindless resources, no
   // pixel-shader-interlock EDRAM (the copy-based RT model), which is what the
   // Xbox-360 root signature in MetalShaderConverter expects.
+  // gamma_render_target_as_unorm8=true: k_8_8_8_8_GAMMA render targets are
+  // plain unorm8 on our side, so the PS must PWL-gamma-encode its linear output
+  // when kSysFlag_ConvertColorNToGamma is set. Without this ctor flag the
+  // translator never emits that codepath and the flag is silently ignored —
+  // JC2's scene renders ~0.02-linear sunlight that only becomes visible
+  // (0x5C-range) after gamma encoding + exposure (the "black gameplay" bug).
   shader_translator_ = std::make_unique<DxbcShaderTranslator>(
       ui::GraphicsProvider::GpuVendorID::kApple,
-      /*bindless_resources_used=*/true, /*edram_rov_used=*/false);
+      /*bindless_resources_used=*/true, /*edram_rov_used=*/false,
+      /*gamma_render_target_as_unorm8=*/true);
 
   std::string error;
   if (!dxil_converter_.Initialize(&error)) {

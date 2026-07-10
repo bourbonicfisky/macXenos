@@ -596,6 +596,33 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (pixel_shader && !pixel_shader->is_ucode_analyzed()) {
     pixel_shader->AnalyzeUcode(ucode_disasm);
   }
+  // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
+  // ucode disassembly to /tmp/xe_ps_<hash>.txt once, for single-shader
+  // forensics (what inputs drive the color output).
+  if (const char* dump_ps = std::getenv("XE_METAL_DUMP_PS")) {
+    if (pixel_shader &&
+        pixel_shader->ucode_data_hash() == strtoull(dump_ps, nullptr, 16)) {
+      static bool s_dumped = false;
+      if (!s_dumped) {
+        s_dumped = true;
+        auto write_disasm = [](const char* kind, uint64_t hash,
+                               const std::string& text) {
+          std::string path = fmt::format("/tmp/xe_{}_{:016X}.txt", kind, hash);
+          FILE* f = fopen(path.c_str(), "w");
+          if (f) {
+            fwrite(text.data(), 1, text.size(), f);
+            fclose(f);
+            XELOGI("MetalCommandProcessor: dumped {} disasm to {}", kind, path);
+          }
+        };
+        write_disasm("ps", pixel_shader->ucode_data_hash(),
+                     pixel_shader->ucode_disassembly());
+        // The paired vertex shader (feeds the PS's interpolators).
+        write_disasm("vs", vertex_shader->ucode_data_hash(),
+                     vertex_shader->ucode_disassembly());
+      }
+    }
+  }
 
   // --- Guest render-target binding (single color + depth; JC2 proven to never
   // bind simultaneous MRT — see the RTConfig diagnostic below). The normalized
@@ -807,12 +834,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             pixel_shader->GetDynamicAddressableRegisterCount(
                 sq_program_cntl.ps_num_reg)));
     ps_mod_decoded.pixel.interpolator_mask = interpolator_mask;
+    // A/B: XE_METAL_NO_CENTROID=1 forces center sampling. Gameplay surfaces are
+    // 4x MSAA (menus 1x), and at 4x the PS modification requests CENTROID
+    // interpolation on some inputs — if MSC mis-links centroid-decorated PS
+    // inputs against the (non-centroid) VS outputs, lighting interpolators read
+    // garbage.
+    static const bool s_no_centroid = std::getenv("XE_METAL_NO_CENTROID");
     ps_mod_decoded.pixel.interpolators_centroid =
-        interpolator_mask &
-        ~xenos::GetInterpolatorSamplingPattern(
-            regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
-            regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
-            regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+        s_no_centroid ? 0
+                      : (interpolator_mask &
+                         ~xenos::GetInterpolatorSamplingPattern(
+                             regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
+                             regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
+                             regs.Get<reg::SQ_INTERPOLATOR_CNTL>()
+                                 .sampling_pattern));
     if (ps_param_gen_pos < xenos::kMaxInterpolators) {
       ps_mod_decoded.pixel.param_gen_enable = 1;
       ps_mod_decoded.pixel.param_gen_interpolator = ps_param_gen_pos;
@@ -1077,6 +1112,45 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                       &float_vertex_alloc)) {
     ++draw_skip_count_;
     return true;
+  }
+  // Forensics (with XE_METAL_DUMP_PS): log the packed VS b1 upload once —
+  // bitmap words + the packed values for the HIGH constants (bitmap word 3,
+  // c192-255: the terrain lighting bank) + direct register reads to compare.
+  if (const char* dump_ps2 = std::getenv("XE_METAL_DUMP_PS")) {
+    if (pixel_shader &&
+        pixel_shader->ucode_data_hash() == strtoull(dump_ps2, nullptr, 16)) {
+      static bool s_logged_b1 = false;
+      if (!s_logged_b1) {
+        s_logged_b1 = true;
+        XELOGI("MetalB1: vs bitmap {:016X} {:016X} {:016X} {:016X}",
+               vs_map.float_bitmap[0], vs_map.float_bitmap[1],
+               vs_map.float_bitmap[2], vs_map.float_bitmap[3]);
+        const float* packed = static_cast<const float*>(
+            static_cast<const void*>(float_vertex_alloc.cpu_ptr));
+        uint32_t packed_idx = 0;
+        for (uint32_t i = 0; i < 4; ++i) {
+          uint64_t entry = vs_map.float_bitmap[i];
+          uint32_t index;
+          while (xe::bit_scan_forward(entry, &index)) {
+            entry = xe::clear_lowest_bit(entry);
+            uint32_t creg = i * 64 + index;
+            if (creg >= 224 || creg < 12) {
+              const float* direct = reinterpret_cast<const float*>(
+                  &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
+                        (index << 2)]);
+              XELOGI(
+                  "MetalB1: c{} packed[{}]=({}, {}, {}, {}) direct=({}, {}, "
+                  "{}, {})",
+                  creg, packed_idx, packed[packed_idx * 4],
+                  packed[packed_idx * 4 + 1], packed[packed_idx * 4 + 2],
+                  packed[packed_idx * 4 + 3], direct[0], direct[1], direct[2],
+                  direct[3]);
+            }
+            ++packed_idx;
+          }
+        }
+      }
+    }
   }
   MetalUploadAllocation float_pixel_alloc{};
   if (pixel_shader) {
