@@ -1062,14 +1062,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
-  id<MTLRenderCommandEncoder> encoder =
-      (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
-  if (!encoder) {
-    ++draw_skip_count_;
-    return true;
-  }
-
   // Upload the vertex data ranges referenced by the vertex shader's vfetches.
+  // This runs BEFORE the frame encoder opens: the hazard path ends the frame
+  // (EndFrameEncoder) when changed content overlaps an already-consumed
+  // range, and an encoder obtained earlier would be dead by the time the
+  // draw encodes into it (setViewport on an ended encoder = driver crash on
+  // first in-game interaction, when dynamic UI/particle rewrites start).
   const Shader::ConstantRegisterMap& vs_map =
       vertex_shader->constant_register_map();
   // Diagnostic: XE_METAL_LOG_VF=<hex VS ucode hash> logs each vfetch slot the
@@ -1118,6 +1116,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
     }
+  }
+
+  id<MTLRenderCommandEncoder> encoder =
+      (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
+  if (!encoder) {
+    ++draw_skip_count_;
+    return true;
   }
 
   // --- Marshal the constant buffers (b0-b4), matching the D3D12 backend. ---
