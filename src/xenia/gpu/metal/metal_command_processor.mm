@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <exception>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -334,6 +335,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_CENTROID=1     force center interpolation (no centroid at MSAA)
 //   XE_METAL_NO_SMALL_DEPTH=1  depth test off for small-pitch (lighting) draws
 //   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
+//   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
 //   XE_METAL_DUMP_PS=hexhash   dump that PS + paired VS ucode disasm to /tmp
@@ -343,16 +345,70 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 // MetalDepthResolve / resolve-owner / resolve-clear / writeback one-shots.
 // ---------------------------------------------------------------------------
 
+// Crash-capture: JC2-on-Metal aborts recurrently via _objc_terminate — an
+// uncaught ObjC/Metal exception (e.g. an MTL validation error thrown from a
+// background thread) whose MESSAGE is lost in the bare abort. ObjC exceptions
+// are thrown through the C++ ABI on arm64, so std::current_exception() captures
+// the NSException and it can be @caught and logged. Installed once at Metal
+// backend setup; chains to the previous handler so behavior is otherwise
+// unchanged. Pair with MTL_DEBUG_LAYER=1 (and MallocGuardEdges for the
+// separate double-free track) when hunting the abort on-device.
+namespace {
+std::terminate_handler g_prev_terminate = nullptr;
+void MetalTerminateHandler() {
+  std::exception_ptr eptr = std::current_exception();
+  if (eptr) {
+    // @catch only accepts ObjC pointer types; route everything else back
+    // through a nested C++ catch to recover the std::exception message.
+    @try {
+      std::rethrow_exception(eptr);
+    } @catch (NSException* ex) {
+      XELOGE("Metal FATAL: uncaught NSException {}: {}",
+             ex.name ? ex.name.UTF8String : "(null)",
+             ex.reason ? ex.reason.UTF8String : "(null)");
+      fprintf(stderr, "Metal FATAL: uncaught NSException %s: %s\n",
+              ex.name ? ex.name.UTF8String : "(null)",
+              ex.reason ? ex.reason.UTF8String : "(null)");
+      for (NSString* frame in ex.callStackSymbols) {
+        XELOGE("  {}", frame.UTF8String);
+      }
+    } @catch (...) {
+      try {
+        std::rethrow_exception(eptr);
+      } catch (const std::exception& e) {
+        XELOGE("Metal FATAL: uncaught std::exception: {}", e.what());
+      } catch (...) {
+        XELOGE("Metal FATAL: uncaught non-standard exception");
+      }
+    }
+  }
+  if (g_prev_terminate) {
+    g_prev_terminate();
+  }
+  std::abort();
+}
+void InstallMetalCrashCapture() {
+  static bool s_installed = false;
+  if (s_installed) {
+    return;
+  }
+  s_installed = true;
+  g_prev_terminate = std::set_terminate(&MetalTerminateHandler);
+}
+}  // namespace
+
 bool MetalCommandProcessor::SetupContext() {
   if (!CommandProcessor::SetupContext()) {
     return false;
   }
+  InstallMetalCrashCapture();
   // Surface active debug toggles prominently so logs are self-describing.
   static const char* kDebugEnvs[] = {
       "XE_METAL_DISABLE_GEO",    "XE_METAL_NO_SIGNS",
       "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
-      "XE_METAL_NO_WRITEBACK",   "XE_METAL_PRESENT_BASE",
-      "XE_METAL_PEEK",           "XE_METAL_DUMP_PS",
+      "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
+      "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
+      "XE_METAL_DUMP_PS",
   };
   for (const char* env : kDebugEnvs) {
     if (const char* value = std::getenv(env)) {
@@ -2030,18 +2086,38 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
                wb.width, wb.height, wb.guest_addr);
       }
-      // Exposure death-spiral forensics: the game's auto-exposure feedback
-      // loop reads these tiny luminance writebacks; a ZERO one crashes
-      // exposure, the scene renders black, real luminance goes 0, and the
-      // loop latches black forever ("stopped updating" while running).
-      // Log zero-content small writebacks (throttled).
-      if (count <= 256 && content_sum == 0) {
+      // Exposure death-spiral guard: the game's auto-exposure feedback loop
+      // reads these tiny luminance writebacks; an ALL-ZERO one collapses
+      // exposure, the scene renders black, real luminance goes 0, and the loop
+      // latches black forever ("stopped updating" while running). Real hardware
+      // never delivers a pure-zero luminance tile, so an exact zero here is our
+      // resolve failing, not a genuinely-black scene (which still carries tiny
+      // non-zero HDR values). Hold the last non-zero content at this address so
+      // exposure rides the gap and recovers instead of latching.
+      static const bool s_no_wb_hold =
+          std::getenv("XE_METAL_NO_WB_HOLD") != nullptr;
+      const bool small = count <= 256;
+      if (small && content_sum == 0) {
         static uint32_t s_zero_wb = 0;
         ++s_zero_wb;
-        if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
-          XELOGW("MetalWB ZERO {}x{} @ {:08X} (swap#{}, #{})", wb.width,
-                 wb.height, wb.guest_addr, swap_count_, s_zero_wb);
+        auto held = held_writeback_content_.find(wb.guest_addr);
+        if (!s_no_wb_hold && held != held_writeback_content_.end() &&
+            held->second.size() == count) {
+          // Re-write the last good luminance instead of the black tile.
+          std::memcpy(dest_words, held->second.data(), count * sizeof(uint32_t));
+          if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
+            XELOGW("MetalWB HOLD {}x{} @ {:08X} (swap#{}, #{}) — held last value",
+                   wb.width, wb.height, wb.guest_addr, swap_count_, s_zero_wb);
+          }
+        } else if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
+          XELOGW("MetalWB ZERO {}x{} @ {:08X} (swap#{}, #{}) — no held value",
+                 wb.width, wb.height, wb.guest_addr, swap_count_, s_zero_wb);
         }
+      } else if (small) {
+        // Non-zero small writeback: remember it as the fallback for future
+        // zero-content resolves at this address.
+        auto& held = held_writeback_content_[wb.guest_addr];
+        held.assign(dest_words, dest_words + count);
       }
     }
   }
@@ -2215,13 +2291,21 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
              base);
     }
   }
+  // Which branch chose the present source — a transient black BLIP (distinct
+  // from the exposure spiral) is a swap presenting a different/stale source
+  // than its neighbors (fb snapshot missing for one frame -> fallback target,
+  // or the fb snapshot pointer flipping to a freshly-cleared generation). The
+  // MetalFlicker probe logs this at collapse events to fingerprint the blip.
+  const char* present_source_path = "none";
   if (source_rt) {
     // already selected by the debug override
+    present_source_path = "debug-base";
   } else if (fb_snapshot) {
     source_rt = (__bridge id<MTLTexture>)fb_snapshot;
     // Use the snapshot's real extent so the present blit can't overrun it.
     present_width = uint32_t(source_rt.width);
     present_height = uint32_t(source_rt.height);
+    present_source_path = "fb-snapshot";
   } else if (frame_has_render_ && render_target_cache_ &&
              render_target_cache_->presentable_color_target()) {
     // Pre-resolve fallback (splash/menus before any frontbuffer snapshot): the
@@ -2231,6 +2315,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                     render_target_cache_->presentable_color_target();
     present_width = frontbuffer_width ? frontbuffer_width : 1280;
     present_height = frontbuffer_height ? frontbuffer_height : 720;
+    present_source_path = "presentable-fallback";
   }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
@@ -2253,6 +2338,12 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     static bool s_luma_pending = false;
     static float s_last_luma = -1.0f;
     static uint32_t s_flicker_logs = 0;
+    // Identity of the frame whose strip is currently pending readback (set when
+    // its strip was blitted a swap ago) — so a collapse names the BLIP's source.
+    static const void* s_measured_src = nullptr;
+    static const char* s_measured_path = "none";
+    static uint32_t s_measured_fb = 0;
+    static uint32_t s_measured_swap = 0;
     if (s_luma_pending && s_luma_rb) {
       const uint8_t* px = static_cast<const uint8_t*>(s_luma_rb.contents);
       uint64_t sum = 0;
@@ -2265,8 +2356,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           ((s_last_luma > 8.0f && luma < 0.35f * s_last_luma) ||
            (luma > 8.0f && s_last_luma < 0.35f * luma))) {
         ++s_flicker_logs;
-        XELOGW("MetalFlicker swap#{}: luma {:.1f} -> {:.1f}", count,
-               s_last_luma, luma);
+        // Report the present source of the collapsed frame: a transient blip
+        // shows up as a source pointer/path that differs from the good frames
+        // (missing fb snapshot -> fallback, or a freshly-cleared snapshot).
+        XELOGW(
+            "MetalFlicker swap#{}: luma {:.1f} -> {:.1f} | blip source "
+            "path={} tex={} fb={:08X} (measured swap#{})",
+            count, s_last_luma, luma, s_measured_path, s_measured_src,
+            s_measured_fb, s_measured_swap);
       }
       s_last_luma = luma;
     }
@@ -2280,6 +2377,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         s_luma_w = w;
       }
       if (s_luma_rb) {
+        // This swap's source becomes the identity measured next iteration.
+        s_measured_src = (__bridge const void*)source_rt;
+        s_measured_path = present_source_path;
+        s_measured_fb = frontbuffer_ptr;
+        s_measured_swap = count;
         id<MTLCommandBuffer> lcb = [queue commandBuffer];
         id<MTLBlitCommandEncoder> lbl = [lcb blitCommandEncoder];
         [lbl copyFromTexture:source_rt

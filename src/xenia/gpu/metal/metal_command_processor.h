@@ -218,6 +218,17 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t endian;  // xenos::Endian of the resolve dest.
   };
   std::vector<PendingWriteback> pending_writebacks_;
+
+  // Auto-exposure death-spiral guard: JC2's exposure feedback loop reads the
+  // small luminance-pyramid writebacks from RAM. Our resolve occasionally
+  // delivers an ALL-ZERO tile (failed owner lookup / stale snapshot / clear
+  // timing); the game reads 0 -> exposure collapses to 0 -> the scene renders
+  // black -> real luminance is 0 -> latched black forever. Real hardware never
+  // hands the loop a pure-zero luminance tile, so when a small writeback would
+  // write exactly-zero content we instead re-write the last non-zero content
+  // seen at that guest address (hold-last-value), which lets exposure ride the
+  // gap and recover. Keyed by guest_addr; stores the final guest-endian words.
+  std::unordered_map<uint32_t, std::vector<uint32_t>> held_writeback_content_;
 };
 
 }  // namespace metal
