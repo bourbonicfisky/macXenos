@@ -125,15 +125,26 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   };
 
   // Executes the base class's requested ownership transfers for the current
-  // accumulated render targets. Same-format blits only (the clear-then-draw
-  // aliasing case); everything else is logged and skipped for now.
+  // accumulated render targets: same-host-format spans as per-tile blits,
+  // color->depth reinterprets via the depth-writing pass; the rest is logged
+  // and skipped for now.
   void PerformTransfers(RenderTarget* const* render_targets,
                         const std::vector<Transfer>* transfer_lists);
+  // Raw-EDRAM-bits color (BGRA8, e.g. the restored snapshot) -> D32F depth:
+  // in-shader tile remap + guest 24-bit depth decode (unorm24 or 20e4 float).
+  void PerformColorToDepthTransfer(const void* command_buffer,
+                                   RenderTarget* source_rt,
+                                   RenderTarget* dest_rt,
+                                   const Transfer& transfer);
 
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
 
   void* presentable_color_target_ = nullptr;  // borrowed from a render target.
+
+  // Color->depth transfer pipeline (lazily built; retained).
+  void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
+  void* transfer_c2d_depth_state_ = nullptr;  // id<MTLDepthStencilState>.
 
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.
