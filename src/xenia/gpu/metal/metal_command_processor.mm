@@ -202,9 +202,38 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
   return frame_command_buffer_;
 }
 
+// ---------------------------------------------------------------------------
+// DEBUG TOGGLES (environment variables) — the Metal backend is under active
+// bring-up; these enable fast in-agent/on-device bisection without rebuilds.
+//   XE_METAL_DISABLE_GEO=1     rect/point geometry emulation off (skip fallback)
+//   XE_METAL_NO_SIGNS=1        texture signedness/gamma decode off
+//   XE_METAL_NO_CENTROID=1     force center interpolation (no centroid at MSAA)
+//   XE_METAL_NO_SMALL_DEPTH=1  depth test off for small-pitch (lighting) draws
+//   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
+//   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
+//   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
+//   XE_METAL_DUMP_PS=hexhash   dump that PS + paired VS ucode disasm to /tmp
+// Diagnostics logged: MetalRTConfig (unique RT configs), MetalZCfg (depth
+// configs), MetalLightProducer (small-pitch draw inputs), MetalRTConsumer
+// (snapshot-sampling passes), MetalB1 (packed-vs-direct constants),
+// MetalDepthResolve / resolve-owner / resolve-clear / writeback one-shots.
+// ---------------------------------------------------------------------------
+
 bool MetalCommandProcessor::SetupContext() {
   if (!CommandProcessor::SetupContext()) {
     return false;
+  }
+  // Surface active debug toggles prominently so logs are self-describing.
+  static const char* kDebugEnvs[] = {
+      "XE_METAL_DISABLE_GEO",    "XE_METAL_NO_SIGNS",
+      "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
+      "XE_METAL_NO_WRITEBACK",   "XE_METAL_PRESENT_BASE",
+      "XE_METAL_PEEK",           "XE_METAL_DUMP_PS",
+  };
+  for (const char* env : kDebugEnvs) {
+    if (const char* value = std::getenv(env)) {
+      XELOGW("MetalCommandProcessor: DEBUG TOGGLE {}={}", env, value);
+    }
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -1691,7 +1720,9 @@ bool MetalCommandProcessor::IssueCopy() {
         // at frame end. JC2's auto-exposure loop is CPU-side: the game reads
         // the resolved 1x1 luminance from RAM to compute the next frame's
         // exposure constant — snapshot-only resolves leave that RAM unwritten.
-        if (resolved && rw * rh * 4 <= 256 * 1024 &&
+        static const bool s_no_writeback =
+            std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
+        if (resolved && !s_no_writeback && rw * rh * 4 <= 256 * 1024 &&
             (src_pixel_format == MetalRenderTargetCache::kColorFormat ||
              src_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
           id<MTLDevice> wb_device =

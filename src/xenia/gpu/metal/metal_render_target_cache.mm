@@ -703,7 +703,11 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
     // sample rows >> span y-shift).
     uint32_t oxs, oys, pxs, pys;
     GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
-    GetMsaaShifts(span_msaa_samples, pxs, pys);
+    // Owner shifts govern both sides (aliased single-sample textures; see the
+    // color resolve).
+    pxs = oxs;
+    pys = oys;
+    (void)span_msaa_samples;
     uint32_t y0 = (rect.row_first * 16) >> pys;
     if (y0 >= height) {
       continue;
@@ -780,19 +784,16 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     uint32_t owner_base = owner->key().base_tiles;
     uint32_t owner_pitch = owner->key().GetPitchTiles();
     uint32_t tile_w = owner->key().Is64bpp() ? 40 : 80;
+    // Owner shifts govern BOTH sides of the mapping: our textures are aliased
+    // single-sample, so an MSAA surface already stores one texel per resolved
+    // pixel — a guest 2x->1x resolve is a 1:1 pixel copy in our model. (The
+    // declared span msaa can differ from the owner's; the physical layout is
+    // the owner's.)
     uint32_t oxs, oys, pxs, pys;
     GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
-    GetMsaaShifts(span_msaa_samples, pxs, pys);
-    if (oxs != pxs || oys != pys) {
-      // Pixel block sizes differ (MSAA mismatch between the pass and the
-      // resolve declaration) -- needs a sampling pass, skip for now.
-      static uint32_t s_msaa_skips = 0;
-      if (s_msaa_skips++ < 8) {
-        XELOGW("MetalRenderTargetCache: color resolve MSAA mismatch {} vs {}",
-               uint32_t(owner->key().msaa_samples), span_msaa_samples);
-      }
-      continue;
-    }
+    pxs = oxs;
+    pys = oys;
+    (void)span_msaa_samples;
     // The rect's tile range within the span.
     static uint32_t s_owner_logs = 0;
     if (s_owner_logs++ < 12) {
