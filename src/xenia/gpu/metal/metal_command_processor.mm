@@ -2227,6 +2227,62 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
   }
 
+  // MetalFlicker probe (testing framework): async center-strip readback of
+  // the presented texture; each swap reads the PREVIOUS swap's strip (a full
+  // frame of latency guarantees completion without a wait) and logs sudden
+  // luminance collapses/recoveries — timestamps the black frames so they can
+  // be correlated with hazard flushes / resolves / writebacks in the log.
+  if (source_rt && source_rt.pixelFormat == MTLPixelFormatBGRA8Unorm) {
+    static id<MTLBuffer> s_luma_rb = nil;
+    static uint32_t s_luma_w = 0;
+    static bool s_luma_pending = false;
+    static float s_last_luma = -1.0f;
+    static uint32_t s_flicker_logs = 0;
+    if (s_luma_pending && s_luma_rb) {
+      const uint8_t* px = static_cast<const uint8_t*>(s_luma_rb.contents);
+      uint64_t sum = 0;
+      uint32_t n = s_luma_w * 4;
+      for (uint32_t i = 0; i < n; ++i) {
+        sum += px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2];
+      }
+      float luma = float(sum) / (3.0f * n);
+      if (s_last_luma >= 0.0f && s_flicker_logs < 64 &&
+          ((s_last_luma > 8.0f && luma < 0.35f * s_last_luma) ||
+           (luma > 8.0f && s_last_luma < 0.35f * luma))) {
+        ++s_flicker_logs;
+        XELOGW("MetalFlicker swap#{}: luma {:.1f} -> {:.1f}", count,
+               s_last_luma, luma);
+      }
+      s_last_luma = luma;
+    }
+    uint32_t w = uint32_t(source_rt.width);
+    uint32_t h = uint32_t(source_rt.height);
+    if (w >= 64 && h >= 8) {
+      if (!s_luma_rb || s_luma_w != w) {
+        s_luma_rb = [source_rt.device
+            newBufferWithLength:size_t(w) * 4 * 4
+                        options:MTLResourceStorageModeShared];
+        s_luma_w = w;
+      }
+      if (s_luma_rb) {
+        id<MTLCommandBuffer> lcb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> lbl = [lcb blitCommandEncoder];
+        [lbl copyFromTexture:source_rt
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, h / 2 - 2, 0)
+                   sourceSize:MTLSizeMake(w, 4, 1)
+                     toBuffer:s_luma_rb
+            destinationOffset:0
+       destinationBytesPerRow:w * 4
+     destinationBytesPerImage:size_t(w) * 4 * 4];
+        [lbl endEncoding];
+        [lcb commit];
+        s_luma_pending = true;
+      }
+    }
+  }
+
   double t = double(count % 120) / 120.0;
   double pattern_r = t, pattern_g = 1.0 - t, pattern_b = 0.5;
 
