@@ -65,10 +65,30 @@ bool MetalSharedMemory::UploadRange(uint32_t guest_address, uint32_t length) {
   if (!guest) {
     return false;
   }
+  // Ranges already consumed this frame: verified (or uploaded) once already.
+  bool contained = false;
+  for (const auto& range : frame_ranges_) {
+    if (guest_address >= range.first && uint32_t(end) <= range.second) {
+      contained = true;
+      break;
+    }
+  }
+  // Static mega-streams (terrain/mesh pools, tens of MB) are re-requested by
+  // nearly every scene draw; memcmp'ing them per draw is O(tens of GB) per
+  // frame — the on-device "graphics freeze" (GPU thread 35% in memcmp).
+  // Trust large ranges after one verification per frame; small ranges (the
+  // dynamic UI glyph/particle buffers that actually rewrite mid-frame) keep
+  // the full per-draw check so hazard detection still fires.
+  constexpr uint32_t kRecheckLimitBytes = 1u << 20;
+  if (contained && length > kRecheckLimitBytes) {
+    return false;
+  }
   // Unchanged content is never a hazard (common: static geometry re-requested
   // every draw) — and needs no copy.
   if (std::memcmp(buffer_contents_ + guest_address, guest, length) == 0) {
-    frame_ranges_.emplace_back(guest_address, uint32_t(end));
+    if (!contained) {
+      frame_ranges_.emplace_back(guest_address, uint32_t(end));
+    }
     return false;
   }
   // Changed content inside a range already consumed this frame: the caller
