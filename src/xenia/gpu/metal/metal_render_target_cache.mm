@@ -60,6 +60,16 @@ MTLPixelFormat ColorResourceFormatToMetal(
 }
 }  // namespace
 
+namespace {
+// Sample-space -> pixel shifts for a key (Xenos MSAA: 2x doubles vertical
+// samples, 4x doubles both).
+void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
+                   uint32_t& y_shift) {
+  x_shift = msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1 : 0;
+  y_shift = msaa_samples >= uint32_t(xenos::MsaaSamples::k2X) ? 1 : 0;
+}
+}  // namespace
+
 MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
   if (texture_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)texture_;
@@ -105,13 +115,14 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   MTLPixelFormat pixel_format =
       key.is_depth ? (MTLPixelFormat)kDepthFormat
                    : ColorResourceFormatToMetal(key.GetColorFormat());
-  // Bring-up: all textures are single-sample regardless of the key's MSAA
-  // (JC2 scene passes are 4x). Size at the 1x pixel dimensions so a 4x key
-  // isn't created half-width, and 4x<->1x transfers become plain copies.
-  uint32_t width = RenderTargetKey::GetWidth(key.pitch_tiles_at_32bpp,
-                                             xenos::MsaaSamples::k1X);
+  // Mainline sizing: pitch_tiles_at_32bpp is SAMPLE-space (a 4x key's pitch is
+  // doubled), GetWidth()/GetRenderTargetHeight() convert to msaa-aware PIXEL
+  // dimensions. Textures are still single-sample (no host MSAA) — MSAA'd guest
+  // surfaces just render aliased at their pixel size; all tile math converts
+  // sample coordinates to pixels with the key's shifts.
+  uint32_t width = key.GetWidth();
   uint32_t height =
-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, xenos::MsaaSamples::k1X);
+      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples);
   if (!width || !height) {
     return nullptr;
   }
@@ -216,33 +227,40 @@ void MetalRenderTargetCache::PerformTransfers(
         continue;
       }
       RenderTargetKey src_key = source->key();
-      if (source->pixel_format() == dest->pixel_format()) {
-        // Same host format (any pitch/MSAA — all textures are 1x-sized): copy
-        // tile-by-tile. Each EDRAM tile is an 80x16 (40x16 at 64bpp) pixel
-        // block at a computable position in each texture's layout.
+      uint32_t sxs, sys, dxs, dys;
+      GetMsaaShifts(uint32_t(src_key.msaa_samples), sxs, sys);
+      GetMsaaShifts(uint32_t(dest_key.msaa_samples), dxs, dys);
+      if (source->pixel_format() == dest->pixel_format() && sxs == dxs &&
+          sys == dys) {
+        // Same host format + same MSAA (equal pixel block sizes): copy
+        // tile-by-tile. An EDRAM tile is 80x16 SAMPLES = an
+        // (80>>xs)x(16>>ys)-pixel block at a computable position per layout.
         if (!blit) {
           blit = [cb blitCommandEncoder];
         }
         id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
         id<MTLTexture> dst_tex = (__bridge id<MTLTexture>)dest->texture();
-        uint32_t tile_w = src_key.Is64bpp() ? 40 : 80;
+        uint32_t tile_w_samples = src_key.Is64bpp() ? 40 : 80;
+        uint32_t bw = tile_w_samples >> sxs, bh = 16 >> sys;
         uint32_t src_pitch = src_key.GetPitchTiles();
         uint32_t dst_pitch = dest_key.GetPitchTiles();
         for (uint32_t tile = transfer.start_tiles; tile < transfer.end_tiles;
              ++tile) {
           uint32_t sl = tile - src_key.base_tiles;
           uint32_t dl = tile - dest_key.base_tiles;
-          uint32_t sx = (sl % src_pitch) * tile_w, sy = (sl / src_pitch) * 16;
-          uint32_t dx = (dl % dst_pitch) * tile_w, dy = (dl / dst_pitch) * 16;
-          if (sx + tile_w > src_tex.width || sy + 16 > src_tex.height ||
-              dx + tile_w > dst_tex.width || dy + 16 > dst_tex.height) {
+          uint32_t sx = ((sl % src_pitch) * tile_w_samples) >> sxs,
+                   sy = ((sl / src_pitch) * 16) >> sys;
+          uint32_t dx = ((dl % dst_pitch) * tile_w_samples) >> dxs,
+                   dy = ((dl / dst_pitch) * 16) >> dys;
+          if (sx + bw > src_tex.width || sy + bh > src_tex.height ||
+              dx + bw > dst_tex.width || dy + bh > dst_tex.height) {
             continue;
           }
           [blit copyFromTexture:src_tex
                     sourceSlice:0
                     sourceLevel:0
                    sourceOrigin:MTLOriginMake(sx, sy, 0)
-                     sourceSize:MTLSizeMake(tile_w, 16, 1)
+                     sourceSize:MTLSizeMake(bw, bh, 1)
                       toTexture:dst_tex
                destinationSlice:0
                destinationLevel:0
@@ -298,7 +316,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
       using namespace metal;
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
-        uint start_tiles; uint end_tiles; uint is_float24; uint pad;
+        uint start_tiles; uint end_tiles; uint is_float24; uint shifts;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_xfer_vs(uint vid [[vertex_id]]) {
@@ -325,14 +343,19 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
                                        texture2d<float> src [[texture(0)]],
                                        constant XferParams& p [[buffer(0)]]) {
         uint2 dp = uint2(in.pos.xy);
-        uint dl = (dp.y / 16u) * p.dst_pitch + (dp.x / 80u);
+        // shifts: dst_x | dst_y<<4 | src_x<<8 | src_y<<12 (sample->pixel).
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
         uint tile = p.dst_base + dl;
         if (tile < p.start_tiles || tile >= p.end_tiles) {
           discard_fragment();
         }
         uint sl = tile - p.src_base;
-        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
-                         (sl / p.src_pitch) * 16u + (dp.y % 16u));
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                         ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
         // BGRA8 texel bytes back to the raw EDRAM word; depth in bits [8,32).
         uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
@@ -374,15 +397,18 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
   if (!transfer_c2d_pipeline_ || !transfer_c2d_depth_state_) {
     return;
   }
+  uint32_t sxs, sys, dxs, dys;
+  GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
+  GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
-    uint32_t start_tiles, end_tiles, is_float24, pad;
+    uint32_t start_tiles, end_tiles, is_float24, shifts;
   } params{source->key().base_tiles,     source->key().GetPitchTiles(),
            dest->key().base_tiles,       dest->key().GetPitchTiles(),
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(dest->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           0};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
   pass.depthAttachment.loadAction = MTLLoadActionLoad;
@@ -412,7 +438,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
       using namespace metal;
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
-        uint start_tiles; uint end_tiles; uint is_float24; uint pad;
+        uint start_tiles; uint end_tiles; uint is_float24; uint shifts;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_xfer_d2c_vs(uint vid [[vertex_id]]) {
@@ -439,14 +465,18 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
                                      depth2d<float> src [[texture(0)]],
                                      constant XferParams& p [[buffer(0)]]) {
         uint2 dp = uint2(in.pos.xy);
-        uint dl = (dp.y / 16u) * p.dst_pitch + (dp.x / 80u);
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
         uint tile = p.dst_base + dl;
         if (tile < p.start_tiles || tile >= p.end_tiles) {
           discard_fragment();
         }
         uint sl = tile - p.src_base;
-        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
-                         (sl / p.src_pitch) * 16u + (dp.y % 16u));
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                         ss.y >> ((p.shifts >> 12) & 15u));
         float d = src.read(sp);
         uint d24 = p.is_float24 != 0u
                        ? xe_f32_to_f20e4(d)
@@ -481,15 +511,18 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   if (!transfer_d2c_pipeline_) {
     return;
   }
+  uint32_t sxs, sys, dxs, dys;
+  GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
+  GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
-    uint32_t start_tiles, end_tiles, is_float24, pad;
+    uint32_t start_tiles, end_tiles, is_float24, shifts;
   } params{source->key().base_tiles,     source->key().GetPitchTiles(),
            dest->key().base_tiles,       dest->key().GetPitchTiles(),
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(source->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           0};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -510,23 +543,36 @@ void* MetalRenderTargetCache::GetResolveSourceTexture(
   resolve_dump_rectangles_.clear();
   GetResolveCopyRectanglesToDump(edram_base, row_length_used, rows, pitch_tiles,
                                  resolve_dump_rectangles_);
+  // The span can be owned piecewise; pick the DOMINANT owner (most tiles) —
+  // e.g. a 64-tile quarter-scene resolve whose first 4 tiles belong to a tiny
+  // R32Float exposure RT must not take its snapshot format from the sliver.
+  MetalRenderTarget* best = nullptr;
+  uint32_t best_tiles = 0;
   for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
     auto* rt = static_cast<MetalRenderTarget*>(rect.render_target);
     if (!rt || rt->key().is_depth != uint32_t(is_depth)) {
       continue;
     }
-    if (pixel_format_out) {
-      *pixel_format_out = rt->pixel_format();
+    uint32_t tiles = rect.rows * row_length_used;
+    if (tiles > best_tiles) {
+      best_tiles = tiles;
+      best = rt;
     }
-    return rt->texture();
   }
-  return nullptr;
+  if (!best) {
+    return nullptr;
+  }
+  if (pixel_format_out) {
+    *pixel_format_out = best->pixel_format();
+  }
+  return best->texture();
 }
 
 bool MetalRenderTargetCache::ResolveDepthToSnapshot(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
-    uint32_t rows, uint32_t span_pitch, bool is_float24, void* dest_snapshot,
-    uint32_t width, uint32_t height, uint32_t dest_y_offset) {
+    uint32_t rows, uint32_t span_pitch, uint32_t span_msaa_samples,
+    bool is_float24, void* dest_snapshot, uint32_t width, uint32_t height,
+    uint32_t dest_y_offset) {
   if (!command_buffer || !dest_snapshot) {
     return false;
   }
@@ -545,8 +591,19 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
       using namespace metal;
       struct Params {
         uint src_base; uint src_pitch; uint span_base; uint span_pitch;
-        uint y_offset; uint is_float24; uint pad0; uint pad1;
+        uint y_offset; uint is_float24; uint shifts; uint pad1;
       };
+      // shifts: src_x | src_y<<4 | span_x<<8 | span_y<<12 (sample->pixel).
+      static uint2 xe_span_sample(uint2 dp, uint y_offset, uint shifts) {
+        return uint2(dp.x << ((shifts >> 8) & 15u),
+                     (dp.y - y_offset) << ((shifts >> 12) & 15u));
+      }
+      static uint2 xe_src_pixel(uint sl, uint src_pitch, uint2 ds,
+                                uint shifts) {
+        uint2 ss = uint2((sl % src_pitch) * 80u + (ds.x % 80u),
+                         (sl / src_pitch) * 16u + (ds.y % 16u));
+        return uint2(ss.x >> (shifts & 15u), ss.y >> ((shifts >> 4) & 15u));
+      }
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_c2f_vs(uint vid [[vertex_id]]) {
         VOut o;
@@ -570,11 +627,10 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
                                texture2d<float> src [[texture(0)]],
                                constant Params& p [[buffer(0)]]) {
         uint2 dp = uint2(in.pos.xy);
-        uint ry = dp.y - p.y_offset;  // row within the resolve region.
-        uint tile = p.span_base + (ry / 16u) * p.span_pitch + (dp.x / 80u);
+        uint2 ds = xe_span_sample(dp, p.y_offset, p.shifts);
+        uint tile = p.span_base + (ds.y / 16u) * p.span_pitch + (ds.x / 80u);
         uint sl = tile - p.src_base;
-        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
-                         (sl / p.src_pitch) * 16u + (ry % 16u));
+        uint2 sp = xe_src_pixel(sl, p.src_pitch, ds, p.shifts);
         float4 c = src.read(sp, 0);
         uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
                     (uint(round(c.r * 255.0)) << 16) |
@@ -587,11 +643,10 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
                                depth2d<float> src [[texture(0)]],
                                constant Params& p [[buffer(0)]]) {
         uint2 dp = uint2(in.pos.xy);
-        uint ry = dp.y - p.y_offset;
-        uint tile = p.span_base + (ry / 16u) * p.span_pitch + (dp.x / 80u);
+        uint2 ds = xe_span_sample(dp, p.y_offset, p.shifts);
+        uint tile = p.span_base + (ds.y / 16u) * p.span_pitch + (ds.x / 80u);
         uint sl = tile - p.src_base;
-        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
-                         (sl / p.src_pitch) * 16u + (ry % 16u));
+        uint2 sp = xe_src_pixel(sl, p.src_pitch, ds, p.shifts);
         return src.read(sp);
       }
     )METAL";
@@ -644,19 +699,23 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
     if (!owner_is_depth && owner->pixel_format() != kColorFormat) {
       continue;  // Raw-bits decode only understands 32bpp color for now.
     }
-    // The rect's tile rows within the span -> destination pixel rows.
-    uint32_t y0 = rect.row_first * 16;
+    // The rect's tile rows within the span -> destination pixel rows (span
+    // sample rows >> span y-shift).
+    uint32_t oxs, oys, pxs, pys;
+    GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
+    GetMsaaShifts(span_msaa_samples, pxs, pys);
+    uint32_t y0 = (rect.row_first * 16) >> pys;
     if (y0 >= height) {
       continue;
     }
-    uint32_t h = std::min(rect.rows * 16, height - y0);
+    uint32_t h = std::min((rect.rows * 16) >> pys, height - y0);
     struct Params {
       uint32_t src_base, src_pitch, span_base, span_pitch;
-      uint32_t y_offset, is_float24, pad0, pad1;
+      uint32_t y_offset, is_float24, shifts, pad1;
     } params{owner->key().base_tiles, owner->key().GetPitchTiles(),
              span_base,               span_pitch,
              dest_y_offset,           uint32_t(is_float24),
-             0,                       0};
+             oxs | (oys << 4) | (pxs << 8) | (pys << 12), 0};
     [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                     owner_is_depth ? resolve_d2f_pipeline_
                                                    : resolve_c2f_pipeline_)];
@@ -693,15 +752,270 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
   return any;
 }
 
+bool MetalRenderTargetCache::ResolveColorToSnapshot(
+    const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
+    uint32_t rows, uint32_t span_pitch, uint32_t span_msaa_samples,
+    void* dest_snapshot, uint64_t dest_pixel_format, uint32_t width,
+    uint32_t height, uint32_t dest_y_offset) {
+  if (!command_buffer || !dest_snapshot) {
+    return false;
+  }
+  resolve_dump_rectangles_.clear();
+  GetResolveCopyRectanglesToDump(span_base, row_length_used, rows, span_pitch,
+                                 resolve_dump_rectangles_);
+  if (resolve_dump_rectangles_.empty()) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> dest_tex = (__bridge id<MTLTexture>)dest_snapshot;
+  id<MTLBlitCommandEncoder> blit = nil;
+  bool any = false;
+  for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
+    auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
+    if (!owner || owner->key().is_depth ||
+        owner->pixel_format() != dest_pixel_format) {
+      continue;
+    }
+    id<MTLTexture> src_tex = (__bridge id<MTLTexture>)owner->texture();
+    uint32_t owner_base = owner->key().base_tiles;
+    uint32_t owner_pitch = owner->key().GetPitchTiles();
+    uint32_t tile_w = owner->key().Is64bpp() ? 40 : 80;
+    uint32_t oxs, oys, pxs, pys;
+    GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
+    GetMsaaShifts(span_msaa_samples, pxs, pys);
+    if (oxs != pxs || oys != pys) {
+      // Pixel block sizes differ (MSAA mismatch between the pass and the
+      // resolve declaration) -- needs a sampling pass, skip for now.
+      static uint32_t s_msaa_skips = 0;
+      if (s_msaa_skips++ < 8) {
+        XELOGW("MetalRenderTargetCache: color resolve MSAA mismatch {} vs {}",
+               uint32_t(owner->key().msaa_samples), span_msaa_samples);
+      }
+      continue;
+    }
+    // The rect's tile range within the span.
+    static uint32_t s_owner_logs = 0;
+    if (s_owner_logs++ < 12) {
+      XELOGI("MetalRenderTargetCache: color resolve owner {} rt={:X} rows[{}+{}]",
+             owner->key().GetDebugName(), uintptr_t(owner->texture()),
+             rect.row_first, rect.rows);
+    }
+    uint32_t rect_start = span_base + rect.row_first * span_pitch;
+    uint32_t rect_end =
+        span_base + (rect.row_first + rect.rows) * span_pitch;
+    if (!blit) {
+      blit = [cb blitCommandEncoder];
+    }
+    uint32_t bw = tile_w >> oxs, bh = 16 >> oys;
+    for (uint32_t tile = rect_start; tile < rect_end; ++tile) {
+      uint32_t sl = tile - owner_base;
+      uint32_t dl = tile - span_base;
+      uint32_t sx = ((sl % owner_pitch) * tile_w) >> oxs,
+               sy = ((sl / owner_pitch) * 16) >> oys;
+      uint32_t dx = ((dl % span_pitch) * tile_w) >> pxs,
+               dy = (((dl / span_pitch) * 16) >> pys) + dest_y_offset;
+      if (sx >= src_tex.width || sy + bh > src_tex.height ||
+          dx >= dest_tex.width || dy + bh > dest_tex.height) {
+        continue;
+      }
+      uint32_t w = std::min<uint32_t>(
+          bw, std::min<uint32_t>(uint32_t(src_tex.width) - sx,
+                                 uint32_t(dest_tex.width) - dx));
+      if (!w) {
+        continue;
+      }
+      [blit copyFromTexture:src_tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(sx, sy, 0)
+                 sourceSize:MTLSizeMake(w, bh, 1)
+                  toTexture:dest_tex
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(dx, dy, 0)];
+      any = true;
+    }
+  }
+  if (blit) {
+    [blit endEncoding];
+  }
+  return any;
+}
+
+void MetalRenderTargetCache::PerformResolveClear(
+    const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
+    uint32_t rows, uint32_t span_pitch, bool is_depth, uint32_t clear_value) {
+  if (!command_buffer) {
+    return;
+  }
+  resolve_dump_rectangles_.clear();
+  GetResolveCopyRectanglesToDump(span_base, row_length_used, rows, span_pitch,
+                                 resolve_dump_rectangles_);
+  if (resolve_dump_rectangles_.empty()) {
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!clear_color_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct ClearParams {
+        uint dst_base; uint dst_pitch; uint start_tiles; uint end_tiles;
+        uint shifts; uint pad0; uint pad1; uint pad2;
+        float4 color;  // or .x = depth.
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_clear_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      static bool xe_clear_out_of_span(uint2 dp, constant ClearParams& p) {
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint tile = p.dst_base + (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
+        return tile < p.start_tiles || tile >= p.end_tiles;
+      }
+      fragment float4 xe_clear_color_fs(VOut in [[stage_in]],
+                                        constant ClearParams& p [[buffer(0)]]) {
+        if (xe_clear_out_of_span(uint2(in.pos.xy), p)) discard_fragment();
+        return p.color;
+      }
+      struct DepthOut { float depth [[depth(any)]]; };
+      fragment DepthOut xe_clear_depth_fs(VOut in [[stage_in]],
+                                          constant ClearParams& p
+                                          [[buffer(0)]]) {
+        if (xe_clear_out_of_span(uint2(in.pos.xy), p)) discard_fragment();
+        DepthOut o;
+        o.depth = p.color.x;
+        return o;
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: clear library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    {
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_clear_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_clear_color_fs"];
+      d.colorAttachments[0].pixelFormat = (MTLPixelFormat)kColorFormat;
+      NSError* perr = nil;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&perr];
+      if (ps) {
+        clear_color_pipeline_ = (__bridge_retained void*)ps;
+      }
+    }
+    {
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_clear_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_clear_depth_fs"];
+      d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      NSError* perr = nil;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&perr];
+      if (ps) {
+        clear_depth_pipeline_ = (__bridge_retained void*)ps;
+      }
+      MTLDepthStencilDescriptor* ds = [[MTLDepthStencilDescriptor alloc] init];
+      ds.depthCompareFunction = MTLCompareFunctionAlways;
+      ds.depthWriteEnabled = YES;
+      clear_depth_state_ =
+          (__bridge_retained void*)[device
+              newDepthStencilStateWithDescriptor:ds];
+    }
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
+    auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
+    if (!owner || owner->key().is_depth != uint32_t(is_depth)) {
+      continue;
+    }
+    uint32_t oxs, oys;
+    GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
+    struct ClearParams {
+      uint32_t dst_base, dst_pitch, start_tiles, end_tiles;
+      uint32_t shifts, pad0, pad1, pad2;
+      float color[4];
+    } params{owner->key().base_tiles,
+             owner->key().GetPitchTiles(),
+             span_base,
+             span_base + rows * span_pitch,
+             oxs | (oys << 4),
+             0,
+             0,
+             0,
+             {0, 0, 0, 0}};
+    if (is_depth) {
+      if (!clear_depth_pipeline_ || !clear_depth_state_) {
+        return;
+      }
+      // Raw EDRAM depth word: depth24 in the high bits (unorm24; float24
+      // clears are typically 0 or max, both map fine through unorm here).
+      params.color[0] = float(clear_value >> 8) / 16777215.0f;
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.depthAttachment.texture = (__bridge id<MTLTexture>)owner->texture();
+      pass.depthAttachment.loadAction = MTLLoadActionLoad;
+      pass.depthAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:pass];
+      [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      clear_depth_pipeline_];
+      [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                    clear_depth_state_];
+      [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    } else {
+      if (!clear_color_pipeline_ || owner->pixel_format() != kColorFormat) {
+        continue;
+      }
+      // Raw 8888 EDRAM word -> BGRA8 channels (same layout as the transfers).
+      params.color[0] = float((clear_value >> 16) & 0xFF) / 255.0f;  // R
+      params.color[1] = float((clear_value >> 8) & 0xFF) / 255.0f;   // G
+      params.color[2] = float(clear_value & 0xFF) / 255.0f;          // B
+      params.color[3] = float(clear_value >> 24) / 255.0f;           // A
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.colorAttachments[0].texture =
+          (__bridge id<MTLTexture>)owner->texture();
+      pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:pass];
+      [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      clear_color_pipeline_];
+      [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    }
+    static uint32_t s_logs = 0;
+    if (s_logs++ < 12) {
+      XELOGI("MetalRenderTargetCache: resolve clear {} = {:08X} into {}",
+             is_depth ? "depth" : "color", clear_value,
+             owner->key().GetDebugName());
+    }
+  }
+}
+
 void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
                                                     uint32_t width,
                                                     uint32_t height,
                                                     uint64_t pixel_format) {
-  // Scene-scale depth resolves arrive as vertical strips of ONE 720-row buffer
-  // sampled full-height from the first strip's base; allocate full-height so
-  // the later strip lands inside (FindContainingSnapshot).
-  if (pixel_format == uint64_t(MTLPixelFormatR32Float) && width >= 1280 &&
-      height < 720) {
+  // Scene-scale resolves (depth AND color, e.g. the 720p albedo) arrive as
+  // vertical strips of ONE 720-row buffer sampled full-height from the first
+  // strip's base; allocate full-height so the later strip lands inside
+  // (FindContainingSnapshot).
+  if (width >= 1280 && height < 720) {
     height = 720;
   }
   auto it = resolve_snapshots_.find(dest_base);

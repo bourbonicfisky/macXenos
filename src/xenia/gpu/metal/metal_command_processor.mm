@@ -194,7 +194,6 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
     if (upload_arena_) {
       upload_arena_->Reset();
     }
-    frame_cleared_targets_.clear();
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -419,7 +418,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   bool new_frame = frame_command_buffer_ == nullptr;
   if (new_frame) {
     upload_arena_->Reset();
-    frame_cleared_targets_.clear();
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     command_buffer = [queue commandBuffer];
@@ -683,12 +681,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         s_seen_light_producer.size() <= 16) {
       XELOGI(
           "MetalLightProducer: ps={:016X} pitch={} fmt={} prim={} n={} geo={} "
-          "blend={:08X} mask={:X} samples:",
+          "blend={:08X} mask={:X} rt={:X} samples:",
           pixel_shader->ucode_data_hash(),
           uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
           uint32_t(rt0_info.color_format), uint32_t(prim_type), index_count,
           use_geometry_emulation, regs[XE_GPU_REG_RB_BLENDCONTROL0],
-          normalized_color_mask & 0b1111);
+          normalized_color_mask & 0b1111,
+          uintptr_t(render_target_cache_->current_color_texture(0, nullptr)));
       for (const auto& binding :
            pixel_shader->GetTextureBindingsAfterTranslation()) {
         auto f = regs.GetTextureFetch(binding.fetch_constant);
@@ -906,6 +905,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (!pipeline) {
     if (use_geometry_emulation) {
       ++geo_pipeline_fail_count_;
+    }
+    static std::unordered_set<uint64_t> s_null_pipeline_ps;
+    if (pixel_shader &&
+        s_null_pipeline_ps.insert(pixel_shader->ucode_data_hash()).second &&
+        s_null_pipeline_ps.size() <= 16) {
+      XELOGW("MetalCommandProcessor: NULL PIPELINE skip ps={:016X} fmt={:X}",
+             pixel_shader->ucode_data_hash(), color_pixel_format);
     }
     ++draw_skip_count_;
     return true;
@@ -1650,34 +1656,37 @@ bool MetalCommandProcessor::IssueCopy() {
       uint32_t span_base, span_row_length, span_rows, span_pitch;
       resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                         span_pitch);
+      // The snapshot format mirrors the first color owner's; the copy itself is
+      // per-owner + per-tile with FULL layout remapping (owner pitch vs the
+      // resolve's linear span -- a naive rect blit scrambles any owner whose
+      // pitch differs, e.g. 4x-MSAA keys twice as wide). Strips coalesce like
+      // depth (the guest splits 720p buffers into adjacent strip resolves).
       uint64_t src_pixel_format = 0;
-      void* color_rt = render_target_cache_->GetResolveSourceTexture(
+      void* probe = render_target_cache_->GetResolveSourceTexture(
           span_base, span_row_length, span_rows, span_pitch, /*is_depth=*/false,
           &src_pixel_format);
-      void* snap = color_rt ? render_target_cache_->EnsureResolveSnapshot(
-                                  resolve_info.copy_dest_base, rw, rh,
-                                  src_pixel_format)
-                            : nullptr;
-      if (snap && color_rt) {
-        uint32_t cw = render_target_cache_->width();
-        uint32_t ch = render_target_cache_->height();
-        uint32_t bw = rw < cw ? rw : cw;
-        uint32_t bh = rh < ch ? rh : ch;
-        id<MTLCommandBuffer> cb =
-            (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
-        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit copyFromTexture:(__bridge id<MTLTexture>)color_rt
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(bw, bh, 1)
-                    toTexture:(__bridge id<MTLTexture>)snap
-             destinationSlice:0
-             destinationLevel:0
-            destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [blit endEncoding];
-        texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
-                                                rw, rh);
+      if (probe) {
+        uint32_t strip_y_offset = 0;
+        void* parent_snap = render_target_cache_->FindContainingSnapshot(
+            resolve_info.copy_dest_base, &strip_y_offset);
+        void* snap = parent_snap;
+        bool is_new_snapshot = false;
+        if (!snap) {
+          snap = render_target_cache_->EnsureResolveSnapshot(
+              resolve_info.copy_dest_base, rw, rh, src_pixel_format);
+          is_new_snapshot = snap != nullptr;
+          strip_y_offset = 0;
+        }
+        bool resolved =
+            snap && render_target_cache_->ResolveColorToSnapshot(
+                        frame_command_buffer_, span_base, span_row_length,
+                        span_rows, span_pitch,
+                        uint32_t(resolve_info.color_edram_info.msaa_samples),
+                        snap, src_pixel_format, rw, rh, strip_y_offset);
+        if (resolved && is_new_snapshot) {
+          texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
+                                                 snap, rw, rh);
+        }
       } else {
         static uint32_t s_missing_color_rt_logs = 0;
         if (s_missing_color_rt_logs++ < 8) {
@@ -1728,12 +1737,33 @@ bool MetalCommandProcessor::IssueCopy() {
       bool resolved =
           snap && render_target_cache_->ResolveDepthToSnapshot(
                       frame_command_buffer_, span_base, span_row_length,
-                      span_rows, span_pitch, is_float24, snap, rw, rh,
-                      strip_y_offset);
+                      span_rows, span_pitch,
+                      uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                      is_float24, snap, rw, rh, strip_y_offset);
       if (resolved && is_new_snapshot) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                snap, rw, rh);
       }
+    }
+  }
+  // Resolve CLEARS: guests set render-target base values this way (JC2's
+  // quarter-res scene multiplies by DESTINATION — an unset base of 0 blackens
+  // the chain; shadow cascades clear depth between renders).
+  if ((resolve_info.IsClearingColor() || resolve_info.IsClearingDepth()) &&
+      render_target_cache_ && frame_command_buffer_) {
+    EndRenderEncoder();
+    uint32_t span_base, span_row_length, span_rows, span_pitch;
+    resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
+                                      span_pitch);
+    if (resolve_info.IsClearingColor()) {
+      render_target_cache_->PerformResolveClear(
+          frame_command_buffer_, span_base, span_row_length, span_rows,
+          span_pitch, /*is_depth=*/false, resolve_info.rb_color_clear);
+    }
+    if (resolve_info.IsClearingDepth()) {
+      render_target_cache_->PerformResolveClear(
+          frame_command_buffer_, span_base, span_row_length, span_rows,
+          span_pitch, /*is_depth=*/true, resolve_info.rb_depth_clear);
     }
   }
   static uint32_t s_copy_count = 0;

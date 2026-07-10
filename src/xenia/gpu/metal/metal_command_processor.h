@@ -147,10 +147,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // the open encoder was created with; a draw whose accumulated render targets
   // differ closes the encoder and opens a new pass.
   uint64_t encoder_attachment_key_ = 0;
-  // Textures (id<MTLTexture> pointer identity) already cleared this frame:
-  // each render target clears on its FIRST use in a frame and loads
-  // afterwards, so multi-pass accumulation into the same target (HUD over
-  // composite) is kept.
+  // Textures (id<MTLTexture> pointer identity) initialized once EVER: a render
+  // target clears only on its first-lifetime use (uninitialized Metal memory),
+  // and LOADS afterwards — in the ownership model, content comes from
+  // transfers/persistence and clears come from guest RESOLVE CLEARS; a
+  // per-frame clear would wipe what the ownership transfer just placed.
   std::unordered_set<uint64_t> frame_cleared_targets_;
 
   // Bring-up diagnostic: pair the real guest vertex function with a hardcoded

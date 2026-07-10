@@ -89,9 +89,33 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // 24-bit depth (unorm24 / 20e4 float24). Returns true if anything resolved.
   bool ResolveDepthToSnapshot(const void* command_buffer, uint32_t span_base,
                               uint32_t row_length_used, uint32_t rows,
-                              uint32_t span_pitch, bool is_float24,
-                              void* dest_snapshot, uint32_t width,
-                              uint32_t height, uint32_t dest_y_offset);
+                              uint32_t span_pitch, uint32_t span_msaa_samples,
+                              bool is_float24, void* dest_snapshot,
+                              uint32_t width, uint32_t height,
+                              uint32_t dest_y_offset);
+
+  // Color resolve into the snapshot: per-owner, per-tile blits with FULL tile
+  // remapping between the owner's layout (its own pitch — e.g. a 4x-MSAA key
+  // is twice as wide) and the resolve span's linear layout. The naive
+  // whole-rect blit assumed owner pixel (x,y) == resolve pixel (x,y), which
+  // scrambles any owner whose pitch differs from the resolve's.
+  bool ResolveColorToSnapshot(const void* command_buffer, uint32_t span_base,
+                              uint32_t row_length_used, uint32_t rows,
+                              uint32_t span_pitch, uint32_t span_msaa_samples,
+                              void* dest_snapshot, uint64_t dest_pixel_format,
+                              uint32_t width, uint32_t height,
+                              uint32_t dest_y_offset);
+
+  // Resolve CLEAR: writes the guest clear value into every render target
+  // owning the span's tiles (fullscreen draw, in-shader tile-range discard).
+  // Guests set render-target base values this way — e.g. JC2's quarter-res
+  // scene multiplies by DESTINATION (blend dst-color), so an unset base value
+  // of 0 blackens the whole chain. clear_value is the raw EDRAM word
+  // (color: 8888 bits; depth: (depth24 << 8)).
+  void PerformResolveClear(const void* command_buffer, uint32_t span_base,
+                           uint32_t row_length_used, uint32_t rows,
+                           uint32_t span_pitch, bool is_depth,
+                           uint32_t clear_value);
 
   // --- RT-as-texture snapshot bridge (kept from bring-up; stage 3 replaces
   // it with direct guest-memory resolves) ---
@@ -165,6 +189,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* resolve_c2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* resolve_d2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
+  void* clear_color_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
+  void* clear_depth_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
+  void* clear_depth_state_ = nullptr;         // id<MTLDepthStencilState>.
 
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.
