@@ -89,6 +89,16 @@ bool MetalSharedMemory::UploadRanges(
   // flush (commit + wait) BEFORE the new bytes land so those draws read the
   // old data. The callback also resets consumed_ranges_.
   bool hazard = false;
+  // Experiment (XE_METAL_FLUSH_ALL_UPLOADS): flush before ANY mid-frame
+  // invalidating upload once a draw has consumed shared memory this frame,
+  // ignoring the overlap test. Over-approximates per-draw serialization for the
+  // shared-memory path (no arena coupling) — an in-agent A/B for whether the
+  // stipple is shared-memory upload staleness at all.
+  static const bool s_flush_all =
+      std::getenv("XE_METAL_FLUSH_ALL_UPLOADS") != nullptr;
+  if (s_flush_all && !consumed_ranges_.empty()) {
+    hazard = true;
+  }
   for (uint32_t i = 0; i < num_upload_ranges && !hazard; ++i) {
     uint32_t range_start = upload_page_ranges[i].first << page_size_log2();
     uint32_t range_end = range_start
