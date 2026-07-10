@@ -336,6 +336,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_SMALL_DEPTH=1  depth test off for small-pitch (lighting) draws
 //   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
+//   XE_METAL_SERIALIZE_DRAWS=1 commit+wait after every draw (staleness A/B; slow)
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
 //   XE_METAL_DUMP_PS=hexhash   dump that PS + paired VS ucode disasm to /tmp
@@ -407,8 +408,8 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_DISABLE_GEO",    "XE_METAL_NO_SIGNS",
       "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
       "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
-      "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
-      "XE_METAL_DUMP_PS",
+      "XE_METAL_SERIALIZE_DRAWS", "XE_METAL_PRESENT_BASE",
+      "XE_METAL_PEEK",           "XE_METAL_DUMP_PS",
   };
   for (const char* env : kDebugEnvs) {
     if (const char* value = std::getenv(env)) {
@@ -1725,6 +1726,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     XELOGI("MetalCommandProcessor: encoded draw #{} (prim {}, {} indices, {})",
            draw_count_, uint32_t(prim_type), index_count,
            index_buffer_info ? "indexed" : "auto");
+  }
+  // Diagnostic A/B: XE_METAL_SERIALIZE_DRAWS=1 commits + waits after EVERY draw,
+  // so each draw executes against the shared buffer's point-in-time state (the
+  // exact clean-capture path). If the live magenta/noise tile stipple VANISHES
+  // under this, the defect is the batching-staleness hazard (draws consuming
+  // shared memory's final frame state) and the fix is versioned/in-stream
+  // uploads; if it PERSISTS, the stipple is a resolve/transfer/MSAA-tile bug,
+  // not staleness. Catastrophically slow — a probe, not a play mode.
+  static const bool s_serialize_draws =
+      std::getenv("XE_METAL_SERIALIZE_DRAWS") != nullptr;
+  if (s_serialize_draws) {
+    EndFrameEncoder();
   }
   return true;
 }
