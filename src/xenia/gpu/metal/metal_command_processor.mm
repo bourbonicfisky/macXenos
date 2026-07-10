@@ -741,8 +741,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // ucode disassembly to /tmp/xe_ps_<hash>.txt once, for single-shader
   // forensics (what inputs drive the color output).
   if (const char* dump_ps = std::getenv("XE_METAL_DUMP_PS")) {
-    if (pixel_shader &&
-        pixel_shader->ucode_data_hash() == strtoull(dump_ps, nullptr, 16)) {
+    uint64_t dump_hash = strtoull(dump_ps, nullptr, 16);
+    // Matches the PS hash OR the VS hash (several VSes share one PS).
+    if ((pixel_shader && pixel_shader->ucode_data_hash() == dump_hash) ||
+        vertex_shader->ucode_data_hash() == dump_hash) {
       static bool s_dumped = false;
       if (!s_dumped) {
         s_dumped = true;
@@ -1070,12 +1072,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Upload the vertex data ranges referenced by the vertex shader's vfetches.
   const Shader::ConstantRegisterMap& vs_map =
       vertex_shader->constant_register_map();
+  // Diagnostic: XE_METAL_LOG_VF=<hex VS ucode hash> logs each vfetch slot the
+  // VS's bitmap consumes for that shader — slot, guest range, and the first
+  // dwords as uploaded — to split fetch-addressing bugs from data bugs.
+  static const char* s_log_vf = std::getenv("XE_METAL_LOG_VF");
+  bool log_vf =
+      s_log_vf &&
+      vertex_shader->ucode_data_hash() == strtoull(s_log_vf, nullptr, 16);
+  static uint32_t s_log_vf_count = 0;
   for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
     uint32_t bits = vs_map.vertex_fetch_bitmap[i];
     uint32_t j;
     while (xe::bit_scan_forward(bits, &j)) {
       bits = xe::clear_lowest_bit(bits);
       xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(i * 32 + j);
+      if (log_vf && s_log_vf_count < 24) {
+        ++s_log_vf_count;
+        const uint32_t* words = reinterpret_cast<const uint32_t*>(
+            memory_->TranslatePhysical(fetch.address << 2));
+        XELOGW("MetalVF draw={} slot={} type={} addr={:08X} size_dw={} "
+               "endian={} words={:08X} {:08X} {:08X} {:08X}",
+               trace_draw_index_, i * 32 + j, uint32_t(fetch.type),
+               fetch.address << 2, uint32_t(fetch.size),
+               uint32_t(fetch.endian), words ? words[0] : 0,
+               words ? words[1] : 0, words ? words[2] : 0,
+               words ? words[3] : 0);
+      }
       if (fetch.type != xenos::FetchConstantType::kVertex &&
           fetch.type != xenos::FetchConstantType::kInvalidVertex) {
         continue;
