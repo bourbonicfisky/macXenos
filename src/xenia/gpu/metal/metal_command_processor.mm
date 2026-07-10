@@ -1210,10 +1210,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     for (uint32_t i = 0; i < 4; ++i) {
       system_constants.color_exp_bias[i] = 1.0f;
     }
-    // Index/vfetch helpers used by the vertex shader.
-    xenos::Endian index_endian =
-        index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone;
-    system_constants.vertex_index_endian = index_endian;
+    // Index/vfetch helpers used by the vertex shader. The endian here must
+    // describe the index buffer AS BOUND, not the guest's: our draw paths
+    // CPU-swap the guest indices into the upload arena (SwapIndicesInto /
+    // the fan expansion), so the value reaching SV_VertexID is already
+    // host-order. Passing the guest endianness made the translated VS swap
+    // it AGAIN — every indexed draw fetched byte-swapped vertex slots
+    // (terrain chunks as giant wedges; chunks whose swapped indices left
+    // the lattice rasterized nothing).
+    system_constants.vertex_index_endian = xenos::Endian::kNone;
     system_constants.vertex_index_offset = regs[XE_GPU_REG_VGT_INDX_OFFSET];
     system_constants.vertex_index_min = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
     system_constants.vertex_index_max = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
