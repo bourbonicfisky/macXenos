@@ -523,6 +523,176 @@ void* MetalRenderTargetCache::GetResolveSourceTexture(
   return nullptr;
 }
 
+bool MetalRenderTargetCache::ResolveDepthToSnapshot(
+    const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
+    uint32_t rows, uint32_t span_pitch, bool is_float24, void* dest_snapshot,
+    uint32_t width, uint32_t height, uint32_t dest_y_offset) {
+  if (!command_buffer || !dest_snapshot) {
+    return false;
+  }
+  // The span can be owned PIECEWISE by several render targets; convert each
+  // owner's rectangle from its texture.
+  resolve_dump_rectangles_.clear();
+  GetResolveCopyRectanglesToDump(span_base, row_length_used, rows, span_pitch,
+                                 resolve_dump_rectangles_);
+  if (resolve_dump_rectangles_.empty()) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!resolve_c2f_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct Params {
+        uint src_base; uint src_pitch; uint span_base; uint span_pitch;
+        uint y_offset; uint is_float24; uint pad0; uint pad1;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_c2f_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      static float xe_f20e4_to_f32(uint f24) {
+        f24 &= 0xFFFFFFu;
+        if (f24 == 0u) return 0.0;
+        uint mantissa = f24 & 0xFFFFFu;
+        uint exponent = f24 >> 20;
+        if (exponent == 0u) {
+          uint lzcnt = clz(mantissa) - (32u - 21u);
+          exponent = uint(1 - int(lzcnt));
+          mantissa = (mantissa << lzcnt) & 0xFFFFFu;
+        }
+        return as_type<float>(((exponent + 112u) << 23) | (mantissa << 3));
+      }
+      fragment float xe_c2f_fs(VOut in [[stage_in]],
+                               texture2d<float> src [[texture(0)]],
+                               constant Params& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint ry = dp.y - p.y_offset;  // row within the resolve region.
+        uint tile = p.span_base + (ry / 16u) * p.span_pitch + (dp.x / 80u);
+        uint sl = tile - p.src_base;
+        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ry % 16u));
+        float4 c = src.read(sp, 0);
+        uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
+                    (uint(round(c.r * 255.0)) << 16) |
+                    (uint(round(c.a * 255.0)) << 24);
+        uint d24 = bits >> 8;
+        return p.is_float24 != 0u ? xe_f20e4_to_f32(d24)
+                                  : float(d24) / 16777215.0;
+      }
+      fragment float xe_d2f_fs(VOut in [[stage_in]],
+                               depth2d<float> src [[texture(0)]],
+                               constant Params& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint ry = dp.y - p.y_offset;
+        uint tile = p.span_base + (ry / 16u) * p.span_pitch + (dp.x / 80u);
+        uint sl = tile - p.src_base;
+        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ry % 16u));
+        return src.read(sp);
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: resolve library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    auto make_pipeline = [&](NSString* fs_name) -> void* {
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_c2f_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:fs_name];
+      d.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+      NSError* perr = nil;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&perr];
+      if (!ps) {
+        XELOGE("MetalRenderTargetCache: resolve pipeline {} failed: {}",
+               fs_name.UTF8String,
+               perr ? perr.localizedDescription.UTF8String : "?");
+        return nullptr;
+      }
+      return (__bridge_retained void*)ps;
+    };
+    resolve_c2f_pipeline_ = make_pipeline(@"xe_c2f_fs");
+    resolve_d2f_pipeline_ = make_pipeline(@"xe_d2f_fs");
+  }
+  if (!resolve_c2f_pipeline_ || !resolve_d2f_pipeline_) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest_snapshot;
+  pass.colorAttachments[0].slice = 0;
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  bool any = false;
+  for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
+    auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
+    if (!owner) {
+      continue;
+    }
+    bool owner_is_depth = owner->key().is_depth != 0;
+    if (!owner_is_depth && owner->pixel_format() != kColorFormat) {
+      continue;  // Raw-bits decode only understands 32bpp color for now.
+    }
+    // The rect's tile rows within the span -> destination pixel rows.
+    uint32_t y0 = rect.row_first * 16;
+    if (y0 >= height) {
+      continue;
+    }
+    uint32_t h = std::min(rect.rows * 16, height - y0);
+    struct Params {
+      uint32_t src_base, src_pitch, span_base, span_pitch;
+      uint32_t y_offset, is_float24, pad0, pad1;
+    } params{owner->key().base_tiles, owner->key().GetPitchTiles(),
+             span_base,               span_pitch,
+             dest_y_offset,           uint32_t(is_float24),
+             0,                       0};
+    [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
+                                    owner_is_depth ? resolve_d2f_pipeline_
+                                                   : resolve_c2f_pipeline_)];
+    MTLViewport vp{0.0, double(dest_y_offset + y0), double(width), double(h),
+                   0.0, 1.0};
+    [enc setViewport:vp];
+    // Viewports don't clip (the fullscreen triangle overflows 2x); scissor
+    // does — without it each rect would stomp the rows below it.
+    id<MTLTexture> dest_tex = (__bridge id<MTLTexture>)dest_snapshot;
+    uint32_t sy = std::min<uint32_t>(dest_y_offset + y0,
+                                     uint32_t(dest_tex.height));
+    uint32_t sh =
+        std::min<uint32_t>(h, uint32_t(dest_tex.height) - sy);
+    if (!sh) {
+      continue;
+    }
+    [enc setScissorRect:MTLScissorRect{0, sy,
+                                       std::min<NSUInteger>(width,
+                                                            dest_tex.width),
+                                       sh}];
+    [enc setFragmentTexture:(__bridge id<MTLTexture>)owner->texture()
+                    atIndex:0];
+    [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    any = true;
+    static uint32_t s_logs = 0;
+    if (s_logs++ < 16) {
+      XELOGI(
+          "MetalRenderTargetCache: depth resolve rect rows[{}+{}] from {}",
+          rect.row_first, rect.rows, owner->key().GetDebugName());
+    }
+  }
+  [enc endEncoding];
+  return any;
+}
+
 void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
                                                     uint32_t width,
                                                     uint32_t height,
@@ -602,6 +772,19 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   }
   auto* rt = static_cast<MetalRenderTarget*>(full_rt);
   id<MTLTexture> texture = (__bridge id<MTLTexture>)rt->texture();
+  {
+    // Diagnostic: sample the snapshot content (is it real data or a fill
+    // pattern?). Words from the depth region (tiles ~16+) and a simple sum.
+    const uint32_t* words = static_cast<const uint32_t*>(snapshot);
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      sum += words[i * 512];
+    }
+    XELOGI(
+        "MetalRenderTargetCache: EDRAM snapshot sample w[0]={:08X} "
+        "w[20K]={:08X} w[500K]={:08X} w[2M]={:08X} sum16M={:016X}",
+        words[0], words[20000], words[500000], words[2000000], sum);
+  }
   // Reorder the tile-major snapshot (2048 tiles of 80x16 32bpp samples) into
   // the 1280-wide (16 tiles per row) row-major layout.
   uint32_t width = uint32_t(texture.width);    // 1280

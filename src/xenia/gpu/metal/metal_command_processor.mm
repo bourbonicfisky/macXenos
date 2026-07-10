@@ -565,14 +565,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   // Rectangle lists (JC2's deferred composite/lighting/post passes are true
-  // 4-corner rects) can't be drawn as plain triangles; expand them via MSC
-  // geometry emulation, which needs a mesh-shader-capable device and a pixel
-  // shader for the fragment stage. Point lists can join this path later; for now
-  // only rect-list is routed here (everything else still goes through the plain
-  // primitive map, which skips unsupported types).
+  // 4-corner rects) and point lists (light-volume sprites — plain Metal points
+  // can't expand size/texcoords, and their pipelines fail on the
+  // xespritetexcoord0 VS/PS mismatch) can't be drawn directly; expand them via
+  // MSC geometry emulation, which needs a mesh-shader-capable device and a
+  // pixel shader for the fragment stage.
   PipelineGeometryShader geometry_type = PipelineGeometryShader::kNone;
   if (prim_type == xenos::PrimitiveType::kRectangleList) {
     geometry_type = PipelineGeometryShader::kRectangleList;
+  } else if (prim_type == xenos::PrimitiveType::kPointList) {
+    geometry_type = PipelineGeometryShader::kPointList;
   }
   bool use_geometry_emulation = geometry_type != PipelineGeometryShader::kNone &&
                                 mesh_shader_supported_ && pixel_shader != nullptr;
@@ -645,6 +647,34 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ++draw_skip_count_;
     return true;
   }
+  // DIAGNOSTIC: the quarter-res lighting producer — log draws into small-pitch
+  // color RTs (the inferred-lighting buffer) with everything they sample.
+  if (color_bound && pixel_shader &&
+      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch <= 400) {
+    static std::unordered_set<uint64_t> s_seen_light_producer;
+    if (s_seen_light_producer.insert(pixel_shader->ucode_data_hash()).second &&
+        s_seen_light_producer.size() <= 16) {
+      XELOGI(
+          "MetalLightProducer: ps={:016X} pitch={} fmt={} prim={} n={} geo={} "
+          "blend={:08X} mask={:X} samples:",
+          pixel_shader->ucode_data_hash(),
+          uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
+          uint32_t(rt0_info.color_format), uint32_t(prim_type), index_count,
+          use_geometry_emulation, regs[XE_GPU_REG_RB_BLENDCONTROL0],
+          normalized_color_mask & 0b1111);
+      for (const auto& binding :
+           pixel_shader->GetTextureBindingsAfterTranslation()) {
+        auto f = regs.GetTextureFetch(binding.fetch_constant);
+        uint32_t fetch_base = f.base_address << 12;
+        XELOGI("MetalLightProducer:   fc={} base={:08X}{} fmt={} {}x{}",
+               binding.fetch_constant, fetch_base,
+               render_target_cache_->GetResolveSnapshot(fetch_base)
+                   ? " [SNAPSHOT]"
+                   : "",
+               uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1);
+      }
+    }
+  }
   // DIAGNOSTIC (lighting-term ~0): log, once per (pixel shader, RT config),
   // every draw whose PS samples a RESOLVED SNAPSHOT (the RT-consuming passes —
   // deferred lighting, composite, post) with what it samples and where it
@@ -692,6 +722,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                     normalized_color_mask, *vertex_shader)) {
     ++draw_skip_count_;
     return true;
+  }
+  // A/B probe: XE_METAL_NO_SMALL_DEPTH=1 disables the depth test on
+  // small-pitch (quarter-res lighting) draws to isolate the light buffer's
+  // zero output (depth-test vs shader-math).
+  static const bool s_no_small_depth = std::getenv("XE_METAL_NO_SMALL_DEPTH");
+  if (s_no_small_depth && depth_bound &&
+      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch <= 400) {
+    norm_depth.value = 0;
+    depth_bound = false;
+    if (!render_target_cache_->Update(color_bound, norm_depth,
+                                      normalized_color_mask, *vertex_shader)) {
+      ++draw_skip_count_;
+      return true;
+    }
   }
   // The truth of what's bound now comes from the accumulated RTs.
   uint64_t color_pixel_format = uint64_t(MTLPixelFormatInvalid);
@@ -934,8 +978,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             signs << ((fc & 3) * 8);
       }
     };
-    fill_texture_signs(vertex_shader);
-    fill_texture_signs(pixel_shader);
+    // A/B: XE_METAL_NO_SIGNS=1 leaves signs zeroed (all-unsigned, no gamma
+    // decode) to isolate sign-driven fetch behavior (signed-SRV selection).
+    if (!std::getenv("XE_METAL_NO_SIGNS")) {
+      fill_texture_signs(vertex_shader);
+      fill_texture_signs(pixel_shader);
+    }
     // Color exponent bias multiplies the pixel output; its neutral value is
     // 1.0 (2^0), NOT 0 -- a zeroed struct here would multiply every color by
     // zero and render pure black. (Full per-RT bias from RB_COLOR_INFO later.)
@@ -961,22 +1009,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
     }
+    // Diagnostic (scene depth stuck at clear): log each unique depth
+    // configuration of depth-bound draws once — z range, func, write, target.
+    if (depth_bound) {
+      uint64_t zcfg = (uint64_t(norm_depth.value) << 32) ^
+                      uint64_t(viewport_info.z_min * 1000) ^
+                      (uint64_t(viewport_info.z_max * 1000) << 10) ^
+                      (render_target_cache_->current_attachment_key() << 20);
+      static std::unordered_set<uint64_t> s_seen_zcfg;
+      if (s_seen_zcfg.insert(zcfg).second && s_seen_zcfg.size() <= 24) {
+        XELOGI(
+            "MetalZCfg: z=({},{}) zfunc={} zwrite={} ext=({},{}) color={} "
+            "clear={:08X}",
+            viewport_info.z_min, viewport_info.z_max,
+            uint32_t(norm_depth.zfunc), uint32_t(norm_depth.z_write_enable),
+            viewport_info.xy_extent[0], viewport_info.xy_extent[1], have_color,
+            regs[XE_GPU_REG_RB_DEPTH_CLEAR]);
+      }
+    }
     // Bring-up diagnostic: log the transform of the first few draws of the
     // session (any primitive type) to catch off-screen / degenerate output.
     if (tri_log_count_ < 12) {
       ++tri_log_count_;
       XELOGI(
           "MetalCommandProcessor: DRAW {} prim={} idx={} clipdis={} imask={:X} "
-          "pgen={} ext=({},{}) ndc_s=({},{},{}) ndc_o=({},{},{}) flags={:X} "
-          "ps_xlat={}",
+          "pgen={} ext=({},{}) z=({},{}) ndc_s=({},{},{}) ndc_o=({},{},{}) "
+          "flags={:X} ps_xlat={} depth={}",
           tri_log_count_, uint32_t(prim_type), index_buffer_info != nullptr,
           uint32_t(regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable),
           interpolator_mask, ps_param_gen_pos, viewport_info.xy_extent[0],
-          viewport_info.xy_extent[1], viewport_info.ndc_scale[0],
-          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2],
-          viewport_info.ndc_offset[0], viewport_info.ndc_offset[1],
-          viewport_info.ndc_offset[2], system_constants.flags,
-          ps_translation != nullptr);
+          viewport_info.xy_extent[1], viewport_info.z_min, viewport_info.z_max,
+          viewport_info.ndc_scale[0], viewport_info.ndc_scale[1],
+          viewport_info.ndc_scale[2], viewport_info.ndc_offset[0],
+          viewport_info.ndc_offset[1], viewport_info.ndc_offset[2],
+          system_constants.flags, ps_translation != nullptr, depth_bound);
     }
   }
   if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {
@@ -1198,6 +1264,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     geometry_config.gsVertexSizeInBytes = gs_vertex_size;
     geometry_config.gsMaxInputPrimitivesPerMeshThreadgroup =
         gs_max_input_primitives;
+    // The runtime primitive matches the GS input topology: rect-list feeds
+    // triangles (the GS synthesizes the 4th corner), point sprites feed points.
+    IRRuntimePrimitiveType geometry_primitive =
+        geometry_type == PipelineGeometryShader::kPointList
+            ? IRRuntimePrimitiveTypePoint
+            : IRRuntimePrimitiveTypeTriangle;
     if (index_buffer_info && index_buffer_info->guest_base) {
       uint32_t index_size =
           index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
@@ -1219,12 +1291,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // arena byte offset, expressed here as an element start index.
       uint32_t start_index = uint32_t(index_alloc.offset / index_size);
       IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
-          encoder, IRRuntimePrimitiveTypeTriangle, index_type, index_buffer,
+          encoder, geometry_primitive, index_type, index_buffer,
           geometry_config, /*instanceCount=*/1, index_count, start_index,
           /*baseVertex=*/0, /*baseInstance=*/0);
     } else {
       IRRuntimeDrawPrimitivesGeometryEmulation(
-          encoder, IRRuntimePrimitiveTypeTriangle, geometry_config,
+          encoder, geometry_primitive, geometry_config,
           /*instanceCount=*/1, index_count, /*baseVertex=*/0,
           /*baseInstance=*/0);
     }
@@ -1557,37 +1629,36 @@ bool MetalCommandProcessor::IssueCopy() {
     if (rw && rh && kDepthEnabled && render_target_cache_ && texture_cache_ &&
         frame_command_buffer_) {
       EndRenderEncoder();
-      // Ownership truth: the render target owning the resolve's EDRAM tiles
-      // (this is what made previous-frame / tile-reused depth reads work).
       uint32_t span_base, span_row_length, span_rows, span_pitch;
       resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                         span_pitch);
-      void* depth_rt = render_target_cache_->GetResolveSourceTexture(
-          span_base, span_row_length, span_rows, span_pitch, /*is_depth=*/true,
-          nullptr);
-      static uint32_t s_depth_resolve_logs = 0;
-      if (s_depth_resolve_logs++ < 16) {
-        XELOGI("MetalDepthResolve: dest={:08X} {}x{} span_base={} target={}",
-               resolve_info.copy_dest_base, rw, rh, span_base,
-               depth_rt != nullptr);
-      }
       // Multi-strip resolve: if this strip's destination lands inside an
       // existing (full-height) snapshot, convert into that snapshot at the row
       // offset — shaders sample the FIRST strip's base as the whole buffer.
       uint32_t strip_y_offset = 0;
       void* parent_snap = render_target_cache_->FindContainingSnapshot(
           resolve_info.copy_dest_base, &strip_y_offset);
-      if (depth_rt && parent_snap) {
-        ConvertDepthToSnapshot(depth_rt, parent_snap, rw, rh, strip_y_offset);
-      } else {
-        void* snap = depth_rt ? render_target_cache_->EnsureResolveSnapshot(
-                                    resolve_info.copy_dest_base, rw, rh,
-                                    MTLPixelFormatR32Float)
-                              : nullptr;
-        if (snap && depth_rt && ConvertDepthToSnapshot(depth_rt, snap, rw, rh)) {
-          texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
-                                                 snap, rw, rh);
-        }
+      void* snap = parent_snap;
+      bool is_new_snapshot = false;
+      if (!snap) {
+        snap = render_target_cache_->EnsureResolveSnapshot(
+            resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
+        is_new_snapshot = snap != nullptr;
+        strip_y_offset = 0;
+      }
+      // Per-owner conversion (the span can be owned piecewise): depth owners
+      // read directly, color owners (raw EDRAM bits, e.g. the restored trace
+      // snapshot) decode the guest 24-bit depth.
+      bool is_float24 = resolve_info.depth_edram_info.format ==
+                        uint32_t(xenos::DepthRenderTargetFormat::kD24FS8);
+      bool resolved =
+          snap && render_target_cache_->ResolveDepthToSnapshot(
+                      frame_command_buffer_, span_base, span_row_length,
+                      span_rows, span_pitch, is_float24, snap, rw, rh,
+                      strip_y_offset);
+      if (resolved && is_new_snapshot) {
+        texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
+                                               snap, rw, rh);
       }
     }
   }
@@ -1654,6 +1725,34 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       present_height = uint32_t(source_rt.height);
       XELOGI("MetalCommandProcessor: DEBUG presenting snapshot base {:08X} ({}x{})",
              base, present_width, present_height);
+      // Read back a few texels so values are exact, not eyeballed.
+      id<MTLDevice> dev = source_rt.device;
+      uint32_t rb_w = uint32_t(source_rt.width);
+      id<MTLBuffer> rb =
+          [dev newBufferWithLength:rb_w * 4 options:MTLResourceStorageModeShared];
+      if (rb) {
+        id<MTLCommandBuffer> rcb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> rbl = [rcb blitCommandEncoder];
+        [rbl copyFromTexture:source_rt
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, source_rt.height / 2, 0)
+                   sourceSize:MTLSizeMake(rb_w, 1, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:rb_w * 4
+     destinationBytesPerImage:rb_w * 4];
+        [rbl endEncoding];
+        [rcb commit];
+        [rcb waitUntilCompleted];
+        const uint32_t* words = static_cast<const uint32_t*>(rb.contents);
+        const float* floats = reinterpret_cast<const float*>(rb.contents);
+        XELOGI(
+            "MetalCommandProcessor: DEBUG row[h/2] raw x0={:08X} x64={:08X} "
+            "x320={:08X} x640={:08X} x1000={:08X} asf x320={} x640={}",
+            words[0], words[64 % rb_w], words[320 % rb_w], words[640 % rb_w],
+            words[1000 % rb_w], floats[320 % rb_w], floats[640 % rb_w]);
+      }
     } else {
       XELOGW("MetalCommandProcessor: DEBUG present base {:08X} has no snapshot",
              base);

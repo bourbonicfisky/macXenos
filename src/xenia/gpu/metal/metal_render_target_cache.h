@@ -81,6 +81,18 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                 uint32_t rows, uint32_t pitch_tiles,
                                 bool is_depth, uint64_t* pixel_format_out);
 
+  // Depth resolve into the R32Float snapshot at rows
+  // [dest_y_offset, dest_y_offset+height): iterates the base class's
+  // per-owner dump rectangles (a span can be owned PIECEWISE by several RTs)
+  // and converts each region from its owner — depth RTs read directly, color
+  // RTs (raw EDRAM bits, e.g. the restored trace snapshot) decode the guest
+  // 24-bit depth (unorm24 / 20e4 float24). Returns true if anything resolved.
+  bool ResolveDepthToSnapshot(const void* command_buffer, uint32_t span_base,
+                              uint32_t row_length_used, uint32_t rows,
+                              uint32_t span_pitch, bool is_float24,
+                              void* dest_snapshot, uint32_t width,
+                              uint32_t height, uint32_t dest_y_offset);
+
   // --- RT-as-texture snapshot bridge (kept from bring-up; stage 3 replaces
   // it with direct guest-memory resolves) ---
   void* EnsureResolveSnapshot(uint32_t dest_base, uint32_t width,
@@ -151,6 +163,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* transfer_c2d_depth_state_ = nullptr;  // id<MTLDepthStencilState>.
   void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
+  void* resolve_c2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
+  void* resolve_d2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
 
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.
