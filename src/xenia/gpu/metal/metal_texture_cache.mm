@@ -226,7 +226,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
-  if (next_slot_ >= view_heap_slots_) {
+  if (next_slot_ >= view_heap_slots_ && free_slots_.empty()) {
     return 0;
   }
 
@@ -370,7 +370,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
-  uint32_t slot = next_slot_++;
+  uint32_t slot = AllocateSlot();
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   IRDescriptorTableSetTexture(&entries[slot], sampled, 0.0f, 0);
   // Retain the sampled view (or the base texture if identity) for the descriptor
@@ -387,32 +387,61 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   if (!texture) {
     return;
   }
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   auto it = resolved_targets_.find(base);
   if (it != resolved_targets_.end()) {
-    // Reuse the base's slot: update the descriptor IN PLACE when the snapshot
-    // texture was recreated. Allocating a new slot per re-registration
-    // (~2/frame) exhausted the 4096-slot heap minutes into gameplay — black
-    // samples, then a frozen present.
     it->second.width = width;
     it->second.height = height;
     if (it->second.texture != texture) {
-      it->second.texture = texture;
-      auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-      IRDescriptorTableSetTexture(&entries[it->second.slot],
+      // The snapshot texture was recreated (grew/reformatted). DON'T repoint the
+      // existing slot in place: draws already encoded this frame reference it by
+      // gpuAddress and made the OLD texture resident on their (now closed)
+      // encoders. Repointing makes them sample the new texture, which is NOT
+      // resident there -> GPU page fault (the "GPU froze" hang), and even when
+      // resident, the wrong generation (the tile stipple). Instead give the new
+      // generation a FRESH slot; the old slot keeps pointing at the old texture
+      // for the in-flight draws and is reclaimed after the frame drains.
+      uint32_t new_slot = AllocateSlot();
+      if (!new_slot) {
+        return;  // heap exhausted; keep the old slot rather than corrupt.
+      }
+      stale_slots_.push_back(it->second.slot);
+      IRDescriptorTableSetTexture(&entries[new_slot],
                                   (__bridge id<MTLTexture>)texture, 0.0f, 0);
+      it->second.texture = texture;
+      it->second.slot = new_slot;
     }
     return;
   }
-  if (next_slot_ >= view_heap_slots_) {
+  uint32_t slot = AllocateSlot();
+  if (!slot) {
     return;
   }
-  uint32_t slot = next_slot_++;
-  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
   IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
   resolved_targets_[base] = ResolvedTarget{texture, width, height, slot};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
+}
+
+uint32_t MetalTextureCache::AllocateSlot() {
+  if (!free_slots_.empty()) {
+    uint32_t slot = free_slots_.back();
+    free_slots_.pop_back();
+    return slot;
+  }
+  if (next_slot_ >= view_heap_slots_) {
+    return 0;  // exhausted (0 == null texture).
+  }
+  return next_slot_++;
+}
+
+void MetalTextureCache::ReclaimStaleSlots() {
+  // The retired slots' in-flight draws have drained (caller waited on the frame
+  // command buffer), so the slots can be reused. Their descriptors are
+  // overwritten on the next AllocateSlot that hands them out.
+  free_slots_.insert(free_slots_.end(), stale_slots_.begin(), stale_slots_.end());
+  stale_slots_.clear();
 }
 
 }  // namespace metal

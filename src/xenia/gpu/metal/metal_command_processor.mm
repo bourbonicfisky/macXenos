@@ -718,6 +718,9 @@ void MetalCommandProcessor::EndFrameEncoder() {
   if (render_target_cache_) {
     render_target_cache_->DrainDeferredReleases();
   }
+  if (texture_cache_) {
+    texture_cache_->ReclaimStaleSlots();
+  }
   // The committed work has consumed the shared buffer's current contents;
   // later uploads may safely rewrite any range.
   if (shared_memory_) {

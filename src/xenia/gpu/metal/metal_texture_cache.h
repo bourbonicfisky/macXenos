@@ -63,13 +63,28 @@ class MetalTextureCache {
   const std::vector<void*>& active_textures() const { return active_textures_; }
   void ResetActive() { active_textures_.clear(); }
 
+  // Returns bindless slots retired this frame (a resolved target got a new
+  // texture generation -> new slot) to the free list. Safe only after the
+  // frame's GPU work has completed: earlier draws still referenced the retired
+  // slot. Called by the command processor after commit + wait.
+  void ReclaimStaleSlots();
+
  private:
+  // Allocates a bindless view-heap slot, reusing a reclaimed one if available.
+  // Returns 0 (the null slot) if the heap is exhausted.
+  uint32_t AllocateSlot();
+
   void* device_;   // id<MTLDevice>, not owned.
   Memory* memory_;  // not owned.
   void* view_heap_;  // id<MTLBuffer>, not owned.
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
   uint32_t view_heap_slots_;
   uint32_t next_slot_ = 1;  // 0 == null texture.
+  // Slots freed when a resolved target was repointed to a new texture; the old
+  // slot keeps pointing at the old texture until in-flight draws drain, then
+  // moves to free_slots_ for reuse (bounds heap growth without in-place update).
+  std::vector<uint32_t> stale_slots_;
+  std::vector<uint32_t> free_slots_;
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
 
   struct Entry {
