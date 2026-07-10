@@ -59,6 +59,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Mid-frame safe: commits + waits the frame command buffer; the next draw
   // reopens it (attachments always LOAD, so content persists).
   bool DumpEdramToBuffer(std::vector<uint8_t>& edram_out) override;
+  // --serialize_draw_range probe: commit + wait the frame command buffer
+  // (same flush DumpEdramToBuffer performs, minus the readback).
+  void FlushForDrawSerialization() override { EndFrameEncoder(); }
 
   // For MetalRenderTargetCache: closes any open render encoder (a transfer is
   // a pass boundary) and returns the frame id<MTLCommandBuffer> (creating it if

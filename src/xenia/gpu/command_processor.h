@@ -594,6 +594,15 @@ class CommandProcessor {
   // --capture_edram_hashes (one EDRAM download serves both). May perturb
   // (design D3): forces a submission + queue drain.
   void MaybeCaptureEdramSnapshot(uint32_t draw_index);
+  // Hazard-bisection probe: if --serialize_draw_range selects this draw,
+  // calls FlushForDrawSerialization() — a submission + wait with NO capture
+  // output. Same call site as MaybeCaptureEdramSnapshot (the placement the
+  // capture path proved safe; an earlier in-IssueDraw hook broke the Metal
+  // upload arena).
+  void MaybeSerializeDraw(uint32_t draw_index);
+  // Backend hook for MaybeSerializeDraw: commit all encoded GPU work and wait
+  // for completion, leaving state ready for the next draw. Default no-op.
+  virtual void FlushForDrawSerialization() {}
   // Appends one record (u32 draw index + kEdramTileCount u64 XXH3-64 tile
   // hashes) to <capture_dir>/edram_hashes.bin, writing the 16-byte header
   // ('XEDH', version, tile_count, tile_bytes) on first use.

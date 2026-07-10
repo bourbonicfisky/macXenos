@@ -173,6 +173,17 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_string(
+    serialize_draw_range, "",
+    "'A..B' (inclusive): force a GPU submission + wait after each draw whose "
+    "index is in the range, WITHOUT any capture output. Hazard-bisection "
+    "probe: draws in the range execute against fully-drained GPU state, so "
+    "corruption that disappears when a range is serialized implicates a GPU "
+    "ordering hazard among those draws (tools/bisect_stipple.sh drives a "
+    "binary search on this). Same draw-index space as --capture_draw_range. "
+    "Empty disables.",
+    "GPU");
+
+DEFINE_string(
     replay_inject_memory, "",
     "Trace-replay diagnostic: semicolon-separated list of "
     "hexaddr,afterdraw,filepath - before issuing draw index 'afterdraw', "
@@ -1610,6 +1621,21 @@ bool CommandProcessor::IsCaptureEdramDraw(uint32_t draw_index) const {
     }
   }
   return false;
+}
+
+void CommandProcessor::MaybeSerializeDraw(uint32_t draw_index) {
+  if (cvars::serialize_draw_range.empty()) {
+    return;
+  }
+  int32_t a = 0, b = 0;
+  if (std::sscanf(cvars::serialize_draw_range.c_str(), "%d..%d", &a, &b) != 2) {
+    return;
+  }
+  int32_t idx = int32_t(draw_index);
+  if (idx < a || idx > b) {
+    return;
+  }
+  FlushForDrawSerialization();
 }
 
 void CommandProcessor::MaybeCaptureEdramSnapshot(uint32_t draw_index) {

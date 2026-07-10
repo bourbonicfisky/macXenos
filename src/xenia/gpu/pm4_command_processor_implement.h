@@ -1552,6 +1552,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
       // per-tile hash record when --capture_edram_hashes. May perturb
       // (forces a submission + queue drain); no-op when not selected.
       COMMAND_PROCESSOR::MaybeCaptureEdramSnapshot(draw_index);
+      // Hazard-bisection probe (--serialize_draw_range): submission + wait
+      // after selected draws, no capture output.
+      COMMAND_PROCESSOR::MaybeSerializeDraw(draw_index);
     }
   }
 
