@@ -83,6 +83,12 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void InitializeTrace() override;
 
+  // Flush + CPU-copy pending resolve writebacks into guest RAM. The guest can
+  // WAIT_REG_MEM on GPU-written memory, so this runs both at IssueSwap and
+  // from PrepareForWait (deferring to swap alone deadlocks such waits).
+  void DrainPendingWritebacks();
+  void PrepareForWait() override;
+
   // --- Draw path helpers (metal_command_processor.mm) ---
 
   // Creates the bindless heaps, the fixed system view table (shared-memory SRV),
