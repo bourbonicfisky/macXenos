@@ -2043,6 +2043,17 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // silently discarded the whole frame (uniform magenta present).
   EndFrameEncoder();
 
+  // Black-flicker forensics: a swap with no draws since the previous one
+  // presents stale/black content — log which swaps do that (throttled).
+  if (!frame_has_render_) {
+    static uint32_t s_empty_swaps = 0;
+    ++s_empty_swaps;
+    if (s_empty_swaps <= 16 || (s_empty_swaps % 256) == 0) {
+      XELOGW("MetalCommandProcessor: swap #{} with NO rendered draws (#{})",
+             swap_count_, s_empty_swaps);
+    }
+  }
+
   // Small-resolve guest-memory writebacks (the CPU-side exposure loop): the
   // frame command buffer completed above, so the staging contents are ready.
   for (PendingWriteback& wb : pending_writebacks_) {

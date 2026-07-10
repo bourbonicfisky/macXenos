@@ -716,6 +716,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                 : register_file_->values[poll_reg_addr];
 
   bool matched = false;
+  uint32_t wait_iterations = 0;
 
   do {
     uint32_t value = value_ref;
@@ -733,6 +734,16 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      // Freeze forensics: a wait that has spun for ~5 seconds is almost
+      // certainly a lost signal (whoever should write the value never did) —
+      // log WHAT is being waited on, once per stuck wait.
+      if (++wait_iterations == 500) {
+        XELOGW(
+            "WAIT_REG_MEM stuck ~5s: {} {:08X} value={:08X} mask={:08X} "
+            "ref={:08X} cond={:X} wait={}",
+            is_memory ? "mem" : "reg", poll_reg_addr, value, mask, ref,
+            wait_info & 0x7, wait);
+      }
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
