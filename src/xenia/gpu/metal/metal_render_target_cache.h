@@ -91,6 +91,13 @@ class MetalRenderTargetCache {
                               uint32_t height, uint64_t pixel_format);
   // Returns the snapshot texture registered for dest_base, or nullptr.
   void* GetResolveSnapshot(uint32_t dest_base) const;
+  // Multi-strip resolves: the guest resolves one buffer as several vertically
+  // adjacent strips to contiguous RAM (e.g. 1280x384 @ B then 1280x336 @
+  // B+0x1E0000), and shaders sample the FIRST base as the full-height texture.
+  // If dest_base lands row-aligned inside an existing snapshot's guest extent,
+  // returns that snapshot and its row offset so the strip writes into the
+  // parent instead of a disjoint texture.
+  void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
 
  private:
   struct Target {

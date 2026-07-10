@@ -92,12 +92,15 @@ class MetalCommandProcessor : public CommandProcessor {
   // Ends any open encoder, then commits + waits on the frame command buffer.
   void EndFrameEncoder();
 
-  // Depth-resolve bridge: runs a fullscreen pass that samples the Depth32Float
-  // depth texture (as depth2d) and writes its value into the R32Float snapshot
+  // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
+  // texture (as depth2d) and writes its value into the R32Float snapshot
   // texture, so deferred lighting can sample the depth as texture2d_array<float>.
-  // Builds the conversion pipeline on first use. Returns false on failure.
+  // dest_y_offset places a multi-strip resolve's rows inside a full-height
+  // snapshot (source rows align by frame-absolute pixel position). Builds the
+  // conversion pipeline on first use. Returns false on failure.
   bool ConvertDepthToSnapshot(void* depth_texture, void* dest_snapshot,
-                              uint32_t width, uint32_t height);
+                              uint32_t width, uint32_t height,
+                              uint32_t dest_y_offset = 0);
 
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
@@ -185,6 +188,14 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t last_color_resolve_base_ = 0;
   uint32_t last_color_resolve_start_ = 0;
   uint32_t last_color_resolve_length_ = 0;
+  // The depth EDRAM base the most recent scene-scale, depth-writing draw bound
+  // (viewport >= ~400 rows). VALIDATION PROBE for the deferred-lighting chain:
+  // JC2's scene-depth resolves declare EDRAM tile base 0 (the previous frame's
+  // layout / a reused tile range), which our identity-by-draw-base target map
+  // cannot represent — the production fix is the mainline RenderTargetCache
+  // ownership-transfer model (openspec stage 2); until then, wide depth
+  // resolves read this frame's actual scene depth target.
+  uint32_t last_scene_depth_base_ = UINT32_MAX;
 };
 
 }  // namespace metal

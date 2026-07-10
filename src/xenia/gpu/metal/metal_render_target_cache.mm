@@ -95,6 +95,14 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
                                                     uint32_t width,
                                                     uint32_t height,
                                                     uint64_t pixel_format) {
+  // Scene-scale depth resolves arrive as vertical strips (1280x384 + 1280x336)
+  // of ONE 720-row buffer that shaders sample full-height from the first
+  // strip's base; allocate the first strip full-height so the later strip can
+  // land inside it (FindContainingSnapshot).
+  if (pixel_format == uint64_t(MTLPixelFormatR32Float) && width >= 1280 &&
+      height < 720) {
+    height = 720;
+  }
   auto it = resolve_snapshots_.find(dest_base);
   if (it != resolve_snapshots_.end() && it->second.texture &&
       it->second.width >= width && it->second.height >= height &&
@@ -134,6 +142,28 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
 void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
   auto it = resolve_snapshots_.find(dest_base);
   return it != resolve_snapshots_.end() ? it->second.texture : nullptr;
+}
+
+void* MetalRenderTargetCache::FindContainingSnapshot(
+    uint32_t dest_base, uint32_t* y_offset_out) const {
+  for (const auto& pair : resolve_snapshots_) {
+    const Snapshot& snap = pair.second;
+    if (!snap.texture || dest_base <= pair.first) {
+      continue;
+    }
+    // Tightly-packed guest extent (pitch == width * 4bpp — true for the 32bpp
+    // scene-depth strips this exists for).
+    uint32_t row_bytes = snap.width * 4;
+    uint32_t extent = row_bytes * snap.height;
+    uint32_t offset = dest_base - pair.first;
+    if (offset < extent && (offset % row_bytes) == 0) {
+      if (y_offset_out) {
+        *y_offset_out = offset / row_bytes;
+      }
+      return snap.texture;
+    }
+  }
+  return nullptr;
 }
 
 void* MetalRenderTargetCache::GetDepthTarget(uint32_t edram_base) {

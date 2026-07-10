@@ -633,6 +633,46 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ++draw_skip_count_;
     return true;
   }
+  // DIAGNOSTIC (lighting-term ~0): log, once per (pixel shader, RT config),
+  // every draw whose PS samples a RESOLVED SNAPSHOT (the RT-consuming passes —
+  // deferred lighting, composite, post) with what it samples and where it
+  // writes, so the black lighting can be traced through the pass graph.
+  if (color_bound && pixel_shader && render_target_cache_) {
+    bool samples_snapshot = false;
+    for (const auto& binding :
+         pixel_shader->GetTextureBindingsAfterTranslation()) {
+      auto f = regs.GetTextureFetch(binding.fetch_constant);
+      if (render_target_cache_->GetResolveSnapshot(f.base_address << 12)) {
+        samples_snapshot = true;
+        break;
+      }
+    }
+    if (samples_snapshot) {
+      static std::unordered_set<uint64_t> s_seen_consumer_ps;
+      uint64_t seen_key = pixel_shader->ucode_data_hash() ^
+                          (uint64_t(rt0_info.value) << 1);
+      if (s_seen_consumer_ps.insert(seen_key).second) {
+        XELOGI(
+            "MetalRTConsumer: ps={:016X} -> color(base={} fmt={}) prim={} "
+            "depth={} zfunc={} samples:",
+            pixel_shader->ucode_data_hash(), uint32_t(rt0_info.color_base),
+            uint32_t(rt0_info.color_format), uint32_t(prim_type), depth_bound,
+            uint32_t(norm_depth.zfunc));
+        for (const auto& binding :
+             pixel_shader->GetTextureBindingsAfterTranslation()) {
+          auto f = regs.GetTextureFetch(binding.fetch_constant);
+          uint32_t fetch_base = f.base_address << 12;
+          bool is_snap =
+              render_target_cache_->GetResolveSnapshot(fetch_base) != nullptr;
+          XELOGI(
+              "MetalRTConsumer:   fc={} base={:08X}{} fmt={} {}x{} signs={:02X}",
+              binding.fetch_constant, fetch_base, is_snap ? " [SNAPSHOT]" : "",
+              uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
+              texture_util::SwizzleSigns(f));
+        }
+      }
+    }
+  }
   // Stage the binding for BeginFrameEncoder (it reopens the encoder when this
   // differs from the open pass).
   pending_has_color_ = color_bound;
@@ -894,6 +934,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     system_constants.vertex_index_min = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
     system_constants.vertex_index_max = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
 
+    // Scene-depth tracking for the depth-resolve validation probe (see the
+    // member comment): remember which depth target the 3D scene writes.
+    // color_bound excludes the depth-only shadow pass (also 1024 rows tall).
+    if (color_bound && depth_bound && norm_depth.z_write_enable &&
+        viewport_info.xy_extent[1] >= 400) {
+      last_scene_depth_base_ = pending_depth_base_;
+    }
     // Set the host viewport from the integer part.
     if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
       MTLViewport vp;
@@ -1329,7 +1376,8 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control
 bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
                                                    void* dest_snapshot,
                                                    uint32_t width,
-                                                   uint32_t height) {
+                                                   uint32_t height,
+                                                   uint32_t dest_y_offset) {
   if (!frame_command_buffer_) {
     return false;
   }
@@ -1385,13 +1433,20 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest_snapshot;
   pass.colorAttachments[0].slice = 0;
-  pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  // Load, not DontCare: a multi-strip resolve converts into a SUB-RECT of a
+  // full-height snapshot (dest_y_offset), and the other strip's rows must
+  // survive this pass.
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [cb renderCommandEncoderWithDescriptor:pass];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       depth_convert_pipeline_];
-  MTLViewport vp{0.0, 0.0, double(width), double(height), 0.0, 1.0};
+  // The viewport clips the fullscreen triangle to the strip's rows; the FS
+  // reads the depth texture at the destination pixel coordinate, so source and
+  // destination rows align automatically (both are frame-absolute).
+  MTLViewport vp{0.0, double(dest_y_offset), double(width), double(height), 0.0,
+                 1.0};
   [encoder setViewport:vp];
   [encoder setFragmentTexture:(__bridge id<MTLTexture>)depth_texture atIndex:0];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -1490,15 +1545,44 @@ bool MetalCommandProcessor::IssueCopy() {
     if (rw && rh && kDepthEnabled && render_target_cache_ && texture_cache_ &&
         frame_command_buffer_) {
       EndRenderEncoder();
-      void* depth_rt = render_target_cache_->FindDepthTarget(
-          resolve_info.depth_original_base);
-      void* snap = depth_rt ? render_target_cache_->EnsureResolveSnapshot(
-                                  resolve_info.copy_dest_base, rw, rh,
-                                  MTLPixelFormatR32Float)
-                            : nullptr;
-      if (snap && depth_rt && ConvertDepthToSnapshot(depth_rt, snap, rw, rh)) {
-        texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base, snap,
-                                                rw, rh);
+      // Source depth target. Wide (scene-scale) depth resolves declare EDRAM
+      // tile base 0 — a tile range reused from the previous frame's layout that
+      // identity-by-draw-base can't represent (the production fix is the
+      // mainline ownership-transfer RenderTargetCache, openspec stage 2). As a
+      // validation probe, read this frame's actual scene depth instead — one
+      // frame fresher than hardware, which the guest's deferred lighting
+      // tolerates.
+      uint32_t depth_src_base = resolve_info.depth_original_base;
+      if (rw >= 1280 && last_scene_depth_base_ != UINT32_MAX) {
+        depth_src_base = last_scene_depth_base_;
+      }
+      void* depth_rt = render_target_cache_->FindDepthTarget(depth_src_base);
+      static uint32_t s_depth_resolve_logs = 0;
+      if (s_depth_resolve_logs++ < 16) {
+        XELOGI(
+            "MetalDepthResolve: dest={:08X} {}x{} declared base={} src base={} "
+            "target={} clear={:08X}",
+            resolve_info.copy_dest_base, rw, rh,
+            resolve_info.depth_original_base, depth_src_base,
+            depth_rt != nullptr, resolve_info.rb_depth_clear);
+      }
+      // Multi-strip resolve: if this strip's destination lands inside an
+      // existing (full-height) snapshot, convert into that snapshot at the row
+      // offset — shaders sample the FIRST strip's base as the whole buffer.
+      uint32_t strip_y_offset = 0;
+      void* parent_snap = render_target_cache_->FindContainingSnapshot(
+          resolve_info.copy_dest_base, &strip_y_offset);
+      if (depth_rt && parent_snap) {
+        ConvertDepthToSnapshot(depth_rt, parent_snap, rw, rh, strip_y_offset);
+      } else {
+        void* snap = depth_rt ? render_target_cache_->EnsureResolveSnapshot(
+                                    resolve_info.copy_dest_base, rw, rh,
+                                    MTLPixelFormatR32Float)
+                              : nullptr;
+        if (snap && depth_rt && ConvertDepthToSnapshot(depth_rt, snap, rw, rh)) {
+          texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
+                                                 snap, rw, rh);
+        }
       }
     }
   }
@@ -1610,7 +1694,63 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       return false;
     }
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
-    if (source_rt) {
+    if (source_rt && source_rt.pixelFormat != mailbox.pixelFormat) {
+      // Debug visualization (XE_METAL_PRESENT_BASE of a non-BGRA8 snapshot,
+      // e.g. an R32Float depth snapshot): a blit between different formats is
+      // invalid, render grayscale (.r) into the mailbox instead.
+      static void* s_gray_pipeline = nullptr;  // id<MTLRenderPipelineState>.
+      if (!s_gray_pipeline) {
+        id<MTLDevice> dev = mailbox.device;
+        NSString* src = @R"METAL(
+          #include <metal_stdlib>
+          using namespace metal;
+          struct VOut { float4 pos [[position]]; };
+          vertex VOut xe_gray_vs(uint vid [[vertex_id]]) {
+            VOut o;
+            float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+            o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+            return o;
+          }
+          fragment float4 xe_gray_fs(VOut in [[stage_in]],
+                                     texture2d<float> t [[texture(0)]]) {
+            float v = t.read(uint2(in.pos.xy), 0).r;
+            return float4(v, v, v, 1.0);
+          }
+        )METAL";
+        NSError* err = nil;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil
+                                                 error:&err];
+        if (lib) {
+          MTLRenderPipelineDescriptor* d =
+              [[MTLRenderPipelineDescriptor alloc] init];
+          d.vertexFunction = [lib newFunctionWithName:@"xe_gray_vs"];
+          d.fragmentFunction = [lib newFunctionWithName:@"xe_gray_fs"];
+          d.colorAttachments[0].pixelFormat = mailbox.pixelFormat;
+          id<MTLRenderPipelineState> ps =
+              [dev newRenderPipelineStateWithDescriptor:d error:&err];
+          if (ps) {
+            s_gray_pipeline = (__bridge_retained void*)ps;
+          }
+        }
+      }
+      if (s_gray_pipeline) {
+        MTLRenderPassDescriptor* pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = mailbox;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
+        id<MTLRenderCommandEncoder> enc =
+            [command_buffer renderCommandEncoderWithDescriptor:pass];
+        [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                        s_gray_pipeline];
+        [enc setFragmentTexture:source_rt atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+        [enc endEncoding];
+      }
+    } else if (source_rt) {
       id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
       [blit copyFromTexture:source_rt
                 sourceSlice:0
