@@ -131,6 +131,7 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
   }
   id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:clear-at-creation";
   [enc endEncoding];
 }
 
@@ -263,6 +264,7 @@ void MetalRenderTargetCache::PerformTransfers(
         // (80>>xs)x(16>>ys)-pixel block at a computable position per layout.
         if (!blit) {
           blit = [cb blitCommandEncoder];
+          blit.label = @"rtcache:transfer-blit";
         }
         id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
         id<MTLTexture> dst_tex = (__bridge id<MTLTexture>)dest->texture();
@@ -486,6 +488,7 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   }
   id<MTLRenderCommandEncoder> enc =
       [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:transfer-crossmsaa";
   [enc setRenderPipelineState:pipeline];
   if (is_depth) {
     [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
@@ -620,6 +623,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
       [cb renderCommandEncoderWithDescriptor:pass];
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   transfer_c2d_pipeline_];
+  enc.label = @"rtcache:transfer-c2d";
   [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                 transfer_c2d_depth_state_];
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
@@ -740,6 +744,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
       [cb renderCommandEncoderWithDescriptor:pass];
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   transfer_d2c_pipeline_];
+  enc.label = @"rtcache:transfer-d2c";
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -906,6 +911,7 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
       [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:resolve-depth-snapshot";
   bool any = false;
   for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
     auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
@@ -1122,6 +1128,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> enc =
         [cb renderCommandEncoderWithDescriptor:pass];
+    enc.label = @"rtcache:resolve-color-snapshot";
     [enc setRenderPipelineState:pipeline];
     // Scissor to this rect's destination rows (the tile-range discard handles
     // exact bounds; the scissor keeps other strips/padding untouched).
@@ -1280,6 +1287,7 @@ void MetalRenderTargetCache::PerformResolveClear(
           [cb renderCommandEncoderWithDescriptor:pass];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       clear_depth_pipeline_];
+      enc.label = @"rtcache:resolve-clear-depth";
       [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                     clear_depth_state_];
       [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
@@ -1304,6 +1312,7 @@ void MetalRenderTargetCache::PerformResolveClear(
           [cb renderCommandEncoderWithDescriptor:pass];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       clear_color_pipeline_];
+      enc.label = @"rtcache:resolve-clear-color";
       [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
       [enc endEncoding];
@@ -1501,6 +1510,7 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
     return;
   }
   id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+  blit.label = @"rtcache:edram-restore";
   [blit copyFromBuffer:staging
              sourceOffset:0
         sourceBytesPerRow:row_bytes

@@ -304,7 +304,13 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     }
 
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)command_queue_;
-    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    // Per-encoder execution status so a present-path GPU fault is attributed.
+    MTLCommandBufferDescriptor* cb_desc =
+        [[MTLCommandBufferDescriptor alloc] init];
+    cb_desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    id<MTLCommandBuffer> command_buffer =
+        [queue commandBufferWithDescriptor:cb_desc];
+    command_buffer.label = @"presenter:paint";
 
     // Take the ready guest-output image (if any). The consumer lock keeps the
     // acquired mailbox slot from being recycled while we sample it, so hold it

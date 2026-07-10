@@ -393,6 +393,17 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     it->second.width = width;
     it->second.height = height;
     if (it->second.texture != texture) {
+      // FAULT INJECTOR (XE_METAL_FAULT_INJECT=1): restore the old in-place
+      // repoint, which reproduces the GPU page fault deliberately — used to
+      // verify fault attribution (S2) and auto-recovery (S6) end-to-end.
+      static const bool s_fault_inject =
+          std::getenv("XE_METAL_FAULT_INJECT") != nullptr;
+      if (s_fault_inject) {
+        it->second.texture = texture;
+        IRDescriptorTableSetTexture(&entries[it->second.slot],
+                                    (__bridge id<MTLTexture>)texture, 0.0f, 0);
+        return;
+      }
       // The snapshot texture was recreated (grew/reformatted). DON'T repoint the
       // existing slot in place: draws already encoded this frame reference it by
       // gpuAddress and made the OLD texture resident on their (now closed)

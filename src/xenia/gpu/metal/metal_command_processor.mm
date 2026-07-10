@@ -306,6 +306,46 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   return true;
 }
 
+// Frame command buffers carry per-encoder execution status so a GPU fault
+// names the encoder that caused it (labels are set at each encoder open). The
+// alternative — a bare [queue commandBuffer] — reports only "Caused GPU
+// Address Fault Error" with no attribution.
+static id<MTLCommandBuffer> MakeAttributedCommandBuffer(
+    id<MTLCommandQueue> queue) {
+  MTLCommandBufferDescriptor* desc = [[MTLCommandBufferDescriptor alloc] init];
+  desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+  return [queue commandBufferWithDescriptor:desc];
+}
+
+// Logs the per-encoder execution status carried by a faulted command buffer
+// (requires MakeAttributedCommandBuffer): which encoders faulted vs completed.
+static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
+                                  const char* site, uint32_t swap_count) {
+  NSError* err = command_buffer.error;
+  XELOGE("Metal GPU FAULT ({}, swap#{}): {} (code {})", site, swap_count,
+         err.localizedDescription ? err.localizedDescription.UTF8String
+                                  : "(no description)",
+         err ? long(err.code) : -1L);
+  NSArray<id<MTLCommandBufferEncoderInfo>>* infos =
+      err.userInfo[MTLCommandBufferEncoderInfoErrorKey];
+  for (id<MTLCommandBufferEncoderInfo> info in infos) {
+    const char* state = "unknown";
+    switch (info.errorState) {
+      case MTLCommandEncoderErrorStateCompleted: state = "completed"; break;
+      case MTLCommandEncoderErrorStateAffected: state = "AFFECTED"; break;
+      case MTLCommandEncoderErrorStateUnknown: state = "unknown"; break;
+      case MTLCommandEncoderErrorStatePending: state = "pending"; break;
+      case MTLCommandEncoderErrorStateFaulted: state = "FAULTED"; break;
+    }
+    // Only the interesting ones — a frame can have hundreds of completed
+    // encoders.
+    if (info.errorState != MTLCommandEncoderErrorStateCompleted) {
+      XELOGE("  encoder '{}': {}",
+             info.label ? info.label.UTF8String : "(unlabeled)", state);
+    }
+  }
+}
+
 void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.
@@ -321,7 +361,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
     }
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
-    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLCommandBuffer> command_buffer = MakeAttributedCommandBuffer(queue);
     frame_command_buffer_ = (__bridge_retained void*)command_buffer;
   }
   return frame_command_buffer_;
@@ -337,6 +377,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
+//   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
 //   XE_METAL_FLUSH_ALL_UPLOADS=1   flush before any mid-frame upload (hazard A/B)
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
@@ -410,6 +451,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
       "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
+      "XE_METAL_FAULT_INJECT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
   };
@@ -637,7 +679,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     upload_arena_->Reset();
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
-    command_buffer = [queue commandBuffer];
+    command_buffer = MakeAttributedCommandBuffer(queue);
     frame_command_buffer_ = (__bridge_retained void*)command_buffer;
   } else {
     command_buffer = (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -667,6 +709,10 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
+  // Fault attribution: names this encoder in per-encoder execution status.
+  encoder.label = [NSString
+      stringWithFormat:@"draws@%u rt=%016llX", draw_count_,
+                       (unsigned long long)want_key];
   [encoder setCullMode:MTLCullModeNone];
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
@@ -699,17 +745,12 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // A GPU fault (invalid resource access from an untracked bindless hazard, a
   // timeout, etc.) fails the command buffer SILENTLY otherwise: we keep
   // submitting and the window shows the last good frame while swaps advance —
-  // reads on-screen as a "GPU freeze" though the process is alive. Surface it.
+  // reads on-screen as a "GPU freeze" though the process is alive. Surface it
+  // WITH per-encoder attribution (encoders are labeled at open).
   if (command_buffer.status == MTLCommandBufferStatusError) {
     static uint32_t s_cb_errors = 0;
     if (s_cb_errors++ < 32) {
-      NSError* err = command_buffer.error;
-      XELOGE("Metal GPU FAULT (frame commit, swap#{}): {} (code {})",
-             swap_count_,
-             err.localizedDescription
-                 ? err.localizedDescription.UTF8String
-                 : "(no description)",
-             err ? long(err.code) : -1L);
+      LogCommandBufferFault(command_buffer, "frame commit", swap_count_);
     }
   }
   // The frame's GPU work is done: snapshot textures retired mid-frame (grown)
@@ -1876,6 +1917,7 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [cb renderCommandEncoderWithDescriptor:pass];
+  encoder.label = @"cp:depth-convert-snapshot";
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       depth_convert_pipeline_];
   // The viewport clips the fullscreen triangle to the strip's rows; the FS
@@ -1980,6 +2022,7 @@ bool MetalCommandProcessor::IssueCopy() {
             id<MTLCommandBuffer> wb_cb =
                 (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
             id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
+            wb_blit.label = @"cp:writeback-blit";
             [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
                           sourceSlice:0
                           sourceLevel:0
