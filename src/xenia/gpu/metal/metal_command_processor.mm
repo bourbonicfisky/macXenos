@@ -1947,6 +1947,14 @@ bool MetalCommandProcessor::IssueCopy() {
                                  resolve_info)) {
     return true;
   }
+  // CRITICAL: the resolve paths below all guard on frame_command_buffer_. If
+  // the frame was committed just before this resolve (mid-frame hazard flush,
+  // writeback wait, --serialize_draw_range), the buffer is NULL and every
+  // resolve op would be SILENTLY SKIPPED — the consumer then samples a stale
+  // or never-written snapshot (missing scene / transient black blips; found
+  // by the draw-range bisect: one commit after the last scene draw dropped
+  // the scene resolve and lost the whole frame). Recreate it up front.
+  PrepareTransferCommandBuffer();
   // RT-as-texture bridge. A color resolve is the boundary of a render pass: blit
   // what the pass drew into ITS color target (looked up by the resolve's EDRAM
   // base + format — the same key the draws bound it with) out into a
