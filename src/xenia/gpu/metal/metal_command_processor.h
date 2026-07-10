@@ -51,6 +51,11 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
+  // For MetalRenderTargetCache: closes any open render encoder (a transfer is
+  // a pass boundary) and returns the frame id<MTLCommandBuffer> (creating it if
+  // needed) so ownership-transfer blits / snapshot uploads can be encoded.
+  void* PrepareTransferCommandBuffer();
+
  private:
   bool SetupContext() override;
   void ShutdownContext() override;
@@ -138,24 +143,14 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
 
-  // Render-target binding for the NEXT encoder open, set by IssueDraw from the
-  // guest registers (RB_COLOR_INFO RT0 / RB_DEPTH_INFO) before calling
-  // BeginFrameEncoder. has_color==false is a depth-only (e.g. shadow) pass.
-  bool pending_has_color_ = false;
-  uint32_t pending_color_base_ = 0;    // EDRAM tile base.
-  uint32_t pending_color_format_ = 0;  // xenos::ColorRenderTargetFormat.
-  bool pending_has_depth_ = false;
-  uint32_t pending_depth_base_ = 0;  // EDRAM tile base.
-  // What the currently-open encoder is bound to (valid while frame_open_); a
-  // draw whose pending config differs closes the encoder and opens a new pass.
-  bool encoder_has_color_ = false;
-  uint32_t encoder_color_key_ = 0;  // (base << 4) | format.
-  bool encoder_has_depth_ = false;
-  uint32_t encoder_depth_base_ = 0;
-  // Targets already cleared this frame: each (color-key / depth-base) target
-  // clears on its FIRST use in a frame and loads afterwards, so multi-pass
-  // accumulation into the same logical target (HUD over composite) is kept
-  // while distinct targets stop bleeding into each other.
+  // The attachment set (from MetalRenderTargetCache::current_attachment_key)
+  // the open encoder was created with; a draw whose accumulated render targets
+  // differ closes the encoder and opens a new pass.
+  uint64_t encoder_attachment_key_ = 0;
+  // Textures (id<MTLTexture> pointer identity) already cleared this frame:
+  // each render target clears on its FIRST use in a frame and loads
+  // afterwards, so multi-pass accumulation into the same target (HUD over
+  // composite) is kept.
   std::unordered_set<uint64_t> frame_cleared_targets_;
 
   // Bring-up diagnostic: pair the real guest vertex function with a hardcoded
@@ -188,14 +183,6 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t last_color_resolve_base_ = 0;
   uint32_t last_color_resolve_start_ = 0;
   uint32_t last_color_resolve_length_ = 0;
-  // The depth EDRAM base the most recent scene-scale, depth-writing draw bound
-  // (viewport >= ~400 rows). VALIDATION PROBE for the deferred-lighting chain:
-  // JC2's scene-depth resolves declare EDRAM tile base 0 (the previous frame's
-  // layout / a reused tile range), which our identity-by-draw-base target map
-  // cannot represent — the production fix is the mainline RenderTargetCache
-  // ownership-transfer model (openspec stage 2); until then, wide depth
-  // resolves read this frame's actual scene depth target.
-  uint32_t last_scene_depth_base_ = UINT32_MAX;
 };
 
 }  // namespace metal
