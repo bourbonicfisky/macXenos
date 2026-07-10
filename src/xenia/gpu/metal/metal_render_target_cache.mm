@@ -988,7 +988,92 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
   }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLTexture> dest_tex = (__bridge id<MTLTexture>)dest_snapshot;
-  id<MTLBlitCommandEncoder> blit = nil;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  // One sampling pass per owner rect instead of per-tile blits: hundreds of
+  // copyFromTexture calls each created a driver texture view — the #2 cost
+  // center in gameplay profiles (after the shared-memory memcmp).
+  if (!resolve_copy_library_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct Params {
+        uint src_base; uint src_pitch; uint span_base; uint span_pitch;
+        uint start_tiles; uint end_tiles; uint y_offset; uint shifts;
+        uint tile_w; uint pad1; uint pad2; uint pad3;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_rcp_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      // shifts: dst_x | dst_y<<4 | src_x<<8 | src_y<<12 (sample->pixel).
+      fragment float4 xe_rcp_fs(VOut in [[stage_in]],
+                                texture2d<float> src [[texture(0)]],
+                                constant Params& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         (dp.y - p.y_offset) << ((p.shifts >> 4) & 15u));
+        uint col = ds.x / p.tile_w;
+        // Past the span's tile row width: would alias into the NEXT tile row.
+        if (col >= p.span_pitch) {
+          discard_fragment();
+        }
+        uint tile = p.span_base + (ds.y / 16u) * p.span_pitch + col;
+        if (tile < p.start_tiles || tile >= p.end_tiles) {
+          discard_fragment();
+        }
+        uint sl = tile - p.src_base;
+        uint2 ss = uint2((sl % p.src_pitch) * p.tile_w + (ds.x % p.tile_w),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                         ss.y >> ((p.shifts >> 12) & 15u));
+        // Owner texture bounds (partial edge tiles).
+        if (sp.x >= src.get_width() || sp.y >= src.get_height()) {
+          discard_fragment();
+        }
+        return src.read(sp, 0);
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: resolve-copy library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    resolve_copy_library_ = (__bridge_retained void*)lib;
+  }
+  id<MTLRenderPipelineState> pipeline = nil;
+  {
+    auto it = resolve_copy_pipelines_.find(dest_pixel_format);
+    if (it == resolve_copy_pipelines_.end()) {
+      id<MTLLibrary> lib = (__bridge id<MTLLibrary>)resolve_copy_library_;
+      NSError* err = nil;
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_rcp_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_rcp_fs"];
+      d.colorAttachments[0].pixelFormat = (MTLPixelFormat)dest_pixel_format;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&err];
+      if (!ps) {
+        XELOGE("MetalRenderTargetCache: resolve-copy pipeline {} failed: {}",
+               dest_pixel_format,
+               err ? err.localizedDescription.UTF8String : "?");
+      }
+      it = resolve_copy_pipelines_
+               .emplace(dest_pixel_format,
+                        ps ? (__bridge_retained void*)ps : nullptr)
+               .first;
+    }
+    pipeline = (__bridge id<MTLRenderPipelineState>)it->second;
+  }
+  if (!pipeline) {
+    return false;
+  }
   bool any = false;
   for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
     auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
@@ -996,7 +1081,6 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
         owner->pixel_format() != dest_pixel_format) {
       continue;
     }
-    id<MTLTexture> src_tex = (__bridge id<MTLTexture>)owner->texture();
     uint32_t owner_base = owner->key().base_tiles;
     uint32_t owner_pitch = owner->key().GetPitchTiles();
     uint32_t tile_w = owner->key().Is64bpp() ? 40 : 80;
@@ -1005,56 +1089,61 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     // pixel — a guest 2x->1x resolve is a 1:1 pixel copy in our model. (The
     // declared span msaa can differ from the owner's; the physical layout is
     // the owner's.)
-    uint32_t oxs, oys, pxs, pys;
+    uint32_t oxs, oys;
     GetMsaaShifts(uint32_t(owner->key().msaa_samples), oxs, oys);
-    pxs = oxs;
-    pys = oys;
     (void)span_msaa_samples;
-    // The rect's tile range within the span.
     static uint32_t s_owner_logs = 0;
     if (s_owner_logs++ < 12) {
       XELOGI("MetalRenderTargetCache: color resolve owner {} rt={:X} rows[{}+{}]",
              owner->key().GetDebugName(), uintptr_t(owner->texture()),
              rect.row_first, rect.rows);
     }
-    uint32_t rect_start = span_base + rect.row_first * span_pitch;
-    uint32_t rect_end =
-        span_base + (rect.row_first + rect.rows) * span_pitch;
-    if (!blit) {
-      blit = [cb blitCommandEncoder];
+    struct Params {
+      uint32_t src_base, src_pitch, span_base, span_pitch;
+      uint32_t start_tiles, end_tiles, y_offset, shifts;
+      uint32_t tile_w, pad1, pad2, pad3;
+    } params{owner_base,
+             owner_pitch,
+             span_base,
+             span_pitch,
+             span_base + rect.row_first * span_pitch,
+             span_base + (rect.row_first + rect.rows) * span_pitch,
+             dest_y_offset,
+             oxs | (oys << 4) | (oxs << 8) | (oys << 12),
+             tile_w,
+             0,
+             0,
+             0};
+    MTLRenderPassDescriptor* pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = dest_tex;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> enc =
+        [cb renderCommandEncoderWithDescriptor:pass];
+    [enc setRenderPipelineState:pipeline];
+    // Scissor to this rect's destination rows (the tile-range discard handles
+    // exact bounds; the scissor keeps other strips/padding untouched).
+    uint32_t sy0 = dest_y_offset + ((rect.row_first * 16) >> oys);
+    uint32_t sy1 = dest_y_offset + (((rect.row_first + rect.rows) * 16) >> oys);
+    sy0 = std::min<uint32_t>(sy0, uint32_t(dest_tex.height));
+    sy1 = std::min<uint32_t>(sy1, uint32_t(dest_tex.height));
+    if (sy1 <= sy0) {
+      [enc endEncoding];
+      continue;
     }
-    uint32_t bw = tile_w >> oxs, bh = 16 >> oys;
-    for (uint32_t tile = rect_start; tile < rect_end; ++tile) {
-      uint32_t sl = tile - owner_base;
-      uint32_t dl = tile - span_base;
-      uint32_t sx = ((sl % owner_pitch) * tile_w) >> oxs,
-               sy = ((sl / owner_pitch) * 16) >> oys;
-      uint32_t dx = ((dl % span_pitch) * tile_w) >> pxs,
-               dy = (((dl / span_pitch) * 16) >> pys) + dest_y_offset;
-      if (sx >= src_tex.width || sy + bh > src_tex.height ||
-          dx >= dest_tex.width || dy + bh > dest_tex.height) {
-        continue;
-      }
-      uint32_t w = std::min<uint32_t>(
-          bw, std::min<uint32_t>(uint32_t(src_tex.width) - sx,
-                                 uint32_t(dest_tex.width) - dx));
-      if (!w) {
-        continue;
-      }
-      [blit copyFromTexture:src_tex
-                sourceSlice:0
-                sourceLevel:0
-               sourceOrigin:MTLOriginMake(sx, sy, 0)
-                 sourceSize:MTLSizeMake(w, bh, 1)
-                  toTexture:dest_tex
-           destinationSlice:0
-           destinationLevel:0
-          destinationOrigin:MTLOriginMake(dx, dy, 0)];
-      any = true;
-    }
-  }
-  if (blit) {
-    [blit endEncoding];
+    MTLScissorRect scissor;
+    scissor.x = 0;
+    scissor.width = dest_tex.width;
+    scissor.y = sy0;
+    scissor.height = sy1 - sy0;
+    [enc setScissorRect:scissor];
+    [enc setFragmentTexture:(__bridge id<MTLTexture>)owner->texture()
+                    atIndex:0];
+    [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+    any = true;
   }
   return any;
 }

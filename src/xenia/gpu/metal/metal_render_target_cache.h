@@ -232,6 +232,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* clear_depth_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* clear_depth_state_ = nullptr;         // id<MTLDepthStencilState>.
 
+  // Resolve-copy sampling pass (replaces per-tile blits: hundreds of
+  // copyFromTexture calls created a driver texture view EACH — the #2 cost
+  // center in gameplay profiles). Pipelines cached per dest pixel format.
+  void* resolve_copy_library_ = nullptr;  // id<MTLLibrary>.
+  std::unordered_map<uint64_t, void*> resolve_copy_pipelines_;
+
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.
     uint32_t width;
