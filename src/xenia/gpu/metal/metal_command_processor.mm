@@ -2020,13 +2020,28 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       uint32_t count = wb.width * wb.height;
       // Endian128 low bits mirror plain Endian for 8in16/8in32.
       xenos::Endian endian = xenos::Endian(wb.endian & 0b11);
+      uint64_t content_sum = 0;
       for (uint32_t i = 0; i < count; ++i) {
         dest_words[i] = xenos::GpuSwapInline(src_words[i], endian);
+        content_sum += src_words[i] & 0xFFFFFF;  // ignore alpha
       }
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
                wb.width, wb.height, wb.guest_addr);
+      }
+      // Exposure death-spiral forensics: the game's auto-exposure feedback
+      // loop reads these tiny luminance writebacks; a ZERO one crashes
+      // exposure, the scene renders black, real luminance goes 0, and the
+      // loop latches black forever ("stopped updating" while running).
+      // Log zero-content small writebacks (throttled).
+      if (count <= 256 && content_sum == 0) {
+        static uint32_t s_zero_wb = 0;
+        ++s_zero_wb;
+        if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
+          XELOGW("MetalWB ZERO {}x{} @ {:08X} (swap#{}, #{})", wb.width,
+                 wb.height, wb.guest_addr, swap_count_, s_zero_wb);
+        }
       }
     }
   }
