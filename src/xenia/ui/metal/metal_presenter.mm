@@ -364,6 +364,20 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     }
     [encoder endEncoding];
 
+    // A silent GPU fault in the present blit leaves the window on the last good
+    // frame while the game keeps running — reads as a "GPU freeze". Log it.
+    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      if (cb.status == MTLCommandBufferStatusError) {
+        static uint32_t s_present_errors = 0;
+        if (s_present_errors++ < 32) {
+          NSError* err = cb.error;
+          XELOGE("Metal GPU FAULT (present): {} (code {})",
+                 err.localizedDescription ? err.localizedDescription.UTF8String
+                                          : "(no description)",
+                 err ? long(err.code) : -1L);
+        }
+      }
+    }];
     [command_buffer presentDrawable:drawable];
     [command_buffer commit];
     consumer_lock.unlock();

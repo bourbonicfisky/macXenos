@@ -530,6 +530,13 @@ bool MacWindow::OpenImpl() {
     [window setTitle:[NSString stringWithUTF8String:std::string(GetTitle())
                                                         .c_str()]];
     [window setReleasedWhenClosed:NO];
+    // Bring-up: don't let macOS restore the previous session's window state. If
+    // the app quit while in a fullscreen Space, state restoration relaunches it
+    // fullscreen (independent of cvars::fullscreen, whose apply is gated off) —
+    // annoying while iterating. Disabling restoration makes launch always
+    // windowed; the fullscreen toggle / green button still work. TODO: revert
+    // before upstream.
+    [window setRestorable:NO];
     // Permit native (Spaces) fullscreen so the cross-platform fullscreen toggle
     // and the green title-bar button work; see ApplyNewFullscreen.
     window.collectionBehavior =

@@ -696,6 +696,22 @@ void MetalCommandProcessor::EndFrameEncoder() {
   ++frame_commit_count_;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
+  // A GPU fault (invalid resource access from an untracked bindless hazard, a
+  // timeout, etc.) fails the command buffer SILENTLY otherwise: we keep
+  // submitting and the window shows the last good frame while swaps advance —
+  // reads on-screen as a "GPU freeze" though the process is alive. Surface it.
+  if (command_buffer.status == MTLCommandBufferStatusError) {
+    static uint32_t s_cb_errors = 0;
+    if (s_cb_errors++ < 32) {
+      NSError* err = command_buffer.error;
+      XELOGE("Metal GPU FAULT (frame commit, swap#{}): {} (code {})",
+             swap_count_,
+             err.localizedDescription
+                 ? err.localizedDescription.UTF8String
+                 : "(no description)",
+             err ? long(err.code) : -1L);
+    }
+  }
   // The committed work has consumed the shared buffer's current contents;
   // later uploads may safely rewrite any range.
   if (shared_memory_) {
