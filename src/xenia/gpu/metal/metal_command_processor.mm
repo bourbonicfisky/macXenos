@@ -181,6 +181,111 @@ void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   }
 }
 
+bool MetalCommandProcessor::DumpEdramToFile(
+    const std::filesystem::path& path) {
+  if (!render_target_cache_) {
+    return false;
+  }
+  // Flush all pending GPU work so texture contents are final.
+  EndFrameEncoder();
+  std::vector<MetalRenderTargetCache::EdramOwnerDump> owners;
+  render_target_cache_->GetEdramOwnersForDump(owners);
+  // The EDRAM image: 2048 tiles x 80x16 samples x 4 bytes, tile-major.
+  constexpr uint32_t kTileBytes = 80 * 16 * 4;
+  std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  if (!provider || !provider->command_queue()) {
+    return false;
+  }
+  id<MTLCommandQueue> queue =
+      (__bridge id<MTLCommandQueue>)provider->command_queue();
+  for (const auto& owner : owners) {
+    if (owner.is_64bpp) {
+      continue;  // 64bpp encode not implemented in the dump yet.
+    }
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)owner.texture;
+    uint32_t tw = uint32_t(tex.width), th = uint32_t(tex.height);
+    // Read the whole owner texture back once.
+    id<MTLDevice> dev = tex.device;
+    id<MTLBuffer> staging =
+        [dev newBufferWithLength:size_t(tw) * th * 4
+                         options:MTLResourceStorageModeShared];
+    if (!staging) {
+      continue;
+    }
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:tex
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(tw, th, 1)
+                 toBuffer:staging
+        destinationOffset:0
+   destinationBytesPerRow:tw * 4
+ destinationBytesPerImage:size_t(tw) * th * 4];
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    const uint8_t* pixels = static_cast<const uint8_t*>(staging.contents);
+    uint32_t xs = owner.msaa_samples >= 3 ? 1 : 0;   // 4x doubles horizontal.
+    uint32_t ys = owner.msaa_samples >= 2 ? 1 : 0;   // 2x+ doubles vertical.
+    // The rect covers full-EDRAM 16-tile rows [row_first, row_first+rows).
+    for (uint32_t er = owner.row_first; er < owner.row_first + owner.rows;
+         ++er) {
+      for (uint32_t ec = 0; ec < 16; ++ec) {
+        uint32_t tile = er * 16 + ec;
+        if (tile < owner.base_tiles) {
+          continue;
+        }
+        uint32_t local = tile - owner.base_tiles;
+        if (owner.pitch_tiles == 0 || local / owner.pitch_tiles >= 100000) {
+          continue;
+        }
+        uint8_t* tile_out = edram.data() + size_t(tile) * kTileBytes;
+        // Per sample of the 80x16 tile: source pixel = sample >> shifts.
+        for (uint32_t sy = 0; sy < 16; ++sy) {
+          for (uint32_t sx = 0; sx < 80; ++sx) {
+            uint32_t sample_x = (local % owner.pitch_tiles) * 80 + sx;
+            uint32_t sample_y = (local / owner.pitch_tiles) * 16 + sy;
+            uint32_t px = sample_x >> xs, py = sample_y >> ys;
+            uint32_t word = 0;
+            if (px < tw && py < th) {
+              const uint8_t* p = pixels + (size_t(py) * tw + px) * 4;
+              if (owner.is_depth) {
+                float d;
+                std::memcpy(&d, p, 4);
+                uint32_t d24 =
+                    owner.is_float24_depth
+                        ? xenos::Float32To20e4(d, false)
+                        : uint32_t(std::min(1.0f, std::max(0.0f, d)) *
+                                       16777215.0f +
+                                   0.5f);
+                word = d24 << 8;
+              } else if (owner.pixel_format == uint64_t(MTLPixelFormatR32Float)) {
+                std::memcpy(&word, p, 4);
+              } else {
+                // BGRA8 bytes -> raw EDRAM word (b|g<<8|r<<16|a<<24).
+                word = uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
+                       (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+              }
+            }
+            std::memcpy(tile_out + (size_t(sy) * 80 + sx) * 4, &word, 4);
+          }
+        }
+      }
+    }
+  }
+  FILE* f = fopen(path.string().c_str(), "wb");
+  if (!f) {
+    return false;
+  }
+  fwrite(edram.data(), 1, edram.size(), f);
+  fclose(f);
+  return true;
+}
+
 void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.

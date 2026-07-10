@@ -1103,6 +1103,36 @@ void* MetalRenderTargetCache::FindContainingSnapshot(
   return nullptr;
 }
 
+void MetalRenderTargetCache::GetEdramOwnersForDump(
+    std::vector<EdramOwnerDump>& out) {
+  out.clear();
+  // The whole EDRAM as one 16-tile-pitch span (matching the snapshot-restore
+  // layout and the offline decoder's expectations).
+  resolve_dump_rectangles_.clear();
+  GetResolveCopyRectanglesToDump(0, 16, xenos::kEdramTileCount / 16, 16,
+                                 resolve_dump_rectangles_);
+  for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
+    auto* rt = static_cast<MetalRenderTarget*>(rect.render_target);
+    if (!rt) {
+      continue;
+    }
+    EdramOwnerDump dump;
+    dump.texture = rt->texture();
+    dump.base_tiles = rt->key().base_tiles;
+    dump.pitch_tiles = rt->key().GetPitchTiles();
+    dump.msaa_samples = uint32_t(rt->key().msaa_samples);
+    dump.is_depth = rt->key().is_depth;
+    dump.is_float24_depth =
+        rt->key().is_depth &&
+        rt->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8;
+    dump.pixel_format = rt->pixel_format();
+    dump.is_64bpp = uint32_t(rt->key().Is64bpp());
+    dump.row_first = rect.row_first;
+    dump.rows = rect.rows;
+    out.push_back(dump);
+  }
+}
+
 void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   // Full-EDRAM 1280-pitch k_8_8_8_8 render target owning all tiles.
   RenderTarget* full_rt = PrepareFullEdram1280xRenderTargetForSnapshotRestoration(

@@ -52,6 +52,12 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
+  // Frame-dissection tooling (--capture_dir per-draw captures + --decode):
+  // reconstructs the 10MB tile-major per-sample EDRAM image from the render
+  // targets owning each tile range, so the existing capture/decode/diff
+  // pipeline works identically for Metal and the Vulkan/AMD references.
+  bool DumpEdramToFile(const std::filesystem::path& path) override;
+
   // For MetalRenderTargetCache: closes any open render encoder (a transfer is
   // a pass boundary) and returns the frame id<MTLCommandBuffer> (creating it if
   // needed) so ownership-transfer blits / snapshot uploads can be encoded.

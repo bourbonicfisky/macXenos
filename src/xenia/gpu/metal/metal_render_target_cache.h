@@ -124,6 +124,25 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
 
+  // Frame-dissection tooling: enumerates the render targets owning each EDRAM
+  // tile range (full-EDRAM span through the base class's dump-rectangle
+  // machinery) so the command processor can reconstruct the 10MB tile-major
+  // EDRAM image for --capture_dir / DumpEdramToFile — making the existing
+  // per-draw capture + offline-decode + diff pipeline backend-agnostic.
+  struct EdramOwnerDump {
+    void* texture;  // id<MTLTexture>, borrowed.
+    uint32_t base_tiles;
+    uint32_t pitch_tiles;
+    uint32_t msaa_samples;
+    uint32_t is_depth;
+    uint32_t is_float24_depth;  // kD24FS8 (vs kD24S8) when is_depth.
+    uint64_t pixel_format;      // MTLPixelFormat.
+    uint32_t is_64bpp;
+    uint32_t row_first;  // In full-EDRAM 16-tile rows.
+    uint32_t rows;
+  };
+  void GetEdramOwnersForDump(std::vector<EdramOwnerDump>& out);
+
   // Restores the trace's EDRAM snapshot: uploads the tile-major 10MB contents
   // into a full-EDRAM 1280-pitch render target and gives it ownership of all
   // tiles (base-class PrepareFullEdram1280xRenderTargetForSnapshotRestoration).
