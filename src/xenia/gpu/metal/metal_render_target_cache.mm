@@ -102,6 +102,7 @@ void MetalRenderTargetCache::Shutdown() {
     }
   }
   resolve_snapshots_.clear();
+  DrainDeferredReleases();
   presentable_color_target_ = nullptr;
   // Destroys all MetalRenderTargets (releasing their textures), then the
   // common ownership state.
@@ -1341,8 +1342,11 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     return it->second.texture;
   }
   if (it != resolve_snapshots_.end() && it->second.texture) {
-    id<MTLTexture> old = (__bridge_transfer id<MTLTexture>)it->second.texture;
-    (void)old;
+    // Do NOT free the old texture now: draws already encoded into the open frame
+    // command buffer still reference it by bindless gpuAddress, and freeing it
+    // mid-frame GPU-page-faults when they execute (the "GPU froze" hang). Retire
+    // it to the deferred list; the command processor frees it after commit+wait.
+    deferred_texture_releases_.push_back(it->second.texture);
     it->second.texture = nullptr;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -1366,6 +1370,14 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   resolve_snapshots_[snap_key] =
       Snapshot{(__bridge_retained void*)texture, width, height, pixel_format};
   return resolve_snapshots_[snap_key].texture;
+}
+
+void MetalRenderTargetCache::DrainDeferredReleases() {
+  for (void* tex : deferred_texture_releases_) {
+    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)tex;
+    (void)released;
+  }
+  deferred_texture_releases_.clear();
 }
 
 void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {

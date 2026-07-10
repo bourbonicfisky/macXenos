@@ -124,6 +124,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
 
+  // Frees textures retired mid-frame (a snapshot that had to grow). They cannot
+  // be released at retire time because draws already encoded into the open frame
+  // command buffer still reference them via bindless gpuAddresses — freeing
+  // early GPU-page-faults when those draws execute. The command processor calls
+  // this only after the frame command buffer has completed (commit + wait).
+  void DrainDeferredReleases();
+
   // Frame-dissection tooling: enumerates the render targets owning each EDRAM
   // tile range (full-EDRAM span through the base class's dump-rectangle
   // machinery) so the command processor can reconstruct the 10MB tile-major
@@ -247,6 +254,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // Keyed by (dest_base << 1) | is_r32f — color and depth snapshots at the
   // same guest base coexist (JC2 resolves both to one base).
   std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
+
+  // Snapshot textures retired mid-frame (grown), held retained until the frame
+  // GPU work finishes so in-flight draws don't dereference freed memory. Drained
+  // by DrainDeferredReleases() after the command processor's commit + wait.
+  std::vector<void*> deferred_texture_releases_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;

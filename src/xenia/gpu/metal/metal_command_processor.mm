@@ -712,6 +712,12 @@ void MetalCommandProcessor::EndFrameEncoder() {
              err ? long(err.code) : -1L);
     }
   }
+  // The frame's GPU work is done: snapshot textures retired mid-frame (grown)
+  // are no longer referenced by any in-flight draw, so they can be freed now
+  // without page-faulting the GPU.
+  if (render_target_cache_) {
+    render_target_cache_->DrainDeferredReleases();
+  }
   // The committed work has consumed the shared buffer's current contents;
   // later uploads may safely rewrite any range.
   if (shared_memory_) {
