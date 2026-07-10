@@ -253,9 +253,14 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
         }
         uint8_t* tile_out = edram.data() + size_t(tile) * kTileBytes;
         // Per sample of the 80x16 tile: source pixel = sample >> shifts.
+        // Depth EDRAM addressing swaps each tile's 40-sample column halves
+        // (see the reference dump shader): word position sx holds the host
+        // sample from the other half.
         for (uint32_t sy = 0; sy < 16; ++sy) {
           for (uint32_t sx = 0; sx < 80; ++sx) {
-            uint32_t sample_x = (local % owner.pitch_tiles) * 80 + sx;
+            uint32_t host_sx =
+                owner.is_depth ? (sx < 40 ? sx + 40 : sx - 40) : sx;
+            uint32_t sample_x = (local % owner.pitch_tiles) * 80 + host_sx;
             uint32_t sample_y = (local / owner.pitch_tiles) * 16 + sy;
             uint32_t px = sample_x >> xs, py = sample_y >> ys;
             uint32_t word = 0;
@@ -264,12 +269,16 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
               if (owner.is_depth) {
                 float d;
                 std::memcpy(&d, p, 4);
+                // unorm24 encode must be roundEven(d * 0xFFFFFF) to match
+                // the guest-visible conversion (see the Vulkan dump shader:
+                // +0.5-and-truncate is explicitly the WRONG conversion, and
+                // biases the whole depth plane by up to 2 ULP24).
                 uint32_t d24 =
                     owner.is_float24_depth
                         ? xenos::Float32To20e4(d, false)
-                        : uint32_t(std::min(1.0f, std::max(0.0f, d)) *
-                                       16777215.0f +
-                                   0.5f);
+                        : uint32_t(std::rint(
+                              std::min(1.0f, std::max(0.0f, d)) *
+                              16777215.0f));
                 word = d24 << 8;
               } else if (owner.pixel_format == uint64_t(MTLPixelFormatR32Float)) {
                 std::memcpy(&word, p, 4);

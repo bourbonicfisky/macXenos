@@ -377,7 +377,12 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
           discard_fragment();
         }
         uint sl = tile - p.src_base;
-        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+        // Depth EDRAM addressing swaps the 40-sample column halves of each
+        // tile (see the reference dump shader): the raw word for host sample
+        // x lives at x^40-ish (self-inverse +-40).
+        uint dtx = ds.x % 80u;
+        uint stx = dtx < 40u ? dtx + 40u : dtx - 40u;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + stx,
                          (sl / p.src_pitch) * 16u + (ds.y % 16u));
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
@@ -388,8 +393,12 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
                     (uint(round(c.a * 255.0)) << 24);
         uint d24 = bits >> 8;
         DepthOut o;
-        o.depth = p.is_float24 != 0u ? xe_f20e4_to_f32(d24)
-                                     : float(d24) / 16777215.0;
+        // Canonical unorm24 decode (pixel_formats.xesli XeUNorm24To32):
+        // exact exponent-shift division by 2^24 with the >>23 bias trick;
+        // /16777215.0 is off by an ULP for common values like 0xC00000.
+        o.depth = p.is_float24 != 0u
+                      ? xe_f20e4_to_f32(d24)
+                      : float(d24 + (d24 >> 23)) * (1.0 / 16777216.0);
         return o;
       }
     )METAL";
@@ -498,14 +507,20 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
           discard_fragment();
         }
         uint sl = tile - p.src_base;
-        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+        // Inverse of the depth EDRAM 40-column swap: this raw-word position
+        // holds the host depth sample from the other 40-column half.
+        uint dtx = ds.x % 80u;
+        uint stx = dtx < 40u ? dtx + 40u : dtx - 40u;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + stx,
                          (sl / p.src_pitch) * 16u + (ds.y % 16u));
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float d = src.read(sp);
+        // rint = roundEven: the canonical unorm24 encode (the Vulkan dump
+        // shader uses GLSL RoundEven; round-half-away differs at exact .5).
         uint d24 = p.is_float24 != 0u
                        ? xe_f32_to_f20e4(d)
-                       : uint(round(saturate(d) * 16777215.0));
+                       : uint(rint(saturate(d) * 16777215.0));
         uint bits = d24 << 8;  // stencil (low byte) not emulated.
         return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
                       float((bits >> 16) & 0xFFu), float((bits >> 24) & 0xFFu)) /
@@ -655,14 +670,22 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
         uint2 ds = xe_span_sample(dp, p.y_offset, p.shifts);
         uint tile = p.span_base + (ds.y / 16u) * p.span_pitch + (ds.x / 80u);
         uint sl = tile - p.src_base;
-        uint2 sp = xe_src_pixel(sl, p.src_pitch, ds, p.shifts);
+        // Depth EDRAM 40-column swap: the word for this span sample is in
+        // the other 40-column half of the tile.
+        uint2 dsw = uint2((ds.x / 80u) * 80u +
+                              ((ds.x % 80u) < 40u ? (ds.x % 80u) + 40u
+                                                  : (ds.x % 80u) - 40u),
+                          ds.y);
+        uint2 sp = xe_src_pixel(sl, p.src_pitch, dsw, p.shifts);
         float4 c = src.read(sp, 0);
         uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
                     (uint(round(c.r * 255.0)) << 16) |
                     (uint(round(c.a * 255.0)) << 24);
         uint d24 = bits >> 8;
-        return p.is_float24 != 0u ? xe_f20e4_to_f32(d24)
-                                  : float(d24) / 16777215.0;
+        // Canonical unorm24 decode (see XeUNorm24To32).
+        return p.is_float24 != 0u
+                   ? xe_f20e4_to_f32(d24)
+                   : float(d24 + (d24 >> 23)) * (1.0 / 16777216.0);
       }
       fragment float xe_d2f_fs(VOut in [[stage_in]],
                                depth2d<float> src [[texture(0)]],
@@ -986,7 +1009,10 @@ void MetalRenderTargetCache::PerformResolveClear(
       }
       // Raw EDRAM depth word: depth24 in the high bits (unorm24; float24
       // clears are typically 0 or max, both map fine through unorm here).
-      params.color[0] = float(clear_value >> 8) / 16777215.0f;
+      uint32_t clear_d24 = clear_value >> 8;
+      // Canonical unorm24 decode (see XeUNorm24To32).
+      params.color[0] =
+          float(clear_d24 + (clear_d24 >> 23)) * (1.0f / 16777216.0f);
       MTLRenderPassDescriptor* pass =
           [MTLRenderPassDescriptor renderPassDescriptor];
       pass.depthAttachment.texture = (__bridge id<MTLTexture>)owner->texture();
