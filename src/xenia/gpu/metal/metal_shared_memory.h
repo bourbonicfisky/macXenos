@@ -11,59 +11,67 @@
 #define XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <vector>
+
+#include "xenia/gpu/shared_memory.h"
 
 namespace xe {
 class Memory;
 namespace gpu {
 namespace metal {
 
-// Bring-up minimal shared memory: a single Metal buffer mirroring guest physical
-// memory, where buffer offset == guest physical byte address, so the translated
-// vertex shader's vfetch (which addresses guest physical memory) reads straight
-// out of it. Uses shared (CPU+GPU) storage and uploads on demand by memcpy from
-// guest RAM for the specific ranges a draw touches.
-//
-// This is deliberately NOT the proper xe::gpu::SharedMemory subclass (no
-// dirty-page watches, no sparse residency, re-uploads the requested range every
-// time). It exists to prove the MSC argument-buffer binding / vfetch path
-// executes; once that's confirmed it should be replaced with a
-// MetalSharedMemory : xe::gpu::SharedMemory that the stable Vulkan backend's
-// base class already gets right.
-class MetalSharedMemory {
+// Real xe::gpu::SharedMemory subclass over a single 512 MiB shared-storage
+// MTLBuffer where buffer offset == guest physical byte address, so the
+// translated vertex shader's vfetch reads straight out of it. The base class
+// provides page-granular validity tracking with CPU write-watch invalidation:
+// uploads happen only for pages actually written since their last use. (The
+// bring-up shim this replaces memcmp'd entire fetch ranges per draw — the
+// terrain mega-streams are tens of MB, which became tens of GB of comparison
+// per frame once real gameplay rendered.) The buffer is CPU-visible, so
+// UploadRanges is a plain memcpy — no staging, no GPU commands.
+class MetalSharedMemory : public SharedMemory {
  public:
-  // 512 MiB, matching xe::gpu::SharedMemory::kBufferSize (guest physical space).
-  static constexpr uint64_t kBufferSize = 512ull * 1024 * 1024;
-
-  MetalSharedMemory(void* device, Memory* memory);
-  ~MetalSharedMemory();
+  MetalSharedMemory(Memory& memory, void* device);
+  ~MetalSharedMemory() override;
 
   bool Initialize();
-
-  // Copies [guest_address, guest_address + length) from guest physical memory
-  // into the shared buffer at the same offset (clamped to the buffer size),
-  // tracking ranges uploaded since the last ResetFrameRanges(). Returns TRUE
-  // (without copying) when the guest data DIFFERS from the buffer inside a
-  // range an earlier draw this frame already consumed — the intra-frame
-  // dynamic vertex-buffer rewrite hazard (UI glyph rings etc.): because all
-  // draws execute against the buffer's final state at frame commit, the caller
-  // must flush the pending GPU work first, ResetFrameRanges(), and call again.
-  // Identical content never reports a hazard (and skips the copy).
-  bool UploadRange(uint32_t guest_address, uint32_t length);
-
-  // Forgets the this-frame uploaded-range set (call after a GPU flush).
-  void ResetFrameRanges() { frame_ranges_.clear(); }
+  void Shutdown();
 
   // id<MTLBuffer> (shared storage), not owned by the caller.
   void* GetBuffer() const { return buffer_; }
 
+  // Frame-batching correctness: every draw in the open frame command buffer
+  // reads the buffer's state at COMMIT, not at encode. When a re-upload is
+  // about to land in pages a draw encoded this frame has already consumed
+  // (the intra-frame dynamic rewrite: UI glyph rings, particles), the flush
+  // callback (commit + wait, set by the command processor) runs FIRST so the
+  // encoded draws read the old data.
+  void SetHazardFlushCallback(std::function<void()> callback) {
+    hazard_flush_callback_ = std::move(callback);
+  }
+
+  // RequestRange plus recording [start, start+length) as consumed by the
+  // current frame for the hazard detection above.
+  bool RequestConsumedRange(uint32_t start, uint32_t length);
+
+  // Forgets the consumed-range set (call after the frame command buffer has
+  // been committed and waited on).
+  void ResetFrameRanges() { consumed_ranges_.clear(); }
+
+ protected:
+  bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,
+                    uint32_t num_upload_ranges) override;
+
  private:
-  void* device_;        // id<MTLDevice>, not owned.
-  Memory* memory_;      // guest memory, not owned.
-  void* buffer_ = nullptr;  // id<MTLBuffer>, retained.
+  void* device_;                        // id<MTLDevice>, not owned.
+  void* buffer_ = nullptr;              // id<MTLBuffer>, retained.
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
-  // Ranges uploaded since the last flush, for hazard detection.
-  std::vector<std::pair<uint32_t, uint32_t>> frame_ranges_;
+
+  // Byte ranges consumed by draws encoded in the open frame command buffer.
+  std::vector<std::pair<uint32_t, uint32_t>> consumed_ranges_;
+  std::function<void()> hazard_flush_callback_;
 };
 
 }  // namespace metal

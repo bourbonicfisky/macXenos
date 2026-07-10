@@ -11,31 +11,27 @@
 
 #import <Metal/Metal.h>
 
-#include <algorithm>
 #include <cstring>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/memory.h"
+
+DECLARE_bool(gpu_allow_invalid_upload_range);
 
 namespace xe {
 namespace gpu {
 namespace metal {
 
-MetalSharedMemory::MetalSharedMemory(void* device, Memory* memory)
-    : device_(device), memory_(memory) {}
+MetalSharedMemory::MetalSharedMemory(Memory& memory, void* device)
+    : SharedMemory(memory), device_(device) {}
 
-MetalSharedMemory::~MetalSharedMemory() {
-  if (buffer_) {
-    id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)buffer_;
-    (void)released;
-    buffer_ = nullptr;
-  }
-}
+MetalSharedMemory::~MetalSharedMemory() { Shutdown(); }
 
 bool MetalSharedMemory::Initialize() {
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
-  // Shared storage so we can memcpy guest RAM into it directly (unified memory
-  // on Apple Silicon makes this a plain host write, no staging/blit).
+  // Shared storage so uploads are plain host memcpys (unified memory on Apple
+  // Silicon); write-combined is fine because nothing reads it from the CPU.
   id<MTLBuffer> buffer =
       [device newBufferWithLength:kBufferSize
                           options:MTLResourceStorageModeShared |
@@ -47,61 +43,97 @@ bool MetalSharedMemory::Initialize() {
   }
   buffer_ = (__bridge_retained void*)buffer;
   buffer_contents_ = static_cast<uint8_t*>([buffer contents]);
+  InitializeCommon();
   return true;
 }
 
-bool MetalSharedMemory::UploadRange(uint32_t guest_address, uint32_t length) {
-  if (!buffer_contents_ || !length) {
-    return false;
+void MetalSharedMemory::Shutdown() {
+  ShutdownCommon();
+  consumed_ranges_.clear();
+  if (buffer_) {
+    id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)buffer_;
+    (void)released;
+    buffer_ = nullptr;
+    buffer_contents_ = nullptr;
   }
-  uint64_t end = uint64_t(guest_address) + length;
-  if (guest_address >= kBufferSize) {
-    return false;
+}
+
+bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
+  if (!length) {
+    return true;
   }
-  if (end > kBufferSize) {
-    length = uint32_t(kBufferSize - guest_address);
-  }
-  const void* guest = memory_->TranslatePhysical(guest_address);
-  if (!guest) {
-    return false;
-  }
-  // Ranges already consumed this frame: verified (or uploaded) once already.
-  bool contained = false;
-  for (const auto& range : frame_ranges_) {
-    if (guest_address >= range.first && uint32_t(end) <= range.second) {
-      contained = true;
-      break;
+  // RequestRange uploads only the pages invalidated since their last use; a
+  // hazard flush (see UploadRanges) may run inside.
+  bool result = RequestRange(start, length);
+  uint32_t end = start + length;
+  for (const auto& range : consumed_ranges_) {
+    if (start >= range.first && end <= range.second) {
+      return result;  // already covered.
     }
   }
-  // Static mega-streams (terrain/mesh pools, tens of MB) are re-requested by
-  // nearly every scene draw; memcmp'ing them per draw is O(tens of GB) per
-  // frame — the on-device "graphics freeze" (GPU thread 35% in memcmp).
-  // Trust large ranges after one verification per frame; small ranges (the
-  // dynamic UI glyph/particle buffers that actually rewrite mid-frame) keep
-  // the full per-draw check so hazard detection still fires.
-  constexpr uint32_t kRecheckLimitBytes = 1u << 20;
-  if (contained && length > kRecheckLimitBytes) {
+  consumed_ranges_.emplace_back(start, end);
+  return result;
+}
+
+bool MetalSharedMemory::UploadRanges(
+    const std::pair<uint32_t, uint32_t>* upload_page_ranges,
+    uint32_t num_upload_ranges) {
+  if (!num_upload_ranges) {
+    return true;
+  }
+  if (!buffer_contents_) {
     return false;
   }
-  // Unchanged content is never a hazard (common: static geometry re-requested
-  // every draw) — and needs no copy.
-  if (std::memcmp(buffer_contents_ + guest_address, guest, length) == 0) {
-    if (!contained) {
-      frame_ranges_.emplace_back(guest_address, uint32_t(end));
+  // Only invalidated pages reach here, so any overlap with a range a draw in
+  // the open frame command buffer consumed is a genuine intra-frame rewrite:
+  // flush (commit + wait) BEFORE the new bytes land so those draws read the
+  // old data. The callback also resets consumed_ranges_.
+  bool hazard = false;
+  for (uint32_t i = 0; i < num_upload_ranges && !hazard; ++i) {
+    uint32_t range_start = upload_page_ranges[i].first << page_size_log2();
+    uint32_t range_end = range_start
+                         + (upload_page_ranges[i].second << page_size_log2());
+    for (const auto& consumed : consumed_ranges_) {
+      if (range_start < consumed.second && range_end > consumed.first) {
+        hazard = true;
+        break;
+      }
     }
-    return false;
   }
-  // Changed content inside a range already consumed this frame: the caller
-  // must flush before this upload lands (all draws read the final buffer
-  // state at commit).
-  for (const auto& range : frame_ranges_) {
-    if (guest_address < range.second && uint32_t(end) > range.first) {
-      return true;
+  if (hazard && hazard_flush_callback_) {
+    static uint32_t s_hazard_flushes = 0;
+    if (s_hazard_flushes++ < 8) {
+      XELOGI("MetalSharedMemory: intra-frame rewrite hazard flush #{}",
+             s_hazard_flushes);
     }
+    hazard_flush_callback_();
   }
-  std::memcpy(buffer_contents_ + guest_address, guest, length);
-  frame_ranges_.emplace_back(guest_address, uint32_t(end));
-  return false;
+  for (uint32_t i = 0; i < num_upload_ranges; ++i) {
+    uint32_t upload_start = upload_page_ranges[i].first << page_size_log2();
+    uint32_t upload_length = upload_page_ranges[i].second << page_size_log2();
+    if (!upload_length) {
+      continue;
+    }
+    if (!cvars::gpu_allow_invalid_upload_range) {
+      uint32_t last_page_start =
+          upload_start + upload_length - (1u << page_size_log2());
+      if (memory().GetPhysicalHeap()->QueryRangeAccess(
+              upload_start, upload_start) == xe::memory::PageAccess::kNoAccess ||
+          memory().GetPhysicalHeap()->QueryRangeAccess(
+              last_page_start, last_page_start) ==
+              xe::memory::PageAccess::kNoAccess) {
+        XELOGE("MetalSharedMemory: invalid upload range {:08X}+{:X}",
+               upload_start, upload_length);
+        return false;
+      }
+    }
+    // Validate BEFORE the memcpy so a CPU write racing the copy re-invalidates
+    // the pages rather than being lost (base-class contract).
+    MakeRangeValid(upload_start, upload_length, false);
+    std::memcpy(buffer_contents_ + upload_start,
+                memory().TranslatePhysical(upload_start), upload_length);
+  }
+  return true;
 }
 
 }  // namespace metal

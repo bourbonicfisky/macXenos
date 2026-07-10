@@ -171,7 +171,13 @@ MetalCommandProcessor::MetalCommandProcessor(
 MetalCommandProcessor::~MetalCommandProcessor() = default;
 
 void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
-                                                     uint32_t length) {}
+                                                     uint32_t length) {
+  // Invalidate the shared-memory pages the trace stream just rewrote so the
+  // next RequestConsumedRange re-uploads them (mirrors the Vulkan backend).
+  if (shared_memory_) {
+    shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
+  }
+}
 
 void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   // Trace playback: seed the EDRAM ownership + contents captured before the
@@ -370,11 +376,16 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: render target cache init failed");
     return false;
   }
-  shared_memory_ = std::make_unique<MetalSharedMemory>(device, memory_);
+  shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
   }
+  // Intra-frame rewrite hazard: commit + wait the open frame so already-
+  // encoded draws consume the pre-rewrite bytes (also resets the consumed-
+  // range set). Runs from inside RequestConsumedRange, which is only called
+  // before the draw's encoder opens.
+  shared_memory_->SetHazardFlushCallback([this]() { EndFrameEncoder(); });
   if (!InitializeDrawResources(device)) {
     XELOGE("MetalCommandProcessor: draw resource init failed");
     return false;
@@ -1100,21 +1111,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           fetch.type != xenos::FetchConstantType::kInvalidVertex) {
         continue;
       }
-      if (shared_memory_->UploadRange(fetch.address << 2, fetch.size << 2)) {
-        // Intra-frame dynamic vertex rewrite (UI glyph rings, particles): the
-        // draws encoded so far must consume the OLD data, so flush the frame's
-        // GPU work before this upload lands. (All draws otherwise read the
-        // buffer's final state at commit — the text-smear / stretched-wedge
-        // corruption.)
-        EndFrameEncoder();
-        shared_memory_->UploadRange(fetch.address << 2, fetch.size << 2);
-        static uint32_t s_hazard_flushes = 0;
-        if (s_hazard_flushes++ < 8) {
-          XELOGI(
-              "MetalCommandProcessor: shared-memory hazard flush at {:08X}+{}",
-              fetch.address << 2, fetch.size << 2);
-        }
-      }
+      // Page-tracked: uploads only pages invalidated since their last use;
+      // the intra-frame rewrite hazard flush runs inside when needed.
+      shared_memory_->RequestConsumedRange(fetch.address << 2,
+                                           fetch.size << 2);
     }
   }
 
