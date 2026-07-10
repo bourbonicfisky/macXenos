@@ -191,6 +191,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // and skipped for now.
   void PerformTransfers(RenderTarget* const* render_targets,
                         const std::vector<Transfer>* transfer_lists);
+  // Same host format but different MSAA sample density (the scene depth /
+  // color tiles ping-pong between 1x and 2x/4x keys): a blit can't remap the
+  // differing per-tile pixel block sizes, so this samples the source through
+  // the same tile arithmetic as the reinterpret transfers (host->host: no
+  // raw-word 40-column swap). 64bpp keys not supported (still log-skipped).
+  void PerformCrossMsaaTransfer(const void* command_buffer,
+                                RenderTarget* source_rt, RenderTarget* dest_rt,
+                                const Transfer& transfer);
   // Raw-EDRAM-bits color (BGRA8, e.g. the restored snapshot) -> D32F depth:
   // in-shader tile remap + guest 24-bit depth decode (unorm24 or 20e4 float).
   void PerformColorToDepthTransfer(const void* command_buffer,
@@ -211,6 +219,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // Reinterpret transfer pipelines (lazily built; retained).
   void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* transfer_c2d_depth_state_ = nullptr;  // id<MTLDepthStencilState>.
+  // Cross-MSAA same-format transfer pipelines: depth (one) and color (keyed
+  // by dest MTLPixelFormat).
+  void* transfer_x2x_library_ = nullptr;        // id<MTLLibrary>.
+  void* transfer_x2x_depth_pipeline_ = nullptr; // id<MTLRenderPipelineState>.
+  void* transfer_x2x_depth_state_ = nullptr;    // id<MTLDepthStencilState>.
+  std::unordered_map<uint64_t, void*> transfer_x2x_color_pipelines_;
   void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* resolve_c2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* resolve_d2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.

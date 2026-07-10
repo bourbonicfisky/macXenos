@@ -291,6 +291,17 @@ void MetalRenderTargetCache::PerformTransfers(
                destinationLevel:0
               destinationOrigin:MTLOriginMake(dx, dy, 0)];
         }
+      } else if (source->pixel_format() == dest->pixel_format() &&
+                 src_key.is_depth == dest_key.is_depth &&
+                 !src_key.Is64bpp() && !dest_key.Is64bpp()) {
+        // Same host format, different MSAA sample density: per-tile pixel
+        // blocks have different sizes, so remap through a sampling pass.
+        if (blit) {
+          [blit endEncoding];
+          blit = nil;
+        }
+        PerformCrossMsaaTransfer((__bridge const void*)cb, source, dest,
+                                 transfer);
       } else if (dest_key.is_depth && !src_key.is_depth &&
                  source->pixel_format() == kColorFormat) {
         // Color (raw EDRAM bits in a BGRA8 texture, e.g. the restored
@@ -326,6 +337,163 @@ void MetalRenderTargetCache::PerformTransfers(
   if (blit) {
     [blit endEncoding];
   }
+}
+
+void MetalRenderTargetCache::PerformCrossMsaaTransfer(
+    const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
+    const Transfer& transfer) {
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  bool is_depth = dest->key().is_depth != 0;
+  if (!transfer_x2x_library_) {
+    // Same tile arithmetic as the reinterpret transfers; host->host, so no
+    // raw-word decode and no depth 40-column swap.
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct XferParams {
+        uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
+        uint start_tiles; uint end_tiles; uint unused; uint shifts;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_x2x_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      // shifts: dst_x | dst_y<<4 | src_x<<8 | src_y<<12 (sample->pixel).
+      static uint2 xe_x2x_src(uint2 dp, constant XferParams& p,
+                              thread bool& in_range) {
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
+        uint tile = p.dst_base + dl;
+        in_range = tile >= p.start_tiles && tile < p.end_tiles;
+        uint sl = tile - p.src_base;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        return uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                     ss.y >> ((p.shifts >> 12) & 15u));
+      }
+      fragment float4 xe_x2x_col_fs(VOut in [[stage_in]],
+                                    texture2d<float> src [[texture(0)]],
+                                    constant XferParams& p [[buffer(0)]]) {
+        bool in_range;
+        uint2 sp = xe_x2x_src(uint2(in.pos.xy), p, in_range);
+        if (!in_range) {
+          discard_fragment();
+        }
+        return src.read(sp, 0);
+      }
+      struct DepthOut { float depth [[depth(any)]]; };
+      fragment DepthOut xe_x2x_dep_fs(VOut in [[stage_in]],
+                                      depth2d<float> src [[texture(0)]],
+                                      constant XferParams& p [[buffer(0)]]) {
+        bool in_range;
+        uint2 sp = xe_x2x_src(uint2(in.pos.xy), p, in_range);
+        if (!in_range) {
+          discard_fragment();
+        }
+        DepthOut o;
+        o.depth = src.read(sp);
+        return o;
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: x2x transfer library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    transfer_x2x_library_ = (__bridge_retained void*)lib;
+  }
+  id<MTLLibrary> lib = (__bridge id<MTLLibrary>)transfer_x2x_library_;
+  id<MTLRenderPipelineState> pipeline = nil;
+  if (is_depth) {
+    if (!transfer_x2x_depth_pipeline_) {
+      NSError* err = nil;
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_x2x_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_x2x_dep_fs"];
+      d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&err];
+      if (!ps) {
+        XELOGE("MetalRenderTargetCache: x2x depth pipeline failed: {}",
+               err ? err.localizedDescription.UTF8String : "?");
+        return;
+      }
+      transfer_x2x_depth_pipeline_ = (__bridge_retained void*)ps;
+      MTLDepthStencilDescriptor* ds = [[MTLDepthStencilDescriptor alloc] init];
+      ds.depthCompareFunction = MTLCompareFunctionAlways;
+      ds.depthWriteEnabled = YES;
+      transfer_x2x_depth_state_ =
+          (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:ds];
+    }
+    pipeline =
+        (__bridge id<MTLRenderPipelineState>)transfer_x2x_depth_pipeline_;
+  } else {
+    uint64_t fmt = dest->pixel_format();
+    auto it = transfer_x2x_color_pipelines_.find(fmt);
+    if (it == transfer_x2x_color_pipelines_.end()) {
+      NSError* err = nil;
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_x2x_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_x2x_col_fs"];
+      d.colorAttachments[0].pixelFormat = (MTLPixelFormat)fmt;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&err];
+      if (!ps) {
+        XELOGE("MetalRenderTargetCache: x2x color pipeline {} failed: {}", fmt,
+               err ? err.localizedDescription.UTF8String : "?");
+      }
+      it = transfer_x2x_color_pipelines_
+               .emplace(fmt, ps ? (__bridge_retained void*)ps : nullptr)
+               .first;
+    }
+    pipeline = (__bridge id<MTLRenderPipelineState>)it->second;
+  }
+  if (!pipeline) {
+    return;
+  }
+  uint32_t sxs, sys, dxs, dys;
+  GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
+  GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
+  struct XferParams {
+    uint32_t src_base, src_pitch, dst_base, dst_pitch;
+    uint32_t start_tiles, end_tiles, unused, shifts;
+  } params{source->key().base_tiles, source->key().GetPitchTiles(),
+           dest->key().base_tiles,   dest->key().GetPitchTiles(),
+           transfer.start_tiles,     transfer.end_tiles,
+           0,                        dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  if (is_depth) {
+    pass.depthAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+  } else {
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  }
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  [enc setRenderPipelineState:pipeline];
+  if (is_depth) {
+    [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                  transfer_x2x_depth_state_];
+  }
+  [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
+  [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc endEncoding];
 }
 
 void MetalRenderTargetCache::PerformColorToDepthTransfer(
