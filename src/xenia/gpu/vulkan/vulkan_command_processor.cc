@@ -149,8 +149,8 @@ void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   render_target_cache_->RestoreEdramSnapshot(snapshot);
 }
 
-bool VulkanCommandProcessor::DumpEdramToFile(
-    const std::filesystem::path& path) {
+bool VulkanCommandProcessor::DumpEdramToBuffer(
+    std::vector<uint8_t>& edram_out) {
   if (!BeginSubmission(true)) {
     return false;
   }
@@ -158,7 +158,7 @@ bool VulkanCommandProcessor::DumpEdramToFile(
     return false;
   }
   AwaitAllQueueOperationsCompletion();
-  return render_target_cache_->CompleteEdramDownloadToFile(path);
+  return render_target_cache_->CompleteEdramDownloadToBuffer(edram_out);
 }
 
 std::string VulkanCommandProcessor::GetCaptureDeviceInfoJson() const {

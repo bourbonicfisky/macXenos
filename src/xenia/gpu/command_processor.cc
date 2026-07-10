@@ -16,6 +16,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -159,6 +160,16 @@ DEFINE_string(
     "With --capture_dir: comma-separated explicit draw indices (e.g. "
     "'101,108,115') to snapshot raw EDRAM after, in addition to any "
     "--capture_draw_range. Empty disables.",
+    "GPU");
+
+DEFINE_bool(
+    capture_edram_hashes, false,
+    "With --capture_dir: after EVERY draw, append per-tile XXH3-64 hashes "
+    "of the raw EDRAM image to <dir>/edram_hashes.bin (16-byte header: "
+    "'XEDH', version, tile_count, tile_bytes; then records of uint32 draw "
+    "index + tile_count uint64 hashes, little-endian). Full-frame "
+    "first-divergence scanning at ~16 KB/draw instead of 10 MB snapshots. "
+    "Forces a submission + queue drain per draw (NOT passive, design D3).",
     "GPU");
 
 DEFINE_string(
@@ -1602,18 +1613,86 @@ bool CommandProcessor::IsCaptureEdramDraw(uint32_t draw_index) const {
 }
 
 void CommandProcessor::MaybeCaptureEdramSnapshot(uint32_t draw_index) {
-  if (!IsCaptureEdramDraw(draw_index)) {
+  bool want_snapshot = IsCaptureEdramDraw(draw_index);
+  bool want_hashes =
+      cvars::capture_edram_hashes && !cvars::capture_dir.empty();
+  if (!want_snapshot && !want_hashes) {
     return;
   }
-  std::filesystem::path capture_dir = std::filesystem::path(cvars::capture_dir);
-  std::error_code ec;
-  std::filesystem::create_directories(capture_dir, ec);
-  std::filesystem::path snapshot_path =
-      capture_dir / fmt::format("draw_{:06d}.edram.bin", draw_index);
-  if (!DumpEdramToFile(snapshot_path)) {
-    XELOGE("capture_dir: EDRAM snapshot unsupported/failed for draw {}",
+  // One EDRAM download serves both the full snapshot and the hash record.
+  std::vector<uint8_t> edram;
+  if (!DumpEdramToBuffer(edram) || edram.size() != xenos::kEdramSizeBytes) {
+    XELOGE("capture_dir: EDRAM download unsupported/failed for draw {}",
            draw_index);
+    return;
   }
+  if (want_snapshot) {
+    std::filesystem::path capture_dir =
+        std::filesystem::path(cvars::capture_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(capture_dir, ec);
+    std::filesystem::path snapshot_path =
+        capture_dir / fmt::format("draw_{:06d}.edram.bin", draw_index);
+    FILE* file = xe::filesystem::OpenFile(snapshot_path, "wb");
+    bool written = false;
+    if (file) {
+      written = fwrite(edram.data(), 1, edram.size(), file) == edram.size();
+      fclose(file);
+    }
+    if (!written) {
+      XELOGE("capture_dir: failed to write {}", snapshot_path.string());
+    }
+  }
+  if (want_hashes) {
+    AppendCaptureEdramHashes(draw_index, edram);
+  }
+}
+
+bool CommandProcessor::DumpEdramToFile(const std::filesystem::path& path) {
+  std::vector<uint8_t> edram;
+  if (!DumpEdramToBuffer(edram)) {
+    return false;
+  }
+  FILE* file = xe::filesystem::OpenFile(path, "wb");
+  if (!file) {
+    return false;
+  }
+  bool written = fwrite(edram.data(), 1, edram.size(), file) == edram.size();
+  fclose(file);
+  return written;
+}
+
+void CommandProcessor::AppendCaptureEdramHashes(
+    uint32_t draw_index, const std::vector<uint8_t>& edram) {
+  constexpr uint32_t kTileBytes = xenos::kEdramTileWidthSamples *
+                                  xenos::kEdramTileHeightSamples * 4;
+  constexpr uint32_t kTileCount = xenos::kEdramTileCount;
+  static_assert(kTileBytes * kTileCount == xenos::kEdramSizeBytes);
+  if (!capture_hashes_file_) {
+    std::filesystem::path capture_dir =
+        std::filesystem::path(cvars::capture_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(capture_dir, ec);
+    std::filesystem::path hashes_path = capture_dir / "edram_hashes.bin";
+    capture_hashes_file_ = xe::filesystem::OpenFile(hashes_path, "wb");
+    if (!capture_hashes_file_) {
+      XELOGE("capture_dir: failed to open {}", hashes_path.string());
+      return;
+    }
+    const uint32_t header[4] = {0x48444558u /* 'XEDH' */, 1u, kTileCount,
+                                kTileBytes};
+    fwrite(header, sizeof(header), 1, capture_hashes_file_);
+  }
+  uint64_t hashes[kTileCount];
+  for (uint32_t tile = 0; tile < kTileCount; ++tile) {
+    hashes[tile] =
+        XXH3_64bits(edram.data() + size_t(tile) * kTileBytes, kTileBytes);
+  }
+  fwrite(&draw_index, sizeof(draw_index), 1, capture_hashes_file_);
+  fwrite(hashes, sizeof(uint64_t), kTileCount, capture_hashes_file_);
+  // Flush per record: the two-machine workflow may SIGALRM-kill the replay
+  // before stdio buffers drain (same policy as the manifest).
+  fflush(capture_hashes_file_);
 }
 
 void CommandProcessor::WriteCaptureManifestRow(const std::string& json_row) {

@@ -2166,8 +2166,8 @@ void VulkanRenderTargetCache::InitializeTraceCompleteDownloads() {
                                          edram_snapshot_download_buffer_memory_);
 }
 
-bool VulkanRenderTargetCache::CompleteEdramDownloadToFile(
-    const std::filesystem::path& path) {
+bool VulkanRenderTargetCache::CompleteEdramDownloadToBuffer(
+    std::vector<uint8_t>& edram_out) {
   if (edram_snapshot_download_buffer_memory_ == VK_NULL_HANDLE) {
     return false;
   }
@@ -2179,11 +2179,9 @@ bool VulkanRenderTargetCache::CompleteEdramDownloadToFile(
   void* download_mapping;
   if (dfn.vkMapMemory(device, edram_snapshot_download_buffer_memory_, 0,
                       VK_WHOLE_SIZE, 0, &download_mapping) == VK_SUCCESS) {
-    if (FILE* file = filesystem::OpenFile(path, "wb")) {
-      written = fwrite(download_mapping, 1, xenos::kEdramSizeBytes, file) ==
-                xenos::kEdramSizeBytes;
-      fclose(file);
-    }
+    edram_out.resize(xenos::kEdramSizeBytes);
+    std::memcpy(edram_out.data(), download_mapping, xenos::kEdramSizeBytes);
+    written = true;
     dfn.vkUnmapMemory(device, edram_snapshot_download_buffer_memory_);
   } else {
     XELOGE(

@@ -45,6 +45,7 @@ DECLARE_string(replay_index_window);
 DECLARE_string(capture_dir);
 DECLARE_string(capture_draw_range);
 DECLARE_string(capture_edram_at);
+DECLARE_bool(capture_edram_hashes);
 
 namespace xe {
 
@@ -203,12 +204,15 @@ class CommandProcessor {
       const reg::DC_LUT_PWL_DATA* new_gamma_ramp_pwl_rgb,
       uint32_t new_gamma_ramp_rw_component);
   virtual void RestoreEdramSnapshot(const void* snapshot) = 0;
-  // Downloads the current host EDRAM representation and writes the raw
-  // 10 MB EDRAM contents to a file (diagnostics, e.g. per-sample MSAA
-  // inspection in trace replays). Returns false if unsupported.
-  virtual bool DumpEdramToFile(const std::filesystem::path& path) {
+  // Downloads the current host EDRAM representation as the raw 10 MB
+  // tile-major EDRAM image (diagnostics, e.g. per-sample MSAA inspection in
+  // trace replays). Returns false if unsupported. NOT passive: forces a
+  // submission + queue drain.
+  virtual bool DumpEdramToBuffer(std::vector<uint8_t>& edram_out) {
     return false;
   }
+  // DumpEdramToBuffer, written to a file.
+  bool DumpEdramToFile(const std::filesystem::path& path);
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);
@@ -562,6 +566,9 @@ class CommandProcessor {
   // when the command processor shuts down.
   FILE* capture_manifest_file_ = nullptr;
   bool capture_meta_written_ = false;
+  // <capture_dir>/edram_hashes.bin (--capture_edram_hashes), lazily opened
+  // on the first hashed draw.
+  FILE* capture_hashes_file_ = nullptr;
   // Appends one byte-stable JSON row to <capture_dir>/manifest.jsonl,
   // opening the file and emitting capture_meta.json on first use. No-op when
   // --capture_dir is empty.
@@ -577,10 +584,16 @@ class CommandProcessor {
   // --capture_draw_range and/or --capture_edram_at. No-op-fast when both are
   // empty.
   bool IsCaptureEdramDraw(uint32_t draw_index) const;
-  // Snapshots raw EDRAM to <capture_dir>/draw_NNNNNN.edram.bin (via the
-  // backend DumpEdramToFile) if this draw is selected. May perturb (design
-  // D3): forces a submission + queue drain.
+  // Snapshots raw EDRAM to <capture_dir>/draw_NNNNNN.edram.bin if this draw
+  // is selected, and/or appends its per-tile hash record when
+  // --capture_edram_hashes (one EDRAM download serves both). May perturb
+  // (design D3): forces a submission + queue drain.
   void MaybeCaptureEdramSnapshot(uint32_t draw_index);
+  // Appends one record (u32 draw index + kEdramTileCount u64 XXH3-64 tile
+  // hashes) to <capture_dir>/edram_hashes.bin, writing the 16-byte header
+  // ('XEDH', version, tile_count, tile_bytes) on first use.
+  void AppendCaptureEdramHashes(uint32_t draw_index,
+                                const std::vector<uint8_t>& edram);
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;

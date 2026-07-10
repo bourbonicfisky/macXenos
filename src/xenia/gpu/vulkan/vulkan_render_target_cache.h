@@ -175,9 +175,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // GPU, InitializeTraceCompleteDownloads must be called).
   bool InitializeTraceSubmitDownloads();
   void InitializeTraceCompleteDownloads();
-  // After InitializeTraceSubmitDownloads and awaiting the GPU, writes the
-  // downloaded EDRAM contents to a file instead of the trace (diagnostics).
-  bool CompleteEdramDownloadToFile(const std::filesystem::path& path);
+  // After InitializeTraceSubmitDownloads and awaiting the GPU, copies the
+  // downloaded EDRAM contents into a buffer instead of the trace
+  // (diagnostics).
+  bool CompleteEdramDownloadToBuffer(std::vector<uint8_t>& edram_out);
 
   bool msaa_2x_attachments_supported() const {
     return msaa_2x_attachments_supported_;

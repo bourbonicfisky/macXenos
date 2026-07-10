@@ -181,18 +181,21 @@ void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   }
 }
 
-bool MetalCommandProcessor::DumpEdramToFile(
-    const std::filesystem::path& path) {
+bool MetalCommandProcessor::DumpEdramToBuffer(
+    std::vector<uint8_t>& edram_out) {
   if (!render_target_cache_) {
     return false;
   }
-  // Flush all pending GPU work so texture contents are final.
+  // Flush all pending GPU work so texture contents are final. Mid-frame this
+  // is a commit + wait; the next draw's BeginFrameEncoder starts a fresh
+  // command buffer and LOADs the (persistent) render-target contents.
   EndFrameEncoder();
   std::vector<MetalRenderTargetCache::EdramOwnerDump> owners;
   render_target_cache_->GetEdramOwnersForDump(owners);
   // The EDRAM image: 2048 tiles x 80x16 samples x 4 bytes, tile-major.
   constexpr uint32_t kTileBytes = 80 * 16 * 4;
-  std::vector<uint8_t> edram(xenos::kEdramSizeBytes, 0);
+  edram_out.assign(xenos::kEdramSizeBytes, 0);
+  std::vector<uint8_t>& edram = edram_out;
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   if (!provider || !provider->command_queue()) {
@@ -204,6 +207,11 @@ bool MetalCommandProcessor::DumpEdramToFile(
     if (owner.is_64bpp) {
       continue;  // 64bpp encode not implemented in the dump yet.
     }
+    // Per-owner autorelease pool: with per-draw capture (--capture_edram_*)
+    // this runs thousands of times on a pool-less replay thread; the
+    // autoreleased command buffer/encoder otherwise retain the multi-MB
+    // staging buffers until the process OOMs (SIGKILL ~2600 draws in).
+    @autoreleasepool {
     id<MTLTexture> tex = (__bridge id<MTLTexture>)owner.texture;
     uint32_t tw = uint32_t(tex.width), th = uint32_t(tex.height);
     // Read the whole owner texture back once.
@@ -276,13 +284,8 @@ bool MetalCommandProcessor::DumpEdramToFile(
         }
       }
     }
+    }  // autoreleasepool
   }
-  FILE* f = fopen(path.string().c_str(), "wb");
-  if (!f) {
-    return false;
-  }
-  fwrite(edram.data(), 1, edram.size(), f);
-  fclose(f);
   return true;
 }
 
