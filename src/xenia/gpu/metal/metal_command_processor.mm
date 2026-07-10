@@ -1680,6 +1680,35 @@ void MetalCommandProcessor::InitializeTrace() {}
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // Diagnostic: XE_METAL_PEEK=addr1,addr2,... (hex) logs the first guest-RAM
+  // words at each address — ground truth for what a buffer SHOULD hold (traces
+  // carry the previous frame's memory; our backend never writes guest RAM).
+  if (const char* peek = std::getenv("XE_METAL_PEEK")) {
+    static bool s_peeked = false;
+    if (!s_peeked) {
+      s_peeked = true;
+      char* dup = strdup(peek);
+      for (char* tok = strtok(dup, ","); tok; tok = strtok(nullptr, ",")) {
+        uint32_t addr = uint32_t(strtoul(tok, nullptr, 16));
+        const uint32_t* p = reinterpret_cast<const uint32_t*>(
+            memory_->TranslatePhysical(addr));
+        if (p) {
+          // Middle of the buffer too (offset +0x60000 = row ~300 of a 1280-wide
+          // 32bpp image) to skip letterbox/border rows.
+          const uint32_t* q = reinterpret_cast<const uint32_t*>(
+              memory_->TranslatePhysical(addr + 0x60000));
+          XELOGI(
+              "MetalPeek {:08X}: {:08X} {:08X} {:08X} {:08X} | +60000: {:08X} "
+              "{:08X} {:08X} {:08X}",
+              addr, p[0], p[1], p[2], p[3], q ? q[0] : 0, q ? q[1] : 0,
+              q ? q[2] : 0, q ? q[3] : 0);
+        } else {
+          XELOGI("MetalPeek {:08X}: unmapped", addr);
+        }
+      }
+      free(dup);
+    }
+  }
   // Flush the frame's draws + resolve blits before presenting. Unconditional:
   // when the frame's LAST GPU work is a resolve (or a skipped draw), the render
   // encoder is already closed (frame_open_ false) but the frame command buffer
