@@ -462,28 +462,20 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   if (rt) {
-    bool clear_color =
-        frame_cleared_targets_.insert(uint64_t(uintptr_t(rt))).second;
+    // Always LOAD: textures are cleared at creation; content comes from
+    // ownership transfers / persistence, clears from guest resolve clears.
     pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
-    pass.colorAttachments[0].loadAction =
-        clear_color ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
   }
   // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
   // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
   // menus) clear to 0 and test "greater"; a hardcoded 1.0 made every fragment
   // fail z>=1.0 -> black. Reading the guest value serves both directions.
   if (depth) {
-    bool clear_depth =
-        frame_cleared_targets_.insert(uint64_t(uintptr_t(depth))).second;
-    uint32_t rb_depth_clear = (*register_file_)[XE_GPU_REG_RB_DEPTH_CLEAR];
-    double clear_depth_value = double(rb_depth_clear >> 8) / double(0xFFFFFF);
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
-    pass.depthAttachment.loadAction =
-        clear_depth ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
-    pass.depthAttachment.clearDepth = clear_depth_value;
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];

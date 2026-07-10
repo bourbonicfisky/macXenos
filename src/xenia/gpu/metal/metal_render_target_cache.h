@@ -160,6 +160,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint64_t pixel_format_;
   };
 
+  // Clears a freshly created texture to zero (color) / the far value (depth)
+  // so uninitialized private memory (magenta/noise garbage) never reaches a
+  // transfer, resolve, or the present. Deterministic-black beats garbage for
+  // debugging.
+  void ClearTextureAtCreation(void* texture, bool is_depth);
+
   // Executes the base class's requested ownership transfers for the current
   // accumulated render targets: same-host-format spans as per-tile blits,
   // color->depth reinterprets via the depth-writing pass; the rest is logged

@@ -109,6 +109,30 @@ void MetalRenderTargetCache::Shutdown() {
   ShutdownCommon();
 }
 
+void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
+                                                    bool is_depth) {
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)
+      command_processor_.PrepareTransferCommandBuffer();
+  if (!cb || !texture) {
+    return;
+  }
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  if (is_depth) {
+    pass.depthAttachment.texture = (__bridge id<MTLTexture>)texture;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = 0.0;  // Reverse-z far (JC2 convention).
+  } else {
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)texture;
+    pass.colorAttachments[0].slice = 0;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+  }
+  id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+  [enc endEncoding];
+}
+
 RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -142,6 +166,7 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   }
   XELOGI("MetalRenderTargetCache: new RT {} ({}x{} mtl={})", key.GetDebugName(),
          width, height, uint32_t(pixel_format));
+  ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
   return new MetalRenderTarget(key, (__bridge_retained void*)texture,
                                uint64_t(pixel_format));
 }
@@ -1047,6 +1072,7 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
            width, height);
     return nullptr;
   }
+  ClearTextureAtCreation((__bridge void*)texture, /*is_depth=*/false);
   resolve_snapshots_[dest_base] =
       Snapshot{(__bridge_retained void*)texture, width, height, pixel_format};
   return resolve_snapshots_[dest_base].texture;
