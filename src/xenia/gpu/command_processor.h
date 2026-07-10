@@ -329,6 +329,11 @@ class CommandProcessor {
   virtual void MakeCoherent();
   virtual void PrepareForWait();
   virtual void ReturnFromWait();
+  // Called once before a WAIT_REG_MEM starts polling a MEMORY location:
+  // backends with deferred GPU->guest-memory writebacks must make any
+  // pending write covering the polled address observable, or a guest
+  // waiting on GPU-written data (fence-after-copy) deadlocks.
+  virtual void FlushPendingWritebacksForWait(uint32_t guest_address) {}
 
   virtual void PollCompletedSubmission() {}
 

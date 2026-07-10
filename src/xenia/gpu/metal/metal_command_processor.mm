@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -633,6 +634,7 @@ void MetalCommandProcessor::EndFrameEncoder() {
   id<MTLCommandBuffer> command_buffer =
       (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
   frame_command_buffer_ = nullptr;
+  ++frame_commit_count_;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
   // The committed work has consumed the shared buffer's current contents;
@@ -2031,17 +2033,25 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
   pending_writebacks_.clear();
 }
 
-void MetalCommandProcessor::PrepareForWait() {
+void MetalCommandProcessor::FlushPendingWritebacksForWait(
+    uint32_t guest_address) {
   // The guest may WAIT_REG_MEM on memory the GPU writes (fence-after-copy /
-  // resolved data): writebacks deferred to IssueSwap would never drain
+  // resolved data): a writeback deferred to IssueSwap would never drain
   // because the wait blocks the command stream BEFORE the swap — a deadlock
-  // (combat freeze: GPU thread polling, guest main thread waiting on it).
-  // GPU writes must be observable at every wait point, not just at swap.
-  if (!pending_writebacks_.empty()) {
-    EndFrameEncoder();
-    DrainPendingWritebacks();
+  // (the combat freeze). But draining EVERYTHING at every wait made the
+  // auto-exposure loop read mid-frame luminance (black flicker) — so flush
+  // only when the polled address actually lies inside a pending writeback;
+  // all other writebacks keep the swap cadence (the reference backends'
+  // readback is likewise a frame behind).
+  for (const PendingWriteback& wb : pending_writebacks_) {
+    uint32_t length = wb.width * wb.height * 4;
+    if (guest_address >= wb.guest_addr &&
+        guest_address < wb.guest_addr + length) {
+      EndFrameEncoder();
+      DrainPendingWritebacks();
+      return;
+    }
   }
-  CommandProcessor::PrepareForWait();
 }
 
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
@@ -2111,6 +2121,29 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  // Frame-cost telemetry: commits per frame is the frame-split count (each is
+  // a full commit + waitUntilCompleted stall — hazard flushes, captures,
+  // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
+  {
+    static uint32_t s_last_commits = 0;
+    static uint32_t s_last_draws = 0;
+    static std::chrono::steady_clock::time_point s_last_time =
+        std::chrono::steady_clock::now();
+    if ((count & 127) == 0 && count) {
+      auto now = std::chrono::steady_clock::now();
+      float secs =
+          std::chrono::duration<float>(now - s_last_time).count();
+      XELOGI(
+          "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
+          "{:.0f} draws/frame",
+          count, 128.0f / std::max(secs, 0.001f),
+          float(frame_commit_count_ - s_last_commits) / 128.0f,
+          float(draw_count_ - s_last_draws) / 128.0f);
+      s_last_commits = frame_commit_count_;
+      s_last_draws = draw_count_;
+      s_last_time = now;
+    }
+  }
   id<MTLTexture> source_rt = nil;
   uint32_t present_width = 1280;
   uint32_t present_height = 720;

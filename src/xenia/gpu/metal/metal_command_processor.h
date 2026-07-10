@@ -83,11 +83,13 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void InitializeTrace() override;
 
-  // Flush + CPU-copy pending resolve writebacks into guest RAM. The guest can
-  // WAIT_REG_MEM on GPU-written memory, so this runs both at IssueSwap and
-  // from PrepareForWait (deferring to swap alone deadlocks such waits).
+  // Flush + CPU-copy pending resolve writebacks into guest RAM. Runs at
+  // IssueSwap, and early via FlushPendingWritebacksForWait when the guest
+  // WAIT_REG_MEMs on an address a pending writeback covers (deferring to
+  // swap alone deadlocks such waits; draining everything at every wait fed
+  // the auto-exposure loop mid-frame values — black flicker).
   void DrainPendingWritebacks();
-  void PrepareForWait() override;
+  void FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   // --- Draw path helpers (metal_command_processor.mm) ---
 
@@ -187,6 +189,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
   uint32_t draw_skip_count_ = 0;
+  // Frame command buffers committed (each = commit + waitUntilCompleted);
+  // per-frame average logged by MetalFrameStats at IssueSwap.
+  uint32_t frame_commit_count_ = 0;
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;

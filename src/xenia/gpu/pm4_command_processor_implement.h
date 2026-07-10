@@ -715,6 +715,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                       poll_reg_addr & ~uint32_t(0x3)))
                 : register_file_->values[poll_reg_addr];
 
+  if (is_memory) {
+    COMMAND_PROCESSOR::FlushPendingWritebacksForWait(poll_reg_addr &
+                                                     ~uint32_t(0x3));
+  }
+
   bool matched = false;
   uint32_t wait_iterations = 0;
 
