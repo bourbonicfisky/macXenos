@@ -13,6 +13,7 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
@@ -184,6 +185,20 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t last_color_resolve_base_ = 0;
   uint32_t last_color_resolve_start_ = 0;
   uint32_t last_color_resolve_length_ = 0;
+
+  // Stage-3 slice: SMALL resolves also write back into REAL guest memory at
+  // frame end (staging blit + CPU memcpy). JC2's auto-exposure loop runs
+  // through the CPU: the luminance pyramid resolves to RAM, game code READS
+  // the 1x1 result and computes the next frame's exposure constant — the
+  // snapshot bridge alone leaves that RAM unwritten (black/stale exposure).
+  struct PendingWriteback {
+    void* staging;  // id<MTLBuffer>, retained.
+    uint32_t guest_addr;
+    uint32_t width;
+    uint32_t height;
+    uint32_t endian;  // xenos::Endian of the resolve dest.
+  };
+  std::vector<PendingWriteback> pending_writebacks_;
 };
 
 }  // namespace metal

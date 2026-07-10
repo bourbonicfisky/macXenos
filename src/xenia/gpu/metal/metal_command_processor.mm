@@ -1687,6 +1687,38 @@ bool MetalCommandProcessor::IssueCopy() {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh);
         }
+        // Stage-3 slice: SMALL resolves also write back into REAL guest memory
+        // at frame end. JC2's auto-exposure loop is CPU-side: the game reads
+        // the resolved 1x1 luminance from RAM to compute the next frame's
+        // exposure constant — snapshot-only resolves leave that RAM unwritten.
+        if (resolved && rw * rh * 4 <= 256 * 1024 &&
+            (src_pixel_format == MetalRenderTargetCache::kColorFormat ||
+             src_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
+          id<MTLDevice> wb_device =
+              ((__bridge id<MTLTexture>)snap).device;
+          id<MTLBuffer> staging =
+              [wb_device newBufferWithLength:rw * rh * 4
+                                     options:MTLResourceStorageModeShared];
+          if (staging) {
+            id<MTLCommandBuffer> wb_cb =
+                (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+            id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
+            [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                           sourceSize:MTLSizeMake(rw, rh, 1)
+                             toBuffer:staging
+                    destinationOffset:0
+               destinationBytesPerRow:rw * 4
+             destinationBytesPerImage:rw * rh * 4];
+            [wb_blit endEncoding];
+            pending_writebacks_.push_back(PendingWriteback{
+                (__bridge_retained void*)staging, resolve_info.copy_dest_base,
+                rw, rh,
+                uint32_t(resolve_info.copy_dest_info.copy_dest_endian)});
+          }
+        }
       } else {
         static uint32_t s_missing_color_rt_logs = 0;
         if (s_missing_color_rt_logs++ < 8) {
@@ -1819,6 +1851,30 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // still holds every draw and snapshot blit — gating the commit on frame_open_
   // silently discarded the whole frame (uniform magenta present).
   EndFrameEncoder();
+
+  // Small-resolve guest-memory writebacks (the CPU-side exposure loop): the
+  // frame command buffer completed above, so the staging contents are ready.
+  for (PendingWriteback& wb : pending_writebacks_) {
+    id<MTLBuffer> staging = (__bridge_transfer id<MTLBuffer>)wb.staging;
+    uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
+    if (dest && staging) {
+      const uint32_t* src_words =
+          static_cast<const uint32_t*>(staging.contents);
+      uint32_t* dest_words = reinterpret_cast<uint32_t*>(dest);
+      uint32_t count = wb.width * wb.height;
+      // Endian128 low bits mirror plain Endian for 8in16/8in32.
+      xenos::Endian endian = xenos::Endian(wb.endian & 0b11);
+      for (uint32_t i = 0; i < count; ++i) {
+        dest_words[i] = xenos::GpuSwapInline(src_words[i], endian);
+      }
+      static uint32_t s_wb_logs = 0;
+      if (s_wb_logs++ < 8) {
+        XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
+               wb.width, wb.height, wb.guest_addr);
+      }
+    }
+  }
+  pending_writebacks_.clear();
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
