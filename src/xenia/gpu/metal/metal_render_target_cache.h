@@ -136,15 +136,21 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                    RenderTarget* source_rt,
                                    RenderTarget* dest_rt,
                                    const Transfer& transfer);
+  // The mirror: D32F depth encoded back to guest 24-bit raw bits as BGRA8.
+  void PerformDepthToColorTransfer(const void* command_buffer,
+                                   RenderTarget* source_rt,
+                                   RenderTarget* dest_rt,
+                                   const Transfer& transfer);
 
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
 
   void* presentable_color_target_ = nullptr;  // borrowed from a render target.
 
-  // Color->depth transfer pipeline (lazily built; retained).
+  // Reinterpret transfer pipelines (lazily built; retained).
   void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* transfer_c2d_depth_state_ = nullptr;  // id<MTLDepthStencilState>.
+  void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
 
   struct Snapshot {
     void* texture;  // id<MTLTexture>, retained.

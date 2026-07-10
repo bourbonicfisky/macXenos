@@ -259,6 +259,17 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         PerformColorToDepthTransfer((__bridge const void*)cb, source, dest,
                                     transfer);
+      } else if (!dest_key.is_depth && src_key.is_depth &&
+                 dest->pixel_format() == kColorFormat) {
+        // Depth reinterpreted as raw-bits color (a color pass reuses tiles a
+        // depth RT last owned): encode host D32F back to the guest 24-bit
+        // pattern and write it as BGRA8 bytes.
+        if (blit) {
+          [blit endEncoding];
+          blit = nil;
+        }
+        PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
+                                    transfer);
       } else {
         static uint32_t s_skips = 0;
         if (s_skips++ < 24) {
@@ -382,6 +393,111 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
                                   transfer_c2d_pipeline_];
   [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                 transfer_c2d_depth_state_];
+  [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
+  [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc endEncoding];
+}
+
+void MetalRenderTargetCache::PerformDepthToColorTransfer(
+    const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
+    const Transfer& transfer) {
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!transfer_d2c_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct XferParams {
+        uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
+        uint start_tiles; uint end_tiles; uint is_float24; uint pad;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_xfer_d2c_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      // float32 -> guest 20e4 float24 (truncating).
+      static uint xe_f32_to_f20e4(float f) {
+        if (!(f > 0.0)) return 0u;
+        uint u = as_type<uint>(f);
+        if (u >= 0x40000000u) return 0xFFFFFFu;  // >= 2.0 saturates.
+        if (u < 0x38800000u) {
+          // Denormal in 20e4: shift the implicit-1 mantissa down.
+          uint shift = min(113u - (u >> 23), 24u);
+          u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
+        } else {
+          u -= 0x38000000u;
+        }
+        return (u >> 3) & 0xFFFFFFu;
+      }
+      fragment float4 xe_xfer_d2c_fs(VOut in [[stage_in]],
+                                     depth2d<float> src [[texture(0)]],
+                                     constant XferParams& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint dl = (dp.y / 16u) * p.dst_pitch + (dp.x / 80u);
+        uint tile = p.dst_base + dl;
+        if (tile < p.start_tiles || tile >= p.end_tiles) {
+          discard_fragment();
+        }
+        uint sl = tile - p.src_base;
+        uint2 sp = uint2((sl % p.src_pitch) * 80u + (dp.x % 80u),
+                         (sl / p.src_pitch) * 16u + (dp.y % 16u));
+        float d = src.read(sp);
+        uint d24 = p.is_float24 != 0u
+                       ? xe_f32_to_f20e4(d)
+                       : uint(round(saturate(d) * 16777215.0));
+        uint bits = d24 << 8;  // stencil (low byte) not emulated.
+        return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
+                      float((bits >> 16) & 0xFFu), float((bits >> 24) & 0xFFu)) /
+               255.0;
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: d2c transfer library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction = [lib newFunctionWithName:@"xe_xfer_d2c_vs"];
+    d.fragmentFunction = [lib newFunctionWithName:@"xe_xfer_d2c_fs"];
+    d.colorAttachments[0].pixelFormat = (MTLPixelFormat)kColorFormat;
+    id<MTLRenderPipelineState> ps =
+        [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) {
+      XELOGE("MetalRenderTargetCache: d2c transfer pipeline failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    transfer_d2c_pipeline_ = (__bridge_retained void*)ps;
+  }
+  if (!transfer_d2c_pipeline_) {
+    return;
+  }
+  struct XferParams {
+    uint32_t src_base, src_pitch, dst_base, dst_pitch;
+    uint32_t start_tiles, end_tiles, is_float24, pad;
+  } params{source->key().base_tiles,     source->key().GetPitchTiles(),
+           dest->key().base_tiles,       dest->key().GetPitchTiles(),
+           transfer.start_tiles,         transfer.end_tiles,
+           uint32_t(source->key().GetDepthFormat() ==
+                    xenos::DepthRenderTargetFormat::kD24FS8),
+           0};
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  transfer_d2c_pipeline_];
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
