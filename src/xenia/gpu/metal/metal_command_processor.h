@@ -225,6 +225,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
 
+  // Per-frame autorelease pool for the GPU Commands thread (cycled at every
+  // IssueSwap). The thread has no run-loop pool, so autoreleased Metal objects
+  // created while encoding (command buffers, encoders, pass descriptors,
+  // label strings) otherwise accumulate for the WHOLE session — a multi-hour
+  // play session leaked gigabytes and stalled the machine (same class as the
+  // capture path's per-owner pool fix). Opaque objc pool token.
+  void* frame_autorelease_pool_ = nullptr;
+
   // Auto-exposure death-spiral guard: JC2's exposure feedback loop reads the
   // small luminance-pyramid writebacks from RAM. Our resolve occasionally
   // delivers an ALL-ZERO tile (failed owner lookup / stale snapshot / clear

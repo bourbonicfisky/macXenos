@@ -11,6 +11,14 @@
 
 #import <Metal/Metal.h>
 
+#include <mach/mach.h>
+#include <objc/message.h>
+
+// Public ObjC ABI for manual autorelease-pool scopes that span calls (the
+// per-frame pool cycled at IssueSwap can't be an @autoreleasepool block).
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void*);
+
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -637,6 +645,12 @@ void MetalCommandProcessor::ShutdownContext() {
   render_target_cache_.reset();
   pipeline_cache_.reset();
   CommandProcessor::ShutdownContext();
+  // Drain the final frame's pool (pushed at the last IssueSwap; the teardown
+  // above autoreleased into it). Runs on the same GPU thread as IssueSwap.
+  if (frame_autorelease_pool_) {
+    objc_autoreleasePoolPop(frame_autorelease_pool_);
+    frame_autorelease_pool_ = nullptr;
+  }
 }
 
 // Depth buffer is GATED OFF for now. When enabled it clears depth to 1.0 (far)
@@ -2268,6 +2282,16 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // Cycle the GPU-thread autorelease pool once per frame: drain everything
+  // autoreleased while encoding the frame just ended (command buffers,
+  // encoders, pass descriptors, label strings — the thread has no run-loop
+  // pool, so without this they accumulate for the whole session; a multi-hour
+  // session leaked to system-wide memory pressure). Pop-then-push so this
+  // swap's own allocations land in the fresh pool.
+  if (frame_autorelease_pool_) {
+    objc_autoreleasePoolPop(frame_autorelease_pool_);
+  }
+  frame_autorelease_pool_ = objc_autoreleasePoolPush();
   // Diagnostic: XE_METAL_PEEK=addr1,addr2,... (hex) logs the first guest-RAM
   // words at each address — ground truth for what a buffer SHOULD hold (traces
   // carry the previous frame's memory; our backend never writes guest RAM).
@@ -2344,12 +2368,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       auto now = std::chrono::steady_clock::now();
       float secs =
           std::chrono::duration<float>(now - s_last_time).count();
+      // Memory-leak telemetry: physical footprint every stats tick — a
+      // steadily climbing number is a leak long before the system pauses.
+      double footprint_mb = 0.0;
+      task_vm_info_data_t vm_info;
+      mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+      if (task_info(mach_task_self(), TASK_VM_INFO,
+                    reinterpret_cast<task_info_t>(&vm_info),
+                    &vm_count) == KERN_SUCCESS) {
+        footprint_mb = double(vm_info.phys_footprint) / (1024.0 * 1024.0);
+      }
       XELOGI(
           "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
-          "{:.0f} draws/frame",
+          "{:.0f} draws/frame, {:.0f} MB footprint",
           count, 128.0f / std::max(secs, 0.001f),
           float(frame_commit_count_ - s_last_commits) / 128.0f,
-          float(draw_count_ - s_last_draws) / 128.0f);
+          float(draw_count_ - s_last_draws) / 128.0f, footprint_mb);
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
