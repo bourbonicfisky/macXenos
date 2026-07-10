@@ -31,6 +31,7 @@
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -850,11 +851,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     xenos::CompareFunction alpha_test_function =
         rb_colorcontrol.alpha_test_enable ? rb_colorcontrol.alpha_func
                                           : xenos::CompareFunction::kAlways;
+    // Gamma write conversion: a k_8_8_8_8_GAMMA render target stores piecewise-
+    // linear gamma; the PS must encode its linear output (matches D3D12).
+    // Without this the scene was written LINEAR and every downstream pass that
+    // gamma-decodes it (composite, bloom) darkened it (0.5 -> ~0.22),
+    // compounding into the near-black gameplay image.
+    if (color_bound && rt0_info.color_format ==
+                           xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      flags |= DxbcShaderTranslator::kSysFlag_ConvertColor0ToGamma;
+    }
     flags |= uint32_t(alpha_test_function)
              << DxbcShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
     system_constants.flags = flags;
     system_constants.alpha_test_reference =
         regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
+    // Texture signedness / gamma (8 bits per fetch constant): tells the PS/VS
+    // to decode gamma-signed fetches (TextureSign::kGamma) to linear on sample
+    // and handle signed formats. Left zeroed, every gamma texture (incl. the
+    // resolved scene the composite samples) was read raw.
+    auto fill_texture_signs = [&](MetalShader* shader) {
+      if (!shader) return;
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        uint32_t fc = binding.fetch_constant;
+        uint32_t signs = texture_util::SwizzleSigns(regs.GetTextureFetch(fc));
+        system_constants.texture_swizzled_signs[fc >> 2] |=
+            signs << ((fc & 3) * 8);
+      }
+    };
+    fill_texture_signs(vertex_shader);
+    fill_texture_signs(pixel_shader);
     // Color exponent bias multiplies the pixel output; its neutral value is
     // 1.0 (2^0), NOT 0 -- a zeroed struct here would multiply every color by
     // zero and render pure black. (Full per-RT bias from RB_COLOR_INFO later.)
@@ -1315,22 +1340,25 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
   if (!depth_convert_pipeline_) {
+    // Exact per-pixel read (snapshot pixel (x,y) == depth-texture pixel (x,y)):
+    // the depth texture (1280x1024, shadow-map-capable) is LARGER than most
+    // snapshots (1280x720 scene), so normalized-uv sampling squashed the whole
+    // texture into the snapshot; and a presenter-style Y-flip mirrored depth
+    // vertically relative to the (unflipped, blit-copied) color snapshots —
+    // together feeding deferred lighting wrong positions everywhere.
     NSString* src = @R"METAL(
       #include <metal_stdlib>
       using namespace metal;
-      struct VOut { float4 pos [[position]]; float2 uv; };
+      struct VOut { float4 pos [[position]]; };
       vertex VOut xe_depth_convert_vs(uint vid [[vertex_id]]) {
         VOut o;
         float2 t = float2(float((vid << 1) & 2), float(vid & 2));
         o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-        o.uv = float2(t.x, 1.0 - t.y);
         return o;
       }
       fragment float xe_depth_convert_fs(VOut in [[stage_in]],
                                          depth2d<float> d [[texture(0)]]) {
-        constexpr sampler s(coord::normalized, filter::nearest,
-                            address::clamp_to_edge);
-        return d.sample(s, in.uv);
+        return d.read(uint2(in.pos.xy));
       }
     )METAL";
     NSError* err = nil;
