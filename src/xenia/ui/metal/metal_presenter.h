@@ -57,6 +57,12 @@ class MetalPresenter : public Presenter {
 
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
 
+  // GPU-fault recovery: points the presenter at the provider's recreated
+  // command queue after the driver revoked the old one (whose submissions are
+  // ignored forever). The old queue object stays retained by the provider, so
+  // a paint racing this setter uses a dead-but-valid queue for one frame.
+  void SetCommandQueue(void* command_queue) { command_queue_ = command_queue; }
+
   bool CaptureGuestOutput(RawImage& image_out) override;
 
  protected:

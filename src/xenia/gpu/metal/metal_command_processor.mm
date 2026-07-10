@@ -797,6 +797,29 @@ void MetalCommandProcessor::EndFrameEncoder() {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
     }
+    // AUTO-RECOVERY: error code 4 (access revoked / "Ignored for causing
+    // prior/excessive GPU errors") LATCHES — the driver drops every later
+    // submission on this queue and the display freezes while the game runs
+    // on. A fresh queue restores submission. Throttled so a fault storm
+    // can't thrash queue creation.
+    if (command_buffer.error && command_buffer.error.code == 4) {
+      static uint32_t s_last_recovery_swap = 0;
+      if (swap_count_ - s_last_recovery_swap > 120 || s_last_recovery_swap == 0) {
+        s_last_recovery_swap = swap_count_;
+        auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+            graphics_system_->provider());
+        if (provider && provider->RecreateQueue()) {
+          if (auto* presenter = static_cast<xe::ui::metal::MetalPresenter*>(
+                  graphics_system_->presenter())) {
+            presenter->SetCommandQueue(provider->command_queue());
+          }
+          XELOGE(
+              "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}); "
+              "display should resume",
+              swap_count_);
+        }
+      }
+    }
   }
   // The frame's GPU work is done: snapshot textures retired mid-frame (grown)
   // are no longer referenced by any in-flight draw, so they can be freed now

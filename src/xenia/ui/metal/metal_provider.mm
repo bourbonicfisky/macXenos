@@ -27,6 +27,11 @@ MetalProvider::~MetalProvider() {
     (void)queue;
     command_queue_ = nullptr;
   }
+  for (void* retired : retired_command_queues_) {
+    id<MTLCommandQueue> queue = (__bridge_transfer id<MTLCommandQueue>)retired;
+    (void)queue;
+  }
+  retired_command_queues_.clear();
   if (device_) {
     id<MTLDevice> device = (__bridge_transfer id<MTLDevice>)device_;
     (void)device;
@@ -58,6 +63,27 @@ bool MetalProvider::Initialize() {
   command_queue_ = (__bridge_retained void*)queue;
   XELOGI("MetalProvider: initialized on {}",
          [[device name] UTF8String] ? [[device name] UTF8String] : "unknown");
+  return true;
+}
+
+bool MetalProvider::RecreateQueue() {
+  if (!device_) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+  if (!queue) {
+    XELOGE("MetalProvider: RecreateQueue failed to create a new queue");
+    return false;
+  }
+  // Keep the revoked queue alive until shutdown (a thread mid-use must see a
+  // dead-but-valid object, not freed memory).
+  if (command_queue_) {
+    retired_command_queues_.push_back(command_queue_);
+  }
+  command_queue_ = (__bridge_retained void*)queue;
+  XELOGW("MetalProvider: command queue RECREATED after driver revocation ({} retired)",
+         retired_command_queues_.size());
   return true;
 }
 

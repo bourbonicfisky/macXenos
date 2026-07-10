@@ -11,6 +11,7 @@
 #define XENIA_UI_METAL_METAL_PROVIDER_H_
 
 #include <memory>
+#include <vector>
 
 #include "xenia/ui/graphics_provider.h"
 
@@ -33,6 +34,14 @@ class MetalProvider : public GraphicsProvider {
   void* device() const { return device_; }
   void* command_queue() const { return command_queue_; }
 
+  // GPU-fault recovery: after the driver revokes the queue (every submission
+  // returns kIOGPUCommandBufferCallbackErrorSubmissionsIgnored, latched — the
+  // display freezes while the emulator runs on), only a FRESH queue restores
+  // submission. The old queue object is intentionally kept retained until
+  // shutdown so a thread mid-use (the paint thread) dereferences a
+  // dead-but-valid object instead of freed memory. Returns false on failure.
+  bool RecreateQueue();
+
   std::unique_ptr<Presenter> CreatePresenter(
       Presenter::HostGpuLossCallback host_gpu_loss_callback =
           Presenter::FatalErrorHostGpuLossCallback) override;
@@ -46,6 +55,9 @@ class MetalProvider : public GraphicsProvider {
 
   void* device_ = nullptr;         // id<MTLDevice> (retained)
   void* command_queue_ = nullptr;  // id<MTLCommandQueue> (retained)
+  // Queues revoked by the driver, kept alive until shutdown (see
+  // RecreateQueue).
+  std::vector<void*> retired_command_queues_;
 };
 
 }  // namespace metal
