@@ -795,6 +795,22 @@ void* MetalRenderTargetCache::GetResolveSourceTexture(
   resolve_dump_rectangles_.clear();
   GetResolveCopyRectanglesToDump(edram_base, row_length_used, rows, pitch_tiles,
                                  resolve_dump_rectangles_);
+  // Ownership forensics (rides XE_METAL_PROBE_RESOLVE, any value): the span
+  // and EVERY owner rect, not just the dominant — the transferless 2x->1x
+  // ownership flip hides in this list.
+  static const bool s_probe_owners =
+      std::getenv("XE_METAL_PROBE_RESOLVE") != nullptr;
+  if (s_probe_owners) {
+    XELOGW(
+        "MetalOwners @draw {}: span base={} rowlen={} rows={} pitch={} depth={}",
+        command_processor_.trace_draw_index(), edram_base, row_length_used,
+        rows, pitch_tiles, is_depth);
+    for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
+      auto* rt = static_cast<MetalRenderTarget*>(rect.render_target);
+      XELOGW("MetalOwners   rows[{}+{}] owner={}", rect.row_first, rect.rows,
+             rt ? rt->key().GetDebugName().c_str() : "(null)");
+    }
+  }
   // The span can be owned piecewise; pick the DOMINANT owner (most tiles) —
   // e.g. a 64-tile quarter-scene resolve whose first 4 tiles belong to a tiny
   // R32Float exposure RT must not take its snapshot format from the sliver.

@@ -1469,6 +1469,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint32_t(clip.clip_disable), viewport_info.ndc_scale[1],
           viewport_info.ndc_offset[1],
           pixel_shader ? uint32_t(pixel_shader->ucode_data_hash() >> 32) : 0);
+      // The draw's pixel-shader fetches: base + format + snapshot-hit, the
+      // composite-input audit.
+      if (pixel_shader && render_target_cache_) {
+        for (const auto& binding :
+             pixel_shader->GetTextureBindingsAfterTranslation()) {
+          auto f = regs.GetTextureFetch(binding.fetch_constant);
+          uint32_t fetch_base = f.base_address << 12;
+          XELOGW("MetalVP   fetch fc={} base={:08X}{} fmt={} {}x{}",
+                 binding.fetch_constant, fetch_base,
+                 render_target_cache_->GetResolveSnapshot(fetch_base)
+                     ? " [SNAP]"
+                     : "",
+                 uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1);
+        }
+      }
     }
 
     // Set the host viewport from the integer part.
