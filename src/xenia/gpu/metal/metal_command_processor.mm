@@ -385,6 +385,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
+//   XE_METAL_NO_RESOLVE_COMMIT=1   disable the default commit-before-resolve
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
 //   XE_METAL_EXPO_TRACE=hash  per-swap exposure-loop telemetry (MetalExpo
 //                             lines: wb value / tonemap-PS c0 / present luma)
@@ -464,7 +465,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
       "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
-      "XE_METAL_CHAIN_TRACE",
+      "XE_METAL_CHAIN_TRACE",   "XE_METAL_NO_RESOLVE_COMMIT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
   };
@@ -783,6 +784,7 @@ void MetalCommandProcessor::EndFrameEncoder() {
       (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
   frame_command_buffer_ = nullptr;
   ++frame_commit_count_;
+  draws_since_commit_ = 0;
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
   // A GPU fault (invalid resource access from an untracked bindless hazard, a
@@ -1876,6 +1878,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   frame_has_render_ = true;
   ++draw_count_;
+  ++draws_since_commit_;
   if (draw_count_ == 1 || (draw_count_ % 2000) == 0) {
     XELOGI("MetalCommandProcessor: encoded draw #{} (prim {}, {} indices, {})",
            draw_count_, uint32_t(prim_type), index_count,
@@ -2033,8 +2036,22 @@ bool MetalCommandProcessor::IssueCopy() {
                                  resolve_info)) {
     return true;
   }
+  // Commit encoded draws BEFORE processing the resolve (default-on;
+  // XE_METAL_NO_RESOLVE_COMMIT=1 restores the old whole-frame buffer for A/B).
+  // Found via the resolve-owner probe: sessions WITHOUT a submission boundary
+  // here page-faulted 60-84x/session (the recurring 'draws@N' +
+  // 'rtcache:resolve-color-snapshot' fault) and every faulted command buffer
+  // DISCARDED its encoded work — scene color lost -> the black flicker bursts.
+  // With the boundary: 0 faults, no flicker, ~4 commits/frame at an unchanged
+  // 28.4 fps (measured live). This is also the XeniOS submission shape:
+  // command buffers split at hazard boundaries.
+  static const bool s_no_resolve_commit =
+      std::getenv("XE_METAL_NO_RESOLVE_COMMIT") != nullptr;
+  if (!s_no_resolve_commit && draws_since_commit_ > 0) {
+    EndFrameEncoder();
+  }
   // CRITICAL: the resolve paths below all guard on frame_command_buffer_. If
-  // the frame was committed just before this resolve (mid-frame hazard flush,
+  // the frame was committed (just above, or by a mid-frame hazard flush,
   // writeback wait, --serialize_draw_range), the buffer is NULL and every
   // resolve op would be SILENTLY SKIPPED — the consumer then samples a stale
   // or never-written snapshot (missing scene / transient black blips; found

@@ -222,6 +222,10 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
+  // Draws encoded into the current frame command buffer since its last
+  // commit — gates the commit-before-resolve submission boundary.
+  uint32_t draws_since_commit_ = 0;
+
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
 
