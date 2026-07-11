@@ -61,8 +61,8 @@ Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
   // Read back the most recently refreshed guest output mailbox texture (used by
   // the headless trace dump to dump the rendered frame). Consume the mailbox to
-  // pin the ready image, blit it (Private BGRA8) into a shared staging buffer,
-  // then copy into the RawImage as R8 G8 B8 X8 (swapping B/R from BGRA).
+  // pin the ready image, blit it (Private RGBA8) into a shared staging buffer,
+  // then copy into the RawImage as R8 G8 B8 X8 (bytes already RGBA).
   void* tex_ptr = nullptr;
   uint32_t width = 0, height = 0;
   {
@@ -109,9 +109,9 @@ destinationBytesPerImage:row_bytes * height];
   image_out.data.resize(row_bytes * height);
   const uint8_t* src = static_cast<const uint8_t*>(staging.contents);
   for (size_t i = 0; i < size_t(width) * height; ++i) {
-    image_out.data[i * 4 + 0] = src[i * 4 + 2];  // B -> R
+    image_out.data[i * 4 + 0] = src[i * 4 + 0];  // R
     image_out.data[i * 4 + 1] = src[i * 4 + 1];  // G
-    image_out.data[i * 4 + 2] = src[i * 4 + 0];  // R -> B
+    image_out.data[i * 4 + 2] = src[i * 4 + 2];  // B
     image_out.data[i * 4 + 3] = 255;
   }
   return true;
@@ -178,14 +178,14 @@ void* MetalPresenter::EnsureGuestOutputTexture(uint32_t index, uint32_t width,
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                    width:width
                                   height:height
                                mipmapped:NO];
-  // BGRA8 matches the backend's color render target so IssueSwap can copy it in
-  // directly, and the drawable so the present blit is format-clean.
-  // Written by the producer's refresher (render target) and sampled by the
-  // present blit (shader read).
+  // RGBA8 matches the backend's canonical color render-target storage (bytes
+  // == guest EDRAM bytes) so IssueSwap can blit it in directly; the present
+  // pass SAMPLES it into the BGRA8 drawable, so the format difference there is
+  // fine. Written by the producer's refresher and sampled by the present blit.
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];

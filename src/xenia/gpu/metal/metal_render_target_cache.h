@@ -37,7 +37,14 @@ class MetalCommandProcessor;
 // Metal objects held as opaque void* (retained) so the header stays C++.
 class MetalRenderTargetCache final : public RenderTargetCache {
  public:
-  // MTLPixelFormatBGRA8Unorm — matches the drawable and the present blit.
+  // MTLPixelFormatRGBA8Unorm — THE CANONICAL COLOR STORAGE. Storage bytes
+  // equal guest EDRAM bytes for drawn 8888 content (shader .r = guest
+  // byte0 = guest red), so every raw crossing (EDRAM dump, snapshot
+  // restore, guest-RAM writeback) is a straight byte copy, and the
+  // reinterpret passes (c2d/d2c/c2f/f2c, resolve clears) all use word =
+  // r | g<<8 | b<<16 | a<<24. Present samples logically, so the BGRA8
+  // drawable is unaffected. (Was BGRA8: drawn content then disagreed
+  // with the raw crossings by an R<->B swap.)
   static const uint64_t kColorFormat;
   // MTLPixelFormatDepth32Float — depth-only (no stencil yet).
   static const uint64_t kDepthFormat;

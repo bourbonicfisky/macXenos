@@ -23,7 +23,7 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
-const uint64_t MetalRenderTargetCache::kColorFormat = MTLPixelFormatBGRA8Unorm;
+const uint64_t MetalRenderTargetCache::kColorFormat = MTLPixelFormatRGBA8Unorm;
 const uint64_t MetalRenderTargetCache::kDepthFormat =
     MTLPixelFormatDepth32Float;
 
@@ -35,7 +35,7 @@ MTLPixelFormat ColorResourceFormatToMetal(
   switch (format) {
     case xenos::ColorRenderTargetFormat::k_8_8_8_8:
     case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
-      return MTLPixelFormatBGRA8Unorm;
+      return MTLPixelFormatRGBA8Unorm;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
       return MTLPixelFormatRGB10A2Unorm;
@@ -55,7 +55,7 @@ MTLPixelFormat ColorResourceFormatToMetal(
     case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
       return MTLPixelFormatRG32Float;
     default:
-      return MTLPixelFormatBGRA8Unorm;
+      return MTLPixelFormatRGBA8Unorm;
   }
 }
 }  // namespace
@@ -580,9 +580,10 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
-        // BGRA8 texel bytes back to the raw EDRAM word; depth in bits [8,32).
-        uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
-                    (uint(round(c.r * 255.0)) << 16) |
+        // Canonical channel order: logical .r holds guest byte0 (RGBA8
+        // storage == guest EDRAM bytes); depth in bits [8,32).
+        uint bits = uint(round(c.r * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
+                    (uint(round(c.b * 255.0)) << 16) |
                     (uint(round(c.a * 255.0)) << 24);
         uint d24 = bits >> 8;
         DepthOut o;
@@ -852,8 +853,9 @@ void MetalRenderTargetCache::PerformColorReinterpretTransfer(
           discard_fragment();
         }
         float4 c = src.read(sp, 0);
-        uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
-                    (uint(round(c.r * 255.0)) << 16) |
+        // Canonical: logical .r = guest byte0 (RGBA8 storage).
+        uint bits = uint(round(c.r * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
+                    (uint(round(c.b * 255.0)) << 16) |
                     (uint(round(c.a * 255.0)) << 24);
         return float4(as_type<float>(bits), 0.0, 0.0, 0.0);
       }
@@ -867,8 +869,9 @@ void MetalRenderTargetCache::PerformColorReinterpretTransfer(
           discard_fragment();
         }
         uint bits = as_type<uint>(src.read(sp, 0).x);
-        return float4(float((bits >> 16) & 0xFFu), float((bits >> 8) & 0xFFu),
-                      float(bits & 0xFFu), float(bits >> 24)) / 255.0;
+        // Canonical: guest byte0 -> logical .r (matches d2c).
+        return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
+                      float((bits >> 16) & 0xFFu), float(bits >> 24)) / 255.0;
       }
     )METAL";
     NSError* err = nil;
@@ -1459,10 +1462,11 @@ void MetalRenderTargetCache::PerformResolveClear(
       if (!clear_color_pipeline_ || owner->pixel_format() != kColorFormat) {
         continue;
       }
-      // Raw 8888 EDRAM word -> BGRA8 channels (same layout as the transfers).
-      params.color[0] = float((clear_value >> 16) & 0xFF) / 255.0f;  // R
+      // Raw 8888 EDRAM word -> canonical logical channels (guest byte0 = .r,
+      // RGBA8 storage == guest bytes; matches d2c/c2d/c2f/f2c and the dump).
+      params.color[0] = float(clear_value & 0xFF) / 255.0f;          // R
       params.color[1] = float((clear_value >> 8) & 0xFF) / 255.0f;   // G
-      params.color[2] = float(clear_value & 0xFF) / 255.0f;          // B
+      params.color[2] = float((clear_value >> 16) & 0xFF) / 255.0f;  // B
       params.color[3] = float(clear_value >> 24) / 255.0f;           // A
       MTLRenderPassDescriptor* pass =
           [MTLRenderPassDescriptor renderPassDescriptor];

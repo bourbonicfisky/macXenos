@@ -299,7 +299,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
               } else if (owner.pixel_format == uint64_t(MTLPixelFormatR32Float)) {
                 std::memcpy(&word, p, 4);
               } else {
-                // BGRA8 bytes -> raw EDRAM word (b|g<<8|r<<16|a<<24).
+                // Canonical RGBA8 storage: bytes ARE the guest EDRAM word.
                 word = uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
                        (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
               }
@@ -2621,7 +2621,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // frame of latency guarantees completion without a wait) and logs sudden
   // luminance collapses/recoveries — timestamps the black frames so they can
   // be correlated with hazard flushes / resolves / writebacks in the log.
-  if (source_rt && source_rt.pixelFormat == MTLPixelFormatBGRA8Unorm) {
+  if (source_rt && source_rt.pixelFormat == MTLPixelFormatRGBA8Unorm) {
     static id<MTLBuffer> s_luma_rb = nil;
     static uint32_t s_luma_w = 0;
     static bool s_luma_pending = false;
