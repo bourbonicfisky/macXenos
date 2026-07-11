@@ -2045,9 +2045,15 @@ bool MetalCommandProcessor::IssueCopy() {
   // With the boundary: 0 faults, no flicker, ~4 commits/frame at an unchanged
   // 28.4 fps (measured live). This is also the XeniOS submission shape:
   // command buffers split at hazard boundaries.
+  // LARGE resolves only: a boundary at EVERY resolve measured 39 commits/frame
+  // -> 23.1 fps (-19%), while the proven-0-fault probe configuration bounded
+  // only the scene-sized resolve. 1MB splits the scene G-buffers/frontbuffer
+  // (1.9-3.7MB) from the pyramid/quarter chain (4-256KB).
   static const bool s_no_resolve_commit =
       std::getenv("XE_METAL_NO_RESOLVE_COMMIT") != nullptr;
-  if (!s_no_resolve_commit && draws_since_commit_ > 0) {
+  constexpr uint32_t kResolveCommitMinBytes = 1024 * 1024;
+  if (!s_no_resolve_commit && draws_since_commit_ > 0 &&
+      resolve_info.copy_dest_extent_length >= kResolveCommitMinBytes) {
     EndFrameEncoder();
   }
   // CRITICAL: the resolve paths below all guard on frame_command_buffer_. If
