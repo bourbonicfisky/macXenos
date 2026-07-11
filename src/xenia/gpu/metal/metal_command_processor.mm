@@ -1440,19 +1440,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const char* v = std::getenv("XE_METAL_EXPO_TRACE");
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
-    if (s_vp_ps_hash && pixel_shader &&
-        pixel_shader->ucode_data_hash() == s_vp_ps_hash) {
+    // XE_METAL_VP_RANGE=A,B additionally logs EVERY draw in that trace-draw
+    // range (the window-offset placement audit over the post-tonemap chain).
+    static const auto s_vp_range = []() -> std::pair<int64_t, int64_t> {
+      const char* v = std::getenv("XE_METAL_VP_RANGE");
+      if (!v) return {-1, -1};
+      int64_t a = 0, b = 0;
+      if (sscanf(v, "%lld,%lld", &a, &b) != 2) return {-1, -1};
+      return {a, b};
+    }();
+    int64_t vp_draw_index = int64_t(trace_draw_index_) - 1;
+    bool vp_log = (s_vp_ps_hash && pixel_shader &&
+                   pixel_shader->ucode_data_hash() == s_vp_ps_hash) ||
+                  (vp_draw_index >= s_vp_range.first &&
+                   vp_draw_index <= s_vp_range.second);
+    if (vp_log) {
       auto win_off = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      auto sc_mode = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+      auto clip = regs.Get<reg::PA_CL_CLIP_CNTL>();
       XELOGW(
-          "MetalVP draw {}: vp=({},{} {}x{}) win_off=({},{}) "
-          "vport_y_off={} vport_y_scale={} ndc_y=(s{} o{})",
-          trace_draw_index_ - 1, viewport_info.xy_offset[0],
-          viewport_info.xy_offset[1], viewport_info.xy_extent[0],
-          viewport_info.xy_extent[1], int32_t(win_off.window_x_offset),
-          int32_t(win_off.window_y_offset),
-          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
-          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
-          viewport_info.ndc_scale[1], viewport_info.ndc_offset[1]);
+          "MetalVP draw {}: prim={} geo={} vp=({},{} {}x{}) win_off=({},{}) "
+          "vtx_wofs_en={} clip_dis={} ndc_y=(s{} o{}) ps={:08X}",
+          vp_draw_index, uint32_t(prim_type), use_geometry_emulation ? 1 : 0,
+          viewport_info.xy_offset[0], viewport_info.xy_offset[1],
+          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
+          int32_t(win_off.window_x_offset), int32_t(win_off.window_y_offset),
+          uint32_t(sc_mode.vtx_window_offset_enable),
+          uint32_t(clip.clip_disable), viewport_info.ndc_scale[1],
+          viewport_info.ndc_offset[1],
+          pixel_shader ? uint32_t(pixel_shader->ucode_data_hash() >> 32) : 0);
     }
 
     // Set the host viewport from the integer part.
