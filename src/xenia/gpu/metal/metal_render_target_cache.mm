@@ -1087,8 +1087,23 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
   bool any = false;
   for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
     auto* owner = static_cast<MetalRenderTarget*>(rect.render_target);
-    if (!owner || owner->key().is_depth ||
-        owner->pixel_format() != dest_pixel_format) {
+    if (!owner || owner->key().is_depth) {
+      continue;
+    }
+    // Same-format owners copy through; the one CONVERSION the guest leans on
+    // (auto-exposure) is k_8_8_8_8 EDRAM resolved to a k_32_FLOAT dest — the
+    // pass's float4 read into an R32Float attachment keeps .r, the hardware
+    // rule. Other cross-format pairs stay skipped until a title demands them.
+    if (owner->pixel_format() != dest_pixel_format &&
+        !(dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
+          owner->pixel_format() == kColorFormat)) {
+      static uint32_t s_skip_convert_logs = 0;
+      if (s_skip_convert_logs++ < 8) {
+        XELOGW(
+            "MetalRenderTargetCache: SKIP color resolve owner fmt {} -> dest "
+            "fmt {} (unsupported conversion)",
+            owner->pixel_format(), dest_pixel_format);
+      }
       continue;
     }
     uint32_t owner_base = owner->key().base_tiles;

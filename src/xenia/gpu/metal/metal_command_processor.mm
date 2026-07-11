@@ -2059,6 +2059,62 @@ bool MetalCommandProcessor::IssueCopy() {
           span_base, span_row_length, span_rows, span_pitch, /*is_depth=*/false,
           &src_pixel_format);
       if (probe) {
+        // Diagnostic: XE_METAL_PROBE_RESOLVE=<hex dest base> reads back the
+        // OWNER texture's top-left region at resolve time (forces a mid-frame
+        // commit) — splits "the producing draw rendered zero" from "the
+        // resolve remap reads the wrong place".
+        static const char* s_probe_resolve =
+            std::getenv("XE_METAL_PROBE_RESOLVE");
+        if (s_probe_resolve &&
+            uint32_t(strtoul(s_probe_resolve, nullptr, 16)) ==
+                resolve_info.copy_dest_base) {
+          EndFrameEncoder();
+          PrepareTransferCommandBuffer();
+          id<MTLTexture> owner_tex = (__bridge id<MTLTexture>)probe;
+          uint32_t pw = std::min<uint32_t>(uint32_t(owner_tex.width), 64);
+          id<MTLBuffer> pstage =
+              [owner_tex.device newBufferWithLength:pw * 4 * 4
+                                            options:MTLResourceStorageModeShared];
+          if (pstage) {
+            id<MTLCommandQueue> pq =
+                (__bridge id<MTLCommandQueue>)static_cast<xe::ui::metal::MetalProvider*>(
+                    graphics_system_->provider())->command_queue();
+            id<MTLCommandBuffer> pcb = [pq commandBuffer];
+            id<MTLBlitCommandEncoder> pbl = [pcb blitCommandEncoder];
+            [pbl copyFromTexture:owner_tex
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(pw, 4, 1)
+                         toBuffer:pstage
+                destinationOffset:0
+           destinationBytesPerRow:pw * 4
+         destinationBytesPerImage:pw * 4 * 4];
+            [pbl endEncoding];
+            [pcb commit];
+            [pcb waitUntilCompleted];
+            const uint32_t* w = static_cast<const uint32_t*>(pstage.contents);
+            XELOGW(
+                "MetalProbeResolve {:08X}: owner {}x{} row0 {:08X} {:08X} "
+                "{:08X} {:08X} row2 {:08X} {:08X}",
+                resolve_info.copy_dest_base, uint32_t(owner_tex.width),
+                uint32_t(owner_tex.height), w[0], w[1], w[8], w[32],
+                w[pw * 2], w[pw * 2 + 8]);
+          }
+        }
+        // Honor the GUEST's copy_dest_format: the Xenos resolve CONVERTS. The
+        // auto-exposure luminance pyramid resolves k_8_8_8_8 EDRAM into
+        // k_32_FLOAT (fmt 36) textures the game (and the next pyramid level)
+        // reads as f32 — registering a BGRA8-content snapshot instead made
+        // consumers decode BGRA8 bytes as floats (denormals ≈ 0): pyramid
+        // levels 2+ rendered genuinely black and the CPU exposure loop read
+        // ~0 (the black flicker/darkness). R32Float attachments keep .r of
+        // the sampled float4 — exactly the hardware's 8888→k_32_FLOAT rule.
+        uint64_t dest_pixel_format = src_pixel_format;
+        if (resolve_info.copy_dest_info.copy_dest_format ==
+            xenos::ColorFormat::k_32_FLOAT) {
+          dest_pixel_format = uint64_t(MTLPixelFormatR32Float);
+        }
         uint32_t strip_y_offset = 0;
         void* parent_snap = render_target_cache_->FindContainingSnapshot(
             resolve_info.copy_dest_base, &strip_y_offset);
@@ -2066,16 +2122,22 @@ bool MetalCommandProcessor::IssueCopy() {
         bool is_new_snapshot = false;
         if (!snap) {
           snap = render_target_cache_->EnsureResolveSnapshot(
-              resolve_info.copy_dest_base, rw, rh, src_pixel_format);
+              resolve_info.copy_dest_base, rw, rh, dest_pixel_format);
           is_new_snapshot = snap != nullptr;
           strip_y_offset = 0;
+        }
+        // A coalesced parent strip may predate the format decision — always
+        // render in the snapshot texture's REAL format.
+        if (snap) {
+          dest_pixel_format =
+              uint64_t(((__bridge id<MTLTexture>)snap).pixelFormat);
         }
         bool resolved =
             snap && render_target_cache_->ResolveColorToSnapshot(
                         frame_command_buffer_, span_base, span_row_length,
                         span_rows, span_pitch,
                         uint32_t(resolve_info.color_edram_info.msaa_samples),
-                        snap, src_pixel_format, rw, rh, strip_y_offset);
+                        snap, dest_pixel_format, rw, rh, strip_y_offset);
         if (resolved && is_new_snapshot) {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh);
@@ -2087,8 +2149,8 @@ bool MetalCommandProcessor::IssueCopy() {
         static const bool s_no_writeback =
             std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
         if (resolved && !s_no_writeback && rw * rh * 4 <= 256 * 1024 &&
-            (src_pixel_format == MetalRenderTargetCache::kColorFormat ||
-             src_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
+            (dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
+             dest_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
           id<MTLDevice> wb_device =
               ((__bridge id<MTLTexture>)snap).device;
           id<MTLBuffer> staging =
