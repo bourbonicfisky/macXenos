@@ -68,6 +68,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // needed) so ownership-transfer blits / snapshot uploads can be encoded.
   void* PrepareTransferCommandBuffer();
 
+  // Diagnostics: the current trace draw index (for correlating RT-cache
+  // transfer logs with manifest/capture draw indices).
+  uint32_t trace_draw_index() const { return trace_draw_index_; }
+
  private:
   bool SetupContext() override;
   void ShutdownContext() override;

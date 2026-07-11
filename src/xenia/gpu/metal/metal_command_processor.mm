@@ -389,6 +389,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
 //   XE_METAL_EXPO_TRACE=hash  per-swap exposure-loop telemetry (MetalExpo
 //                             lines: wb value / tonemap-PS c0 / present luma)
+//   XE_METAL_DUMP_RT=N        dump bound color RT texture to /tmp at draw N
 //   XE_METAL_CHAIN_TRACE=hex,hex  per-swap 4px fingerprint of each base's
 //                             snapshot (MetalChain lines; find what alternates)
 //   XE_METAL_FLUSH_ALL_UPLOADS=1   flush before any mid-frame upload (hazard A/B)
@@ -466,6 +467,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
       "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
       "XE_METAL_CHAIN_TRACE",   "XE_METAL_NO_RESOLVE_COMMIT",
+      "XE_METAL_DUMP_RT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
   };
@@ -1430,6 +1432,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     system_constants.vertex_index_min = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
     system_constants.vertex_index_max = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
 
+    // Diagnostic (rides XE_METAL_EXPO_TRACE=<ps hash>): log the host viewport
+    // + window-offset registers for draws using that pixel shader — the
+    // tonemap half-screen blocks landed at different texture rows while the
+    // guest reuses the same EDRAM tiles for both halves.
+    static const uint64_t s_vp_ps_hash = [] {
+      const char* v = std::getenv("XE_METAL_EXPO_TRACE");
+      return v ? strtoull(v, nullptr, 16) : 0ull;
+    }();
+    if (s_vp_ps_hash && pixel_shader &&
+        pixel_shader->ucode_data_hash() == s_vp_ps_hash) {
+      auto win_off = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      XELOGW(
+          "MetalVP draw {}: vp=({},{} {}x{}) win_off=({},{}) "
+          "vport_y_off={} vport_y_scale={} ndc_y=(s{} o{})",
+          trace_draw_index_ - 1, viewport_info.xy_offset[0],
+          viewport_info.xy_offset[1], viewport_info.xy_extent[0],
+          viewport_info.xy_extent[1], int32_t(win_off.window_x_offset),
+          int32_t(win_off.window_y_offset),
+          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+          viewport_info.ndc_scale[1], viewport_info.ndc_offset[1]);
+    }
+
     // Set the host viewport from the integer part.
     if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
       MTLViewport vp;
@@ -1883,6 +1908,56 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     XELOGI("MetalCommandProcessor: encoded draw #{} (prim {}, {} indices, {})",
            draw_count_, uint32_t(prim_type), index_count,
            index_buffer_info ? "indexed" : "auto");
+  }
+  // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
+  // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
+  // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture
+  // pipeline (splits "content mislaid in the texture" from "the dump/EDRAM
+  // mapping mislays it").
+  static const int64_t s_dump_rt_at = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_RT");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  if (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at) {
+    EndFrameEncoder();
+    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
+    if (rt_ptr) {
+      id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
+      uint32_t tw = uint32_t(rt_tex.width), th = uint32_t(rt_tex.height);
+      id<MTLBuffer> rb =
+          [rt_tex.device newBufferWithLength:size_t(tw) * th * 4
+                                     options:MTLResourceStorageModeShared];
+      id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->command_queue();
+      if (rb && dq) {
+        id<MTLCommandBuffer> dcb = [dq commandBuffer];
+        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+        [dbl copyFromTexture:rt_tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(tw, th, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:tw * 4
+     destinationBytesPerImage:size_t(tw) * th * 4];
+        [dbl endEncoding];
+        [dcb commit];
+        [dcb waitUntilCompleted];
+        std::string path = fmt::format("/tmp/xe_rt_{}.ppm", s_dump_rt_at);
+        FILE* f = fopen(path.c_str(), "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", tw, th);
+          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
+          for (size_t i = 0; i < size_t(tw) * th; ++i) {
+            fwrite(px + i * 4, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
+          }
+          fclose(f);
+          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{})", path, tw, th);
+        }
+      }
+    }
   }
   return true;
 }

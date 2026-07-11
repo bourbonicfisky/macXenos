@@ -368,6 +368,15 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     const Transfer& transfer) {
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  // The half-height double-stack forensics: which draw triggers a cross-MSAA
+  // transfer over which tiles (throttled; replay has dozens per frame).
+  static uint32_t s_x2x_logs = 0;
+  if (s_x2x_logs++ < 256) {
+    XELOGW("MetalX2X @draw {}: {} -> {} tiles [{},{})",
+           command_processor_.trace_draw_index(),
+           source->key().GetDebugName(), dest->key().GetDebugName(),
+           transfer.start_tiles, transfer.end_tiles);
+  }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   bool is_depth = dest->key().is_depth != 0;
