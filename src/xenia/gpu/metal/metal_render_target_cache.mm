@@ -269,6 +269,13 @@ void MetalRenderTargetCache::PerformTransfers(
           blit = [cb blitCommandEncoder];
           blit.label = @"rtcache:transfer-blit";
         }
+        static uint32_t s_blit_logs = 0;
+        if (s_blit_logs++ < 256) {
+          XELOGW("MetalXferBlit @draw {}: {} -> {} tiles [{},{})",
+                 command_processor_.trace_draw_index(),
+                 src_key.GetDebugName(), dest_key.GetDebugName(),
+                 transfer.start_tiles, transfer.end_tiles);
+        }
         id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
         id<MTLTexture> dst_tex = (__bridge id<MTLTexture>)dest->texture();
         uint32_t tile_w_samples = src_key.Is64bpp() ? 40 : 80;
