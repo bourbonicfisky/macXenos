@@ -227,6 +227,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                    RenderTarget* source_rt,
                                    RenderTarget* dest_rt,
                                    const Transfer& transfer);
+  // Color<->color 32bpp reinterpret (BGRA8 raw bytes <-> f32 bits of the same
+  // EDRAM word): k_8_8_8_8-keyed and k_32_FLOAT-keyed RTs aliasing the same
+  // tiles (JC2's auto-exposure luminance pyramid).
+  void PerformColorReinterpretTransfer(const void* command_buffer,
+                                       RenderTarget* source_rt,
+                                       RenderTarget* dest_rt,
+                                       const Transfer& transfer);
 
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
@@ -243,6 +250,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_x2x_depth_state_ = nullptr;    // id<MTLDepthStencilState>.
   std::unordered_map<uint64_t, void*> transfer_x2x_color_pipelines_;
   void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
+  // Color reinterpret transfers (BGRA8 <-> R32Float containers of one word).
+  void* transfer_reint_c2f_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
+  void* transfer_reint_f2c_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* resolve_c2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* resolve_d2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* clear_color_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.

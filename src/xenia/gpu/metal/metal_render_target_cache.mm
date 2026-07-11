@@ -330,6 +330,24 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
                                     transfer);
+      } else if (!src_key.is_depth && !dest_key.is_depth &&
+                 !src_key.Is64bpp() && !dest_key.Is64bpp() &&
+                 ((source->pixel_format() == kColorFormat &&
+                   dest->pixel_format() == uint64_t(MTLPixelFormatR32Float)) ||
+                  (source->pixel_format() == uint64_t(MTLPixelFormatR32Float) &&
+                   dest->pixel_format() == kColorFormat))) {
+        // Color<->color 32bpp REINTERPRET: the EDRAM word is identical, only
+        // the host container differs (BGRA8 bytes vs f32 bits). JC2's
+        // auto-exposure pyramid renders into k_32_FLOAT-keyed tiles that then
+        // alias k_8_8_8_8 keys (and vice versa); this was the last log-skipped
+        // transfer class — the luminance content stayed stranded in the other
+        // key's texture and the exposure loop read zeros (the black flicker).
+        if (blit) {
+          [blit endEncoding];
+          blit = nil;
+        }
+        PerformColorReinterpretTransfer((__bridge const void*)cb, source, dest,
+                                        transfer);
       } else {
         static uint32_t s_skips = 0;
         if (s_skips++ < 24) {
@@ -783,6 +801,132 @@ void* MetalRenderTargetCache::GetResolveSourceTexture(
     *pixel_format_out = best->pixel_format();
   }
   return best->texture();
+}
+
+void MetalRenderTargetCache::PerformColorReinterpretTransfer(
+    const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
+    const Transfer& transfer) {
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  bool to_float = dest->pixel_format() == uint64_t(MTLPixelFormatR32Float);
+  if (!transfer_reint_c2f_pipeline_ || !transfer_reint_f2c_pipeline_) {
+    // Same tile arithmetic as the c2d/d2c reinterprets, but color tiles have
+    // no 40-sample column swap; the EDRAM 32-bit word itself is preserved.
+    // Byte order matches the c2d reconstruction: word = b|g<<8|r<<16|a<<24.
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct XferParams {
+        uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
+        uint start_tiles; uint end_tiles; uint unused; uint shifts;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_xfer_reint_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      static uint2 xe_reint_src_pixel(uint2 dp, constant XferParams& p,
+                                      thread bool& in_range) {
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
+        uint tile = p.dst_base + dl;
+        in_range = tile >= p.start_tiles && tile < p.end_tiles;
+        uint sl = tile - p.src_base;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        return uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                     ss.y >> ((p.shifts >> 12) & 15u));
+      }
+      // BGRA8 raw bytes -> the same EDRAM word as f32 bits.
+      fragment float4 xe_xfer_c2f_fs(VOut in [[stage_in]],
+                                     texture2d<float> src [[texture(0)]],
+                                     constant XferParams& p [[buffer(0)]]) {
+        bool in_range;
+        uint2 sp = xe_reint_src_pixel(uint2(in.pos.xy), p, in_range);
+        if (!in_range || sp.x >= src.get_width() || sp.y >= src.get_height()) {
+          discard_fragment();
+        }
+        float4 c = src.read(sp, 0);
+        uint bits = uint(round(c.b * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
+                    (uint(round(c.r * 255.0)) << 16) |
+                    (uint(round(c.a * 255.0)) << 24);
+        return float4(as_type<float>(bits), 0.0, 0.0, 0.0);
+      }
+      // f32 bits -> the same EDRAM word as BGRA8 raw bytes.
+      fragment float4 xe_xfer_f2c_fs(VOut in [[stage_in]],
+                                     texture2d<float> src [[texture(0)]],
+                                     constant XferParams& p [[buffer(0)]]) {
+        bool in_range;
+        uint2 sp = xe_reint_src_pixel(uint2(in.pos.xy), p, in_range);
+        if (!in_range || sp.x >= src.get_width() || sp.y >= src.get_height()) {
+          discard_fragment();
+        }
+        uint bits = as_type<uint>(src.read(sp, 0).x);
+        return float4(float((bits >> 16) & 0xFFu), float((bits >> 8) & 0xFFu),
+                      float(bits & 0xFFu), float(bits >> 24)) / 255.0;
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: reinterpret transfer library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    auto make_pipeline = [&](NSString* fs, MTLPixelFormat rt_format) -> void* {
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_xfer_reint_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:fs];
+      d.colorAttachments[0].pixelFormat = rt_format;
+      NSError* perr = nil;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&perr];
+      if (!ps) {
+        XELOGE("MetalRenderTargetCache: reinterpret pipeline failed: {}",
+               perr ? perr.localizedDescription.UTF8String : "?");
+        return nullptr;
+      }
+      return (__bridge_retained void*)ps;
+    };
+    transfer_reint_c2f_pipeline_ =
+        make_pipeline(@"xe_xfer_c2f_fs", MTLPixelFormatR32Float);
+    transfer_reint_f2c_pipeline_ =
+        make_pipeline(@"xe_xfer_f2c_fs", (MTLPixelFormat)kColorFormat);
+  }
+  void* pipeline =
+      to_float ? transfer_reint_c2f_pipeline_ : transfer_reint_f2c_pipeline_;
+  if (!pipeline) {
+    return;
+  }
+  uint32_t sxs, sys, dxs, dys;
+  GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
+  GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
+  struct XferParams {
+    uint32_t src_base, src_pitch, dst_base, dst_pitch;
+    uint32_t start_tiles, end_tiles, unused, shifts;
+  } params{source->key().base_tiles, source->key().GetPitchTiles(),
+           dest->key().base_tiles,   dest->key().GetPitchTiles(),
+           transfer.start_tiles,     transfer.end_tiles,
+           0,                        dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:transfer-reinterpret";
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
+  [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc endEncoding];
 }
 
 bool MetalRenderTargetCache::ResolveDepthToSnapshot(
