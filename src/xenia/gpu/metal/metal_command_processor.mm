@@ -386,6 +386,10 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
 //   XE_METAL_NO_RESOLVE_COMMIT=1   disable the default commit-before-resolve
+//   XE_METAL_STAGE3=1         guest-RAM resolve reads/writes (stage 3; default
+//                             off until the tiled writeback matches hardware)
+//   XE_METAL_COLOR_BRIDGE=1    restore the color RT-as-texture bridge (A/B;
+//                             default = fetches read guest RAM, stage 3)
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
 //   XE_METAL_EXPO_TRACE=hash  per-swap exposure-loop telemetry (MetalExpo
 //                             lines: wb value / tonemap-PS c0 / present luma)
@@ -467,6 +471,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
       "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
       "XE_METAL_CHAIN_TRACE",   "XE_METAL_NO_RESOLVE_COMMIT",
+      "XE_METAL_COLOR_BRIDGE",  "XE_METAL_STAGE3",
       "XE_METAL_DUMP_RT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
@@ -1322,6 +1327,41 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // STAGE 3 lazy writeback flush: if this draw SAMPLES a range a pending
+  // resolve writeback covers (same-frame consumer — e.g. each luminance
+  // pyramid level reads the previous level's resolve), commit + drain so the
+  // fetch's guest-RAM upload sees the resolved content. MUST run before the
+  // encoder opens (a flush here would kill an open encoder — the
+  // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
+  // nothing: their writebacks drained at a prior swap.
+  if (!pending_writebacks_.empty()) {
+    auto fetch_overlaps_writeback = [&](MetalShader* shader) {
+      if (!shader) return false;
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        auto f = regs.GetTextureFetch(binding.fetch_constant);
+        uint32_t fbase = f.base_address << 12;
+        if (!fbase) continue;
+        // Conservative extent: aligned pitch x height x 4B (over-flushing is
+        // harmless; under-flushing reads stale RAM).
+        uint32_t fpitch = f.pitch ? (f.pitch << 5) : (f.size_2d.width + 32);
+        uint32_t fbytes = fpitch * (f.size_2d.height + 1) * 4;
+        uint32_t fend = fbase + std::min<uint32_t>(fbytes, 8 * 1024 * 1024);
+        for (const PendingWriteback& wb : pending_writebacks_) {
+          uint32_t wend = wb.guest_addr + wb.width * wb.height * 4;
+          if (fbase < wend && fend > wb.guest_addr) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    if (fetch_overlaps_writeback(pixel_shader) ||
+        fetch_overlaps_writeback(vertex_shader)) {
+      EndFrameEncoder();
+      DrainPendingWritebacks();
+    }
+  }
+
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
@@ -1476,12 +1516,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              pixel_shader->GetTextureBindingsAfterTranslation()) {
           auto f = regs.GetTextureFetch(binding.fetch_constant);
           uint32_t fetch_base = f.base_address << 12;
-          XELOGW("MetalVP   fetch fc={} base={:08X}{} fmt={} {}x{}",
+          XELOGW("MetalVP   fetch fc={} base={:08X}{} fmt={} {}x{} swz={:03X} "
+                 "endian={} tiled={} pitch={}",
                  binding.fetch_constant, fetch_base,
                  render_target_cache_->GetResolveSnapshot(fetch_base)
                      ? " [SNAP]"
                      : "",
-                 uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1);
+                 uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
+                 f.swizzle & 0xFFF, uint32_t(f.endianness), uint32_t(f.tiled),
+                 uint32_t(f.pitch) << 5);
         }
       }
     }
@@ -2287,7 +2330,8 @@ bool MetalCommandProcessor::IssueCopy() {
                         snap, dest_pixel_format, rw, rh, strip_y_offset);
         if (resolved && is_new_snapshot) {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
-                                                 snap, rw, rh);
+                                                 snap, rw, rh,
+                                                 /*is_depth=*/false);
         }
         // Stage-3 slice: SMALL resolves also write back into REAL guest memory
         // at frame end. JC2's auto-exposure loop is CPU-side: the game reads
@@ -2295,7 +2339,15 @@ bool MetalCommandProcessor::IssueCopy() {
         // exposure constant — snapshot-only resolves leave that RAM unwritten.
         static const bool s_no_writeback =
             std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
-        if (resolved && !s_no_writeback && rw * rh * 4 <= 256 * 1024 &&
+        // STAGE 3 (XE_METAL_STAGE3=1): write back at EVERY size — the
+        // composite's temporal history buffer (3.7MB) and the G-buffer dests
+        // all live in guest RAM; fetches read RAM (color bridge retired).
+        // Default OFF until the tiled writeback scatter matches hardware
+        // byte-exactly (currently produces confetti — see the handoff).
+        static const bool s_stage3 = std::getenv("XE_METAL_STAGE3") != nullptr;
+        const uint32_t wb_cap =
+            s_stage3 ? 4u * 1024 * 1024 : 256u * 1024;
+        if (resolved && !s_no_writeback && rw * rh * 4 <= wb_cap &&
             (dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
              dest_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
           id<MTLDevice> wb_device =
@@ -2318,10 +2370,17 @@ bool MetalCommandProcessor::IssueCopy() {
                destinationBytesPerRow:rw * 4
              destinationBytesPerImage:rw * rh * 4];
             [wb_blit endEncoding];
+            const auto& dc = resolve_info.copy_dest_coordinate_info;
+            uint32_t extent_bytes =
+                resolve_info.copy_dest_extent_start - resolve_info.copy_dest_base +
+                resolve_info.copy_dest_extent_length;
             pending_writebacks_.push_back(PendingWriteback{
                 (__bridge_retained void*)staging, resolve_info.copy_dest_base,
                 rw, rh,
-                uint32_t(resolve_info.copy_dest_info.copy_dest_endian)});
+                uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                uint32_t(dc.pitch_aligned_div_32) << 5,
+                uint32_t(dc.offset_x_div_8) << 3,
+                uint32_t(dc.offset_y_div_8) << 3, extent_bytes});
           }
         }
       } else {
@@ -2379,7 +2438,7 @@ bool MetalCommandProcessor::IssueCopy() {
                       is_float24, snap, rw, rh, strip_y_offset);
       if (resolved && is_new_snapshot) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
-                                               snap, rw, rh);
+                                               snap, rw, rh, /*is_depth=*/true);
       }
     }
   }
@@ -2438,19 +2497,43 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
     if (dest && staging) {
       const uint32_t* src_words =
           static_cast<const uint32_t*>(staging.contents);
-      uint32_t* dest_words = reinterpret_cast<uint32_t*>(dest);
       uint32_t count = wb.width * wb.height;
       // Endian128 low bits mirror plain Endian for 8in16/8in32.
       xenos::Endian endian = xenos::Endian(wb.endian & 0b11);
       uint64_t content_sum = 0;
       for (uint32_t i = 0; i < count; ++i) {
-        dest_words[i] = xenos::GpuSwapInline(src_words[i], endian);
         content_sum += src_words[i] & 0xFFFFFF;  // ignore alpha
       }
+      // Scatter through the TILED addresser: resolve dests are tiled guest
+      // textures (32bpp: block == pixel, block_log2 == 2). A linear memcpy
+      // makes every tiled fetch of the dest read block-scrambled garbage.
+      uint32_t pitch_aligned =
+          wb.dest_pitch_aligned ? wb.dest_pitch_aligned : ((wb.width + 31) & ~31u);
+      auto scatter_words = [&](const uint32_t* words) {
+        for (uint32_t y = 0; y < wb.height; ++y) {
+          for (uint32_t x = 0; x < wb.width; ++x) {
+            uint32_t off = uint32_t(texture_address::Tiled2D(
+                int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
+                pitch_aligned, 2));
+            if (wb.dest_extent_bytes && off + 4 > wb.dest_extent_bytes) {
+              continue;
+            }
+            uint32_t v =
+                xenos::GpuSwapInline(words[y * wb.width + x], endian);
+            std::memcpy(dest + off, &v, 4);
+          }
+        }
+      };
+      scatter_words(src_words);
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
                wb.width, wb.height, wb.guest_addr);
+      }
+      // STAGE 3: the writeback changed guest RAM — evict cached textures
+      // uploaded from that range so the next fetch re-uploads fresh content.
+      if (texture_cache_) {
+        texture_cache_->InvalidateRange(wb.guest_addr, count * 4);
       }
       // Exposure telemetry: remember the smallest writeback this frame (the
       // pyramid tip the game's exposure controller actually reads).
@@ -2478,8 +2561,10 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         auto held = held_writeback_content_.find(wb.guest_addr);
         if (!s_no_wb_hold && held != held_writeback_content_.end() &&
             held->second.size() == count) {
-          // Re-write the last good luminance instead of the black tile.
-          std::memcpy(dest_words, held->second.data(), count * sizeof(uint32_t));
+          // Re-write the last good luminance instead of the black tile. The
+          // held words are PRE-swap staging content; scatter like the normal
+          // path.
+          scatter_words(held->second.data());
           if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
             XELOGW("MetalWB HOLD {}x{} @ {:08X} (swap#{}, #{}) — held last value",
                    wb.width, wb.height, wb.guest_addr, swap_count_, s_zero_wb);
@@ -2490,9 +2575,10 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         }
       } else if (small) {
         // Non-zero small writeback: remember it as the fallback for future
-        // zero-content resolves at this address.
+        // zero-content resolves at this address (pre-swap staging words; the
+        // hold path re-scatters them like a normal drain).
         auto& held = held_writeback_content_[wb.guest_addr];
-        held.assign(dest_words, dest_words + count);
+        held.assign(src_words, src_words + count);
       }
     }
   }
@@ -2621,10 +2707,12 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       }
       XELOGI(
           "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
-          "{:.0f} draws/frame, {:.0f} MB footprint",
+          "{:.0f} draws/frame, {:.0f} MB footprint, {:.1f} tex-uploads/frame",
           count, 128.0f / std::max(secs, 0.001f),
           float(frame_commit_count_ - s_last_commits) / 128.0f,
-          float(draw_count_ - s_last_draws) / 128.0f, footprint_mb);
+          float(draw_count_ - s_last_draws) / 128.0f, footprint_mb,
+          texture_cache_ ? float(texture_cache_->ConsumeUploadCount()) / 128.0f
+                         : 0.0f);
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;

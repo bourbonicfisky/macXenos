@@ -54,7 +54,14 @@ struct FormatPlan {
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
   switch (format) {
     case xenos::TextureFormat::k_8_8_8_8:
+    // AS_16_16_16_16 (fmt 50): a memory-layout alias of 8888 — same bytes,
+    // same decode (JC2's temporal composite fetches its history buffer with
+    // it).
+    case xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16:
       return {true, false, 4, 2, 1, MTLPixelFormatRGBA8Unorm};
+    case xenos::TextureFormat::k_32_FLOAT:
+      // Raw f32 words (the resolve dest format of the luminance pyramid).
+      return {true, false, 4, 2, 1, MTLPixelFormatR32Float};
     case xenos::TextureFormat::k_4_4_4_4:
       // 16bpp RGBA4, decoded to RGBA8 on the CPU (see decode_4444). block_log2 =
       // log2(2 source bytes) = 1.
@@ -178,12 +185,20 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return 0;
   }
-  // RT-as-texture bridge: if this fetch targets a base a resolve blitted a color
-  // RT snapshot into, sample that snapshot (real rendered pixels) rather than the
-  // unpopulated guest memory. This is what feeds the deferred/composite passes.
+  // RT-as-texture bridge — STAGE 3: served for DEPTH only (no guest-RAM
+  // encoding of host depth yet). COLOR fetches read guest RAM, which resolves
+  // now write back at every size: the bridge's per-base snapshot cannot
+  // represent base reuse, strip assembly, or temporal (previous-frame) reads
+  // — JC2's final composite reads LAST frame's image and got the current
+  // frame's G-buffer strip + garbage instead (the stipple/darkness).
+  // XE_METAL_COLOR_BRIDGE=1 restores the old behavior for A/B.
   {
+    static const bool s_stage3 = std::getenv("XE_METAL_STAGE3") != nullptr;
+    static const bool s_color_bridge =
+        !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
     auto rit = resolved_targets_.find(fetch.base_address << 12);
-    if (rit != resolved_targets_.end() && rit->second.texture) {
+    if (rit != resolved_targets_.end() && rit->second.texture &&
+        (rit->second.is_depth || s_color_bridge)) {
       active_textures_.push_back(rit->second.texture);
       return rit->second.slot;
     }
@@ -238,6 +253,17 @@ uint32_t MetalTextureCache::GetTextureSlot(
 
   bool tiled = fetch.tiled != 0;
   xenos::Endian endian = fetch.endianness;
+  // Calibration override (XE_METAL_HISTORY_ENDIAN=0..3): endian applied when
+  // untiling fetches of RESOLVE-WRITTEN bases — hardware's resolve write
+  // order vs artist-texture order is being determined empirically.
+  static const int s_history_endian = [] {
+    const char* v = std::getenv("XE_METAL_HISTORY_ENDIAN");
+    return v ? atoi(v) : -1;
+  }();
+  if (s_history_endian >= 0 &&
+      resolved_targets_.find(base) != resolved_targets_.end()) {
+    endian = xenos::Endian(s_history_endian & 3);
+  }
   uint32_t max_src_bytes = kPhysicalSize - base;
 
   // Block grid (1x1 for uncompressed). The tiled addresser works in block
@@ -274,6 +300,23 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // fetch-swizzle-view path as k_8_8_8_8 makes channels correct.
   const uint8_t* upload_data = linear.data();
   uint32_t upload_bytes_per_row = blocks_w * bpb;
+  // Calibration (XE_METAL_DUMP_FETCH=<hex base>): print center texels of the
+  // untiled+endian-swapped upload for that base — channel-permutation ground
+  // truth against a reference render of the same content.
+  static const uint32_t s_dump_fetch = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_FETCH");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_dump_fetch && base == s_dump_fetch && bpb == 4) {
+    auto texel = [&](uint32_t x, uint32_t y) {
+      const uint8_t* t = &linear[(size_t(y) * blocks_w + x) * 4];
+      return fmt::format("({},{},{},{})", t[0], t[1], t[2], t[3]);
+    };
+    XELOGW("MetalFetchDump {:08X} fmt={} {}x{} swz={:03X}: c={} q1={} q3={}",
+           base, uint32_t(fetch.format), width, height, fetch.swizzle & 0xFFF,
+           texel(width / 2, height / 2), texel(width / 4, height / 4),
+           texel(3 * width / 4, 3 * height / 4));
+  }
   std::vector<uint8_t> decoded;
   if (plan.decode_4444 || plan.decode_r16) {
     decoded.resize(size_t(width) * height * 4);
@@ -376,14 +419,20 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // Retain the sampled view (or the base texture if identity) for the descriptor
   // and residency. A view keeps its base alive, so this covers both.
   void* texture_ptr = (__bridge_retained void*)sampled;
-  cache_.emplace(key, Entry{texture_ptr, slot});
+  // Guest byte extent (conservative: aligned pitch over all block rows) for
+  // resolve-writeback invalidation.
+  uint32_t guest_bytes = uint32_t(
+      std::min<size_t>(size_t(pitch_blocks_aligned) * blocks_h * bpb,
+                       max_src_bytes));
+  ++upload_count_;
+  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes});
   active_textures_.push_back(texture_ptr);
   return slot;
 }
 
 void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
-                                               uint32_t width,
-                                               uint32_t height) {
+                                               uint32_t width, uint32_t height,
+                                               bool is_depth) {
   if (!texture) {
     return;
   }
@@ -430,7 +479,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   }
   id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
   IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
-  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot};
+  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot, is_depth};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
 }
@@ -466,6 +515,30 @@ void MetalTextureCache::ReclaimStaleSlots() {
   // overwritten on the next AllocateSlot that hands them out.
   free_slots_.insert(free_slots_.end(), stale_slots_.begin(), stale_slots_.end());
   stale_slots_.clear();
+  for (void* tex : retired_textures_) {
+    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)tex;
+    (void)released;
+  }
+  retired_textures_.clear();
+}
+
+uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
+  uint32_t evicted = 0;
+  uint32_t end = base + length;
+  for (auto it = cache_.begin(); it != cache_.end();) {
+    const Entry& e = it->second;
+    if (e.guest_base < end && e.guest_base + e.guest_bytes > base) {
+      // Retire, don't free: in-flight draws may still reference the texture
+      // (bindless) and the slot; both drain after the next commit + wait.
+      retired_textures_.push_back(e.texture);
+      stale_slots_.push_back(e.slot);
+      it = cache_.erase(it);
+      ++evicted;
+    } else {
+      ++it;
+    }
+  }
+  return evicted;
 }
 
 }  // namespace metal

@@ -56,7 +56,7 @@ class MetalTextureCache {
   // slot is allocated once per base and reused; the snapshot's contents update
   // in place, so re-registering the same base/texture is a cheap no-op.
   void RegisterResolvedTarget(uint32_t base, void* texture, uint32_t width,
-                              uint32_t height);
+                              uint32_t height, bool is_depth);
 
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
@@ -71,10 +71,24 @@ class MetalTextureCache {
   void AppendAllTextures(std::vector<void*>& out) const;
 
   // Returns bindless slots retired this frame (a resolved target got a new
-  // texture generation -> new slot) to the free list. Safe only after the
-  // frame's GPU work has completed: earlier draws still referenced the retired
-  // slot. Called by the command processor after commit + wait.
+  // texture generation -> new slot) to the free list, and releases textures
+  // retired by InvalidateRange. Safe only after the frame's GPU work has
+  // completed: earlier draws still referenced them. Called by the command
+  // processor after commit + wait.
   void ReclaimStaleSlots();
+
+  // Stage 3: a resolve wrote [base, base+length) of guest RAM — evict cached
+  // textures overlapping it so the next fetch re-uploads fresh content.
+  // Evicted textures/slots are retired (freed via ReclaimStaleSlots after the
+  // frame's GPU work completes). Returns entries evicted.
+  uint32_t InvalidateRange(uint32_t base, uint32_t length);
+
+  // Telemetry: uploads performed since the last query (frame stats).
+  uint32_t ConsumeUploadCount() {
+    uint32_t n = upload_count_;
+    upload_count_ = 0;
+    return n;
+  }
 
  private:
   // Allocates a bindless view-heap slot, reusing a reclaimed one if available.
@@ -92,11 +106,18 @@ class MetalTextureCache {
   // moves to free_slots_ for reuse (bounds heap growth without in-place update).
   std::vector<uint32_t> stale_slots_;
   std::vector<uint32_t> free_slots_;
+  // Textures evicted by InvalidateRange, released after the frame drains.
+  std::vector<void*> retired_textures_;
+  uint32_t upload_count_ = 0;
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
 
   struct Entry {
     void* texture;  // id<MTLTexture>, retained.
     uint32_t slot;
+    // Guest byte range the texture was uploaded from — resolve writebacks
+    // into this range invalidate the entry (stage 3: fetches read guest RAM).
+    uint32_t guest_base;
+    uint32_t guest_bytes;
   };
   std::unordered_map<uint64_t, Entry> cache_;
   std::vector<void*> active_textures_;
@@ -106,6 +127,9 @@ class MetalTextureCache {
     uint32_t width;
     uint32_t height;
     uint32_t slot;
+    // Stage 3: only DEPTH bridges are served to fetches (color reads guest
+    // RAM); color entries remain registered for diagnostics/present only.
+    bool is_depth;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;

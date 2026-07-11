@@ -223,6 +223,13 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t width;
     uint32_t height;
     uint32_t endian;  // xenos::Endian of the resolve dest.
+    // Tiled-dest layout (stage 3): resolve destinations are TILED guest
+    // textures — the drain scatters rows through the tiled addresser (a
+    // linear memcpy made every tiled fetch of the dest read block garbage).
+    uint32_t dest_pitch_aligned;  // texels
+    uint32_t dest_offset_x;
+    uint32_t dest_offset_y;
+    uint32_t dest_extent_bytes;   // write bound relative to guest_addr
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
