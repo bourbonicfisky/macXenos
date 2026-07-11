@@ -307,15 +307,27 @@ uint32_t MetalTextureCache::GetTextureSlot(
     const char* v = std::getenv("XE_METAL_DUMP_FETCH");
     return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
   }();
-  if (s_dump_fetch && base == s_dump_fetch && bpb == 4) {
-    auto texel = [&](uint32_t x, uint32_t y) {
-      const uint8_t* t = &linear[(size_t(y) * blocks_w + x) * 4];
-      return fmt::format("({},{},{},{})", t[0], t[1], t[2], t[3]);
-    };
-    XELOGW("MetalFetchDump {:08X} fmt={} {}x{} swz={:03X}: c={} q1={} q3={}",
-           base, uint32_t(fetch.format), width, height, fetch.swizzle & 0xFFF,
-           texel(width / 2, height / 2), texel(width / 4, height / 4),
-           texel(3 * width / 4, 3 * height / 4));
+  if (s_dump_fetch && base == s_dump_fetch) {
+    if (bpb == 4) {
+      auto texel = [&](uint32_t x, uint32_t y) {
+        const uint8_t* t = &linear[(size_t(y) * blocks_w + x) * 4];
+        return fmt::format("({},{},{},{})", t[0], t[1], t[2], t[3]);
+      };
+      XELOGW("MetalFetchDump {:08X} fmt={} {}x{} swz={:03X}: c={} q1={} q3={}",
+             base, uint32_t(fetch.format), width, height, fetch.swizzle & 0xFFF,
+             texel(width / 2, height / 2), texel(width / 4, height / 4),
+             texel(3 * width / 4, 3 * height / 4));
+    } else if (bpb == 2) {
+      // 16bpp (k_16 LUTs etc.): print a ramp of raw 16-bit values.
+      std::string vals;
+      for (uint32_t x = 0; x < width; x += std::max(1u, width / 16)) {
+        const uint8_t* t = &linear[size_t(x) * 2];
+        vals += fmt::format(" {:04X}", uint32_t(t[0]) | (uint32_t(t[1]) << 8));
+      }
+      XELOGW("MetalFetchDump {:08X} fmt={} {}x{} swz={:03X} endian={}:{}",
+             base, uint32_t(fetch.format), width, height, fetch.swizzle & 0xFFF,
+             uint32_t(endian), vals);
+    }
   }
   std::vector<uint8_t> decoded;
   if (plan.decode_4444 || plan.decode_r16) {
