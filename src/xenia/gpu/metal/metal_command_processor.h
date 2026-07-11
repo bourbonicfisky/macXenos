@@ -225,6 +225,19 @@ class MetalCommandProcessor : public CommandProcessor {
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
 
+  // Exposure-loop telemetry (XE_METAL_EXPO_TRACE=<tonemap ps ucode hash hex>):
+  // per-swap snapshot of the auto-exposure FEEDBACK LOOP's three stages —
+  // (1) the smallest luminance writeback value delivered to guest RAM this
+  // frame, (2) the tonemap pixel shader's first float constants (the exposure
+  // the game computed FROM (1) and fed back in), (3) the presented luma.
+  // Correlating the three time series localizes an oscillation to producer,
+  // game controller, or present. Written by DrainPendingWritebacks/IssueDraw,
+  // emitted as one "MetalExpo" line per swap.
+  float expo_last_wb_value_ = 0.0f;
+  uint32_t expo_last_wb_words_ = 0;
+  float expo_tonemap_c0_[4] = {};
+  bool expo_tonemap_seen_ = false;
+
   // Per-frame autorelease pool for the GPU Commands thread (cycled at every
   // IssueSwap). The thread has no run-loop pool, so autoreleased Metal objects
   // created while encoding (command buffers, encoders, pass descriptors,

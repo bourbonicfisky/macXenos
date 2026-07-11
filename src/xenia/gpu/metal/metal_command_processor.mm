@@ -386,6 +386,8 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
+//   XE_METAL_EXPO_TRACE=hash  per-swap exposure-loop telemetry (MetalExpo
+//                             lines: wb value / tonemap-PS c0 / present luma)
 //   XE_METAL_FLUSH_ALL_UPLOADS=1   flush before any mid-frame upload (hazard A/B)
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
@@ -459,7 +461,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
       "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
-      "XE_METAL_FAULT_INJECT",
+      "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
   };
@@ -1549,6 +1551,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       ++draw_skip_count_;
       return true;
     }
+    // Exposure telemetry (XE_METAL_EXPO_TRACE=<ps hash hex>): capture the
+    // tonemap shader's first float constants — the exposure value the game
+    // computed FROM our luminance writebacks and fed back into rendering.
+    static const uint64_t s_expo_ps_hash = [] {
+      const char* v = std::getenv("XE_METAL_EXPO_TRACE");
+      return v ? strtoull(v, nullptr, 16) : 0ull;
+    }();
+    if (s_expo_ps_hash && float_pixel_alloc.cpu_ptr &&
+        pixel_shader->ucode_data_hash() == s_expo_ps_hash) {
+      std::memcpy(expo_tonemap_c0_, float_pixel_alloc.cpu_ptr,
+                  sizeof(expo_tonemap_c0_));
+      expo_tonemap_seen_ = true;
+    }
   }
 
   // Bool/loop (b2), fetch (b3) — verbatim register blocks.
@@ -2305,6 +2320,15 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
                wb.width, wb.height, wb.guest_addr);
       }
+      // Exposure telemetry: remember the smallest writeback this frame (the
+      // pyramid tip the game's exposure controller actually reads).
+      if (count <= 256 &&
+          (expo_last_wb_words_ == 0 || count <= expo_last_wb_words_)) {
+        expo_last_wb_words_ = count;
+        float f;
+        std::memcpy(&f, &src_words[0], sizeof(f));
+        expo_last_wb_value_ = f;
+      }
       // Exposure death-spiral guard: the game's auto-exposure feedback loop
       // reads these tiny luminance writebacks; an ALL-ZERO one collapses
       // exposure, the scene renders black, real luminance goes 0, and the loop
@@ -2591,6 +2615,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         sum += px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2];
       }
       float luma = float(sum) / (3.0f * n);
+      // Exposure-loop telemetry: one line per swap with all three loop stages
+      // — luminance we wrote back, exposure constant the game fed back into
+      // the tonemap, luma that came out. NOTE: luma lags one swap (async strip
+      // readback); align by shifting the luma column when analyzing.
+      static const bool s_expo_trace =
+          std::getenv("XE_METAL_EXPO_TRACE") != nullptr;
+      if (s_expo_trace) {
+        XELOGI(
+            "MetalExpo swap#{}: wb={:.6f} ({}w) expc=({:.5f},{:.5f},{:.5f},"
+            "{:.5f}){} luma={:.1f}",
+            count, expo_last_wb_value_, expo_last_wb_words_,
+            expo_tonemap_c0_[0], expo_tonemap_c0_[1], expo_tonemap_c0_[2],
+            expo_tonemap_c0_[3], expo_tonemap_seen_ ? "" : "[stale]", luma);
+        expo_last_wb_words_ = 0;
+        expo_tonemap_seen_ = false;
+      }
       if (s_last_luma >= 0.0f && s_flicker_logs < 64 &&
           ((s_last_luma > 8.0f && luma < 0.35f * s_last_luma) ||
            (luma > 8.0f && s_last_luma < 0.35f * luma))) {
