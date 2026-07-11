@@ -388,6 +388,8 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
 //   XE_METAL_EXPO_TRACE=hash  per-swap exposure-loop telemetry (MetalExpo
 //                             lines: wb value / tonemap-PS c0 / present luma)
+//   XE_METAL_CHAIN_TRACE=hex,hex  per-swap 4px fingerprint of each base's
+//                             snapshot (MetalChain lines; find what alternates)
 //   XE_METAL_FLUSH_ALL_UPLOADS=1   flush before any mid-frame upload (hazard A/B)
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
@@ -462,6 +464,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
       "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
+      "XE_METAL_CHAIN_TRACE",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
   };
@@ -2675,6 +2678,80 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         [lbl endEncoding];
         [lcb commit];
         s_luma_pending = true;
+      }
+    }
+  }
+
+  // Chain-trace probe (XE_METAL_CHAIN_TRACE=hex,hex,...): per-swap content
+  // fingerprint of the listed guest-base snapshots — a center 4-pixel strip
+  // of each, read back async (one swap of lag, same pattern as the luma
+  // probe). With constant exposure constants but an alternating presented
+  // frame (the MetalExpo finding), walking these fingerprints upstream finds
+  // the FIRST pipeline stage whose content alternates — the flicker origin.
+  {
+    static std::vector<uint32_t> s_chain_bases = [] {
+      std::vector<uint32_t> bases;
+      if (const char* env = std::getenv("XE_METAL_CHAIN_TRACE")) {
+        char* dup = strdup(env);
+        for (char* tok = strtok(dup, ","); tok; tok = strtok(nullptr, ",")) {
+          bases.push_back(uint32_t(strtoul(tok, nullptr, 16)));
+        }
+        free(dup);
+      }
+      return bases;
+    }();
+    if (!s_chain_bases.empty() && render_target_cache_) {
+      static id<MTLBuffer> s_chain_rb = nil;
+      static bool s_chain_pending = false;
+      constexpr uint32_t kPixelsPerBase = 4;
+      const uint32_t stride = kPixelsPerBase * 4;
+      if (s_chain_pending && s_chain_rb) {
+        const uint32_t* words = static_cast<const uint32_t*>(s_chain_rb.contents);
+        std::string line;
+        for (size_t i = 0; i < s_chain_bases.size(); ++i) {
+          line += fmt::format(" {:08X}={:08X},{:08X},{:08X},{:08X}",
+                              s_chain_bases[i], words[i * kPixelsPerBase],
+                              words[i * kPixelsPerBase + 1],
+                              words[i * kPixelsPerBase + 2],
+                              words[i * kPixelsPerBase + 3]);
+        }
+        XELOGI("MetalChain swap#{}:{}", count, line);
+      }
+      if (!s_chain_rb) {
+        id<MTLDevice> dev = (__bridge id<MTLDevice>)
+            static_cast<xe::ui::metal::MetalProvider*>(
+                graphics_system_->provider())->device();
+        s_chain_rb =
+            [dev newBufferWithLength:s_chain_bases.size() * stride
+                             options:MTLResourceStorageModeShared];
+      }
+      if (s_chain_rb) {
+        id<MTLCommandBuffer> ccb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> cbl = [ccb blitCommandEncoder];
+        cbl.label = @"cp:chain-trace";
+        for (size_t i = 0; i < s_chain_bases.size(); ++i) {
+          void* snap = render_target_cache_->GetResolveSnapshot(s_chain_bases[i]);
+          if (!snap) {
+            continue;
+          }
+          id<MTLTexture> tex = (__bridge id<MTLTexture>)snap;
+          uint32_t cx = uint32_t(tex.width) / 2, cy = uint32_t(tex.height) / 2;
+          if (cx + kPixelsPerBase > tex.width) {
+            cx = 0;
+          }
+          [cbl copyFromTexture:tex
+                    sourceSlice:0
+                    sourceLevel:0
+                   sourceOrigin:MTLOriginMake(cx, cy, 0)
+                     sourceSize:MTLSizeMake(kPixelsPerBase, 1, 1)
+                       toBuffer:s_chain_rb
+              destinationOffset:i * stride
+         destinationBytesPerRow:stride
+       destinationBytesPerImage:stride];
+        }
+        [cbl endEncoding];
+        [ccb commit];
+        s_chain_pending = true;
       }
     }
   }
