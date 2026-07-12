@@ -179,6 +179,24 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
         trace_ptr += cmd->encoded_length;
         command_processor->TracePlaybackWroteMemory(cmd->base_ptr,
                                                     cmd->decoded_length);
+        // Diagnostic: XE_TRACE_WATCH=<hex phys addr> logs each kMemoryRead
+        // restore covering that address (what the hardware ACTUALLY read
+        // there at capture time) with a data sample — separates "the trace
+        // delivers these bytes" from "our replay corrupted them".
+        static const uint64_t watch_addr = [] {
+          const char* v = std::getenv("XE_TRACE_WATCH");
+          return v ? strtoull(v, nullptr, 16) : 0ull;
+        }();
+        if (watch_addr && watch_addr >= cmd->base_ptr &&
+            watch_addr < cmd->base_ptr + cmd->decoded_length) {
+          const uint32_t* w = reinterpret_cast<const uint32_t*>(
+              memory->TranslatePhysical(uint32_t(watch_addr)));
+          XELOGW(
+              "TraceWatch: kMemoryRead [{:08X}+{:X}] covers {:08X}: "
+              "{:08X} {:08X} {:08X} {:08X}",
+              cmd->base_ptr, cmd->decoded_length, watch_addr, w[0], w[1], w[2],
+              w[3]);
+        }
         break;
       }
       case TraceCommandType::kMemoryWrite: {

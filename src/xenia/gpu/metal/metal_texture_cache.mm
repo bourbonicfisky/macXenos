@@ -185,6 +185,74 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (fetch.type != xenos::FetchConstantType::kTexture) {
     return 0;
   }
+  // Shader-executor harness (XE_METAL_SYNTH_FETCH=hexbase,R,G,B,A): serve a
+  // constant-color texture for that base — a known input pushed through the
+  // REAL pipeline (VS, interpolators, sampler, translated PS). Reading the
+  // consuming pass's output then fingerprints any channel permutation/scale
+  // the translated shader introduces.
+  {
+    struct SynthFetch {
+      uint32_t base = 0;
+      uint8_t rgba[4] = {0, 0, 0, 0};
+    };
+    static const SynthFetch s_synth = [] {
+      SynthFetch s;
+      if (const char* v = std::getenv("XE_METAL_SYNTH_FETCH")) {
+        unsigned b = 0, r = 0, g = 0, bl = 0, a = 255;
+        if (sscanf(v, "%x,%u,%u,%u,%u", &b, &r, &g, &bl, &a) >= 4) {
+          s.base = b;
+          s.rgba[0] = uint8_t(r);
+          s.rgba[1] = uint8_t(g);
+          s.rgba[2] = uint8_t(bl);
+          s.rgba[3] = uint8_t(a);
+        }
+      }
+      return s;
+    }();
+    if (s_synth.base && (fetch.base_address << 12) == s_synth.base) {
+      static void* s_synth_tex = nullptr;
+      static uint32_t s_synth_slot = 0;
+      if (!s_synth_tex) {
+        // Match the fetch's DECLARED dimensions: unnormalized-coordinate
+        // fetches read at pixel coords sized for the real texture — an
+        // undersized stand-in reads out of bounds (undefined garbage).
+        uint32_t sw = fetch.size_2d.width + 1;
+        uint32_t sh = fetch.size_2d.height + 1;
+        id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+        MTLTextureDescriptor* d = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:sw
+                                        height:sh
+                                     mipmapped:NO];
+        d.textureType = MTLTextureType2DArray;
+        d.arrayLength = 1;
+        d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> tex = [device newTextureWithDescriptor:d];
+        std::vector<uint8_t> px(size_t(sw) * sh * 4);
+        for (size_t i = 0; i < size_t(sw) * sh; ++i) {
+          std::memcpy(&px[i * 4], s_synth.rgba, 4);
+        }
+        [tex replaceRegion:MTLRegionMake2D(0, 0, sw, sh)
+               mipmapLevel:0
+                     slice:0
+                 withBytes:px.data()
+               bytesPerRow:sw * 4
+             bytesPerImage:size_t(sw) * sh * 4];
+        s_synth_tex = (__bridge_retained void*)tex;
+        s_synth_slot = AllocateSlot();
+        auto* entries =
+            static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+        IRDescriptorTableSetTexture(&entries[s_synth_slot],
+                                    (__bridge id<MTLTexture>)s_synth_tex, 0.0f,
+                                    0);
+        XELOGW("MetalSynthFetch: base {:08X} -> constant ({},{},{},{}) slot {}",
+               s_synth.base, s_synth.rgba[0], s_synth.rgba[1], s_synth.rgba[2],
+               s_synth.rgba[3], s_synth_slot);
+      }
+      active_textures_.push_back(s_synth_tex);
+      return s_synth_slot;
+    }
+  }
   // RT-as-texture bridge — STAGE 3: served for DEPTH only (no guest-RAM
   // encoding of host depth yet). COLOR fetches read guest RAM, which resolves
   // now write back at every size: the bridge's per-base snapshot cannot

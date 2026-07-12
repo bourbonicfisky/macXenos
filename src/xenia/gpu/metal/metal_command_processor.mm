@@ -983,6 +983,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // The paired vertex shader (feeds the PS's interpolators).
         write_disasm("vs", vertex_shader->ucode_data_hash(),
                      vertex_shader->ucode_disassembly());
+        // Raw ucode words too — the shader-executor harness's input.
+        auto write_ucode = [](const char* kind, uint64_t hash,
+                              const std::vector<uint32_t>& words) {
+          std::string path =
+              fmt::format("/tmp/xe_{}_{:016X}.ucode.bin", kind, hash);
+          FILE* f = fopen(path.c_str(), "wb");
+          if (f) {
+            fwrite(words.data(), sizeof(uint32_t), words.size(), f);
+            fclose(f);
+            XELOGI("MetalCommandProcessor: dumped {} ucode ({} words) to {}",
+                   kind, words.size(), path);
+          }
+        };
+        if (pixel_shader) {
+          write_ucode("ps", pixel_shader->ucode_data_hash(),
+                      pixel_shader->ucode_data());
+        }
+        write_ucode("vs", vertex_shader->ucode_data_hash(),
+                    vertex_shader->ucode_data());
       }
     }
   }
@@ -1141,6 +1160,36 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   if (!have_color) {
     color_pixel_format = uint64_t(MTLPixelFormatInvalid);
+  }
+  // Diagnostic: XE_METAL_PRECLEAR_RT=<trace draw index> clears the bound
+  // color-0 RT to magenta right before encoding that draw. Combined with
+  // XE_METAL_DUMP_RT on the same index, the post-draw dump shows the draw's
+  // raster coverage exactly: any non-magenta pixel was written BY this draw.
+  static const int64_t s_preclear_rt_at = [] {
+    const char* v = std::getenv("XE_METAL_PRECLEAR_RT");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  if (s_preclear_rt_at >= 0 &&
+      int64_t(trace_draw_index_) - 1 == s_preclear_rt_at && have_color) {
+    EndFrameEncoder();
+    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
+    if (rt_ptr) {
+      id<MTLCommandQueue> pq = (__bridge id<MTLCommandQueue>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->command_queue();
+      id<MTLCommandBuffer> pcb = [pq commandBuffer];
+      MTLRenderPassDescriptor* pd = [MTLRenderPassDescriptor renderPassDescriptor];
+      pd.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt_ptr;
+      pd.colorAttachments[0].loadAction = MTLLoadActionClear;
+      pd.colorAttachments[0].storeAction = MTLStoreActionStore;
+      pd.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+      id<MTLRenderCommandEncoder> pe = [pcb renderCommandEncoderWithDescriptor:pd];
+      [pe endEncoding];
+      [pcb commit];
+      [pcb waitUntilCompleted];
+      XELOGW("XE_METAL_PRECLEAR_RT: cleared RT to magenta before draw {}",
+             s_preclear_rt_at);
+    }
   }
 
   // Translate to MTLFunctions (cached per modification).
@@ -1500,7 +1549,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       auto clip = regs.Get<reg::PA_CL_CLIP_CNTL>();
       XELOGW(
           "MetalVP draw {}: prim={} geo={} vp=({},{} {}x{}) win_off=({},{}) "
-          "vtx_wofs_en={} clip_dis={} ndc_y=(s{} o{}) ps={:08X}",
+          "vtx_wofs_en={} clip_dis={} ndc_y=(s{} o{}) ps={:08X} blend={:08X} "
+          "mask={:X}",
           vp_draw_index, uint32_t(prim_type), use_geometry_emulation ? 1 : 0,
           viewport_info.xy_offset[0], viewport_info.xy_offset[1],
           viewport_info.xy_extent[0], viewport_info.xy_extent[1],
@@ -1508,7 +1558,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint32_t(sc_mode.vtx_window_offset_enable),
           uint32_t(clip.clip_disable), viewport_info.ndc_scale[1],
           viewport_info.ndc_offset[1],
-          pixel_shader ? uint32_t(pixel_shader->ucode_data_hash() >> 32) : 0);
+          pixel_shader ? uint32_t(pixel_shader->ucode_data_hash() >> 32) : 0,
+          regs[XE_GPU_REG_RB_BLENDCONTROL0], normalized_color_mask & 0xF);
       // The draw's pixel-shader fetches: base + format + snapshot-hit, the
       // composite-input audit.
       if (pixel_shader && render_target_cache_) {
@@ -1525,6 +1576,48 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
                  f.swizzle & 0xFFF, uint32_t(f.endianness), uint32_t(f.tiled),
                  uint32_t(f.pitch) << 5);
+        }
+      }
+      // Geometry-side audit (zero-raster dissection): VTE transform bits,
+      // index state, and the first vertices of each VS vertex binding read
+      // straight from guest RAM (byteswapped) — shows where positions land.
+      XELOGW("MetalVP   vte={:08X} idx={} cnt={} vgt_ofs={} min={} max={}",
+             regs[XE_GPU_REG_PA_CL_VTE_CNTL], index_buffer_info != nullptr,
+             index_count, regs[XE_GPU_REG_VGT_INDX_OFFSET],
+             regs[XE_GPU_REG_VGT_MIN_VTX_INDX],
+             regs[XE_GPU_REG_VGT_MAX_VTX_INDX]);
+      {
+        const float* vs_c255 = reinterpret_cast<const float*>(
+            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + 255 * 4]);
+        XELOGW("MetalVP   vs_c255=({:g} {:g} {:g} {:g})", vs_c255[0],
+               vs_c255[1], vs_c255[2], vs_c255[3]);
+      }
+      if (vertex_shader) {
+        for (const auto& vb : vertex_shader->vertex_bindings()) {
+          xenos::xe_gpu_vertex_fetch_t vf =
+              regs.GetVertexFetch(vb.fetch_constant);
+          uint32_t vaddr = vf.address << 2;
+          XELOGW("MetalVP   vbind fc={} addr={:08X} size_dw={} endian={} "
+                 "stride_dw={}",
+                 vb.fetch_constant, vaddr, uint32_t(vf.size),
+                 uint32_t(vf.endian), vb.stride_words);
+          if (vaddr && vf.size) {
+            const uint32_t* vdata = reinterpret_cast<const uint32_t*>(
+                memory_->TranslatePhysical(vaddr));
+            uint32_t stride = vb.stride_words ? vb.stride_words : 4;
+            for (uint32_t vtx = 0;
+                 vtx < 4 && (vtx + 1) * stride <= vf.size; ++vtx) {
+              std::string words;
+              for (uint32_t w = 0; w < stride && w < 8; ++w) {
+                uint32_t raw = xenos::GpuSwap(vdata[vtx * stride + w],
+                                              xenos::Endian(vf.endian));
+                float fv;
+                std::memcpy(&fv, &raw, 4);
+                words += fmt::format(" {:g}[{:08X}]", fv, raw);
+              }
+              XELOGW("MetalVP     v{}:{}", vtx, words);
+            }
+          }
         }
       }
     }
@@ -1667,6 +1760,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       std::memcpy(expo_tonemap_c0_, float_pixel_alloc.cpu_ptr,
                   sizeof(expo_tonemap_c0_));
       expo_tonemap_seen_ = true;
+      // Also log the full PACKED float-constant buffer once (the c255-class
+      // weight forensics: is the last packed register marshaled right?).
+      static bool s_packed_logged = false;
+      if (!s_packed_logged) {
+        s_packed_logged = true;
+        const auto& map = pixel_shader->constant_register_map();
+        uint32_t packed = 0;
+        for (uint32_t i = 0; i < 4; ++i) {
+          packed += xe::bit_count(map.float_bitmap[i]);
+        }
+        const float* fl = static_cast<const float*>(float_pixel_alloc.cpu_ptr);
+        std::string line;
+        for (uint32_t i = 0; i < packed; ++i) {
+          line += fmt::format(" [{}]=({} {} {} {})", i, fl[i * 4], fl[i * 4 + 1],
+                              fl[i * 4 + 2], fl[i * 4 + 3]);
+        }
+        XELOGW("MetalPackedC ps={:016X} count={}:{}",
+               pixel_shader->ucode_data_hash(), packed, line);
+      }
     }
   }
 
