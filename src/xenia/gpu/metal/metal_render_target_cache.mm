@@ -76,7 +76,10 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
     // (see the class comment). The cache drains after the frame's GPU work
     // completes.
     cache_.deferred_texture_releases_.emplace_back(
-        cache_.command_processor_.CurrentEncodingSubmission(), texture_);
+        MetalCommandProcessor::S7LifetimeOff()
+            ? 0
+            : cache_.command_processor_.CurrentEncodingSubmission(),
+        texture_);
     texture_ = nullptr;
   }
 }
@@ -1571,7 +1574,10 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     // mid-frame GPU-page-faults when they execute (the "GPU froze" hang). Retire
     // it to the deferred list; the command processor frees it after commit+wait.
     deferred_texture_releases_.emplace_back(
-        command_processor_.CurrentEncodingSubmission(), it->second.texture);
+        MetalCommandProcessor::S7LifetimeOff()
+            ? 0
+            : command_processor_.CurrentEncodingSubmission(),
+        it->second.texture);
     it->second.texture = nullptr;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;

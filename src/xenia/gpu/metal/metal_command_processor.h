@@ -82,6 +82,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // (textures, bindless slots, arena regions) are tagged with it so
   // reclamation frees exactly what completed submissions can no longer read.
   uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
+  // XE_METAL_S7_OFF=1 live-bisect kill switch (pre-S7 lifetime semantics).
+  static bool S7LifetimeOff();
 
  private:
   bool SetupContext() override;

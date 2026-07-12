@@ -437,6 +437,9 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
     if (!provider || !provider->command_queue()) {
       return nullptr;
     }
+    if (S7LifetimeOff() && upload_arena_) {
+      upload_arena_->Reset();
+    }
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     id<MTLCommandBuffer> command_buffer = MakeAttributedCommandBuffer(queue);
@@ -571,8 +574,9 @@ bool MetalCommandProcessor::SetupContext() {
   }
   shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
   shared_memory_->SetTraceWriter(&trace_writer_);
-  shared_memory_->SetSubmissionProvider(
-      [this]() { return CurrentEncodingSubmission(); });
+  shared_memory_->SetSubmissionProvider([this]() {
+    return S7LifetimeOff() ? 0 : CurrentEncodingSubmission();
+  });
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
@@ -700,8 +704,9 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   texture_cache_ = std::make_unique<MetalTextureCache>(
       device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
-  texture_cache_->SetSubmissionProvider(
-      [this]() { return CurrentEncodingSubmission(); });
+  texture_cache_->SetSubmissionProvider([this]() {
+    return S7LifetimeOff() ? 0 : CurrentEncodingSubmission();
+  });
   return true;
 }
 
@@ -786,6 +791,9 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   id<MTLCommandBuffer> command_buffer;
   bool new_frame = frame_command_buffer_ == nullptr;
   if (new_frame) {
+    if (S7LifetimeOff() && upload_arena_) {
+      upload_arena_->Reset();
+    }
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     command_buffer = MakeAttributedCommandBuffer(queue);
@@ -851,6 +859,15 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   frame_open_ = true;
   encoder_attachment_key_ = want_key;
   return frame_render_encoder_;
+}
+
+// XE_METAL_S7_OFF=1: live-bisect kill switch — restores pre-S7 lifetime
+// semantics (retires/writebacks tagged 0 = reclaimable at the next
+// completion, upload ring hard-reset at every new command buffer like the
+// old bump arena). Only sound combined with XE_METAL_SYNC_WAIT=1.
+bool MetalCommandProcessor::S7LifetimeOff() {
+  static const bool s_off = std::getenv("XE_METAL_S7_OFF") != nullptr;
+  return s_off;
 }
 
 void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
@@ -2781,7 +2798,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
-                CurrentEncodingSubmission()});
+                S7LifetimeOff() ? 0 : CurrentEncodingSubmission()});
           }
         }
       } else {
