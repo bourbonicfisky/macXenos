@@ -20,6 +20,7 @@
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/texture_util.h"
+#include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
 
 #include "metal_irconverter_runtime.h"
@@ -605,10 +606,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
                bytesPerImage:0];
     }
   }
+  uint32_t entry_mip_bytes = 0;
   if (host_levels > 1) {
     texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
         fetch.dimension, fetch.pitch, width, height, 1, tiled, fetch.format,
         fetch.packed_mips != 0, /*has_base=*/true, fetch.mip_max_level);
+    entry_mip_bytes = std::min<uint32_t>(layout.mips_total_extent_bytes,
+                                         kPhysicalSize - mip_addr);
     // Mips live at mip_address, NOT relative to the base level — read through
     // their own translation with their own bounds.
     const uint8_t* mip_guest =
@@ -737,9 +741,32 @@ uint32_t MetalTextureCache::GetTextureSlot(
               : size_t(pitch_blocks_aligned) * blocks_h * bpb,
       max_src_bytes));
   ++upload_count_;
-  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes});
+  uint32_t entry_mip_base = entry_mip_bytes ? mip_addr : 0;
+  // Frame-trace recording: a replay must restore this texture's guest bytes
+  // before the fetch that triggered this upload. No-op unless tracing.
+  if (trace_writer_) {
+    trace_writer_->WriteMemoryRead(base, guest_bytes);
+    if (entry_mip_bytes) {
+      trace_writer_->WriteMemoryRead(entry_mip_base, entry_mip_bytes);
+    }
+  }
+  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes,
+                            entry_mip_base, entry_mip_bytes});
   active_textures_.push_back(texture_ptr);
   return slot;
+}
+
+void MetalTextureCache::WriteAllCachedTexturesToTrace(
+    TraceWriter& trace_writer) const {
+  for (const auto& pair : cache_) {
+    const Entry& entry = pair.second;
+    if (entry.guest_bytes) {
+      trace_writer.WriteMemoryRead(entry.guest_base, entry.guest_bytes);
+    }
+    if (entry.mip_bytes) {
+      trace_writer.WriteMemoryRead(entry.mip_base, entry.mip_bytes);
+    }
+  }
 }
 
 void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,

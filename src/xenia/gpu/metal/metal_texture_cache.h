@@ -19,6 +19,7 @@
 namespace xe {
 class Memory;
 namespace gpu {
+class TraceWriter;
 namespace metal {
 
 // Bring-up minimal texture cache. Given a guest texture fetch constant, produces
@@ -86,6 +87,15 @@ class MetalTextureCache {
   // frame's GPU work completes). Returns entries evicted.
   uint32_t InvalidateRange(uint32_t base, uint32_t length);
 
+  // Frame-trace recording: uploads record their guest source ranges into an
+  // open trace; WriteAllCachedTexturesToTrace records the ranges of WARM
+  // entries (they won't re-upload during the traced frame, but the replay
+  // must still restore their data). Guest RAM holds their current content.
+  void SetTraceWriter(TraceWriter* trace_writer) {
+    trace_writer_ = trace_writer;
+  }
+  void WriteAllCachedTexturesToTrace(TraceWriter& trace_writer) const;
+
   // Telemetry: uploads performed since the last query (frame stats).
   uint32_t ConsumeUploadCount() {
     uint32_t n = upload_count_;
@@ -112,6 +122,7 @@ class MetalTextureCache {
   // Textures evicted by InvalidateRange, released after the frame drains.
   std::vector<void*> retired_textures_;
   uint32_t upload_count_ = 0;
+  TraceWriter* trace_writer_ = nullptr;  // not owned; may be null.
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
 
   struct Entry {
@@ -121,6 +132,9 @@ class MetalTextureCache {
     // into this range invalidate the entry (stage 3: fetches read guest RAM).
     uint32_t guest_base;
     uint32_t guest_bytes;
+    // Mip range (0/0 when single-level) for invalidation + trace recording.
+    uint32_t mip_base = 0;
+    uint32_t mip_bytes = 0;
   };
   std::unordered_map<uint64_t, Entry> cache_;
   std::vector<void*> active_textures_;

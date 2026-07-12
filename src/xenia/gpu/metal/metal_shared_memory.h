@@ -20,6 +20,7 @@
 namespace xe {
 class Memory;
 namespace gpu {
+class TraceWriter;
 namespace metal {
 
 // Real xe::gpu::SharedMemory subclass over a single 512 MiB shared-storage
@@ -38,6 +39,17 @@ class MetalSharedMemory : public SharedMemory {
 
   bool Initialize();
   void Shutdown();
+
+  // Frame-trace recording: every upload's source range is written into the
+  // open trace (uploads read guest RAM, which is exactly the data a replay
+  // must restore). WriteMemoryRead self-guards when no trace is open.
+  void SetTraceWriter(TraceWriter* trace_writer) {
+    trace_writer_ = trace_writer;
+  }
+  // Frame-trace init: invalidates every non-GPU-written page (so ranges the
+  // traced frame consumes re-upload and get recorded) and writes collected
+  // GPU-written ranges straight from guest RAM (CPU-authoritative here).
+  void WriteTraceInitialState(TraceWriter& trace_writer);
 
   // id<MTLBuffer> (shared storage), not owned by the caller.
   void* GetBuffer() const { return buffer_; }
@@ -65,6 +77,7 @@ class MetalSharedMemory : public SharedMemory {
                     uint32_t num_upload_ranges) override;
 
  private:
+  TraceWriter* trace_writer_ = nullptr;
   void* device_;                        // id<MTLDevice>, not owned.
   void* buffer_ = nullptr;              // id<MTLBuffer>, retained.
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.

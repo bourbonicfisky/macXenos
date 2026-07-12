@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_shared_memory.h"
 
+#include "xenia/gpu/trace_writer.h"
+
 #import <Metal/Metal.h>
 
 #include <cstring>
@@ -73,6 +75,14 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   }
   consumed_ranges_.emplace_back(start, end);
   return result;
+}
+
+void MetalSharedMemory::WriteTraceInitialState(TraceWriter& trace_writer) {
+  PrepareForTraceDownload();
+  for (const auto& range : trace_download_ranges()) {
+    trace_writer.WriteMemoryRead(range.first, range.second);
+  }
+  ReleaseTraceDownloadRanges();
 }
 
 bool MetalSharedMemory::UploadRanges(
@@ -142,6 +152,12 @@ bool MetalSharedMemory::UploadRanges(
     MakeRangeValid(upload_start, upload_length, false);
     std::memcpy(buffer_contents_ + upload_start,
                 memory().TranslatePhysical(upload_start), upload_length);
+    // Frame-trace recording: the uploaded source bytes are exactly what a
+    // replay must restore before this range's consumers run. No-op unless a
+    // trace file is open.
+    if (trace_writer_) {
+      trace_writer_->WriteMemoryRead(upload_start, upload_length);
+    }
   }
   return true;
 }

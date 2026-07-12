@@ -573,6 +573,7 @@ bool MetalCommandProcessor::SetupContext() {
     return false;
   }
   shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
+  shared_memory_->SetTraceWriter(&trace_writer_);
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
@@ -697,6 +698,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
 
   texture_cache_ = std::make_unique<MetalTextureCache>(
       device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
+  texture_cache_->SetTraceWriter(&trace_writer_);
   return true;
 }
 
@@ -1203,6 +1205,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
     }
+  }
+  // Frame-trace recording: this backend reads guest indices directly from
+  // RAM (not through shared memory), so record the range for replay. No-op
+  // unless a trace file is open.
+  if (index_buffer_info && index_buffer_info->guest_base && index_count) {
+    uint32_t index_size_bytes =
+        index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
+    trace_writer_.WriteMemoryRead(index_buffer_info->guest_base,
+                                  size_t(index_count) * index_size_bytes);
   }
   // Base-class EDRAM ownership update: derives the RenderTargetKeys from the
   // registers, creates/accumulates the bound host RTs, and computes+executes
@@ -2756,7 +2767,30 @@ bool MetalCommandProcessor::IssueCopy() {
   return true;
 }
 
-void MetalCommandProcessor::InitializeTrace() {}
+void MetalCommandProcessor::InitializeTrace() {
+  // Base: all register values + gamma ramps.
+  CommandProcessor::InitializeTrace();
+  // Guest RAM is CPU-authoritative for this backend (uploads read it
+  // directly, resolves write back to it through the CPU) — no GPU downloads
+  // are needed. PrepareForTraceDownload invalidates every non-GPU-written
+  // shared-memory page so all ranges the traced frame consumes re-upload
+  // during it (and get recorded by the UploadRanges hook); any collected
+  // GPU-written ranges are written straight from RAM.
+  if (shared_memory_) {
+    shared_memory_->WriteTraceInitialState(trace_writer_);
+  }
+  // Warm texture-cache entries won't re-upload during the traced frame —
+  // record their guest ranges now (RAM holds their current content).
+  if (texture_cache_) {
+    texture_cache_->WriteAllCachedTexturesToTrace(trace_writer_);
+  }
+  // EDRAM: encode the current render-target ownership back to guest tile
+  // bytes (the replay seeds its RT caches from this snapshot).
+  std::vector<uint8_t> edram;
+  if (DumpEdramToBuffer(edram) && edram.size() >= xenos::kEdramSizeBytes) {
+    trace_writer_.WriteEdramSnapshot(edram.data());
+  }
+}
 
 void MetalCommandProcessor::DrainPendingWritebacks() {
   // Resolve guest-memory writebacks (the CPU-side exposure loop and any
