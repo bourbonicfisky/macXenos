@@ -1295,11 +1295,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     static std::unordered_set<uint64_t> s_seen_rt_configs;
     if (s_seen_rt_configs.insert(cfg_key).second) {
       XELOGI(
-          "MetalRTConfig: color={} (base={} fmt={} mask={:X}) depth={} (base={} "
-          "fmt={}) ncm={:04X}",
+          "MetalRTConfig: color={} (base={} fmt={} mask={:X} expbias={}) "
+          "depth={} (base={} fmt={}) ncm={:04X}",
           color_bound, uint32_t(rt0_info.color_base),
           uint32_t(rt0_info.color_format), normalized_color_mask & 0b1111,
-          depth_bound, uint32_t(rb_depth_info.depth_base),
+          int32_t(rt0_info.color_exp_bias), depth_bound,
+          uint32_t(rb_depth_info.depth_base),
           uint32_t(rb_depth_info.depth_format), normalized_color_mask);
     }
   }
@@ -1759,9 +1760,34 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (!shader) return;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         uint32_t fc = binding.fetch_constant;
-        uint32_t signs = texture_util::SwizzleSigns(regs.GetTextureFetch(fc));
+        auto fetch = regs.GetTextureFetch(fc);
+        uint32_t signs = texture_util::SwizzleSigns(fetch);
         system_constants.texture_swizzled_signs[fc >> 2] |=
             signs << ((fc & 3) * 8);
+        // Gamma-parity diagnostic: the game's signs describe the raw bytes
+        // hardware resolves preserve — compare against the resolve source's
+        // gamma-ness we recorded (see IssueCopy).
+        static const bool s_gamma_parity = std::getenv("XE_METAL_GAMMA_PARITY");
+        if (s_gamma_parity) {
+          uint32_t fbase = fetch.base_address << 12;
+          auto it = gamma_parity_resolves_.find(fbase);
+          if (it != gamma_parity_resolves_.end()) {
+            bool fetch_gamma = (signs & 0b11) == 0b11;  // component 0 kGamma
+            if (fetch_gamma != it->second &&
+                gamma_parity_reported_.insert(fbase).second) {
+              XELOGW(
+                  "MetalGammaParity MISMATCH base={:08X}: resolve source "
+                  "{}GAMMA but fetch signs={:02X} ({}gamma) — byte domain "
+                  "disagreement",
+                  fbase, it->second ? "" : "NOT-", signs,
+                  fetch_gamma ? "" : "not-");
+            } else if (gamma_parity_reported_.insert(fbase ^ 0x80000000u)
+                           .second) {
+              XELOGI("MetalGammaParity ok base={:08X}: src_gamma={} signs={:02X}",
+                     fbase, it->second, signs);
+            }
+          }
+        }
       }
     };
     // A/B: XE_METAL_NO_SIGNS=1 leaves signs zeroed (all-unsigned, no gamma
@@ -2768,6 +2794,22 @@ bool MetalCommandProcessor::IssueCopy() {
         uint32_t strip_y_offset = 0;
         void* parent_snap = render_target_cache_->FindContainingSnapshot(
             resolve_info.copy_dest_base, &strip_y_offset);
+        // A k_32_FLOAT resolve must NEVER join a color-format parent strip:
+        // "render in the snapshot's REAL format" then silently skips the
+        // 8888->float conversion the guest asked for, and the writeback
+        // scatters RAW COLOR BYTES where the game reads FLOATS. JC2's
+        // adjacent luminance-pyramid buffers coalesced this way — the
+        // exposure loop read 0x..8181 byte patterns as ~0.5 luminance
+        // (~300x too bright), crushing the scene to black and driving the
+        // temporal oscillator (crash x4 / overshoot x5 / ringing) that
+        // presented live as the black flicker and the seam's dark half.
+        if (parent_snap &&
+            dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
+            ((__bridge id<MTLTexture>)parent_snap).pixelFormat !=
+                MTLPixelFormatR32Float) {
+          parent_snap = nullptr;
+          strip_y_offset = 0;
+        }
         void* snap = parent_snap;
         bool is_new_snapshot = false;
         if (!snap) {
@@ -2922,6 +2964,19 @@ bool MetalCommandProcessor::IssueCopy() {
           frame_command_buffer_, span_base, span_row_length, span_rows,
           span_pitch, /*is_depth=*/true, resolve_info.rb_depth_clear);
     }
+  }
+  // Gamma-parity diagnostic (XE_METAL_GAMMA_PARITY=1): record each color
+  // resolve's dest base -> whether its EDRAM SOURCE format was
+  // k_8_8_8_8_GAMMA. Raw resolves preserve the byte domain, so a consumer
+  // fetch's gamma signs must MATCH the source's gamma-ness; a mismatch means
+  // our derived RT format (and thus the PS gamma-encode flag) disagrees with
+  // the game's own declaration — the non-cancelling leg of the history
+  // cycle (the temporal-oscillator hunt).
+  static const bool s_gamma_parity = std::getenv("XE_METAL_GAMMA_PARITY");
+  if (s_gamma_parity && !resolve_info.IsCopyingDepth()) {
+    bool src_gamma = resolve_info.color_edram_info.format ==
+                     uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA);
+    gamma_parity_resolves_[resolve_info.copy_dest_base] = src_gamma;
   }
   static uint32_t s_copy_count = 0;
   if (s_copy_count++ < 48) {
@@ -3215,6 +3270,57 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
+    }
+  }
+  // Cycle-transfer instrument (XE_METAL_DUMP_SNAPSHOT=<hexbase>): dump the
+  // resolve snapshot for that base at EVERY swap to
+  // /tmp/xe_snap_<base>_<n>.ppm — across --replay_loops this yields the
+  // texel series v_n whose pairwise map v_{n+1}=f(v_n) IS the temporal
+  // cycle's transfer function (the oscillator hunt).
+  static const uint32_t s_dump_snapshot = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_SNAPSHOT");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_dump_snapshot && render_target_cache_) {
+    void* snap = render_target_cache_->GetResolveSnapshot(s_dump_snapshot);
+    if (snap) {
+      static uint32_t s_snap_n = 0;
+      id<MTLTexture> st = (__bridge id<MTLTexture>)snap;
+      uint32_t tw = uint32_t(st.width), th = uint32_t(st.height);
+      id<MTLBuffer> rb =
+          [st.device newBufferWithLength:size_t(tw) * th * 4
+                                 options:MTLResourceStorageModeShared];
+      auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+          graphics_system_->provider());
+      if (rb && provider && provider->command_queue()) {
+        id<MTLCommandQueue> dq =
+            (__bridge id<MTLCommandQueue>)provider->command_queue();
+        id<MTLCommandBuffer> dcb = [dq commandBuffer];
+        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+        [dbl copyFromTexture:st
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(tw, th, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:tw * 4
+     destinationBytesPerImage:size_t(tw) * th * 4];
+        [dbl endEncoding];
+        [dcb commit];
+        [dcb waitUntilCompleted];
+        std::string path = fmt::format("/tmp/xe_snap_{:08X}_{}.ppm",
+                                       s_dump_snapshot, s_snap_n++);
+        FILE* f = fopen(path.c_str(), "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", tw, th);
+          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
+          for (size_t i = 0; i < size_t(tw) * th; ++i) {
+            fwrite(px + i * 4, 1, 3, f);
+          }
+          fclose(f);
+        }
+      }
     }
   }
   id<MTLTexture> source_rt = nil;
