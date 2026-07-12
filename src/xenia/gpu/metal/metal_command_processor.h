@@ -77,6 +77,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // Diagnostics: the current trace draw index (for correlating RT-cache
   // transfer logs with manifest/capture draw indices).
   uint32_t trace_draw_index() const { return trace_draw_index_; }
+  // The submission id the currently-open frame command buffer will get when
+  // committed (commits are strictly ordered on the GPU thread). Retire lists
+  // (textures, bindless slots, arena regions) are tagged with it so
+  // reclamation frees exactly what completed submissions can no longer read.
+  uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
 
  private:
   bool SetupContext() override;
@@ -225,9 +230,6 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t submission_counter_ = 0;
   std::atomic<uint64_t> completed_submission_{0};
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
-  // The submission id the currently-open frame command buffer will get when
-  // committed (commits are strictly ordered on the GPU thread).
-  uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
 

@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_TEXTURE_CACHE_H_
 
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -74,12 +75,18 @@ class MetalTextureCache {
   // attributed live faults ('draws@N' encoders) are exactly this class.
   void AppendAllTextures(std::vector<void*>& out) const;
 
-  // Returns bindless slots retired this frame (a resolved target got a new
-  // texture generation -> new slot) to the free list, and releases textures
-  // retired by InvalidateRange. Safe only after the frame's GPU work has
-  // completed: earlier draws still referenced them. Called by the command
-  // processor after commit + wait.
-  void ReclaimStaleSlots();
+  // Returns bindless slots retired by submissions <= `completed_submission`
+  // (a resolved target got a new texture generation -> new slot) to the free
+  // list, and releases textures retired by InvalidateRange in that window.
+  // Entries retired while ENCODING a later, still-in-flight submission stay
+  // retired — freeing them page-faults the in-flight draws (the async-S8
+  // black flicker). Pass UINT64_MAX at shutdown.
+  void ReclaimStaleSlots(uint64_t completed_submission);
+
+  // Tags retires with the submission that may last reference them.
+  void SetSubmissionProvider(std::function<uint64_t()> provider) {
+    submission_provider_ = std::move(provider);
+  }
 
   // Stage 3: a resolve wrote [base, base+length) of guest RAM — evict cached
   // textures overlapping it so the next fetch re-uploads fresh content.
@@ -115,12 +122,18 @@ class MetalTextureCache {
   uint32_t view_heap_slots_;
   uint32_t next_slot_ = 1;  // 0 == null texture.
   // Slots freed when a resolved target was repointed to a new texture; the old
-  // slot keeps pointing at the old texture until in-flight draws drain, then
-  // moves to free_slots_ for reuse (bounds heap growth without in-place update).
-  std::vector<uint32_t> stale_slots_;
+  // slot keeps pointing at the old texture until the submissions encoded
+  // against it complete, then moves to free_slots_ for reuse. Tagged with the
+  // last submission that may reference them.
+  std::vector<std::pair<uint64_t, uint32_t>> stale_slots_;
   std::vector<uint32_t> free_slots_;
-  // Textures evicted by InvalidateRange, released after the frame drains.
-  std::vector<void*> retired_textures_;
+  // Textures evicted by InvalidateRange, released once their submissions
+  // complete.
+  std::vector<std::pair<uint64_t, void*>> retired_textures_;
+  std::function<uint64_t()> submission_provider_;
+  uint64_t RetireSubmission() const {
+    return submission_provider_ ? submission_provider_() : UINT64_MAX;
+  }
   uint32_t upload_count_ = 0;
   TraceWriter* trace_writer_ = nullptr;  // not owned; may be null.
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.

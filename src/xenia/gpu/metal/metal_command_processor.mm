@@ -700,6 +700,8 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   texture_cache_ = std::make_unique<MetalTextureCache>(
       device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
+  texture_cache_->SetSubmissionProvider(
+      [this]() { return CurrentEncodingSubmission(); });
   return true;
 }
 
@@ -1024,10 +1026,10 @@ void MetalCommandProcessor::EndFrameEncoder() {
       upload_arena_->Reclaim(submission);
     }
     if (render_target_cache_) {
-      render_target_cache_->DrainDeferredReleases();
+      render_target_cache_->DrainDeferredReleases(submission);
     }
     if (texture_cache_) {
-      texture_cache_->ReclaimStaleSlots();
+      texture_cache_->ReclaimStaleSlots(submission);
     }
     if (shared_memory_) {
       shared_memory_->ReleaseConsumedRanges(submission);

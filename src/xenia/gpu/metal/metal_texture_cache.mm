@@ -804,7 +804,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       if (!new_slot) {
         return;  // heap exhausted; keep the old slot rather than corrupt.
       }
-      stale_slots_.push_back(it->second.slot);
+      stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
       IRDescriptorTableSetTexture(&entries[new_slot],
                                   (__bridge id<MTLTexture>)texture, 0.0f, 0);
       it->second.texture = texture;
@@ -848,17 +848,32 @@ uint32_t MetalTextureCache::AllocateSlot() {
   return next_slot_++;
 }
 
-void MetalTextureCache::ReclaimStaleSlots() {
-  // The retired slots' in-flight draws have drained (caller waited on the frame
-  // command buffer), so the slots can be reused. Their descriptors are
-  // overwritten on the next AllocateSlot that hands them out.
-  free_slots_.insert(free_slots_.end(), stale_slots_.begin(), stale_slots_.end());
-  stale_slots_.clear();
-  for (void* tex : retired_textures_) {
-    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)tex;
-    (void)released;
-  }
-  retired_textures_.clear();
+void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
+  // Free ONLY entries whose last-referencing submission has completed —
+  // later in-flight submissions still read the rest (freeing them was the
+  // async-S8 page-fault flicker). Descriptors are overwritten on the next
+  // AllocateSlot that hands a freed slot out.
+  auto slot_it = std::remove_if(
+      stale_slots_.begin(), stale_slots_.end(),
+      [&](const std::pair<uint64_t, uint32_t>& entry) {
+        if (entry.first > completed_submission) {
+          return false;
+        }
+        free_slots_.push_back(entry.second);
+        return true;
+      });
+  stale_slots_.erase(slot_it, stale_slots_.end());
+  auto tex_it = std::remove_if(
+      retired_textures_.begin(), retired_textures_.end(),
+      [&](const std::pair<uint64_t, void*>& entry) {
+        if (entry.first > completed_submission) {
+          return false;
+        }
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
+        (void)released;
+        return true;
+      });
+  retired_textures_.erase(tex_it, retired_textures_.end());
 }
 
 uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
@@ -868,9 +883,10 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
     const Entry& e = it->second;
     if (e.guest_base < end && e.guest_base + e.guest_bytes > base) {
       // Retire, don't free: in-flight draws may still reference the texture
-      // (bindless) and the slot; both drain after the next commit + wait.
-      retired_textures_.push_back(e.texture);
-      stale_slots_.push_back(e.slot);
+      // (bindless) and the slot; both drain once the submissions encoded
+      // against them complete.
+      retired_textures_.emplace_back(RetireSubmission(), e.texture);
+      stale_slots_.emplace_back(RetireSubmission(), e.slot);
       it = cache_.erase(it);
       ++evicted;
     } else {

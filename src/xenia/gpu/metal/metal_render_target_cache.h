@@ -136,7 +136,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // command buffer still reference them via bindless gpuAddresses — freeing
   // early GPU-page-faults when those draws execute. The command processor calls
   // this only after the frame command buffer has completed (commit + wait).
-  void DrainDeferredReleases();
+  void DrainDeferredReleases(uint64_t completed_submission);
 
   // Frame-dissection tooling: enumerates the render targets owning each EDRAM
   // tile range (full-EDRAM span through the base class's dump-rectangle
@@ -288,8 +288,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
 
   // Snapshot textures retired mid-frame (grown), held retained until the frame
   // GPU work finishes so in-flight draws don't dereference freed memory. Drained
-  // by DrainDeferredReleases() after the command processor's commit + wait.
-  std::vector<void*> deferred_texture_releases_;
+  // by DrainDeferredReleases() once the submissions encoded against them
+  // complete (tagged with the last submission that may reference them).
+  std::vector<std::pair<uint64_t, void*>> deferred_texture_releases_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;

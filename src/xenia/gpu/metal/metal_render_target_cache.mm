@@ -75,7 +75,8 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
     // Defer, don't free: in-flight encoders may still reference this texture
     // (see the class comment). The cache drains after the frame's GPU work
     // completes.
-    cache_.deferred_texture_releases_.push_back(texture_);
+    cache_.deferred_texture_releases_.emplace_back(
+        cache_.command_processor_.CurrentEncodingSubmission(), texture_);
     texture_ = nullptr;
   }
 }
@@ -110,7 +111,7 @@ void MetalRenderTargetCache::Shutdown() {
   // are actually freed.
   DestroyAllRenderTargets(true);
   ShutdownCommon();
-  DrainDeferredReleases();
+  DrainDeferredReleases(UINT64_MAX);
 }
 
 void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
@@ -1569,7 +1570,8 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     // command buffer still reference it by bindless gpuAddress, and freeing it
     // mid-frame GPU-page-faults when they execute (the "GPU froze" hang). Retire
     // it to the deferred list; the command processor frees it after commit+wait.
-    deferred_texture_releases_.push_back(it->second.texture);
+    deferred_texture_releases_.emplace_back(
+        command_processor_.CurrentEncodingSubmission(), it->second.texture);
     it->second.texture = nullptr;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -1595,12 +1597,19 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   return resolve_snapshots_[snap_key].texture;
 }
 
-void MetalRenderTargetCache::DrainDeferredReleases() {
-  for (void* tex : deferred_texture_releases_) {
-    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)tex;
-    (void)released;
-  }
-  deferred_texture_releases_.clear();
+void MetalRenderTargetCache::DrainDeferredReleases(
+    uint64_t completed_submission) {
+  auto it = std::remove_if(
+      deferred_texture_releases_.begin(), deferred_texture_releases_.end(),
+      [&](const std::pair<uint64_t, void*>& entry) {
+        if (entry.first > completed_submission) {
+          return false;
+        }
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
+        (void)released;
+        return true;
+      });
+  deferred_texture_releases_.erase(it, deferred_texture_releases_.end());
 }
 
 void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
