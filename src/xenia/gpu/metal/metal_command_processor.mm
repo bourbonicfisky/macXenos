@@ -852,6 +852,27 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   return frame_render_encoder_;
 }
 
+void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
+  uint64_t prev = completed_submission_.load(std::memory_order_relaxed);
+  while (prev < submission &&
+         !completed_submission_.compare_exchange_weak(
+             prev, submission, std::memory_order_release,
+             std::memory_order_relaxed)) {
+  }
+}
+
+void MetalCommandProcessor::PumpCompletedActions() {
+  // GPU-thread only: completion_actions_ isn't synchronized; only the
+  // published counter crosses threads.
+  uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  while (!completion_actions_.empty() &&
+         completion_actions_.front().first <= completed) {
+    auto action = std::move(completion_actions_.front().second);
+    completion_actions_.pop_front();
+    action();
+  }
+}
+
 void MetalCommandProcessor::EndRenderEncoder() {
   if (!frame_open_) {
     return;
@@ -873,8 +894,16 @@ void MetalCommandProcessor::EndFrameEncoder() {
   frame_command_buffer_ = nullptr;
   ++frame_commit_count_;
   draws_since_commit_ = 0;
+  // S7: assign this commit its submission id and publish completion from the
+  // GPU-side handler (the async path S8 relies on; the synchronous wait below
+  // also publishes inline since it doesn't order against the handler thread).
+  uint64_t submission = ++submission_counter_;
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    PublishCompletedSubmission(submission);
+  }];
   [command_buffer commit];
   [command_buffer waitUntilCompleted];
+  PublishCompletedSubmission(submission);
   // A GPU fault (invalid resource access from an untracked bindless hazard, a
   // timeout, etc.) fails the command buffer SILENTLY otherwise: we keep
   // submitting and the window shows the last good frame while swaps advance —
@@ -916,20 +945,24 @@ void MetalCommandProcessor::EndFrameEncoder() {
       }
     }
   }
-  // The frame's GPU work is done: snapshot textures retired mid-frame (grown)
-  // are no longer referenced by any in-flight draw, so they can be freed now
-  // without page-faulting the GPU.
-  if (render_target_cache_) {
-    render_target_cache_->DrainDeferredReleases();
-  }
-  if (texture_cache_) {
-    texture_cache_->ReclaimStaleSlots();
-  }
-  // The committed work has consumed the shared buffer's current contents;
-  // later uploads may safely rewrite any range.
-  if (shared_memory_) {
-    shared_memory_->ResetFrameRanges();
-  }
+  // Reclamation runs once THIS submission has completed (S7): snapshot
+  // textures retired mid-frame are then no longer referenced by any in-flight
+  // draw, bindless slots can recycle, and later uploads may rewrite any
+  // shared-memory range the submission consumed. With the synchronous wait
+  // above the pump fires immediately — identical behavior to the pre-S7
+  // direct drains; without it (S8) the actions wait for the GPU.
+  completion_actions_.emplace_back(submission, [this]() {
+    if (render_target_cache_) {
+      render_target_cache_->DrainDeferredReleases();
+    }
+    if (texture_cache_) {
+      texture_cache_->ReclaimStaleSlots();
+    }
+    if (shared_memory_) {
+      shared_memory_->ResetFrameRanges();
+    }
+  });
+  PumpCompletedActions();
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -2662,7 +2695,8 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
-                uint32_t(dc.offset_y_div_8) << 3, extent_bytes});
+                uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
+                CurrentEncodingSubmission()});
           }
         }
       } else {
@@ -2794,9 +2828,17 @@ void MetalCommandProcessor::InitializeTrace() {
 
 void MetalCommandProcessor::DrainPendingWritebacks() {
   // Resolve guest-memory writebacks (the CPU-side exposure loop and any
-  // fence-after-copy data): caller must have committed + waited the frame
-  // command buffer so the staging contents are final.
+  // fence-after-copy data). S7: a staging buffer is final only once its
+  // submission completed — process those, keep the rest pending (with the
+  // synchronous EndFrameEncoder wait every entry is completed by the time
+  // any drain site runs, so this is behavior-neutral until S8).
+  uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  std::vector<PendingWriteback> still_pending;
   for (PendingWriteback& wb : pending_writebacks_) {
+    if (wb.submission > completed) {
+      still_pending.push_back(wb);
+      continue;
+    }
     id<MTLBuffer> staging = (__bridge_transfer id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
     if (dest && staging) {
@@ -2887,7 +2929,7 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       }
     }
   }
-  pending_writebacks_.clear();
+  pending_writebacks_ = std::move(still_pending);
 }
 
 void MetalCommandProcessor::FlushPendingWritebacksForWait(

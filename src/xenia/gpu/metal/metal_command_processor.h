@@ -10,6 +10,9 @@
 #ifndef XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
+#include <atomic>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -206,6 +209,24 @@ class MetalCommandProcessor : public CommandProcessor {
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;
+
+  // S7 — submission-gated lifetime. Every frame-command-buffer commit gets a
+  // monotonically increasing submission id; a completion handler publishes
+  // the highest completed id (also published inline after synchronous waits,
+  // which don't order against the async handler). Reclamation work enqueues
+  // as (submission, action) and runs from PumpCompletedActions once its
+  // submission has completed. While EndFrameEncoder still waits
+  // synchronously this is behavior-neutral; it is the prerequisite for S8
+  // (removing the hot-path waits) — arenas/slots/textures must not be
+  // reclaimed while a submission that references them is in flight.
+  uint64_t submission_counter_ = 0;
+  std::atomic<uint64_t> completed_submission_{0};
+  std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
+  // The submission id the currently-open frame command buffer will get when
+  // committed (commits are strictly ordered on the GPU thread).
+  uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
+  void PublishCompletedSubmission(uint64_t submission);
+  void PumpCompletedActions();
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;
@@ -237,6 +258,9 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t dest_offset_x;
     uint32_t dest_offset_y;
     uint32_t dest_extent_bytes;   // write bound relative to guest_addr
+    // Submission whose command buffer fills `staging` — the drain may only
+    // read the staging contents once this submission has completed.
+    uint64_t submission;
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
