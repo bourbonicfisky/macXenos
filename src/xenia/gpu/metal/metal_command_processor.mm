@@ -299,9 +299,18 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   }
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
+  static const bool s_dump_owner_log = std::getenv("XE_METAL_DUMP_OWNER_LOG");
   for (const auto& owner : owners) {
     if (owner.is_64bpp) {
       continue;  // 64bpp encode not implemented in the dump yet.
+    }
+    if (s_dump_owner_log) {
+      id<MTLTexture> ot = (__bridge id<MTLTexture>)owner.texture;
+      XELOGW("MetalDumpOwner: tex={} {}x{} depth={} msaa={} base={} pitch={} "
+             "rows[{},{})",
+             owner.texture, ot.width, ot.height, owner.is_depth,
+             owner.msaa_samples, owner.base_tiles, owner.pitch_tiles,
+             owner.row_first, owner.row_first + owner.rows);
     }
     // Per-owner autorelease pool: with per-draw capture (--capture_edram_*)
     // this runs thousands of times on a pool-less replay thread; the
@@ -364,8 +373,15 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
     const uint8_t* pixels = static_cast<const uint8_t*>(staging.contents);
     const uint8_t* stencil_plane =
         combined_ds ? pixels + depth_plane_bytes : nullptr;
-    uint32_t xs = owner.msaa_samples >= 3 ? 1 : 0;   // 4x doubles horizontal.
-    uint32_t ys = owner.msaa_samples >= 2 ? 1 : 0;   // 2x+ doubles vertical.
+    // msaa_samples is the xenos::MsaaSamples ENUM (k1X=0, k2X=1, k4X=2), not a
+    // sample count: 2x+ doubles vertical, 4x also doubles horizontal. The old
+    // >=3/>=2 count-style thresholds read 4x owners with xs=0 — the right half
+    // of every sample row fell out of bounds and dumped as zeros (the phantom
+    // "half-screen" divergence at the 7282/6756 draw-25 MSAA clears).
+    uint32_t xs =
+        owner.msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1 : 0;
+    uint32_t ys =
+        owner.msaa_samples >= uint32_t(xenos::MsaaSamples::k2X) ? 1 : 0;
     // The rect covers full-EDRAM 16-tile rows [row_first, row_first+rows).
     for (uint32_t er = owner.row_first; er < owner.row_first + owner.rows;
          ++er) {

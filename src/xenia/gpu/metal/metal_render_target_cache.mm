@@ -401,14 +401,23 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   // transfer over which tiles (throttled; replay has dozens per frame).
   static uint32_t s_x2x_logs = 0;
   if (s_x2x_logs++ < 256) {
-    XELOGW("MetalX2X @draw {}: {} -> {} tiles [{},{})",
+    id<MTLTexture> st = (__bridge id<MTLTexture>)source->texture();
+    id<MTLTexture> dt = (__bridge id<MTLTexture>)dest->texture();
+    XELOGW("MetalX2X @draw {}: {} ({}x{} tex={}) -> {} ({}x{} tex={}) "
+           "tiles [{},{})",
            command_processor_.trace_draw_index(),
-           source->key().GetDebugName(), dest->key().GetDebugName(),
-           transfer.start_tiles, transfer.end_tiles);
+           source->key().GetDebugName(), st.width, st.height,
+           (void*)source->texture(), dest->key().GetDebugName(), dt.width,
+           dt.height, (void*)dest->texture(), transfer.start_tiles,
+           transfer.end_tiles);
   }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   bool is_depth = dest->key().is_depth != 0;
+  // XE_METAL_X2X_PROBE=1: after the first depth transfer, flush and read
+  // back dest vs source pixels (verifies the copy lands). =2: at the SECOND
+  // depth transfer, read the SOURCE (the msaa RT after the guest draw on it)
+  // BEFORE encoding anything — locates where transferred content gets wiped.
   if (!transfer_x2x_library_) {
     // Same tile arithmetic as the reinterpret transfers; host->host, so no
     // raw-word decode and no depth 40-column swap.
@@ -600,12 +609,13 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-  // Default OFF: the x2x sample mapping itself is still divergent for MSAA
-  // targets (row-interlace defect); transferring stencil through the broken
-  // mapping ADDS ~60K diff dwords at 7282 draw 25 (A/B 2026-07-12). Re-enable
-  // with XE_METAL_X2X_STEN=1 once the mapping is fixed.
-  static const bool s_x2x_sten_on = std::getenv("XE_METAL_X2X_STEN");
-  if (is_depth && s_x2x_sten_on && transfer_x2x_sten_pipeline_ &&
+  // Default ON: the earlier "x2x stencil makes it worse" verdict was an
+  // artifact of the dump's msaa-shift bug (enum-vs-count). With the dump
+  // fixed, stencil transfer takes 7282 draw-25 567K -> 327K diff dwords and
+  // draw 900 reaches FULL EDRAM parity (0 tiles). XE_METAL_X2X_STEN_OFF=1
+  // disables for A/B.
+  static const bool s_x2x_sten_off = std::getenv("XE_METAL_X2X_STEN_OFF");
+  if (is_depth && !s_x2x_sten_off && transfer_x2x_sten_pipeline_ &&
       stencil_bit_states_[0]) {
     // Transfer the source stencil plane: 8 masked REPLACE passes reading an
     // X32_Stencil8 view of the source (texture2d<uint>, .r = stencil).

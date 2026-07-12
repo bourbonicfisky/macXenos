@@ -88,6 +88,8 @@ class MetalCommandProcessor : public CommandProcessor {
   static bool S7TagsOff();        // XE_METAL_S7_OFF_TAGS
 
  private:
+  // Debug probes in the RT cache flush the frame CB directly.
+  friend class MetalRenderTargetCache;
   bool SetupContext() override;
   void ShutdownContext() override;
 
