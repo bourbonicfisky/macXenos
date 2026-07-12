@@ -225,6 +225,20 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
         trace_ptr += sizeof(*cmd);
         switch (cmd->event_type) {
           case EventCommand::Type::kSwap: {
+            // XE_TRACE_WATCH companion: sample guest RAM at the watched
+            // address at swap — with readback resolves enabled this shows
+            // the REPLAYING backend's effective content (what a consumer
+            // pass read), comparable across backends.
+            static const uint64_t swap_watch_addr = [] {
+              const char* v = std::getenv("XE_TRACE_WATCH");
+              return v ? strtoull(v, nullptr, 16) : 0ull;
+            }();
+            if (swap_watch_addr) {
+              const uint32_t* w = reinterpret_cast<const uint32_t*>(
+                  memory->TranslatePhysical(uint32_t(swap_watch_addr)));
+              XELOGW("TraceWatch: at swap {:08X}: {:08X} {:08X} {:08X} {:08X}",
+                     uint32_t(swap_watch_addr), w[0], w[1], w[2], w[3]);
+            }
             if (playback_mode == TracePlaybackMode::kBreakOnSwap) {
               pending_break = true;
             }
@@ -261,6 +275,22 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
             cmd->rw_component);
         break;
       }
+    }
+  }
+
+  // XE_TRACE_WATCH companion: sample guest RAM at the watched address after
+  // the whole stream has played — with readback resolves enabled this is the
+  // REPLAYING backend's effective final content, comparable across backends.
+  {
+    static const uint64_t end_watch_addr = [] {
+      const char* v = std::getenv("XE_TRACE_WATCH");
+      return v ? strtoull(v, nullptr, 16) : 0ull;
+    }();
+    if (end_watch_addr) {
+      const uint32_t* w = reinterpret_cast<const uint32_t*>(
+          memory->TranslatePhysical(uint32_t(end_watch_addr)));
+      XELOGW("TraceWatch: at end {:08X}: {:08X} {:08X} {:08X} {:08X}",
+             uint32_t(end_watch_addr), w[0], w[1], w[2], w[3]);
     }
   }
 

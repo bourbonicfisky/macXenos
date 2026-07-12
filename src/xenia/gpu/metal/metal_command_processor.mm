@@ -187,6 +187,14 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   if (shared_memory_) {
     shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
   }
+  // Also evict cached guest-texture uploads overlapping the restore: the
+  // trace re-restores a buffer right before each packet that read it at
+  // capture (the blur chain ping-pongs draw -> resolve -> RAM -> fetch
+  // through the SAME addresses), so a fetch must re-upload the fresh bytes
+  // or it replays a stale earlier-era upload.
+  if (texture_cache_) {
+    texture_cache_->InvalidateRange(base_ptr, length);
+  }
 }
 
 void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {

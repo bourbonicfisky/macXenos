@@ -732,7 +732,16 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
         uint d24 = p.is_float24 != 0u
                        ? xe_f32_to_f20e4(d)
                        : uint(rint(saturate(d) * 16777215.0));
-        uint bits = d24 << 8;  // stencil (low byte) not emulated.
+        // DEFAULT: zero words. Rationale: a color pass claiming depth-owned
+        // tiles only ever CONSUMES this content when the real producer draws
+        // were lost (trace replay's stale-VB degenerate quads) — live, the
+        // guest overwrites the tiles before reading. The stable Vulkan
+        // reference zero-fills this case, and real f20e4 depth bytes here
+        // read as saturated blue fog in JC2's composite (81.9 vs 49.9 MAE).
+        // p.shifts bit 17 = probe: encode the REAL depth bits (d24<<8, with
+        // bit 16 setting stencil FF instead of 0).
+        uint stencil = (p.shifts & 0x10000u) != 0u ? 0xFFu : 0u;
+        uint bits = (p.shifts & 0x20000u) != 0u ? ((d24 << 8) | stencil) : 0u;
         return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
                       float((bits >> 16) & 0xFFu), float((bits >> 24) & 0xFFu)) /
                255.0;
@@ -765,6 +774,13 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   uint32_t sxs, sys, dxs, dys;
   GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
   GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
+  // A/B probes: XE_METAL_D2C_REAL=1 encodes the real depth bits instead of
+  // the default zero words (see the shader comment); XE_METAL_D2C_STENCILFF=1
+  // additionally writes 0xFF in the stencil byte (hardware-capture-like;
+  // measured WORSE vs Vulkan truth).
+  static const uint32_t s_stencil0_bit =
+      (std::getenv("XE_METAL_D2C_STENCILFF") ? 0x10000u : 0u) |
+      (std::getenv("XE_METAL_D2C_REAL") ? 0x20000u : 0u);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
@@ -773,7 +789,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(source->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12) | s_stencil0_bit};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
