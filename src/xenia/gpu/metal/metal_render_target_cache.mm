@@ -76,7 +76,7 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
     // (see the class comment). The cache drains after the frame's GPU work
     // completes.
     cache_.deferred_texture_releases_.emplace_back(
-        MetalCommandProcessor::S7LifetimeOff()
+        MetalCommandProcessor::S7TagsOff()
             ? 0
             : cache_.command_processor_.CurrentEncodingSubmission(),
         texture_);
@@ -1574,7 +1574,7 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
     // mid-frame GPU-page-faults when they execute (the "GPU froze" hang). Retire
     // it to the deferred list; the command processor frees it after commit+wait.
     deferred_texture_releases_.emplace_back(
-        MetalCommandProcessor::S7LifetimeOff()
+        MetalCommandProcessor::S7TagsOff()
             ? 0
             : command_processor_.CurrentEncodingSubmission(),
         it->second.texture);

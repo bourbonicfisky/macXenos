@@ -437,7 +437,7 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
     if (!provider || !provider->command_queue()) {
       return nullptr;
     }
-    if (S7LifetimeOff() && upload_arena_) {
+    if (S7ArenaResetOff() && upload_arena_) {
       upload_arena_->Reset();
     }
     id<MTLCommandQueue> queue =
@@ -575,7 +575,7 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
   shared_memory_->SetTraceWriter(&trace_writer_);
   shared_memory_->SetSubmissionProvider([this]() {
-    return S7LifetimeOff() ? 0 : CurrentEncodingSubmission();
+    return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
@@ -705,7 +705,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
   texture_cache_->SetSubmissionProvider([this]() {
-    return S7LifetimeOff() ? 0 : CurrentEncodingSubmission();
+    return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
   return true;
 }
@@ -791,7 +791,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   id<MTLCommandBuffer> command_buffer;
   bool new_frame = frame_command_buffer_ == nullptr;
   if (new_frame) {
-    if (S7LifetimeOff() && upload_arena_) {
+    if (S7ArenaResetOff() && upload_arena_) {
       upload_arena_->Reset();
     }
     id<MTLCommandQueue> queue =
@@ -865,9 +865,21 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
 // semantics (retires/writebacks tagged 0 = reclaimable at the next
 // completion, upload ring hard-reset at every new command buffer like the
 // old bump arena). Only sound combined with XE_METAL_SYNC_WAIT=1.
+// Split variants for narrowing: XE_METAL_S7_OFF_ARENA (ring reset only),
+// XE_METAL_S7_OFF_TAGS (zero retire tags only).
 bool MetalCommandProcessor::S7LifetimeOff() {
   static const bool s_off = std::getenv("XE_METAL_S7_OFF") != nullptr;
   return s_off;
+}
+
+bool MetalCommandProcessor::S7ArenaResetOff() {
+  static const bool s_off = std::getenv("XE_METAL_S7_OFF_ARENA") != nullptr;
+  return s_off || S7LifetimeOff();
+}
+
+bool MetalCommandProcessor::S7TagsOff() {
+  static const bool s_off = std::getenv("XE_METAL_S7_OFF_TAGS") != nullptr;
+  return s_off || S7LifetimeOff();
 }
 
 void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
@@ -2798,7 +2810,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
-                S7LifetimeOff() ? 0 : CurrentEncodingSubmission()});
+                S7TagsOff() ? 0 : CurrentEncodingSubmission()});
           }
         }
       } else {

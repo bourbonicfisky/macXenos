@@ -84,6 +84,8 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
   // XE_METAL_S7_OFF=1 live-bisect kill switch (pre-S7 lifetime semantics).
   static bool S7LifetimeOff();
+  static bool S7ArenaResetOff();  // XE_METAL_S7_OFF_ARENA
+  static bool S7TagsOff();        // XE_METAL_S7_OFF_TAGS
 
  private:
   bool SetupContext() override;
