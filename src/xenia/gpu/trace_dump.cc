@@ -190,10 +190,12 @@ int TraceDump::Run() {
   // concurrency (iteration k's GPU work overlaps k+1's encoding) — the
   // in-agent reproducer for lifetime races that only fire at speed.
   int32_t replay_loops = std::max(int32_t(1), cvars::replay_loops);
-  for (int32_t loop = 0; loop < replay_loops; ++loop) {
-    player_->SeekFrame(0);
-    player_->SeekCommand(
-        static_cast<int>(player_->current_frame()->commands.size() - 1));
+  player_->SeekFrame(0);
+  player_->SeekCommand(
+      static_cast<int>(player_->current_frame()->commands.size() - 1));
+  player_->WaitOnPlayback();
+  for (int32_t loop = 1; loop < replay_loops; ++loop) {
+    player_->ReplayCurrentFrame();
     player_->WaitOnPlayback();
   }
   EndHostCapture();

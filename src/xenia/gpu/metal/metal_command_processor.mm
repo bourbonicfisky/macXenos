@@ -1736,8 +1736,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Without this the scene was written LINEAR and every downstream pass that
     // gamma-decodes it (composite, bloom) darkened it (0.5 -> ~0.22),
     // compounding into the near-black gameplay image.
-    if (color_bound && rt0_info.color_format ==
-                           xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+    // A/B (XE_METAL_NO_GAMMA_ENCODE=1): skip the PS linear->gamma encode on
+    // gamma RTs — the exposure/history-loop stability probe (gamma decode
+    // NO_SIGNS flattens the oscillation; this tests the encode leg).
+    static const bool s_no_gamma_encode =
+        std::getenv("XE_METAL_NO_GAMMA_ENCODE") != nullptr;
+    if (!s_no_gamma_encode && color_bound &&
+        rt0_info.color_format ==
+            xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
       flags |= DxbcShaderTranslator::kSysFlag_ConvertColor0ToGamma;
     }
     flags |= uint32_t(alpha_test_function)

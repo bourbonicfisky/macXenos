@@ -43,6 +43,11 @@ class TracePlayer : public TraceReader {
 
   void SeekFrame(int target_frame);
   void SeekCommand(int target_command);
+  // Re-plays the current frame from its start unconditionally (SeekFrame /
+  // SeekCommand no-op when already positioned — a repeat caller would wedge
+  // in WaitOnPlayback). Multi-pass replay builds cross-frame state (RT/key
+  // persistence, temporal history) that single-pass replay cannot.
+  void ReplayCurrentFrame();
 
   void WaitOnPlayback();
 

@@ -80,6 +80,16 @@ void TracePlayer::SeekCommand(int target_command) {
   }
 }
 
+void TracePlayer::ReplayCurrentFrame() {
+  auto frame = current_frame();
+  if (!frame) {
+    return;
+  }
+  current_command_index_ = int(frame->commands.size()) - 1;
+  PlayTrace(frame->start_ptr, frame->end_ptr - frame->start_ptr,
+            TracePlaybackMode::kBreakOnSwap, false);
+}
+
 void TracePlayer::WaitOnPlayback() {
   xe::threading::Wait(playback_event_.get(), true);
 }
