@@ -45,6 +45,10 @@ DEFINE_string(dump_guest_memory, "",
               "(e.g. 1D06C000,26AC00). Combine with --readback_resolve=full "
               "to capture resolve destinations.",
               "GPU");
+DEFINE_int32(replay_loops, 1,
+             "Replay the traced frame N times before capturing (async-race "
+             "stress; see TraceDump::Run).",
+             "GPU");
 DEFINE_bool(dump_edram, false,
             "After playback, dump the raw 10 MB EDRAM contents (per-sample, "
             "tile-major) next to the output image as <output>.edram.bin.",
@@ -181,10 +185,17 @@ int TraceDump::Run() {
         "during animation/transitions instead");
     return 1;
   }
-  player_->SeekFrame(0);
-  player_->SeekCommand(
-      static_cast<int>(player_->current_frame()->commands.size() - 1));
-  player_->WaitOnPlayback();
+  // Replay-loop stress (--replay_loops=N): re-plays the frame N times before
+  // the capture. Under async submission this creates cross-iteration
+  // concurrency (iteration k's GPU work overlaps k+1's encoding) — the
+  // in-agent reproducer for lifetime races that only fire at speed.
+  int32_t replay_loops = std::max(int32_t(1), cvars::replay_loops);
+  for (int32_t loop = 0; loop < replay_loops; ++loop) {
+    player_->SeekFrame(0);
+    player_->SeekCommand(
+        static_cast<int>(player_->current_frame()->commands.size() - 1));
+    player_->WaitOnPlayback();
+  }
   EndHostCapture();
 
   if (cvars::dump_edram) {

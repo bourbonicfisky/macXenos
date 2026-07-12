@@ -543,7 +543,9 @@ bool MetalCommandProcessor::SetupContext() {
   // misidentified from fps profiles alone — the log states the truth.
   XELOGI(
       "MetalCommandProcessor: MODE submission={} arena={} ({} MB) retire-tags={}",
-      std::getenv("XE_METAL_SYNC_WAIT") ? "SYNC-WAIT" : "async",
+      (std::getenv("XE_METAL_SYNC_WAIT") || !std::getenv("XE_METAL_ASYNC"))
+          ? "SYNC-WAIT"
+          : "async",
       S7ArenaResetOff() ? "reset-per-buffer" : "ring",
       UploadArenaSize() / (1024 * 1024), S7TagsOff() ? "OFF" : "on");
   if (!CommandProcessor::SetupContext()) {
@@ -882,7 +884,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
 // Split variants for narrowing: XE_METAL_S7_OFF_ARENA (ring reset only),
 // XE_METAL_S7_OFF_TAGS (zero retire tags only).
 bool MetalCommandProcessor::S7LifetimeOff() {
-  static const bool s_off = std::getenv("XE_METAL_S7_OFF") != nullptr;
+  // DEFAULT ON (pre-S7 semantics) until the async lifetime race is found:
+  // the S7/S8 fast path (28.5 vs 21 fps live) faults ~1/500 swaps in
+  // gameplay — a timing race that hides under shader validation and hasn't
+  // reproduced in replay (even 16x ring stress / loop stress). XE_METAL_ASYNC=1
+  // opts back into the full async+ring+tags path for the hunt.
+  static const bool s_async = std::getenv("XE_METAL_ASYNC") != nullptr;
+  static const bool s_off =
+      std::getenv("XE_METAL_S7_OFF") != nullptr || !s_async;
   return s_off;
 }
 
@@ -1048,7 +1057,9 @@ void MetalCommandProcessor::EndFrameEncoder() {
   [command_buffer commit];
   // S8: NO synchronous wait — the GPU pipelines behind CPU encoding.
   // XE_METAL_SYNC_WAIT=1 restores the pre-S8 commit+wait for A/B.
-  static const bool s_sync_wait = std::getenv("XE_METAL_SYNC_WAIT") != nullptr;
+  static const bool s_sync_wait =
+      std::getenv("XE_METAL_SYNC_WAIT") != nullptr ||
+      std::getenv("XE_METAL_ASYNC") == nullptr;
   if (s_sync_wait) {
     [command_buffer waitUntilCompleted];
     PublishCompletedSubmission(submission);
