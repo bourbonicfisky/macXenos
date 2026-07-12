@@ -1445,7 +1445,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pd.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt_ptr;
       pd.colorAttachments[0].loadAction = MTLLoadActionClear;
       pd.colorAttachments[0].storeAction = MTLStoreActionStore;
-      pd.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+      // Alpha 0 so post-draw alpha == the accumulated SRC alpha (additive
+      // light passes: out = src*srcA + dst — separating "src small" from
+      // "alpha small" in the zero-contribution hunt).
+      pd.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 0.0);
       id<MTLRenderCommandEncoder> pe = [pcb renderCommandEncoderWithDescriptor:pd];
       [pe endEncoding];
       [pcb commit];
@@ -1844,7 +1847,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       XELOGW(
           "MetalVP draw {}: prim={} geo={} vp=({},{} {}x{}) win_off=({},{}) "
           "vtx_wofs_en={} clip_dis={} ndc_y=(s{} o{}) ps={:08X} blend={:08X} "
-          "mask={:X}",
+          "mask={:X} imask={:X} pgen={}",
           vp_draw_index, uint32_t(prim_type), use_geometry_emulation ? 1 : 0,
           viewport_info.xy_offset[0], viewport_info.xy_offset[1],
           viewport_info.xy_extent[0], viewport_info.xy_extent[1],
@@ -1853,7 +1856,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint32_t(clip.clip_disable), viewport_info.ndc_scale[1],
           viewport_info.ndc_offset[1],
           pixel_shader ? uint32_t(pixel_shader->ucode_data_hash() >> 32) : 0,
-          regs[XE_GPU_REG_RB_BLENDCONTROL0], normalized_color_mask & 0xF);
+          regs[XE_GPU_REG_RB_BLENDCONTROL0], normalized_color_mask & 0xF,
+          interpolator_mask, ps_param_gen_pos);
       // The draw's pixel-shader fetches: base + format + snapshot-hit, the
       // composite-input audit.
       if (pixel_shader && render_target_cache_) {
@@ -2510,11 +2514,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         if (f) {
           fprintf(f, "P6\n%u %u\n255\n", tw, th);
           const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
+          uint64_t a_sum = 0;
+          uint8_t a_min = 255, a_max = 0;
           for (size_t i = 0; i < size_t(tw) * th; ++i) {
             fwrite(px + i * 4, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
+            uint8_t a = px[i * 4 + 3];
+            a_sum += a;
+            a_min = std::min(a_min, a);
+            a_max = std::max(a_max, a);
           }
           fclose(f);
-          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{})", path, tw, th);
+          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{}) alpha min={} max={} mean={:.2f}",
+                 path, tw, th, a_min, a_max,
+                 double(a_sum) / (double(tw) * th));
         }
       }
     }

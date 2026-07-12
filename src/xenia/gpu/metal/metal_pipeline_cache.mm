@@ -154,11 +154,41 @@ bool MetalPipelineCache::TranslateShader(
     return false;
   }
 
+  // Shader-chain forensics (XE_METAL_DUMP_XLAT=<hex ucode hash>): dump the
+  // translated DXBC + DXIL + metallib for that shader to /tmp for offline
+  // disassembly (the light-VS frc-unpack outputs zero; the M4 GPU primitive
+  // is proven exact, so the divergence is inside this chain).
+  static const uint64_t s_dump_xlat = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_XLAT");
+    return v ? strtoull(v, nullptr, 16) : 0ull;
+  }();
+  if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
+    auto dump = [&](const char* ext, const std::vector<uint8_t>& data) {
+      std::string path =
+          fmt::format("/tmp/xe_xlat_{:016X}.{}", s_dump_xlat, ext);
+      FILE* f = fopen(path.c_str(), "wb");
+      if (f) {
+        fwrite(data.data(), 1, data.size(), f);
+        fclose(f);
+        XELOGW("MetalPipelineCache: dumped {} ({} bytes)", path, data.size());
+      }
+    };
+    dump("dxbc", dxbc);
+  }
   // Stage 3: DXIL -> metallib.
   MetalShaderConverter::Stage stage =
       shader.type() == xenos::ShaderType::kVertex
           ? MetalShaderConverter::Stage::kVertex
           : MetalShaderConverter::Stage::kFragment;
+  if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
+    std::string path = fmt::format("/tmp/xe_xlat_{:016X}.dxil", s_dump_xlat);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (f) {
+      fwrite(dxil.data(), 1, dxil.size(), f);
+      fclose(f);
+      XELOGW("MetalPipelineCache: dumped {} ({} bytes)", path, dxil.size());
+    }
+  }
   std::vector<uint8_t> metallib;
   if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
     XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
@@ -167,6 +197,16 @@ bool MetalPipelineCache::TranslateShader(
   }
 
   // Load onto the device as an MTLFunction.
+  if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
+    std::string path =
+        fmt::format("/tmp/xe_xlat_{:016X}.metallib", s_dump_xlat);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (f) {
+      fwrite(metallib.data(), 1, metallib.size(), f);
+      fclose(f);
+      XELOGW("MetalPipelineCache: dumped {} ({} bytes)", path, metallib.size());
+    }
+  }
   if (!translation.CreateMetalFunction(device_, metallib)) {
     XELOGE("MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
            shader.ucode_data_hash());
