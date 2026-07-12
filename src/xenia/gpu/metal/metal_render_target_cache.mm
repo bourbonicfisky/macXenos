@@ -333,14 +333,25 @@ void MetalRenderTargetCache::PerformTransfers(
       } else if (!dest_key.is_depth && src_key.is_depth &&
                  dest->pixel_format() == kColorFormat) {
         // Depth reinterpreted as raw-bits color (a color pass reuses tiles a
-        // depth RT last owned): encode host D32F back to the guest 24-bit
-        // pattern and write it as BGRA8 bytes.
-        if (blit) {
-          [blit endEncoding];
-          blit = nil;
+        // depth RT last owned). DEFAULT: SKIP — the color key keeps its own
+        // previous content ("key-local EDRAM persistence"). Both consumer
+        // patterns want that: JC2's tonemap draws BLEND AGAINST DESTINATION
+        // over these tiles (writing zeros here rendered the casino's dark
+        // rectangles; real depth bits render as garbage the multiply
+        // amplifies), and the composite's depth-owned resolve spans read
+        // whatever the chain last produced, exactly like the mainline truth
+        // leg. XE_METAL_D2C_REAL=1 encodes the real depth bits instead
+        // (hardware-accurate raw reinterpret, for titles that genuinely
+        // read them).
+        static const bool s_d2c_real = std::getenv("XE_METAL_D2C_REAL");
+        if (s_d2c_real) {
+          if (blit) {
+            [blit endEncoding];
+            blit = nil;
+          }
+          PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
+                                      transfer);
         }
-        PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
-                                    transfer);
       } else if (!src_key.is_depth && !dest_key.is_depth &&
                  !src_key.Is64bpp() && !dest_key.Is64bpp() &&
                  ((source->pixel_format() == kColorFormat &&
