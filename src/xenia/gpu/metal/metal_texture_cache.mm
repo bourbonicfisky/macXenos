@@ -17,7 +17,9 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
+#include "xenia/gpu/texture_util.h"
 #include "xenia/memory.h"
 
 #include "metal_irconverter_runtime.h"
@@ -497,13 +499,64 @@ uint32_t MetalTextureCache::GetTextureSlot(
     log_null("cube-shape");
     return 0;
   }
+  // Mip chain: mips live at fetch.mip_address with their own layout
+  // (pow2-rounded, 32-block-aligned, small levels packed into a tail —
+  // texture_util::GetGuestTextureLayout). Serving mip 0 only point/linear
+  // aliases every minified texture (JC2 cloth moire). 2D only for now.
+  uint32_t mip_addr = fetch.mip_address << 12;
+  uint32_t host_levels = 1;
+  // A/B: XE_METAL_NO_MIPS=1 disables mip upload; XE_METAL_NO_PACKED_MIPS=1
+  // uploads only the levels before the packed tail.
+  static const bool s_no_mips = std::getenv("XE_METAL_NO_MIPS") != nullptr;
+  static const bool s_no_packed_mips =
+      std::getenv("XE_METAL_NO_PACKED_MIPS") != nullptr;
+  static const bool s_mips_dxt_only =
+      std::getenv("XE_METAL_MIPS_DXT_ONLY") != nullptr;
+  static const bool s_mips_uncomp_only =
+      std::getenv("XE_METAL_MIPS_UNCOMP_ONLY") != nullptr;
+  bool mip_format_allowed = !(s_mips_dxt_only && !plan.compressed) &&
+                            !(s_mips_uncomp_only && plan.compressed);
+  if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && mip_addr &&
+      mip_addr < kPhysicalSize && fetch.mip_max_level > 0 &&
+      !plan.decode_4444 && !plan.decode_r16) {
+    host_levels = std::min<uint32_t>(
+        uint32_t(fetch.mip_max_level) + 1,
+        xe::log2_floor(std::max(width, height)) + 1);
+    if (s_no_packed_mips && fetch.packed_mips) {
+      host_levels = std::min(
+          host_levels, std::max(1u, texture_util::GetPackedMipLevel(width, height)));
+    }
+    // Content guard: trace replays don't carry mip memory (the capture never
+    // recorded it) — the restored pages are ZEROS, and uploading them blacks
+    // out every minified surface. If the first 4KB at mip_address is
+    // all-zero, serve the base level only (live RAM has real mips; a
+    // genuinely black mip tail just loses nothing visible).
+    const uint32_t* probe = reinterpret_cast<const uint32_t*>(
+        memory_->TranslatePhysical(mip_addr));
+    if (probe) {
+      uint32_t probe_words =
+          std::min<uint32_t>(1024, (kPhysicalSize - mip_addr) / 4);
+      bool any_nonzero = false;
+      for (uint32_t i = 0; i < probe_words; ++i) {
+        if (probe[i]) {
+          any_nonzero = true;
+          break;
+        }
+      }
+      if (!any_nonzero) {
+        host_levels = 1;
+      }
+    } else {
+      host_levels = 1;
+    }
+  }
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
   desc.textureType = is_cube ? MTLTextureTypeCubeArray : MTLTextureType2DArray;
   desc.pixelFormat = plan.host_format;
   desc.width = width;
   desc.height = height;
   desc.arrayLength = 1;  // For cube arrays this is the CUBE count (6 slices).
-  desc.mipmapLevelCount = 1;
+  desc.mipmapLevelCount = host_levels;
   desc.usage = MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModeShared;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
@@ -552,6 +605,99 @@ uint32_t MetalTextureCache::GetTextureSlot(
                bytesPerImage:0];
     }
   }
+  if (host_levels > 1) {
+    texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
+        fetch.dimension, fetch.pitch, width, height, 1, tiled, fetch.format,
+        fetch.packed_mips != 0, /*has_base=*/true, fetch.mip_max_level);
+    // Mips live at mip_address, NOT relative to the base level — read through
+    // their own translation with their own bounds.
+    const uint8_t* mip_guest =
+        static_cast<const uint8_t*>(memory_->TranslatePhysical(mip_addr));
+    uint32_t max_mip_bytes = kPhysicalSize - mip_addr;
+    std::vector<uint8_t> mip_linear;
+    for (uint32_t level = 1; mip_guest && level < host_levels; ++level) {
+      uint32_t lw = std::max(1u, width >> level);
+      uint32_t lh = std::max(1u, height >> level);
+      uint32_t lbw = (lw + block_texels - 1) / block_texels;
+      uint32_t lbh = (lh + block_texels - 1) / block_texels;
+      uint32_t storage_level = level;
+      uint32_t xb = 0, yb = 0, zb = 0;
+      if (layout.packed_level != UINT32_MAX && level >= layout.packed_level) {
+        storage_level = layout.packed_level;
+        texture_util::GetPackedMipOffset(width, height, 1, fetch.format, level,
+                                         xb, yb, zb);
+      }
+      if (storage_level >= xenos::kTextureMaxMips) {
+        break;
+      }
+      const auto& lvl = layout.mips[storage_level];
+      if (!lvl.row_pitch_bytes) {
+        break;
+      }
+      uint32_t level_base = layout.mip_offsets_bytes[storage_level];
+      uint32_t lpitch_blocks = lvl.row_pitch_bytes / bpb;
+      mip_linear.assign(size_t(lbw) * lbh * bpb, 0);
+      for (uint32_t by = 0; by < lbh; ++by) {
+        for (uint32_t bx = 0; bx < lbw; ++bx) {
+          uint32_t src_off;
+          if (tiled) {
+            src_off = level_base +
+                      uint32_t(texture_address::Tiled2D(
+                          int32_t(bx + xb), int32_t(by + yb), lpitch_blocks,
+                          plan.block_log2));
+          } else {
+            src_off = level_base + (by + yb) * lvl.row_pitch_bytes +
+                      (bx + xb) * bpb;
+          }
+          uint8_t* dst = &mip_linear[(size_t(by) * lbw + bx) * bpb];
+          if (src_off + bpb <= max_mip_bytes) {
+            std::memcpy(dst, mip_guest + src_off, bpb);
+            SwapEndian(dst, bpb, endian);
+          }
+        }
+      }
+      // XE_METAL_MIP_TRACE=1: sample the untiled level's bytes (mip
+      // corruption forensics — plausible-DXT vs noise vs zeros).
+      static const bool s_mip_trace = std::getenv("XE_METAL_MIP_TRACE");
+      static uint32_t s_mip_trace_count = 0;
+      if (s_mip_trace && level == 1 && s_mip_trace_count < 8) {
+        ++s_mip_trace_count;
+        const uint8_t* l0 = linear.data();
+        const uint8_t* l1 = mip_linear.data();
+        size_t mid1 = (mip_linear.size() / 2) & ~15ull;
+        // First nonzero byte offset in the raw guest mip region — reveals
+        // where the data actually lives vs where the layout math looks.
+        uint32_t first_nz = 0xFFFFFFFFu;
+        uint32_t scan_len = std::min<uint32_t>(0x100000, kPhysicalSize - mip_addr);
+        const uint8_t* raw = mip_guest;
+        for (uint32_t i = 0; i < scan_len; ++i) {
+          if (raw[i]) {
+            first_nz = i;
+            break;
+          }
+        }
+        XELOGW("MetalMipTrace   first_nonzero at mip_addr+{:#x}", first_nz);
+        XELOGW(
+            "MetalMipTrace base={:08X} fmt={} {}x{} mip_addr={:08X} "
+            "packed_lvl={} off1={} pitch1={} L0[0..8]={:02X}{:02X}{:02X}{:02X}"
+            "{:02X}{:02X}{:02X}{:02X} L1[0..8]={:02X}{:02X}{:02X}{:02X}{:02X}"
+            "{:02X}{:02X}{:02X} L1[mid]={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}"
+            "{:02X}{:02X}",
+            base, uint32_t(fetch.format), width, height, mip_addr,
+            layout.packed_level, layout.mip_offsets_bytes[storage_level],
+            lpitch_blocks, l0[0], l0[1], l0[2], l0[3], l0[4], l0[5], l0[6],
+            l0[7], l1[0], l1[1], l1[2], l1[3], l1[4], l1[5], l1[6], l1[7],
+            l1[mid1], l1[mid1 + 1], l1[mid1 + 2], l1[mid1 + 3], l1[mid1 + 4],
+            l1[mid1 + 5], l1[mid1 + 6], l1[mid1 + 7]);
+      }
+      [texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh)
+                 mipmapLevel:level
+                       slice:0
+                   withBytes:mip_linear.data()
+                 bytesPerRow:lbw * bpb
+               bytesPerImage:0];
+    }
+  }
 
   // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output
   // channel) when sampling. Bake it into a swizzled texture VIEW so the shader
@@ -570,7 +716,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         newTextureViewWithPixelFormat:plan.host_format
                           textureType:is_cube ? MTLTextureTypeCubeArray
                                               : MTLTextureType2DArray
-                               levels:NSMakeRange(0, 1)
+                               levels:NSMakeRange(0, host_levels)
                                slices:NSMakeRange(0, is_cube ? 6 : 1)
                               swizzle:channels];
     if (view) {
