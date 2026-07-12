@@ -106,6 +106,13 @@ constexpr uint32_t kSystemViewEntryCount = 2;
 constexpr uint32_t kViewBindlessHeapSlots = 4096;
 constexpr uint32_t kSamplerBindlessHeapSlots = 256;
 constexpr uint32_t kUploadArenaSize = 32u * 1024 * 1024;
+// XE_METAL_ARENA_SIZE=<bytes>: ring-stress override — a small ring forces
+// constant wrapping/reclaim pressure in trace replay, turning any ring
+// lifetime bug into a deterministic headless corruption vs the baselines.
+static uint32_t UploadArenaSize() {
+  const char* v = std::getenv("XE_METAL_ARENA_SIZE");
+  return v ? uint32_t(strtoul(v, nullptr, 10)) : kUploadArenaSize;
+}
 
 bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   switch (type) {
@@ -532,6 +539,13 @@ void InstallMetalCrashCapture() {
 }  // namespace
 
 bool MetalCommandProcessor::SetupContext() {
+  // Effective submission/lifetime mode banner: config sessions were getting
+  // misidentified from fps profiles alone — the log states the truth.
+  XELOGI(
+      "MetalCommandProcessor: MODE submission={} arena={} ({} MB) retire-tags={}",
+      std::getenv("XE_METAL_SYNC_WAIT") ? "SYNC-WAIT" : "async",
+      S7ArenaResetOff() ? "reset-per-buffer" : "ring",
+      UploadArenaSize() / (1024 * 1024), S7TagsOff() ? "OFF" : "on");
   if (!CommandProcessor::SetupContext()) {
     return false;
   }
@@ -608,7 +622,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
     mesh_shader_supported_ = false;
   }
 
-  upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, kUploadArenaSize);
+  upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, UploadArenaSize());
   if (!upload_arena_->Initialize()) {
     return false;
   }
