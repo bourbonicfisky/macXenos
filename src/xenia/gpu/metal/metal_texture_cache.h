@@ -46,8 +46,11 @@ class MetalTextureCache {
   // Returns the bindless view-heap slot for the texture described by `fetch`,
   // uploading + caching the host texture on first use. Returns 0 (null) if the
   // format/dimension isn't supported yet or the fetch is invalid. Records the
-  // resolved host texture in the active list for residency.
-  uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch);
+  // resolved host texture in the active list for residency. `is_signed`
+  // requests the SNORM view variant (signed fetches are separate translated
+  // bindings expecting -1..1 texels).
+  uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch,
+                          bool is_signed = false);
 
   // RT-as-texture bridge: register a resolved render-target snapshot (owned by
   // the render-target cache) at its guest resolve destination base. A later

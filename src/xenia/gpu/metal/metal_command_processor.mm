@@ -1830,7 +1830,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         if (binding.bindless_descriptor_index < count) {
           indices[binding.bindless_descriptor_index] =
               texture_cache_->GetTextureSlot(
-                  regs.GetTextureFetch(binding.fetch_constant));
+                  regs.GetTextureFetch(binding.fetch_constant),
+                  binding.is_signed);
         }
       }
     }

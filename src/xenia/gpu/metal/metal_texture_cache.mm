@@ -49,6 +49,10 @@ struct FormatPlan {
   // If true, the untiled 16bpp single-channel k_16 texels are expanded to RGBA8
   // (high byte -> R=G=B, A=255); the fetch swizzle (typically R,R,R,1) selects R.
   bool decode_r16 = false;
+  // SNORM variant served to SIGNED texture bindings (the DXBC translator makes
+  // signed fetches a SEPARATE binding expecting -1..1 values; guest signed
+  // 8-bit texels are two's-complement, i.e. exactly host snorm bytes).
+  MTLPixelFormat host_format_signed = MTLPixelFormatInvalid;
 };
 
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
@@ -58,7 +62,16 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
     // same decode (JC2's temporal composite fetches its history buffer with
     // it).
     case xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16:
-      return {true, false, 4, 2, 1, MTLPixelFormatRGBA8Unorm};
+      return {true,  false, 4, 2, 1, MTLPixelFormatRGBA8Unorm,
+              false, false, MTLPixelFormatRGBA8Snorm};
+    case xenos::TextureFormat::k_8_8:
+      // Two-channel (bump/normal maps: swizzle typically (X,X,X,Y), the
+      // shader reconstructs Z).
+      return {true,  false, 2, 1, 1, MTLPixelFormatRG8Unorm,
+              false, false, MTLPixelFormatRG8Snorm};
+    case xenos::TextureFormat::k_8:
+      return {true,  false, 1, 0, 1, MTLPixelFormatR8Unorm,
+              false, false, MTLPixelFormatR8Snorm};
     case xenos::TextureFormat::k_32_FLOAT:
       // Raw f32 words (the resolve dest format of the luminance pyramid).
       return {true, false, 4, 2, 1, MTLPixelFormatR32Float};
@@ -164,7 +177,7 @@ MetalTextureCache::~MetalTextureCache() {
 }
 
 uint32_t MetalTextureCache::GetTextureSlot(
-    const xenos::xe_gpu_texture_fetch_t& fetch) {
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   // Diagnostic: log why a fetch resolves to the null (gray) texture. The
   // gameplay gray screen is a composite pass sampling slot 0; this shows the
   // fetch (base/format/dimension) so we know whether it's an unsupported format,
@@ -271,10 +284,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
       return rit->second.slot;
     }
   }
-  // 2D (or stacked) and 3D are handled; 3D is sampled as its slice 0 as a 2D
-  // texture (the guest gpu_3d_to_2d_texture behavior). 1D/cube are skipped.
+  // 2D (or stacked), 3D and CUBE are handled; 3D is sampled as its slice 0 as
+  // a 2D texture (the guest gpu_3d_to_2d_texture behavior). Cubes upload all
+  // 6 faces (guest layout: faces sequential, each a 32x32-block-aligned tiled
+  // slice) into an MTLTextureTypeCubeArray — MSC's ForceTextureArray turns
+  // the translated TextureCube SRV into texturecube_array. 1D is skipped.
   bool is_3d = fetch.dimension == xenos::DataDimension::k3D;
-  if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d) {
+  bool is_cube = fetch.dimension == xenos::DataDimension::kCube;
+  if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d &&
+      !is_cube) {
     log_null("dim");
     return 0;
   }
@@ -282,6 +300,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (!plan.supported) {
     log_null("fmt");
     return 0;
+  }
+  if (is_signed && plan.host_format_signed != MTLPixelFormatInvalid) {
+    plan.host_format = plan.host_format_signed;
   }
 
   uint32_t width = (is_3d ? fetch.size_3d.width : fetch.size_2d.width) + 1;
@@ -301,7 +322,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
     uint32_t base, width, height, pitch;
     uint32_t format_tiled_endian;
   } kb{base, width, height, pitch_texels,
-       (uint32_t(fetch.format) << 16) | (uint32_t(fetch.tiled) << 8) |
+       (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
+           (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
            uint32_t(fetch.endianness)};
   uint64_t key = XXH3_64bits(&kb, sizeof(kb));
   auto it = cache_.find(key);
@@ -467,12 +489,17 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // MUST be a 2D ARRAY texture: our DXBC translator emits texture2d_array reads
   // and MSC is compiled with IRCompatibilityFlagForceTextureArray, so a plain
   // 2D texture sampled through an array read returns garbage (flat sampling).
+  // Cubes likewise must be CUBE ARRAYS (texturecube_array in the MSL).
+  if (is_cube && (width != height || plan.decode_4444 || plan.decode_r16)) {
+    log_null("cube-shape");
+    return 0;
+  }
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-  desc.textureType = MTLTextureType2DArray;
+  desc.textureType = is_cube ? MTLTextureTypeCubeArray : MTLTextureType2DArray;
   desc.pixelFormat = plan.host_format;
   desc.width = width;
   desc.height = height;
-  desc.arrayLength = 1;
+  desc.arrayLength = 1;  // For cube arrays this is the CUBE count (6 slices).
   desc.mipmapLevelCount = 1;
   desc.usage = MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModeShared;
@@ -488,6 +515,40 @@ uint32_t MetalTextureCache::GetTextureSlot(
                withBytes:upload_data
              bytesPerRow:upload_bytes_per_row
            bytesPerImage:0];
+  // Cube faces 1..5: guest layout is face-major — each face is a full tiled
+  // (or linear) slice whose block grid is padded to 32x32 blocks
+  // (texture_extent.cc guest rules); re-untile each face at its offset.
+  uint32_t face_stride = 0;
+  if (is_cube) {
+    uint32_t blocks_v_aligned = (blocks_h + 31u) & ~31u;
+    face_stride = pitch_blocks_aligned * blocks_v_aligned * bpb;
+    for (uint32_t face = 1; face < 6; ++face) {
+      uint32_t face_base = face * face_stride;
+      for (uint32_t by = 0; by < blocks_h; ++by) {
+        for (uint32_t bx = 0; bx < blocks_w; ++bx) {
+          uint32_t src_off;
+          if (tiled) {
+            src_off = face_base + uint32_t(texture_address::Tiled2D(
+                                      int32_t(bx), int32_t(by),
+                                      pitch_blocks_aligned, plan.block_log2));
+          } else {
+            src_off = face_base + (by * pitch_blocks + bx) * bpb;
+          }
+          uint8_t* dst = &linear[(size_t(by) * blocks_w + bx) * bpb];
+          if (src_off + bpb <= max_src_bytes) {
+            std::memcpy(dst, guest + src_off, bpb);
+            SwapEndian(dst, bpb, endian);
+          }
+        }
+      }
+      [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                 mipmapLevel:0
+                       slice:face
+                   withBytes:linear.data()
+                 bytesPerRow:upload_bytes_per_row
+               bytesPerImage:0];
+    }
+  }
 
   // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output
   // channel) when sampling. Bake it into a swizzled texture VIEW so the shader
@@ -502,12 +563,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
         GuestSwizzleComponentToMetal((guest_swizzle >> 3) & 0b111),
         GuestSwizzleComponentToMetal((guest_swizzle >> 6) & 0b111),
         GuestSwizzleComponentToMetal((guest_swizzle >> 9) & 0b111));
-    id<MTLTexture> view =
-        [texture newTextureViewWithPixelFormat:plan.host_format
-                                   textureType:MTLTextureType2DArray
-                                        levels:NSMakeRange(0, 1)
-                                        slices:NSMakeRange(0, 1)
-                                       swizzle:channels];
+    id<MTLTexture> view = [texture
+        newTextureViewWithPixelFormat:plan.host_format
+                          textureType:is_cube ? MTLTextureTypeCubeArray
+                                              : MTLTextureType2DArray
+                               levels:NSMakeRange(0, 1)
+                               slices:NSMakeRange(0, is_cube ? 6 : 1)
+                              swizzle:channels];
     if (view) {
       sampled = view;
     }
@@ -519,11 +581,12 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // Retain the sampled view (or the base texture if identity) for the descriptor
   // and residency. A view keeps its base alive, so this covers both.
   void* texture_ptr = (__bridge_retained void*)sampled;
-  // Guest byte extent (conservative: aligned pitch over all block rows) for
-  // resolve-writeback invalidation.
-  uint32_t guest_bytes = uint32_t(
-      std::min<size_t>(size_t(pitch_blocks_aligned) * blocks_h * bpb,
-                       max_src_bytes));
+  // Guest byte extent (conservative: aligned pitch over all block rows; all
+  // 6 face slices for cubes) for resolve-writeback invalidation.
+  uint32_t guest_bytes = uint32_t(std::min<size_t>(
+      is_cube ? size_t(face_stride) * 6
+              : size_t(pitch_blocks_aligned) * blocks_h * bpb,
+      max_src_bytes));
   ++upload_count_;
   cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes});
   active_textures_.push_back(texture_ptr);
