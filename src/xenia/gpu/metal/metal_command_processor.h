@@ -121,8 +121,11 @@ class MetalCommandProcessor : public CommandProcessor {
   void ShutdownDrawResources();
 
   // Returns a cached id<MTLDepthStencilState> for the given RB_DEPTHCONTROL
-  // value (depth-only; stencil not yet implemented), creating it on first use.
-  void* GetOrCreateDepthStencilState(uint32_t depth_control);
+  // value + RB_STENCILREFMASK(_BF) masks (the reference values are encoder
+  // state, not descriptor state), creating it on first use.
+  void* GetOrCreateDepthStencilState(uint32_t depth_control,
+                                     uint32_t stencil_ref_mask,
+                                     uint32_t stencil_ref_mask_bf);
 
   // Opens the frame command buffer (lazily, once per frame) and a render encoder
   // into the color RT if one isn't already open. The render pass clears on the
@@ -168,9 +171,9 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t next_sampler_slot_ = 1;     // 0 == null sampler.
   std::vector<void*> sampler_states_;  // id<MTLSamplerState>, retained.
 
-  // Cache of id<MTLDepthStencilState> keyed by the depth-relevant bits of
-  // RB_DEPTHCONTROL.
-  std::unordered_map<uint32_t, void*> depth_stencil_states_;
+  // Cache of id<MTLDepthStencilState> keyed by RB_DEPTHCONTROL's depth+stencil
+  // bits combined with the read/write masks of RB_STENCILREFMASK(_BF).
+  std::unordered_map<uint64_t, void*> depth_stencil_states_;
 
   // Whether the device supports mesh shaders (Apple7 / Mac2 family), a
   // prerequisite for the MSC geometry-emulation path that expands

@@ -1364,6 +1364,15 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             uint32_t(rb_depth_info.depth_base),
             uint32_t(rb_depth_info.depth_format));
         row += fmt::format(
+            ",\"stencil\":{{\"en\":{},\"bf_en\":{},\"dc\":\"{:08X}\","
+            "\"refmask\":\"{:08X}\",\"refmask_bf\":\"{:08X}\"}}"
+            ",\"colormask\":\"{:08X}\"",
+            uint32_t(rb_depthcontrol.stencil_enable),
+            uint32_t(rb_depthcontrol.backface_enable), rb_depthcontrol.value,
+            fbits(XE_GPU_REG_RB_STENCILREFMASK),
+            fbits(XE_GPU_REG_RB_STENCILREFMASK_BF),
+            fbits(XE_GPU_REG_RB_COLOR_MASK));
+        row += fmt::format(
             ",\"surface\":{{\"msaa\":{},\"pitch\":{}}},"
             "\"color0\":{{\"base\":{},\"fmt\":{}}}",
             uint32_t(rb_surface_info.msaa_samples),

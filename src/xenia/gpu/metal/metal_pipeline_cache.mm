@@ -356,6 +356,10 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+    if ((MTLPixelFormat)depth_pixel_format ==
+        MTLPixelFormatDepth32Float_Stencil8) {
+      desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+    }
   }
 
   NSError* error = nil;
@@ -585,6 +589,10 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+    if ((MTLPixelFormat)depth_pixel_format ==
+        MTLPixelFormatDepth32Float_Stencil8) {
+      desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+    }
   }
   desc.rasterSampleCount = 1;
   desc.alphaToCoverageEnabled = NO;

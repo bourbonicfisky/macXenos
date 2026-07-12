@@ -24,8 +24,11 @@ namespace gpu {
 namespace metal {
 
 const uint64_t MetalRenderTargetCache::kColorFormat = MTLPixelFormatRGBA8Unorm;
+// Combined depth+stencil: the guest's D24S8/D24FS8 stencil plane is real state
+// (JC2 gates its half-screen passes on it); a stencil-less depth RT silently
+// zeroes the stencil byte on every EDRAM round-trip.
 const uint64_t MetalRenderTargetCache::kDepthFormat =
-    MTLPixelFormatDepth32Float;
+    MTLPixelFormatDepth32Float_Stencil8;
 
 namespace {
 // Guest color RESOURCE format (gamma already collapsed by the base class since
@@ -130,6 +133,10 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
     pass.depthAttachment.loadAction = MTLLoadActionClear;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = 0.0;  // Reverse-z far (JC2 convention).
+    pass.stencilAttachment.texture = (__bridge id<MTLTexture>)texture;
+    pass.stencilAttachment.loadAction = MTLLoadActionClear;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.clearStencil = 0;
   } else {
     pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)texture;
     pass.colorAttachments[0].slice = 0;
@@ -410,7 +417,7 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
       using namespace metal;
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
-        uint start_tiles; uint end_tiles; uint unused; uint shifts;
+        uint start_tiles; uint end_tiles; uint stencil_bit; uint shifts;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_x2x_vs(uint vid [[vertex_id]]) {
@@ -456,6 +463,20 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
         o.depth = src.read(sp);
         return o;
       }
+      // Stencil bit-plane pass (source stencil sampled via an X32_Stencil8
+      // view bound as texture2d<uint>); same masked-REPLACE scheme as c2d.
+      fragment void xe_x2x_sten_fs(VOut in [[stage_in]],
+                                   texture2d<uint> src [[texture(0)]],
+                                   constant XferParams& p [[buffer(0)]]) {
+        bool in_range;
+        uint2 sp = xe_x2x_src(uint2(in.pos.xy), p, in_range);
+        if (!in_range) {
+          discard_fragment();
+        }
+        if ((src.read(sp, 0).r & p.stencil_bit) == 0u) {
+          discard_fragment();
+        }
+      }
     )METAL";
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
@@ -477,6 +498,7 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
       d.vertexFunction = [lib newFunctionWithName:@"xe_x2x_vs"];
       d.fragmentFunction = [lib newFunctionWithName:@"xe_x2x_dep_fs"];
       d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      d.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
       id<MTLRenderPipelineState> ps =
           [device newRenderPipelineStateWithDescriptor:d error:&err];
       if (!ps) {
@@ -485,11 +507,36 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
         return;
       }
       transfer_x2x_depth_pipeline_ = (__bridge_retained void*)ps;
+      // The depth pass also zeroes the rect's stencil (REPLACE ref=0) as the
+      // base the bit passes below OR the source stencil into.
       MTLDepthStencilDescriptor* ds = [[MTLDepthStencilDescriptor alloc] init];
       ds.depthCompareFunction = MTLCompareFunctionAlways;
       ds.depthWriteEnabled = YES;
+      MTLStencilDescriptor* zero_sten = [[MTLStencilDescriptor alloc] init];
+      zero_sten.stencilCompareFunction = MTLCompareFunctionAlways;
+      zero_sten.depthStencilPassOperation = MTLStencilOperationReplace;
+      zero_sten.stencilFailureOperation = MTLStencilOperationReplace;
+      zero_sten.depthFailureOperation = MTLStencilOperationReplace;
+      zero_sten.writeMask = 0xFF;
+      ds.frontFaceStencil = zero_sten;
+      ds.backFaceStencil = zero_sten;
       transfer_x2x_depth_state_ =
           (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:ds];
+      MTLRenderPipelineDescriptor* sd =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      sd.vertexFunction = [lib newFunctionWithName:@"xe_x2x_vs"];
+      sd.fragmentFunction = [lib newFunctionWithName:@"xe_x2x_sten_fs"];
+      sd.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      sd.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      id<MTLRenderPipelineState> sps =
+          [device newRenderPipelineStateWithDescriptor:sd error:&err];
+      if (sps) {
+        transfer_x2x_sten_pipeline_ = (__bridge_retained void*)sps;
+      } else {
+        XELOGE("MetalRenderTargetCache: x2x stencil pipeline failed: {}",
+               err ? err.localizedDescription.UTF8String : "?");
+      }
+      EnsureStencilBitStates();
     }
     pipeline =
         (__bridge id<MTLRenderPipelineState>)transfer_x2x_depth_pipeline_;
@@ -523,7 +570,7 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
-    uint32_t start_tiles, end_tiles, unused, shifts;
+    uint32_t start_tiles, end_tiles, stencil_bit, shifts;
   } params{source->key().base_tiles, source->key().GetPitchTiles(),
            dest->key().base_tiles,   dest->key().GetPitchTiles(),
            transfer.start_tiles,     transfer.end_tiles,
@@ -533,6 +580,9 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
     pass.depthAttachment.loadAction = MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
+    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
   } else {
     pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
     pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -545,11 +595,69 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   if (is_depth) {
     [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                   transfer_x2x_depth_state_];
+    [enc setStencilReferenceValue:0];  // depth pass zeroes the rect's stencil.
   }
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  // Default OFF: the x2x sample mapping itself is still divergent for MSAA
+  // targets (row-interlace defect); transferring stencil through the broken
+  // mapping ADDS ~60K diff dwords at 7282 draw 25 (A/B 2026-07-12). Re-enable
+  // with XE_METAL_X2X_STEN=1 once the mapping is fixed.
+  static const bool s_x2x_sten_on = std::getenv("XE_METAL_X2X_STEN");
+  if (is_depth && s_x2x_sten_on && transfer_x2x_sten_pipeline_ &&
+      stencil_bit_states_[0]) {
+    // Transfer the source stencil plane: 8 masked REPLACE passes reading an
+    // X32_Stencil8 view of the source (texture2d<uint>, .r = stencil).
+    id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
+    id<MTLTexture> sten_view = [src_tex
+        newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    static uint32_t s_view_logs = 0;
+    if (!sten_view && s_view_logs++ < 4) {
+      XELOGE("MetalX2X: X32_Stencil8 view creation FAILED (usage flags?)");
+    }
+    if (sten_view) {
+      [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      transfer_x2x_sten_pipeline_];
+      [enc setStencilReferenceValue:0xFF];
+      [enc setFragmentTexture:sten_view atIndex:0];
+      for (uint32_t bit = 0; bit < 8; ++bit) {
+        params.stencil_bit = 1u << bit;
+        [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                      stencil_bit_states_[bit]];
+        [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+      }
+    }
+  }
   [enc endEncoding];
+}
+
+// Lazily creates the 8 per-bit stencil-write states shared by the c2d and x2x
+// stencil rebuild passes: func ALWAYS, REPLACE on pass (the fragment shader
+// discards where the source bit is clear), write mask = that bit.
+void MetalRenderTargetCache::EnsureStencilBitStates() {
+  if (stencil_bit_states_[0]) {
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  for (uint32_t bit = 0; bit < 8; ++bit) {
+    MTLDepthStencilDescriptor* bds = [[MTLDepthStencilDescriptor alloc] init];
+    bds.depthCompareFunction = MTLCompareFunctionAlways;
+    bds.depthWriteEnabled = NO;
+    MTLStencilDescriptor* bsten = [[MTLStencilDescriptor alloc] init];
+    bsten.stencilCompareFunction = MTLCompareFunctionAlways;
+    bsten.depthStencilPassOperation = MTLStencilOperationReplace;
+    bsten.stencilFailureOperation = MTLStencilOperationKeep;
+    bsten.depthFailureOperation = MTLStencilOperationReplace;
+    bsten.writeMask = 1u << bit;
+    bds.frontFaceStencil = bsten;
+    bds.backFaceStencil = bsten;
+    stencil_bit_states_[bit] =
+        (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:bds];
+  }
 }
 
 void MetalRenderTargetCache::PerformColorToDepthTransfer(
@@ -566,6 +674,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
         uint start_tiles; uint end_tiles; uint is_float24; uint shifts;
+        uint stencil_bit; uint pad0; uint pad1; uint pad2;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_xfer_vs(uint vid [[vertex_id]]) {
@@ -626,6 +735,34 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
                       : float(d24 + (d24 >> 23)) * (1.0 / 16777216.0);
         return o;
       }
+      // Stencil bit-plane pass: survives (and lets the stencil REPLACE op set
+      // writemask's bit) only where the source word's stencil byte has
+      // p.stencil_bit set. No depth/color output; Metal has no shader stencil
+      // export, so the byte transfers as 8 masked REPLACE passes.
+      fragment void xe_xfer_c2d_sten_fs(VOut in [[stage_in]],
+                                        texture2d<float> src [[texture(0)]],
+                                        constant XferParams& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
+        uint tile = p.dst_base + dl;
+        if (tile < p.start_tiles || tile >= p.end_tiles) {
+          discard_fragment();
+        }
+        uint sl = tile - p.src_base;
+        uint dtx = ds.x % 80u;
+        uint stx = dtx < 40u ? dtx + 40u : dtx - 40u;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + stx,
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                         ss.y >> ((p.shifts >> 12) & 15u));
+        float4 c = src.read(sp, 0);
+        uint stencil = uint(round(c.r * 255.0));  // guest byte0 = stencil.
+        if ((stencil & p.stencil_bit) == 0u) {
+          discard_fragment();
+        }
+      }
     )METAL";
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
@@ -639,6 +776,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
     d.vertexFunction = [lib newFunctionWithName:@"xe_xfer_vs"];
     d.fragmentFunction = [lib newFunctionWithName:@"xe_xfer_c2d_fs"];
     d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+    d.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
     id<MTLRenderPipelineState> ps =
         [device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!ps) {
@@ -647,13 +785,40 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
       return;
     }
     transfer_c2d_pipeline_ = (__bridge_retained void*)ps;
+    // Depth pass state: also zeroes the transferred rect's stencil (REPLACE
+    // ref=0, full write mask) as the base the bit passes OR into.
     MTLDepthStencilDescriptor* ds = [[MTLDepthStencilDescriptor alloc] init];
     ds.depthCompareFunction = MTLCompareFunctionAlways;
     ds.depthWriteEnabled = YES;
+    MTLStencilDescriptor* zero_sten = [[MTLStencilDescriptor alloc] init];
+    zero_sten.stencilCompareFunction = MTLCompareFunctionAlways;
+    zero_sten.depthStencilPassOperation = MTLStencilOperationReplace;
+    zero_sten.stencilFailureOperation = MTLStencilOperationReplace;
+    zero_sten.depthFailureOperation = MTLStencilOperationReplace;
+    zero_sten.writeMask = 0xFF;
+    ds.frontFaceStencil = zero_sten;
+    ds.backFaceStencil = zero_sten;
     transfer_c2d_depth_state_ =
         (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:ds];
+    // Stencil bit-plane pipeline + one state per bit.
+    MTLRenderPipelineDescriptor* sd =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    sd.vertexFunction = [lib newFunctionWithName:@"xe_xfer_vs"];
+    sd.fragmentFunction = [lib newFunctionWithName:@"xe_xfer_c2d_sten_fs"];
+    sd.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+    sd.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+    id<MTLRenderPipelineState> sps =
+        [device newRenderPipelineStateWithDescriptor:sd error:&err];
+    if (!sps) {
+      XELOGE("MetalRenderTargetCache: c2d stencil pipeline failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    transfer_c2d_sten_pipeline_ = (__bridge_retained void*)sps;
+    EnsureStencilBitStates();
   }
-  if (!transfer_c2d_pipeline_ || !transfer_c2d_depth_state_) {
+  if (!transfer_c2d_pipeline_ || !transfer_c2d_depth_state_ ||
+      !transfer_c2d_sten_pipeline_) {
     return;
   }
   uint32_t sxs, sys, dxs, dys;
@@ -662,16 +827,21 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
+    uint32_t stencil_bit, pad0, pad1, pad2;
   } params{source->key().base_tiles,     source->key().GetPitchTiles(),
            dest->key().base_tiles,       dest->key().GetPitchTiles(),
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(dest->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12),
+           0, 0, 0, 0};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
   pass.depthAttachment.loadAction = MTLLoadActionLoad;
   pass.depthAttachment.storeAction = MTLStoreActionStore;
+  pass.stencilAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
+  pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+  pass.stencilAttachment.storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
       [cb renderCommandEncoderWithDescriptor:pass];
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
@@ -679,9 +849,25 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
   enc.label = @"rtcache:transfer-c2d";
   [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                 transfer_c2d_depth_state_];
+  [enc setStencilReferenceValue:0];  // depth pass zeroes the rect's stencil.
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  // Rebuild the guest stencil byte from the source color's byte0, one masked
+  // REPLACE pass per bit (no shader stencil export in Metal).
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  transfer_c2d_sten_pipeline_];
+  [enc setStencilReferenceValue:0xFF];
+  for (uint32_t bit = 0; bit < 8; ++bit) {
+    if (!stencil_bit_states_[bit]) {
+      break;
+    }
+    params.stencil_bit = 1u << bit;
+    [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                  stencil_bit_states_[bit]];
+    [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  }
   [enc endEncoding];
 }
 
@@ -1461,6 +1647,7 @@ void MetalRenderTargetCache::PerformResolveClear(
       d.vertexFunction = [lib newFunctionWithName:@"xe_clear_vs"];
       d.fragmentFunction = [lib newFunctionWithName:@"xe_clear_depth_fs"];
       d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+      d.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
       NSError* perr = nil;
       id<MTLRenderPipelineState> ps =
           [device newRenderPipelineStateWithDescriptor:d error:&perr];
@@ -1470,6 +1657,16 @@ void MetalRenderTargetCache::PerformResolveClear(
       MTLDepthStencilDescriptor* ds = [[MTLDepthStencilDescriptor alloc] init];
       ds.depthCompareFunction = MTLCompareFunctionAlways;
       ds.depthWriteEnabled = YES;
+      // The guest clear dword is depth24<<8 | stencil: the same rect clear
+      // also REPLACEs stencil with the encoder's reference (clear & 0xFF).
+      MTLStencilDescriptor* sten = [[MTLStencilDescriptor alloc] init];
+      sten.stencilCompareFunction = MTLCompareFunctionAlways;
+      sten.depthStencilPassOperation = MTLStencilOperationReplace;
+      sten.stencilFailureOperation = MTLStencilOperationReplace;
+      sten.depthFailureOperation = MTLStencilOperationReplace;
+      sten.writeMask = 0xFF;
+      ds.frontFaceStencil = sten;
+      ds.backFaceStencil = sten;
       clear_depth_state_ =
           (__bridge_retained void*)[device
               newDepthStencilStateWithDescriptor:ds];
@@ -1511,6 +1708,10 @@ void MetalRenderTargetCache::PerformResolveClear(
       pass.depthAttachment.texture = (__bridge id<MTLTexture>)owner->texture();
       pass.depthAttachment.loadAction = MTLLoadActionLoad;
       pass.depthAttachment.storeAction = MTLStoreActionStore;
+      pass.stencilAttachment.texture =
+          (__bridge id<MTLTexture>)owner->texture();
+      pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+      pass.stencilAttachment.storeAction = MTLStoreActionStore;
       id<MTLRenderCommandEncoder> enc =
           [cb renderCommandEncoderWithDescriptor:pass];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
@@ -1518,6 +1719,7 @@ void MetalRenderTargetCache::PerformResolveClear(
       enc.label = @"rtcache:resolve-clear-depth";
       [enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                     clear_depth_state_];
+      [enc setStencilReferenceValue:clear_value & 0xFF];
       [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
       [enc endEncoding];

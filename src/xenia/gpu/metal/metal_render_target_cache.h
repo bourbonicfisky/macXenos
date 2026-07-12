@@ -254,6 +254,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // Reinterpret transfer pipelines (lazily built; retained).
   void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
   void* transfer_c2d_depth_state_ = nullptr;  // id<MTLDepthStencilState>.
+  // Stencil bit-plane rebuild (one masked REPLACE pass per bit; Metal has no
+  // shader stencil export). States shared by the c2d and x2x paths.
+  void EnsureStencilBitStates();
+  void* transfer_c2d_sten_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
+  void* transfer_x2x_sten_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
+  void* stencil_bit_states_[8] = {};            // id<MTLDepthStencilState>.
   // Cross-MSAA same-format transfer pipelines: depth (one) and color (keyed
   // by dest MTLPixelFormat).
   void* transfer_x2x_library_ = nullptr;        // id<MTLLibrary>.

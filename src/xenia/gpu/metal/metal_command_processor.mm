@@ -310,29 +310,60 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
     @autoreleasepool {
     id<MTLTexture> tex = (__bridge id<MTLTexture>)owner.texture;
     uint32_t tw = uint32_t(tex.width), th = uint32_t(tex.height);
-    // Read the whole owner texture back once.
+    // Read the whole owner texture back once. Combined depth-stencil owners
+    // read as two plane blits: depth floats (4B/px) + stencil bytes (1B/px,
+    // appended after the depth plane in the staging buffer).
+    bool combined_ds =
+        owner.is_depth && tex.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     id<MTLDevice> dev = tex.device;
+    size_t depth_plane_bytes = size_t(tw) * th * 4;
     id<MTLBuffer> staging =
-        [dev newBufferWithLength:size_t(tw) * th * 4
+        [dev newBufferWithLength:depth_plane_bytes +
+                                 (combined_ds ? size_t(tw) * th : 0)
                          options:MTLResourceStorageModeShared];
     if (!staging) {
       continue;
     }
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:tex
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(tw, th, 1)
-                 toBuffer:staging
-        destinationOffset:0
-   destinationBytesPerRow:tw * 4
- destinationBytesPerImage:size_t(tw) * th * 4];
+    if (combined_ds) {
+      [blit copyFromTexture:tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(tw, th, 1)
+                   toBuffer:staging
+          destinationOffset:0
+     destinationBytesPerRow:tw * 4
+   destinationBytesPerImage:depth_plane_bytes
+                    options:MTLBlitOptionDepthFromDepthStencil];
+      [blit copyFromTexture:tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(tw, th, 1)
+                   toBuffer:staging
+          destinationOffset:depth_plane_bytes
+     destinationBytesPerRow:tw
+   destinationBytesPerImage:size_t(tw) * th
+                    options:MTLBlitOptionStencilFromDepthStencil];
+    } else {
+      [blit copyFromTexture:tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(tw, th, 1)
+                   toBuffer:staging
+          destinationOffset:0
+     destinationBytesPerRow:tw * 4
+   destinationBytesPerImage:depth_plane_bytes];
+    }
     [blit endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
     const uint8_t* pixels = static_cast<const uint8_t*>(staging.contents);
+    const uint8_t* stencil_plane =
+        combined_ds ? pixels + depth_plane_bytes : nullptr;
     uint32_t xs = owner.msaa_samples >= 3 ? 1 : 0;   // 4x doubles horizontal.
     uint32_t ys = owner.msaa_samples >= 2 ? 1 : 0;   // 2x+ doubles vertical.
     // The rect covers full-EDRAM 16-tile rows [row_first, row_first+rows).
@@ -376,6 +407,9 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
                               std::min(1.0f, std::max(0.0f, d)) *
                               16777215.0f));
                 word = d24 << 8;
+                if (stencil_plane) {
+                  word |= stencil_plane[size_t(py) * tw + px];
+                }
               } else if (owner.pixel_format == uint64_t(MTLPixelFormatR32Float)) {
                 std::memcpy(&word, p, 4);
               } else {
@@ -839,6 +873,9 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction = MTLLoadActionLoad;
     pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
+    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
@@ -2157,12 +2194,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
     std::memset(indices, 0, count * sizeof(uint32_t));
     if (shader) {
+      // XE_METAL_TEX_PROBE=<draw>: log every texture binding's fetch fields +
+      // resolved bindless slot at that trace draw (slot 0 = null texture ->
+      // the shader samples zero; the light-draw zero-output suspect).
+      static const int64_t s_tex_probe = [] {
+        const char* v = std::getenv("XE_METAL_TEX_PROBE");
+        return v ? strtoll(v, nullptr, 10) : -1;
+      }();
+      bool probe = s_tex_probe >= 0 &&
+                   int64_t(trace_draw_index_) - 1 == s_tex_probe;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         if (binding.bindless_descriptor_index < count) {
+          auto fetch = regs.GetTextureFetch(binding.fetch_constant);
           indices[binding.bindless_descriptor_index] =
-              texture_cache_->GetTextureSlot(
-                  regs.GetTextureFetch(binding.fetch_constant),
-                  binding.is_signed);
+              texture_cache_->GetTextureSlot(fetch, binding.is_signed);
+          if (probe) {
+            XELOGI(
+                "MetalTexProbe draw={} {} fc={} descidx={} -> slot={} "
+                "type={} fmt={} base={:08X} size={}x{} endian={} tiled={} "
+                "stacked={} packedmips={} miplevels={}-{}",
+                s_tex_probe, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
+                binding.fetch_constant, binding.bindless_descriptor_index,
+                indices[binding.bindless_descriptor_index],
+                uint32_t(fetch.dimension), uint32_t(fetch.format),
+                fetch.base_address << 12, fetch.size_2d.width + 1,
+                fetch.size_2d.height + 1, uint32_t(fetch.endianness),
+                uint32_t(fetch.tiled), uint32_t(fetch.stacked),
+                uint32_t(fetch.packed_mips), fetch.mip_min_level,
+                fetch.mip_max_level);
+          }
         }
       }
       for (const auto& sb : shader->GetSamplerBindingsAfterTranslation()) {
@@ -2246,10 +2306,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Only when the pass has a depth attachment — setting a depth-test state on
     // an encoder without one is a Metal validation error. norm_depth already
     // collapsed "always, no write" to disabled.
-    void* depth_state = GetOrCreateDepthStencilState(norm_depth.value);
+    uint32_t srm_value = regs[XE_GPU_REG_RB_STENCILREFMASK];
+    uint32_t srm_bf_value = regs[XE_GPU_REG_RB_STENCILREFMASK_BF];
+    void* depth_state = GetOrCreateDepthStencilState(
+        norm_depth.value, srm_value, srm_bf_value);
     if (depth_state) {
       [encoder
           setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
+      if (norm_depth.stencil_enable) {
+        uint32_t back_ref =
+            norm_depth.backface_enable ? srm_bf_value : srm_value;
+        [encoder setStencilFrontReferenceValue:srm_value & 0xFF
+                            backReferenceValue:back_ref & 0xFF];
+      }
     }
   }
   if (kDebugSolidFragment) {
@@ -2593,15 +2662,51 @@ static MTLCompareFunction ToMetalCompareFunction(xenos::CompareFunction f) {
   }
 }
 
-// Builds (and caches) an MTLDepthStencilState from RB_DEPTHCONTROL. Stencil is
-// not implemented yet; only z_enable / z_write_enable / zfunc are honored. When
+static MTLStencilOperation ToMetalStencilOperation(xenos::StencilOp op) {
+  switch (op) {
+    case xenos::StencilOp::kKeep:
+      return MTLStencilOperationKeep;
+    case xenos::StencilOp::kZero:
+      return MTLStencilOperationZero;
+    case xenos::StencilOp::kReplace:
+      return MTLStencilOperationReplace;
+    case xenos::StencilOp::kIncrementClamp:
+      return MTLStencilOperationIncrementClamp;
+    case xenos::StencilOp::kDecrementClamp:
+      return MTLStencilOperationDecrementClamp;
+    case xenos::StencilOp::kInvert:
+      return MTLStencilOperationInvert;
+    case xenos::StencilOp::kIncrementWrap:
+      return MTLStencilOperationIncrementWrap;
+    case xenos::StencilOp::kDecrementWrap:
+      return MTLStencilOperationDecrementWrap;
+    default:
+      return MTLStencilOperationKeep;
+  }
+}
+
+// Builds (and caches) an MTLDepthStencilState from RB_DEPTHCONTROL plus the
+// read/write masks of RB_STENCILREFMASK(_BF). The stencil REFERENCE is encoder
+// state (setStencilReferenceValue at the draw), not part of this object. When
 // depth test is disabled the state passes everything and writes nothing.
-void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control) {
-  // Only the depth-relevant bits matter for the key (mask out stencil fields).
+void* MetalCommandProcessor::GetOrCreateDepthStencilState(
+    uint32_t depth_control, uint32_t stencil_ref_mask,
+    uint32_t stencil_ref_mask_bf) {
   reg::RB_DEPTHCONTROL dc;
   dc.value = depth_control;
-  uint32_t key = (dc.z_enable ? 1u : 0u) | (dc.z_write_enable ? 2u : 0u) |
-                 (uint32_t(dc.zfunc) << 2);
+  reg::RB_STENCILREFMASK srm;
+  srm.value = stencil_ref_mask;
+  reg::RB_STENCILREFMASK srm_bf;
+  srm_bf.value = dc.backface_enable ? stencil_ref_mask_bf : stencil_ref_mask;
+  uint32_t masks = 0;
+  if (dc.stencil_enable) {
+    masks = (srm.stencilmask) | (srm.stencilwritemask << 8) |
+            (srm_bf.stencilmask << 16) | (srm_bf.stencilwritemask << 24);
+  }
+  // Depth bits + all stencil fields of RB_DEPTHCONTROL + the masks.
+  uint64_t key =
+      (uint64_t(masks) << 32) |
+      (dc.value & ~0x8u);  // bit 3 is unused padding on Xenos.
   auto it = depth_stencil_states_.find(key);
   if (it != depth_stencil_states_.end()) {
     return it->second;
@@ -2617,6 +2722,35 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(uint32_t depth_control
                                   ? ToMetalCompareFunction(dc.zfunc)
                                   : MTLCompareFunctionAlways;
   desc.depthWriteEnabled = dc.z_enable && dc.z_write_enable;
+  if (dc.stencil_enable) {
+    MTLStencilDescriptor* front = [[MTLStencilDescriptor alloc] init];
+    front.stencilCompareFunction = ToMetalCompareFunction(dc.stencilfunc);
+    front.stencilFailureOperation = ToMetalStencilOperation(dc.stencilfail);
+    front.depthStencilPassOperation =
+        ToMetalStencilOperation(dc.stencilzpass);
+    front.depthFailureOperation = ToMetalStencilOperation(dc.stencilzfail);
+    front.readMask = srm.stencilmask;
+    front.writeMask = srm.stencilwritemask;
+    desc.frontFaceStencil = front;
+    MTLStencilDescriptor* back = [[MTLStencilDescriptor alloc] init];
+    if (dc.backface_enable) {
+      back.stencilCompareFunction = ToMetalCompareFunction(dc.stencilfunc_bf);
+      back.stencilFailureOperation =
+          ToMetalStencilOperation(dc.stencilfail_bf);
+      back.depthStencilPassOperation =
+          ToMetalStencilOperation(dc.stencilzpass_bf);
+      back.depthFailureOperation =
+          ToMetalStencilOperation(dc.stencilzfail_bf);
+    } else {
+      back.stencilCompareFunction = front.stencilCompareFunction;
+      back.stencilFailureOperation = front.stencilFailureOperation;
+      back.depthStencilPassOperation = front.depthStencilPassOperation;
+      back.depthFailureOperation = front.depthFailureOperation;
+    }
+    back.readMask = srm_bf.stencilmask;
+    back.writeMask = srm_bf.stencilwritemask;
+    desc.backFaceStencil = back;
+  }
   id<MTLDepthStencilState> state =
       [device newDepthStencilStateWithDescriptor:desc];
   void* state_ptr = (__bridge_retained void*)state;
