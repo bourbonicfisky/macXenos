@@ -2994,6 +2994,26 @@ bool MetalCommandProcessor::IssueCopy() {
         uint32_t strip_y_offset = 0;
         void* parent_snap = render_target_cache_->FindContainingSnapshot(
             resolve_info.copy_dest_base, &strip_y_offset);
+        // Half-pass placement audit (XE_METAL_RESOLVE_LOG=1): the guest splits
+        // 720p into EDRAM-capacity halves; each half's resolve must land at
+        // its own dest rows. Log the raw placement inputs for big resolves.
+        static const bool s_resolve_log =
+            std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+        if (s_resolve_log && rw * rh * 4 >= 1024 * 1024) {
+          XELOGW(
+              "MetalResolve @draw {}: dest base={:08X} extent=[{:08X},+{}] "
+              "rect={}x{} edram_base={} pitch={} msaa={} dest_pitch={} "
+              "parent={} strip_y={}",
+              trace_draw_index_, resolve_info.copy_dest_base,
+              resolve_info.copy_dest_extent_start,
+              resolve_info.copy_dest_extent_length, rw, rh,
+              resolve_info.color_edram_info.base_tiles,
+              resolve_info.color_edram_info.pitch_tiles,
+              uint32_t(resolve_info.color_edram_info.msaa_samples),
+              uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32)
+                  * 32,
+              parent_snap != nullptr, strip_y_offset);
+        }
         // A k_32_FLOAT resolve must NEVER join a color-format parent strip:
         // "render in the snapshot's REAL format" then silently skips the
         // 8888->float conversion the guest asked for, and the writeback
@@ -3120,6 +3140,23 @@ bool MetalCommandProcessor::IssueCopy() {
       uint32_t strip_y_offset = 0;
       void* parent_snap = render_target_cache_->FindContainingSnapshot(
           resolve_info.copy_dest_base, &strip_y_offset);
+      static const bool s_resolve_log_d =
+          std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+      if (s_resolve_log_d) {
+        XELOGW(
+            "MetalResolve @draw {} DEPTH: dest base={:08X} extent=[{:08X},+{}] "
+            "rect={}x{} edram_base={} msaa={} parent={} parent_fmt={} strip_y={}",
+            trace_draw_index_, resolve_info.copy_dest_base,
+            resolve_info.copy_dest_extent_start,
+            resolve_info.copy_dest_extent_length, rw, rh,
+            resolve_info.depth_edram_info.base_tiles,
+            uint32_t(resolve_info.depth_edram_info.msaa_samples),
+            parent_snap != nullptr,
+            parent_snap
+                ? uint64_t(((__bridge id<MTLTexture>)parent_snap).pixelFormat)
+                : 0,
+            strip_y_offset);
+      }
       void* snap = parent_snap;
       bool is_new_snapshot = false;
       if (!snap) {
@@ -3154,15 +3191,52 @@ bool MetalCommandProcessor::IssueCopy() {
     uint32_t span_base, span_row_length, span_rows, span_pitch;
     resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                       span_pitch);
+    static const bool s_clear_log =
+        std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+    if (s_clear_log) {
+      XELOGW(
+          "MetalResolveClear @draw {}: color={} depth={} span base={} "
+          "rowlen={} rows={} pitch={} c_edram(base={} pitch={} msaa={}) "
+          "d_edram(base={} pitch={} msaa={}) clearval c={:08X} d={:08X}",
+          trace_draw_index_, uint32_t(resolve_info.IsClearingColor()),
+          uint32_t(resolve_info.IsClearingDepth()), span_base, span_row_length,
+          span_rows, span_pitch, resolve_info.color_edram_info.base_tiles,
+          resolve_info.color_edram_info.pitch_tiles,
+          uint32_t(resolve_info.color_edram_info.msaa_samples),
+          resolve_info.depth_edram_info.base_tiles,
+          resolve_info.depth_edram_info.pitch_tiles,
+          uint32_t(resolve_info.depth_edram_info.msaa_samples),
+          resolve_info.rb_color_clear, resolve_info.rb_depth_clear);
+    }
+    // Each clear must use ITS OWN surface's tile span: GetCopyEdramTileSpan
+    // returns the span of the surface being COPIED (color unless
+    // IsCopyingDepth), but a dual clear also names the OTHER surface via its
+    // own edram_info. Passing the color span (base 768) to the depth clear
+    // found no depth owners there and silently did nothing — the guest's
+    // depth never cleared between the 720p half-passes, and the composite's
+    // depth tests ran against the previous half's stale depth (the hard
+    // half-screen seam: sky/objects failing GE tests only below y=384).
     if (resolve_info.IsClearingColor()) {
+      uint32_t cbase, crowlen, crows;
+      draw_util::GetResolveEdramTileSpan(resolve_info.color_edram_info,
+                                         resolve_info.coordinate_info,
+                                         resolve_info.height_div_8, cbase,
+                                         crowlen, crows);
       render_target_cache_->PerformResolveClear(
-          frame_command_buffer_, span_base, span_row_length, span_rows,
-          span_pitch, /*is_depth=*/false, resolve_info.rb_color_clear);
+          frame_command_buffer_, cbase, crowlen, crows,
+          resolve_info.color_edram_info.pitch_tiles, /*is_depth=*/false,
+          resolve_info.rb_color_clear);
     }
     if (resolve_info.IsClearingDepth()) {
+      uint32_t dbase, drowlen, drows;
+      draw_util::GetResolveEdramTileSpan(resolve_info.depth_edram_info,
+                                         resolve_info.coordinate_info,
+                                         resolve_info.height_div_8, dbase,
+                                         drowlen, drows);
       render_target_cache_->PerformResolveClear(
-          frame_command_buffer_, span_base, span_row_length, span_rows,
-          span_pitch, /*is_depth=*/true, resolve_info.rb_depth_clear);
+          frame_command_buffer_, dbase, drowlen, drows,
+          resolve_info.depth_edram_info.pitch_tiles, /*is_depth=*/true,
+          resolve_info.rb_depth_clear);
     }
   }
   // Gamma-parity diagnostic (XE_METAL_GAMMA_PARITY=1): record each color
