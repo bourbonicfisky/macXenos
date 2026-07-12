@@ -146,6 +146,13 @@ class MetalCommandProcessor : public CommandProcessor {
   void* null_texture_ = nullptr;           // id<MTLTexture> 1x1, for unbound samples
   void* null_sampler_ = nullptr;           // id<MTLSamplerState>
 
+  // Real guest samplers: filters/clamps/aniso packed into a key ->
+  // sampler-heap slot, created on first use (states retained until shutdown).
+  uint32_t GetOrCreateSamplerSlot(uint32_t key);
+  std::unordered_map<uint32_t, uint32_t> sampler_slot_cache_;
+  uint32_t next_sampler_slot_ = 1;     // 0 == null sampler.
+  std::vector<void*> sampler_states_;  // id<MTLSamplerState>, retained.
+
   // Cache of id<MTLDepthStencilState> keyed by the depth-relevant bits of
   // RB_DEPTHCONTROL.
   std::unordered_map<uint32_t, void*> depth_stencil_states_;

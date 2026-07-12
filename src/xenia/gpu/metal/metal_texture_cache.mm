@@ -80,8 +80,11 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       // log2(2 source bytes) = 1.
       return {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm, true, false};
     case xenos::TextureFormat::k_16:
-      // 16bpp single channel, decoded to RGBA8 grayscale (see decode_r16).
-      return {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm, false, true};
+      // 16bpp single channel at FULL precision. (Was decode_r16 high-byte
+      // RGBA8 expansion — 8-bit quantization banded JC2's 1024x3072 k_16
+      // shadow map into visible stripes on every shadow receiver.)
+      return {true,  false, 2, 1, 1, MTLPixelFormatR16Unorm,
+              false, false, MTLPixelFormatR16Snorm};
     case xenos::TextureFormat::k_DXT1:
     case xenos::TextureFormat::k_DXT1_AS_16_16_16_16:
       return {bc_supported, true, 8, 3, 4, MTLPixelFormatBC1_RGBA};

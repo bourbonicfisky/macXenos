@@ -180,6 +180,71 @@ MetalCommandProcessor::MetalCommandProcessor(
     : CommandProcessor(graphics_system, kernel_state) {}
 MetalCommandProcessor::~MetalCommandProcessor() = default;
 
+uint32_t MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key) {
+  auto it = sampler_slot_cache_.find(key);
+  if (it != sampler_slot_cache_.end()) {
+    return it->second;
+  }
+  if (next_sampler_slot_ >= kSamplerBindlessHeapSlots ||
+      !sampler_bindless_heap_) {
+    return 0;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
+          ->device();
+  MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
+  auto minmag = [](uint32_t f) {
+    // TextureFilter: 0=point, 1=linear, 2=base-map (no mip; min/mag linear
+    // gives the least-surprising look), 3 resolved before packing.
+    return f == 0 ? MTLSamplerMinMagFilterNearest
+                  : MTLSamplerMinMagFilterLinear;
+  };
+  d.magFilter = minmag(key & 3);
+  d.minFilter = minmag((key >> 2) & 3);
+  uint32_t mip = (key >> 4) & 3;
+  // Textures are single-mip for now; point/linear only matter once mip
+  // chains upload. kBaseMap (2) = not mipmapped.
+  d.mipFilter = mip == 1 ? MTLSamplerMipFilterLinear
+                         : (mip == 0 ? MTLSamplerMipFilterNearest
+                                     : MTLSamplerMipFilterNotMipmapped);
+  auto addr = [](uint32_t c) {
+    switch (xenos::ClampMode(c)) {
+      case xenos::ClampMode::kRepeat:
+        return MTLSamplerAddressModeRepeat;
+      case xenos::ClampMode::kMirroredRepeat:
+        return MTLSamplerAddressModeMirrorRepeat;
+      case xenos::ClampMode::kMirrorClampToEdge:
+      case xenos::ClampMode::kMirrorClampToHalfway:
+      case xenos::ClampMode::kMirrorClampToBorder:
+        return MTLSamplerAddressModeMirrorClampToEdge;
+      case xenos::ClampMode::kClampToBorder:
+        return MTLSamplerAddressModeClampToBorderColor;
+      case xenos::ClampMode::kClampToEdge:
+      case xenos::ClampMode::kClampToHalfway:
+      default:
+        return MTLSamplerAddressModeClampToEdge;
+    }
+  };
+  d.sAddressMode = addr((key >> 6) & 7);
+  d.tAddressMode = addr((key >> 9) & 7);
+  d.rAddressMode = addr((key >> 12) & 7);
+  uint32_t aniso = (key >> 15) & 7;
+  if (aniso) {
+    d.maxAnisotropy = std::min(16u, 1u << (aniso - 1));
+  }
+  id<MTLSamplerState> state = [device newSamplerStateWithDescriptor:d];
+  if (!state) {
+    return 0;
+  }
+  uint32_t slot = next_sampler_slot_++;
+  auto* entries = static_cast<IRDescriptorTableEntry*>(
+      [(__bridge id<MTLBuffer>)sampler_bindless_heap_ contents]);
+  IRDescriptorTableSetSampler(&entries[slot], state, 0.0f);
+  sampler_states_.push_back((__bridge_retained void*)state);
+  sampler_slot_cache_.emplace(key, slot);
+  return slot;
+}
+
 void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
                                                      uint32_t length) {
   // Invalidate the shared-memory pages the trace stream just rewrote so the
@@ -654,6 +719,12 @@ void MetalCommandProcessor::ShutdownDrawResources() {
     release(pair.second);
   }
   depth_stencil_states_.clear();
+  for (void*& state : sampler_states_) {
+    release(state);
+  }
+  sampler_states_.clear();
+  sampler_slot_cache_.clear();
+  next_sampler_slot_ = 1;
   upload_arena_.reset();
 }
 
@@ -1809,7 +1880,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Descriptor indices (b4): for each texture binding, resolve its guest fetch
   // constant to a bindless view-heap slot (real texture, or 0=null/gray if the
-  // format isn't supported yet). Samplers stay at slot 0 (the null sampler).
+  // format isn't supported yet); for each sampler binding, a sampler-heap slot
+  // built from the binding's filters (fetch-constant filters where the shader
+  // says kUseFetchConst) + the fetch constant's clamp modes. Texture and
+  // sampler bindings share one bindless index space (disjoint indices).
   texture_cache_->ResetActive();
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
@@ -1833,6 +1907,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                   regs.GetTextureFetch(binding.fetch_constant),
                   binding.is_signed);
         }
+      }
+      for (const auto& sb : shader->GetSamplerBindingsAfterTranslation()) {
+        if (sb.bindless_descriptor_index >= count) {
+          continue;
+        }
+        auto f = regs.GetTextureFetch(sb.fetch_constant);
+        auto resolve_filter = [](xenos::TextureFilter binding_filter,
+                                 uint32_t fetch_filter) {
+          return binding_filter == xenos::TextureFilter::kUseFetchConst
+                     ? fetch_filter
+                     : uint32_t(binding_filter);
+        };
+        uint32_t mag = resolve_filter(sb.mag_filter, uint32_t(f.mag_filter));
+        uint32_t mn = resolve_filter(sb.min_filter, uint32_t(f.min_filter));
+        uint32_t mip = resolve_filter(sb.mip_filter, uint32_t(f.mip_filter));
+        uint32_t an = sb.aniso_filter == xenos::AnisoFilter::kUseFetchConst
+                          ? uint32_t(f.aniso_filter)
+                          : uint32_t(sb.aniso_filter);
+        uint32_t skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
+                        ((uint32_t(f.clamp_x) & 7) << 6) |
+                        ((uint32_t(f.clamp_y) & 7) << 9) |
+                        ((uint32_t(f.clamp_z) & 7) << 12) | ((an & 7) << 15);
+        indices[sb.bindless_descriptor_index] = GetOrCreateSamplerSlot(skey);
       }
     }
     return true;
