@@ -278,7 +278,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   // Flush all pending GPU work so texture contents are final. Mid-frame this
   // is a commit + wait; the next draw's BeginFrameEncoder starts a fresh
   // command buffer and LOADs the (persistent) render-target contents.
-  EndFrameEncoder();
+  EndFrameEncoderAndWait();
   std::vector<MetalRenderTargetCache::EdramOwnerDump> owners;
   render_target_cache_->GetEdramOwnersForDump(owners);
   // The EDRAM image: 2048 tiles x 80x16 samples x 4 bytes, tile-major.
@@ -437,9 +437,6 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
     if (!provider || !provider->command_queue()) {
       return nullptr;
     }
-    if (upload_arena_) {
-      upload_arena_->Reset();
-    }
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     id<MTLCommandBuffer> command_buffer = MakeAttributedCommandBuffer(queue);
@@ -574,6 +571,8 @@ bool MetalCommandProcessor::SetupContext() {
   }
   shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
   shared_memory_->SetTraceWriter(&trace_writer_);
+  shared_memory_->SetSubmissionProvider(
+      [this]() { return CurrentEncodingSubmission(); });
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
@@ -582,7 +581,9 @@ bool MetalCommandProcessor::SetupContext() {
   // encoded draws consume the pre-rewrite bytes (also resets the consumed-
   // range set). Runs from inside RequestConsumedRange, which is only called
   // before the draw's encoder opens.
-  shared_memory_->SetHazardFlushCallback([this]() { EndFrameEncoder(); });
+  // Must WAIT: the caller is about to memcpy over shared-buffer ranges that
+  // in-flight submissions read.
+  shared_memory_->SetHazardFlushCallback([this]() { EndFrameEncoderAndWait(); });
   if (!InitializeDrawResources(device)) {
     XELOGE("MetalCommandProcessor: draw resource init failed");
     return false;
@@ -732,7 +733,7 @@ void MetalCommandProcessor::ShutdownDrawResources() {
 
 void MetalCommandProcessor::ShutdownContext() {
   if (frame_open_) {
-    EndFrameEncoder();
+    EndFrameEncoderAndWait();
   }
   ShutdownDrawResources();
   shared_memory_.reset();
@@ -778,13 +779,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
   }
-  // The command buffer lives for the whole frame; create it (and reset the
-  // per-frame upload arena + per-frame clear tracking) on the first encoder
-  // open of the frame.
+  // The command buffer lives until the next commit boundary; the upload ring
+  // reclaims per-submission from the completion pump (S8) — no reset here.
   id<MTLCommandBuffer> command_buffer;
   bool new_frame = frame_command_buffer_ == nullptr;
   if (new_frame) {
-    upload_arena_->Reset();
     id<MTLCommandQueue> queue =
         (__bridge id<MTLCommandQueue>)provider->command_queue();
     command_buffer = MakeAttributedCommandBuffer(queue);
@@ -859,11 +858,101 @@ void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
              prev, submission, std::memory_order_release,
              std::memory_order_relaxed)) {
   }
+  // Wake WaitForSubmission (S8). The empty lock pairs with the waiter's
+  // predicate re-check so a wake between check and wait isn't lost.
+  { std::lock_guard<std::mutex> lock(completion_mutex_); }
+  completion_cv_.notify_all();
+}
+
+bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
+                                              uint32_t timeout_ms) {
+  if (completed_submission_.load(std::memory_order_acquire) >= submission) {
+    return true;
+  }
+  std::unique_lock<std::mutex> lock(completion_mutex_);
+  bool ok = completion_cv_.wait_for(
+      lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return completed_submission_.load(std::memory_order_acquire) >=
+               submission;
+      });
+  if (!ok) {
+    XELOGE(
+        "MetalCommandProcessor: TIMEOUT waiting for submission {} "
+        "(completed {}) — GPU wedged?",
+        submission, completed_submission_.load(std::memory_order_acquire));
+  }
+  return ok;
+}
+
+void MetalCommandProcessor::DrainFaultedCommandBuffers() {
+  std::vector<void*> faulted;
+  {
+    std::lock_guard<std::mutex> lock(fault_mutex_);
+    faulted.swap(faulted_command_buffers_);
+  }
+  for (void* cb_ptr : faulted) {
+    id<MTLCommandBuffer> command_buffer =
+        (__bridge_transfer id<MTLCommandBuffer>)cb_ptr;
+    static uint32_t s_cb_errors = 0;
+    ++s_cb_errors;
+    if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
+      LogCommandBufferFault(command_buffer, "frame commit", swap_count_);
+      if (s_cb_errors > 32) {
+        XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
+      }
+    }
+    // AUTO-RECOVERY: error code 4 (access revoked) LATCHES — recreate the
+    // queue (GPU thread; the provider/presenter aren't touched from the
+    // completion-handler thread). Throttled against fault storms.
+    if (command_buffer.error && command_buffer.error.code == 4) {
+      static uint32_t s_last_recovery_swap = 0;
+      if (swap_count_ - s_last_recovery_swap > 120 ||
+          s_last_recovery_swap == 0) {
+        s_last_recovery_swap = swap_count_;
+        auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+            graphics_system_->provider());
+        if (provider && provider->RecreateQueue()) {
+          if (auto* presenter = static_cast<xe::ui::metal::MetalPresenter*>(
+                  graphics_system_->presenter())) {
+            presenter->SetCommandQueue(provider->command_queue());
+          }
+          XELOGE(
+              "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}); "
+              "display should resume",
+              swap_count_);
+        }
+      }
+    }
+  }
+}
+
+bool MetalCommandProcessor::ArenaAllocate(uint32_t size, uint32_t alignment,
+                                          MetalUploadAllocation* out) {
+  if (!upload_arena_) {
+    return false;
+  }
+  if (upload_arena_->Allocate(size, alignment, out)) {
+    return true;
+  }
+  // Ring full: space is owned by in-flight submissions. Wait for the oldest
+  // one, reclaim, retry once. (Waiting for ALL would serialize; the oldest
+  // frees the ring tail.)
+  uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  if (completed < submission_counter_) {
+    if (WaitForSubmission(completed + 1)) {
+      upload_arena_->Reclaim(
+          completed_submission_.load(std::memory_order_acquire));
+      PumpCompletedActions();
+      return upload_arena_->Allocate(size, alignment, out);
+    }
+  }
+  return false;
 }
 
 void MetalCommandProcessor::PumpCompletedActions() {
   // GPU-thread only: completion_actions_ isn't synchronized; only the
   // published counter crosses threads.
+  DrainFaultedCommandBuffers();
   uint64_t completed = completed_submission_.load(std::memory_order_acquire);
   while (!completion_actions_.empty() &&
          completion_actions_.front().first <= completed) {
@@ -894,64 +983,46 @@ void MetalCommandProcessor::EndFrameEncoder() {
   frame_command_buffer_ = nullptr;
   ++frame_commit_count_;
   draws_since_commit_ = 0;
-  // S7: assign this commit its submission id and publish completion from the
-  // GPU-side handler (the async path S8 relies on; the synchronous wait below
-  // also publishes inline since it doesn't order against the handler thread).
+  // S7/S8: assign this commit its submission id; the completion handler
+  // publishes it and records faults (drained + logged + auto-recovered on
+  // the GPU thread from PumpCompletedActions — a fault otherwise fails the
+  // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    if (cb.status == MTLCommandBufferStatusError) {
+      std::lock_guard<std::mutex> lock(fault_mutex_);
+      faulted_command_buffers_.push_back((__bridge_retained void*)cb);
+    }
     PublishCompletedSubmission(submission);
   }];
+  // Stamp the upload ring: everything allocated since the previous mark is
+  // owned by this submission until it completes.
+  if (upload_arena_) {
+    upload_arena_->MarkSubmission(submission);
+  }
   [command_buffer commit];
-  [command_buffer waitUntilCompleted];
-  PublishCompletedSubmission(submission);
-  // A GPU fault (invalid resource access from an untracked bindless hazard, a
-  // timeout, etc.) fails the command buffer SILENTLY otherwise: we keep
-  // submitting and the window shows the last good frame while swaps advance —
-  // reads on-screen as a "GPU freeze" though the process is alive. Surface it
-  // WITH per-encoder attribution (encoders are labeled at open).
-  if (command_buffer.status == MTLCommandBufferStatusError) {
-    // First 32 in full, then a heartbeat every 256th so the log always shows
-    // whether faulting is ONGOING (a hard 32-cap went silent mid-session and
-    // hid whether the driver recovered).
-    static uint32_t s_cb_errors = 0;
-    ++s_cb_errors;
-    if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
-      LogCommandBufferFault(command_buffer, "frame commit", swap_count_);
-      if (s_cb_errors > 32) {
-        XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
-      }
-    }
-    // AUTO-RECOVERY: error code 4 (access revoked / "Ignored for causing
-    // prior/excessive GPU errors") LATCHES — the driver drops every later
-    // submission on this queue and the display freezes while the game runs
-    // on. A fresh queue restores submission. Throttled so a fault storm
-    // can't thrash queue creation.
-    if (command_buffer.error && command_buffer.error.code == 4) {
-      static uint32_t s_last_recovery_swap = 0;
-      if (swap_count_ - s_last_recovery_swap > 120 || s_last_recovery_swap == 0) {
-        s_last_recovery_swap = swap_count_;
-        auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
-            graphics_system_->provider());
-        if (provider && provider->RecreateQueue()) {
-          if (auto* presenter = static_cast<xe::ui::metal::MetalPresenter*>(
-                  graphics_system_->presenter())) {
-            presenter->SetCommandQueue(provider->command_queue());
-          }
-          XELOGE(
-              "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}); "
-              "display should resume",
-              swap_count_);
-        }
-      }
+  // S8: NO synchronous wait — the GPU pipelines behind CPU encoding.
+  // XE_METAL_SYNC_WAIT=1 restores the pre-S8 commit+wait for A/B.
+  static const bool s_sync_wait = std::getenv("XE_METAL_SYNC_WAIT") != nullptr;
+  if (s_sync_wait) {
+    [command_buffer waitUntilCompleted];
+    PublishCompletedSubmission(submission);
+  } else {
+    // Bound the pipeline depth: cap in-flight submissions so a fast CPU
+    // can't queue unbounded GPU work (memory + latency + ring pressure).
+    constexpr uint64_t kMaxInFlightSubmissions = 8;
+    if (submission > kMaxInFlightSubmissions) {
+      WaitForSubmission(submission - kMaxInFlightSubmissions);
     }
   }
-  // Reclamation runs once THIS submission has completed (S7): snapshot
-  // textures retired mid-frame are then no longer referenced by any in-flight
-  // draw, bindless slots can recycle, and later uploads may rewrite any
-  // shared-memory range the submission consumed. With the synchronous wait
-  // above the pump fires immediately — identical behavior to the pre-S7
-  // direct drains; without it (S8) the actions wait for the GPU.
-  completion_actions_.emplace_back(submission, [this]() {
+  // Reclamation runs once THIS submission has completed: snapshot textures
+  // retired mid-frame are then no longer referenced by any in-flight draw,
+  // bindless slots can recycle, the upload-ring region frees, and later
+  // uploads may rewrite any shared-memory range the submission consumed.
+  completion_actions_.emplace_back(submission, [this, submission]() {
+    if (upload_arena_) {
+      upload_arena_->Reclaim(submission);
+    }
     if (render_target_cache_) {
       render_target_cache_->DrainDeferredReleases();
     }
@@ -959,10 +1030,22 @@ void MetalCommandProcessor::EndFrameEncoder() {
       texture_cache_->ReclaimStaleSlots();
     }
     if (shared_memory_) {
-      shared_memory_->ResetFrameRanges();
+      shared_memory_->ReleaseConsumedRanges(submission);
     }
   });
   PumpCompletedActions();
+}
+
+void MetalCommandProcessor::EndFrameEncoderAndWait() {
+  // For sites that read GPU results on the CPU right after the commit
+  // (writeback drains, guest fence waits, EDRAM/RT readbacks, shutdown):
+  // full synchronous semantics.
+  bool had_buffer = frame_command_buffer_ != nullptr;
+  EndFrameEncoder();
+  if (had_buffer) {
+    WaitForSubmission(submission_counter_);
+    PumpCompletedActions();
+  }
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -1294,7 +1377,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }();
   if (s_preclear_rt_at >= 0 &&
       int64_t(trace_draw_index_) - 1 == s_preclear_rt_at && have_color) {
-    EndFrameEncoder();
+    EndFrameEncoderAndWait();
     void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
     if (rt_ptr) {
       id<MTLCommandQueue> pq = (__bridge id<MTLCommandQueue>)
@@ -1529,7 +1612,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     };
     if (fetch_overlaps_writeback(pixel_shader) ||
         fetch_overlaps_writeback(vertex_shader)) {
-      EndFrameEncoder();
+      EndFrameEncoderAndWait();
       DrainPendingWritebacks();
     }
   }
@@ -2254,7 +2337,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return v ? strtoll(v, nullptr, 10) : -1ll;
   }();
   if (s_dump_depth_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_depth_at) {
-    EndFrameEncoder();
+    EndFrameEncoderAndWait();
     void* dt_ptr = render_target_cache_->current_depth_texture();
     if (dt_ptr) {
       id<MTLTexture> dt = (__bridge id<MTLTexture>)dt_ptr;
@@ -2308,7 +2391,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return v ? strtoll(v, nullptr, 10) : -1ll;
   }();
   if (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at) {
-    EndFrameEncoder();
+    EndFrameEncoderAndWait();
     void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
     if (rt_ptr) {
       id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
@@ -2573,7 +2656,7 @@ bool MetalCommandProcessor::IssueCopy() {
         if (s_probe_resolve &&
             uint32_t(strtoul(s_probe_resolve, nullptr, 16)) ==
                 resolve_info.copy_dest_base) {
-          EndFrameEncoder();
+          EndFrameEncoderAndWait();
           PrepareTransferCommandBuffer();
           id<MTLTexture> owner_tex = (__bridge id<MTLTexture>)probe;
           uint32_t pw = std::min<uint32_t>(uint32_t(owner_tex.width), 64);
@@ -2796,7 +2879,7 @@ bool MetalCommandProcessor::IssueCopy() {
   static const bool s_serialize_resolves =
       std::getenv("XE_METAL_SERIALIZE_RESOLVES") != nullptr;
   if (s_serialize_resolves) {
-    EndFrameEncoder();
+    EndFrameEncoderAndWait();
   }
   return true;
 }
@@ -2946,7 +3029,7 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
     uint32_t length = wb.width * wb.height * 4;
     if (guest_address >= wb.guest_addr &&
         guest_address < wb.guest_addr + length) {
-      EndFrameEncoder();
+      EndFrameEncoderAndWait();
       DrainPendingWritebacks();
       return;
     }
@@ -3000,7 +3083,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // encoder is already closed (frame_open_ false) but the frame command buffer
   // still holds every draw and snapshot blit — gating the commit on frame_open_
   // silently discarded the whole frame (uniform magenta present).
-  EndFrameEncoder();
+  // The swap is the frame's ONE synchronous point (S8): the writeback drain
+  // below reads staging buffers, and the wait doubles as frame pacing.
+  EndFrameEncoderAndWait();
 
   // Black-flicker forensics: a swap with no draws since the previous one
   // presents stale/black content — log which swaps do that (throttled).

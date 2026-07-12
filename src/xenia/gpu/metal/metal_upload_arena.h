@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_UPLOAD_ARENA_H_
 
 #include <cstdint>
+#include <deque>
 
 namespace xe {
 namespace gpu {
@@ -25,11 +26,13 @@ struct MetalUploadAllocation {
   void* cpu_ptr = nullptr;    // buffer.contents() + offset
 };
 
-// Bring-up transient allocator: one shared MTLBuffer, bump-allocated within a
-// frame and reset (offset back to 0) once that frame's GPU work has completed.
-// Holds the top-level argument buffers and the b0-b4 constant slices for a
-// frame's draws. Single-buffered for simplicity (the command processor waits on
-// the frame command buffer before Reset), so no in-flight aliasing.
+// Transient allocator over one shared MTLBuffer, operated as a RING (S8):
+// allocations bump `head_`; MarkSubmission stamps the ring position at each
+// command-buffer commit; Reclaim releases the stamped regions once their
+// submissions complete on the GPU. Accounting is monotonic byte counters
+// (allocated vs reclaimed, both including alignment/wrap waste), so "live
+// bytes <= capacity" is the single overlap invariant — an Allocate that would
+// exceed it fails instead of aliasing memory a in-flight submission reads.
 class MetalUploadArena {
  public:
   MetalUploadArena(void* device, uint32_t size);
@@ -37,18 +40,32 @@ class MetalUploadArena {
 
   bool Initialize();
 
-  // Returns the bump offset to 0. Only safe once the GPU is done reading the
-  // previously handed-out slices.
+  // Hard reset (head to 0, all regions freed). Only safe when NOTHING is in
+  // flight — shutdown or the synchronous-wait A/B path.
   void Reset();
 
+  // Stamps the current ring position as the end of `submission`'s
+  // allocations. Call at command-buffer commit, before encoding continues.
+  void MarkSubmission(uint64_t submission);
+
+  // Releases the regions of all marked submissions <= `completed`.
+  void Reclaim(uint64_t completed);
+
   // Allocates `size` bytes aligned to `alignment`. Returns false (and leaves
-  // `out` untouched) if the arena is exhausted.
+  // `out` untouched) if the ring is full (live in-flight regions occupy the
+  // space) — the caller may wait for a submission to complete, Reclaim, and
+  // retry.
   bool Allocate(uint32_t size, uint32_t alignment, MetalUploadAllocation* out);
 
  private:
   void* device_;   // id<MTLDevice>, not owned.
   uint32_t size_;
-  uint32_t offset_ = 0;
+  uint32_t head_ = 0;  // ring write cursor
+  // Monotonic byte counters (include alignment + end-of-buffer wrap waste).
+  uint64_t total_allocated_ = 0;
+  uint64_t total_reclaimed_ = 0;
+  // (submission, total_allocated_ at its commit), oldest first.
+  std::deque<std::pair<uint64_t, uint64_t>> marks_;
   void* buffer_ = nullptr;  // id<MTLBuffer>, retained.
   uint8_t* contents_ = nullptr;
   uint64_t gpu_base_ = 0;

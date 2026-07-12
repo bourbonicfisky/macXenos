@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_shared_memory.h"
 
+#include <algorithm>
+
 #include "xenia/gpu/trace_writer.h"
 
 #import <Metal/Metal.h>
@@ -68,13 +70,26 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   // hazard flush (see UploadRanges) may run inside.
   bool result = RequestRange(start, length);
   uint32_t end = start + length;
-  for (const auto& range : consumed_ranges_) {
+  uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  for (auto& range : consumed_ranges_) {
     if (start >= range.first && end <= range.second) {
-      return result;  // already covered.
+      // Already covered — but the NEWER submission now also reads it; keep
+      // the range protected until the newest reader completes.
+      range.submission = std::max(range.submission, submission);
+      return result;
     }
   }
-  consumed_ranges_.emplace_back(start, end);
+  consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   return result;
+}
+
+void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
+  consumed_ranges_.erase(
+      std::remove_if(consumed_ranges_.begin(), consumed_ranges_.end(),
+                     [&](const ConsumedRange& range) {
+                       return range.submission <= completed_submission;
+                     }),
+      consumed_ranges_.end());
 }
 
 void MetalSharedMemory::WriteTraceInitialState(TraceWriter& trace_writer) {

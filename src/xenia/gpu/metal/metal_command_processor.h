@@ -11,9 +11,11 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -32,6 +34,7 @@ class MetalRenderTargetCache;
 class MetalSharedMemory;
 class MetalTextureCache;
 class MetalUploadArena;
+struct MetalUploadAllocation;
 
 // Phase 2b skeleton command processor. Overrides the same pure-virtual surface
 // as the other backends; the draw/copy/shader paths are stubs for now (behaves
@@ -227,6 +230,26 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
+
+  // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
+  // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
+  // sites that read results on the CPU right after the commit use
+  // EndFrameEncoderAndWait. Faults are recorded by the completion handler
+  // and drained (logged + auto-recovered) on the GPU thread from
+  // PumpCompletedActions.
+  void EndFrameEncoderAndWait();
+  // Blocks until `submission` completes (condition variable signaled by the
+  // completion handler). Returns false on timeout — a wedged GPU.
+  bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000);
+  // Arena allocation with ring-full handling: on failure, waits for the
+  // oldest in-flight submission, reclaims, and retries once.
+  bool ArenaAllocate(uint32_t size, uint32_t alignment,
+                     MetalUploadAllocation* out);
+  void DrainFaultedCommandBuffers();
+  std::mutex completion_mutex_;
+  std::condition_variable completion_cv_;
+  std::mutex fault_mutex_;
+  std::vector<void*> faulted_command_buffers_;  // id<MTLCommandBuffer>, retained.
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;

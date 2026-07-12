@@ -45,23 +45,61 @@ bool MetalUploadArena::Initialize() {
   return true;
 }
 
-void MetalUploadArena::Reset() { offset_ = 0; }
+void MetalUploadArena::Reset() {
+  head_ = 0;
+  total_allocated_ = 0;
+  total_reclaimed_ = 0;
+  marks_.clear();
+}
+
+void MetalUploadArena::MarkSubmission(uint64_t submission) {
+  // Nothing allocated since the previous mark: no region to stamp.
+  if (!marks_.empty() && marks_.back().second == total_allocated_) {
+    // Still record so Reclaim(submission) advances (zero-size region).
+    marks_.emplace_back(submission, total_allocated_);
+    return;
+  }
+  marks_.emplace_back(submission, total_allocated_);
+}
+
+void MetalUploadArena::Reclaim(uint64_t completed) {
+  while (!marks_.empty() && marks_.front().first <= completed) {
+    total_reclaimed_ = marks_.front().second;
+    marks_.pop_front();
+  }
+}
 
 bool MetalUploadArena::Allocate(uint32_t size, uint32_t alignment,
                                 MetalUploadAllocation* out) {
-  if (!contents_ || !size) {
+  if (!contents_ || !size || size > size_) {
     return false;
   }
-  uint32_t aligned = alignment ? xe::align(offset_, alignment) : offset_;
+  uint32_t aligned = alignment ? xe::align(head_, alignment) : head_;
+  uint64_t waste = aligned - head_;
   if (uint64_t(aligned) + size > size_) {
-    XELOGE("MetalUploadArena: exhausted ({} + {} > {})", aligned, size, size_);
+    // Wrap: the rest of the buffer is waste; restart at 0 (already aligned
+    // for any power-of-two alignment).
+    waste = size_ - head_;
+    aligned = 0;
+  }
+  uint64_t live = total_allocated_ - total_reclaimed_;
+  if (live + waste + size > size_) {
+    // Ring full: the space is owned by in-flight submissions. The caller may
+    // wait for a completion, Reclaim, and retry. (Log throttled: this is an
+    // expected transient under async submission, not a leak.)
+    static uint32_t s_full_logs = 0;
+    if (s_full_logs++ < 8) {
+      XELOGW("MetalUploadArena: ring full (live {} + {} > {})",
+             live, waste + size, size_);
+    }
     return false;
   }
   out->buffer = buffer_;
   out->offset = aligned;
   out->gpu_address = gpu_base_ + aligned;
   out->cpu_ptr = contents_ + aligned;
-  offset_ = aligned + size;
+  head_ = aligned + size;
+  total_allocated_ += waste + size;
   return true;
 }
 

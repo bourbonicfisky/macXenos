@@ -68,9 +68,18 @@ class MetalSharedMemory : public SharedMemory {
   // current frame for the hazard detection above.
   bool RequestConsumedRange(uint32_t start, uint32_t length);
 
+  // S8: the submission the currently-open command buffer will get — consumed
+  // ranges are tagged with it so ReleaseConsumedRanges frees exactly the
+  // ranges whose reader has completed (a blanket clear would drop hazard
+  // protection for LATER in-flight submissions).
+  void SetSubmissionProvider(std::function<uint64_t()> provider) {
+    submission_provider_ = std::move(provider);
+  }
+  void ReleaseConsumedRanges(uint64_t completed_submission);
+
   // Forgets the consumed-range set (call after the frame command buffer has
   // been committed and waited on).
-  void ResetFrameRanges() { consumed_ranges_.clear(); }
+  void ResetFrameRanges() { consumed_ranges_.clear(); }  // sync-mode/shutdown
 
  protected:
   bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,
@@ -83,7 +92,13 @@ class MetalSharedMemory : public SharedMemory {
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
 
   // Byte ranges consumed by draws encoded in the open frame command buffer.
-  std::vector<std::pair<uint32_t, uint32_t>> consumed_ranges_;
+  struct ConsumedRange {
+    uint32_t first;   // start
+    uint32_t second;  // end
+    uint64_t submission;
+  };
+  std::vector<ConsumedRange> consumed_ranges_;
+  std::function<uint64_t()> submission_provider_;
   std::function<void()> hazard_flush_callback_;
 };
 
