@@ -704,6 +704,11 @@ class RenderTargetCache {
       uint32_t length_tiles, std::vector<Transfer>* transfers_append_out,
       const Transfer::Rectangle* resolve_clear_cutout = nullptr);
 
+  // Diagnostic hook for XE_GPU_TILE_TRACE ownership logging: backends that
+  // track a trace/draw index can override so ownership-change events can be
+  // correlated with draws.
+  virtual uint32_t GetTraceDrawIndexForOwnershipTrace() const { return 0; }
+
   // If failed to create, may contain nullptr to prevent attempting to create a
   // render target twice.
   std::unordered_map<RenderTargetKey, RenderTarget*, RenderTargetKey::Hasher>

@@ -166,6 +166,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
   uint32_t GetMaxRenderTargetHeight() const override { return 8192; }
 
+  // XE_GPU_TILE_TRACE correlation: ownership-claim events log the trace draw
+  // index they happened at.
+  uint32_t GetTraceDrawIndexForOwnershipTrace() const override;
+
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
   // Host depth is D32F vs guest unorm24/float24, but tracking the separate

@@ -1650,6 +1650,10 @@ void MetalRenderTargetCache::GetEdramOwnersForDump(
   }
 }
 
+uint32_t MetalRenderTargetCache::GetTraceDrawIndexForOwnershipTrace() const {
+  return command_processor_.trace_draw_index();
+}
+
 void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   // Full-EDRAM 1280-pitch k_8_8_8_8 render target owning all tiles.
   RenderTarget* full_rt = PrepareFullEdram1280xRenderTargetForSnapshotRestoration(

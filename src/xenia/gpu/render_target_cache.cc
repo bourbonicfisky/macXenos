@@ -1548,6 +1548,28 @@ void RenderTargetCache::ChangeOwnership(
   bool host_depth_encoding_different =
       dest.is_depth && GetPath() == Path::kHostRenderTargets &&
       IsHostDepthEncodingDifferent(dest.GetDepthFormat());
+  // Diagnostic: XE_GPU_TILE_TRACE=A,B logs every ownership claim whose tile
+  // range intersects [A,B) — old owner, new owner, and whether a transfer was
+  // requested. The ordered claim history for a tile window is how "content X
+  // leaked into pass Y" gets attributed to the exact hop that lost it.
+  static const auto s_tile_trace = []() -> std::pair<uint32_t, uint32_t> {
+    const char* v = std::getenv("XE_GPU_TILE_TRACE");
+    if (!v) return {0, 0};
+    unsigned a = 0, b = 0;
+    if (std::sscanf(v, "%u,%u", &a, &b) != 2) return {0, 0};
+    return {a, b};
+  }();
+  auto tile_trace = [&](uint32_t range_start, uint32_t range_end,
+                        RenderTargetKey old_owner, bool transfer) {
+    if (s_tile_trace.first == s_tile_trace.second) return;
+    if (range_end <= s_tile_trace.first || range_start >= s_tile_trace.second) {
+      return;
+    }
+    XELOGW("TileTrace @draw {}: tiles [{},{}) {} -> {}{}",
+           GetTraceDrawIndexForOwnershipTrace(), range_start, range_end,
+           old_owner.IsEmpty() ? "(empty)" : old_owner.GetDebugName(),
+           dest.GetDebugName(), transfer ? " XFER" : " no-xfer");
+  };
   auto change_ownership_in_extent = [&](uint32_t extent_start,
                                         uint32_t extent_end) {
     // The map contains consecutive ranges, merged if the adjacent ones are the
@@ -1645,6 +1667,9 @@ void RenderTargetCache::ChangeOwnership(
         }
       }
       // Claim the current range.
+      tile_trace(it->first, it->second.end_tiles, it->second.render_target,
+                 transfers_append_out && !it->second.render_target.IsEmpty() &&
+                     it->second.render_target != dest);
       it->second.render_target = dest;
       if (host_depth_encoding_different) {
         it->second.GetHostDepthRenderTarget(dest.GetDepthFormat()) = dest;

@@ -2095,6 +2095,59 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
            draw_count_, uint32_t(prim_type), index_count,
            index_buffer_info ? "indexed" : "auto");
   }
+  // Diagnostic: XE_METAL_DUMP_DEPTH=<trace draw index> dumps the bound depth
+  // texture (D32F) to /tmp/xe_depth_<index>.ppm as sqrt-toned grayscale right
+  // after that draw encodes — splits "depth VALUES wrong" from "the d2c
+  // reinterpret scrambles correct values" (smooth image = values fine).
+  static const int64_t s_dump_depth_at = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_DEPTH");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  if (s_dump_depth_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_depth_at) {
+    EndFrameEncoder();
+    void* dt_ptr = render_target_cache_->current_depth_texture();
+    if (dt_ptr) {
+      id<MTLTexture> dt = (__bridge id<MTLTexture>)dt_ptr;
+      uint32_t tw = uint32_t(dt.width), th = uint32_t(dt.height);
+      id<MTLBuffer> rb =
+          [dt.device newBufferWithLength:size_t(tw) * th * 4
+                                 options:MTLResourceStorageModeShared];
+      id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->command_queue();
+      if (rb && dq) {
+        id<MTLCommandBuffer> dcb = [dq commandBuffer];
+        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+        [dbl copyFromTexture:dt
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(tw, th, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:tw * 4
+     destinationBytesPerImage:size_t(tw) * th * 4];
+        [dbl endEncoding];
+        [dcb commit];
+        [dcb waitUntilCompleted];
+        std::string path = fmt::format("/tmp/xe_depth_{}.ppm", s_dump_depth_at);
+        FILE* f = fopen(path.c_str(), "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", tw, th);
+          const float* px = static_cast<const float*>(rb.contents);
+          for (size_t i = 0; i < size_t(tw) * th; ++i) {
+            float v = px[i];
+            v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+            uint8_t g = uint8_t(std::sqrt(v) * 255.f + 0.5f);
+            uint8_t rgb[3] = {g, g, g};
+            fwrite(rgb, 1, 3, f);
+          }
+          fclose(f);
+          XELOGW("XE_METAL_DUMP_DEPTH: wrote {} ({}x{})", path, tw, th);
+        }
+      }
+    }
+  }
   // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
   // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
   // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture

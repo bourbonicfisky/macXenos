@@ -397,6 +397,26 @@ uint32_t MetalTextureCache::GetTextureSlot(
              uint32_t(endian), vals);
     }
   }
+  // XE_METAL_DUMP_FETCH_PNG=<hex base>: dump the whole untiled+swapped upload
+  // as /tmp/xe_fetch_<base>.ppm (bytes 0,1,2 as RGB). Run once reader-only
+  // (trace-restored RAM = hardware content) and once with stage-3 writebacks
+  // (our content) — the visual diff attributes divergence to the producer.
+  static const uint32_t s_dump_fetch_png = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_FETCH_PNG");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_dump_fetch_png && base == s_dump_fetch_png && bpb == 4) {
+    std::string path = fmt::format("/tmp/xe_fetch_{:08X}.ppm", base);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (f) {
+      fprintf(f, "P6\n%u %u\n255\n", blocks_w, blocks_h);
+      for (size_t i = 0; i < size_t(blocks_w) * blocks_h; ++i) {
+        fwrite(&linear[i * 4], 1, 3, f);
+      }
+      fclose(f);
+      XELOGW("MetalFetchPNG: wrote {} ({}x{})", path, blocks_w, blocks_h);
+    }
+  }
   std::vector<uint8_t> decoded;
   if (plan.decode_4444 || plan.decode_r16) {
     decoded.resize(size_t(width) * height * 4);
