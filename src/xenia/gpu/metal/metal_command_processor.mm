@@ -3184,12 +3184,17 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       }
       XELOGI(
           "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
-          "{:.0f} draws/frame, {:.0f} MB footprint, {:.1f} tex-uploads/frame",
+          "{:.0f} draws/frame, {:.0f} MB footprint, {:.1f} tex-uploads/frame, "
+          "slots {}/{} (free {}, stale {})",
           count, 128.0f / std::max(secs, 0.001f),
           float(frame_commit_count_ - s_last_commits) / 128.0f,
           float(draw_count_ - s_last_draws) / 128.0f, footprint_mb,
           texture_cache_ ? float(texture_cache_->ConsumeUploadCount()) / 128.0f
-                         : 0.0f);
+                         : 0.0f,
+          texture_cache_ ? texture_cache_->slots_used() : 0,
+          texture_cache_ ? texture_cache_->slots_capacity() : 0,
+          texture_cache_ ? texture_cache_->slots_free() : 0,
+          texture_cache_ ? texture_cache_->slots_stale() : 0);
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;

@@ -103,6 +103,14 @@ class MetalTextureCache {
   }
   void WriteAllCachedTexturesToTrace(TraceWriter& trace_writer) const;
 
+  // Telemetry: bindless-slot pressure (frame stats). Exhaustion is silent
+  // at the allocation sites — surfacing it here caught the slot leak that
+  // zeroed the exposure pyramid ~1 minute into every session.
+  uint32_t slots_used() const { return next_slot_; }
+  uint32_t slots_free() const { return uint32_t(free_slots_.size()); }
+  uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
+  uint32_t slots_capacity() const { return view_heap_slots_; }
+
   // Telemetry: uploads performed since the last query (frame stats).
   uint32_t ConsumeUploadCount() {
     uint32_t n = upload_count_;

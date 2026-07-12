@@ -843,6 +843,13 @@ uint32_t MetalTextureCache::AllocateSlot() {
     return slot;
   }
   if (next_slot_ >= view_heap_slots_) {
+    // Exhaustion was SILENT here while consumers degraded to stale/null
+    // textures (the zero-exposure black flicker) — scream, throttled.
+    static uint32_t s_exhausted_logs = 0;
+    if (s_exhausted_logs++ < 8 || (s_exhausted_logs & 1023) == 0) {
+      XELOGE("MetalTextureCache: BINDLESS HEAP EXHAUSTED ({} slots, {} stale)",
+             view_heap_slots_, uint32_t(stale_slots_.size()));
+    }
     return 0;  // exhausted (0 == null texture).
   }
   return next_slot_++;
