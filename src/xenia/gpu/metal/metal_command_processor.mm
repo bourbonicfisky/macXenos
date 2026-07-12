@@ -1379,6 +1379,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
+  // VB sentinel probe (XE_METAL_VB_SENTINEL=<draw>): overwrite the draw's
+  // vertex floats with per-dword sentinels z = (w+1)*8 + 0.5 so a consumer
+  // like frc(z*c254) encodes WHICH dword the translated vfetch actually
+  // read into the output color (o1.y = (w+1)/8 + 0.0078 -> G ~= 7,15,22,
+  // 29,36,44 * tex.a for w=0..5). Settles offset-vs-endian in the
+  // light-VS zero-output hunt empirically.
+  static const int64_t s_vb_sentinel = [] {
+    const char* v = std::getenv("XE_METAL_VB_SENTINEL");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  if (s_vb_sentinel >= 0 &&
+      int64_t(trace_draw_index_) - 1 == s_vb_sentinel && vertex_shader) {
+    for (const auto& vb : vertex_shader->vertex_bindings()) {
+      xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(vb.fetch_constant);
+      uint32_t vaddr = vf.address << 2;
+      uint32_t stride = vb.stride_words ? vb.stride_words : 4;
+      if (!vaddr || !vf.size) continue;
+      uint32_t* vdata =
+          reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(vaddr));
+      uint32_t vcount = std::min<uint32_t>(vf.size / stride, 8);
+      for (uint32_t vtx = 0; vtx < vcount; ++vtx) {
+        // Keep dwords 0-2 (position) intact — sentinel only the tail
+        // (uv/packed attributes) so the quad still rasterizes.
+        for (uint32_t w = 3; w < stride && w < 8; ++w) {
+          float sentinel = float(w + 1) * 8.0f + 0.5f;
+          uint32_t bits;
+          std::memcpy(&bits, &sentinel, 4);
+          vdata[vtx * stride + w] =
+              xenos::GpuSwapInline(bits, xenos::Endian(vf.endian));
+        }
+      }
+      if (shared_memory_) {
+        shared_memory_->MemoryInvalidationCallback(vaddr, vf.size * 4, true);
+      }
+      XELOGW("MetalVBSentinel: draw {} fc={} addr={:08X} patched {} verts",
+             s_vb_sentinel, vb.fetch_constant, vaddr, vcount);
+    }
+  }
   // Frame-trace recording: this backend reads guest indices directly from
   // RAM (not through shared memory), so record the range for replay. No-op
   // unless a trace file is open.

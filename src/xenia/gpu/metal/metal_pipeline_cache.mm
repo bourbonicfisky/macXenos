@@ -165,7 +165,7 @@ bool MetalPipelineCache::TranslateShader(
   if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
     auto dump = [&](const char* ext, const std::vector<uint8_t>& data) {
       std::string path =
-          fmt::format("/tmp/xe_xlat_{:016X}.{}", s_dump_xlat, ext);
+          fmt::format("/tmp/xe_xlat_{:016X}_{:016X}.{}", s_dump_xlat, translation.modification(), ext);
       FILE* f = fopen(path.c_str(), "wb");
       if (f) {
         fwrite(data.data(), 1, data.size(), f);
@@ -181,7 +181,7 @@ bool MetalPipelineCache::TranslateShader(
           ? MetalShaderConverter::Stage::kVertex
           : MetalShaderConverter::Stage::kFragment;
   if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
-    std::string path = fmt::format("/tmp/xe_xlat_{:016X}.dxil", s_dump_xlat);
+    std::string path = fmt::format("/tmp/xe_xlat_{:016X}_{:016X}.dxil", s_dump_xlat, translation.modification());
     FILE* f = fopen(path.c_str(), "wb");
     if (f) {
       fwrite(dxil.data(), 1, dxil.size(), f);
@@ -199,7 +199,7 @@ bool MetalPipelineCache::TranslateShader(
   // Load onto the device as an MTLFunction.
   if (s_dump_xlat && translation.shader().ucode_data_hash() == s_dump_xlat) {
     std::string path =
-        fmt::format("/tmp/xe_xlat_{:016X}.metallib", s_dump_xlat);
+        fmt::format("/tmp/xe_xlat_{:016X}_{:016X}.metallib", s_dump_xlat, translation.modification());
     FILE* f = fopen(path.c_str(), "wb");
     if (f) {
       fwrite(metallib.data(), 1, metallib.size(), f);
