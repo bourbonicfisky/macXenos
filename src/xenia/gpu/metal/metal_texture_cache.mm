@@ -280,7 +280,12 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // frame's G-buffer strip + garbage instead (the stipple/darkness).
   // XE_METAL_COLOR_BRIDGE=1 restores the old behavior for A/B.
   {
-    static const bool s_stage3 = std::getenv("XE_METAL_STAGE3") != nullptr;
+    // Stage 3 is DEFAULT ON (XE_METAL_STAGE3=0 disables) — keep in sync with
+    // the writeback-cap reader in metal_command_processor.mm.
+    static const bool s_stage3 = [] {
+      const char* v = std::getenv("XE_METAL_STAGE3");
+      return !v || v[0] != '0';
+    }();
     static const bool s_color_bridge =
         !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
     auto rit = resolved_targets_.find(fetch.base_address << 12);

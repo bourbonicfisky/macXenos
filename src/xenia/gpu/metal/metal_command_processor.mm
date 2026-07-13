@@ -516,8 +516,10 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
 //   XE_METAL_NO_RESOLVE_COMMIT=1   disable the default commit-before-resolve
-//   XE_METAL_STAGE3=1         guest-RAM resolve reads/writes (stage 3; default
-//                             off until the tiled writeback matches hardware)
+//   XE_METAL_STAGE3=0         disable stage 3 (guest-RAM resolve reads/writes,
+//                             DEFAULT ON since the copy_dest_swap fix: gate
+//                             at-or-better on every trace and SF4's column
+//                             resolves need exact-address placement)
 //   XE_METAL_COLOR_BRIDGE=1    restore the color RT-as-texture bridge (A/B;
 //                             default = fetches read guest RAM, stage 3)
 //   XE_METAL_FAULT_INJECT=1    deliberately reproduce the bindless page fault
@@ -3072,12 +3074,16 @@ bool MetalCommandProcessor::IssueCopy() {
         // exposure constant — snapshot-only resolves leave that RAM unwritten.
         static const bool s_no_writeback =
             std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
-        // STAGE 3 (XE_METAL_STAGE3=1): write back at EVERY size — the
-        // composite's temporal history buffer (3.7MB) and the G-buffer dests
-        // all live in guest RAM; fetches read RAM (color bridge retired).
-        // Default OFF until the tiled writeback scatter matches hardware
-        // byte-exactly (currently produces confetti — see the handoff).
-        static const bool s_stage3 = std::getenv("XE_METAL_STAGE3") != nullptr;
+        // STAGE 3 (default ON; XE_METAL_STAGE3=0 disables): write back at
+        // EVERY size — the composite's temporal history buffer (3.7MB) and
+        // the G-buffer dests all live in guest RAM; fetches read RAM (color
+        // bridge retired). Viable since the copy_dest_swap fix: the scatter
+        // now matches hardware channel order, and SF4's x-offset column
+        // resolves REQUIRE exact-address placement (the bridge can't).
+        static const bool s_stage3 = [] {
+          const char* v = std::getenv("XE_METAL_STAGE3");
+          return !v || v[0] != '0';
+        }();
         const uint32_t wb_cap =
             s_stage3 ? 4u * 1024 * 1024 : 256u * 1024;
         if (resolved && !s_no_writeback && rw * rh * 4 <= wb_cap &&
@@ -3107,13 +3113,18 @@ bool MetalCommandProcessor::IssueCopy() {
             uint32_t extent_bytes =
                 resolve_info.copy_dest_extent_start - resolve_info.copy_dest_base +
                 resolve_info.copy_dest_extent_length;
+            // copy_dest_swap only applies to multi-channel color packing
+            // (resolve.xesli writes .bgra); R32Float has nothing to swap.
+            uint32_t wb_swap_rb =
+                dest_pixel_format == MetalRenderTargetCache::kColorFormat &&
+                resolve_info.copy_dest_info.copy_dest_swap;
             pending_writebacks_.push_back(PendingWriteback{
                 (__bridge_retained void*)staging, resolve_info.copy_dest_base,
                 rw, rh,
                 uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
-                uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
+                uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
                 S7TagsOff() ? 0 : CurrentEncodingSubmission()});
           }
         }
@@ -3350,8 +3361,14 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
             if (wb.dest_extent_bytes && off + 4 > wb.dest_extent_bytes) {
               continue;
             }
-            uint32_t v =
-                xenos::GpuSwapInline(words[y * wb.width + x], endian);
+            uint32_t v = words[y * wb.width + x];
+            if (wb.swap_rb) {
+              // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
+              // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
+              v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
+                  ((v >> 16) & 0xFFu);
+            }
+            v = xenos::GpuSwapInline(v, endian);
             std::memcpy(dest + off, &v, 4);
           }
         }

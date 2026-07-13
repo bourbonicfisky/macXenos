@@ -292,6 +292,10 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t dest_offset_x;
     uint32_t dest_offset_y;
     uint32_t dest_extent_bytes;   // write bound relative to guest_addr
+    // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs resolved pixels .bgra
+    // (artist-texture channel order) — the scatter must too, or every fetch
+    // of the dest through the game's swizzle reads R/B swapped.
+    uint32_t swap_rb;
     // Submission whose command buffer fills `staging` — the drain may only
     // read the staging contents once this submission has completed.
     uint64_t submission;
