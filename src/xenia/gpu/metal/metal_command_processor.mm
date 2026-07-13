@@ -3055,6 +3055,17 @@ bool MetalCommandProcessor::IssueCopy() {
                                                  snap, rw, rh,
                                                  /*is_depth=*/false);
         }
+        static const bool s_resolve_log2 =
+            std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+        if (s_resolve_log2 && (!resolved || (!is_new_snapshot && !parent_snap))) {
+          XELOGW(
+              "MetalResolve @draw {} COLOR {:08X} {}x{}: resolved={} snap={} "
+              "new={} parent={} (bridge {})",
+              trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+              resolved, snap != nullptr, is_new_snapshot,
+              parent_snap != nullptr,
+              resolved && is_new_snapshot ? "registered" : "NOT registered");
+        }
         // Stage-3 slice: SMALL resolves also write back into REAL guest memory
         // at frame end. JC2's auto-exposure loop is CPU-side: the game reads
         // the resolved 1x1 luminance from RAM to compute the next frame's

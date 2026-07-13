@@ -260,6 +260,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_c2d_sten_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* transfer_x2x_sten_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* stencil_bit_states_[8] = {};            // id<MTLDepthStencilState>.
+  // General color->color transfer: encode source texel to the raw EDRAM word
+  // (per source host format), decode to the dest format, with the x2x tile
+  // remap — covers format reinterprets the specific handlers don't (7e3).
+  void PerformColorConvertTransfer(const void* command_buffer,
+                                   RenderTarget* source_rt,
+                                   RenderTarget* dest_rt,
+                                   const Transfer& transfer);
+  void* transfer_conv_library_ = nullptr;  // id<MTLLibrary>.
+  std::unordered_map<uint64_t, void*> transfer_conv_pipelines_;
   // Cross-MSAA same-format transfer pipelines: depth (one) and color (keyed
   // by dest MTLPixelFormat).
   void* transfer_x2x_library_ = nullptr;        // id<MTLLibrary>.

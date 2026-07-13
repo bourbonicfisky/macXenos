@@ -377,6 +377,21 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         PerformColorReinterpretTransfer((__bridge const void*)cb, source, dest,
                                         transfer);
+      } else if (!src_key.is_depth && !dest_key.is_depth &&
+                 !src_key.Is64bpp() && !dest_key.Is64bpp()) {
+        // General 32bpp color->color transfer: encode the source texel to the
+        // raw EDRAM word (per source host format), decode per dest format,
+        // with the full tile remap (handles reinterpret AND cross-MSAA in one
+        // pass). Covers the combos the specific handlers don't — Sonic's HDR
+        // chain runs on k_2_10_10_10_FLOAT (host RGBA16F, 7e3-packed words)
+        // and every one of its ownership handoffs to/from 8888 was skipped,
+        // so the bloom pyramid read stale content (the scrambled top band).
+        if (blit) {
+          [blit endEncoding];
+          blit = nil;
+        }
+        PerformColorConvertTransfer((__bridge const void*)cb, source, dest,
+                                    transfer);
       } else {
         static uint32_t s_skips = 0;
         if (s_skips++ < 24) {
@@ -642,6 +657,227 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
       }
     }
   }
+  [enc endEncoding];
+}
+
+
+// General color->color transfer with format conversion through the raw EDRAM
+// word. Source texel -> 32-bit word (per source host format) -> dest texel
+// (per dest format), with the same dest-pixel -> tile -> source-pixel remap
+// as the cross-MSAA pass, so one pipeline handles reinterpret, cross-MSAA,
+// and both combined. Format classes: 0=RGBA8 (bytes are the word),
+// 1=R32Float (bits are the word), 2=RGBA16F holding 7e3-packed
+// k_2_10_10_10_FLOAT (10:10:10 7e3 floats + 2-bit alpha),
+// 3=RGB10A2Unorm (raw 2:10:10:10 unorm).
+void MetalRenderTargetCache::PerformColorConvertTransfer(
+    const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
+    const Transfer& transfer) {
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  auto fmt_class = [](uint64_t pf) -> int32_t {
+    switch ((MTLPixelFormat)pf) {
+      case MTLPixelFormatRGBA8Unorm:
+        return 0;
+      case MTLPixelFormatR32Float:
+        return 1;
+      case MTLPixelFormatRGBA16Float:
+        return 2;
+      case MTLPixelFormatRGB10A2Unorm:
+        return 3;
+      default:
+        return -1;
+    }
+  };
+  int32_t src_fmt = fmt_class(source->pixel_format());
+  int32_t dst_fmt = fmt_class(dest->pixel_format());
+  if (src_fmt < 0 || dst_fmt < 0) {
+    static uint32_t s_conv_skips = 0;
+    if (s_conv_skips++ < 8) {
+      XELOGW("MetalRenderTargetCache: conv transfer unsupported format {} -> {}",
+             source->pixel_format(), dest->pixel_format());
+    }
+    return;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!transfer_conv_library_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct ConvParams {
+        uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
+        uint start_tiles; uint end_tiles; uint src_fmt; uint shifts;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_conv_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      // Xenos 7e3 (7-bit mantissa, 3-bit exponent, bias -124 vs f32): the
+      // packed channel format of k_2_10_10_10_FLOAT EDRAM words.
+      static float xe_7e3_to_f32(uint v) {
+        v &= 0x3FFu;
+        if (v == 0u) { return 0.0; }
+        uint m = v & 0x7Fu;
+        int e = int(v >> 7);
+        if (e == 0) {
+          // Denormal: normalize into the f32 encoding.
+          int lz = clz(m) - 24;  // m in [1,0x7F] -> lz in [1,7]
+          e = 1 - lz;
+          m = (m << uint(lz)) & 0x7Fu;
+        }
+        return as_type<float>(uint(e + 124) << 23 | (m << 16));
+      }
+      static uint xe_f32_to_7e3(float f) {
+        if (!(f > 0.0)) { return 0u; }
+        if (f >= 31.875) { return 0x3FFu; }
+        uint u = as_type<uint>(f);
+        int e = int((u >> 23) & 0xFFu) - 124;
+        uint m = (u >> 16) & 0x7Fu;
+        uint round = (u >> 15) & 1u;
+        if (e <= 0) {
+          uint shift = uint(1 - e);
+          if (shift > 8u) { return 0u; }
+          uint full = 0x80u | m;
+          uint r = (full >> shift) + ((full >> (shift - 1u)) & 1u);
+          return min(r, 0x7Fu);
+        }
+        m += round;
+        if (m > 0x7Fu) {
+          m = 0u;
+          ++e;
+          if (e >= 8) { return 0x3FFu; }
+        }
+        return (uint(e) << 7) | m;
+      }
+      static uint xe_encode(float4 c, uint fmt) {
+        switch (fmt) {
+          default:
+          case 0u:  // RGBA8: storage bytes ARE the guest word.
+            return uint(round(saturate(c.r) * 255.0)) |
+                   (uint(round(saturate(c.g) * 255.0)) << 8) |
+                   (uint(round(saturate(c.b) * 255.0)) << 16) |
+                   (uint(round(saturate(c.a) * 255.0)) << 24);
+          case 1u:  // R32F: bits are the word.
+            return as_type<uint>(c.r);
+          case 2u:  // RGBA16F container of 7e3 floats + 2-bit alpha.
+            return xe_f32_to_7e3(c.r) | (xe_f32_to_7e3(c.g) << 10) |
+                   (xe_f32_to_7e3(c.b) << 20) |
+                   (uint(round(saturate(c.a) * 3.0)) << 30);
+          case 3u:  // RGB10A2 unorm raw.
+            return uint(round(saturate(c.r) * 1023.0)) |
+                   (uint(round(saturate(c.g) * 1023.0)) << 10) |
+                   (uint(round(saturate(c.b) * 1023.0)) << 20) |
+                   (uint(round(saturate(c.a) * 3.0)) << 30);
+        }
+      }
+      static float4 xe_decode(uint w, uint fmt) {
+        switch (fmt) {
+          default:
+          case 0u:
+            return float4(float(w & 0xFFu), float((w >> 8) & 0xFFu),
+                          float((w >> 16) & 0xFFu), float(w >> 24)) /
+                   255.0;
+          case 1u:
+            return float4(as_type<float>(w), 0.0, 0.0, 0.0);
+          case 2u:
+            return float4(xe_7e3_to_f32(w), xe_7e3_to_f32(w >> 10),
+                          xe_7e3_to_f32(w >> 20), float(w >> 30) / 3.0);
+          case 3u:
+            return float4(float(w & 0x3FFu) / 1023.0,
+                          float((w >> 10) & 0x3FFu) / 1023.0,
+                          float((w >> 20) & 0x3FFu) / 1023.0,
+                          float(w >> 30) / 3.0);
+        }
+      }
+      fragment float4 xe_conv_fs(VOut in [[stage_in]],
+                                 texture2d<float> src [[texture(0)]],
+                                 constant ConvParams& p [[buffer(0)]],
+                                 constant uint& dst_fmt [[buffer(1)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        // shifts: dst_x | dst_y<<4 | src_x<<8 | src_y<<12 (sample->pixel).
+        uint2 ds = uint2(dp.x << (p.shifts & 15u),
+                         dp.y << ((p.shifts >> 4) & 15u));
+        uint dl = (ds.y / 16u) * p.dst_pitch + (ds.x / 80u);
+        uint tile = p.dst_base + dl;
+        if (tile < p.start_tiles || tile >= p.end_tiles) {
+          discard_fragment();
+        }
+        uint sl = tile - p.src_base;
+        uint2 ss = uint2((sl % p.src_pitch) * 80u + (ds.x % 80u),
+                         (sl / p.src_pitch) * 16u + (ds.y % 16u));
+        uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
+                         ss.y >> ((p.shifts >> 12) & 15u));
+        float4 c = src.read(sp, 0);
+        return xe_decode(xe_encode(c, p.src_fmt), dst_fmt);
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: conv transfer library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    transfer_conv_library_ = (__bridge_retained void*)lib;
+  }
+  uint64_t pipe_key = dest->pixel_format();
+  auto it = transfer_conv_pipelines_.find(pipe_key);
+  if (it == transfer_conv_pipelines_.end()) {
+    id<MTLLibrary> lib = (__bridge id<MTLLibrary>)transfer_conv_library_;
+    MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction = [lib newFunctionWithName:@"xe_conv_vs"];
+    d.fragmentFunction = [lib newFunctionWithName:@"xe_conv_fs"];
+    d.colorAttachments[0].pixelFormat = (MTLPixelFormat)dest->pixel_format();
+    NSError* err = nil;
+    id<MTLRenderPipelineState> ps =
+        [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) {
+      XELOGE("MetalRenderTargetCache: conv transfer pipeline {} failed: {}",
+             dest->pixel_format(),
+             err ? err.localizedDescription.UTF8String : "?");
+    }
+    it = transfer_conv_pipelines_
+             .emplace(pipe_key, ps ? (__bridge_retained void*)ps : nullptr)
+             .first;
+  }
+  if (!it->second) {
+    return;
+  }
+  static uint32_t s_conv_logs = 0;
+  if (s_conv_logs++ < 64) {
+    XELOGW("MetalXferConv @draw {}: {} -> {} tiles [{},{}) fmt {}->{}",
+           command_processor_.trace_draw_index(),
+           source->key().GetDebugName(), dest->key().GetDebugName(),
+           transfer.start_tiles, transfer.end_tiles, src_fmt, dst_fmt);
+  }
+  uint32_t sxs, sys, dxs, dys;
+  GetMsaaShifts(uint32_t(source->key().msaa_samples), sxs, sys);
+  GetMsaaShifts(uint32_t(dest->key().msaa_samples), dxs, dys);
+  struct ConvParams {
+    uint32_t src_base, src_pitch, dst_base, dst_pitch;
+    uint32_t start_tiles, end_tiles, src_fmt, shifts;
+  } params{source->key().base_tiles, source->key().GetPitchTiles(),
+           dest->key().base_tiles,   dest->key().GetPitchTiles(),
+           transfer.start_tiles,     transfer.end_tiles,
+           uint32_t(src_fmt),
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12)};
+  uint32_t dst_fmt_u = uint32_t(dst_fmt);
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:transfer-convert";
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)it->second];
+  [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
+  [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+  [enc setFragmentBytes:&dst_fmt_u length:sizeof(dst_fmt_u) atIndex:1];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [enc endEncoding];
 }
 
