@@ -234,10 +234,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                    RenderTarget* dest_rt,
                                    const Transfer& transfer);
   // The mirror: D32F depth encoded back to guest 24-bit raw bits as BGRA8.
+  // real_bits: encode the actual depth bits (same-frame c2d->d2c ping-pong
+  // bit transport — Sonic's packed vector map). Without it the shader
+  // writes ZERO words (the JC2 key-local-persistence default); the env
+  // XE_METAL_D2C_REAL probe also forces it globally.
   void PerformDepthToColorTransfer(const void* command_buffer,
                                    RenderTarget* source_rt,
                                    RenderTarget* dest_rt,
-                                   const Transfer& transfer);
+                                   const Transfer& transfer, bool real_bits);
   // Color<->color 32bpp reinterpret (BGRA8 raw bytes <-> f32 bits of the same
   // EDRAM word): k_8_8_8_8-keyed and k_32_FLOAT-keyed RTs aliasing the same
   // tiles (JC2's auto-exposure luminance pyramid).

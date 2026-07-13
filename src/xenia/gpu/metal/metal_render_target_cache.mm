@@ -385,7 +385,7 @@ void MetalRenderTargetCache::PerformTransfers(
             blit = nil;
           }
           PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
-                                      transfer);
+                                      transfer, pingpong_return);
         }
       } else if (!src_key.is_depth && !dest_key.is_depth &&
                  !src_key.Is64bpp() && !dest_key.Is64bpp() &&
@@ -1147,7 +1147,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
 
 void MetalRenderTargetCache::PerformDepthToColorTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
-    const Transfer& transfer) {
+    const Transfer& transfer, bool real_bits) {
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
@@ -1256,6 +1256,13 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   static const uint32_t s_stencil0_bit =
       (std::getenv("XE_METAL_D2C_STENCILFF") ? 0x10000u : 0u) |
       (std::getenv("XE_METAL_D2C_REAL") ? 0x20000u : 0u);
+  // Ping-pong bit transport: the caller proved this transfer returns tiles
+  // the dest color key lent THIS frame — the guest wrote real payload bits
+  // through the depth plane (Sonic's vector map). Zero words here decode as
+  // maximum-magnitude vectors (packed formats center at 0x8000): the
+  // full-screen echo/streak haze.
+  const uint32_t encode_bits =
+      s_stencil0_bit | (real_bits ? 0x20000u : 0u);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
@@ -1264,7 +1271,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(source->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           dxs | (dys << 4) | (sxs << 8) | (sys << 12) | s_stencil0_bit};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12) | encode_bits};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
