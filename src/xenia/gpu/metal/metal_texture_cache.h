@@ -63,6 +63,11 @@ class MetalTextureCache {
   void RegisterResolvedTarget(uint32_t base, void* texture, uint32_t width,
                               uint32_t height, bool is_depth);
 
+  // Stage 3 hybrid: a resolve at `base` enqueued a guest-RAM writeback, so
+  // RAM is authoritative for fetches of this base (the bridge snapshot is a
+  // fallback for dests the writer can't encode — e.g. 64bpp HDR).
+  void MarkResolvedTargetRamBacked(uint32_t base);
+
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }
@@ -165,9 +170,15 @@ class MetalTextureCache {
     uint32_t width;
     uint32_t height;
     uint32_t slot;
-    // Stage 3: only DEPTH bridges are served to fetches (color reads guest
-    // RAM); color entries remain registered for diagnostics/present only.
+    // Stage 3: DEPTH bridges and non-RAM-backed color bridges are served to
+    // fetches; RAM-backed color reads guest RAM (exact-address placement).
     bool is_depth;
+    // True once any resolve at this base enqueued a guest-RAM writeback: the
+    // writer could encode the dest, so RAM (not the per-base snapshot) is
+    // the truth. Stays false for dests the writer skips (64bpp HDR etc.),
+    // which keep the bridge (Sonic's tonemap chain went flat gray without
+    // this fallback under default-ON stage 3).
+    bool ram_backed = false;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;

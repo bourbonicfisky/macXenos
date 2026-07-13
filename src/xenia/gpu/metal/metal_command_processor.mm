@@ -3126,6 +3126,12 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.offset_x_div_8) << 3,
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
                 S7TagsOff() ? 0 : CurrentEncodingSubmission()});
+            // Stage-3 hybrid: RAM now holds (will hold) this dest — fetches
+            // of the base must read RAM, not the bridge snapshot.
+            if (texture_cache_) {
+              texture_cache_->MarkResolvedTargetRamBacked(
+                  resolve_info.copy_dest_base);
+            }
           }
         }
       } else {

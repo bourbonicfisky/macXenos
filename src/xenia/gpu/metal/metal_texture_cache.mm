@@ -272,13 +272,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
       return s_synth_slot;
     }
   }
-  // RT-as-texture bridge — STAGE 3: served for DEPTH only (no guest-RAM
-  // encoding of host depth yet). COLOR fetches read guest RAM, which resolves
-  // now write back at every size: the bridge's per-base snapshot cannot
-  // represent base reuse, strip assembly, or temporal (previous-frame) reads
-  // — JC2's final composite reads LAST frame's image and got the current
-  // frame's G-buffer strip + garbage instead (the stipple/darkness).
-  // XE_METAL_COLOR_BRIDGE=1 restores the old behavior for A/B.
+  // RT-as-texture bridge — STAGE 3 hybrid: served for DEPTH (no guest-RAM
+  // encoding of host depth yet) and for color bases whose resolves never
+  // enqueued a RAM writeback (dest formats the writer can't encode — 64bpp
+  // HDR etc.). RAM-BACKED color fetches read guest RAM: the bridge's per-base
+  // snapshot cannot represent base reuse, strip assembly, x-offset column
+  // placement (SF4), or temporal (previous-frame) reads — JC2's final
+  // composite reads LAST frame's image and got the current frame's G-buffer
+  // strip + garbage instead (the stipple/darkness).
+  // XE_METAL_COLOR_BRIDGE=1 restores bridge-for-all-color for A/B.
   {
     // Stage 3 is DEFAULT ON (XE_METAL_STAGE3=0 disables) — keep in sync with
     // the writeback-cap reader in metal_command_processor.mm.
@@ -290,7 +292,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
     auto rit = resolved_targets_.find(fetch.base_address << 12);
     if (rit != resolved_targets_.end() && rit->second.texture &&
-        (rit->second.is_depth || s_color_bridge)) {
+        (rit->second.is_depth || s_color_bridge || !rit->second.ram_backed)) {
       active_textures_.push_back(rit->second.texture);
       return rit->second.slot;
     }
@@ -826,6 +828,15 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   resolved_targets_[base] = ResolvedTarget{texture, width, height, slot, is_depth};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
+}
+
+void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base) {
+  auto it = resolved_targets_.find(base);
+  if (it != resolved_targets_.end() && !it->second.ram_backed) {
+    it->second.ram_backed = true;
+    XELOGI("MetalTex: resolved RT base={:08X} now RAM-backed (bridge retired)",
+           base);
+  }
 }
 
 void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
