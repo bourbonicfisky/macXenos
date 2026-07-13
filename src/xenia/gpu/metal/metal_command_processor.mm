@@ -835,6 +835,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
   uint64_t want_key = render_target_cache_->current_attachment_key();
+  if (dummy_depth_pass_) {
+    // Scratch-depth passes are distinct from same-color passes without one:
+    // their pipelines carry a depth pixel format the plain pass lacks.
+    want_key ^= 0x9E3779B97F4A7C15ull;
+  }
   if (frame_open_) {
     if (encoder_attachment_key_ == want_key) {
       return frame_render_encoder_;
@@ -894,6 +899,38 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.stencilAttachment.loadAction = MTLLoadActionLoad;
     pass.stencilAttachment.storeAction = MTLStoreActionStore;
+  } else if (rt && dummy_depth_pass_) {
+    // The draw's PS exports depth with no depth target bound — attach a
+    // throwaway scratch depth so the pipeline is valid (see dummy_depth in
+    // IssueDraw). Never loaded, never stored; content is irrelevant.
+    id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt;
+    uint64_t dk = (uint64_t(rt_tex.width) << 20) | uint64_t(rt_tex.height);
+    id<MTLTexture> dummy_tex = nil;
+    auto dit = dummy_depth_textures_.find(dk);
+    if (dit != dummy_depth_textures_.end()) {
+      dummy_tex = (__bridge id<MTLTexture>)dit->second;
+    } else {
+      MTLTextureDescriptor* dd = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:(MTLPixelFormat)
+                                                 MetalRenderTargetCache::
+                                                     kDepthFormat
+                                       width:rt_tex.width
+                                      height:rt_tex.height
+                                   mipmapped:NO];
+      dd.usage = MTLTextureUsageRenderTarget;
+      dd.storageMode = MTLStorageModePrivate;
+      dummy_tex = [rt_tex.device newTextureWithDescriptor:dd];
+      dummy_tex.label = @"cp:dummy-depth";
+      dummy_depth_textures_.emplace(dk, (__bridge_retained void*)dummy_tex);
+    }
+    if (dummy_tex) {
+      pass.depthAttachment.texture = dummy_tex;
+      pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+      pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+      pass.stencilAttachment.texture = dummy_tex;
+      pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+      pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
+    }
   }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
@@ -1645,6 +1682,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   void* pipeline;
+  // Guest PS exports depth but this draw binds no depth target (z + stencil
+  // disabled). Metal rejects a depth-writing fragment function without a
+  // depth attachment — the draw used to NULL-PIPELINE skip (Sonic's
+  // fullscreen bloom composite 1088: skipped -> the resolve exported stale
+  // mip debris = the top-band scramble). Attach a scratch throwaway depth
+  // target instead; the default encoder depth state (test Always, write off)
+  // gives hardware semantics: with z disabled, oDepth is ignored.
+  bool dummy_depth =
+      pixel_shader && pixel_shader->writes_depth() &&
+      !(kDepthEnabled && depth_bound);
+  uint64_t pipeline_depth_format =
+      ((kDepthEnabled && depth_bound) || dummy_depth)
+          ? MetalRenderTargetCache::kDepthFormat
+          : uint64_t(MTLPixelFormatInvalid);
   // Geometry-emulation config (VS output size + GS max input primitives per mesh
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
@@ -1662,18 +1713,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         vs_translation, ps_translation, geometry_type,
         DxbcShaderTranslator::Modification(vs_mod),
         DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_format,
-        (kDepthEnabled && depth_bound) ? MetalRenderTargetCache::kDepthFormat
-                                       : uint64_t(MTLPixelFormatInvalid),
-        blend_control, color_write_mask, &gs_vertex_size,
-        &gs_max_input_primitives);
+        pipeline_depth_format, blend_control, color_write_mask,
+        &gs_vertex_size, &gs_max_input_primitives);
   } else {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
     uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_format,
-        (kDepthEnabled && depth_bound) ? MetalRenderTargetCache::kDepthFormat
-                                       : uint64_t(MTLPixelFormatInvalid),
-        blend_control, color_write_mask);
+        pipeline_depth_format, blend_control, color_write_mask);
   }
   if (!pipeline) {
     if (use_geometry_emulation) {
@@ -1770,6 +1817,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  dummy_depth_pass_ = dummy_depth;
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {

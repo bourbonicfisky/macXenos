@@ -198,6 +198,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // the open encoder was created with; a draw whose accumulated render targets
   // differ closes the encoder and opens a new pass.
   uint64_t encoder_attachment_key_ = 0;
+  // Guest PS exports depth (oDepth) but the draw binds no depth target: Metal
+  // rejects such pipelines ("shader writes to depth" with no attachment), and
+  // the draw used to be NULL-PIPELINE skipped — Sonic's fullscreen bloom
+  // composite (draw 1088) fell to this, leaving stale mip debris in the big
+  // RT (the top-band scramble). Attach a throwaway scratch depth target
+  // instead (DontCare/DontCare, default depth state = test Always, write off
+  // — hardware semantics: z disabled ignores oDepth). Keyed by (w,h);
+  // id<MTLTexture>, retained.
+  bool dummy_depth_pass_ = false;
+  std::unordered_map<uint64_t, void*> dummy_depth_textures_;
   // Textures (id<MTLTexture> pointer identity) initialized once EVER: a render
   // target clears only on its first-lifetime use (uninitialized Metal memory),
   // and LOADS afterwards — in the ownership model, content comes from
