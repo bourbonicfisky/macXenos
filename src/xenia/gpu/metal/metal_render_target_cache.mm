@@ -1183,6 +1183,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
       }
       fragment float4 xe_xfer_d2c_fs(VOut in [[stage_in]],
                                      depth2d<float> src [[texture(0)]],
+                                     texture2d<uint> sten [[texture(1)]],
                                      constant XferParams& p [[buffer(0)]]) {
         uint2 dp = uint2(in.pos.xy);
         uint2 ds = uint2(dp.x << (p.shifts & 15u),
@@ -1215,7 +1216,13 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
         // read as saturated blue fog in JC2's composite (81.9 vs 49.9 MAE).
         // p.shifts bit 17 = probe: encode the REAL depth bits (d24<<8, with
         // bit 16 setting stencil FF instead of 0).
-        uint stencil = (p.shifts & 0x10000u) != 0u ? 0xFFu : 0u;
+        // Bit 18 (0x40000): transport the REAL stencil plane — in Sonic's
+        // packed vector map the stencil byte is part of each vector's value
+        // (packed formats center at 128; a zero byte decodes as a large
+        // negative component = the horizontal echo drag).
+        uint stencil = (p.shifts & 0x40000u) != 0u
+                           ? (sten.read(sp).r & 0xFFu)
+                           : ((p.shifts & 0x10000u) != 0u ? 0xFFu : 0u);
         uint bits = (p.shifts & 0x20000u) != 0u ? ((d24 << 8) | stencil) : 0u;
         return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
                       float((bits >> 16) & 0xFFu), float((bits >> 24) & 0xFFu)) /
@@ -1262,7 +1269,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   // maximum-magnitude vectors (packed formats center at 0x8000): the
   // full-screen echo/streak haze.
   const uint32_t encode_bits =
-      s_stencil0_bit | (real_bits ? 0x20000u : 0u);
+      s_stencil0_bit | (real_bits ? (0x20000u | 0x40000u) : 0u);
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
@@ -1281,7 +1288,13 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   transfer_d2c_pipeline_];
   enc.label = @"rtcache:transfer-d2c";
-  [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
+  id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
+  [enc setFragmentTexture:src_tex atIndex:0];
+  // Stencil plane view (bit 18 real-stencil transport). The shader statically
+  // references the texture, so bind it even when the bit is off.
+  id<MTLTexture> sten_view =
+      [src_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  [enc setFragmentTexture:sten_view atIndex:1];
   [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
   [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [enc endEncoding];
