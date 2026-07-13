@@ -1142,6 +1142,15 @@ void IoDeleteDevice_entry(dword_t device_ptr, const ppc_context_t& ctx) {
 
 DECLARE_XBOXKRNL_EXPORT1(IoDeleteDevice, kFileSystem, kStub);
 
+// Volume dismount: we never cache mounted-volume state per handle, so
+// acknowledging success is complete behavior. DOA5's WMV player calls this
+// (previously an undefined extern) around its intro-video file handling.
+dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle,
+                                                  const ppc_context_t& ctx) {
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe
