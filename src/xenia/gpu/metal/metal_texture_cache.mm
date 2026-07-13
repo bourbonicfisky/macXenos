@@ -379,21 +379,33 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t pitch_blocks_aligned = (pitch_blocks + 31u) & ~31u;
 
   // Untile / copy into a linear block-major staging buffer (host byte order).
+  // Rows are independent — run them concurrently: stage-3 re-uploads big
+  // resolve dests every frame (SF4: 1280x720 each frame on the GPU thread),
+  // and the single-threaded per-block loop was a measurable slice of the
+  // live frame.
   std::vector<uint8_t> linear(size_t(blocks_w) * blocks_h * bpb);
-  for (uint32_t by = 0; by < blocks_h; ++by) {
+  auto untile_row = [&](size_t by) {
     for (uint32_t bx = 0; bx < blocks_w; ++bx) {
       uint32_t src_off;
       if (tiled) {
         src_off = uint32_t(texture_address::Tiled2D(
             int32_t(bx), int32_t(by), pitch_blocks_aligned, plan.block_log2));
       } else {
-        src_off = (by * pitch_blocks + bx) * bpb;
+        src_off = uint32_t(by * pitch_blocks + bx) * bpb;
       }
-      uint8_t* dst = &linear[(size_t(by) * blocks_w + bx) * bpb];
+      uint8_t* dst = &linear[(by * blocks_w + bx) * bpb];
       if (src_off + bpb <= max_src_bytes) {
         std::memcpy(dst, guest + src_off, bpb);
         SwapEndian(dst, bpb, endian);
       }
+    }
+  };
+  if (size_t(blocks_w) * blocks_h * bpb >= 512 * 1024) {
+    dispatch_apply(blocks_h, DISPATCH_APPLY_AUTO,
+                   ^(size_t by) { untile_row(by); });
+  } else {
+    for (uint32_t by = 0; by < blocks_h; ++by) {
+      untile_row(by);
     }
   }
 

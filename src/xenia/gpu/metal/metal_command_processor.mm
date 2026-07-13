@@ -1689,8 +1689,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // mip debris = the top-band scramble). Attach a scratch throwaway depth
   // target instead; the default encoder depth state (test Always, write off)
   // gives hardware semantics: with z disabled, oDepth is ignored.
+  // XE_METAL_NO_DUMMY_DEPTH=1 restores the old NULL-PIPELINE skip for A/B
+  // (e.g. Sonic: the skip hid a white-out from bad composite inputs).
+  static const bool s_no_dummy_depth =
+      std::getenv("XE_METAL_NO_DUMMY_DEPTH") != nullptr;
   bool dummy_depth =
-      pixel_shader && pixel_shader->writes_depth() &&
+      !s_no_dummy_depth && pixel_shader && pixel_shader->writes_depth() &&
       !(kDepthEnabled && depth_bound);
   uint64_t pipeline_depth_format =
       ((kDepthEnabled && depth_bound) || dummy_depth)
@@ -3080,6 +3084,24 @@ bool MetalCommandProcessor::IssueCopy() {
           parent_snap = nullptr;
           strip_y_offset = 0;
         }
+        // A parent-strip join is only valid when the strip actually FITS:
+        // same width, and the y range inside the parent texture. SF4's intro
+        // double-buffers 1280-pitch column dests 0x11000 apart — the second
+        // frame's 544x720 resolve "joined" the first frame's 544-wide
+        // snapshot at strip_y=32 (69632/544/4 = exactly 32 rows), rendering
+        // 720 rows into a 720-tall texture: the bottom 32 rows clipped and
+        // the writeback blit read out of bounds -> stale bottom-of-column
+        // bands live (the lower-right smear zones) and every-other-frame
+        // ghosting. Reject the join; the resolve gets its own snapshot and
+        // stage-3 RAM assembly handles placement.
+        if (parent_snap) {
+          id<MTLTexture> parent_tex = (__bridge id<MTLTexture>)parent_snap;
+          if (rw != uint32_t(parent_tex.width) ||
+              strip_y_offset + rh > uint32_t(parent_tex.height)) {
+            parent_snap = nullptr;
+            strip_y_offset = 0;
+          }
+        }
         void* snap = parent_snap;
         bool is_new_snapshot = false;
         if (!snap) {
@@ -3406,24 +3428,36 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       // makes every tiled fetch of the dest read block-scrambled garbage.
       uint32_t pitch_aligned =
           wb.dest_pitch_aligned ? wb.dest_pitch_aligned : ((wb.width + 31) & ~31u);
+      auto scatter_row = [&](const uint32_t* words, size_t y) {
+        for (uint32_t x = 0; x < wb.width; ++x) {
+          uint32_t off = uint32_t(texture_address::Tiled2D(
+              int32_t(wb.dest_offset_x + x),
+              int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned, 2));
+          if (wb.dest_extent_bytes && off + 4 > wb.dest_extent_bytes) {
+            continue;
+          }
+          uint32_t v = words[y * wb.width + x];
+          if (wb.swap_rb) {
+            // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
+            // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
+            v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
+                ((v >> 16) & 0xFFu);
+          }
+          v = xenos::GpuSwapInline(v, endian);
+          std::memcpy(dest + off, &v, 4);
+        }
+      };
+      // Rows scatter to disjoint tiled addresses — run them concurrently for
+      // the big stage-3 writebacks (SF4 scatters several MB per frame on the
+      // GPU thread; the single-threaded loop was a visible slice of the live
+      // frame).
       auto scatter_words = [&](const uint32_t* words) {
-        for (uint32_t y = 0; y < wb.height; ++y) {
-          for (uint32_t x = 0; x < wb.width; ++x) {
-            uint32_t off = uint32_t(texture_address::Tiled2D(
-                int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
-                pitch_aligned, 2));
-            if (wb.dest_extent_bytes && off + 4 > wb.dest_extent_bytes) {
-              continue;
-            }
-            uint32_t v = words[y * wb.width + x];
-            if (wb.swap_rb) {
-              // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
-              // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
-              v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
-                  ((v >> 16) & 0xFFu);
-            }
-            v = xenos::GpuSwapInline(v, endian);
-            std::memcpy(dest + off, &v, 4);
+        if (size_t(wb.width) * wb.height >= 128 * 1024) {
+          dispatch_apply(wb.height, DISPATCH_APPLY_AUTO,
+                         ^(size_t y) { scatter_row(words, y); });
+        } else {
+          for (uint32_t y = 0; y < wb.height; ++y) {
+            scatter_row(words, y);
           }
         }
       };
