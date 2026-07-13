@@ -3073,7 +3073,7 @@ bool MetalCommandProcessor::IssueCopy() {
           XELOGW(
               "MetalResolve @draw {}: dest base={:08X} extent=[{:08X},+{}] "
               "rect={}x{} edram_base={} pitch={} msaa={} dest_pitch={} "
-              "off_x={} off_y={} dest_fmt={} swap={} endian={} "
+              "off_x={} off_y={} dest_fmt={} swap={} endian={} exp_bias={} "
               "parent={} strip_y={}",
               trace_draw_index_, resolve_info.copy_dest_base,
               resolve_info.copy_dest_extent_start,
@@ -3090,6 +3090,7 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(resolve_info.copy_dest_info.copy_dest_format),
               uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
               uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+              int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
               parent_snap != nullptr, strip_y_offset);
         }
         // A k_32_FLOAT resolve must NEVER join a color-format parent strip:
