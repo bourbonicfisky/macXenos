@@ -1816,7 +1816,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t fbytes = fpitch * (f.size_2d.height + 1) * 4;
         uint32_t fend = fbase + std::min<uint32_t>(fbytes, 8 * 1024 * 1024);
         for (const PendingWriteback& wb : pending_writebacks_) {
-          uint32_t wend = wb.guest_addr + wb.width * wb.height * 4;
+          uint32_t wend = wb.guest_addr + wb.width * wb.height * wb.bpp;
           if (fbase < wend && fend > wb.guest_addr) {
             return true;
           }
@@ -3187,13 +3187,20 @@ bool MetalCommandProcessor::IssueCopy() {
         }();
         const uint32_t wb_cap =
             s_stage3 ? 4u * 1024 * 1024 : 256u * 1024;
-        if (resolved && !s_no_writeback && rw * rh * 4 <= wb_cap &&
+        // 64bpp fmt32 dests write back too: Sonic's exposure tip resolves
+        // k_16_16_16_16_FLOAT — with no RAM writeback, the game's CPU
+        // exposure controller read never-written RAM (zeros) and latched
+        // the tonemap white even after the RGBA16F fetch fix.
+        const uint32_t wb_bpp =
+            dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float) ? 8u : 4u;
+        if (resolved && !s_no_writeback && rw * rh * wb_bpp <= wb_cap &&
             (dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
-             dest_pixel_format == uint64_t(MTLPixelFormatR32Float))) {
+             dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
+             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float))) {
           id<MTLDevice> wb_device =
               ((__bridge id<MTLTexture>)snap).device;
           id<MTLBuffer> staging =
-              [wb_device newBufferWithLength:rw * rh * 4
+              [wb_device newBufferWithLength:rw * rh * wb_bpp
                                      options:MTLResourceStorageModeShared];
           if (staging) {
             id<MTLCommandBuffer> wb_cb =
@@ -3207,8 +3214,8 @@ bool MetalCommandProcessor::IssueCopy() {
                            sourceSize:MTLSizeMake(rw, rh, 1)
                              toBuffer:staging
                     destinationOffset:0
-               destinationBytesPerRow:rw * 4
-             destinationBytesPerImage:rw * rh * 4];
+               destinationBytesPerRow:rw * wb_bpp
+             destinationBytesPerImage:rw * rh * wb_bpp];
             [wb_blit endEncoding];
             const auto& dc = resolve_info.copy_dest_coordinate_info;
             uint32_t extent_bytes =
@@ -3221,7 +3228,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 resolve_info.copy_dest_info.copy_dest_swap;
             pending_writebacks_.push_back(PendingWriteback{
                 (__bridge_retained void*)staging, resolve_info.copy_dest_base,
-                rw, rh,
+                rw, rh, wb_bpp,
                 uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
@@ -3448,10 +3455,11 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       const uint32_t* src_words =
           static_cast<const uint32_t*>(staging.contents);
       uint32_t count = wb.width * wb.height;
+      const uint32_t words_per_texel = wb.bpp / 4;
       // Endian128 low bits mirror plain Endian for 8in16/8in32.
       xenos::Endian endian = xenos::Endian(wb.endian & 0b11);
       uint64_t content_sum = 0;
-      for (uint32_t i = 0; i < count; ++i) {
+      for (uint32_t i = 0; i < count * words_per_texel; ++i) {
         content_sum += src_words[i] & 0xFFFFFF;  // ignore alpha
       }
       // Scatter through the TILED addresser: resolve dests are tiled guest
@@ -3459,23 +3467,30 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       // makes every tiled fetch of the dest read block-scrambled garbage.
       uint32_t pitch_aligned =
           wb.dest_pitch_aligned ? wb.dest_pitch_aligned : ((wb.width + 31) & ~31u);
+      const uint32_t block_log2 = wb.bpp == 8 ? 3u : 2u;
       auto scatter_row = [&](const uint32_t* words, size_t y) {
         for (uint32_t x = 0; x < wb.width; ++x) {
           uint32_t off = uint32_t(texture_address::Tiled2D(
               int32_t(wb.dest_offset_x + x),
-              int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned, 2));
-          if (wb.dest_extent_bytes && off + 4 > wb.dest_extent_bytes) {
+              int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned,
+              int32_t(block_log2)));
+          if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
             continue;
           }
-          uint32_t v = words[y * wb.width + x];
-          if (wb.swap_rb) {
-            // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
-            // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
-            v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
-                ((v >> 16) & 0xFFu);
+          const uint32_t* texel =
+              &words[(y * wb.width + x) * words_per_texel];
+          for (uint32_t w = 0; w < words_per_texel; ++w) {
+            uint32_t v = texel[w];
+            if (wb.swap_rb) {
+              // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
+              // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
+              // (32bpp color only; never set for R32F/RGBA16F.)
+              v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
+                  ((v >> 16) & 0xFFu);
+            }
+            v = xenos::GpuSwapInline(v, endian);
+            std::memcpy(dest + off + w * 4, &v, 4);
           }
-          v = xenos::GpuSwapInline(v, endian);
-          std::memcpy(dest + off, &v, 4);
         }
       };
       // Rows scatter to disjoint tiled addresses — run them concurrently for
@@ -3501,7 +3516,7 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       // STAGE 3: the writeback changed guest RAM — evict cached textures
       // uploaded from that range so the next fetch re-uploads fresh content.
       if (texture_cache_) {
-        texture_cache_->InvalidateRange(wb.guest_addr, count * 4);
+        texture_cache_->InvalidateRange(wb.guest_addr, count * wb.bpp);
       }
       // Exposure telemetry: remember the smallest writeback this frame (the
       // pyramid tip the game's exposure controller actually reads).
@@ -3528,7 +3543,7 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         ++s_zero_wb;
         auto held = held_writeback_content_.find(wb.guest_addr);
         if (!s_no_wb_hold && held != held_writeback_content_.end() &&
-            held->second.size() == count) {
+            held->second.size() == count * words_per_texel) {
           // Re-write the last good luminance instead of the black tile. The
           // held words are PRE-swap staging content; scatter like the normal
           // path.
@@ -3546,7 +3561,7 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         // zero-content resolves at this address (pre-swap staging words; the
         // hold path re-scatters them like a normal drain).
         auto& held = held_writeback_content_[wb.guest_addr];
-        held.assign(src_words, src_words + count);
+        held.assign(src_words, src_words + count * words_per_texel);
       }
     }
   }
@@ -3564,7 +3579,7 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
   // all other writebacks keep the swap cadence (the reference backends'
   // readback is likewise a frame behind).
   for (const PendingWriteback& wb : pending_writebacks_) {
-    uint32_t length = wb.width * wb.height * 4;
+    uint32_t length = wb.width * wb.height * wb.bpp;
     if (guest_address >= wb.guest_addr &&
         guest_address < wb.guest_addr + length) {
       EndFrameEncoderAndWait();

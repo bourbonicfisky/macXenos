@@ -297,6 +297,7 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t guest_addr;
     uint32_t width;
     uint32_t height;
+    uint32_t bpp;     // dest bytes per texel: 4 (8888/R32F) or 8 (RGBA16F).
     uint32_t endian;  // xenos::Endian of the resolve dest.
     // Tiled-dest layout (stage 3): resolve destinations are TILED guest
     // textures — the drain scatters rows through the tiled addresser (a
