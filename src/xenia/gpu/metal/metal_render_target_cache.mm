@@ -337,6 +337,11 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         PerformColorToDepthTransfer((__bridge const void*)cb, source, dest,
                                     transfer);
+        // Remember who lent these tiles: if the SAME color key takes them
+        // back this frame, that d2c must transport the real bits (below).
+        c2d_pingpong_[dest] = C2dPingPong{source, transfer.start_tiles,
+                                          transfer.end_tiles,
+                                          command_processor_.swap_count()};
       } else if (!dest_key.is_depth && src_key.is_depth &&
                  dest->pixel_format() == kColorFormat) {
         // Depth reinterpreted as raw-bits color (a color pass reuses tiles a
@@ -351,7 +356,30 @@ void MetalRenderTargetCache::PerformTransfers(
         // (hardware-accurate raw reinterpret, for titles that genuinely
         // read them).
         static const bool s_d2c_real = std::getenv("XE_METAL_D2C_REAL");
-        if (s_d2c_real) {
+        // Same-frame ping-pong exception: this color key lent exactly these
+        // tiles to that depth key THIS frame (Sonic's DoF pass writes a
+        // packed motion-vector/CoC map as 4x depth bits over the blur
+        // buffer's tiles and the composite decodes the raw bits — skipping
+        // left stale scene pixels to be decoded as gather vectors: the
+        // melted mip / white screen).
+        bool pingpong_return = false;
+        auto pp = c2d_pingpong_.find(source);
+        if (pp != c2d_pingpong_.end() &&
+            pp->second.src_color_rt == (const void*)dest &&
+            pp->second.swap == command_processor_.swap_count() &&
+            transfer.start_tiles < pp->second.end_tiles &&
+            transfer.end_tiles > pp->second.start_tiles) {
+          pingpong_return = true;
+          static uint32_t s_pp_logs = 0;
+          if (s_pp_logs++ < 16) {
+            XELOGW("MetalXferD2C @draw {}: ping-pong return {} -> {} tiles "
+                   "[{},{}) — real bit transport",
+                   command_processor_.trace_draw_index(),
+                   src_key.GetDebugName(), dest_key.GetDebugName(),
+                   transfer.start_tiles, transfer.end_tiles);
+          }
+        }
+        if (s_d2c_real || pingpong_return) {
           if (blit) {
             [blit endEncoding];
             blit = nil;

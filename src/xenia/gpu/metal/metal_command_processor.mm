@@ -1800,6 +1800,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         auto f = regs.GetTextureFetch(binding.fetch_constant);
         uint32_t fbase = f.base_address << 12;
         if (!fbase) continue;
+        // Bridge-served fetches never read guest RAM — the snapshot is
+        // GPU-ordered, so no flush is needed. This is the JC2 fast path:
+        // the luminance pyramid's resolve->read ping-pong forced a full
+        // commit+wait PER LEVEL through this check (39 commits/frame,
+        // 21.5 -> 12.7 fps when stage 3 went default-ON).
+        if (texture_cache_ &&
+            texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
+                                         f.size_2d.height + 1)) {
+          continue;
+        }
         // Conservative extent: aligned pitch x height x 4B (over-flushing is
         // harmless; under-flushing reads stale RAM).
         uint32_t fpitch = f.pitch ? (f.pitch << 5) : (f.size_2d.width + 32);
@@ -3053,10 +3063,17 @@ bool MetalCommandProcessor::IssueCopy() {
         // its own dest rows. Log the raw placement inputs for big resolves.
         static const bool s_resolve_log =
             std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
-        if (s_resolve_log && rw * rh * 4 >= 1024 * 1024) {
+        // XE_METAL_RESOLVE_LOG=2: log ALL color resolves (incl. small mips).
+        static const bool s_resolve_log_all = [] {
+          const char* v = std::getenv("XE_METAL_RESOLVE_LOG");
+          return v && v[0] == '2';
+        }();
+        if ((s_resolve_log && rw * rh * 4 >= 1024 * 1024) ||
+            s_resolve_log_all) {
           XELOGW(
               "MetalResolve @draw {}: dest base={:08X} extent=[{:08X},+{}] "
               "rect={}x{} edram_base={} pitch={} msaa={} dest_pitch={} "
+              "off_x={} off_y={} dest_fmt={} swap={} endian={} "
               "parent={} strip_y={}",
               trace_draw_index_, resolve_info.copy_dest_base,
               resolve_info.copy_dest_extent_start,
@@ -3066,6 +3083,13 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(resolve_info.color_edram_info.msaa_samples),
               uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32)
                   * 32,
+              uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8)
+                  * 8,
+              uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8)
+                  * 8,
+              uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+              uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+              uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
               parent_snap != nullptr, strip_y_offset);
         }
         // A k_32_FLOAT resolve must NEVER join a color-format parent strip:
@@ -3122,7 +3146,14 @@ bool MetalCommandProcessor::IssueCopy() {
                         span_rows, span_pitch,
                         uint32_t(resolve_info.color_edram_info.msaa_samples),
                         snap, dest_pixel_format, rw, rh, strip_y_offset);
-        if (resolved && is_new_snapshot) {
+        if (resolved && !parent_snap) {
+          // Register (or re-register) every own-snapshot resolve: the entry's
+          // dims must track the LAST resolve to the base — base reuse (JC2's
+          // mid-frame G-buffer dump into the history base) downgrades them so
+          // the covered-fetch bridge fast path correctly falls back to RAM
+          // for the composite's full-height temporal read. Parent-strip joins
+          // must NOT register: the strip base would alias the parent texture
+          // without its y-offset.
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh,
                                                  /*is_depth=*/false);

@@ -68,6 +68,14 @@ class MetalTextureCache {
   // fallback for dests the writer can't encode — e.g. 64bpp HDR).
   void MarkResolvedTargetRamBacked(uint32_t base);
 
+  // True if a fetch of (base, width, height) will be served by the bridge
+  // snapshot rather than guest RAM — the command processor skips the
+  // pending-writeback flush (a full mid-frame commit+wait) for such fetches.
+  // Must mirror the serving rule in the fetch path's bridge block (covered
+  // fast path is R32Float only — see the comment there). Defined in the .mm
+  // (needs the MTLTexture bridge cast).
+  bool BridgeServes(uint32_t base, uint32_t width, uint32_t height) const;
+
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }

@@ -272,14 +272,21 @@ uint32_t MetalTextureCache::GetTextureSlot(
       return s_synth_slot;
     }
   }
-  // RT-as-texture bridge — STAGE 3 hybrid: served for DEPTH (no guest-RAM
-  // encoding of host depth yet) and for color bases whose resolves never
-  // enqueued a RAM writeback (dest formats the writer can't encode — 64bpp
-  // HDR etc.). RAM-BACKED color fetches read guest RAM: the bridge's per-base
-  // snapshot cannot represent base reuse, strip assembly, x-offset column
-  // placement (SF4), or temporal (previous-frame) reads — JC2's final
-  // composite reads LAST frame's image and got the current frame's G-buffer
-  // strip + garbage instead (the stipple/darkness).
+  // RT-as-texture bridge — STAGE 3 hybrid. Served for:
+  //   - DEPTH (no guest-RAM encoding of host depth yet);
+  //   - color bases whose resolves never enqueued a RAM writeback (dest
+  //     formats the writer can't encode — 64bpp HDR etc.);
+  //   - RAM-backed color bases whose registered snapshot FULLY COVERS the
+  //     fetch (single-buffer dests: JC2's luminance-pyramid levels, SF4's
+  //     per-column dests). The snapshot holds exactly what the writeback
+  //     scatters, and sampling it is GPU-ordered — the RAM path for these
+  //     forced a mid-frame commit+wait PER CONSUMER (JC2: 39 commits/frame,
+  //     21.5 -> 12.7 fps when stage 3 went default-ON).
+  // Everything else (multi-writeback assemblies, base reuse, strips — the
+  // registered dims don't cover the fetch there) reads guest RAM: JC2's
+  // final composite reads LAST frame's 1280x720 image while the base's
+  // snapshot was re-registered 1280x384 by the mid-frame G-buffer dump —
+  // coverage fails -> RAM, exactly the case the bridge can't represent.
   // XE_METAL_COLOR_BRIDGE=1 restores bridge-for-all-color for A/B.
   {
     // Stage 3 is DEFAULT ON (XE_METAL_STAGE3=0 disables) — keep in sync with
@@ -291,10 +298,24 @@ uint32_t MetalTextureCache::GetTextureSlot(
     static const bool s_color_bridge =
         !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
     auto rit = resolved_targets_.find(fetch.base_address << 12);
-    if (rit != resolved_targets_.end() && rit->second.texture &&
-        (rit->second.is_depth || s_color_bridge || !rit->second.ram_backed)) {
-      active_textures_.push_back(rit->second.texture);
-      return rit->second.slot;
+    if (rit != resolved_targets_.end() && rit->second.texture) {
+      const ResolvedTarget& rt = rit->second;
+      uint32_t fetch_w = fetch.size_2d.width + 1;
+      uint32_t fetch_h = fetch.size_2d.height + 1;
+      // Covered-fetch fast path: R32Float ONLY. Single-channel float has no
+      // guest-swizzle/channel-order ambiguity, and it is exactly the JC2
+      // luminance-pyramid ping-pong whose RAM path forced a commit+wait per
+      // level. Serving covered RGBA8 snapshots regressed the gate (51776
+      // 12.90 -> 13.18 = old bridge number, SF4 4.21 -> 9.38): those need
+      // the RAM path's hardware channel order + fetch swizzle.
+      bool covered_r32f =
+          !rt.is_depth && rt.width >= fetch_w && rt.height >= fetch_h &&
+          ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
+              MTLPixelFormatR32Float;
+      if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
+        active_textures_.push_back(rt.texture);
+        return rt.slot;
+      }
     }
   }
   // 2D (or stacked), 3D and CUBE are handled; 3D is sampled as its slice 0 as
@@ -840,6 +861,21 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   resolved_targets_[base] = ResolvedTarget{texture, width, height, slot, is_depth};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
+}
+
+bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
+                                     uint32_t height) const {
+  auto it = resolved_targets_.find(base);
+  if (it == resolved_targets_.end() || !it->second.texture) {
+    return false;
+  }
+  const ResolvedTarget& rt = it->second;
+  if (rt.is_depth || !rt.ram_backed) {
+    return true;
+  }
+  return rt.width >= width && rt.height >= height &&
+         ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
+             MTLPixelFormatR32Float;
 }
 
 void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base) {

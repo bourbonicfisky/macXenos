@@ -77,6 +77,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Diagnostics: the current trace draw index (for correlating RT-cache
   // transfer logs with manifest/capture draw indices).
   uint32_t trace_draw_index() const { return trace_draw_index_; }
+  // Frame counter (increments at IssueSwap) — the RT cache uses it to scope
+  // same-frame c2d->d2c ping-pong detection.
+  uint32_t swap_count() const { return swap_count_; }
   // The submission id the currently-open frame command buffer will get when
   // committed (commits are strictly ordered on the GPU thread). Retire lists
   // (textures, bindless slots, arena regions) are tagged with it so

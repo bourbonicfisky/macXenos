@@ -301,6 +301,21 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // same guest base coexist (JC2 resolves both to one base).
   std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
 
+  // Same-frame c2d->d2c ping-pong detection (Sonic's DoF bit-transport: a
+  // color key lends tiles to a depth key, one depth pass writes a packed
+  // vector map, the SAME color key takes the tiles back and the shader
+  // decodes the raw bits). Keyed by the depth RenderTarget; records who lent
+  // the tiles and when. The d2c transfer runs the REAL bit transport only
+  // for this pattern — everywhere else it keeps the key-local-persistence
+  // SKIP (JC2 casino dst-blend, SF4: real bits regress both).
+  struct C2dPingPong {
+    const void* src_color_rt;
+    uint32_t start_tiles;
+    uint32_t end_tiles;
+    uint32_t swap;
+  };
+  std::unordered_map<const void*, C2dPingPong> c2d_pingpong_;
+
   // Snapshot textures retired mid-frame (grown), held retained until the frame
   // GPU work finishes so in-flight draws don't dereference freed memory. Drained
   // by DrainDeferredReleases() once the submissions encoded against them
