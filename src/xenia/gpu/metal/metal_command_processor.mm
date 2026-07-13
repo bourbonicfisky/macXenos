@@ -50,6 +50,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/xenos.h"
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/user_module.h"
+#include "third_party/xxhash/xxhash.h"
 #include "xenia/ui/metal/metal_presenter.h"
 #include "xenia/ui/metal/metal_provider.h"
 #include "xenia/ui/presenter.h"
@@ -3437,6 +3438,88 @@ void MetalCommandProcessor::InitializeTrace() {
   }
 }
 
+void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
+                                                      uint32_t width,
+                                                      uint32_t height) {
+  if (!base || !width || !height || width > 2048 || height > 2048) {
+    return nullptr;
+  }
+  const uint8_t* guest = memory_->TranslatePhysical<const uint8_t*>(base);
+  if (!guest) {
+    return nullptr;
+  }
+  // The frontbuffer is a tiled k_8_8_8_8 surface (a resolve dest). Bound the
+  // readable range by the tiled extent (rows padded to the 32-row macro tile).
+  uint32_t pitch_aligned = (width + 31u) & ~31u;
+  uint32_t rows_padded = (height + 31u) & ~31u;
+  uint64_t range_bytes = uint64_t(pitch_aligned) * rows_padded * 4;
+  constexpr uint64_t kPhysicalMemorySize = 512ull * 1024 * 1024;
+  if (uint64_t(base) + range_bytes > kPhysicalMemorySize) {
+    return nullptr;
+  }
+  uint64_t hash = XXH3_64bits(guest, size_t(range_bytes));
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)fb_ram_texture_;
+  if (tex && fb_ram_width_ == width && fb_ram_height_ == height &&
+      fb_ram_content_hash_ == hash) {
+    return fb_ram_texture_;  // unchanged frame (video below refresh rate).
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  id<MTLDevice> device =
+      provider ? (__bridge id<MTLDevice>)provider->device() : nil;
+  if (!device) {
+    return nullptr;
+  }
+  if (!tex || fb_ram_width_ != width || fb_ram_height_ != height) {
+    if (fb_ram_texture_) {
+      CFRelease(fb_ram_texture_);
+      fb_ram_texture_ = nullptr;
+    }
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:width
+                                    height:height
+                                 mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    tex = [device newTextureWithDescriptor:desc];
+    if (!tex) {
+      return nullptr;
+    }
+    tex.label = @"cp:ram-frontbuffer";
+    fb_ram_texture_ = (__bridge_retained void*)tex;
+    fb_ram_width_ = width;
+    fb_ram_height_ = height;
+  }
+  fb_ram_content_hash_ = hash;
+  // Untile guest RAM -> linear RGBA. RAM bytes per texel are the hardware
+  // scanout order [A][R][G][B] (resolve dests with copy_dest_swap, and what
+  // CPU-decoded video writes); host RGBA is a rotate-right-8 of the LE word.
+  std::vector<uint32_t> linear(size_t(width) * height);
+  uint32_t* out = linear.data();
+  auto untile_row = [&](size_t y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      uint32_t off = uint32_t(texture_address::Tiled2D(
+          int32_t(x), int32_t(y), pitch_aligned, 2));
+      uint32_t v;
+      std::memcpy(&v, guest + off, 4);
+      out[y * width + x] = (v >> 8) | (v << 24);
+    }
+  };
+  dispatch_apply(height, DISPATCH_APPLY_AUTO,
+                 ^(size_t y) { untile_row(y); });
+  [tex replaceRegion:MTLRegionMake2D(0, 0, width, height)
+         mipmapLevel:0
+           withBytes:linear.data()
+         bytesPerRow:size_t(width) * 4];
+  static uint32_t s_fb_ram_logs = 0;
+  if (s_fb_ram_logs++ < 8) {
+    XELOGI("MetalCommandProcessor: RAM frontbuffer present {}x{} @ {:08X}",
+           width, height, base);
+  }
+  return fb_ram_texture_;
+}
+
 void MetalCommandProcessor::DrainPendingWritebacks() {
   // Resolve guest-memory writebacks (the CPU-side exposure loop and any
   // fence-after-copy data). S7: a staging buffer is final only once its
@@ -3841,6 +3924,19 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     present_width = frontbuffer_width ? frontbuffer_width : 1280;
     present_height = frontbuffer_height ? frontbuffer_height : 720;
     present_source_path = "presentable-fallback";
+  } else {
+    // No snapshot AND nothing rendered this frame: the frontbuffer content
+    // lives only in guest RAM (CPU-decoded FMV) — the RequestSwapTexture
+    // pattern. Upload and present it instead of the test pattern.
+    void* ram_fb = GetRamFrontbufferTexture(
+        frontbuffer_ptr, frontbuffer_width ? frontbuffer_width : 1280,
+        frontbuffer_height ? frontbuffer_height : 720);
+    if (ram_fb) {
+      source_rt = (__bridge id<MTLTexture>)ram_fb;
+      present_width = uint32_t(source_rt.width);
+      present_height = uint32_t(source_rt.height);
+      present_source_path = "ram-frontbuffer";
+    }
   }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(

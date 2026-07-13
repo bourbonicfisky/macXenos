@@ -211,6 +211,18 @@ class MetalCommandProcessor : public CommandProcessor {
   // id<MTLTexture>, retained.
   bool dummy_depth_pass_ = false;
   std::unordered_map<uint64_t, void*> dummy_depth_textures_;
+
+  // RAM-frontbuffer present fallback (the mainline/XeniOS RequestSwapTexture
+  // pattern, FMV slice): when a swap has neither an fb snapshot nor a
+  // rendered target, the frontbuffer content lives only in guest RAM
+  // (CPU-decoded video). Untile+upload it as the present source; content
+  // hash skips the re-upload on unchanged frames.
+  void* GetRamFrontbufferTexture(uint32_t base, uint32_t width,
+                                 uint32_t height);
+  void* fb_ram_texture_ = nullptr;  // id<MTLTexture>, shared storage, retained.
+  uint64_t fb_ram_content_hash_ = 0;
+  uint32_t fb_ram_width_ = 0;
+  uint32_t fb_ram_height_ = 0;
   // Textures (id<MTLTexture> pointer identity) initialized once EVER: a render
   // target clears only on its first-lifetime use (uninitialized Metal memory),
   // and LOADS afterwards — in the ownership model, content comes from
