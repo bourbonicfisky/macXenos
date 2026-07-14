@@ -68,8 +68,10 @@ inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
   return address << 2;
 }
 
-// Per-surface constants for pack/unpack (one surface per dispatch).
-struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, pad; };
+// Per-surface constants for pack/unpack (one surface per dispatch). `words` is
+// the canonical buffer size in 32-bit words, so a bounds guard can skip an
+// over-dispatch instead of reading/writing out of range.
+struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, words; };
 // One (pixel, sample) work item.
 struct Coord { uint px, py, sample; };
 
@@ -132,6 +134,42 @@ kernel void pack_8888(texture2d<float, access::read> tex [[texture(0)]],
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   canonical[off >> 2] = w;
+}
+
+// PER-SAMPLE MSAA materialize/pack (task 3.3, the sample-collapse fix). A true
+// MSAA texture can't be per-sample-written from compute, so each of the 2x/4x
+// samples lives in its own slice of a texture2d_array (sample s -> slice s).
+// gid.z is the sample index; the canonical offset carries it. This is what
+// keeps the samples the collapsed 1x path throws away.
+kernel void materialize_8888_msaa(
+    device const uint* canonical [[buffer(0)]],
+    texture2d_array<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_array_size()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
+                    (w >> 24) & 0xFFu) * (1.0 / 255.0);
+  tex.write(c, uint2(gid.x, gid.y), gid.z);
+}
+kernel void pack_8888_msaa(
+    texture2d_array<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_array_size()) return;
+  float4 c = tex.read(uint2(gid.x, gid.y), gid.z);
+  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2;
+  if (idx < sp.words) canonical[idx] = b.x | (b.y << 8) | (b.z << 16) |
+                                       (b.w << 24);
 }
 
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
@@ -234,7 +272,7 @@ struct Coord {
   uint32_t px, py, sample;
 };
 struct SurfaceParams {
-  uint32_t base, pitch, msaa, is_depth, fmt_log2, pad;
+  uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
 };
 
 // A minimal compute harness: compile the library once, dispatch one kernel over
@@ -490,6 +528,86 @@ struct MetalCompute {
         out[y * w + x] = cwords[off >> 2];
       }
     }
+    return out;
+  }
+
+  // Per-sample MSAA variant: seed canonical with a distinct word for every
+  // (pixel, sample), materialize into a texture2d_array (slice per sample),
+  // pack it back, and return the re-packed words. Identity <=> all 2x/4x
+  // samples survive independently -- the sample-collapse fix (task 3.3).
+  // `values` is indexed [(y*w + x) * num_samples + s].
+  std::vector<uint32_t> RoundTripMaterializeMsaa(uint32_t w, uint32_t h,
+                                                 uint32_t num_samples,
+                                                 const struct SurfaceParams& sp,
+                                                 const std::vector<uint32_t>& values,
+                                                 size_t canonical_bytes) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    auto seed_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
+      return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa, false,
+                                        0u, s) >> 2;
+    };
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          cwords[seed_offset(x, y, s)] = values[(y * w + x) * num_samples + s];
+    MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+    td.textureType = MTLTextureType2DArray;
+    td.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    td.width = w;
+    td.height = h;
+    td.arrayLength = num_samples;
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> mat = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_8888_msaa"]
+                                      error:&err];
+    REQUIRE(mat != nil);
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_8888_msaa"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    auto dispatch3d = [&](id<MTLComputeCommandEncoder> enc,
+                          id<MTLComputePipelineState> pso) {
+      [enc setComputePipelineState:pso];
+      NSUInteger tw = pso.threadExecutionWidth;
+      NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    };
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      dispatch3d(enc, mat);
+      [enc endEncoding];
+    }
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      dispatch3d(enc, pk);
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h * num_samples);
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
     return out;
   }
 };
@@ -818,6 +936,48 @@ TEST_CASE("Canonical k_8_8_8_8 materialize->pack round-trips through a texture",
       }
     }
     INFO("w=" << cfg.w << " h=" << cfg.h << " base=" << cfg.base);
+    REQUIRE(bad == 0u);
+  }
+}
+
+// The sample-collapse fix, proven (task 3.3): materialize per-sample canonical
+// into a texture2d_array (one slice per 2x/4x sample), pack it back, and
+// require every sample survives independently. This is exactly what the
+// collapsed 1x host path cannot do -- the accuracy loss behind Red Dead /
+// Katamari MSAA corruption. Distinct per-sample seed words make a collapse
+// (any sample overwriting another) impossible to miss.
+TEST_CASE("Canonical per-sample MSAA materialize->pack keeps all samples",
+          "[l1][metal][materialize][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct Cfg { uint32_t w, h, base, msaa, samples; const char* name; } cfgs[] = {
+      {48, 24, 0, 1u, 2u, "2x"},
+      {48, 24, 0, 2u, 4u, "4x"},
+      {40, 16, 7, 2u, 4u, "4x base=7"},
+  };
+  for (const Cfg& cfg : cfgs) {
+    const uint32_t pitch = PitchFor(cfg.w, cfg.msaa, 0u);
+    std::vector<uint32_t> values(size_t(cfg.w) * cfg.h * cfg.samples);
+    for (uint32_t y = 0; y < cfg.h; ++y)
+      for (uint32_t x = 0; x < cfg.w; ++x)
+        for (uint32_t s = 0; s < cfg.samples; ++s)
+          // Distinct across every (pixel, sample) so a collapse is detectable.
+          values[(y * cfg.w + x) * cfg.samples + s] =
+              (uint32_t((y * cfg.w + x) * cfg.samples + s) * 2654435761u) ^
+              0x5A17C0DEu;
+    SurfaceParams sp{cfg.base, pitch, cfg.msaa, 0u, 0u,
+                     uint32_t(xenos::kEdramSizeBytes / 4u)};
+    auto out = mc.RoundTripMaterializeMsaa(cfg.w, cfg.h, cfg.samples, sp, values,
+                                           xenos::kEdramSizeBytes);
+    uint32_t bad = 0;
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (out[i] != values[i]) {
+        if (bad < 8) WARN(cfg.name << " idx " << i << " expected " << values[i]
+                                   << " got " << out[i]);
+        ++bad;
+      }
+    }
+    INFO(cfg.name);
     REQUIRE(bad == 0u);
   }
 }
