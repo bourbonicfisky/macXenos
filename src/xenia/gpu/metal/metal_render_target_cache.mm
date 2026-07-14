@@ -1780,13 +1780,16 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     if (!owner || owner->key().is_depth) {
       continue;
     }
-    // Same-format owners copy through; the one CONVERSION the guest leans on
-    // (auto-exposure) is k_8_8_8_8 EDRAM resolved to a k_32_FLOAT dest — the
-    // pass's float4 read into an R32Float attachment keeps .r, the hardware
-    // rule. Other cross-format pairs stay skipped until a title demands them.
+    // Same-format owners copy through. Auto-exposure resolves both
+    // k_8_8_8_8 and k_2_10_10_10_FLOAT EDRAM into k_32_FLOAT destinations;
+    // the pass's float4 read into an R32Float attachment keeps .r, matching
+    // the hardware's numeric color-to-float conversion. The latter is Sonic's
+    // luminance pyramid — skipping its RGBA16F owner left the snapshot zero,
+    // latching the live exposure feedback at white.
     if (owner->pixel_format() != dest_pixel_format &&
         !(dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
-          owner->pixel_format() == kColorFormat)) {
+          (owner->pixel_format() == kColorFormat ||
+           owner->pixel_format() == uint64_t(MTLPixelFormatRGBA16Float)))) {
       static uint32_t s_skip_convert_logs = 0;
       if (s_skip_convert_logs++ < 8) {
         XELOGW(
