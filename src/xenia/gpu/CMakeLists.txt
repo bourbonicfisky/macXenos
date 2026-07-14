@@ -12,6 +12,8 @@ xe_target_defaults(xenia-gpu)
 if(XENIA_BUILD_TESTS)
   set(CMAKE_FOLDER "tests")
   add_subdirectory(testing)
+  # Metal conformance ladder (Level 0: lean CPU format/address oracles).
+  add_subdirectory(conformance)
 endif()
 
 # Experimental native-Metal shader path (Apple only, opt-in).
