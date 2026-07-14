@@ -38,5 +38,16 @@ target_include_directories(xenia-gpu-conformance PRIVATE
   ${PROJECT_SOURCE_DIR}/tools/build/third_party/catch/include
 )
 target_link_libraries(xenia-gpu-conformance PRIVATE fmt xenia-base)
+
+# Level 1: Metal compute kernels checked against the L0 CPU oracles. Compiled
+# only on Apple (needs a Metal device); on other platforms the executable is
+# L0-only. Kept in the SAME binary so one run covers both rungs.
+if(APPLE)
+  target_sources(xenia-gpu-conformance PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm)
+  target_link_libraries(xenia-gpu-conformance PRIVATE
+    "-framework Metal" "-framework Foundation")
+endif()
+
 xe_target_defaults(xenia-gpu-conformance)
 set_target_properties(xenia-gpu-conformance PROPERTIES FOLDER "tests")
