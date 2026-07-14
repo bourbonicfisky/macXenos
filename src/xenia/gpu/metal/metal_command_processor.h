@@ -109,6 +109,7 @@ class MetalCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
 
   void InitializeTrace() override;
+  std::string GetCaptureDeviceInfoJson() const override;
 
   // Flush + CPU-copy pending resolve writebacks into guest RAM. Runs at
   // IssueSwap, and early via FlushPendingWritebacksForWait when the guest

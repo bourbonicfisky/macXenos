@@ -3455,6 +3455,27 @@ void MetalCommandProcessor::InitializeTrace() {
   }
 }
 
+std::string MetalCommandProcessor::GetCaptureDeviceInfoJson() const {
+  auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+      graphics_system_->provider());
+  id<MTLDevice> device =
+      provider ? (__bridge id<MTLDevice>)provider->device() : nil;
+  if (!device) {
+    return std::string();
+  }
+  const char* device_name =
+      device.name.UTF8String ? device.name.UTF8String : "unknown";
+  return fmt::format(
+      "{{\"device_name\":\"{}\",\"registry_id\":{},"
+      "\"unified_memory\":{},\"low_power\":{},\"removable\":{},"
+      "\"recommended_max_working_set_size\":{}}}",
+      device_name, uint64_t(device.registryID),
+      device.hasUnifiedMemory ? "true" : "false",
+      device.isLowPower ? "true" : "false",
+      device.isRemovable ? "true" : "false",
+      uint64_t(device.recommendedMaxWorkingSetSize));
+}
+
 void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
                                                       uint32_t width,
                                                       uint32_t height) {

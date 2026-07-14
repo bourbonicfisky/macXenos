@@ -575,16 +575,20 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         trace_writer_.Flush();
         if (trace_state_ == TraceState::kSingleFrame) {
           trace_state_ = TraceState::kDisabled;
-          trace_writer_.Close();
+          CloseTrace();
         }
       } else if (trace_state_ == TraceState::kSingleFrame) {
         // New trace request - we only start tracing at the beginning of a
         // frame.
-        uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
-        auto file_name = fmt::format("{:08X}_{}.xtr", title_id, counter_ - 1);
+        auto executable_module = kernel_state_->GetExecutableModule();
+        uint32_t title_id =
+            executable_module ? executable_module->title_id() : 0;
+        uint32_t frame_index = counter_ - 1;
+        auto file_name = BuildTraceFileName(title_id, frame_index, false);
         auto path = trace_frame_path_ / file_name;
-        trace_writer_.Open(path, title_id);
-        InitializeTrace();
+        if (OpenTrace(path, title_id, frame_index, false)) {
+          InitializeTrace();
+        }
       }
     }
 #endif
@@ -660,6 +664,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
   uint32_t frontbuffer_height = reader_.ReadAndSwap<uint32_t>();
   reader_.AdvanceRead((count - 4) * sizeof(uint32_t));
 
+  last_swap_width_ = frontbuffer_width;
+  last_swap_height_ = frontbuffer_height;
   COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
                                frontbuffer_height);
   LogFpsTick();
@@ -1835,10 +1841,11 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
     uint32_t title_id = kernel_state_->GetExecutableModule()
                             ? kernel_state_->GetExecutableModule()->title_id()
                             : 0;
-    auto file_name = fmt::format("{:08X}_stream.xtr", title_id);
+    auto file_name = BuildTraceFileName(title_id, counter_, true);
     auto path = trace_stream_path_ / file_name;
-    trace_writer_.Open(path, title_id);
-    InitializeTrace();
+    if (OpenTrace(path, title_id, counter_, true)) {
+      InitializeTrace();
+    }
   }
 #endif
   // Adjust pointer base.

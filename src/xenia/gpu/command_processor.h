@@ -547,6 +547,29 @@ class CommandProcessor {
   std::filesystem::path trace_stream_path_;
   std::filesystem::path trace_frame_path_;
 
+  // Actual dimensions from the most recent PM4_XE_SWAP. These describe the
+  // captured guest frontbuffer more precisely than the configured display
+  // mode when a title uses a different scanout size.
+  uint32_t last_swap_width_ = 0;
+  uint32_t last_swap_height_ = 0;
+
+  // A trace is finalized separately from TraceWriter::Close so an adjacent
+  // provenance sidecar can be emitted after the binary file is complete.
+  std::filesystem::path active_trace_path_;
+  uint32_t active_trace_title_id_ = 0;
+  uint32_t active_trace_frame_index_ = 0;
+  uint32_t active_trace_width_ = 0;
+  uint32_t active_trace_height_ = 0;
+  bool active_trace_streaming_ = false;
+  std::string active_trace_started_utc_;
+
+  std::string BuildTraceFileName(uint32_t title_id, uint32_t frame_index,
+                                 bool streaming) const;
+  bool OpenTrace(const std::filesystem::path& path, uint32_t title_id,
+                 uint32_t frame_index, bool streaming);
+  void CloseTrace();
+  void WriteTraceMetadata() const;
+
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 

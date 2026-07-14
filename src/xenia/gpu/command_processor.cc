@@ -9,14 +9,20 @@
 
 #include "xenia/gpu/command_processor.h"
 
+#include <algorithm>
+#include <ctime>
+#include <tuple>
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/xxhash.h"
+#include "xenia/emulator.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -230,6 +236,202 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
+namespace {
+
+std::string JsonEscape(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  constexpr char kHex[] = "0123456789ABCDEF";
+  for (unsigned char c : value) {
+    switch (c) {
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          escaped += "\\u00";
+          escaped.push_back(kHex[c >> 4]);
+          escaped.push_back(kHex[c & 0xF]);
+        } else {
+          escaped.push_back(char(c));
+        }
+        break;
+    }
+  }
+  return escaped;
+}
+
+std::string SanitizeTraceFileToken(std::string_view value,
+                                   size_t max_length = 48) {
+  std::string token;
+  token.reserve(std::min(value.size(), max_length));
+  bool pending_separator = false;
+  for (unsigned char c : value) {
+    bool ascii_alnum = (c >= 'A' && c <= 'Z') ||
+                       (c >= 'a' && c <= 'z') ||
+                       (c >= '0' && c <= '9');
+    if (ascii_alnum) {
+      if (pending_separator && !token.empty() && token.size() < max_length) {
+        token.push_back('_');
+      }
+      pending_separator = false;
+      if (token.size() < max_length) {
+        token.push_back(char(c));
+      }
+    } else {
+      pending_separator = true;
+    }
+    if (token.size() >= max_length) {
+      break;
+    }
+  }
+  while (!token.empty() && token.back() == '_') {
+    token.pop_back();
+  }
+  return token;
+}
+
+const char* HostOperatingSystemName() {
+#if XE_PLATFORM_MAC
+  return "macOS";
+#elif XE_PLATFORM_WIN32
+  return "Windows";
+#elif XE_PLATFORM_LINUX
+  return "Linux";
+#else
+  return "unknown";
+#endif
+}
+
+const char* HostArchitectureName() {
+#if XE_ARCH_ARM64
+  return "arm64";
+#elif XE_ARCH_AMD64
+  return "x86_64";
+#else
+  return "unknown";
+#endif
+}
+
+const char* HostPlatformClass() {
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+  return "apple-silicon";
+#elif XE_PLATFORM_MAC && XE_ARCH_AMD64
+  return "intel-mac";
+#elif XE_PLATFORM_WIN32 && XE_ARCH_ARM64
+  return "windows-arm64";
+#elif XE_PLATFORM_WIN32 && XE_ARCH_AMD64
+  return "windows-x64";
+#elif XE_PLATFORM_LINUX && XE_ARCH_ARM64
+  return "linux-arm64";
+#elif XE_PLATFORM_LINUX && XE_ARCH_AMD64
+  return "linux-x64";
+#else
+  return "unknown-host";
+#endif
+}
+
+std::string UtcTimestamp(bool compact) {
+  std::time_t now = std::time(nullptr);
+  std::tm utc = {};
+#if XE_PLATFORM_WIN32
+  gmtime_s(&utc, &now);
+#else
+  gmtime_r(&now, &utc);
+#endif
+  char buffer[32] = {};
+  std::strftime(buffer, sizeof(buffer),
+                compact ? "%Y%m%dT%H%M%SZ" : "%Y-%m-%dT%H:%M:%SZ", &utc);
+  return buffer;
+}
+
+std::string RendererFileToken(std::string_view backend_name) {
+  std::string backend_lower;
+  backend_lower.reserve(backend_name.size());
+  for (unsigned char c : backend_name) {
+    backend_lower.push_back(
+        (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : char(c));
+  }
+  if (backend_lower.rfind("vulkan", 0) == 0) {
+#if XE_PLATFORM_MAC
+    return "vulkan-moltenvk";
+#else
+    return "vulkan";
+#endif
+  }
+  if (backend_lower.rfind("metal", 0) == 0) {
+    return "metal";
+  }
+  if (backend_lower.rfind("direct3d", 0) == 0 ||
+      backend_lower.rfind("d3d12", 0) == 0) {
+    return "d3d12";
+  }
+  std::string token = SanitizeTraceFileToken(backend_lower, 32);
+  return token.empty() ? "unknown-renderer" : token;
+}
+
+std::string RendererApiName(std::string_view renderer_token) {
+  if (renderer_token.rfind("vulkan", 0) == 0) {
+    return "Vulkan";
+  }
+  if (renderer_token == "metal") {
+    return "Metal";
+  }
+  if (renderer_token == "d3d12") {
+    return "Direct3D 12";
+  }
+  return std::string(renderer_token);
+}
+
+bool HashFileXXH3(const std::filesystem::path& path, uint64_t* hash_out) {
+  FILE* f = xe::filesystem::OpenFile(path, "rb");
+  if (!f) {
+    return false;
+  }
+  XXH3_state_t state = {};
+  if (XXH3_64bits_reset(&state) == XXH_ERROR) {
+    fclose(f);
+    return false;
+  }
+  std::vector<uint8_t> buffer(256 * 1024);
+  while (true) {
+    size_t read = fread(buffer.data(), 1, buffer.size(), f);
+    if (read && XXH3_64bits_update(&state, buffer.data(), read) == XXH_ERROR) {
+      fclose(f);
+      return false;
+    }
+    if (read != buffer.size()) {
+      bool ok = !ferror(f);
+      fclose(f);
+      if (!ok) {
+        return false;
+      }
+      *hash_out = XXH3_64bits_digest(&state);
+      return true;
+    }
+  }
+}
+
+}  // namespace
+
 // This should be written completely differently with support for different
 // types.
 void SaveGPUSetting(GPUSetting setting, uint64_t value) {
@@ -389,7 +591,177 @@ void CommandProcessor::EndTracing() {
   }
   assert_true(trace_state_ == TraceState::kStreaming);
   trace_state_ = TraceState::kDisabled;
+  CloseTrace();
+}
+
+std::string CommandProcessor::BuildTraceFileName(uint32_t title_id,
+                                                 uint32_t frame_index,
+                                                 bool streaming) const {
+  std::string title_name;
+  if (kernel_state_ && kernel_state_->emulator()) {
+    title_name = SanitizeTraceFileToken(
+        kernel_state_->emulator()->title_name());
+  }
+  std::string title_component =
+      title_name.empty() ? std::string() : fmt::format("_{}", title_name);
+
+  uint32_t width = last_swap_width_;
+  uint32_t height = last_swap_height_;
+  if ((!width || !height) && graphics_system_) {
+    std::tie(width, height) = graphics_system_->GetResolution();
+  }
+  std::string renderer = RendererFileToken(
+      graphics_system_ ? graphics_system_->name() : "unknown");
+  std::string position = streaming
+                             ? "stream"
+                             : fmt::format("frame_{:08d}", frame_index);
+  return fmt::format(
+      "{:08X}{}__{}__{}x{}__{}__{}__{}.{}", title_id, title_component,
+      HostPlatformClass(), width, height, renderer, position,
+      UtcTimestamp(true), kTraceExtension);
+}
+
+bool CommandProcessor::OpenTrace(const std::filesystem::path& path,
+                                 uint32_t title_id, uint32_t frame_index,
+                                 bool streaming) {
+  std::filesystem::path output_path = path;
+  std::error_code exists_error;
+  for (uint32_t duplicate = 2;
+       std::filesystem::exists(output_path, exists_error) && !exists_error;
+       ++duplicate) {
+    output_path = path.parent_path() /
+                  fmt::format("{}_{}{}", path.stem().string(), duplicate,
+                              path.extension().string());
+  }
+  if (!trace_writer_.Open(output_path, title_id)) {
+    XELOGE("Failed to open GPU trace {}", xe::path_to_utf8(output_path));
+    return false;
+  }
+  active_trace_path_ = std::filesystem::absolute(output_path);
+  active_trace_title_id_ = title_id;
+  active_trace_frame_index_ = frame_index;
+  active_trace_width_ = last_swap_width_;
+  active_trace_height_ = last_swap_height_;
+  if ((!active_trace_width_ || !active_trace_height_) && graphics_system_) {
+    std::tie(active_trace_width_, active_trace_height_) =
+        graphics_system_->GetResolution();
+  }
+  active_trace_streaming_ = streaming;
+  active_trace_started_utc_ = UtcTimestamp(false);
+  XELOGI("Capturing GPU trace to {}", xe::path_to_utf8(active_trace_path_));
+  return true;
+}
+
+void CommandProcessor::CloseTrace() {
+  if (!trace_writer_.is_open()) {
+    return;
+  }
   trace_writer_.Close();
+  WriteTraceMetadata();
+  active_trace_path_.clear();
+  active_trace_title_id_ = 0;
+  active_trace_frame_index_ = 0;
+  active_trace_width_ = 0;
+  active_trace_height_ = 0;
+  active_trace_streaming_ = false;
+  active_trace_started_utc_.clear();
+}
+
+void CommandProcessor::WriteTraceMetadata() const {
+  if (active_trace_path_.empty()) {
+    return;
+  }
+  std::filesystem::path meta_path = active_trace_path_;
+  meta_path += ".meta.json";
+  FILE* f = xe::filesystem::OpenFile(meta_path, "wb");
+  if (!f) {
+    XELOGE("Failed to open GPU trace metadata {}",
+           xe::path_to_utf8(meta_path));
+    return;
+  }
+
+#if defined(NDEBUG)
+  const char* build_config = "Release";
+#else
+  const char* build_config = "Debug";
+#endif
+#if defined(XE_BUILD_COMMIT)
+  const char* build_commit = XE_BUILD_COMMIT;
+  const char* build_branch = XE_BUILD_BRANCH;
+#else
+  const char* build_commit = "unknown";
+  const char* build_branch = "unknown";
+#endif
+
+  std::string title_name;
+  std::string title_version;
+  if (kernel_state_ && kernel_state_->emulator()) {
+    title_name = kernel_state_->emulator()->title_name();
+    title_version = kernel_state_->emulator()->title_version();
+  }
+  std::string backend_name =
+      graphics_system_ ? graphics_system_->name() : "unknown";
+  std::string renderer_token = RendererFileToken(backend_name);
+  std::string renderer_api = RendererApiName(renderer_token);
+  std::string translation_layer = "null";
+  std::string host_api = renderer_api;
+#if XE_PLATFORM_MAC
+  if (renderer_token == "vulkan-moltenvk") {
+    translation_layer = "\"MoltenVK\"";
+    host_api = "Metal";
+  }
+#endif
+  std::string device_json = GetCaptureDeviceInfoJson();
+  if (device_json.empty()) {
+    device_json = "null";
+  }
+  std::error_code size_error;
+  uintmax_t trace_size =
+      std::filesystem::file_size(active_trace_path_, size_error);
+  if (size_error) {
+    trace_size = 0;
+  }
+  uint64_t trace_hash = 0;
+  bool trace_hash_valid = HashFileXXH3(active_trace_path_, &trace_hash);
+  std::string trace_hash_json =
+      trace_hash_valid ? fmt::format("\"{:016X}\"", trace_hash) : "null";
+
+  std::string meta = fmt::format(
+      "{{\n"
+      "  \"schema\": 1,\n"
+      "  \"complete\": true,\n"
+      "  \"trace_format_version\": {},\n"
+      "  \"trace_file\": \"{}\",\n"
+      "  \"trace_size_bytes\": {},\n"
+      "  \"trace_xxh3_64\": {},\n"
+      "  \"capture_kind\": \"{}\",\n"
+      "  \"frame_index\": {},\n"
+      "  \"captured_utc\": \"{}\",\n"
+      "  \"title\": {{\"id\": \"{:08X}\", \"name\": \"{}\", "
+      "\"version\": \"{}\"}},\n"
+      "  \"guest\": {{\"display_width\": {}, \"display_height\": {}}},\n"
+      "  \"host\": {{\"platform\": \"{}\", \"os\": \"{}\", "
+      "\"architecture\": \"{}\"}},\n"
+      "  \"renderer\": {{\"backend\": \"{}\", \"api\": \"{}\", "
+      "\"translation_layer\": {}, \"host_api\": \"{}\", "
+      "\"device\": {}}},\n"
+      "  \"build\": {{\"commit\": \"{}\", \"branch\": \"{}\", "
+      "\"config\": \"{}\"}}\n"
+      "}}\n",
+      kTraceFormatVersion,
+      JsonEscape(active_trace_path_.filename().string()), trace_size,
+      trace_hash_json, active_trace_streaming_ ? "stream" : "single-frame",
+      active_trace_frame_index_, JsonEscape(active_trace_started_utc_),
+      active_trace_title_id_, JsonEscape(title_name), JsonEscape(title_version),
+      active_trace_width_, active_trace_height_, HostPlatformClass(),
+      HostOperatingSystemName(), HostArchitectureName(), JsonEscape(backend_name),
+      JsonEscape(renderer_api), translation_layer, JsonEscape(host_api),
+      device_json, JsonEscape(build_commit), JsonEscape(build_branch),
+      build_config);
+  fwrite(meta.data(), 1, meta.size(), f);
+  fclose(f);
+  XELOGI("GPU trace complete: {} (metadata: {})",
+         xe::path_to_utf8(active_trace_path_), xe::path_to_utf8(meta_path));
 }
 
 void CommandProcessor::RestoreRegisters(uint32_t first_register,
@@ -1589,10 +1961,36 @@ void CommandProcessor::WriteCaptureMeta(
   if (device_json.empty()) {
     device_json = "null";
   }
+  std::string backend_name =
+      graphics_system_ ? graphics_system_->name() : "unknown";
+  std::string renderer_token = RendererFileToken(backend_name);
+  std::string renderer_api = RendererApiName(renderer_token);
+  std::string translation_layer = "null";
+  std::string host_api = renderer_api;
+#if XE_PLATFORM_MAC
+  if (renderer_token == "vulkan-moltenvk") {
+    translation_layer = "\"MoltenVK\"";
+    host_api = "Metal";
+  }
+#endif
+  uint32_t width = 0;
+  uint32_t height = 0;
+  if (graphics_system_) {
+    std::tie(width, height) = graphics_system_->GetResolution();
+  }
   std::string meta = fmt::format(
-      "{{\"schema\":1,\"build_commit\":\"{}\",\"build_branch\":\"{}\","
-      "\"build_config\":\"{}\",\"device\":{}}}\n",
-      build_commit, build_branch, build_config, device_json);
+      "{{\"schema\":2,\"build_commit\":\"{}\",\"build_branch\":\"{}\","
+      "\"build_config\":\"{}\","
+      "\"host\":{{\"platform\":\"{}\",\"os\":\"{}\","
+      "\"architecture\":\"{}\"}},"
+      "\"guest\":{{\"display_width\":{},\"display_height\":{}}},"
+      "\"renderer\":{{\"backend\":\"{}\",\"api\":\"{}\","
+      "\"translation_layer\":{},\"host_api\":\"{}\"}},"
+      "\"device\":{}}}\n",
+      JsonEscape(build_commit), JsonEscape(build_branch), build_config,
+      HostPlatformClass(), HostOperatingSystemName(), HostArchitectureName(),
+      width, height, JsonEscape(backend_name), JsonEscape(renderer_api),
+      translation_layer, JsonEscape(host_api), device_json);
   fwrite(meta.data(), 1, meta.size(), f);
   fclose(f);
 }

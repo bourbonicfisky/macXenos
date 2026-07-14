@@ -172,9 +172,10 @@ std::string VulkanCommandProcessor::GetCaptureDeviceInfoJson() const {
   const ui::vulkan::VulkanDevice::Properties& props =
       vulkan_device->properties();
   return fmt::format(
-      "{{\"device_name\":\"{}\",\"api_version\":{},\"driver_version\":{}}}",
+      "{{\"device_name\":\"{}\",\"api_version\":{},\"driver_version\":{},"
+      "\"vendor_id\":{},\"device_id\":{}}}",
       props.deviceName, uint32_t(props.apiVersion),
-      uint32_t(props.driverVersion));
+      uint32_t(props.driverVersion), props.vendorID, props.deviceID);
 }
 
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
