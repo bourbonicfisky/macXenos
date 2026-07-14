@@ -329,6 +329,16 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
+  // Byte packing used by GPU resolve writebacks at each guest base. RAM
+  // frontbuffer presentation reverses this packing back to logical RGBA.
+  // Bases with no entry are CPU-produced scanout buffers and retain the
+  // legacy ARGB scanout conversion.
+  struct RamColorLayout {
+    uint32_t endian;
+    uint32_t swap_rb;
+  };
+  std::unordered_map<uint32_t, RamColorLayout> ram_color_layouts_;
+
   // Gamma-parity diagnostic state (XE_METAL_GAMMA_PARITY=1).
   std::unordered_map<uint32_t, bool> gamma_parity_resolves_;
   std::unordered_set<uint32_t> gamma_parity_reported_;

@@ -3253,6 +3253,11 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.offset_x_div_8) << 3,
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
                 S7TagsOff() ? 0 : CurrentEncodingSubmission()});
+            if (dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
+              ram_color_layouts_[resolve_info.copy_dest_base] = RamColorLayout{
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                  wb_swap_rb};
+            }
             // Stage-3 hybrid: RAM now holds (will hold) this dest — fetches
             // of the base must read RAM, not the bridge snapshot.
             if (texture_cache_) {
@@ -3530,18 +3535,33 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
     fb_ram_height_ = height;
   }
   fb_ram_content_hash_ = hash;
-  // Untile guest RAM -> linear RGBA. RAM bytes per texel are the hardware
-  // scanout order [A][R][G][B] (resolve dests with copy_dest_swap, and what
-  // CPU-decoded video writes); host RGBA is a rotate-right-8 of the LE word.
+  // Untile guest RAM -> linear RGBA. GPU resolve destinations carry their
+  // exact endian / copy_dest_swap packing, which is reversed here. Buffers
+  // without a recorded resolve layout are CPU-produced scanout (FMV) in
+  // [A][R][G][B] byte order, retained via the legacy rotate-right-8 path.
   std::vector<uint32_t> linear(size_t(width) * height);
   uint32_t* out = linear.data();
+  auto layout_it = ram_color_layouts_.find(base);
+  bool has_resolve_layout = layout_it != ram_color_layouts_.end();
+  RamColorLayout resolve_layout =
+      has_resolve_layout ? layout_it->second : RamColorLayout{};
   auto untile_row = [&](size_t y) {
     for (uint32_t x = 0; x < width; ++x) {
       uint32_t off = uint32_t(texture_address::Tiled2D(
           int32_t(x), int32_t(y), pitch_aligned, 2));
       uint32_t v;
       std::memcpy(&v, guest + off, 4);
-      out[y * width + x] = (v >> 8) | (v << 24);
+      if (has_resolve_layout) {
+        v = xenos::GpuSwapInline(
+            v, xenos::Endian(resolve_layout.endian & 0b11));
+        if (resolve_layout.swap_rb) {
+          v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
+              ((v >> 16) & 0xFFu);
+        }
+        out[y * width + x] = v;
+      } else {
+        out[y * width + x] = (v >> 8) | (v << 24);
+      }
     }
   };
   dispatch_apply(height, DISPATCH_APPLY_AUTO,
@@ -3890,6 +3910,28 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   void* fb_snapshot = render_target_cache_
                           ? render_target_cache_->GetResolveSnapshot(frontbuffer_ptr)
                           : nullptr;
+  // Some games assemble the frontbuffer with adjacent column resolves. The
+  // per-base snapshot only contains the first column (F.E.A.R.: 768x720),
+  // while stage-3 writebacks place every column at its exact address in guest
+  // RAM. Presenting that partial snapshot crops / magnifies the frame. When
+  // RAM is authoritative and the snapshot doesn't cover the requested guest
+  // extent, prefer a full-size RAM frontbuffer upload.
+  uint32_t requested_present_width =
+      frontbuffer_width ? frontbuffer_width : 1280;
+  uint32_t requested_present_height =
+      frontbuffer_height ? frontbuffer_height : 720;
+  bool partial_ram_backed_snapshot = false;
+  if (fb_snapshot && texture_cache_) {
+    id<MTLTexture> snapshot_texture = (__bridge id<MTLTexture>)fb_snapshot;
+    bool snapshot_covers_frontbuffer =
+        snapshot_texture.width >= requested_present_width &&
+        snapshot_texture.height >= requested_present_height;
+    partial_ram_backed_snapshot =
+        !snapshot_covers_frontbuffer &&
+        !texture_cache_->BridgeServes(frontbuffer_ptr,
+                                      requested_present_width,
+                                      requested_present_height);
+  }
   // Diagnostic: XE_METAL_PRESENT_BASE=<hex guest base> presents that resolved
   // snapshot instead of the frontbuffer, to inspect an intermediate scene RT
   // (G-buffer / pre-tonemap / bloom) via the dumped image.
@@ -3946,12 +3988,28 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (source_rt) {
     // already selected by the debug override
     present_source_path = "debug-base";
-  } else if (fb_snapshot) {
+  } else if (fb_snapshot && !partial_ram_backed_snapshot) {
     source_rt = (__bridge id<MTLTexture>)fb_snapshot;
     // Use the snapshot's real extent so the present blit can't overrun it.
     present_width = uint32_t(source_rt.width);
     present_height = uint32_t(source_rt.height);
     present_source_path = "fb-snapshot";
+  } else if (partial_ram_backed_snapshot) {
+    void* ram_fb = GetRamFrontbufferTexture(
+        frontbuffer_ptr, requested_present_width, requested_present_height);
+    if (ram_fb) {
+      source_rt = (__bridge id<MTLTexture>)ram_fb;
+      present_width = uint32_t(source_rt.width);
+      present_height = uint32_t(source_rt.height);
+      present_source_path = "ram-frontbuffer-partial-snapshot";
+    } else {
+      // Keep the old partial presentation as a last-resort fallback rather
+      // than dropping the frame entirely if the RAM upload can't be made.
+      source_rt = (__bridge id<MTLTexture>)fb_snapshot;
+      present_width = uint32_t(source_rt.width);
+      present_height = uint32_t(source_rt.height);
+      present_source_path = "fb-snapshot-ram-fallback-failed";
+    }
   } else if (frame_has_render_ && render_target_cache_ &&
              render_target_cache_->presentable_color_target()) {
     // Pre-resolve fallback (splash/menus before any frontbuffer snapshot): the
@@ -3982,7 +4040,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         "{:08X}, {}; draws {} skipped {}; geo-draws {} geo-pipeline-fails {})",
         count, present_width, present_height, frontbuffer_width,
         frontbuffer_height, frontbuffer_ptr,
-        source_rt ? "render target" : "test pattern", draw_count_,
+        source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
   }
 
