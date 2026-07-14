@@ -158,7 +158,8 @@ bool IsPolygonalPrimitive(xenos::PrimitiveType type) {
   return type == xenos::PrimitiveType::kTriangleList ||
          type == xenos::PrimitiveType::kTriangleStrip ||
          type == xenos::PrimitiveType::kTriangleFan ||
-         type == xenos::PrimitiveType::kRectangleList;
+         type == xenos::PrimitiveType::kRectangleList ||
+         type == xenos::PrimitiveType::kQuadList;
 }
 
 // Byte-swaps guest indices into a host (little-endian) copy for Metal.
@@ -1273,17 +1274,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
-  // Rectangle lists (JC2's deferred composite/lighting/post passes are true
-  // 4-corner rects) and point lists (light-volume sprites — plain Metal points
-  // can't expand size/texcoords, and their pipelines fail on the
-  // xespritetexcoord0 VS/PS mismatch) can't be drawn directly; expand them via
-  // MSC geometry emulation, which needs a mesh-shader-capable device and a
-  // pixel shader for the fragment stage.
+  // Rectangle and quad lists (fullscreen/composite surfaces) and point lists
+  // (light-volume sprites — plain Metal points can't expand size/texcoords,
+  // and their pipelines fail on the xespritetexcoord0 VS/PS mismatch) can't be
+  // drawn directly; expand them via MSC geometry emulation, which needs a
+  // mesh-shader-capable device and a pixel shader for the fragment stage.
   PipelineGeometryShader geometry_type = PipelineGeometryShader::kNone;
   if (prim_type == xenos::PrimitiveType::kRectangleList) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList) {
     geometry_type = PipelineGeometryShader::kPointList;
+  } else if (prim_type == xenos::PrimitiveType::kQuadList) {
+    geometry_type = PipelineGeometryShader::kQuadList;
   }
   bool use_geometry_emulation = geometry_type != PipelineGeometryShader::kNone &&
                                 mesh_shader_supported_ && pixel_shader != nullptr;
@@ -2464,7 +2466,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   // --- Draw. ---
-  // Rectangle-list (and later point/quad) geometry emulation: the guest VS runs
+  // Rectangle/point/quad geometry emulation: the guest VS runs
   // as the object stage and a generated GS as the mesh stage; the runtime
   // dispatches the object+mesh threadgroups. rect-list maps to a triangle input
   // topology (the GS synthesizes the 4th corner). See openspec
@@ -2474,12 +2476,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     geometry_config.gsVertexSizeInBytes = gs_vertex_size;
     geometry_config.gsMaxInputPrimitivesPerMeshThreadgroup =
         gs_max_input_primitives;
-    // The runtime primitive matches the GS input topology: rect-list feeds
-    // triangles (the GS synthesizes the 4th corner), point sprites feed points.
-    IRRuntimePrimitiveType geometry_primitive =
-        geometry_type == PipelineGeometryShader::kPointList
-            ? IRRuntimePrimitiveTypePoint
-            : IRRuntimePrimitiveTypeTriangle;
+    // The runtime primitive matches the GS input topology: rectangle lists
+    // feed triangles, point sprites feed points, and quad lists feed the
+    // line-with-adjacency geometry shader through the line primitive family.
+    IRRuntimePrimitiveType geometry_primitive;
+    switch (geometry_type) {
+      case PipelineGeometryShader::kPointList:
+        geometry_primitive = IRRuntimePrimitiveTypePoint;
+        break;
+      case PipelineGeometryShader::kQuadList:
+        // The generated geometry shader declares line-with-adjacency so four
+        // guest vertices arrive as one primitive and are emitted as a
+        // triangle strip.
+        geometry_primitive = IRRuntimePrimitiveTypeLine;
+        break;
+      case PipelineGeometryShader::kRectangleList:
+      default:
+        geometry_primitive = IRRuntimePrimitiveTypeTriangle;
+        break;
+    }
     if (index_buffer_info && index_buffer_info->guest_base) {
       uint32_t index_size =
           index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;

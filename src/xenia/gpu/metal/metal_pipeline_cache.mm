@@ -305,6 +305,10 @@ MetalShaderConverter::InputTopology GeometryInputTopology(
     case PipelineGeometryShader::kRectangleList:
       return MetalShaderConverter::InputTopology::kTriangle;
     case PipelineGeometryShader::kQuadList:
+      // The generated DXBC GS declares line-with-adjacency. MSC's input
+      // topology describes the base primitive family; the adjacency arity
+      // comes from the shader declaration itself.
+      return MetalShaderConverter::InputTopology::kLine;
     default:
       return MetalShaderConverter::InputTopology::kUndefined;
   }
