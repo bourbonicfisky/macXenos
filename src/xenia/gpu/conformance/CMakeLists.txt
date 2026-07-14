@@ -21,6 +21,10 @@ endif()
 add_executable(xenia-gpu-conformance
   ${_conformance_sources}
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/xenos.cc
+  # EDRAM tile/sample addressing oracle (mirror of edram.xesli). Pure math +
+  # fmt/base/stb — no command_processor, so it stays in the lean target.
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_analysis_decode.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/stb_image_write_impl.cc
   ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
 )
