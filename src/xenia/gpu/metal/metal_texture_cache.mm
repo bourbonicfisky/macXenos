@@ -494,22 +494,25 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t pitch_blocks = pitch_texels / block_texels;
   uint32_t pitch_blocks_aligned = (pitch_blocks + 31u) & ~31u;
 
-  // Make texture source pages participate in SharedMemory's CPU write-watch
-  // tracking. FMV decoders rewrite a small ring of guest buffers at the same
-  // addresses; without requesting these pages, the Metal bring-up cache kept
-  // the first (usually black/neutral) upload forever. The global watch queues
-  // overlapping cache entries for retirement before the next texture fetch.
   uint32_t blocks_h_aligned = (blocks_h + 31u) & ~31u;
   size_t base_source_bytes =
       is_cube ? size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6
               : size_t(pitch_blocks_aligned) * blocks_h * bpb;
   uint32_t watched_base_bytes = uint32_t(std::min<size_t>(
       base_source_bytes, size_t(kPhysicalSize - base)));
-  if (!trace_playback_ && shared_memory_ &&
-      !shared_memory_->RequestRange(base, watched_base_bytes)) {
-    log_null("shared-memory");
-    return 0;
-  }
+  // NOTE: this cache deliberately does NOT call SharedMemory::RequestRange to
+  // register these pages for CPU write-watching. RequestRange does host-GPU
+  // buffer residency + guest-page write protection (EnsureHostGpuMemoryAllocated
+  // -> UploadRanges), a memory model this bring-up cache doesn't otherwise use:
+  // it reads guest RAM directly below. Enabling it CORRUPTED that direct read —
+  // font-atlas glyphs rendered as noise blocks and the HDR/exposure chain blew
+  // out to white live (SF4 434307FC), because protecting/relocating the source
+  // pages tore the concurrent untile read. Live-bisected 2026-07-14: this call
+  // was the sole cause; removing it renders SF4 clean. It was added to refresh
+  // FMV/video textures the CPU rewrites in place — that refresh now needs a
+  // Metal-safe page watch (physical access callbacks) instead; tracked
+  // separately. The retire path (QueueInvalidation/InvalidateRange) stays for
+  // that future watch and for trace playback's explicit restores.
 
   // Untile / copy into a linear block-major staging buffer (host byte order).
   // Rows are independent — run them concurrently: stage-3 re-uploads big
