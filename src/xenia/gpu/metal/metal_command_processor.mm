@@ -266,6 +266,7 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   // through the SAME addresses), so a fetch must re-upload the fresh bytes
   // or it replays a stale earlier-era upload.
   if (texture_cache_) {
+    texture_cache_->SetTracePlayback();
     texture_cache_->InvalidateRange(base_ptr, length);
   }
 }
@@ -771,7 +772,8 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   system_view_tables_ = (__bridge_retained void*)system_view;
 
   texture_cache_ = std::make_unique<MetalTextureCache>(
-      device_ptr, memory_, view_bindless_heap_, kViewBindlessHeapSlots);
+      device_ptr, memory_, shared_memory_.get(), view_bindless_heap_,
+      kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();

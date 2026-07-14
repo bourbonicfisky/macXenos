@@ -169,20 +169,30 @@ void SwapEndian(uint8_t* data, uint32_t bytes, xenos::Endian endian) {
 }  // namespace
 
 MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
+                                     SharedMemory* shared_memory,
                                      void* view_heap, uint32_t view_heap_slots)
     : device_(device),
       memory_(memory),
+      shared_memory_(shared_memory),
       view_heap_(view_heap),
       view_heap_slots_(view_heap_slots) {
   id<MTLBuffer> heap = (__bridge id<MTLBuffer>)view_heap_;
   view_heap_contents_ = [heap contents];
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
   bc_supported_ = [mtl_device supportsBCTextureCompression];
+  if (shared_memory_) {
+    shared_memory_watch_ = shared_memory_->RegisterGlobalWatch(
+        SharedMemoryGlobalWatchCallback, this);
+  }
   XELOGI("MetalTextureCache: BC (DXT) texture compression {}",
          bc_supported_ ? "supported" : "UNSUPPORTED (DXT stays gray)");
 }
 
 MetalTextureCache::~MetalTextureCache() {
+  if (shared_memory_watch_) {
+    shared_memory_->UnregisterGlobalWatch(shared_memory_watch_);
+    shared_memory_watch_ = nullptr;
+  }
   for (auto& pair : cache_) {
     if (pair.second.texture) {
       id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
@@ -192,8 +202,77 @@ MetalTextureCache::~MetalTextureCache() {
   cache_.clear();
 }
 
+void MetalTextureCache::SetTracePlayback() {
+  if (trace_playback_) {
+    return;
+  }
+  trace_playback_ = true;
+  if (shared_memory_watch_) {
+    shared_memory_->UnregisterGlobalWatch(shared_memory_watch_);
+    shared_memory_watch_ = nullptr;
+  }
+  std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
+  pending_invalidations_.clear();
+}
+
+void MetalTextureCache::SharedMemoryGlobalWatchCallback(
+    [[maybe_unused]] const global_unique_lock_type& global_lock, void* context,
+    uint32_t address_first, uint32_t address_last,
+    [[maybe_unused]] bool invalidated_by_gpu) {
+  static_cast<MetalTextureCache*>(context)->QueueInvalidation(address_first,
+                                                               address_last);
+}
+
+void MetalTextureCache::QueueInvalidation(uint32_t address_first,
+                                          uint32_t address_last) {
+  if (address_last < address_first) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
+  // Memory invalidation normally arrives in page runs. Coalesce adjacent runs
+  // here so a decoder rewriting a frame plane produces one GPU-thread lookup,
+  // not one per protected page.
+  if (!pending_invalidations_.empty()) {
+    auto& last = pending_invalidations_.back();
+    uint64_t last_start = last.first;
+    uint64_t last_end = uint64_t(last.first) + last.second;
+    uint64_t new_start = address_first;
+    uint64_t new_end = uint64_t(address_last) + uint64_t(1);
+    if (new_start <= last_end && new_end >= last_start) {
+      uint64_t merged_start = std::min(last_start, new_start);
+      uint64_t merged_end =
+          std::max(last_end, new_end);
+      last.first = uint32_t(merged_start);
+      last.second = uint32_t(merged_end - merged_start);
+      return;
+    }
+  }
+  pending_invalidations_.emplace_back(address_first,
+                                      address_last - address_first + 1);
+}
+
+void MetalTextureCache::DrainPendingInvalidations() {
+  std::vector<std::pair<uint32_t, uint32_t>> invalidations;
+  {
+    std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
+    invalidations.swap(pending_invalidations_);
+  }
+  uint32_t evicted = 0;
+  for (const auto& range : invalidations) {
+    evicted += InvalidateRange(range.first, range.second);
+  }
+  static uint32_t s_cpu_invalidation_logs = 0;
+  if (evicted && s_cpu_invalidation_logs++ < 16) {
+    XELOGI("MetalTextureCache: CPU/GPU writes refreshed {} cached texture{}",
+           evicted, evicted == 1 ? "" : "s");
+  }
+}
+
 uint32_t MetalTextureCache::GetTextureSlot(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
+  if (!trace_playback_) {
+    DrainPendingInvalidations();
+  }
   // Diagnostic: log why a fetch resolves to the null (gray) texture. The
   // gameplay gray screen is a composite pass sampling slot 0; this shows the
   // fetch (base/format/dimension) so we know whether it's an unsupported format,
@@ -408,6 +487,23 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t blocks_h = (height + block_texels - 1) / block_texels;
   uint32_t pitch_blocks = pitch_texels / block_texels;
   uint32_t pitch_blocks_aligned = (pitch_blocks + 31u) & ~31u;
+
+  // Make texture source pages participate in SharedMemory's CPU write-watch
+  // tracking. FMV decoders rewrite a small ring of guest buffers at the same
+  // addresses; without requesting these pages, the Metal bring-up cache kept
+  // the first (usually black/neutral) upload forever. The global watch queues
+  // overlapping cache entries for retirement before the next texture fetch.
+  uint32_t blocks_h_aligned = (blocks_h + 31u) & ~31u;
+  size_t base_source_bytes =
+      is_cube ? size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6
+              : size_t(pitch_blocks_aligned) * blocks_h * bpb;
+  uint32_t watched_base_bytes = uint32_t(std::min<size_t>(
+      base_source_bytes, size_t(kPhysicalSize - base)));
+  if (!trace_playback_ && shared_memory_ &&
+      !shared_memory_->RequestRange(base, watched_base_bytes)) {
+    log_null("shared-memory");
+    return 0;
+  }
 
   // Untile / copy into a linear block-major staging buffer (host byte order).
   // Rows are independent — run them concurrently: stage-3 re-uploads big
@@ -627,8 +723,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // (texture_extent.cc guest rules); re-untile each face at its offset.
   uint32_t face_stride = 0;
   if (is_cube) {
-    uint32_t blocks_v_aligned = (blocks_h + 31u) & ~31u;
-    face_stride = pitch_blocks_aligned * blocks_v_aligned * bpb;
+    face_stride = pitch_blocks_aligned * blocks_h_aligned * bpb;
     for (uint32_t face = 1; face < 6; ++face) {
       uint32_t face_base = face * face_stride;
       for (uint32_t by = 0; by < blocks_h; ++by) {
@@ -786,10 +881,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   void* texture_ptr = (__bridge_retained void*)sampled;
   // Guest byte extent (conservative: aligned pitch over all block rows; all
   // 6 face slices for cubes) for resolve-writeback invalidation.
-  uint32_t guest_bytes = uint32_t(std::min<size_t>(
-      is_cube ? size_t(face_stride) * 6
-              : size_t(pitch_blocks_aligned) * blocks_h * bpb,
-      max_src_bytes));
+  uint32_t guest_bytes = watched_base_bytes;
   ++upload_count_;
   uint32_t entry_mip_base = entry_mip_bytes ? mip_addr : 0;
   // Frame-trace recording: a replay must restore this texture's guest bytes

@@ -12,9 +12,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -41,8 +43,8 @@ class MetalTextureCache {
   // device: id<MTLDevice>. view_heap: id<MTLBuffer> of IRDescriptorTableEntry
   // (the bindless view heap owned by the command processor). Slot 0 is reserved
   // for the null texture.
-  MetalTextureCache(void* device, Memory* memory, void* view_heap,
-                    uint32_t view_heap_slots);
+  MetalTextureCache(void* device, Memory* memory, SharedMemory* shared_memory,
+                    void* view_heap, uint32_t view_heap_slots);
   ~MetalTextureCache();
 
   // Returns the bindless view-heap slot for the texture described by `fetch`,
@@ -107,6 +109,11 @@ class MetalTextureCache {
   // frame's GPU work completes). Returns entries evicted.
   uint32_t InvalidateRange(uint32_t base, uint32_t length);
 
+  // Trace playback restores guest ranges explicitly and calls InvalidateRange
+  // for each restore. It doesn't need live CPU page watching, which would add
+  // a redundant protected-page copy to every replayed texture upload.
+  void SetTracePlayback();
+
   // Frame-trace recording: uploads record their guest source ranges into an
   // open trace; WriteAllCachedTexturesToTrace records the ranges of WARM
   // entries (they won't re-upload during the traced frame, but the replay
@@ -132,12 +139,26 @@ class MetalTextureCache {
   }
 
  private:
+  static void SharedMemoryGlobalWatchCallback(
+      const global_unique_lock_type& global_lock, void* context,
+      uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
+  void QueueInvalidation(uint32_t address_first, uint32_t address_last);
+  void DrainPendingInvalidations();
+
   // Allocates a bindless view-heap slot, reusing a reclaimed one if available.
   // Returns 0 (the null slot) if the heap is exhausted.
   uint32_t AllocateSlot();
 
   void* device_;   // id<MTLDevice>, not owned.
   Memory* memory_;  // not owned.
+  SharedMemory* shared_memory_;  // not owned.
+  SharedMemory::GlobalWatchHandle shared_memory_watch_ = nullptr;
+  std::mutex pending_invalidations_mutex_;
+  // Guest CPU writes may arrive from any emulated thread. The shared-memory
+  // callback only queues their ranges; cache mutation and Metal object
+  // retirement stay on the GPU thread in DrainPendingInvalidations.
+  std::vector<std::pair<uint32_t, uint32_t>> pending_invalidations_;
+  bool trace_playback_ = false;
   void* view_heap_;  // id<MTLBuffer>, not owned.
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
   uint32_t view_heap_slots_;
