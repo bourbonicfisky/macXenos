@@ -172,6 +172,47 @@ kernel void pack_8888_msaa(
                                        (b.w << 24);
 }
 
+// The LIVE MSAA representation (task 3.3 wiring): a real texture2d_ms
+// attachment. Materialize is a fullscreen RENDER pass with sample-rate shading
+// -- [[sample_id]] forces per-sample execution, so each sample writes its own
+// canonical word. This is the only way to get per-sample data into a true MSAA
+// attachment (compute can't per-sample-write one).
+struct FsOut { float4 pos [[position]]; };
+vertex FsOut xe_fs_vs(uint vid [[vertex_id]]) {
+  FsOut o;
+  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+  o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+  return o;
+}
+fragment float4 materialize_ms_fs(FsOut in [[stage_in]],
+                                 device const uint* canonical [[buffer(0)]],
+                                 constant SurfaceParams& sp [[buffer(1)]],
+                                 uint sid [[sample_id]]) {
+  uint2 p = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(p.x, p.y, sp.base, sp.pitch, sp.msaa, 0u, 0u,
+                                   sid);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  return float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
+                (w >> 24) & 0xFFu) * (1.0 / 255.0);
+}
+// Pack from the real MSAA attachment: compute reads each sample via
+// texture2d_ms.read(coord, sample). This is the live resolve/ownership pack.
+kernel void pack_ms(texture2d_ms<float, access::read> tex [[texture(0)]],
+                   device uint* canonical [[buffer(0)]],
+                   constant SurfaceParams& sp [[buffer(1)]],
+                   uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples()) return;
+  float4 c = tex.read(uint2(gid.x, gid.y), gid.z);
+  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2;
+  if (idx < sp.words) canonical[idx] = b.x | (b.y << 8) | (b.z << 16) |
+                                       (b.w << 24);
+}
+
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
                       device uint* out [[buffer(1)]],
                       constant uint& mode [[buffer(2)]],
@@ -610,6 +651,96 @@ struct MetalCompute {
           out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
     return out;
   }
+
+  // The LIVE representation round-trip: materialize canonical into a REAL MSAA
+  // texture via a sample-rate render pass, then pack it back via compute
+  // (texture2d_ms.read per sample). Proves the exact technique the cache wiring
+  // will use to render per-sample and resolve samples. `values` indexed
+  // [(y*w+x)*num_samples + s]; returns the re-packed words.
+  std::vector<uint32_t> RoundTripMsaaReal(uint32_t w, uint32_t h,
+                                          uint32_t num_samples,
+                                          const struct SurfaceParams& sp,
+                                          const std::vector<uint32_t>& values,
+                                          size_t canonical_bytes) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    auto seed_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
+      return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa, false,
+                                        0u, s) >> 2;
+    };
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          cwords[seed_offset(x, y, s)] = values[(y * w + x) * num_samples + s];
+    // Real MSAA attachment (private; MSAA can't be shared). Store all samples.
+    MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+    td.textureType = MTLTextureType2DMultisample;
+    td.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    td.width = w;
+    td.height = h;
+    td.sampleCount = num_samples;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> ms = [dev newTextureWithDescriptor:td];
+    REQUIRE(ms != nil);
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
+    rpd.vertexFunction = [lib newFunctionWithName:@"xe_fs_vs"];
+    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_ms_fs"];
+    rpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    rpd.rasterSampleCount = num_samples;
+    id<MTLRenderPipelineState> rps =
+        [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
+    REQUIRE(rps != nil);
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_ms"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    // Materialize: sample-rate render pass into the MSAA texture.
+    {
+      MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.colorAttachments[0].texture = ms;
+      rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+      rp.colorAttachments[0].storeAction = MTLStoreActionStore;  // keep samples
+      rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:rp];
+      [enc setRenderPipelineState:rps];
+      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    }
+    // Pack: compute reads each sample of the MSAA texture back to canonical.
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:pk];
+      [enc setTexture:ms atIndex:0];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      NSUInteger tw = pk.threadExecutionWidth;
+      NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h * num_samples);
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
+    return out;
+  }
 };
 
 // Mirror of the MSL EdramIn struct (std layout, 8 x uint32).
@@ -969,6 +1100,47 @@ TEST_CASE("Canonical per-sample MSAA materialize->pack keeps all samples",
                      uint32_t(xenos::kEdramSizeBytes / 4u)};
     auto out = mc.RoundTripMaterializeMsaa(cfg.w, cfg.h, cfg.samples, sp, values,
                                            xenos::kEdramSizeBytes);
+    uint32_t bad = 0;
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (out[i] != values[i]) {
+        if (bad < 8) WARN(cfg.name << " idx " << i << " expected " << values[i]
+                                   << " got " << out[i]);
+        ++bad;
+      }
+    }
+    INFO(cfg.name);
+    REQUIRE(bad == 0u);
+  }
+}
+
+// The LIVE technique proof (task 3.3 wiring precursor): render per-sample into a
+// REAL texture2d_ms attachment via sample-rate shading, then pack each sample
+// back via compute. This is exactly what the cache will do -- draws render into
+// a real MSAA attachment, resolves/ownership read individual samples -- so
+// proving the round-trip here de-risks the rendering technique before it
+// touches the draw path. Distinct per-sample seeds catch any sample loss.
+TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
+          "[l1][metal][msaa][live]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct Cfg { uint32_t w, h, base, msaa, samples; const char* name; } cfgs[] = {
+      {48, 24, 0, 1u, 2u, "2x"},
+      {48, 24, 0, 2u, 4u, "4x"},
+      {40, 16, 5, 2u, 4u, "4x base=5"},
+  };
+  for (const Cfg& cfg : cfgs) {
+    const uint32_t pitch = PitchFor(cfg.w, cfg.msaa, 0u);
+    std::vector<uint32_t> values(size_t(cfg.w) * cfg.h * cfg.samples);
+    for (uint32_t y = 0; y < cfg.h; ++y)
+      for (uint32_t x = 0; x < cfg.w; ++x)
+        for (uint32_t s = 0; s < cfg.samples; ++s)
+          values[(y * cfg.w + x) * cfg.samples + s] =
+              (uint32_t((y * cfg.w + x) * cfg.samples + s) * 2246822519u) ^
+              0x1234ABCDu;
+    SurfaceParams sp{cfg.base, pitch, cfg.msaa, 0u, 0u,
+                     uint32_t(xenos::kEdramSizeBytes / 4u)};
+    auto out = mc.RoundTripMsaaReal(cfg.w, cfg.h, cfg.samples, sp, values,
+                                    xenos::kEdramSizeBytes);
     uint32_t bad = 0;
     for (size_t i = 0; i < values.size(); ++i) {
       if (out[i] != values[i]) {
