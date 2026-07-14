@@ -327,12 +327,10 @@ void MetalRenderTargetCache::PerformTransfers(
         PerformCrossMsaaTransfer((__bridge const void*)cb, source, dest,
                                  transfer);
       } else if (dest_key.is_depth && !src_key.is_depth &&
-                 (source->pixel_format() == kColorFormat ||
-                  source->pixel_format() ==
-                      uint64_t(MTLPixelFormatRGBA16Float))) {
-        // Color (raw EDRAM bits in RGBA8 bytes or the RGBA16F host container
-        // for Xenos 7e3) reinterpreted as depth: unpack the 24-bit guest depth
-        // and write host D32F via a depth-only pass.
+                 source->pixel_format() == kColorFormat) {
+        // Color (raw EDRAM bits in a BGRA8 texture, e.g. the restored
+        // snapshot) reinterpreted as depth: unpack the 24-bit guest depth and
+        // write host D32F via a depth-only pass.
         if (blit) {
           [blit endEncoding];
           blit = nil;
@@ -345,9 +343,7 @@ void MetalRenderTargetCache::PerformTransfers(
                                           transfer.end_tiles,
                                           command_processor_.swap_count()};
       } else if (!dest_key.is_depth && src_key.is_depth &&
-                 (dest->pixel_format() == kColorFormat ||
-                  dest->pixel_format() ==
-                      uint64_t(MTLPixelFormatRGBA16Float))) {
+                 dest->pixel_format() == kColorFormat) {
         // Depth reinterpreted as raw-bits color (a color pass reuses tiles a
         // depth RT last owned). DEFAULT: SKIP — the color key keeps its own
         // previous content ("key-local EDRAM persistence"). Both consumer
@@ -360,11 +356,6 @@ void MetalRenderTargetCache::PerformTransfers(
         // (hardware-accurate raw reinterpret, for titles that genuinely
         // read them).
         static const bool s_d2c_real = std::getenv("XE_METAL_D2C_REAL");
-        // A 7e3 RT is a direct host expansion of the same 32-bit EDRAM word,
-        // so unlike the RGBA8 key-local-persistence workaround it must receive
-        // the actual depth+stencil word when it claims depth-owned tiles.
-        const bool dest_is_7e3 =
-            dest->pixel_format() == uint64_t(MTLPixelFormatRGBA16Float);
         // Same-frame ping-pong exception: this color key lent exactly these
         // tiles to that depth key THIS frame (Sonic's DoF pass writes a
         // packed motion-vector/CoC map as 4x depth bits over the blur
@@ -388,13 +379,13 @@ void MetalRenderTargetCache::PerformTransfers(
                    transfer.start_tiles, transfer.end_tiles);
           }
         }
-        if (s_d2c_real || pingpong_return || dest_is_7e3) {
+        if (s_d2c_real || pingpong_return) {
           if (blit) {
             [blit endEncoding];
             blit = nil;
           }
           PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
-                                      transfer, pingpong_return || dest_is_7e3);
+                                      transfer, pingpong_return);
         }
       } else if (!src_key.is_depth && !dest_key.is_depth &&
                  !src_key.Is64bpp() && !dest_key.Is64bpp() &&
@@ -957,7 +948,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
         uint start_tiles; uint end_tiles; uint is_float24; uint shifts;
-        uint stencil_bit; uint src_fmt; uint pad0; uint pad1;
+        uint stencil_bit; uint pad0; uint pad1; uint pad2;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_xfer_vs(uint vid [[vertex_id]]) {
@@ -979,40 +970,6 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
           mantissa = (mantissa << lzcnt) & 0xFFFFFu;
         }
         return as_type<float>(((exponent + 112u) << 23) | (mantissa << 3));
-      }
-      // Xenos 7e3 float channel -> its packed 10-bit representation.
-      static uint xe_f32_to_7e3(float f) {
-        if (!(f > 0.0)) { return 0u; }
-        if (f >= 31.875) { return 0x3FFu; }
-        uint u = as_type<uint>(f);
-        int e = int((u >> 23) & 0xFFu) - 124;
-        uint m = (u >> 16) & 0x7Fu;
-        uint round_bit = (u >> 15) & 1u;
-        if (e <= 0) {
-          uint shift = uint(1 - e);
-          if (shift > 8u) { return 0u; }
-          uint full = 0x80u | m;
-          uint r = (full >> shift) + ((full >> (shift - 1u)) & 1u);
-          return min(r, 0x7Fu);
-        }
-        m += round_bit;
-        if (m > 0x7Fu) {
-          m = 0u;
-          ++e;
-          if (e >= 8) { return 0x3FFu; }
-        }
-        return (uint(e) << 7) | m;
-      }
-      static uint xe_color_word(float4 c, uint fmt) {
-        if (fmt == 2u) {
-          return xe_f32_to_7e3(c.r) | (xe_f32_to_7e3(c.g) << 10) |
-                 (xe_f32_to_7e3(c.b) << 20) |
-                 (uint(round(saturate(c.a) * 3.0)) << 30);
-        }
-        return uint(round(saturate(c.r) * 255.0)) |
-               (uint(round(saturate(c.g) * 255.0)) << 8) |
-               (uint(round(saturate(c.b) * 255.0)) << 16) |
-               (uint(round(saturate(c.a) * 255.0)) << 24);
       }
       fragment DepthOut xe_xfer_c2d_fs(VOut in [[stage_in]],
                                        texture2d<float> src [[texture(0)]],
@@ -1037,7 +994,11 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
-        uint bits = xe_color_word(c, p.src_fmt);
+        // Canonical channel order: logical .r holds guest byte0 (RGBA8
+        // storage == guest EDRAM bytes); depth in bits [8,32).
+        uint bits = uint(round(c.r * 255.0)) | (uint(round(c.g * 255.0)) << 8) |
+                    (uint(round(c.b * 255.0)) << 16) |
+                    (uint(round(c.a * 255.0)) << 24);
         uint d24 = bits >> 8;
         DepthOut o;
         // Canonical unorm24 decode (pixel_formats.xesli XeUNorm24To32):
@@ -1071,7 +1032,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
-        uint stencil = xe_color_word(c, p.src_fmt) & 0xFFu;
+        uint stencil = uint(round(c.r * 255.0));  // guest byte0 = stencil.
         if ((stencil & p.stencil_bit) == 0u) {
           discard_fragment();
         }
@@ -1140,17 +1101,14 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
-    uint32_t stencil_bit, src_fmt, pad0, pad1;
+    uint32_t stencil_bit, pad0, pad1, pad2;
   } params{source->key().base_tiles,     source->key().GetPitchTiles(),
            dest->key().base_tiles,       dest->key().GetPitchTiles(),
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(dest->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
            dxs | (dys << 4) | (sxs << 8) | (sys << 12),
-           0,
-           source->pixel_format() == uint64_t(MTLPixelFormatRGBA16Float) ? 2u
-                                                                         : 0u,
-           0, 0};
+           0, 0, 0, 0};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = (__bridge id<MTLTexture>)dest->texture();
   pass.depthAttachment.loadAction = MTLLoadActionLoad;
@@ -1201,7 +1159,6 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
       struct XferParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
         uint start_tiles; uint end_tiles; uint is_float24; uint shifts;
-        uint dst_fmt;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_xfer_d2c_vs(uint vid [[vertex_id]]) {
@@ -1223,18 +1180,6 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
           u -= 0x38000000u;
         }
         return (u >> 3) & 0xFFFFFFu;
-      }
-      static float xe_7e3_to_f32(uint v) {
-        v &= 0x3FFu;
-        if (v == 0u) { return 0.0; }
-        uint m = v & 0x7Fu;
-        int e = int(v >> 7);
-        if (e == 0) {
-          int lz = clz(m) - 24;
-          e = 1 - lz;
-          m = (m << uint(lz)) & 0x7Fu;
-        }
-        return as_type<float>(uint(e + 124) << 23 | (m << 16));
       }
       fragment float4 xe_xfer_d2c_fs(VOut in [[stage_in]],
                                      depth2d<float> src [[texture(0)]],
@@ -1279,10 +1224,6 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
                            ? (sten.read(sp).r & 0xFFu)
                            : ((p.shifts & 0x10000u) != 0u ? 0xFFu : 0u);
         uint bits = (p.shifts & 0x20000u) != 0u ? ((d24 << 8) | stencil) : 0u;
-        if (p.dst_fmt == 2u) {
-          return float4(xe_7e3_to_f32(bits), xe_7e3_to_f32(bits >> 10),
-                        xe_7e3_to_f32(bits >> 20), float(bits >> 30) / 3.0);
-        }
         return float4(float(bits & 0xFFu), float((bits >> 8) & 0xFFu),
                       float((bits >> 16) & 0xFFu), float((bits >> 24) & 0xFFu)) /
                255.0;
@@ -1296,36 +1237,20 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
              err ? err.localizedDescription.UTF8String : "?");
       return;
     }
-    id<MTLFunction> vs = [lib newFunctionWithName:@"xe_xfer_d2c_vs"];
-    id<MTLFunction> fs = [lib newFunctionWithName:@"xe_xfer_d2c_fs"];
-    auto make_pipeline = [&](MTLPixelFormat format,
-                             const char* name) -> void* {
-      MTLRenderPipelineDescriptor* d =
-          [[MTLRenderPipelineDescriptor alloc] init];
-      d.vertexFunction = vs;
-      d.fragmentFunction = fs;
-      d.colorAttachments[0].pixelFormat = format;
-      NSError* pipeline_error = nil;
-      id<MTLRenderPipelineState> ps =
-          [device newRenderPipelineStateWithDescriptor:d error:&pipeline_error];
-      if (!ps) {
-        XELOGE("MetalRenderTargetCache: d2c {} pipeline failed: {}", name,
-               pipeline_error ? pipeline_error.localizedDescription.UTF8String
-                              : "?");
-        return nullptr;
-      }
-      return (__bridge_retained void*)ps;
-    };
-    transfer_d2c_pipeline_ = make_pipeline((MTLPixelFormat)kColorFormat,
-                                           "RGBA8");
-    transfer_d2c_7e3_pipeline_ =
-        make_pipeline(MTLPixelFormatRGBA16Float, "7e3");
+    MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction = [lib newFunctionWithName:@"xe_xfer_d2c_vs"];
+    d.fragmentFunction = [lib newFunctionWithName:@"xe_xfer_d2c_fs"];
+    d.colorAttachments[0].pixelFormat = (MTLPixelFormat)kColorFormat;
+    id<MTLRenderPipelineState> ps =
+        [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) {
+      XELOGE("MetalRenderTargetCache: d2c transfer pipeline failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    transfer_d2c_pipeline_ = (__bridge_retained void*)ps;
   }
-  const bool dest_is_7e3 =
-      dest->pixel_format() == uint64_t(MTLPixelFormatRGBA16Float);
-  void* pipeline =
-      dest_is_7e3 ? transfer_d2c_7e3_pipeline_ : transfer_d2c_pipeline_;
-  if (!pipeline) {
+  if (!transfer_d2c_pipeline_) {
     return;
   }
   uint32_t sxs, sys, dxs, dys;
@@ -1348,21 +1273,20 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   struct XferParams {
     uint32_t src_base, src_pitch, dst_base, dst_pitch;
     uint32_t start_tiles, end_tiles, is_float24, shifts;
-    uint32_t dst_fmt;
   } params{source->key().base_tiles,     source->key().GetPitchTiles(),
            dest->key().base_tiles,       dest->key().GetPitchTiles(),
            transfer.start_tiles,         transfer.end_tiles,
            uint32_t(source->key().GetDepthFormat() ==
                     xenos::DepthRenderTargetFormat::kD24FS8),
-           dxs | (dys << 4) | (sxs << 8) | (sys << 12) | encode_bits,
-           dest_is_7e3 ? 2u : 0u};
+           dxs | (dys << 4) | (sxs << 8) | (sys << 12) | encode_bits};
   MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)dest->texture();
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
       [cb renderCommandEncoderWithDescriptor:pass];
-  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  transfer_d2c_pipeline_];
   enc.label = @"rtcache:transfer-d2c";
   id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
   [enc setFragmentTexture:src_tex atIndex:0];
@@ -1856,16 +1780,13 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     if (!owner || owner->key().is_depth) {
       continue;
     }
-    // Same-format owners copy through. Auto-exposure resolves both
-    // k_8_8_8_8 and k_2_10_10_10_FLOAT EDRAM into k_32_FLOAT destinations;
-    // the pass's float4 read into an R32Float attachment keeps .r, matching
-    // the hardware's numeric color-to-float conversion. The latter is Sonic's
-    // luminance pyramid — skipping its RGBA16F owner left the snapshot zero,
-    // latching the live exposure feedback at white.
+    // Same-format owners copy through; the one CONVERSION the guest leans on
+    // (auto-exposure) is k_8_8_8_8 EDRAM resolved to a k_32_FLOAT dest — the
+    // pass's float4 read into an R32Float attachment keeps .r, the hardware
+    // rule. Other cross-format pairs stay skipped until a title demands them.
     if (owner->pixel_format() != dest_pixel_format &&
         !(dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
-          (owner->pixel_format() == kColorFormat ||
-           owner->pixel_format() == uint64_t(MTLPixelFormatRGBA16Float)))) {
+          owner->pixel_format() == kColorFormat)) {
       static uint32_t s_skip_convert_logs = 0;
       if (s_skip_convert_logs++ < 8) {
         XELOGW(
