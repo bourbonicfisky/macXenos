@@ -147,6 +147,12 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
     canonical_materialize_pipeline_ = nullptr;
   }
+  if (canonical_pack_pipeline_) {
+    id<MTLComputePipelineState> released =
+        (__bridge_transfer id<MTLComputePipelineState>)canonical_pack_pipeline_;
+    (void)released;
+    canonical_pack_pipeline_ = nullptr;
+  }
   if (canonical_materialize_library_) {
     id<MTLLibrary> released =
         (__bridge_transfer id<MTLLibrary>)canonical_materialize_library_;
@@ -2289,6 +2295,21 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
                           (w >> 24) & 0xFFu) * (1.0 / 255.0);
         tex.write(c, gid);
       }
+      // Inverse: pack an RGBA8Unorm texel back to its canonical EDRAM word.
+      kernel void pack_8888(
+          texture2d<float, access::read> tex [[texture(0)]],
+          device uint* canonical [[buffer(0)]],
+          constant SurfaceParams& sp [[buffer(1)]],
+          uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+        uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch,
+                                         sp.msaa, 0u, 0u, 0u);
+        uint idx = off >> 2;
+        if (idx >= sp.words) return;
+        float4 c = tex.read(gid);
+        uint4 b = uint4(round(c * 255.0)) & 0xFFu;
+        canonical[idx] = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+      }
     )METAL";
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
@@ -2305,12 +2326,17 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   id<MTLComputePipelineState> pso = [device
       newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_8888"]
                                     error:&err];
-  if (!pso) {
-    XELOGE("MetalRenderTargetCache: canonical materialize pipeline failed: {}",
+  id<MTLComputePipelineState> pack = [device
+      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_8888"]
+                                    error:&err];
+  if (!pso || !pack) {
+    XELOGE("MetalRenderTargetCache: canonical materialize/pack pipeline "
+           "failed: {}",
            err ? err.localizedDescription.UTF8String : "?");
     return false;
   }
   canonical_materialize_pipeline_ = (__bridge_retained void*)pso;
+  canonical_pack_pipeline_ = (__bridge_retained void*)pack;
   return true;
 }
 
@@ -2350,6 +2376,16 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
   id<MTLBuffer> sp_buf = [device newBufferWithBytes:&sp
                                             length:sizeof(sp)
                                            options:MTLResourceStorageModeShared];
+  // Second canonical buffer for the pack (materialize -> pack) leg; shared so
+  // the round-trip result can be compared against the snapshot on the CPU.
+  id<MTLBuffer> canonical2 =
+      [device newBufferWithLength:kCanonicalEdramSize
+                          options:MTLResourceStorageModeShared];
+  id<MTLComputePipelineState> pack_pso =
+      (__bridge id<MTLComputePipelineState>)canonical_pack_pipeline_;
+  if (canonical2) {
+    std::memset(canonical2.contents, 0, kCanonicalEdramSize);
+  }
   id<MTLCommandQueue> queue = [device newCommandQueue];
   id<MTLCommandBuffer> cb = [queue commandBuffer];
   {
@@ -2362,6 +2398,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
                      size:kCanonicalEdramSize];
     [blit endEncoding];
   }
+  NSUInteger tw = pso.threadExecutionWidth;
+  NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
   {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     enc.label = @"rtcache:canonical-materialize-selfcheck";
@@ -2369,8 +2407,17 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:canonical offset:0 atIndex:0];
     [enc setTexture:scratch atIndex:0];
     [enc setBuffer:sp_buf offset:0 atIndex:1];
-    NSUInteger tw = pso.threadExecutionWidth;
-    NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
+    [enc dispatchThreads:MTLSizeMake(width, height, 1)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [enc endEncoding];
+  }
+  if (canonical2 && pack_pso) {
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    enc.label = @"rtcache:canonical-pack-selfcheck";
+    [enc setComputePipelineState:pack_pso];
+    [enc setTexture:scratch atIndex:0];
+    [enc setBuffer:canonical2 offset:0 atIndex:0];
+    [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
@@ -2381,6 +2428,38 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     XELOGW("MetalRenderTargetCache: canonical self-check GPU error: {}",
            cb.error.localizedDescription.UTF8String);
     return;
+  }
+  // Pack leg: materialize -> pack must reproduce the original snapshot words for
+  // every pixel the surface covers (offsets in [0, covered)); proves the pack
+  // direction (host attachment -> canonical) on real trace data.
+  if (canonical2) {
+    const uint32_t* got_words = static_cast<const uint32_t*>(canonical2.contents);
+    const uint32_t* snap_words = static_cast<const uint32_t*>(snapshot);
+    uint64_t pack_bad = 0;
+    size_t pack_first = 0;
+    uint32_t tiles_per_row = width / xenos::kEdramTileWidthSamples;
+    uint32_t covered_tiles =
+        tiles_per_row * (height / xenos::kEdramTileHeightSamples);
+    size_t covered_words =
+        size_t(covered_tiles) * xenos::kEdramTileWidthSamples *
+        xenos::kEdramTileHeightSamples;
+    for (size_t i = 0; i < covered_words; ++i) {
+      if (got_words[i] != snap_words[i]) {
+        if (pack_bad == 0) pack_first = i;
+        ++pack_bad;
+      }
+    }
+    if (pack_bad == 0) {
+      XELOGI(
+          "MetalRenderTargetCache: canonical materialize+pack round-trip PASS "
+          "({} words == snapshot)",
+          covered_words);
+    } else {
+      XELOGE(
+          "MetalRenderTargetCache: canonical materialize+pack round-trip FAIL: "
+          "{} / {} words differ, first at word {}",
+          pack_bad, covered_words, pack_first);
+    }
   }
   // Compare the materialized scratch bytes against the legacy CPU reorder. Both
   // are raw snapshot bytes per pixel, so byte-equality is the exact invariant.

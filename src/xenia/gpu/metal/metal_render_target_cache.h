@@ -268,6 +268,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // lazily; retained. See metal_kernel_conformance_test.mm for the proven kernel.
   void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.
   void* canonical_materialize_pipeline_ = nullptr;   // id<MTLComputePipelineState>.
+  void* canonical_pack_pipeline_ = nullptr;          // id<MTLComputePipelineState>.
   bool EnsureCanonicalMaterializePipeline();
   // Gated, ADDITIVE self-check run during snapshot restore: populate the
   // canonical buffer from the (already physical-order) snapshot, materialize it
