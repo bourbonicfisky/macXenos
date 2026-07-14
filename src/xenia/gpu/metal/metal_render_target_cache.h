@@ -200,11 +200,23 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     ~MetalRenderTarget();
     void* texture() const { return texture_; }  // id<MTLTexture>, retained.
     uint64_t pixel_format() const { return pixel_format_; }
+    // Optional real MSAA attachment (sample-accurate path, gated). When set,
+    // draws render per-sample into this and resolve to texture_ (the 1x
+    // companion) so the collapsed consumers stay unchanged; the samples feed
+    // the canonical EDRAM. nullptr / sample_count 1 on the default path.
+    void* msaa_texture() const { return msaa_texture_; }
+    uint32_t sample_count() const { return sample_count_; }
+    void set_msaa_texture(void* texture, uint32_t sample_count) {
+      msaa_texture_ = texture;
+      sample_count_ = sample_count;
+    }
 
    private:
     MetalRenderTargetCache& cache_;
     void* texture_;
     uint64_t pixel_format_;
+    void* msaa_texture_ = nullptr;  // id<MTLTexture>, retained when set.
+    uint32_t sample_count_ = 1;
   };
 
   // Clears a freshly created texture to zero (color) / the far value (depth)

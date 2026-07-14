@@ -85,6 +85,14 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
         texture_);
     texture_ = nullptr;
   }
+  if (msaa_texture_) {
+    cache_.deferred_texture_releases_.emplace_back(
+        MetalCommandProcessor::S7TagsOff()
+            ? 0
+            : cache_.command_processor_.CurrentEncodingSubmission(),
+        msaa_texture_);
+    msaa_texture_ = nullptr;
+  }
 }
 
 MetalRenderTargetCache::MetalRenderTargetCache(
@@ -231,8 +239,39 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   XELOGI("MetalRenderTargetCache: new RT {} ({}x{} mtl={})", key.GetDebugName(),
          width, height, uint32_t(pixel_format));
   ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
-  return new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
-                               uint64_t(pixel_format));
+  auto* rt = new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
+                                   uint64_t(pixel_format));
+  // Sample-accurate path (gated): an MSAA color/depth key gets a REAL MSAA
+  // companion so draws can render per-sample and feed the canonical EDRAM. The
+  // 1x texture above stays as the resolve target / collapsed-consumer view, so
+  // this allocation alone changes nothing until BeginFrameEncoder renders into
+  // it. Depth MSAA must match color MSAA within a pass, so both are allocated.
+  if (sample_edram_enabled_ &&
+      key.msaa_samples != xenos::MsaaSamples::k1X) {
+    uint32_t sample_count =
+        uint32_t(1) << uint32_t(key.msaa_samples);  // k2X->2, k4X->4
+    MTLTextureDescriptor* mdesc = [[MTLTextureDescriptor alloc] init];
+    mdesc.textureType = MTLTextureType2DMultisample;
+    mdesc.pixelFormat = pixel_format;
+    mdesc.width = width;
+    mdesc.height = height;
+    mdesc.sampleCount = sample_count;
+    mdesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    mdesc.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> msaa_texture = [device newTextureWithDescriptor:mdesc];
+    if (msaa_texture) {
+      msaa_texture.label =
+          [NSString stringWithFormat:@"xe_rt_msaa_%ux", sample_count];
+      rt->set_msaa_texture((__bridge_retained void*)msaa_texture, sample_count);
+      XELOGI(
+          "MetalRenderTargetCache: RT {} gets a {}x MSAA companion ({}x{})",
+          key.GetDebugName(), sample_count, width, height);
+    } else {
+      XELOGW("MetalRenderTargetCache: {}x MSAA companion alloc failed for {}",
+             sample_count, key.GetDebugName());
+    }
+  }
+  return rt;
 }
 
 bool MetalRenderTargetCache::Update(bool is_rasterization_done,
