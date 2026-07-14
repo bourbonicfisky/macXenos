@@ -227,13 +227,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void PerformCrossMsaaTransfer(const void* command_buffer,
                                 RenderTarget* source_rt, RenderTarget* dest_rt,
                                 const Transfer& transfer);
-  // Raw-EDRAM-bits color (BGRA8, e.g. the restored snapshot) -> D32F depth:
+  // Raw-EDRAM-bits color (RGBA8 bytes or RGBA16F-hosted 7e3) -> D32F depth:
   // in-shader tile remap + guest 24-bit depth decode (unorm24 or 20e4 float).
   void PerformColorToDepthTransfer(const void* command_buffer,
                                    RenderTarget* source_rt,
                                    RenderTarget* dest_rt,
                                    const Transfer& transfer);
-  // The mirror: D32F depth encoded back to guest 24-bit raw bits as BGRA8.
+  // The mirror: D32F depth encoded back to guest 24-bit raw bits as RGBA8
+  // bytes or decoded into the RGBA16F host container used for Xenos 7e3.
   // real_bits: encode the actual depth bits (same-frame c2d->d2c ping-pong
   // bit transport — Sonic's packed vector map). Without it the shader
   // writes ZERO words (the JC2 key-local-persistence default); the env
@@ -279,7 +280,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_x2x_depth_pipeline_ = nullptr; // id<MTLRenderPipelineState>.
   void* transfer_x2x_depth_state_ = nullptr;    // id<MTLDepthStencilState>.
   std::unordered_map<uint64_t, void*> transfer_x2x_color_pipelines_;
-  void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
+  void* transfer_d2c_pipeline_ =
+      nullptr;  // RGBA8 id<MTLRenderPipelineState>.
+  void* transfer_d2c_7e3_pipeline_ =
+      nullptr;  // RGBA16F id<MTLRenderPipelineState>.
   // Color reinterpret transfers (BGRA8 <-> R32Float containers of one word).
   void* transfer_reint_c2f_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* transfer_reint_f2c_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
