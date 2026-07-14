@@ -99,6 +99,31 @@ MetalRenderTargetCache::~MetalRenderTargetCache() { Shutdown(); }
 
 bool MetalRenderTargetCache::Initialize() {
   InitializeCommon();
+  // Canonical per-sample EDRAM buffer (source of truth for the sample-accurate
+  // path). Allocated only when gated on, so the default collapsed path stays
+  // byte-for-byte unchanged. See openspec implement-sample-accurate-metal-edram
+  // task 2.1.
+  sample_edram_enabled_ = std::getenv("XE_METAL_SAMPLE_EDRAM") != nullptr;
+  if (sample_edram_enabled_) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    id<MTLBuffer> buffer =
+        [device newBufferWithLength:kCanonicalEdramSize
+                            options:MTLResourceStorageModePrivate];
+    if (!buffer) {
+      XELOGE(
+          "MetalRenderTargetCache: canonical EDRAM allocation failed ({} MB); "
+          "falling back to the collapsed path",
+          kCanonicalEdramSize / (1024 * 1024));
+      sample_edram_enabled_ = false;
+    } else {
+      buffer.label = @"xe_canonical_edram";
+      canonical_edram_ = (__bridge_retained void*)buffer;
+      XELOGI(
+          "MetalRenderTargetCache: canonical per-sample EDRAM enabled "
+          "({} MB private buffer)",
+          kCanonicalEdramSize / (1024 * 1024));
+    }
+  }
   return true;
 }
 
@@ -111,6 +136,23 @@ void MetalRenderTargetCache::Shutdown() {
     }
   }
   resolve_snapshots_.clear();
+  if (canonical_edram_) {
+    id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)canonical_edram_;
+    (void)released;
+    canonical_edram_ = nullptr;
+  }
+  if (canonical_materialize_pipeline_) {
+    id<MTLComputePipelineState> released =
+        (__bridge_transfer id<MTLComputePipelineState>)canonical_materialize_pipeline_;
+    (void)released;
+    canonical_materialize_pipeline_ = nullptr;
+  }
+  if (canonical_materialize_library_) {
+    id<MTLLibrary> released =
+        (__bridge_transfer id<MTLLibrary>)canonical_materialize_library_;
+    (void)released;
+    canonical_materialize_library_ = nullptr;
+  }
   presentable_color_target_ = nullptr;
   // Destroys all MetalRenderTargets (retiring their textures to the deferred
   // list), then the common ownership state; drain LAST so those retirements
@@ -2200,6 +2242,177 @@ uint32_t MetalRenderTargetCache::GetTraceDrawIndexForOwnershipTrace() const {
   return command_processor_.trace_draw_index();
 }
 
+bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
+  if (canonical_materialize_pipeline_) {
+    return true;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!canonical_materialize_library_) {
+    // Mirror of the proven materialize_8888 kernel (see the L1 conformance
+    // suite). Reads a canonical EDRAM word at each pixel's physical offset and
+    // decodes the four byte lanes to an RGBA8Unorm texel. SurfaceParams.pad
+    // carries the canonical word count so an over-dispatch can't read OOB.
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, words; };
+      inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
+                                        uint msaa, uint is_depth, uint fmt_log2,
+                                        uint sample) {
+        uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u,
+                                         msaa >= 1u ? 1u : 0u);
+        s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
+        uint2 tsize32 = uint2(80u, 16u);
+        uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
+        uint2 toff = s / tsize;
+        uint b = base + toff.y * pitch + toff.x;
+        s -= toff * tsize;
+        if (is_depth != 0u) {
+          uint half_w = tsize.x >> 1u;
+          s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
+        }
+        uint address = b * (tsize32.x * tsize32.y) +
+                       ((s.y * tsize.x + s.x) << fmt_log2);
+        return address << 2;
+      }
+      kernel void materialize_8888(
+          device const uint* canonical [[buffer(0)]],
+          texture2d<float, access::write> tex [[texture(0)]],
+          constant SurfaceParams& sp [[buffer(1)]],
+          uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+        uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch,
+                                         sp.msaa, 0u, 0u, 0u);
+        uint idx = off >> 2;
+        uint w = (idx < sp.words) ? canonical[idx] : 0u;
+        float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
+                          (w >> 24) & 0xFFu) * (1.0 / 255.0);
+        tex.write(c, gid);
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: canonical materialize library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    canonical_materialize_library_ = (__bridge_retained void*)lib;
+  }
+  id<MTLLibrary> lib = (__bridge id<MTLLibrary>)canonical_materialize_library_;
+  NSError* err = nil;
+  id<MTLComputePipelineState> pso = [device
+      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_8888"]
+                                    error:&err];
+  if (!pso) {
+    XELOGE("MetalRenderTargetCache: canonical materialize pipeline failed: {}",
+           err ? err.localizedDescription.UTF8String : "?");
+    return false;
+  }
+  canonical_materialize_pipeline_ = (__bridge_retained void*)pso;
+  return true;
+}
+
+void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
+    const void* snapshot, const void* reordered_reference, uint32_t width,
+    uint32_t height, uint32_t row_bytes) {
+  if (!EnsureCanonicalMaterializePipeline()) {
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pso =
+      (__bridge id<MTLComputePipelineState>)canonical_materialize_pipeline_;
+  // The snapshot is tile-major physical order == the canonical layout, so
+  // populating canonical is a straight copy (blit staging -> private buffer).
+  id<MTLBuffer> staging =
+      [device newBufferWithBytes:snapshot
+                          length:kCanonicalEdramSize
+                         options:MTLResourceStorageModeShared];
+  // Scratch host attachment: RGBA8Unorm, shared so we can read it back and
+  // compare. tiles-per-row = width/80 gives the pitch in tiles (16 for 1280).
+  MTLTextureDescriptor* td = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                   width:width
+                                  height:height
+                               mipmapped:NO];
+  td.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModeShared;
+  id<MTLTexture> scratch = [device newTextureWithDescriptor:td];
+  if (!staging || !scratch) {
+    return;
+  }
+  struct SurfaceParamsCPU {
+    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
+  } sp{0u, width / xenos::kEdramTileWidthSamples, 0u, 0u, 0u,
+       kCanonicalEdramSize / 4u};
+  id<MTLBuffer> sp_buf = [device newBufferWithBytes:&sp
+                                            length:sizeof(sp)
+                                           options:MTLResourceStorageModeShared];
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  {
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    blit.label = @"rtcache:canonical-populate";
+    [blit copyFromBuffer:staging
+             sourceOffset:0
+                 toBuffer:canonical
+        destinationOffset:0
+                     size:kCanonicalEdramSize];
+    [blit endEncoding];
+  }
+  {
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    enc.label = @"rtcache:canonical-materialize-selfcheck";
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:canonical offset:0 atIndex:0];
+    [enc setTexture:scratch atIndex:0];
+    [enc setBuffer:sp_buf offset:0 atIndex:1];
+    NSUInteger tw = pso.threadExecutionWidth;
+    NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
+    [enc dispatchThreads:MTLSizeMake(width, height, 1)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [enc endEncoding];
+  }
+  [cb commit];
+  [cb waitUntilCompleted];
+  if (cb.error) {
+    XELOGW("MetalRenderTargetCache: canonical self-check GPU error: {}",
+           cb.error.localizedDescription.UTF8String);
+    return;
+  }
+  // Compare the materialized scratch bytes against the legacy CPU reorder. Both
+  // are raw snapshot bytes per pixel, so byte-equality is the exact invariant.
+  std::unique_ptr<uint8_t[]> got(new uint8_t[size_t(row_bytes) * height]);
+  [scratch getBytes:got.get()
+        bytesPerRow:row_bytes
+         fromRegion:MTLRegionMake2D(0, 0, width, height)
+        mipmapLevel:0];
+  const uint8_t* ref = static_cast<const uint8_t*>(reordered_reference);
+  size_t total = size_t(row_bytes) * height;
+  size_t first_bad = total;
+  uint64_t bad_count = 0;
+  for (size_t i = 0; i < total; ++i) {
+    if (got[i] != ref[i]) {
+      if (first_bad == total) first_bad = i;
+      ++bad_count;
+    }
+  }
+  if (bad_count == 0) {
+    XELOGI(
+        "MetalRenderTargetCache: canonical materialize self-check PASS "
+        "({}x{}, {} bytes byte-exact vs legacy reorder)",
+        width, height, total);
+  } else {
+    XELOGE(
+        "MetalRenderTargetCache: canonical materialize self-check FAIL: {} / {} "
+        "bytes differ, first at byte {} (px {},{})",
+        bad_count, total, first_bad, (first_bad / 4) % width,
+        (first_bad / 4) / width);
+  }
+}
+
 void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   // Full-EDRAM 1280-pitch k_8_8_8_8 render target owning all tiles.
   RenderTarget* full_rt = PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
@@ -2271,6 +2484,12 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   [blit endEncoding];
   XELOGI("MetalRenderTargetCache: EDRAM snapshot restored into {}",
          full_rt->key().GetDebugName());
+  // Gated, additive: exercise + self-check the canonical materialize path on
+  // this real snapshot without touching the restored RT above.
+  if (sample_edram_enabled_ && canonical_edram_) {
+    RunCanonicalRestoreSelfCheck(snapshot, reordered.get(), width, height,
+                                 row_bytes);
+  }
 }
 
 }  // namespace metal

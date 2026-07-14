@@ -253,6 +253,32 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
 
+  // --- Canonical per-sample EDRAM (openspec implement-sample-accurate-metal-edram).
+  // A raw 10 MB private buffer in Xenos physical sample order is the intended
+  // source of truth for every color/depth/stencil sample across 1x/2x/4x, so
+  // ownership transfers/resolves can reconstruct samples the collapsed host
+  // targets discard. Gated OFF by default behind XE_METAL_SAMPLE_EDRAM=1 until
+  // the materialize/pack + authority-tracking paths are proven; the existing
+  // collapsed path stays the rollback. Phase 1 only allocates/lifecycles it
+  // (task 2.1) — no visible rendering change.
+  static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
+  bool sample_edram_enabled_ = false;
+  void* canonical_edram_ = nullptr;  // id<MTLBuffer>, private, retained.
+  // Materialize pipeline (canonical words -> host RGBA8Unorm attachment). Built
+  // lazily; retained. See metal_kernel_conformance_test.mm for the proven kernel.
+  void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.
+  void* canonical_materialize_pipeline_ = nullptr;   // id<MTLComputePipelineState>.
+  bool EnsureCanonicalMaterializePipeline();
+  // Gated, ADDITIVE self-check run during snapshot restore: populate the
+  // canonical buffer from the (already physical-order) snapshot, materialize it
+  // into a scratch texture, and verify byte-for-byte against the legacy CPU
+  // reorder. No effect on the restored render target — proves the canonical
+  // materialize path on real trace data. Logs PASS or the first divergence.
+  void RunCanonicalRestoreSelfCheck(const void* snapshot,
+                                    const void* reordered_reference,
+                                    uint32_t width, uint32_t height,
+                                    uint32_t row_bytes);
+
   void* presentable_color_target_ = nullptr;  // borrowed from a render target.
 
   // Reinterpret transfer pipelines (lazily built; retained).
