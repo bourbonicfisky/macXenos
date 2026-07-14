@@ -101,6 +101,39 @@ kernel void unpack_words(device const Coord* coords [[buffer(0)]],
   out[i] = canonical[off >> 2];
 }
 
+// MATERIALIZE (canonical -> host attachment) for k_8_8_8_8 into an RGBA8Unorm
+// texture: decode the EDRAM word's four byte lanes to normalized float4 and
+// write the resolved pixel. 1x/single-sample. This is the exact 3.1 operation
+// the cache will run to reconstruct a host render target from canonical EDRAM.
+kernel void materialize_8888(device const uint* canonical [[buffer(0)]],
+                            texture2d<float, access::write> tex [[texture(0)]],
+                            constant SurfaceParams& sp [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint w = canonical[off >> 2];
+  float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
+                    (w >> 24) & 0xFFu) * (1.0 / 255.0);
+  tex.write(c, gid);
+}
+
+// PACK (host attachment -> canonical) for k_8_8_8_8: the inverse -- read the
+// RGBA8Unorm texel, re-encode the four byte lanes into the EDRAM word. Exact
+// for 8-bit unorm (byte/255 rounds back to byte). materialize->pack == identity.
+kernel void pack_8888(texture2d<float, access::read> tex [[texture(0)]],
+                     device uint* canonical [[buffer(0)]],
+                     constant SurfaceParams& sp [[buffer(1)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  float4 c = tex.read(gid);
+  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
+  uint w = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  canonical[off >> 2] = w;
+}
+
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
                       device uint* out [[buffer(1)]],
                       constant uint& mode [[buffer(2)]],
@@ -377,6 +410,86 @@ struct MetalCompute {
     REQUIRE(cb.error == nil);
     std::vector<uint32_t> out(n);
     std::memcpy(out.data(), out_buf.contents, n * sizeof(uint32_t));
+    return out;
+  }
+
+  // Materialize k_8_8_8_8 canonical words into a host RGBA8Unorm texture, then
+  // pack the texture back to canonical -- the round-trip the cache's 3.1
+  // materialize/pack will perform. `words` holds one word per (y*w+x); returns
+  // the re-packed words read back from the canonical buffer at the same offsets.
+  std::vector<uint32_t> RoundTripMaterialize8888(uint32_t w, uint32_t h,
+                                                 const struct SurfaceParams& sp,
+                                                 const std::vector<uint32_t>& words,
+                                                 size_t canonical_bytes) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    // Seed canonical at each pixel's physical offset (CPU oracle offset).
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch,
+                                                  sp.msaa, false, 0u, 0u);
+        cwords[off >> 2] = words[y * w + x];
+      }
+    }
+    MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:w
+                                    height:h
+                                 mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> mat = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_8888"]
+                                      error:&err];
+    REQUIRE(mat != nil);
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_8888"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    auto dispatch2d = [&](id<MTLComputeCommandEncoder> enc,
+                          id<MTLComputePipelineState> pso) {
+      [enc setComputePipelineState:pso];
+      NSUInteger tw = pso.threadExecutionWidth;
+      NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, 1)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    };
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      dispatch2d(enc, mat);
+      [enc endEncoding];
+    }
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      dispatch2d(enc, pk);
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch,
+                                                  sp.msaa, false, 0u, 0u);
+        out[y * w + x] = cwords[off >> 2];
+      }
+    }
     return out;
   }
 };
@@ -667,6 +780,44 @@ TEST_CASE("Canonical EDRAM pack->unpack round-trips a surface's samples",
       }
     }
     INFO(cfg.name);
+    REQUIRE(bad == 0u);
+  }
+}
+
+// The materialize/pack precursor to the live cache wiring (task 3.1): seed
+// canonical k_8_8_8_8 words, materialize them into a host RGBA8Unorm texture,
+// pack the texture back to canonical, and require the round-trip is the
+// identity for arbitrary 32-bit words. Exercises real compute texture
+// read/write + the byte-lane encode/decode + canonical addressing together --
+// the exact machinery MetalRenderTargetCache will port, proven headlessly.
+TEST_CASE("Canonical k_8_8_8_8 materialize->pack round-trips through a texture",
+          "[l1][metal][materialize]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct Cfg { uint32_t w, h, base; } cfgs[] = {
+      {64, 32, 0}, {80, 16, 0}, {130, 40, 9}};
+  for (const Cfg& cfg : cfgs) {
+    const uint32_t pitch = PitchFor(cfg.w, 0u, 0u);  // 1x color 32bpp
+    std::vector<uint32_t> words(size_t(cfg.w) * cfg.h);
+    for (size_t i = 0; i < words.size(); ++i) {
+      // Arbitrary 32-bit words: every byte lane must survive (RGBA8Unorm stores
+      // each byte exactly, so any word round-trips iff the plumbing is correct).
+      words[i] = uint32_t(i * 2654435761u) ^ 0x0F1E2D3Cu;
+    }
+    SurfaceParams sp{cfg.base, pitch, 0u, 0u, 0u, 0u};
+    auto out = mc.RoundTripMaterialize8888(cfg.w, cfg.h, sp, words,
+                                           xenos::kEdramSizeBytes);
+    uint32_t bad = 0;
+    for (size_t i = 0; i < words.size(); ++i) {
+      if (out[i] != words[i]) {
+        if (bad < 8) {
+          WARN("pixel " << (i % cfg.w) << "," << (i / cfg.w) << " expected "
+                        << words[i] << " got " << out[i]);
+        }
+        ++bad;
+      }
+    }
+    INFO("w=" << cfg.w << " h=" << cfg.h << " base=" << cfg.base);
     REQUIRE(bad == 0u);
   }
 }
