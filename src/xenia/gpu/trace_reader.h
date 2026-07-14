@@ -95,6 +95,8 @@ class TraceReader {
   const TraceHeader* header() const {
     return reinterpret_cast<const TraceHeader*>(trace_data_);
   }
+  uint32_t bundle_format_version() const { return bundle_format_version_; }
+  std::string_view metadata_json() const { return metadata_json_; }
 
   const Frame* frame(int n) const { return &frames_[n]; }
   int frame_count() const { return int(frames_.size()); }
@@ -111,6 +113,8 @@ class TraceReader {
   std::unique_ptr<MappedMemory> mmap_;
   const uint8_t* trace_data_ = nullptr;
   size_t trace_size_ = 0;
+  uint32_t bundle_format_version_ = 0;
+  std::string_view metadata_json_;
   std::vector<Frame> frames_;
 };
 

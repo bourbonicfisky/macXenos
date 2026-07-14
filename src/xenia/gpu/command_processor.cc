@@ -22,6 +22,9 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/xxhash.h"
+#if XE_PLATFORM_MAC
+#include <sys/clonefile.h>
+#endif
 #include "xenia/emulator.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
@@ -430,6 +433,37 @@ bool HashFileXXH3(const std::filesystem::path& path, uint64_t* hash_out) {
   }
 }
 
+std::filesystem::path TraceBundlePath(const std::filesystem::path& trace_path) {
+  std::filesystem::path path = trace_path;
+  path.replace_extension(kTraceBundleExtension);
+  return path;
+}
+
+std::filesystem::path TraceMetadataPath(
+    const std::filesystem::path& trace_path) {
+  std::filesystem::path path = trace_path;
+  path += ".meta.json";
+  return path;
+}
+
+bool CloneOrCopyFile(const std::filesystem::path& source,
+                     const std::filesystem::path& destination,
+                     bool* cloned_out) {
+  *cloned_out = false;
+#if XE_PLATFORM_MAC
+  if (clonefile(source.c_str(), destination.c_str(), 0) == 0) {
+    *cloned_out = true;
+    return true;
+  }
+  // clonefile may leave a destination after a filesystem-specific failure.
+  std::error_code remove_error;
+  std::filesystem::remove(destination, remove_error);
+#endif
+  std::error_code copy_error;
+  return std::filesystem::copy_file(
+      source, destination, std::filesystem::copy_options::none, copy_error);
+}
+
 }  // namespace
 
 // This should be written completely differently with support for different
@@ -625,10 +659,25 @@ bool CommandProcessor::OpenTrace(const std::filesystem::path& path,
                                  uint32_t title_id, uint32_t frame_index,
                                  bool streaming) {
   std::filesystem::path output_path = path;
-  std::error_code exists_error;
-  for (uint32_t duplicate = 2;
-       std::filesystem::exists(output_path, exists_error) && !exists_error;
-       ++duplicate) {
+  for (uint32_t duplicate = 2;; ++duplicate) {
+    std::error_code exists_error;
+    bool artifact_exists = std::filesystem::exists(output_path, exists_error);
+    if (!exists_error && !artifact_exists) {
+      artifact_exists =
+          std::filesystem::exists(TraceBundlePath(output_path), exists_error);
+    }
+    if (!exists_error && !artifact_exists) {
+      artifact_exists =
+          std::filesystem::exists(TraceMetadataPath(output_path), exists_error);
+    }
+    if (exists_error) {
+      XELOGE("Failed to check GPU trace output path {}: {}",
+             xe::path_to_utf8(output_path), exists_error.message());
+      return false;
+    }
+    if (!artifact_exists) {
+      break;
+    }
     output_path = path.parent_path() /
                   fmt::format("{}_{}{}", path.stem().string(), duplicate,
                               path.extension().string());
@@ -657,7 +706,34 @@ void CommandProcessor::CloseTrace() {
     return;
   }
   trace_writer_.Close();
-  WriteTraceMetadata();
+
+  std::error_code size_error;
+  uintmax_t trace_size =
+      std::filesystem::file_size(active_trace_path_, size_error);
+  if (size_error) {
+    trace_size = 0;
+  }
+  uint64_t trace_hash = 0;
+  bool trace_hash_valid =
+      !size_error && HashFileXXH3(active_trace_path_, &trace_hash);
+  std::string metadata =
+      BuildTraceMetadataJson(trace_size, trace_hash_valid, trace_hash);
+  bool bundle_written =
+      trace_hash_valid &&
+      WriteTraceBundle(metadata, trace_size, trace_hash);
+  bool metadata_written = WriteTraceMetadata(metadata);
+  if (!trace_hash_valid) {
+    XELOGE("Failed to hash completed GPU trace {}; v2 bundle not written",
+           xe::path_to_utf8(active_trace_path_));
+  }
+  XELOGI("GPU trace complete: legacy={} portable={} metadata={}",
+         xe::path_to_utf8(active_trace_path_),
+         bundle_written
+             ? xe::path_to_utf8(TraceBundlePath(active_trace_path_))
+             : "ERROR",
+         metadata_written
+             ? xe::path_to_utf8(TraceMetadataPath(active_trace_path_))
+             : "ERROR");
   active_trace_path_.clear();
   active_trace_title_id_ = 0;
   active_trace_frame_index_ = 0;
@@ -667,17 +743,10 @@ void CommandProcessor::CloseTrace() {
   active_trace_started_utc_.clear();
 }
 
-void CommandProcessor::WriteTraceMetadata() const {
+std::string CommandProcessor::BuildTraceMetadataJson(
+    uintmax_t trace_size, bool trace_hash_valid, uint64_t trace_hash) const {
   if (active_trace_path_.empty()) {
-    return;
-  }
-  std::filesystem::path meta_path = active_trace_path_;
-  meta_path += ".meta.json";
-  FILE* f = xe::filesystem::OpenFile(meta_path, "wb");
-  if (!f) {
-    XELOGE("Failed to open GPU trace metadata {}",
-           xe::path_to_utf8(meta_path));
-    return;
+    return std::string();
   }
 
 #if defined(NDEBUG)
@@ -715,23 +784,20 @@ void CommandProcessor::WriteTraceMetadata() const {
   if (device_json.empty()) {
     device_json = "null";
   }
-  std::error_code size_error;
-  uintmax_t trace_size =
-      std::filesystem::file_size(active_trace_path_, size_error);
-  if (size_error) {
-    trace_size = 0;
-  }
-  uint64_t trace_hash = 0;
-  bool trace_hash_valid = HashFileXXH3(active_trace_path_, &trace_hash);
   std::string trace_hash_json =
       trace_hash_valid ? fmt::format("\"{:016X}\"", trace_hash) : "null";
+  std::filesystem::path bundle_path = TraceBundlePath(active_trace_path_);
+  std::filesystem::path metadata_path = TraceMetadataPath(active_trace_path_);
 
-  std::string meta = fmt::format(
+  return fmt::format(
       "{{\n"
-      "  \"schema\": 1,\n"
+      "  \"schema\": 2,\n"
       "  \"complete\": true,\n"
       "  \"trace_format_version\": {},\n"
+      "  \"bundle_format_version\": {},\n"
       "  \"trace_file\": \"{}\",\n"
+      "  \"bundle_file\": \"{}\",\n"
+      "  \"metadata_file\": \"{}\",\n"
       "  \"trace_size_bytes\": {},\n"
       "  \"trace_xxh3_64\": {},\n"
       "  \"capture_kind\": \"{}\",\n"
@@ -748,9 +814,11 @@ void CommandProcessor::WriteTraceMetadata() const {
       "  \"build\": {{\"commit\": \"{}\", \"branch\": \"{}\", "
       "\"config\": \"{}\"}}\n"
       "}}\n",
-      kTraceFormatVersion,
-      JsonEscape(active_trace_path_.filename().string()), trace_size,
-      trace_hash_json, active_trace_streaming_ ? "stream" : "single-frame",
+      kTraceFormatVersion, kTraceBundleFormatVersion,
+      JsonEscape(active_trace_path_.filename().string()),
+      JsonEscape(bundle_path.filename().string()),
+      JsonEscape(metadata_path.filename().string()), trace_size, trace_hash_json,
+      active_trace_streaming_ ? "stream" : "single-frame",
       active_trace_frame_index_, JsonEscape(active_trace_started_utc_),
       active_trace_title_id_, JsonEscape(title_name), JsonEscape(title_version),
       active_trace_width_, active_trace_height_, HostPlatformClass(),
@@ -758,10 +826,75 @@ void CommandProcessor::WriteTraceMetadata() const {
       JsonEscape(renderer_api), translation_layer, JsonEscape(host_api),
       device_json, JsonEscape(build_commit), JsonEscape(build_branch),
       build_config);
-  fwrite(meta.data(), 1, meta.size(), f);
+}
+
+bool CommandProcessor::WriteTraceMetadata(std::string_view metadata) const {
+  std::filesystem::path meta_path = TraceMetadataPath(active_trace_path_);
+  FILE* f = xe::filesystem::OpenFile(meta_path, "wb");
+  if (!f) {
+    XELOGE("Failed to open GPU trace metadata {}",
+           xe::path_to_utf8(meta_path));
+    return false;
+  }
+  bool written = fwrite(metadata.data(), 1, metadata.size(), f) ==
+                 metadata.size();
   fclose(f);
-  XELOGI("GPU trace complete: {} (metadata: {})",
-         xe::path_to_utf8(active_trace_path_), xe::path_to_utf8(meta_path));
+  if (!written) {
+    XELOGE("Failed to write GPU trace metadata {}",
+           xe::path_to_utf8(meta_path));
+  }
+  return written;
+}
+
+bool CommandProcessor::WriteTraceBundle(std::string_view metadata,
+                                        uintmax_t trace_size,
+                                        uint64_t trace_hash) const {
+  std::filesystem::path bundle_path = TraceBundlePath(active_trace_path_);
+  bool cloned = false;
+  if (!CloneOrCopyFile(active_trace_path_, bundle_path, &cloned)) {
+    XELOGE("Failed to create portable GPU trace bundle {}",
+           xe::path_to_utf8(bundle_path));
+    return false;
+  }
+  FILE* f = xe::filesystem::OpenFile(bundle_path, "ab");
+  if (!f) {
+    XELOGE("Failed to append portable GPU trace bundle {}",
+           xe::path_to_utf8(bundle_path));
+    std::error_code remove_error;
+    std::filesystem::remove(bundle_path, remove_error);
+    return false;
+  }
+
+  TraceBundleSection metadata_section = {};
+  metadata_section.type = TraceBundleSectionType::kMetadataJson;
+  metadata_section.offset = trace_size;
+  metadata_section.length = metadata.size();
+  metadata_section.xxh3_64 = XXH3_64bits(metadata.data(), metadata.size());
+  TraceBundleFooter footer = {};
+  footer.magic = kTraceBundleMagic;
+  footer.version = kTraceBundleFormatVersion;
+  footer.footer_size = sizeof(footer);
+  footer.legacy_trace_size = trace_size;
+  footer.legacy_trace_xxh3_64 = trace_hash;
+  footer.section_table_offset = trace_size + metadata.size();
+  footer.section_count = 1;
+
+  bool written =
+      fwrite(metadata.data(), 1, metadata.size(), f) == metadata.size() &&
+      fwrite(&metadata_section, 1, sizeof(metadata_section), f) ==
+          sizeof(metadata_section) &&
+      fwrite(&footer, 1, sizeof(footer), f) == sizeof(footer);
+  fclose(f);
+  if (!written) {
+    XELOGE("Failed to finalize portable GPU trace bundle {}",
+           xe::path_to_utf8(bundle_path));
+    std::error_code remove_error;
+    std::filesystem::remove(bundle_path, remove_error);
+    return false;
+  }
+  XELOGI("Portable GPU trace bundle created via {}: {}",
+         cloned ? "APFS clone" : "file copy", xe::path_to_utf8(bundle_path));
+  return true;
 }
 
 void CommandProcessor::RestoreRegisters(uint32_t first_register,

@@ -17,6 +17,9 @@ namespace gpu {
 
 // Trace file extension.
 static constexpr char kTraceExtension[] = "xtr";
+// Portable trace bundle extension. A v2 bundle contains an exact legacy v1
+// trace payload followed by optional typed sections and a fixed footer.
+static constexpr char kTraceBundleExtension[] = "xtr2";
 
 // Any byte changes to the files should bump this version.
 // Only builds with matching versions will work.
@@ -24,6 +27,40 @@ static constexpr char kTraceExtension[] = "xtr";
 // anything that changes what is recorded into the files (new GPU
 // command processor commands, etc).
 constexpr uint32_t kTraceFormatVersion = 1;
+
+// The portable bundle is deliberately a container around the unchanged v1
+// command stream. This lets captures ship a self-contained metadata-bearing
+// artifact while retaining a byte-identical .xtr for older readers.
+constexpr uint32_t kTraceBundleFormatVersion = 2;
+constexpr uint64_t kTraceBundleMagic = 0x4C444E4232525458ull;  // XTR2BNDL
+
+enum class TraceBundleSectionType : uint32_t {
+  kMetadataJson = 1,
+};
+
+struct TraceBundleSection {
+  TraceBundleSectionType type;
+  uint32_t flags;
+  uint64_t offset;
+  uint64_t length;
+  uint64_t xxh3_64;
+};
+static_assert(sizeof(TraceBundleSection) == 32);
+
+// Stored at the very end of an .xtr2 file so the preceding v1 trace can be an
+// APFS clone of the legacy .xtr without rewriting or relocating its payload.
+// The section table immediately precedes this footer.
+struct TraceBundleFooter {
+  uint64_t magic;
+  uint32_t version;
+  uint32_t footer_size;
+  uint64_t legacy_trace_size;
+  uint64_t legacy_trace_xxh3_64;
+  uint64_t section_table_offset;
+  uint32_t section_count;
+  uint32_t reserved;
+};
+static_assert(sizeof(TraceBundleFooter) == 48);
 
 // Trace file header identifying information about the trace.
 // This must be positioned at the start of the file and must only occur once.

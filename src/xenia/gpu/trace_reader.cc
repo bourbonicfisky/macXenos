@@ -9,12 +9,15 @@
 
 #include "xenia/gpu/trace_reader.h"
 
+#include <cstring>
+
 #include "third_party/snappy/snappy.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/trace_protocol.h"
 #include "xenia/memory.h"
@@ -40,7 +43,94 @@ bool TraceReader::Open(const std::string_view path) {
   }
 
   trace_data_ = reinterpret_cast<const uint8_t*>(mmap_->data());
-  trace_size_ = mmap_->size();
+  size_t mapped_size = mmap_->size();
+  if (mapped_size < sizeof(TraceHeader)) {
+    XELOGE("Trace file is too small to contain a header");
+    Close();
+    return false;
+  }
+  trace_size_ = mapped_size;
+
+  // A v2 bundle starts with an exact v1 trace and ends with its section table
+  // and footer. Detect it from the footer rather than changing the command
+  // stream header, preserving byte identity with the legacy sibling.
+  bool bundle_extension =
+      path.size() >= 5 && path.substr(path.size() - 5) == ".xtr2";
+  bool bundle_found = false;
+  if (mapped_size >= sizeof(TraceHeader) + sizeof(TraceBundleFooter)) {
+    TraceBundleFooter footer = {};
+    size_t footer_offset = mapped_size - sizeof(footer);
+    std::memcpy(&footer, trace_data_ + footer_offset, sizeof(footer));
+    if (footer.magic == kTraceBundleMagic) {
+      bundle_found = true;
+      if (footer.version != kTraceBundleFormatVersion ||
+          footer.footer_size != sizeof(TraceBundleFooter) ||
+          footer.legacy_trace_size < sizeof(TraceHeader) ||
+          footer.legacy_trace_size > footer_offset ||
+          footer.section_table_offset < footer.legacy_trace_size ||
+          footer.section_table_offset > footer_offset ||
+          footer.section_count >
+              (footer_offset - footer.section_table_offset) /
+                  sizeof(TraceBundleSection) ||
+          footer.section_table_offset +
+                  uint64_t(footer.section_count) * sizeof(TraceBundleSection) !=
+              footer_offset) {
+        XELOGE("Portable trace bundle footer is invalid");
+        Close();
+        return false;
+      }
+
+      uint64_t legacy_hash =
+          XXH3_64bits(trace_data_, size_t(footer.legacy_trace_size));
+      if (legacy_hash != footer.legacy_trace_xxh3_64) {
+        XELOGE(
+            "Portable trace bundle legacy payload hash mismatch (expected "
+            "{:016X}, got {:016X})",
+            footer.legacy_trace_xxh3_64, legacy_hash);
+        Close();
+        return false;
+      }
+
+      for (uint32_t i = 0; i < footer.section_count; ++i) {
+        TraceBundleSection section = {};
+        std::memcpy(&section,
+                    trace_data_ + footer.section_table_offset +
+                        size_t(i) * sizeof(section),
+                    sizeof(section));
+        if (section.offset < footer.legacy_trace_size ||
+            section.offset > footer.section_table_offset ||
+            section.length > footer.section_table_offset - section.offset) {
+          XELOGE("Portable trace bundle section {} is out of bounds", i);
+          Close();
+          return false;
+        }
+        uint64_t section_hash =
+            XXH3_64bits(trace_data_ + section.offset, size_t(section.length));
+        if (section_hash != section.xxh3_64) {
+          XELOGE("Portable trace bundle section {} hash mismatch", i);
+          Close();
+          return false;
+        }
+        if (section.type == TraceBundleSectionType::kMetadataJson) {
+          metadata_json_ = std::string_view(
+              reinterpret_cast<const char*>(trace_data_ + section.offset),
+              size_t(section.length));
+        }
+      }
+      if (metadata_json_.empty()) {
+        XELOGE("Portable trace bundle has no metadata JSON section");
+        Close();
+        return false;
+      }
+      bundle_format_version_ = footer.version;
+      trace_size_ = size_t(footer.legacy_trace_size);
+    }
+  }
+  if (bundle_extension && !bundle_found) {
+    XELOGE("Portable trace bundle footer is missing");
+    Close();
+    return false;
+  }
 
   // Verify version.
   auto header = reinterpret_cast<const TraceHeader*>(trace_data_);
@@ -54,6 +144,10 @@ bool TraceReader::Open(const std::string_view path) {
   }
 
   XELOGI("Mapped {}b trace from {}", trace_size_, path);
+  if (bundle_format_version_) {
+    XELOGI("    Bundle: v{} ({}b metadata)", bundle_format_version_,
+           metadata_json_.size());
+  }
   XELOGI("   Version: {}", header->version);
   auto commit_str = std::string(header->build_commit_sha,
                                 xe::countof(header->build_commit_sha));
@@ -66,9 +160,12 @@ bool TraceReader::Open(const std::string_view path) {
 }
 
 void TraceReader::Close() {
+  frames_.clear();
   mmap_.reset();
   trace_data_ = nullptr;
   trace_size_ = 0;
+  bundle_format_version_ = 0;
+  metadata_json_ = {};
 }
 
 void TraceReader::ParseTrace() {

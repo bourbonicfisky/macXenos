@@ -17,6 +17,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -553,8 +554,9 @@ class CommandProcessor {
   uint32_t last_swap_width_ = 0;
   uint32_t last_swap_height_ = 0;
 
-  // A trace is finalized separately from TraceWriter::Close so an adjacent
-  // provenance sidecar can be emitted after the binary file is complete.
+  // A trace is finalized separately from TraceWriter::Close so the portable
+  // v2 bundle and adjacent provenance sidecar can be emitted after the legacy
+  // v1 binary is complete.
   std::filesystem::path active_trace_path_;
   uint32_t active_trace_title_id_ = 0;
   uint32_t active_trace_frame_index_ = 0;
@@ -568,7 +570,12 @@ class CommandProcessor {
   bool OpenTrace(const std::filesystem::path& path, uint32_t title_id,
                  uint32_t frame_index, bool streaming);
   void CloseTrace();
-  void WriteTraceMetadata() const;
+  std::string BuildTraceMetadataJson(uintmax_t trace_size,
+                                     bool trace_hash_valid,
+                                     uint64_t trace_hash) const;
+  bool WriteTraceMetadata(std::string_view metadata) const;
+  bool WriteTraceBundle(std::string_view metadata, uintmax_t trace_size,
+                        uint64_t trace_hash) const;
 
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;
