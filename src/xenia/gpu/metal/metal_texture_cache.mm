@@ -78,14 +78,20 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
     case xenos::TextureFormat::k_32_FLOAT:
       // Raw f32 words (the resolve dest format of the luminance pyramid).
       return {true, false, 4, 2, 1, MTLPixelFormatR32Float};
+    case xenos::TextureFormat::k_16_16_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_16_16_FLOAT:
       // 64bpp RGBA16F. Sonic's upscale draw reads its 1x1 EXPOSURE and a
       // 220x180 HDR buffer with this — the NULL fetch fed the tonemap a
       // garbage exposure (white-out candidate). Guest halfwords swap with
       // k8in16 (SwapEndian handles 2-byte units across the 8-byte block).
+      // EXPAND is the same half-float storage, with filtering semantics that
+      // don't alter the upload representation (Red Dead's full-frame HDR
+      // chain declares its resolved RGBA16F surfaces through this alias).
       return {true, false, 8, 3, 1, MTLPixelFormatRGBA16Float};
+    case xenos::TextureFormat::k_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_FLOAT:
       return {true, false, 4, 2, 1, MTLPixelFormatRG16Float};
+    case xenos::TextureFormat::k_16_EXPAND:
     case xenos::TextureFormat::k_16_FLOAT:
       return {true, false, 2, 1, 1, MTLPixelFormatR16Float};
     case xenos::TextureFormat::k_4_4_4_4:

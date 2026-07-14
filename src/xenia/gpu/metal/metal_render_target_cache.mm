@@ -1676,7 +1676,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, uint32_t span_msaa_samples,
     void* dest_snapshot, uint64_t dest_pixel_format, uint32_t width,
-    uint32_t height, uint32_t dest_y_offset) {
+    uint32_t height, uint32_t dest_y_offset, float exp_bias_scale) {
   if (!command_buffer || !dest_snapshot) {
     return false;
   }
@@ -1699,7 +1699,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
       struct Params {
         uint src_base; uint src_pitch; uint span_base; uint span_pitch;
         uint start_tiles; uint end_tiles; uint y_offset; uint shifts;
-        uint tile_w; uint pad1; uint pad2; uint pad3;
+        uint tile_w; float exp_bias_scale; uint pad2; uint pad3;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_rcp_vs(uint vid [[vertex_id]]) {
@@ -1733,7 +1733,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
         if (sp.x >= src.get_width() || sp.y >= src.get_height()) {
           discard_fragment();
         }
-        return src.read(sp, 0);
+        return src.read(sp, 0) * p.exp_bias_scale;
       }
     )METAL";
     NSError* err = nil;
@@ -1780,13 +1780,19 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     if (!owner || owner->key().is_depth) {
       continue;
     }
-    // Same-format owners copy through; the one CONVERSION the guest leans on
-    // (auto-exposure) is k_8_8_8_8 EDRAM resolved to a k_32_FLOAT dest — the
-    // pass's float4 read into an R32Float attachment keeps .r, the hardware
-    // rule. Other cross-format pairs stay skipped until a title demands them.
-    if (owner->pixel_format() != dest_pixel_format &&
-        !(dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
-          owner->pixel_format() == kColorFormat)) {
+    // Metal performs the numeric color conversion when the sampled float4 is
+    // written to the destination attachment. These are the host containers
+    // used by Xenos color RTs and resolve destinations; in particular, Red
+    // Dead resolves RGBA16F HDR EDRAM into its RGBA8 frontbuffer here.
+    auto numeric_color_format = [](uint64_t format) {
+      return format == kColorFormat ||
+             format == uint64_t(MTLPixelFormatR32Float) ||
+             format == uint64_t(MTLPixelFormatRG16Float) ||
+             format == uint64_t(MTLPixelFormatRGBA16Float) ||
+             format == uint64_t(MTLPixelFormatRGB10A2Unorm);
+    };
+    if (!numeric_color_format(owner->pixel_format()) ||
+        !numeric_color_format(dest_pixel_format)) {
       static uint32_t s_skip_convert_logs = 0;
       if (s_skip_convert_logs++ < 8) {
         XELOGW(
@@ -1816,7 +1822,9 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     struct Params {
       uint32_t src_base, src_pitch, span_base, span_pitch;
       uint32_t start_tiles, end_tiles, y_offset, shifts;
-      uint32_t tile_w, pad1, pad2, pad3;
+      uint32_t tile_w;
+      float exp_bias_scale;
+      uint32_t pad2, pad3;
     } params{owner_base,
              owner_pitch,
              span_base,
@@ -1826,7 +1834,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
              dest_y_offset,
              oxs | (oys << 4) | (oxs << 8) | (oys << 12),
              tile_w,
-             0,
+             exp_bias_scale,
              0,
              0};
     MTLRenderPassDescriptor* pass =

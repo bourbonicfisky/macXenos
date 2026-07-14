@@ -21,6 +21,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -1959,11 +1960,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       fill_texture_signs(vertex_shader);
       fill_texture_signs(pixel_shader);
     }
-    // Color exponent bias multiplies the pixel output; its neutral value is
-    // 1.0 (2^0), NOT 0 -- a zeroed struct here would multiply every color by
-    // zero and render pure black. (Full per-RT bias from RB_COLOR_INFO later.)
+    // Color exponent bias multiplies the pixel output. The host SNORM
+    // containers used for the fixed 16-bit formats represent -1..1 rather
+    // than Xenos's -32..32, so compensate exactly like the other host-RT
+    // backends do.
     for (uint32_t i = 0; i < 4; ++i) {
-      system_constants.color_exp_bias[i] = 1.0f;
+      auto color_info = regs.Get<reg::RB_COLOR_INFO>(
+          reg::RB_COLOR_INFO::rt_register_indices[i]);
+      int32_t color_exp_bias = color_info.color_exp_bias;
+      if (color_info.color_format ==
+              xenos::ColorRenderTargetFormat::k_16_16 ||
+          color_info.color_format ==
+              xenos::ColorRenderTargetFormat::k_16_16_16_16) {
+        color_exp_bias -= 5;
+      }
+      system_constants.color_exp_bias[i] =
+          std::ldexp(1.0f, color_exp_bias);
     }
     // Index/vfetch helpers used by the vertex shader. The endian here must
     // describe the index buffer AS BOUND, not the guest's: our draw paths
@@ -2485,10 +2497,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         geometry_primitive = IRRuntimePrimitiveTypePoint;
         break;
       case PipelineGeometryShader::kQuadList:
-        // The generated geometry shader declares line-with-adjacency so four
-        // guest vertices arrive as one primitive and are emitted as a
-        // triangle strip.
-        geometry_primitive = IRRuntimePrimitiveTypeLine;
+        // The generated geometry shader declares line-with-adjacency. Tell
+        // the runtime the full four-vertex primitive type too — passing the
+        // ordinary two-vertex line type makes its object stage assemble pairs
+        // while the mesh stage consumes groups of four, joining unrelated
+        // quad vertices into long wedges (Red Dead's foliage draw 705).
+        geometry_primitive = IRRuntimePrimitiveTypeLineWithAdj;
         break;
       case PipelineGeometryShader::kRectangleList:
       default:
@@ -3069,9 +3083,23 @@ bool MetalCommandProcessor::IssueCopy() {
         // ~0 (the black flicker/darkness). R32Float attachments keep .r of
         // the sampled float4 — exactly the hardware's 8888→k_32_FLOAT rule.
         uint64_t dest_pixel_format = src_pixel_format;
-        if (resolve_info.copy_dest_info.copy_dest_format ==
-            xenos::ColorFormat::k_32_FLOAT) {
-          dest_pixel_format = uint64_t(MTLPixelFormatR32Float);
+        switch (resolve_info.copy_dest_info.copy_dest_format) {
+          case xenos::ColorFormat::k_8_8_8_8:
+          case xenos::ColorFormat::k_8_8_8_8_A:
+          case xenos::ColorFormat::k_8_8_8_8_AS_16_16_16_16:
+            dest_pixel_format = MetalRenderTargetCache::kColorFormat;
+            break;
+          case xenos::ColorFormat::k_16_16_FLOAT:
+            dest_pixel_format = uint64_t(MTLPixelFormatRG16Float);
+            break;
+          case xenos::ColorFormat::k_16_16_16_16_FLOAT:
+            dest_pixel_format = uint64_t(MTLPixelFormatRGBA16Float);
+            break;
+          case xenos::ColorFormat::k_32_FLOAT:
+            dest_pixel_format = uint64_t(MTLPixelFormatR32Float);
+            break;
+          default:
+            break;
         }
         uint32_t strip_y_offset = 0;
         void* parent_snap = render_target_cache_->FindContainingSnapshot(
@@ -3111,19 +3139,15 @@ bool MetalCommandProcessor::IssueCopy() {
               int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
               parent_snap != nullptr, strip_y_offset);
         }
-        // A k_32_FLOAT resolve must NEVER join a color-format parent strip:
-        // "render in the snapshot's REAL format" then silently skips the
-        // 8888->float conversion the guest asked for, and the writeback
-        // scatters RAW COLOR BYTES where the game reads FLOATS. JC2's
-        // adjacent luminance-pyramid buffers coalesced this way — the
-        // exposure loop read 0x..8181 byte patterns as ~0.5 luminance
-        // (~300x too bright), crushing the scene to black and driving the
-        // temporal oscillator (crash x4 / overshoot x5 / ringing) that
-        // presented live as the black flicker and the seam's dark half.
+        // A resolve must NEVER join a parent strip of a different format:
+        // "render in the snapshot's REAL format" would silently skip the
+        // guest-requested conversion. JC2 exposed this first with an
+        // 8888->float luminance resolve whose raw color bytes were consumed
+        // as floats; Red Dead adds the inverse HDR-float->8888 frontbuffer
+        // case. Keep mixed-format destinations as independent snapshots.
         if (parent_snap &&
-            dest_pixel_format == uint64_t(MTLPixelFormatR32Float) &&
-            ((__bridge id<MTLTexture>)parent_snap).pixelFormat !=
-                MTLPixelFormatR32Float) {
+            uint64_t(((__bridge id<MTLTexture>)parent_snap).pixelFormat) !=
+                dest_pixel_format) {
           parent_snap = nullptr;
           strip_y_offset = 0;
         }
@@ -3164,7 +3188,11 @@ bool MetalCommandProcessor::IssueCopy() {
                         frame_command_buffer_, span_base, span_row_length,
                         span_rows, span_pitch,
                         uint32_t(resolve_info.color_edram_info.msaa_samples),
-                        snap, dest_pixel_format, rw, rh, strip_y_offset);
+                        snap, dest_pixel_format, rw, rh, strip_y_offset,
+                        std::ldexp(
+                            1.0f,
+                            int32_t(resolve_info.copy_dest_info
+                                        .copy_dest_exp_bias)));
         if (resolved && !parent_snap) {
           // Register (or re-register) every own-snapshot resolve: the entry's
           // dims must track the LAST resolve to the base — base reuse (JC2's

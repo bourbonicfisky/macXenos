@@ -111,7 +111,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                               uint32_t span_pitch, uint32_t span_msaa_samples,
                               void* dest_snapshot, uint64_t dest_pixel_format,
                               uint32_t width, uint32_t height,
-                              uint32_t dest_y_offset);
+                              uint32_t dest_y_offset, float exp_bias_scale);
 
   // Resolve CLEAR: writes the guest clear value into every render target
   // owning the span's tiles (fullscreen draw, in-shader tile-range discard).
