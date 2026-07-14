@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -102,6 +103,35 @@ kernel void k_unorm24(device const uint* in [[buffer(0)]],
   float r = float(n24 + (n24 >> 23)) * (1.0 / 16777216.0);
   out[i] = as_type<uint>(r);
 }
+
+// EDRAM tile/sample byte offset -- a faithful transcription of the SHIPPING
+// GPU addresser edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
+// wrap=false. Checked against the CPU oracle XeEdramSnapshotOffsetBytes so the
+// two independent implementations of the one addressing convention are proven
+// to agree (task 2.2). msaa: 0=1x,1=2x,2=4x (Xenos enum).
+struct EdramIn {
+  uint px, py, base, pitch, msaa, is_depth, fmt_log2, sample;
+};
+kernel void k_edram_offset(device const EdramIn* in [[buffer(0)]],
+                          device uint* out [[buffer(1)]],
+                          uint i [[thread_position_in_grid]]) {
+  EdramIn e = in[i];
+  uint2 s = uint2(e.px, e.py) << uint2(e.msaa >= 2u ? 1u : 0u,   // x doubles @4x
+                                       e.msaa >= 1u ? 1u : 0u);  // y doubles @2x
+  s += (uint2(e.sample, e.sample) >> uint2(1u, 0u)) & 1u;
+  uint2 tsize32 = uint2(80u, 16u);
+  uint2 tsize = tsize32 >> uint2(e.fmt_log2, 0u);
+  uint2 toff = s / tsize;
+  uint base = e.base + toff.y * e.pitch + toff.x;
+  s -= toff * tsize;
+  if (e.is_depth != 0u) {
+    uint half_w = tsize.x >> 1u;  // 'half' is a reserved MSL type name
+    s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
+  }
+  uint address = base * (tsize32.x * tsize32.y) +
+                 ((s.y * tsize.x + s.x) << e.fmt_log2);
+  out[i] = address << 2;
+}
 )MSL";
 
 // A minimal compute harness: compile the library once, dispatch one kernel over
@@ -112,6 +142,10 @@ struct MetalCompute {
   id<MTLCommandQueue> queue = nil;
   id<MTLLibrary> lib = nil;
 
+  // Returns false ONLY when there is no Metal device (a legitimate headless-CI
+  // skip). If a device IS present but the shared MSL library fails to compile,
+  // that is a HARD FAILURE, not a skip -- a broken kernel silently skipping
+  // every L1 case is precisely the false-green this ladder exists to prevent.
   bool Init() {
     dev = MTLCreateSystemDefaultDevice();
     if (!dev) return false;
@@ -121,9 +155,8 @@ struct MetalCompute {
                             options:nil
                               error:&err];
     if (!lib) {
-      WARN("MSL compile failed: " <<
+      FAIL("device present but MSL library failed to compile: " <<
            (err ? err.localizedDescription.UTF8String : "unknown"));
-      return false;
     }
     return true;
   }
@@ -166,6 +199,44 @@ struct MetalCompute {
     std::memcpy(out.data(), out_buf.contents, bytes);
     return out;
   }
+
+  // Runs `name` over `count` input elements of arbitrary struct type at
+  // buffer(0); returns `count` uint results from buffer(1).
+  std::vector<uint32_t> RunRaw(const char* name, const void* in_data,
+                               size_t in_bytes, size_t count) {
+    NSError* err = nil;
+    id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:name]];
+    id<MTLComputePipelineState> pso =
+        [dev newComputePipelineStateWithFunction:fn error:&err];
+    REQUIRE(pso != nil);
+    id<MTLBuffer> in_buf = [dev newBufferWithBytes:in_data
+                                            length:in_bytes
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out_buf =
+        [dev newBufferWithLength:count * sizeof(uint32_t)
+                         options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:in_buf offset:0 atIndex:0];
+    [enc setBuffer:out_buf offset:0 atIndex:1];
+    NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+    if (tg > count) tg = count ? count : 1;
+    [enc dispatchThreads:MTLSizeMake(count, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(count);
+    std::memcpy(out.data(), out_buf.contents, count * sizeof(uint32_t));
+    return out;
+  }
+};
+
+// Mirror of the MSL EdramIn struct (std layout, 8 x uint32).
+struct EdramIn {
+  uint32_t px, py, base, pitch, msaa, is_depth, fmt_log2, sample;
 };
 
 // Count and report the first few mismatches so a break is diagnosable.
@@ -263,6 +334,67 @@ TEST_CASE("Metal GpuSwap matches CPU oracle bit-for-bit", "[l1][metal][endian]")
     auto gpu = mc.Run("k_gpuswap", codes, /*has_mode=*/true, m.mode);
     REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
   }
+}
+
+// The redesign-critical one: the SHIPPING GPU addresser edram.xesli
+// XeEdramOffsetBytes (transcribed to MSL, resolution_scale=1, wrap=false) must
+// agree with the CPU oracle XeEdramSnapshotOffsetBytes for EVERY sample across
+// 1x/2x/4x, color/depth, 32/64bpp. This is the CPU<->GPU convention guarantee
+// the canonical per-sample EDRAM buffer's correctness rests on (task 2.2): if
+// the two disagree on where a sample lives, materialize/pack corrupts it.
+TEST_CASE("Metal EDRAM offset matches CPU oracle over the parameter space",
+          "[l1][metal][edram]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  std::vector<EdramIn> in;
+  // Sweep a spread of pixels through several tiles, every MSAA level with its
+  // valid sample count, color+depth, 32+64bpp, and a couple of base/pitch
+  // values. Equality holds for any inputs if the transcription is faithful, so
+  // physical validity isn't required -- only coverage of the branches.
+  const uint32_t bases[] = {0u, 7u};
+  const uint32_t pitches[] = {2u, 16u};
+  for (uint32_t msaa = 0; msaa <= 2; ++msaa) {
+    uint32_t nsamp = (msaa == 0) ? 1u : (msaa == 1) ? 2u : 4u;
+    for (uint32_t fmt = 0; fmt <= 1; ++fmt) {
+      for (uint32_t is_depth = 0; is_depth <= 1; ++is_depth) {
+        for (uint32_t base : bases) {
+          for (uint32_t pitch : pitches) {
+            for (uint32_t py = 0; py < 40; py += 3) {
+              for (uint32_t px = 0; px < 170; px += 3) {
+                for (uint32_t s = 0; s < nsamp; ++s) {
+                  in.push_back(
+                      {px, py, base, pitch, msaa, is_depth, fmt, s});
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  std::vector<uint32_t> cpu(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    const EdramIn& e = in[i];
+    cpu[i] = XeEdramSnapshotOffsetBytes(e.px, e.py, e.base, e.pitch, e.msaa,
+                                        e.is_depth != 0u, e.fmt_log2, e.sample);
+  }
+  auto gpu = mc.RunRaw("k_edram_offset", in.data(),
+                       in.size() * sizeof(EdramIn), in.size());
+  uint32_t bad = 0;
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (gpu[i] != cpu[i]) {
+      if (bad < 8) {
+        const EdramIn& e = in[i];
+        WARN("px=" << e.px << " py=" << e.py << " msaa=" << e.msaa
+                   << " depth=" << e.is_depth << " fmt=" << e.fmt_log2
+                   << " s=" << e.sample << " base=" << e.base
+                   << " pitch=" << e.pitch << " gpu=" << gpu[i]
+                   << " cpu=" << cpu[i]);
+      }
+      ++bad;
+    }
+  }
+  REQUIRE(bad == 0u);
 }
 
 }  // namespace test
