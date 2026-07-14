@@ -45,6 +45,62 @@ static const char* kKernelSource = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 
+// Shared addresser: edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
+// wrap=false. One MSL definition used by BOTH the offset-parity kernel and the
+// canonical pack/unpack kernels, so they cannot drift. msaa: 0=1x,1=2x,2=4x.
+inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
+                                  uint msaa, uint is_depth, uint fmt_log2,
+                                  uint sample) {
+  uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u,   // x doubles @4x
+                                   msaa >= 1u ? 1u : 0u);   // y doubles @2x
+  s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
+  uint2 tsize32 = uint2(80u, 16u);
+  uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
+  uint2 toff = s / tsize;
+  uint b = base + toff.y * pitch + toff.x;
+  s -= toff * tsize;
+  if (is_depth != 0u) {
+    uint half_w = tsize.x >> 1u;  // 'half' is a reserved MSL type name
+    s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
+  }
+  uint address = b * (tsize32.x * tsize32.y) +
+                 ((s.y * tsize.x + s.x) << fmt_log2);
+  return address << 2;
+}
+
+// Per-surface constants for pack/unpack (one surface per dispatch).
+struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, pad; };
+// One (pixel, sample) work item.
+struct Coord { uint px, py, sample; };
+
+// PACK: write each sample's raw 32-bit word into the canonical EDRAM buffer at
+// its physical offset. This is the word-level core of the resolve/ownership
+// materialize that will be wired into MetalRenderTargetCache behind the gate.
+kernel void pack_words(device const Coord* coords [[buffer(0)]],
+                      device const uint* values [[buffer(1)]],
+                      device uint* canonical [[buffer(2)]],
+                      constant SurfaceParams& sp [[buffer(3)]],
+                      uint i [[thread_position_in_grid]]) {
+  Coord c = coords[i];
+  uint off = xe_edram_offset_bytes(c.px, c.py, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, sp.fmt_log2, c.sample);
+  canonical[off >> 2] = values[i];  // off is bytes; >>2 -> word index
+}
+
+// UNPACK: read each sample back from the canonical buffer at its physical
+// offset. pack->unpack must be the identity (also re-proves address
+// injectivity on real hardware: a collision would clobber a word).
+kernel void unpack_words(device const Coord* coords [[buffer(0)]],
+                        device uint* out [[buffer(1)]],
+                        device const uint* canonical [[buffer(2)]],
+                        constant SurfaceParams& sp [[buffer(3)]],
+                        uint i [[thread_position_in_grid]]) {
+  Coord c = coords[i];
+  uint off = xe_edram_offset_bytes(c.px, c.py, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, sp.fmt_log2, c.sample);
+  out[i] = canonical[off >> 2];
+}
+
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
                       device uint* out [[buffer(1)]],
                       constant uint& mode [[buffer(2)]],
@@ -116,23 +172,19 @@ kernel void k_edram_offset(device const EdramIn* in [[buffer(0)]],
                           device uint* out [[buffer(1)]],
                           uint i [[thread_position_in_grid]]) {
   EdramIn e = in[i];
-  uint2 s = uint2(e.px, e.py) << uint2(e.msaa >= 2u ? 1u : 0u,   // x doubles @4x
-                                       e.msaa >= 1u ? 1u : 0u);  // y doubles @2x
-  s += (uint2(e.sample, e.sample) >> uint2(1u, 0u)) & 1u;
-  uint2 tsize32 = uint2(80u, 16u);
-  uint2 tsize = tsize32 >> uint2(e.fmt_log2, 0u);
-  uint2 toff = s / tsize;
-  uint base = e.base + toff.y * e.pitch + toff.x;
-  s -= toff * tsize;
-  if (e.is_depth != 0u) {
-    uint half_w = tsize.x >> 1u;  // 'half' is a reserved MSL type name
-    s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
-  }
-  uint address = base * (tsize32.x * tsize32.y) +
-                 ((s.y * tsize.x + s.x) << e.fmt_log2);
-  out[i] = address << 2;
+  out[i] = xe_edram_offset_bytes(e.px, e.py, e.base, e.pitch, e.msaa,
+                                 e.is_depth, e.fmt_log2, e.sample);
 }
 )MSL";
+
+// Mirrors of the MSL pack/unpack structs -- layouts must match exactly or the
+// round-trip corrupts (a stride mismatch would fail loudly, by design).
+struct Coord {
+  uint32_t px, py, sample;
+};
+struct SurfaceParams {
+  uint32_t base, pitch, msaa, is_depth, fmt_log2, pad;
+};
 
 // A minimal compute harness: compile the library once, dispatch one kernel over
 // a code vector, return the output bits. All buffers are shared storage so the
@@ -230,6 +282,83 @@ struct MetalCompute {
     REQUIRE(cb.error == nil);
     std::vector<uint32_t> out(count);
     std::memcpy(out.data(), out_buf.contents, count * sizeof(uint32_t));
+    return out;
+  }
+
+  // Packs `values` into a real EDRAM-sized canonical buffer at each coord's
+  // physical offset, then unpacks them back -- the word-level resolve/ownership
+  // materialize round-trip against the ACTUAL buffer the redesign will use.
+  // Returns the unpacked values; identity <=> correct addressing + no aliasing.
+  std::vector<uint32_t> RoundTripCanonical(const std::vector<Coord>& coords,
+                                           const std::vector<uint32_t>& values,
+                                           const struct SurfaceParams& sp,
+                                           size_t canonical_bytes) {
+    const size_t n = coords.size();
+    id<MTLBuffer> coord_buf =
+        [dev newBufferWithBytes:coords.data()
+                         length:n * sizeof(Coord)
+                        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> val_buf =
+        [dev newBufferWithBytes:values.data()
+                         length:n * sizeof(uint32_t)
+                        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out_buf =
+        [dev newBufferWithLength:n * sizeof(uint32_t)
+                         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);  // not zero-guaranteed
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> pack =
+        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_words"]
+                                           error:&err];
+    REQUIRE(pack != nil);
+    id<MTLComputePipelineState> unpack =
+        [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"unpack_words"]
+                                           error:&err];
+    REQUIRE(unpack != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    // Two separate encoders => the pack writes are ordered-before the unpack
+    // reads (encoder boundary is a barrier on the shared canonical buffer).
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:pack];
+      [enc setBuffer:coord_buf offset:0 atIndex:0];
+      [enc setBuffer:val_buf offset:0 atIndex:1];
+      [enc setBuffer:canonical offset:0 atIndex:2];
+      [enc setBuffer:sp_buf offset:0 atIndex:3];
+      [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(
+              pack.maxTotalThreadsPerThreadgroup > n
+                  ? (n ? n : 1)
+                  : pack.maxTotalThreadsPerThreadgroup,
+              1, 1)];
+      [enc endEncoding];
+    }
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:unpack];
+      [enc setBuffer:coord_buf offset:0 atIndex:0];
+      [enc setBuffer:out_buf offset:0 atIndex:1];
+      [enc setBuffer:canonical offset:0 atIndex:2];
+      [enc setBuffer:sp_buf offset:0 atIndex:3];
+      [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(
+              unpack.maxTotalThreadsPerThreadgroup > n
+                  ? (n ? n : 1)
+                  : unpack.maxTotalThreadsPerThreadgroup,
+              1, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(n);
+    std::memcpy(out.data(), out_buf.contents, n * sizeof(uint32_t));
     return out;
   }
 };
@@ -395,6 +524,77 @@ TEST_CASE("Metal EDRAM offset matches CPU oracle over the parameter space",
     }
   }
   REQUIRE(bad == 0u);
+}
+
+// Consistent tile pitch for a surface (matches L0's derivation): the 64bpp tile
+// is 40 samples wide, so it CANNOT use XeEdramPitchTiles (which bakes in 80).
+static uint32_t PitchFor(uint32_t w, uint32_t msaa, uint32_t fmt_log2) {
+  uint32_t tile_w = 80u >> fmt_log2;
+  uint32_t width_samples = w << (msaa >= 2u ? 1u : 0u);  // 4x doubles x
+  return (width_samples + tile_w - 1u) / tile_w;
+}
+
+// The 2.3 groundwork: run the canonical EDRAM pack/unpack against a REAL
+// 10 MB Metal buffer and prove pack->unpack is the identity over a whole
+// surface's samples. Identity <=> the shipping addresser indexes the buffer
+// correctly AND every sample is injective (a collision would clobber a word and
+// break identity). This is the last agent-testable rung before the kernel is
+// wired into MetalRenderTargetCache::ResolveColorToSnapshot behind the gate.
+TEST_CASE("Canonical EDRAM pack->unpack round-trips a surface's samples",
+          "[l1][metal][canonical]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct Cfg {
+    uint32_t w, h, base, msaa, is_depth, fmt_log2;
+    const char* name;
+  } cfgs[] = {
+      {48, 24, 0, 0, 0, 0, "1x color 32bpp"},
+      {48, 24, 0, 1, 0, 0, "2x color 32bpp"},
+      {48, 24, 0, 2, 0, 0, "4x color 32bpp"},
+      {48, 24, 13, 2, 0, 0, "4x color 32bpp base=13"},
+      {48, 24, 0, 2, 1, 0, "4x depth (40-col swap)"},
+      {48, 24, 0, 2, 0, 1, "4x 64bpp"},
+  };
+  for (const Cfg& cfg : cfgs) {
+    const uint32_t nsamp = cfg.msaa == 0 ? 1u : cfg.msaa == 1 ? 2u : 4u;
+    const uint32_t pitch = PitchFor(cfg.w, cfg.msaa, cfg.fmt_log2);
+    std::vector<Coord> coords;
+    std::vector<uint32_t> values;
+    for (uint32_t y = 0; y < cfg.h; ++y) {
+      for (uint32_t x = 0; x < cfg.w; ++x) {
+        for (uint32_t s = 0; s < nsamp; ++s) {
+          coords.push_back({x, y, s});
+          values.push_back(uint32_t(values.size()) + 1u);  // distinct, nonzero
+        }
+      }
+    }
+    // Independently bound-check every offset so the kernel never writes OOB.
+    uint32_t max_end = 0;
+    for (const Coord& c : coords) {
+      uint32_t off = XeEdramSnapshotOffsetBytes(c.px, c.py, cfg.base, pitch,
+                                                cfg.msaa, cfg.is_depth != 0u,
+                                                cfg.fmt_log2, c.sample);
+      uint32_t end = off + (4u << cfg.fmt_log2);
+      if (end > max_end) max_end = end;
+    }
+    REQUIRE(max_end <= xenos::kEdramSizeBytes);
+
+    SurfaceParams sp{cfg.base, pitch, cfg.msaa, cfg.is_depth, cfg.fmt_log2, 0u};
+    auto out = mc.RoundTripCanonical(coords, values, sp, xenos::kEdramSizeBytes);
+    uint32_t bad = 0;
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (out[i] != values[i]) {
+        if (bad < 8) {
+          WARN(cfg.name << ": coord(" << coords[i].px << "," << coords[i].py
+                        << ",s" << coords[i].sample << ") expected "
+                        << values[i] << " got " << out[i]);
+        }
+        ++bad;
+      }
+    }
+    INFO(cfg.name);
+    REQUIRE(bad == 0u);
+  }
 }
 
 }  // namespace test
