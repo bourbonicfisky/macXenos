@@ -1960,22 +1960,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       fill_texture_signs(vertex_shader);
       fill_texture_signs(pixel_shader);
     }
-    // Color exponent bias multiplies the pixel output. The host SNORM
-    // containers used for the fixed 16-bit formats represent -1..1 rather
-    // than Xenos's -32..32, so compensate exactly like the other host-RT
-    // backends do.
+    // Color exponent bias multiplies the pixel output. Metal stores the fixed
+    // 16-bit formats in SNORM host targets, which truncate to -1..1, so unlike
+    // a backend configured for full-range fixed16 storage we must not apply
+    // the additional /32 remap here. Doing so starves temporal luminance
+    // passes and made SF4 compensate into a live white-out. The guest exponent
+    // is still required for HDR formats (notably Red Dead's 7e3 chain).
     for (uint32_t i = 0; i < 4; ++i) {
       auto color_info = regs.Get<reg::RB_COLOR_INFO>(
           reg::RB_COLOR_INFO::rt_register_indices[i]);
-      int32_t color_exp_bias = color_info.color_exp_bias;
-      if (color_info.color_format ==
-              xenos::ColorRenderTargetFormat::k_16_16 ||
-          color_info.color_format ==
-              xenos::ColorRenderTargetFormat::k_16_16_16_16) {
-        color_exp_bias -= 5;
-      }
       system_constants.color_exp_bias[i] =
-          std::ldexp(1.0f, color_exp_bias);
+          std::ldexp(1.0f, int32_t(color_info.color_exp_bias));
     }
     // Index/vfetch helpers used by the vertex shader. The endian here must
     // describe the index buffer AS BOUND, not the guest's: our draw paths
