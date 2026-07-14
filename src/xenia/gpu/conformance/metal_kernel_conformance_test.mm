@@ -175,6 +175,24 @@ kernel void k_edram_offset(device const EdramIn* in [[buffer(0)]],
   out[i] = xe_edram_offset_bytes(e.px, e.py, e.base, e.pitch, e.msaa,
                                  e.is_depth, e.fmt_log2, e.sample);
 }
+
+// The SHIPPING resolve-copy tile walk, transcribed from
+// MetalRenderTargetCache xe_rcp_fs (.mm:1745-1753) at y_offset=0. It runs in
+// the collapsed single-sample model (no per-sample, no depth swap), but it
+// assigns each dest pixel to an EDRAM tile with the SAME arithmetic the
+// canonical addresser uses. Proving the two agree on tile membership is the
+// invariant the canonical resolve wiring depends on (both must place a pixel in
+// the same tile). Reuses EdramIn; sample/is_depth are ignored (origin sample).
+kernel void k_rcp_tile(device const EdramIn* in [[buffer(0)]],
+                      device uint* out [[buffer(1)]],
+                      uint i [[thread_position_in_grid]]) {
+  EdramIn e = in[i];
+  uint tile_w = 80u >> e.fmt_log2;
+  uint2 ds = uint2(e.px << (e.msaa >= 2u ? 1u : 0u),   // x doubles @4x
+                   e.py << (e.msaa >= 1u ? 1u : 0u));   // y doubles @2x
+  uint col = ds.x / tile_w;
+  out[i] = e.base + (ds.y / 16u) * e.pitch + col;
+}
 )MSL";
 
 // Mirrors of the MSL pack/unpack structs -- layouts must match exactly or the
@@ -519,6 +537,62 @@ TEST_CASE("Metal EDRAM offset matches CPU oracle over the parameter space",
                    << " s=" << e.sample << " base=" << e.base
                    << " pitch=" << e.pitch << " gpu=" << gpu[i]
                    << " cpu=" << cpu[i]);
+      }
+      ++bad;
+    }
+  }
+  REQUIRE(bad == 0u);
+}
+
+// The shipping resolve-copy tile walk (Metal-inline math) must assign each
+// pixel to the SAME EDRAM tile the canonical addresser does, or the canonical
+// resolve wiring would pack a pixel into a different tile than the collapsed
+// path resolved it from. The canonical tile index is the addresser's byte
+// offset / (80*16 words) / 4. Third transcription of the spec, now pinned.
+TEST_CASE("Metal resolve-copy tile walk agrees with canonical tile assignment",
+          "[l1][metal][resolvecopy]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t kTileWords =
+      xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples;  // 1280
+  std::vector<EdramIn> in;
+  const uint32_t bases[] = {0u, 11u};
+  for (uint32_t msaa = 0; msaa <= 2; ++msaa) {
+    for (uint32_t fmt = 0; fmt <= 1; ++fmt) {
+      for (uint32_t base : bases) {
+        const uint32_t w = 160, h = 40;
+        const uint32_t pitch =
+            [&] {
+              uint32_t tile_w = 80u >> fmt;
+              uint32_t ws = w << (msaa >= 2u ? 1u : 0u);
+              return (ws + tile_w - 1u) / tile_w;
+            }();
+        for (uint32_t py = 0; py < h; py += 2) {
+          for (uint32_t px = 0; px < w; px += 2) {
+            in.push_back({px, py, base, pitch, msaa, 0u, fmt, 0u});
+          }
+        }
+      }
+    }
+  }
+  std::vector<uint32_t> cpu(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    const EdramIn& e = in[i];
+    uint32_t off = XeEdramSnapshotOffsetBytes(e.px, e.py, e.base, e.pitch,
+                                              e.msaa, /*is_depth=*/false,
+                                              e.fmt_log2, /*sample=*/0u);
+    cpu[i] = (off >> 2) / kTileWords;  // byte offset -> word -> tile index
+  }
+  auto gpu = mc.RunRaw("k_rcp_tile", in.data(), in.size() * sizeof(EdramIn),
+                       in.size());
+  uint32_t bad = 0;
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (gpu[i] != cpu[i]) {
+      if (bad < 8) {
+        const EdramIn& e = in[i];
+        WARN("px=" << e.px << " py=" << e.py << " msaa=" << e.msaa << " fmt="
+                   << e.fmt_log2 << " base=" << e.base << " pitch=" << e.pitch
+                   << " rcp_tile=" << gpu[i] << " canonical_tile=" << cpu[i]);
       }
       ++bad;
     }
