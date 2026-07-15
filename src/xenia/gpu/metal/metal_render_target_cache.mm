@@ -559,10 +559,14 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   transition_manifest_.push_back(rec);
   static const bool s_manifest = std::getenv("XE_METAL_TRANSITION_MANIFEST");
   if (s_manifest) {
-    XELOGGPU("MetalXfer[{}] #{} @draw {}: {} -> {} tiles [{},{})",
-             TransferKindName(kind), rec.transition_id, rec.draw_index,
-             src_key.GetDebugName(), dst_key.GetDebugName(), rec.start_tiles,
-             rec.end_tiles);
+    // Warning level (not GPU/Debug): the sibling transfer logs use XELOGW and a
+    // Release build filters Debug, so a Debug line here logs nothing on-device
+    // (why the first M4 run showed zero MetalXfer lines). Env-gated, so this is
+    // only noisy in an explicit diagnostic session.
+    XELOGW("MetalXfer[{}] #{} @draw {}: {} -> {} tiles [{},{})",
+           TransferKindName(kind), rec.transition_id, rec.draw_index,
+           src_key.GetDebugName(), dst_key.GetDebugName(), rec.start_tiles,
+           rec.end_tiles);
   }
 }
 
