@@ -71,6 +71,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // id<MTLTexture> of the bound depth / color-0 target, or nullptr.
   void* current_depth_texture() const;
   void* current_color_texture(uint32_t index, uint64_t* pixel_format_out) const;
+  // Sample-accurate path: the current accumulated targets' real MSAA companions
+  // and sample count (1 on the default path / for 1x keys). Color and depth
+  // share a sample count within a pass, so current_sample_count() reports the
+  // max across the bound targets. nullptr companion => render to the 1x texture.
+  void* current_color_msaa_texture(uint32_t index) const;
+  void* current_depth_msaa_texture() const;
+  uint32_t current_sample_count() const;
   // A stable identity for "did the attachment set change" pass management.
   uint64_t current_attachment_key() const;
 
