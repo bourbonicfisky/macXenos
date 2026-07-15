@@ -58,8 +58,7 @@ class MetalPipelineCache {
                                        uint64_t color_pixel_format,
                                        uint64_t depth_pixel_format,
                                        uint32_t blend_control,
-                                       uint32_t color_write_mask,
-                                       uint32_t sample_count = 1);
+                                       uint32_t color_write_mask);
 
   // Builds (or returns the cached) MESH id<MTLRenderPipelineState> that expands a
   // point/rectangle/quad primitive via MSC geometry emulation: the guest VS runs
@@ -79,8 +78,7 @@ class MetalPipelineCache {
       DxbcShaderTranslator::Modification pixel_modification,
       uint64_t color_pixel_format, uint64_t depth_pixel_format,
       uint32_t blend_control, uint32_t color_write_mask,
-      uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out,
-      uint32_t sample_count = 1);
+      uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out);
 
   DxbcShaderTranslator* shader_translator() const {
     return shader_translator_.get();

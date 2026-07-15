@@ -262,9 +262,6 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     if (msaa_texture) {
       msaa_texture.label =
           [NSString stringWithFormat:@"xe_rt_msaa_%ux", sample_count];
-      // Clear all samples so the persistent-Load render path never reads
-      // uninitialized MSAA memory on a target's first use.
-      ClearTextureAtCreation((__bridge void*)msaa_texture, key.is_depth != 0);
       rt->set_msaa_texture((__bridge_retained void*)msaa_texture, sample_count);
       XELOGI(
           "MetalRenderTargetCache: RT {} gets a {}x MSAA companion ({}x{})",
@@ -303,26 +300,6 @@ void* MetalRenderTargetCache::current_depth_texture() const {
   auto* rt = static_cast<MetalRenderTarget*>(
       last_update_accumulated_render_targets()[0]);
   return rt ? rt->texture() : nullptr;
-}
-void* MetalRenderTargetCache::current_color_msaa_texture(uint32_t index) const {
-  auto* rt = static_cast<MetalRenderTarget*>(
-      last_update_accumulated_render_targets()[1 + index]);
-  return rt ? rt->msaa_texture() : nullptr;
-}
-void* MetalRenderTargetCache::current_depth_msaa_texture() const {
-  auto* rt = static_cast<MetalRenderTarget*>(
-      last_update_accumulated_render_targets()[0]);
-  return rt ? rt->msaa_texture() : nullptr;
-}
-uint32_t MetalRenderTargetCache::current_sample_count() const {
-  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
-  uint32_t count = 1;
-  auto* depth = static_cast<MetalRenderTarget*>(accumulated[0]);
-  if (depth && depth->msaa_texture()) count = depth->sample_count();
-  auto* color = static_cast<MetalRenderTarget*>(accumulated[1]);
-  if (color && color->msaa_texture() && color->sample_count() > count)
-    count = color->sample_count();
-  return count;
 }
 
 void* MetalRenderTargetCache::current_color_texture(

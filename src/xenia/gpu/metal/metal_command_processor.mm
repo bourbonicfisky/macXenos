@@ -864,14 +864,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
   }
-  // Sample-accurate path (gated): if the bound targets have real MSAA
-  // companions, render per-sample into them and resolve to the 1x textures
-  // (which the collapsed consumers keep reading). msaa_* are nullptr otherwise.
-  void* msaa_rt = rt ? render_target_cache_->current_color_msaa_texture(0)
-                     : nullptr;
-  void* msaa_depth =
-      depth ? render_target_cache_->current_depth_msaa_texture() : nullptr;
-  uint32_t sample_count = render_target_cache_->current_sample_count();
   // The command buffer lives until the next commit boundary; the upload ring
   // reclaims per-submission from the completion pump (S8) — no reset here.
   id<MTLCommandBuffer> command_buffer;
@@ -897,57 +889,27 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (rt) {
     // Always LOAD: textures are cleared at creation; content comes from
     // ownership transfers / persistence, clears from guest resolve clears.
-    if (msaa_rt) {
-      // Render per-sample into the MSAA companion; resolve to the 1x texture at
-      // store so the collapsed consumers see the resolved image. NOTE: content
-      // delivered via ownership transfers lands in the 1x texture only and is
-      // not yet seeded into the MSAA samples (a known first-cut limitation).
-      pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)msaa_rt;
-      pass.colorAttachments[0].resolveTexture = (__bridge id<MTLTexture>)rt;
-      pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-      pass.colorAttachments[0].storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
-    } else {
-      pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
-      pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    }
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   }
   // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
   // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
   // menus) clear to 0 and test "greater"; a hardcoded 1.0 made every fragment
   // fail z>=1.0 -> black. Reading the guest value serves both directions.
   if (depth) {
-    if (msaa_depth) {
-      // MSAA depth+stencil, resolved to the 1x depth texture (Sample0 filter).
-      pass.depthAttachment.texture = (__bridge id<MTLTexture>)msaa_depth;
-      pass.depthAttachment.resolveTexture = (__bridge id<MTLTexture>)depth;
-      pass.depthAttachment.loadAction = MTLLoadActionLoad;
-      pass.depthAttachment.storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
-      pass.stencilAttachment.texture = (__bridge id<MTLTexture>)msaa_depth;
-      pass.stencilAttachment.resolveTexture = (__bridge id<MTLTexture>)depth;
-      pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-      pass.stencilAttachment.storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
-    } else {
-      pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
-      pass.depthAttachment.loadAction = MTLLoadActionLoad;
-      pass.depthAttachment.storeAction = MTLStoreActionStore;
-      pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
-      pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-      pass.stencilAttachment.storeAction = MTLStoreActionStore;
-    }
+    pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
+    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
   } else if (rt && dummy_depth_pass_) {
     // The draw's PS exports depth with no depth target bound — attach a
     // throwaway scratch depth so the pipeline is valid (see dummy_depth in
     // IssueDraw). Never loaded, never stored; content is irrelevant.
     id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt;
-    // When color is MSAA the dummy depth must match its sample count (a pass
-    // requires all attachments at the same sample count). Key on sample count.
-    uint32_t dummy_samples = msaa_rt ? sample_count : 1;
-    uint64_t dk = (uint64_t(rt_tex.width) << 20) | uint64_t(rt_tex.height) |
-                  (uint64_t(dummy_samples) << 40);
+    uint64_t dk = (uint64_t(rt_tex.width) << 20) | uint64_t(rt_tex.height);
     id<MTLTexture> dummy_tex = nil;
     auto dit = dummy_depth_textures_.find(dk);
     if (dit != dummy_depth_textures_.end()) {
@@ -962,10 +924,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
                                    mipmapped:NO];
       dd.usage = MTLTextureUsageRenderTarget;
       dd.storageMode = MTLStorageModePrivate;
-      if (dummy_samples > 1) {
-        dd.textureType = MTLTextureType2DMultisample;
-        dd.sampleCount = dummy_samples;
-      }
       dummy_tex = [rt_tex.device newTextureWithDescriptor:dd];
       dummy_tex.label = @"cp:dummy-depth";
       dummy_depth_textures_.emplace(dk, (__bridge_retained void*)dummy_tex);
@@ -1766,15 +1724,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         DxbcShaderTranslator::Modification(vs_mod),
         DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_format,
         pipeline_depth_format, blend_control, color_write_mask,
-        &gs_vertex_size, &gs_max_input_primitives,
-        render_target_cache_->current_sample_count());
+        &gs_vertex_size, &gs_max_input_primitives);
   } else {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
     uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_format,
-        pipeline_depth_format, blend_control, color_write_mask,
-        render_target_cache_->current_sample_count());
+        pipeline_depth_format, blend_control, color_write_mask);
   }
   if (!pipeline) {
     if (use_geometry_emulation) {
