@@ -164,6 +164,106 @@ TEST_CASE("EDRAM color->depth reinterpret is the 40-col swap surface-wide",
   }
 }
 
+// Contract 3b: depth->color reinterpret is the SAME 40-column swap as c2d, in
+// the other direction. The live PerformDepthToColorTransfer "real bits" leg
+// reconstructs the guest depth word with the INVERSE swap (dtx<40 ? +40 : -40,
+// metal_render_target_cache.mm:1330) -- symmetric with c2d. This is the crux
+// that lets the d2c heuristic (skip / XE_METAL_D2C_REAL / same-frame ping-pong)
+// be RETIRED: in canonical per-sample EDRAM the physical word is invariant to
+// which key addresses it, so a color surface reclaiming depth-owned tiles reads
+// exactly the depth bits at its own (unswapped) offset -- no game-specific
+// branch, no lost content. The skip default exists only because the COLLAPSED
+// host can't hold those bits; this pins the correct answer the canonical path
+// must reproduce.
+TEST_CASE("EDRAM depth->color reinterpret is the 40-col swap surface-wide",
+          "[l2][edram][reinterpret][d2c]") {
+  const uint32_t w = 240, h = 8;  // 3 tiles wide at 1x 32bpp
+  const uint32_t pitch = Pitch(w, MsaaSamples::k1X);
+  EdramRef e;
+  // A depth surface owns these tiles: store guest depth words (d24<<8 | stencil
+  // shape) at each pixel's DEPTH offset.
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      e.Store(x, y, MsaaSamples::k1X, 0, /*is_depth=*/true, 0, pitch,
+              Val(x, y, 0));
+  // A color surface now reclaims the same physical tiles: reading at its own
+  // (unswapped) color offset yields the depth word from the swapped-within-tile
+  // partner column -- the raw reinterpret, exact.
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      uint32_t tile = x / 80u, col = x % 80u;
+      uint32_t col_sw = (col >= 40u) ? (col - 40u) : (col + 40u);
+      uint32_t x_sw = tile * 80u + col_sw;
+      uint32_t as_color = e.Load(x, y, MsaaSamples::k1X, 0, /*is_depth=*/false, 0,
+                                 pitch);
+      REQUIRE(as_color == Val(x_sw, y, 0));
+    }
+  }
+}
+
+// Contract 3c: c2d -> d2c is IDENTITY at the word level (the swap is its own
+// inverse). This is why the same-frame ping-pong "real bit transport" is not a
+// special case in canonical EDRAM but a free consequence: a color key that lent
+// tiles to a depth key and takes them back reads its ORIGINAL words. The Sonic
+// DoF packed-vector-map bug (zeroed words decode as max-magnitude vectors) is a
+// COLLAPSED-model artifact; the canonical model round-trips losslessly.
+TEST_CASE("EDRAM c2d->d2c round-trips a surface's words losslessly",
+          "[l2][edram][reinterpret][d2c]") {
+  const uint32_t w = 160, h = 16;  // 2 tiles wide at 1x
+  const uint32_t pitch = Pitch(w, MsaaSamples::k1X);
+  EdramRef a;
+  // Original color content owned by a color key.
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      a.Store(x, y, MsaaSamples::k1X, 0, false, 0, pitch, Val(x, y, 3));
+  // c2d: a depth key reclaims the tiles; its per-pixel view is the swapped read.
+  // Materialize that depth view into a fresh EDRAM as depth-owned words.
+  EdramRef b;
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      b.Store(x, y, MsaaSamples::k1X, 0, /*is_depth=*/true, 0, pitch,
+              a.Load(x, y, MsaaSamples::k1X, 0, /*is_depth=*/true, 0, pitch));
+  // d2c: the color key takes the tiles back; reading b as color must reproduce
+  // a's original words everywhere (double swap == identity).
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      REQUIRE(b.Load(x, y, MsaaSamples::k1X, 0, false, 0, pitch) ==
+              Val(x, y, 3));
+}
+
+// Contract 3d: at 4x, d2c preserves ALL FOUR samples per pixel. This is the
+// case the collapsed host physically CANNOT represent (one host texel per
+// pixel), which is precisely why the live d2c leg falls back to heuristics and
+// why the canonical per-sample model is the fix, not another branch.
+TEST_CASE("EDRAM c2d->d2c at 4x round-trips every sample losslessly",
+          "[l2][edram][reinterpret][d2c][msaa]") {
+  const uint32_t w = 40, h = 16;
+  const uint32_t pitch = Pitch(w, MsaaSamples::k4X);
+  EdramRef a;
+  // Original 4x color content: four DISTINCT words per pixel so any sample
+  // collapse or cross-sample leak is caught.
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      for (uint32_t s = 0; s < 4; ++s)
+        a.Store(x, y, MsaaSamples::k4X, s, false, 0, pitch, Val(x, y, s));
+  // c2d: depth key reclaims, materialize its per-sample view (whatever the
+  // sample-space swap is) into a fresh EDRAM as depth-owned words.
+  EdramRef b;
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      for (uint32_t s = 0; s < 4; ++s)
+        b.Store(x, y, MsaaSamples::k4X, s, /*is_depth=*/true, 0, pitch,
+                a.Load(x, y, MsaaSamples::k4X, s, /*is_depth=*/true, 0, pitch));
+  // d2c: color key takes them back; reading b as color reproduces a exactly,
+  // all four samples -- the per-sample losslessness the collapsed host cannot
+  // provide (one texel per pixel) and the canonical model delivers for free.
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < w; ++x)
+      for (uint32_t s = 0; s < 4; ++s)
+        REQUIRE(b.Load(x, y, MsaaSamples::k4X, s, false, 0, pitch) ==
+                Val(x, y, s));
+}
+
 // Contract 4: two surfaces owning DISJOINT tile ranges never leak into each
 // other. Surface B is based past all of A's tiles; filling B must leave every
 // A sample untouched. Guards the base-tile ownership boundary a resolve or a
