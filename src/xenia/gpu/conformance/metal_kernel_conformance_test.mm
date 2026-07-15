@@ -483,6 +483,52 @@ kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
   uint s = sten.read(gid).r & 0xFFu;
   canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
 }
+// Per-sample 4x/2x depth+stencil: the same materialize/pack, but SAMPLE-AWARE.
+// Materialize is sample-rate ([[sample_id]] forces per-sample execution) so each
+// sample gets the canonical word at its own (pixel, sample) offset; pack reads
+// depth2d_ms/texture2d_ms per sample. Reuses xe_depth_word_to_host /
+// xe_host_to_depth_d24 / xe_edram_offset_bytes verbatim (the live path must too).
+fragment DepthFragOut materialize_depth_ms_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint sid [[sample_id]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, sid);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthFragOut o;
+  o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  return o;
+}
+fragment void materialize_sten_ms_fs(DepthVOut in [[stage_in]],
+                                     device const uint* canonical [[buffer(0)]],
+                                     constant SurfaceParams& sp [[buffer(1)]],
+                                     constant uint& bit [[buffer(2)]],
+                                     uint sid [[sample_id]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, sid);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+}
+kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
+                         texture2d_ms<uint, access::read> sten [[texture(1)]],
+                         device uint* canonical [[buffer(0)]],
+                         constant SurfaceParams& sp [[buffer(1)]],
+                         uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, gid.z);
+  uint idx = off >> 2;
+  if (idx >= sp.words) return;
+  float d = tex.read(uint2(gid.x, gid.y), gid.z);
+  uint s = sten.read(uint2(gid.x, gid.y), gid.z).r & 0xFFu;
+  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+}
 )MSL";
 
 // Mirrors of the MSL pack/unpack structs -- layouts must match exactly or the
@@ -1053,6 +1099,140 @@ struct MetalCompute {
     return out;
   }
 
+  // Per-sample MSAA depth+stencil round-trip: a REAL num_samples-sample
+  // Depth32Float_Stencil8 attachment, materialized sample-rate and packed
+  // per sample. `words` is indexed [(y*w + x) * num_samples + s]; returns the
+  // re-packed complete words in the same order. Identity <=> every sample's
+  // depth AND stencil survive independently (the 4x sample dimension the
+  // collapsed host loses).
+  std::vector<uint32_t> RoundTripDepthMsaa(uint32_t w, uint32_t h,
+                                           uint32_t num_samples,
+                                           const struct SurfaceParams& sp,
+                                           const std::vector<uint32_t>& words,
+                                           size_t canonical_bytes) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    auto doff = [&](uint32_t x, uint32_t y, uint32_t s) {
+      return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa,
+                                        /*is_depth=*/true, 0u, s) >> 2;
+    };
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          cwords[doff(x, y, s)] = words[(y * w + x) * num_samples + s];
+    MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+    td.textureType = MTLTextureType2DMultisample;
+    td.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    td.width = w;
+    td.height = h;
+    td.sampleCount = num_samples;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> depth = [dev newTextureWithDescriptor:td];
+    REQUIRE(depth != nil);
+    id<MTLTexture> sten_view =
+        [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    REQUIRE(sten_view != nil);
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
+    rpd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_depth_ms_fs"];
+    rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    rpd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    rpd.rasterSampleCount = num_samples;
+    id<MTLRenderPipelineState> rps =
+        [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
+    REQUIRE(rps != nil);
+    MTLRenderPipelineDescriptor* spd = [[MTLRenderPipelineDescriptor alloc] init];
+    spd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+    spd.fragmentFunction = [lib newFunctionWithName:@"materialize_sten_ms_fs"];
+    spd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    spd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    spd.rasterSampleCount = num_samples;
+    id<MTLRenderPipelineState> sps =
+        [dev newRenderPipelineStateWithDescriptor:spd error:&err];
+    REQUIRE(sps != nil);
+    MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+    id<MTLDepthStencilState> bit_states[8];
+    for (uint32_t b = 0; b < 8; ++b) {
+      MTLDepthStencilDescriptor* bds = [[MTLDepthStencilDescriptor alloc] init];
+      bds.depthCompareFunction = MTLCompareFunctionAlways;
+      bds.depthWriteEnabled = NO;
+      MTLStencilDescriptor* bs = [[MTLStencilDescriptor alloc] init];
+      bs.stencilCompareFunction = MTLCompareFunctionAlways;
+      bs.depthStencilPassOperation = MTLStencilOperationReplace;
+      bs.writeMask = 1u << b;
+      bds.frontFaceStencil = bs;
+      bds.backFaceStencil = bs;
+      bit_states[b] = [dev newDepthStencilStateWithDescriptor:bds];
+    }
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth_ms"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    {
+      MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.depthAttachment.texture = depth;
+      rp.depthAttachment.loadAction = MTLLoadActionClear;
+      rp.depthAttachment.clearDepth = 0.0;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.stencilAttachment.texture = depth;
+      rp.stencilAttachment.loadAction = MTLLoadActionClear;
+      rp.stencilAttachment.clearStencil = 0;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:rp];
+      [enc setRenderPipelineState:rps];
+      [enc setDepthStencilState:dss];
+      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc setRenderPipelineState:sps];
+      [enc setStencilReferenceValue:0xFF];
+      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      for (uint32_t b = 0; b < 8; ++b) {
+        uint32_t bit = 1u << b;
+        [enc setDepthStencilState:bit_states[b]];
+        [enc setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      }
+      [enc endEncoding];
+    }
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:pk];
+      [enc setTexture:depth atIndex:0];
+      [enc setTexture:sten_view atIndex:1];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      NSUInteger tw = pk.threadExecutionWidth;
+      NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h * num_samples);
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        for (uint32_t s = 0; s < num_samples; ++s)
+          out[(y * w + x) * num_samples + s] = cwords[doff(x, y, s)];
+    return out;
+  }
+
   // Reduces `words` with k_tile_hash into a single atomic-accumulated hash.
   uint32_t HashWordsBuffer(const std::vector<uint32_t>& words) {
     const uint32_t count = uint32_t(words.size());
@@ -1582,6 +1762,32 @@ uint32_t DepthRoundTripBad(MetalCompute& mc, const std::vector<uint32_t>& d24,
   }
   return bad;
 }
+
+// Per-sample 4x variant: one 4x tile (40x8 px x 4 samples = 1280 words), a
+// DISTINCT (d24, stencil) per (pixel, sample). Returns failed-word count.
+uint32_t MsaaDepthBad(MetalCompute& mc, uint32_t fmt) {
+  const uint32_t w = 40, h = 8, ns = 4;
+  const uint32_t pitch = PitchFor(w, /*4x=*/2u, 0u);
+  SurfaceParams sp{0u, pitch, /*4x=*/2u, fmt, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / 4u)};
+  std::vector<uint32_t> words(size_t(w) * h * ns);
+  for (uint32_t i = 0; i < words.size(); ++i) {
+    uint32_t d = (i * 2654435761u) & 0xFFFFFFu;   // distinct depth per sample
+    uint32_t s = (i * 37u + 1u) & 0xFFu;          // distinct stencil per sample
+    words[i] = (d << 8) | s;
+  }
+  auto out = mc.RoundTripDepthMsaa(w, h, ns, sp, words, xenos::kEdramSizeBytes);
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < words.size(); ++i) {
+    if (out[i] != words[i]) {
+      if (bad < 8)
+        WARN("fmt " << fmt << " idx " << i << " expected " << words[i]
+                    << " got " << out[i]);
+      ++bad;
+    }
+  }
+  return bad;
+}
 }  // namespace
 
 TEST_CASE("Canonical kD24FS8 (float24) depth+stencil word round-trips over [0,2)",
@@ -1617,6 +1823,18 @@ TEST_CASE("Canonical kD24S8 (unorm24) depth+stencil word round-trips exactly nea
   for (uint32_t i = 0; i < sweep.size(); ++i)
     sweep[i] = uint32_t(uint64_t(i) * 0xFFFFFFu / (sweep.size() - 1));
   REQUIRE(DepthRoundTripBad(mc, sweep, /*unorm24=*/1u) == 0u);
+}
+
+TEST_CASE("Canonical 4x per-sample depth+stencil round-trips every sample",
+          "[l1][metal][materialize][depth][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Both guest depth formats, all four samples independent: the sample
+  // dimension the collapsed host cannot hold and the cross-MSAA slice depends
+  // on. Distinct depth AND stencil per (pixel, sample) makes any collapse or
+  // cross-sample leak fail loudly.
+  REQUIRE(MsaaDepthBad(mc, /*float24=*/2u) == 0u);
+  REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u) == 0u);
 }
 
 // ---------------------------------------------------------------------------
