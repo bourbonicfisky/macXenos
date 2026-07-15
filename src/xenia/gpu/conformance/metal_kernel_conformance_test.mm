@@ -452,7 +452,25 @@ fragment DepthFragOut materialize_depth_fs(
   o.depth = xe_depth_word_to_host(w, sp.is_depth);  // is_depth: 2=float24,1=unorm24
   return o;
 }
+// Stencil materialize: no shader stencil export in Metal, so the guest stencil
+// byte is rebuilt one bit-plane at a time -- this fragment discards where the
+// source word's stencil bit `bit` is clear, and the caller's REPLACE state ORs
+// the bit in where it survives (mirrors the c2d stencil rebuild).
+fragment void materialize_sten_fs(DepthVOut in [[stage_in]],
+                                  device const uint* canonical [[buffer(0)]],
+                                  constant SurfaceParams& sp [[buffer(1)]],
+                                  constant uint& bit [[buffer(2)]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+}
+// Pack emits the COMPLETE depth/stencil word: (d24 << 8) | stencil. Depth from
+// the depth2d view, stencil from the X32_Stencil8 view of the same attachment.
 kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
+                      texture2d<uint, access::read> sten [[texture(1)]],
                       device uint* canonical [[buffer(0)]],
                       constant SurfaceParams& sp [[buffer(1)]],
                       uint2 gid [[thread_position_in_grid]]) {
@@ -462,7 +480,8 @@ kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
   uint idx = off >> 2;
   if (idx >= sp.words) return;
   float d = tex.read(gid);
-  canonical[idx] = xe_host_to_depth_d24(d, sp.is_depth) << 8;  // stencil 0 rung
+  uint s = sten.read(gid).r & 0xFFu;
+  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
 }
 )MSL";
 
@@ -910,7 +929,7 @@ struct MetalCompute {
   // slice needs for JC2's kD24FS8/kD24S8 buffers.
   std::vector<uint32_t> RoundTripDepth(uint32_t w, uint32_t h,
                                        const struct SurfaceParams& sp,
-                                       const std::vector<uint32_t>& d24,
+                                       const std::vector<uint32_t>& words,
                                        size_t canonical_bytes) {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
@@ -923,16 +942,22 @@ struct MetalCompute {
     };
     for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
-        cwords[doff(x, y)] = (d24[y * w + x] & 0xFFFFFFu) << 8;
+        cwords[doff(x, y)] = words[y * w + x];  // full (d24<<8)|stencil word
+    // Combined depth+stencil attachment (guest word = (d24<<8)|stencil), so the
+    // round-trip carries the full word, not just depth.
     MTLTextureDescriptor* td = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
                                      width:w
                                     height:h
                                  mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    td.storageMode = MTLStorageModePrivate;  // depth can't be shared.
+    td.storageMode = MTLStorageModePrivate;  // depth/stencil can't be shared.
     id<MTLTexture> depth = [dev newTextureWithDescriptor:td];
     REQUIRE(depth != nil);
+    // X32_Stencil8 view for reading the stencil plane as texture2d<uint>.
+    id<MTLTexture> sten_view =
+        [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    REQUIRE(sten_view != nil);
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
                                             length:sizeof(struct SurfaceParams)
                                            options:MTLResourceStorageModeShared];
@@ -940,25 +965,53 @@ struct MetalCompute {
     MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
     rpd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
     rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_depth_fs"];
-    rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    rpd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
     id<MTLRenderPipelineState> rps =
         [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
     REQUIRE(rps != nil);
+    MTLRenderPipelineDescriptor* spd = [[MTLRenderPipelineDescriptor alloc] init];
+    spd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+    spd.fragmentFunction = [lib newFunctionWithName:@"materialize_sten_fs"];
+    spd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    spd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    id<MTLRenderPipelineState> sps =
+        [dev newRenderPipelineStateWithDescriptor:spd error:&err];
+    REQUIRE(sps != nil);
+    // Depth pass: write depth, leave stencil untouched (cleared to 0 by load).
     MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
     dsd.depthCompareFunction = MTLCompareFunctionAlways;
     dsd.depthWriteEnabled = YES;
     id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+    // One REPLACE-masked state per stencil bit (sets bit where undiscarded).
+    id<MTLDepthStencilState> bit_states[8];
+    for (uint32_t b = 0; b < 8; ++b) {
+      MTLDepthStencilDescriptor* bds = [[MTLDepthStencilDescriptor alloc] init];
+      bds.depthCompareFunction = MTLCompareFunctionAlways;
+      bds.depthWriteEnabled = NO;
+      MTLStencilDescriptor* bs = [[MTLStencilDescriptor alloc] init];
+      bs.stencilCompareFunction = MTLCompareFunctionAlways;
+      bs.depthStencilPassOperation = MTLStencilOperationReplace;
+      bs.writeMask = 1u << b;
+      bds.frontFaceStencil = bs;
+      bds.backFaceStencil = bs;
+      bit_states[b] = [dev newDepthStencilStateWithDescriptor:bds];
+    }
     id<MTLComputePipelineState> pk = [dev
         newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth"]
                                       error:&err];
     REQUIRE(pk != nil);
     id<MTLCommandBuffer> cb = [queue commandBuffer];
-    {  // materialize: full-screen triangle, fragment exports SV_Depth.
+    {  // materialize: depth via SV_Depth, then stencil one bit-plane at a time.
       MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
       rp.depthAttachment.texture = depth;
       rp.depthAttachment.loadAction = MTLLoadActionClear;
       rp.depthAttachment.clearDepth = 0.0;
       rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.stencilAttachment.texture = depth;
+      rp.stencilAttachment.loadAction = MTLLoadActionClear;
+      rp.stencilAttachment.clearStencil = 0;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
       id<MTLRenderCommandEncoder> enc =
           [cb renderCommandEncoderWithDescriptor:rp];
       [enc setRenderPipelineState:rps];
@@ -966,12 +1019,23 @@ struct MetalCompute {
       [enc setFragmentBuffer:canonical offset:0 atIndex:0];
       [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc setRenderPipelineState:sps];
+      [enc setStencilReferenceValue:0xFF];
+      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      for (uint32_t b = 0; b < 8; ++b) {
+        uint32_t bit = 1u << b;
+        [enc setDepthStencilState:bit_states[b]];
+        [enc setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      }
       [enc endEncoding];
     }
-    {  // pack: compute reads the depth texture back to canonical.
+    {  // pack: compute reads depth + stencil views back to the complete word.
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
       [enc setComputePipelineState:pk];
       [enc setTexture:depth atIndex:0];
+      [enc setTexture:sten_view atIndex:1];
       [enc setBuffer:canonical offset:0 atIndex:0];
       [enc setBuffer:sp_buf offset:0 atIndex:1];
       NSUInteger tw = pk.threadExecutionWidth;
@@ -1493,21 +1557,26 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
 // was not the whole domain; unorm24 must be proven, not declared lossy).
 namespace {
 // Round-trips `d24` through a wxh 1x depth tile of the given format and reports
-// how many words fail to survive. fmt: 2=float24 (kD24FS8), 1=unorm24 (kD24S8).
+// how many complete words fail to survive. fmt: 2=float24 (kD24FS8),
+// 1=unorm24 (kD24S8). A DISTINCT stencil byte is folded into each pixel's word
+// so the full (d24<<8)|stencil round-trip (incl. the 8 bit-plane passes) is
+// exercised, not just depth.
 uint32_t DepthRoundTripBad(MetalCompute& mc, const std::vector<uint32_t>& d24,
                            uint32_t fmt) {
   const uint32_t w = 80, h = 16;  // one 32bpp tile at 1x (1280 pixels).
   const uint32_t pitch = PitchFor(w, 0u, 0u);
   SurfaceParams sp{0u, pitch, 0u, fmt, 0u,
                    uint32_t(xenos::kEdramSizeBytes / 4u)};
-  auto out = mc.RoundTripDepth(w, h, sp, d24, xenos::kEdramSizeBytes);
+  std::vector<uint32_t> words(d24.size());
+  for (uint32_t i = 0; i < d24.size(); ++i)
+    words[i] = ((d24[i] & 0xFFFFFFu) << 8) | ((i * 37u + 1u) & 0xFFu);
+  auto out = mc.RoundTripDepth(w, h, sp, words, xenos::kEdramSizeBytes);
   uint32_t bad = 0;
-  for (uint32_t i = 0; i < d24.size(); ++i) {
-    uint32_t expected = (d24[i] & 0xFFFFFFu) << 8;
-    if (out[i] != expected) {
+  for (uint32_t i = 0; i < words.size(); ++i) {
+    if (out[i] != words[i]) {
       if (bad < 8)
-        WARN("fmt " << fmt << " idx " << i << " d24 " << (d24[i] & 0xFFFFFFu)
-                    << " expected " << expected << " got " << out[i]);
+        WARN("fmt " << fmt << " idx " << i << " expected " << words[i]
+                    << " got " << out[i]);
       ++bad;
     }
   }
@@ -1515,7 +1584,7 @@ uint32_t DepthRoundTripBad(MetalCompute& mc, const std::vector<uint32_t>& d24,
 }
 }  // namespace
 
-TEST_CASE("Canonical kD24FS8 (float24) depth round-trips over the full [0,2)",
+TEST_CASE("Canonical kD24FS8 (float24) depth+stencil word round-trips over [0,2)",
           "[l1][metal][materialize][depth]") {
   MetalCompute mc;
   if (!mc.Init()) { SUCCEED("no device"); return; }
@@ -1531,7 +1600,7 @@ TEST_CASE("Canonical kD24FS8 (float24) depth round-trips over the full [0,2)",
   REQUIRE(DepthRoundTripBad(mc, d24, /*float24=*/2u) == 0u);
 }
 
-TEST_CASE("Canonical kD24S8 (unorm24) depth round-trips exactly near 1.0",
+TEST_CASE("Canonical kD24S8 (unorm24) depth+stencil word round-trips exactly near 1.0",
           "[l1][metal][materialize][depth]") {
   MetalCompute mc;
   if (!mc.Init()) { SUCCEED("no device"); return; }
