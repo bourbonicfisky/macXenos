@@ -307,6 +307,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* materialize_sten = nullptr;
     void* pack = nullptr;  // id<MTLComputePipelineState>
     void* pack_cov = nullptr;  // diagnostic legacy adapter: pack + coverage mark
+    void* pack_range = nullptr;      // canonical authority: pack, tile-range guard
+    void* mat_depth_range = nullptr; // canonical authority: materialize depth, ranged
+    void* mat_sten_range = nullptr;  // canonical authority: materialize stencil, ranged
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
     uint32_t sample_count = 0;
@@ -330,6 +333,21 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
   bool sample_edram_enabled_ = false;
   void* canonical_edram_ = nullptr;  // id<MTLBuffer>, private, retained.
+
+  // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the
+  // authority for depth ownership flips, single-sample rendering). Gated behind
+  // XE_METAL_CANONICAL_DEPTH. For a depth cross-MSAA transition it REPLACES the
+  // lossy legacy spatial resample with: pack(source depth+stencil) -> canonical
+  // EDRAM, then materialize(dest) <- canonical EDRAM, both range-guarded to the
+  // transfer's tiles, using the conformance-proven kEdramDepthMsl helpers. The
+  // canonical buffer persists across frames/RT instances, so content survives the
+  // ownership churn that the transient-RT companion-resolve persistence loses --
+  // that old persistence model is NOT reused here. Changes visible output (the
+  // dest depth), so it is off by default and validated with --edram_determinism
+  // --replay_loops=3 before trusting.
+  bool canonical_depth_enabled_ = false;
+  void CanonicalDepthTransfer(const void* command_buffer, RenderTarget* source,
+                              RenderTarget* dest, const Transfer& transfer);
   // Materialize pipeline (canonical words -> host RGBA8Unorm attachment). Built
   // lazily; retained. See metal_kernel_conformance_test.mm for the proven kernel.
   void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.

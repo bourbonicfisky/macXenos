@@ -114,7 +114,8 @@ bool MetalRenderTargetCache::Initialize() {
   // byte-for-byte unchanged. See openspec implement-sample-accurate-metal-edram
   // task 2.1.
   sample_edram_enabled_ = std::getenv("XE_METAL_SAMPLE_EDRAM") != nullptr;
-  if (sample_edram_enabled_) {
+  canonical_depth_enabled_ = std::getenv("XE_METAL_CANONICAL_DEPTH") != nullptr;
+  if (sample_edram_enabled_ || canonical_depth_enabled_) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
     id<MTLBuffer> buffer =
         [device newBufferWithLength:kCanonicalEdramSize
@@ -125,13 +126,15 @@ bool MetalRenderTargetCache::Initialize() {
           "falling back to the collapsed path",
           kCanonicalEdramSize / (1024 * 1024));
       sample_edram_enabled_ = false;
+      canonical_depth_enabled_ = false;
     } else {
       buffer.label = @"xe_canonical_edram";
       canonical_edram_ = (__bridge_retained void*)buffer;
       XELOGI(
           "MetalRenderTargetCache: canonical per-sample EDRAM enabled "
-          "({} MB private buffer)",
-          kCanonicalEdramSize / (1024 * 1024));
+          "({} MB private buffer){}",
+          kCanonicalEdramSize / (1024 * 1024),
+          canonical_depth_enabled_ ? " [depth authority]" : "");
     }
   }
   return true;
@@ -434,8 +437,17 @@ void MetalRenderTargetCache::PerformTransfers(
           [blit endEncoding];
           blit = nil;
         }
-        PerformCrossMsaaTransfer((__bridge const void*)cb, source, dest,
+        if (canonical_depth_enabled_ && src_key.is_depth && dest_key.is_depth &&
+            canonical_edram_) {
+          // Option 1: route the depth ownership flip through the durable
+          // canonical EDRAM authority (pack source -> canonical, materialize
+          // dest <- canonical) instead of the lossy legacy spatial resample.
+          CanonicalDepthTransfer((__bridge const void*)cb, source, dest,
                                  transfer);
+        } else {
+          PerformCrossMsaaTransfer((__bridge const void*)cb, source, dest,
+                                   transfer);
+        }
       } else if (dest_key.is_depth && !src_key.is_depth &&
                  source->pixel_format() == kColorFormat) {
         // Color (raw EDRAM bits in a BGRA8 texture, e.g. the restored
@@ -606,6 +618,67 @@ kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
   canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
   coverage[idx] = 1u;
 }
+// --- Canonical DEPTH authority kernels (Option 1). Same addresser/helpers as
+// the pristine canonical string (compiled in this unit), plus a tile-range guard
+// so a whole-texture pass touches ONLY the transfer's tiles -- the source pack
+// refreshes just its owned tiles in canonical, and the dest materialize replaces
+// just those tiles, leaving every other tile of the real RT intact.
+struct RangeParams { uint start_tiles; uint end_tiles; };
+// Tile index for a host pixel (mirrors the toff math in xe_edram_offset_bytes;
+// fmt_log2 = 0 for 32bpp depth, so the tile grid is 80x16 samples).
+inline uint xe_edram_tile_of(uint px, uint py, uint base, uint pitch, uint msaa,
+                             uint sample) {
+  uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u, msaa >= 1u ? 1u : 0u);
+  s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
+  return base + (s.y / 16u) * pitch + (s.x / 80u);
+}
+kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
+                             texture2d<uint, access::read> sten [[texture(1)]],
+                             device uint* canonical [[buffer(0)]],
+                             constant SurfaceParams& sp [[buffer(1)]],
+                             constant RangeParams& rp [[buffer(2)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
+  if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  if (idx >= sp.words) return;
+  float d = tex.read(gid);
+  uint s = sten.read(gid).r & 0xFFu;
+  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+}
+fragment DepthFragOut materialize_depth_range_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant RangeParams& rp [[buffer(2)]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
+  if (tile < rp.start_tiles || tile >= rp.end_tiles) discard_fragment();
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthFragOut o;
+  o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  return o;
+}
+fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
+                                        device const uint* canonical [[buffer(0)]],
+                                        constant SurfaceParams& sp [[buffer(1)]],
+                                        constant RangeParams& rp [[buffer(2)]],
+                                        constant uint& bit [[buffer(3)]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
+  if (tile < rp.start_tiles || tile >= rp.end_tiles) discard_fragment();
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+}
 )MSL";
     std::string src = std::string(kEdramDepthMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
@@ -646,7 +719,25 @@ kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
          : [device newComputePipelineStateWithFunction:
                        [lib newFunctionWithName:@"pack_depth_cov"]
                                                  error:&err];
-  if (!matd || !mats || !pack || (!ms && !pack_cov)) {
+  // Range-guarded canonical-authority pipelines (Option 1). sc=1 only: this path
+  // renders single-sample and uses canonical EDRAM as the durable authority.
+  id<MTLComputePipelineState> pack_range =
+      ms ? nil
+         : [device newComputePipelineStateWithFunction:
+                       [lib newFunctionWithName:@"pack_depth_range"]
+                                                 error:&err];
+  id<MTLRenderPipelineState> mat_depth_range = nil;
+  id<MTLRenderPipelineState> mat_sten_range = nil;
+  if (!ms) {
+    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_depth_range_fs"];
+    mat_depth_range = [device newRenderPipelineStateWithDescriptor:rpd
+                                                             error:&err];
+    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_sten_range_fs"];
+    mat_sten_range = [device newRenderPipelineStateWithDescriptor:rpd
+                                                            error:&err];
+  }
+  if (!matd || !mats || !pack ||
+      (!ms && (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range))) {
     XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
            err ? err.localizedDescription.UTF8String : "?");
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
@@ -658,6 +749,11 @@ kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
   p.materialize_sten = (__bridge_retained void*)mats;
   p.pack = (__bridge_retained void*)pack;
   p.pack_cov = pack_cov ? (__bridge_retained void*)pack_cov : nullptr;
+  p.pack_range = pack_range ? (__bridge_retained void*)pack_range : nullptr;
+  p.mat_depth_range =
+      mat_depth_range ? (__bridge_retained void*)mat_depth_range : nullptr;
+  p.mat_sten_range =
+      mat_sten_range ? (__bridge_retained void*)mat_sten_range : nullptr;
   // Depth pass writes depth AND REPLACEs stencil to 0 (stencilRef 0) so the
   // bit-plane passes fully replace stencil -- the partial-write lesson from the
   // conformance mixed-sequence test, kept here so the substrate behaves the same.
@@ -857,6 +953,116 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
     (void)canon_b;
     (void)cov_a;  // keep buffers alive until the handler runs.
   }];
+}
+
+void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
+                                                    RenderTarget* source_rt,
+                                                    RenderTarget* dest_rt,
+                                                    const Transfer& transfer) {
+  // Option 1 depth authority: pack(source depth+stencil) -> canonical EDRAM,
+  // then materialize(dest) <- canonical EDRAM, both guarded to the transfer's
+  // tiles. Content lives in the durable canonical buffer, so it survives the RT
+  // instance churn that lost it before -- NO transient-companion persistence.
+  // Single-sample rendering: both host textures are sc=1, so the sc=1 range
+  // pipelines and per-view SurfaceParams (base/pitch/msaa from each key) map each
+  // view's pixels into the shared per-sample canonical space.
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
+  id<MTLTexture> dst_tex = (__bridge id<MTLTexture>)dest->texture();
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  if (!cb || !src_tex || !dst_tex || !canonical) {
+    return;
+  }
+  const ShadowDepthPipelines* p = EnsureShadowDepthPipelines(1u);
+  if (!p || !p->pack_range || !p->mat_depth_range || !p->mat_sten_range) {
+    // Fall back to the legacy resample if the canonical pipelines are missing.
+    PerformCrossMsaaTransfer(command_buffer, source_rt, dest_rt, transfer);
+    return;
+  }
+  auto fmt_is_depth = [](MetalRenderTarget* rt) -> uint32_t {
+    return rt->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+               ? 2u
+               : 1u;
+  };
+  struct SP {
+    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
+  };
+  const uint32_t kWords = kCanonicalEdramSize / 4u;
+  SP sp_src{source->key().base_tiles, source->key().GetPitchTiles(),
+            uint32_t(source->key().msaa_samples), fmt_is_depth(source), 0u,
+            kWords};
+  SP sp_dst{dest->key().base_tiles, dest->key().GetPitchTiles(),
+            uint32_t(dest->key().msaa_samples), fmt_is_depth(dest), 0u, kWords};
+  struct RP {
+    uint32_t start_tiles, end_tiles;
+  } rp{transfer.start_tiles, transfer.end_tiles};
+
+  id<MTLTexture> src_sten =
+      [src_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+
+  // 1) pack source depth+stencil into canonical EDRAM (source's owned tiles).
+  id<MTLComputePipelineState> pack_pso =
+      (__bridge id<MTLComputePipelineState>)p->pack_range;
+  {
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    e.label = @"rtcache:canonical-depth-pack";
+    [e setComputePipelineState:pack_pso];
+    [e setTexture:src_tex atIndex:0];
+    [e setTexture:src_sten atIndex:1];
+    [e setBuffer:canonical offset:0 atIndex:0];
+    [e setBytes:&sp_src length:sizeof(sp_src) atIndex:1];
+    [e setBytes:&rp length:sizeof(rp) atIndex:2];
+    NSUInteger tw = pack_pso.threadExecutionWidth;
+    NSUInteger th = pack_pso.maxTotalThreadsPerThreadgroup / tw;
+    [e dispatchThreads:MTLSizeMake(src_tex.width, src_tex.height, 1)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [e endEncoding];
+  }
+
+  // 2) materialize dest depth+stencil FROM canonical EDRAM (dest's tiles only;
+  //    loadAction Load + the range guard leave every other tile untouched).
+  MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+  rpd.depthAttachment.texture = dst_tex;
+  rpd.depthAttachment.loadAction = MTLLoadActionLoad;
+  rpd.depthAttachment.storeAction = MTLStoreActionStore;
+  rpd.stencilAttachment.texture = dst_tex;
+  rpd.stencilAttachment.loadAction = MTLLoadActionLoad;
+  rpd.stencilAttachment.storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rpd];
+  e.label = @"rtcache:canonical-depth-materialize";
+  // Depth pass: write depth AND REPLACE stencil to 0 (so the bit-plane passes
+  // fully replace instead of OR-ing over stale stencil -- the conformance lesson).
+  [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)p->mat_depth_range];
+  [e setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->depth_state];
+  [e setStencilReferenceValue:0];
+  [e setFragmentBuffer:canonical offset:0 atIndex:0];
+  [e setFragmentBytes:&sp_dst length:sizeof(sp_dst) atIndex:1];
+  [e setFragmentBytes:&rp length:sizeof(rp) atIndex:2];
+  [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  // Stencil bit-plane REPLACE passes.
+  [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)p->mat_sten_range];
+  [e setStencilReferenceValue:0xFF];
+  [e setFragmentBuffer:canonical offset:0 atIndex:0];
+  [e setFragmentBytes:&sp_dst length:sizeof(sp_dst) atIndex:1];
+  [e setFragmentBytes:&rp length:sizeof(rp) atIndex:2];
+  for (uint32_t b = 0; b < 8; ++b) {
+    uint32_t bit = 1u << b;
+    [e setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->bit_states[b]];
+    [e setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  }
+  [e endEncoding];
+
+  static uint32_t s_logs = 0;
+  if (s_logs++ < 128) {
+    XELOGW("MetalCanonicalDepth @draw {}: {} ({}x)->{} ({}x) tiles [{},{})",
+           command_processor_.trace_draw_index(), source->key().GetDebugName(),
+           1u << uint32_t(source->key().msaa_samples), dest->key().GetDebugName(),
+           1u << uint32_t(dest->key().msaa_samples), transfer.start_tiles,
+           transfer.end_tiles);
+  }
 }
 
 void MetalRenderTargetCache::PerformCrossMsaaTransfer(
