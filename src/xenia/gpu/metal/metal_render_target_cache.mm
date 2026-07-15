@@ -17,6 +17,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -358,6 +359,27 @@ void MetalRenderTargetCache::PerformTransfers(
       uint32_t sxs, sys, dxs, dys;
       GetMsaaShifts(uint32_t(src_key.msaa_samples), sxs, sys);
       GetMsaaShifts(uint32_t(dest_key.msaa_samples), dxs, dys);
+      // Classify the ownership transition with the shared, unit-tested decision
+      // function (render_target_transfer_class.h) — the SAME predicates that
+      // drive the branch cascade below. This labels the transition manifest and
+      // gives the L2/L3b conformance rung an independent expected kind. Purely
+      // observational: it does not change which branch runs.
+      TransferClassInput tci;
+      tci.src_is_depth = src_key.is_depth != 0;
+      tci.dst_is_depth = dest_key.is_depth != 0;
+      tci.src_is_64bpp = src_key.Is64bpp();
+      tci.dst_is_64bpp = dest_key.Is64bpp();
+      tci.src_msaa = uint32_t(src_key.msaa_samples);
+      tci.dst_msaa = uint32_t(dest_key.msaa_samples);
+      tci.host_format_equal = source->pixel_format() == dest->pixel_format();
+      tci.src_is_color8888 = source->pixel_format() == kColorFormat;
+      tci.dst_is_color8888 = dest->pixel_format() == kColorFormat;
+      tci.src_is_r32f =
+          source->pixel_format() == uint64_t(MTLPixelFormatR32Float);
+      tci.dst_is_r32f =
+          dest->pixel_format() == uint64_t(MTLPixelFormatR32Float);
+      TransferKind kind = ClassifyTransfer(tci);
+      RecordTransition(kind, src_key, dest_key, transfer);
       if (source->pixel_format() == dest->pixel_format() && sxs == dxs &&
           sys == dys) {
         // Same host format + same MSAA (equal pixel block sizes): copy
@@ -519,6 +541,28 @@ void MetalRenderTargetCache::PerformTransfers(
   }
   if (blit) {
     [blit endEncoding];
+  }
+}
+
+void MetalRenderTargetCache::RecordTransition(TransferKind kind,
+                                              const RenderTargetKey& src_key,
+                                              const RenderTargetKey& dst_key,
+                                              const Transfer& transfer) {
+  TransitionRecord rec;
+  rec.transition_id = transition_counter_++;
+  rec.draw_index = command_processor_.trace_draw_index();
+  rec.src_key = src_key.key;
+  rec.dst_key = dst_key.key;
+  rec.kind = kind;
+  rec.start_tiles = transfer.start_tiles;
+  rec.end_tiles = transfer.end_tiles;
+  transition_manifest_.push_back(rec);
+  static const bool s_manifest = std::getenv("XE_METAL_TRANSITION_MANIFEST");
+  if (s_manifest) {
+    XELOGGPU("MetalXfer[{}] #{} @draw {}: {} -> {} tiles [{},{})",
+             TransferKindName(kind), rec.transition_id, rec.draw_index,
+             src_key.GetDebugName(), dst_key.GetDebugName(), rec.start_tiles,
+             rec.end_tiles);
   }
 }
 

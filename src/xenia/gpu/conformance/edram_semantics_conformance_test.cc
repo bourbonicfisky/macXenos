@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -213,6 +214,158 @@ TEST_CASE("EDRAM 1x surface is stable across a later 4x surface",
     for (uint32_t x = 0; x < w; ++x)
       REQUIRE(e.Load(x, y, MsaaSamples::k1X, 0, false, 0, pitch1) ==
               Val(x, y, 7));
+}
+
+// ---------------------------------------------------------------------------
+// L3b predictor: the ownership-transition CLASSIFIER.
+//
+// PerformTransfers (metal_render_target_cache.mm) picks one of seven branches
+// per tile-range transfer from a cascade of predicates over the (source, dest)
+// render-target pair. That cascade is the murkiest stage of frame assembly, and
+// a single-frame trace can't prove it takes the RIGHT branch for a given key
+// pair. ClassifyTransfer() is that cascade extracted as a pure function; the
+// live code drives its branch from it, so these cases are an EXECUTABLE
+// prediction of which transition every key pair produces -- the L2 oracle the
+// recorded live manifest (RecordTransition) is diffed against.
+namespace {
+
+// Builds a color/depth surface descriptor for the classifier. `container`:
+// 0 = raw-word 8888, 1 = R32F reinterpret, 2 = other (e.g. HDR / depth host).
+struct Surf {
+  bool is_depth = false;
+  bool is_64bpp = false;
+  MsaaSamples msaa = MsaaSamples::k1X;
+  int container = 0;  // 0=8888, 1=r32f, 2=other
+};
+
+TransferClassInput MakeInput(const Surf& s, const Surf& d) {
+  TransferClassInput in;
+  in.src_is_depth = s.is_depth;
+  in.dst_is_depth = d.is_depth;
+  in.src_is_64bpp = s.is_64bpp;
+  in.dst_is_64bpp = d.is_64bpp;
+  in.src_msaa = uint32_t(s.msaa);
+  in.dst_msaa = uint32_t(d.msaa);
+  in.src_is_color8888 = !s.is_depth && s.container == 0;
+  in.dst_is_color8888 = !d.is_depth && d.container == 0;
+  in.src_is_r32f = !s.is_depth && s.container == 1;
+  in.dst_is_r32f = !d.is_depth && d.container == 1;
+  // Host formats are equal iff same depth-ness and same container tag (two
+  // distinct depth host formats would differ, but the model uses one tag).
+  in.host_format_equal =
+      (s.is_depth == d.is_depth) && (s.container == d.container);
+  return in;
+}
+
+}  // namespace
+
+TEST_CASE("Transfer classify: same format + same MSAA is a blit",
+          "[l3b][transfer][classify]") {
+  Surf a{false, false, MsaaSamples::k4X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(a, a)) == TransferKind::kBlit);
+  Surf depth{true, false, MsaaSamples::k1X, 2};
+  REQUIRE(ClassifyTransfer(MakeInput(depth, depth)) == TransferKind::kBlit);
+}
+
+TEST_CASE("Transfer classify: same format, different MSAA is cross-MSAA",
+          "[l3b][transfer][classify]") {
+  // 1x -> 4x: x AND y shift both differ.
+  Surf lo{false, false, MsaaSamples::k1X, 0};
+  Surf hi{false, false, MsaaSamples::k4X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(lo, hi)) == TransferKind::kCrossMsaa);
+  REQUIRE(ClassifyTransfer(MakeInput(hi, lo)) == TransferKind::kCrossMsaa);
+  // 2x -> 4x differs only in the x shift, still not a blit.
+  Surf two{false, false, MsaaSamples::k2X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(two, hi)) == TransferKind::kCrossMsaa);
+  // Depth cross-MSAA is also cross-MSAA, not a reinterpret.
+  Surf dlo{true, false, MsaaSamples::k1X, 2};
+  Surf dhi{true, false, MsaaSamples::k4X, 2};
+  REQUIRE(ClassifyTransfer(MakeInput(dlo, dhi)) == TransferKind::kCrossMsaa);
+}
+
+TEST_CASE("Transfer classify: 1x vs 2x collapses to a blit (equal shifts)",
+          "[l3b][transfer][classify]") {
+  // GetMsaaShifts(1x) == GetMsaaShifts(2x)? No: 2x sets the y shift. But 2x vs
+  // 4x share the y shift and differ in x. Pin the exact equal-shift boundary:
+  // only same-enum pairs (and any pair with identical shift vector) are blits.
+  Surf one{false, false, MsaaSamples::k1X, 0};
+  Surf two{false, false, MsaaSamples::k2X, 0};
+  // 1x (0,0) vs 2x (0,1) differ in y -> NOT a blit.
+  REQUIRE(ClassifyTransfer(MakeInput(one, two)) == TransferKind::kCrossMsaa);
+}
+
+TEST_CASE("Transfer classify: color->depth reinterpret",
+          "[l3b][transfer][classify]") {
+  Surf color{false, false, MsaaSamples::k1X, 0};
+  Surf depth{true, false, MsaaSamples::k1X, 2};
+  REQUIRE(ClassifyTransfer(MakeInput(color, depth)) ==
+          TransferKind::kColorToDepth);
+  // Only from raw-word 8888: an R32F source into depth is not c2d.
+  Surf r32f{false, false, MsaaSamples::k1X, 1};
+  REQUIRE(ClassifyTransfer(MakeInput(r32f, depth)) != TransferKind::kColorToDepth);
+}
+
+TEST_CASE("Transfer classify: depth->color reinterpret (classified even when "
+          "the live default skips the GPU work)",
+          "[l3b][transfer][classify]") {
+  Surf depth{true, false, MsaaSamples::k1X, 2};
+  Surf color{false, false, MsaaSamples::k1X, 0};
+  // Classification records the ownership handoff regardless of the runtime
+  // XE_METAL_D2C_REAL / ping-pong skip policy.
+  REQUIRE(ClassifyTransfer(MakeInput(depth, color)) ==
+          TransferKind::kDepthToColor);
+  // Depth -> R32F is not the d2c reinterpret path (dest is not raw-word 8888).
+  Surf r32f{false, false, MsaaSamples::k1X, 1};
+  REQUIRE(ClassifyTransfer(MakeInput(depth, r32f)) != TransferKind::kDepthToColor);
+}
+
+TEST_CASE("Transfer classify: 8888<->R32F is a pure reinterpret",
+          "[l3b][transfer][classify]") {
+  Surf c8888{false, false, MsaaSamples::k1X, 0};
+  Surf r32f{false, false, MsaaSamples::k1X, 1};
+  REQUIRE(ClassifyTransfer(MakeInput(c8888, r32f)) ==
+          TransferKind::kColorReinterpret);
+  REQUIRE(ClassifyTransfer(MakeInput(r32f, c8888)) ==
+          TransferKind::kColorReinterpret);
+}
+
+TEST_CASE("Transfer classify: HDR/other color combos fall to convert",
+          "[l3b][transfer][classify]") {
+  // HDR (container 2, non-depth) <-> 8888: neither blit (formats differ) nor
+  // the specific 8888<->R32F reinterpret -> general convert.
+  Surf hdr{false, false, MsaaSamples::k1X, 2};
+  Surf c8888{false, false, MsaaSamples::k1X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(hdr, c8888)) ==
+          TransferKind::kColorConvert);
+  REQUIRE(ClassifyTransfer(MakeInput(c8888, hdr)) ==
+          TransferKind::kColorConvert);
+  // HDR <-> R32F is also convert, not reinterpret.
+  Surf r32f{false, false, MsaaSamples::k1X, 1};
+  REQUIRE(ClassifyTransfer(MakeInput(hdr, r32f)) == TransferKind::kColorConvert);
+}
+
+TEST_CASE("Transfer classify: any 64bpp owner is skipped",
+          "[l3b][transfer][classify]") {
+  // 64bpp keys have no color/depth reinterpret handler and are not blittable
+  // against a 32bpp partner -> skip (key-local persistence). A 64bpp surface's
+  // host format is NOT the raw-word 8888 container, so host_format_equal is
+  // false against a 32bpp 8888 (container 2 models "some other host format").
+  Surf wide{false, true, MsaaSamples::k1X, 2};
+  Surf c8888{false, false, MsaaSamples::k1X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(wide, c8888)) == TransferKind::kSkip);
+  REQUIRE(ClassifyTransfer(MakeInput(c8888, wide)) == TransferKind::kSkip);
+  // But two identical 64bpp surfaces ARE a blit (same host format + MSAA): the
+  // blit branch precedes every 64bpp guard.
+  REQUIRE(ClassifyTransfer(MakeInput(wide, wide)) == TransferKind::kBlit);
+}
+
+TEST_CASE("Transfer classify: precedence — blit wins over reinterpret",
+          "[l3b][transfer][classify]") {
+  // A same-format same-MSAA pair that ALSO looks like a color pair must resolve
+  // to blit (the first branch), never fall through to convert. Guards against a
+  // reordering regression in the live cascade.
+  Surf c8888{false, false, MsaaSamples::k2X, 0};
+  REQUIRE(ClassifyTransfer(MakeInput(c8888, c8888)) == TransferKind::kBlit);
 }
 
 }  // namespace test

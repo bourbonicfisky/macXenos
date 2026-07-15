@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "xenia/gpu/render_target_cache.h"
+#include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -262,6 +263,30 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        RenderTarget* dest_rt,
                                        const Transfer& transfer);
 
+  // --- Ownership-transition manifest (L3b conformance rung) ---------------
+  // A compact, ordered record of every EDRAM ownership transition performed in
+  // the frame — the observable "transition stream" that makes the murkiest
+  // frame-assembly stage (PerformTransfers) auditable against the L2 model.
+  // Metadata only (no GPU sync): the classified kind comes from the shared
+  // ClassifyTransfer() so a manifest entry is, by construction, the branch the
+  // cascade took. GPU before/after hashes are a later rung and deliberately
+  // omitted here (they need a command-stream reduction, not a commit+wait).
+  struct TransitionRecord {
+    uint32_t transition_id;  // Monotonic within the process (never reset).
+    uint32_t draw_index;     // trace_draw_index() at the transition.
+    uint64_t src_key;        // RenderTargetKey.key (source owner).
+    uint64_t dst_key;        // RenderTargetKey.key (reclaiming owner).
+    TransferKind kind;
+    uint32_t start_tiles;
+    uint32_t end_tiles;
+  };
+  // Appends one classified transition to the manifest and, when
+  // XE_METAL_TRANSITION_MANIFEST is set, emits an ordered log line. Pure
+  // instrumentation — does not touch the GPU or alter transfer behavior.
+  void RecordTransition(TransferKind kind, const RenderTargetKey& src_key,
+                        const RenderTargetKey& dst_key,
+                        const Transfer& transfer);
+
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
 
@@ -358,6 +383,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint32_t swap;
   };
   std::unordered_map<const void*, C2dPingPong> c2d_pingpong_;
+
+  // Ordered ownership-transition manifest (see RecordTransition). Grows for the
+  // life of the cache; cheap metadata, capped-throttled logging.
+  std::vector<TransitionRecord> transition_manifest_;
+  uint32_t transition_counter_ = 0;
 
   // Snapshot textures retired mid-frame (grown), held retained until the frame
   // GPU work finishes so in-flight draws don't dereference freed memory. Drained
