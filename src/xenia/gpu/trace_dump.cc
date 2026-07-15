@@ -53,6 +53,13 @@ DEFINE_bool(dump_edram, false,
             "After playback, dump the raw 10 MB EDRAM contents (per-sample, "
             "tile-major) next to the output image as <output>.edram.bin.",
             "GPU");
+DEFINE_bool(edram_determinism, false,
+            "Replay the SAME frame --replay_loops times and require the EDRAM "
+            "is byte-identical after every loop. A correct backend is stateless "
+            "per frame, so any divergence is a cross-frame-state bug (stale "
+            "render-target persistence, uninitialized reuse) that a single-frame "
+            "dump cannot see. Needs --replay_loops>=2.",
+            "GPU");
 DEFINE_string(decode, "",
               "Offline decode mode (no replay): decode every draw_*.edram.bin "
               "in the given capture directory into color_drawNNNNNN.png using "
@@ -194,9 +201,56 @@ int TraceDump::Run() {
   player_->SeekCommand(
       static_cast<int>(player_->current_frame()->commands.size() - 1));
   player_->WaitOnPlayback();
+  // Cross-loop EDRAM determinism check: the same frame replayed must produce
+  // byte-identical EDRAM every loop. Divergence => a cross-frame-state bug the
+  // single-frame dump is blind to (the class the MSAA persistence regression
+  // belonged to). Baseline captured after loop 0.
+  bool determinism = cvars::edram_determinism && replay_loops >= 2;
+  std::vector<uint8_t> det_baseline;
+  bool determinism_failed = false;
+  if (determinism) {
+    if (!graphics_system_->command_processor()->DumpEdramToBuffer(
+            det_baseline)) {
+      XELOGW("--edram_determinism: baseline EDRAM dump failed; skipping check");
+      determinism = false;
+    }
+  }
   for (int32_t loop = 1; loop < replay_loops; ++loop) {
     player_->ReplayCurrentFrame();
     player_->WaitOnPlayback();
+    if (determinism) {
+      std::vector<uint8_t> cur;
+      if (!graphics_system_->command_processor()->DumpEdramToBuffer(cur) ||
+          cur.size() != det_baseline.size()) {
+        XELOGE("--edram_determinism: loop {} EDRAM dump failed/size mismatch",
+               loop);
+        determinism_failed = true;
+        continue;
+      }
+      size_t diffs = 0, first = cur.size();
+      for (size_t i = 0; i < cur.size(); ++i) {
+        if (cur[i] != det_baseline[i]) {
+          if (!diffs) first = i;
+          ++diffs;
+        }
+      }
+      if (diffs) {
+        XELOGE(
+            "EDRAM DETERMINISM FAIL: loop {} differs from loop 0 -- {} / {} "
+            "bytes, first at byte {} (word {}). Cross-frame-state bug.",
+            loop, diffs, cur.size(), first, first / 4);
+        determinism_failed = true;
+      } else {
+        XELOGI("EDRAM determinism: loop {} == loop 0", loop);
+      }
+    }
+  }
+  if (determinism) {
+    if (determinism_failed) {
+      XELOGE("EDRAM DETERMINISM: FAILED ({} loops)", replay_loops);
+    } else {
+      XELOGI("EDRAM DETERMINISM: PASS -- {} loops byte-identical", replay_loops);
+    }
   }
   EndHostCapture();
 
