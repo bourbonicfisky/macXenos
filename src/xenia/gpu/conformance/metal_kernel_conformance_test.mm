@@ -24,6 +24,7 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -37,6 +38,25 @@ namespace gpu {
 namespace test {
 
 namespace {
+
+// CPU reference for the tile-range content hash (mirror of xe_hash_mix /
+// k_tile_hash in the MSL below). The live ownership-transition manifest hashes
+// dst tile ranges before/after each transfer; this is the oracle proving the
+// GPU reduction is content-addressed and thread-order-independent.
+inline uint32_t XeHashMix(uint32_t w, uint32_t i) {
+  uint32_t h = w;
+  h ^= i * 0x9E3779B9u;
+  h *= 0x85EBCA6Bu;
+  h ^= h >> 13;
+  h *= 0xC2B2AE35u;
+  h ^= h >> 16;
+  return h;
+}
+inline uint32_t XeTileHash(const std::vector<uint32_t>& words) {
+  uint32_t acc = 0u;
+  for (uint32_t i = 0; i < words.size(); ++i) acc += XeHashMix(words[i], i);
+  return acc;
+}
 
 // Inline MSL: one kernel per format decoder. Each reads a uint code from `in`
 // and writes the RESULT BITS to `out` (float results are stored via as_type so
@@ -304,6 +324,53 @@ kernel void k_rcp_tile(device const EdramIn* in [[buffer(0)]],
                    e.py << (e.msaa >= 1u ? 1u : 0u));   // y doubles @2x
   uint col = ds.x / tile_w;
   out[i] = e.base + (ds.y / 16u) * e.pitch + col;
+}
+
+// Tile-range content hash primitive (L3b ownership-transition manifest). An
+// order-INDEPENDENT (atomic-add), position-SENSITIVE (index folded in)
+// reduction over 32-bit EDRAM words. The live transition manifest will hash a
+// destination tile range before and after each transfer to detect value
+// corruption, so the reduction must be reproducible regardless of thread order
+// yet change if a word lands at the wrong position. Avalanche mix so distinct
+// content maps to distinct sums with high probability.
+inline uint xe_hash_mix(uint w, uint i) {
+  uint h = w;
+  h ^= i * 0x9E3779B9u;
+  h *= 0x85EBCA6Bu;
+  h ^= h >> 13;
+  h *= 0xC2B2AE35u;
+  h ^= h >> 16;
+  return h;
+}
+kernel void k_tile_hash(device const uint* words [[buffer(0)]],
+                       device atomic_uint* out [[buffer(1)]],
+                       constant uint& count [[buffer(2)]],
+                       uint i [[thread_position_in_grid]]) {
+  if (i >= count) return;
+  atomic_fetch_add_explicit(out, xe_hash_mix(words[i], i),
+                            memory_order_relaxed);
+}
+// Same reduction, but sourced from a host attachment -- proves hashing the
+// RGBA8Unorm/R32Float texture equals hashing its raw EDRAM words, the invariant
+// the live path relies on to hash owned tiles without a materialize step.
+// mode 0 = RGBA8Unorm (pack the four unorm8 lanes, matching pack_8888);
+// mode 1 = R32Float (raw float bits).
+kernel void k_tile_hash_tex(texture2d<float, access::read> tex [[texture(0)]],
+                           device atomic_uint* out [[buffer(0)]],
+                           constant uint& mode [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+  uint W = tex.get_width();
+  if (gid.x >= W || gid.y >= tex.get_height()) return;
+  float4 v = tex.read(gid);
+  uint word;
+  if (mode == 0u) {
+    uint4 b = uint4(round(v * 255.0)) & 0xFFu;
+    word = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
+  } else {
+    word = as_type<uint>(v.x);
+  }
+  uint i = gid.y * W + gid.x;
+  atomic_fetch_add_explicit(out, xe_hash_mix(word, i), memory_order_relaxed);
 }
 )MSL";
 
@@ -741,6 +808,91 @@ struct MetalCompute {
           out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
     return out;
   }
+
+  // Reduces `words` with k_tile_hash into a single atomic-accumulated hash.
+  uint32_t HashWordsBuffer(const std::vector<uint32_t>& words) {
+    const uint32_t count = uint32_t(words.size());
+    id<MTLBuffer> in_buf =
+        [dev newBufferWithBytes:words.data()
+                         length:std::max<size_t>(1u, words.size()) * 4u
+                        options:MTLResourceStorageModeShared];
+    uint32_t zero = 0u;
+    id<MTLBuffer> out_buf = [dev newBufferWithBytes:&zero
+                                             length:4u
+                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> cnt_buf = [dev newBufferWithBytes:&count
+                                             length:4u
+                                            options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> pso = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k_tile_hash"]
+                                      error:&err];
+    REQUIRE(pso != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:in_buf offset:0 atIndex:0];
+    [enc setBuffer:out_buf offset:0 atIndex:1];
+    [enc setBuffer:cnt_buf offset:0 atIndex:2];
+    NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+    if (tg > count) tg = count ? count : 1;
+    [enc dispatchThreads:MTLSizeMake(count ? count : 1, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    return *static_cast<const uint32_t*>(out_buf.contents);
+  }
+
+  // Uploads `words` (w*h of them, row-major) into a wxh host texture and hashes
+  // it with k_tile_hash_tex. mode 0 = RGBA8Unorm, 1 = R32Float. Proves that
+  // hashing the attachment == hashing the raw words (HashWordsBuffer).
+  uint32_t HashTexture(const std::vector<uint32_t>& words, uint32_t w,
+                       uint32_t h, uint32_t mode) {
+    MTLPixelFormat pf =
+        mode == 0u ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatR32Float;
+    MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:pf
+                                     width:w
+                                    height:h
+                                 mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    REQUIRE(tex != nil);
+    // The 4 raw bytes per word ARE the little-endian texel bits for both
+    // formats (RGBA8Unorm: R,G,B,A lanes; R32Float: the f32 bit pattern).
+    [tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
+           mipmapLevel:0
+             withBytes:words.data()
+           bytesPerRow:w * 4u];
+    uint32_t zero = 0u;
+    id<MTLBuffer> out_buf = [dev newBufferWithBytes:&zero
+                                             length:4u
+                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> mode_buf = [dev newBufferWithBytes:&mode
+                                              length:4u
+                                             options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> pso = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k_tile_hash_tex"]
+                                      error:&err];
+    REQUIRE(pso != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setTexture:tex atIndex:0];
+    [enc setBuffer:out_buf offset:0 atIndex:0];
+    [enc setBuffer:mode_buf offset:0 atIndex:1];
+    [enc dispatchThreads:MTLSizeMake(w, h, 1)
+        threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    return *static_cast<const uint32_t*>(out_buf.contents);
+  }
 };
 
 // Mirror of the MSL EdramIn struct (std layout, 8 x uint32).
@@ -1152,6 +1304,78 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
     INFO(cfg.name);
     REQUIRE(bad == 0u);
   }
+}
+
+// ---------------------------------------------------------------------------
+// L3b hash primitive: the tile-range content hash the live ownership-transition
+// manifest will use to detect value corruption (before/after a transfer). Prove
+// here, headless, three properties the live path depends on:
+//   (1) the GPU reduction matches the CPU oracle bit-for-bit;
+//   (2) it is thread-order-independent yet position-sensitive;
+//   (3) hashing a host attachment == hashing its raw EDRAM words.
+namespace {
+std::vector<uint32_t> SpreadWords(uint32_t n) {
+  std::vector<uint32_t> v(n);
+  for (uint32_t i = 0; i < n; ++i)
+    v[i] = (i * 2654435761u) ^ (0xB5297A4Du + (i << 3));  // spread all 32 bits
+  return v;
+}
+}  // namespace
+
+TEST_CASE("Metal tile-hash buffer reduction matches the CPU oracle",
+          "[l1][metal][hash]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  for (uint32_t n : {1u, 2u, 7u, 64u, 1000u, 4096u}) {
+    auto words = SpreadWords(n);
+    INFO("n=" << n);
+    REQUIRE(mc.HashWordsBuffer(words) == XeTileHash(words));
+  }
+}
+
+TEST_CASE("Metal tile-hash is content-addressed (a single changed word moves it)",
+          "[l1][metal][hash]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  auto words = SpreadWords(512);
+  uint32_t h0 = mc.HashWordsBuffer(words);
+  // Flip one bit of one word: the hash must change (corruption is observable).
+  words[123] ^= 1u;
+  REQUIRE(mc.HashWordsBuffer(words) != h0);
+  // Move a word to a different position (swap two): position-sensitivity means
+  // the hash changes even though the multiset of words is identical.
+  auto swapped = SpreadWords(512);
+  std::swap(swapped[10], swapped[400]);
+  REQUIRE(mc.HashWordsBuffer(swapped) != XeTileHash(SpreadWords(512)));
+}
+
+TEST_CASE("Metal tile-hash of an RGBA8Unorm attachment == hashing its words",
+          "[l1][metal][hash][texture]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t w = 40, h = 16;  // one 32bpp EDRAM tile's pixel block at 1x.
+  auto words = SpreadWords(w * h);
+  // RGBA8Unorm is a bijection on 32-bit words (each byte lane is exact unorm8),
+  // so hashing the attachment must equal hashing the raw words.
+  REQUIRE(mc.HashTexture(words, w, h, 0u) == XeTileHash(words));
+  REQUIRE(mc.HashTexture(words, w, h, 0u) == mc.HashWordsBuffer(words));
+}
+
+TEST_CASE("Metal tile-hash of an R32Float attachment == hashing its words",
+          "[l1][metal][hash][texture]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t w = 40, h = 16;
+  // Use FINITE-float bit patterns: NaN payloads can be canonicalized on a
+  // texture read, which is not a hash bug but would break bit-exactness. Real
+  // EDRAM luminance words the reinterpret path carries are finite.
+  std::vector<uint32_t> words(w * h);
+  for (uint32_t i = 0; i < words.size(); ++i) {
+    float f = (float(i) - 128.0f) * 0.375f + 1e-3f;
+    std::memcpy(&words[i], &f, 4);
+  }
+  REQUIRE(mc.HashTexture(words, w, h, 1u) == XeTileHash(words));
+  REQUIRE(mc.HashTexture(words, w, h, 1u) == mc.HashWordsBuffer(words));
 }
 
 }  // namespace test
