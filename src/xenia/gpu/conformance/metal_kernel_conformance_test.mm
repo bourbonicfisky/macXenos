@@ -1233,6 +1233,189 @@ struct MetalCompute {
     return out;
   }
 
+  // Mixed 4x -> 1x -> 4x relabel chain through ONE shared canonical buffer, with
+  // a write through the 4x view (the seed materialize) and a SCISSORED write
+  // through the 1x view. Returns the final tile words (offsets 0..1279). The
+  // caller CPU-replays the same physical-slot writes to get the expected result:
+  // identity <=> the relabel preserves untouched samples AND propagates a 1x
+  // write to the 4x view -- the live cross-MSAA slice's exact contract. Fixed to
+  // one tile: 4x = 40x8 px x 4 samples, 1x = 80x16 px, both 1280 slots.
+  std::vector<uint32_t> CrossMsaaChain(uint32_t fmt,
+                                       const std::vector<uint32_t>& a4x,
+                                       const std::vector<uint32_t>& c1x,
+                                       uint32_t rx0, uint32_t ry0, uint32_t rx1,
+                                       uint32_t ry1, size_t canonical_bytes) {
+    const uint32_t w4 = 40, h4 = 8, ns = 4, w1 = 80, h1 = 16;
+    // Tile pitch (PitchFor is defined after this struct): one tile wide for both.
+    const uint32_t p4 = ((w4 << 1) + 79u) / 80u, p1 = (w1 + 79u) / 80u;
+    SurfaceParams sp4{0u, p4, 2u, fmt, 0u, uint32_t(canonical_bytes / 4)};
+    SurfaceParams sp1{0u, p1, 0u, fmt, 0u, uint32_t(canonical_bytes / 4)};
+    auto off4 = [&](uint32_t x, uint32_t y, uint32_t s) {
+      return XeEdramSnapshotOffsetBytes(x, y, 0u, p4, 2u, true, 0u, s) >> 2;
+    };
+    auto off1 = [&](uint32_t x, uint32_t y) {
+      return XeEdramSnapshotOffsetBytes(x, y, 0u, p1, 0u, true, 0u, 0u) >> 2;
+    };
+    auto mkbuf = [&](const std::vector<uint32_t>& src4,
+                     const std::vector<uint32_t>* src1) {
+      id<MTLBuffer> b = [dev newBufferWithLength:canonical_bytes
+                                         options:MTLResourceStorageModeShared];
+      std::memset(b.contents, 0, canonical_bytes);
+      uint32_t* cw = static_cast<uint32_t*>(b.contents);
+      if (!src4.empty())
+        for (uint32_t y = 0; y < h4; ++y)
+          for (uint32_t x = 0; x < w4; ++x)
+            for (uint32_t s = 0; s < ns; ++s)
+              cw[off4(x, y, s)] = src4[(y * w4 + x) * ns + s];
+      if (src1)
+        for (uint32_t y = 0; y < h1; ++y)
+          for (uint32_t x = 0; x < w1; ++x) cw[off1(x, y)] = (*src1)[y * w1 + x];
+      return b;
+    };
+    id<MTLBuffer> seedA = mkbuf(a4x, nullptr);
+    id<MTLBuffer> cC = mkbuf({}, &c1x);
+    id<MTLBuffer> canon = [dev newBufferWithLength:canonical_bytes
+                                           options:MTLResourceStorageModeShared];
+    std::memset(canon.contents, 0, canonical_bytes);
+    id<MTLBuffer> sp4b = [dev newBufferWithBytes:&sp4 length:sizeof(sp4)
+                                         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> sp1b = [dev newBufferWithBytes:&sp1 length:sizeof(sp1)
+                                         options:MTLResourceStorageModeShared];
+    // Attachments: one 4x and one 1x Depth32Float_Stencil8, reused across passes.
+    auto mktex = [&](uint32_t w, uint32_t h, uint32_t samples) {
+      MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+      td.textureType = samples > 1 ? MTLTextureType2DMultisample
+                                   : MTLTextureType2D;
+      td.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+      td.width = w; td.height = h; td.sampleCount = samples;
+      td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModePrivate;
+      return [dev newTextureWithDescriptor:td];
+    };
+    id<MTLTexture> t4 = mktex(w4, h4, ns), t1 = mktex(w1, h1, 1);
+    id<MTLTexture> v4 = [t4 newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    id<MTLTexture> v1 = [t1 newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    NSError* err = nil;
+    auto pipe = [&](NSString* dep, NSString* sten, uint32_t samples) {
+      MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:dep];
+      d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+      d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+      d.rasterSampleCount = samples;
+      id<MTLRenderPipelineState> dp =
+          [dev newRenderPipelineStateWithDescriptor:d error:&err];
+      d.fragmentFunction = [lib newFunctionWithName:sten];
+      id<MTLRenderPipelineState> sp =
+          [dev newRenderPipelineStateWithDescriptor:d error:&err];
+      return std::make_pair(dp, sp);
+    };
+    auto pipe4 = pipe(@"materialize_depth_ms_fs", @"materialize_sten_ms_fs", ns);
+    auto pipe1 = pipe(@"materialize_depth_fs", @"materialize_sten_fs", 1);
+    // Depth pass ALSO zeroes the stencil (REPLACE ref 0, full mask) so a
+    // materialize fully REPLACES stencil even on a loadAction:Load scissored
+    // write -- the bit-plane passes only SET bits, so without this a 1x write
+    // over existing stencil would OR instead of replace (mirrors the c2d depth
+    // state). Caller sets stencilRef 0 before the depth draw, 0xFF before bits.
+    MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = YES;
+    MTLStencilDescriptor* zs = [[MTLStencilDescriptor alloc] init];
+    zs.stencilCompareFunction = MTLCompareFunctionAlways;
+    zs.depthStencilPassOperation = MTLStencilOperationReplace;
+    zs.writeMask = 0xFF;
+    dsd.frontFaceStencil = zs; dsd.backFaceStencil = zs;
+    id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+    id<MTLDepthStencilState> bit_states[8];
+    for (uint32_t b = 0; b < 8; ++b) {
+      MTLDepthStencilDescriptor* bds = [[MTLDepthStencilDescriptor alloc] init];
+      bds.depthCompareFunction = MTLCompareFunctionAlways;
+      bds.depthWriteEnabled = NO;
+      MTLStencilDescriptor* bs = [[MTLStencilDescriptor alloc] init];
+      bs.stencilCompareFunction = MTLCompareFunctionAlways;
+      bs.depthStencilPassOperation = MTLStencilOperationReplace;
+      bs.writeMask = 1u << b;
+      bds.frontFaceStencil = bs; bds.backFaceStencil = bs;
+      bit_states[b] = [dev newDepthStencilStateWithDescriptor:bds];
+    }
+    id<MTLComputePipelineState> pk4 = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth_ms"]
+                                      error:&err];
+    id<MTLComputePipelineState> pk1 = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth"]
+                                      error:&err];
+    REQUIRE(pipe4.first); REQUIRE(pipe1.first); REQUIRE(pk4); REQUIRE(pk1);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    // Materialize `src` into `att` (depth + 8 stencil bit-planes). load=Clear
+    // starts fresh; load=Load + a scissor writes only the rect (a view write).
+    auto materialize = [&](id<MTLTexture> att, std::pair<id<MTLRenderPipelineState>,
+                           id<MTLRenderPipelineState>> ps, id<MTLBuffer> src,
+                           id<MTLBuffer> spb, bool clear, const MTLScissorRect* sc) {
+      MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.depthAttachment.texture = att;
+      rp.depthAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+      rp.depthAttachment.clearDepth = 0.0;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.stencilAttachment.texture = att;
+      rp.stencilAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+      rp.stencilAttachment.clearStencil = 0;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+      if (sc) [e setScissorRect:*sc];
+      [e setRenderPipelineState:ps.first];
+      [e setDepthStencilState:dss];
+      [e setStencilReferenceValue:0];  // depth pass zeroes stencil (REPLACE 0)
+      [e setFragmentBuffer:src offset:0 atIndex:0];
+      [e setFragmentBuffer:spb offset:0 atIndex:1];
+      [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [e setRenderPipelineState:ps.second];
+      [e setStencilReferenceValue:0xFF];
+      [e setFragmentBuffer:src offset:0 atIndex:0];
+      [e setFragmentBuffer:spb offset:0 atIndex:1];
+      for (uint32_t b = 0; b < 8; ++b) {
+        uint32_t bit = 1u << b;
+        [e setDepthStencilState:bit_states[b]];
+        [e setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      }
+      [e endEncoding];
+    };
+    auto pack = [&](id<MTLTexture> att, id<MTLTexture> sview,
+                    id<MTLComputePipelineState> pk, id<MTLBuffer> spb, uint32_t w,
+                    uint32_t h, uint32_t samples) {
+      id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+      [e setComputePipelineState:pk];
+      [e setTexture:att atIndex:0];
+      [e setTexture:sview atIndex:1];
+      [e setBuffer:canon offset:0 atIndex:0];
+      [e setBuffer:spb offset:0 atIndex:1];
+      NSUInteger tw = pk.threadExecutionWidth;
+      NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
+      [e dispatchThreads:MTLSizeMake(w, h, samples)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+      [e endEncoding];
+    };
+    // 1) Write A through the 4x view, pack to canonical.
+    materialize(t4, pipe4, seedA, sp4b, true, nullptr);
+    pack(t4, v4, pk4, sp4b, w4, h4, ns);
+    // 2) Relabel to 1x (materialize from canonical), then a SCISSORED write of C
+    //    through the 1x view, then pack back to canonical.
+    materialize(t1, pipe1, canon, sp1b, true, nullptr);
+    MTLScissorRect sc{rx0, ry0, rx1 - rx0, ry1 - ry0};
+    materialize(t1, pipe1, cC, sp1b, false, &sc);
+    pack(t1, v1, pk1, sp1b, w1, h1, 1);
+    // 3) Relabel back to 4x and pack (must be lossless after the 1x write).
+    materialize(t4, pipe4, canon, sp4b, true, nullptr);
+    pack(t4, v4, pk4, sp4b, w4, h4, ns);
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    const uint32_t* cw = static_cast<const uint32_t*>(canon.contents);
+    std::vector<uint32_t> out(1280);
+    for (uint32_t i = 0; i < 1280; ++i) out[i] = cw[i];
+    return out;
+  }
+
   // Reduces `words` with k_tile_hash into a single atomic-accumulated hash.
   uint32_t HashWordsBuffer(const std::vector<uint32_t>& words) {
     const uint32_t count = uint32_t(words.size());
@@ -1788,6 +1971,45 @@ uint32_t MsaaDepthBad(MetalCompute& mc, uint32_t fmt) {
   }
   return bad;
 }
+
+// Drives the mixed 4x->1x->4x chain and checks the GPU's final canonical against
+// a CPU replay of the SAME physical-slot writes (A via 4x offsets, then C via
+// the 1x rect offsets). Returns the failed-slot count.
+uint32_t CrossMsaaBad(MetalCompute& mc, uint32_t fmt) {
+  const uint32_t w4 = 40, h4 = 8, ns = 4, w1 = 80, h1 = 16;
+  const uint32_t p4 = PitchFor(w4, 2u, 0u), p1 = PitchFor(w1, 0u, 0u);
+  std::vector<uint32_t> a4x(size_t(w4) * h4 * ns), c1x(size_t(w1) * h1);
+  for (uint32_t i = 0; i < a4x.size(); ++i)
+    a4x[i] = ((i * 2654435761u & 0xFFFFFFu) << 8) | ((i * 37u + 1u) & 0xFFu);
+  for (uint32_t i = 0; i < c1x.size(); ++i)
+    c1x[i] = ((i * 40503u & 0xFFFFFFu) << 8) | ((i * 101u + 7u) & 0xFFu);
+  const uint32_t rx0 = 48, ry0 = 4, rx1 = 72, ry1 = 12;  // 1x-space write rect
+  auto out = mc.CrossMsaaChain(fmt, a4x, c1x, rx0, ry0, rx1, ry1,
+                               xenos::kEdramSizeBytes);
+  auto off4 = [&](uint32_t x, uint32_t y, uint32_t s) {
+    return XeEdramSnapshotOffsetBytes(x, y, 0u, p4, 2u, true, 0u, s) >> 2;
+  };
+  auto off1 = [&](uint32_t x, uint32_t y) {
+    return XeEdramSnapshotOffsetBytes(x, y, 0u, p1, 0u, true, 0u, 0u) >> 2;
+  };
+  std::vector<uint32_t> exp(1280, 0);
+  for (uint32_t y = 0; y < h4; ++y)
+    for (uint32_t x = 0; x < w4; ++x)
+      for (uint32_t s = 0; s < ns; ++s)
+        exp[off4(x, y, s)] = a4x[(y * w4 + x) * ns + s];
+  for (uint32_t y = ry0; y < ry1; ++y)
+    for (uint32_t x = rx0; x < rx1; ++x) exp[off1(x, y)] = c1x[y * w1 + x];
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < 1280; ++i) {
+    if (out[i] != exp[i]) {
+      if (bad < 8)
+        WARN("fmt " << fmt << " slot " << i << " expected " << exp[i] << " got "
+                    << out[i]);
+      ++bad;
+    }
+  }
+  return bad;
+}
 }  // namespace
 
 TEST_CASE("Canonical kD24FS8 (float24) depth+stencil word round-trips over [0,2)",
@@ -1835,6 +2057,18 @@ TEST_CASE("Canonical 4x per-sample depth+stencil round-trips every sample",
   // cross-sample leak fail loudly.
   REQUIRE(MsaaDepthBad(mc, /*float24=*/2u) == 0u);
   REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u) == 0u);
+}
+
+TEST_CASE("Cross-MSAA 4x->1x->4x preserves samples and propagates a 1x write",
+          "[l1][metal][materialize][depth][msaa][cross_msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // The live slice's exact contract, through REAL attachments: write A via the
+  // 4x view, relabel to 1x, write C into a sub-rect via the 1x view, relabel
+  // back to 4x. Every untouched sample must survive AND the 1x write must show
+  // up at 4x. Checked against a CPU replay of the same physical-slot writes.
+  REQUIRE(CrossMsaaBad(mc, /*float24=*/2u) == 0u);
+  REQUIRE(CrossMsaaBad(mc, /*unorm24=*/1u) == 0u);
 }
 
 // ---------------------------------------------------------------------------
