@@ -54,11 +54,17 @@ DEFINE_bool(dump_edram, false,
             "tile-major) next to the output image as <output>.edram.bin.",
             "GPU");
 DEFINE_bool(edram_determinism, false,
-            "Replay the SAME frame --replay_loops times and require the EDRAM "
-            "is byte-identical after every loop. A correct backend is stateless "
-            "per frame, so any divergence is a cross-frame-state bug (stale "
-            "render-target persistence, uninitialized reuse) that a single-frame "
-            "dump cannot see. Needs --replay_loops>=2.",
+            "Replay-reset determinism: replay the SAME frame --replay_loops "
+            "times and require the EDRAM dump is byte-identical after every "
+            "loop. Each replay restores the trace's captured EDRAM snapshot + "
+            "memory reads, so given the same restored inputs, persistent backend "
+            "caches must not change the result. A divergence is hidden backend "
+            "state leaking across replays (stale RT persistence, uninitialized "
+            "reuse) -- invisible to a single-frame dump. NOT a temporal/"
+            "multi-frame correctness test (no genuine frame N->N+1 feedback), "
+            "and only as complete as the dump oracle (Metal skips 64bpp owners; "
+            "collapsed backends can't expose lost samples -- stable zeros pass). "
+            "Needs --replay_loops>=2. Exits nonzero on failure.",
             "GPU");
 DEFINE_string(decode, "",
               "Offline decode mode (no replay): decode every draw_*.edram.bin "
@@ -201,10 +207,13 @@ int TraceDump::Run() {
   player_->SeekCommand(
       static_cast<int>(player_->current_frame()->commands.size() - 1));
   player_->WaitOnPlayback();
-  // Cross-loop EDRAM determinism check: the same frame replayed must produce
-  // byte-identical EDRAM every loop. Divergence => a cross-frame-state bug the
-  // single-frame dump is blind to (the class the MSAA persistence regression
-  // belonged to). Baseline captured after loop 0.
+  // Replay-reset determinism check: TracePlayer restores the captured EDRAM
+  // snapshot + memory reads on every replay, so given identical restored
+  // inputs the observable EDRAM dump must be byte-identical every loop.
+  // Divergence => hidden backend state leaking across replays (the class the
+  // MSAA persistence regression belonged to). This is NOT temporal multi-frame
+  // correctness (no real N->N+1 feedback) and is only as complete as the dump
+  // oracle. Baseline captured after loop 0.
   bool determinism = cvars::edram_determinism && replay_loops >= 2;
   std::vector<uint8_t> det_baseline;
   bool determinism_failed = false;
@@ -283,8 +292,10 @@ int TraceDump::Run() {
     }
   }
 
-  // Capture.
-  int result = 0;
+  // Capture. A determinism failure must make the process exit nonzero (exit
+  // code 2) so a CI/shell gate actually fails; otherwise the check is
+  // advisory-only and a broken backend passes silently.
+  int result = determinism_failed ? 2 : 0;
   ui::Presenter* presenter = graphics_system_->presenter();
   ui::RawImage raw_image;
   if (presenter && presenter->CaptureGuestOutput(raw_image)) {
