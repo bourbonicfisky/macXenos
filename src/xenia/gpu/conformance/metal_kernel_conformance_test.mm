@@ -404,6 +404,33 @@ inline uint xe_f32_to_f20e4(float f) {  // inverse; mirrors the d2c encode
   }
   return (u >> 3) & 0xFFFFFFu;
 }
+// UNorm24 (kD24S8): the exact Xenia mapping. The numerator n24+(n24>>23) is an
+// integer <= 2^24 (exactly representable in f32) and the *2^-24 only shifts the
+// exponent, so EVERY decoded value is an exact f32 -- no near-1.0 collision.
+inline float xe_unorm24_to_f32(uint n24) {
+  n24 &= 0xFFFFFFu;
+  return float(n24 + (n24 >> 23)) * (1.0 / 16777216.0);
+}
+inline uint xe_f32_to_unorm24(float d) {
+  // EXACT inverse of xe_unorm24_to_f32: decode is (n24 + (n24>>23)) * 2^-24, so
+  // d * 2^24 reconstructs the integer n24+b EXACTLY (power-of-two multiply, no
+  // rounding), then remove the +b bias (b = 1 above the 0.5 boundary). Using
+  // *2^24 (not *(2^24-1)) avoids the round-even tie that dropped near-boundary
+  // values by 1.
+  uint t = min(uint(rint(saturate(d) * 16777216.0)), 16777216u);
+  return (t > 8388608u ? t - 1u : t) & 0xFFFFFFu;
+}
+// Decode a guest depth word's d24 to a host [0,1] depth value. float24 (fmt 2)
+// spans guest [0,2): pack it to [0,1] with *0.5 so a Metal depth attachment
+// (which clamps to [0,1]) holds the WHOLE domain; unorm24 (fmt 1) is already
+// [0,1]. pack applies the inverse (*2 for float24).
+inline float xe_depth_word_to_host(uint word, uint fmt) {
+  uint d24 = word >> 8;
+  return fmt == 2u ? xe_f20e4_to_f32(d24) * 0.5 : xe_unorm24_to_f32(d24);
+}
+inline uint xe_host_to_depth_d24(float d, uint fmt) {
+  return fmt == 2u ? xe_f32_to_f20e4(d * 2.0) : xe_f32_to_unorm24(d);
+}
 struct DepthVOut { float4 pos [[position]]; };
 vertex DepthVOut xe_depth_vs(uint vid [[vertex_id]]) {
   DepthVOut o;
@@ -422,7 +449,7 @@ fragment DepthFragOut materialize_depth_fs(
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
   DepthFragOut o;
-  o.depth = xe_f20e4_to_f32(w >> 8);
+  o.depth = xe_depth_word_to_host(w, sp.is_depth);  // is_depth: 2=float24,1=unorm24
   return o;
 }
 kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
@@ -435,7 +462,7 @@ kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
   uint idx = off >> 2;
   if (idx >= sp.words) return;
   float d = tex.read(gid);
-  canonical[idx] = xe_f32_to_f20e4(d) << 8;  // stencil 0 (depth-only rung)
+  canonical[idx] = xe_host_to_depth_d24(d, sp.is_depth) << 8;  // stencil 0 rung
 }
 )MSL";
 
@@ -874,16 +901,17 @@ struct MetalCompute {
     return out;
   }
 
-  // Depth (kD24FS8 float24) canonical round-trip: seed canonical with a d24
-  // word at each pixel's DEPTH offset, materialize into a host D32Float depth
-  // texture via an SV_Depth render pass, pack it back with pack_depth, and
-  // return the re-packed canonical words. Identity <=> the float24 decode/encode
-  // and depth addressing are exact inverses through real host depth storage --
-  // the substrate the cross-MSAA slice needs for JC2's kD24FS8 buffers.
-  std::vector<uint32_t> RoundTripDepthFloat24(uint32_t w, uint32_t h,
-                                              const struct SurfaceParams& sp,
-                                              const std::vector<uint32_t>& d24,
-                                              size_t canonical_bytes) {
+  // Depth canonical round-trip: seed canonical with a d24 word at each pixel's
+  // DEPTH offset, materialize into a host D32Float depth texture via an SV_Depth
+  // render pass, pack it back with pack_depth, and return the re-packed canonical
+  // words. Identity <=> the format's decode/encode (sp.is_depth: 2=float24 with
+  // the *0.5//*2 [0,2) mapping, 1=unorm24) and depth addressing are exact
+  // inverses through real host depth storage -- the substrate the cross-MSAA
+  // slice needs for JC2's kD24FS8/kD24S8 buffers.
+  std::vector<uint32_t> RoundTripDepth(uint32_t w, uint32_t h,
+                                       const struct SurfaceParams& sp,
+                                       const std::vector<uint32_t>& d24,
+                                       size_t canonical_bytes) {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
@@ -1458,45 +1486,68 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
   }
 }
 
-// Depth substrate for the cross-MSAA slice: kD24FS8 (float24) canonical
-// materialize->pack round-trips losslessly through a REAL host D32Float depth
-// texture. This is the format of JC2's hot [720,1440) buffer -- the 50%-of-
-// ownership cross-MSAA target. float24's 20-bit mantissa fits D32Float's 23, so
-// depth survives the host round-trip exactly (unorm24/kD24S8 near 1.0 does not;
-// that's a separate rung). Proving this headless is the substrate the live
-// cross-MSAA-as-canonical-relabel needs, before any M4 wiring.
-TEST_CASE("Canonical kD24FS8 depth materialize->pack round-trips losslessly",
-          "[l1][metal][materialize][depth]") {
-  MetalCompute mc;
-  if (!mc.Init()) { SUCCEED("no device"); return; }
-  const uint32_t w = 80, h = 16;  // one 32bpp tile at 1x.
+// Depth substrate for the cross-MSAA slice. Both guest depth encodings must
+// round-trip losslessly through a REAL host D32Float depth texture -- the
+// invariant the cross-MSAA-as-canonical-relabel rests on for JC2's kD24FS8/
+// kD24S8 buffers. Runs the FULL domain of each format (Codex: the [0,1] sweep
+// was not the whole domain; unorm24 must be proven, not declared lossy).
+namespace {
+// Round-trips `d24` through a wxh 1x depth tile of the given format and reports
+// how many words fail to survive. fmt: 2=float24 (kD24FS8), 1=unorm24 (kD24S8).
+uint32_t DepthRoundTripBad(MetalCompute& mc, const std::vector<uint32_t>& d24,
+                           uint32_t fmt) {
+  const uint32_t w = 80, h = 16;  // one 32bpp tile at 1x (1280 pixels).
   const uint32_t pitch = PitchFor(w, 0u, 0u);
-  // Guest depth is [0,1]; float24 encodes that as d24 in [0, 0xF00000] (0xF00000
-  // decodes to exactly 1.0). Values above that are depth > 1.0, which a Metal
-  // depth attachment CLAMPS to 1.0 (out of the real depth domain -- a separate
-  // concern from lossless round-tripping). Sweep the valid [0,1] domain, which
-  // must survive exactly since float24's 20-bit mantissa fits D32Float's 23.
-  const uint32_t kMax = 0xF00000u;  // == depth 1.0 in 20e4
-  std::vector<uint32_t> d24(size_t(w) * h);
-  for (uint32_t i = 0; i < d24.size(); ++i)
-    d24[i] = uint32_t(uint64_t(i) * kMax / (d24.size() - 1));
-  d24[0] = 0u;
-  d24[1] = kMax;        // exactly 1.0
-  d24[2] = 0x800000u;   // exponent boundary, well within [0,1]
-  SurfaceParams sp{0u, pitch, 0u, /*is_depth=*/1u, 0u,
+  SurfaceParams sp{0u, pitch, 0u, fmt, 0u,
                    uint32_t(xenos::kEdramSizeBytes / 4u)};
-  auto out = mc.RoundTripDepthFloat24(w, h, sp, d24, xenos::kEdramSizeBytes);
+  auto out = mc.RoundTripDepth(w, h, sp, d24, xenos::kEdramSizeBytes);
   uint32_t bad = 0;
   for (uint32_t i = 0; i < d24.size(); ++i) {
     uint32_t expected = (d24[i] & 0xFFFFFFu) << 8;
     if (out[i] != expected) {
       if (bad < 8)
-        WARN("idx " << i << " d24 " << d24[i] << " expected word " << expected
-                    << " got " << out[i]);
+        WARN("fmt " << fmt << " idx " << i << " d24 " << (d24[i] & 0xFFFFFFu)
+                    << " expected " << expected << " got " << out[i]);
       ++bad;
     }
   }
-  REQUIRE(bad == 0u);
+  return bad;
+}
+}  // namespace
+
+TEST_CASE("Canonical kD24FS8 (float24) depth round-trips over the full [0,2)",
+          "[l1][metal][materialize][depth]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Sweep all 24 bits, so exponent 15 (guest depth in [1,2)) is included: the
+  // *0.5//*2 mapping keeps it inside the [0,1] attachment instead of clamping.
+  std::vector<uint32_t> d24(80u * 16u);
+  for (uint32_t i = 0; i < d24.size(); ++i)
+    d24[i] = uint32_t(uint64_t(i) * 0xFFFFFFu / (d24.size() - 1));
+  d24[0] = 0u;
+  d24[1] = 0xFFFFFFu;  // just under 2.0 -- the value the [0,1]-only test clamped
+  d24[2] = 0xF00000u;  // exactly 1.0 (the old ceiling)
+  d24[3] = 0xF00001u;  // just over 1.0 -- must now survive
+  REQUIRE(DepthRoundTripBad(mc, d24, /*float24=*/2u) == 0u);
+}
+
+TEST_CASE("Canonical kD24S8 (unorm24) depth round-trips exactly near 1.0",
+          "[l1][metal][materialize][depth]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Adversarial: the values my "24>23 bits" claim said would collide. Densely
+  // fill the top of the range and the 0.5 exponent boundary with ADJACENT n24
+  // (step 1) -- if any two collide through D32Float, the count drops and this
+  // fails. 1280 pixels: 640 near 1.0, 640 straddling 0x800000.
+  std::vector<uint32_t> d24(80u * 16u);
+  for (uint32_t i = 0; i < 640u; ++i) d24[i] = 0xFFFFFFu - i;        // near 1.0
+  for (uint32_t i = 0; i < 640u; ++i) d24[640u + i] = 0x800000u - 320u + i;
+  REQUIRE(DepthRoundTripBad(mc, d24, /*unorm24=*/1u) == 0u);
+  // And a full-range stride, including 0 and the exact top.
+  std::vector<uint32_t> sweep(80u * 16u);
+  for (uint32_t i = 0; i < sweep.size(); ++i)
+    sweep[i] = uint32_t(uint64_t(i) * 0xFFFFFFu / (sweep.size() - 1));
+  REQUIRE(DepthRoundTripBad(mc, sweep, /*unorm24=*/1u) == 0u);
 }
 
 // ---------------------------------------------------------------------------
