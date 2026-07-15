@@ -1369,6 +1369,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
   bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  // Write-provenance probe (XE_METAL_DEPTH_PROVENANCE): the pack-shader-
+  // INDEPENDENT answer to "does the guest ever write real depth into the 4x
+  // view?" — read straight from guest registers, so it can't be fooled by a
+  // pack misread the way a host-texture nonzero count can. For the cross-MSAA
+  // depth bypass this is the authority question: if no draw ever binds a 4x
+  // depth surface with z-write, the 4x view carries no guest content and the
+  // resample to/from it is pure churn; if some do, the empty shadow reads are a
+  // pack artifact and the bypass would drop real depth. Throttled; grep
+  // MetalDepthWrite and count by msaa/zwrite over depth_base 720.
+  if (depth_bound) {
+    static const bool s_depth_prov = std::getenv("XE_METAL_DEPTH_PROVENANCE");
+    if (s_depth_prov) {
+      static uint32_t s_prov_logs = 0;
+      if (s_prov_logs++ < 4096) {
+        uint32_t msaa = uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples);
+        XELOGW("MetalDepthWrite @draw {}: base={}t msaa={}x fmt={} z_enable={} "
+               "z_write={} sten_enable={}",
+               trace_draw_index(), uint32_t(rb_depth_info.depth_base),
+               1u << msaa,
+               uint32_t(rb_depth_info.depth_format),
+               uint32_t(norm_depth.z_enable),
+               uint32_t(norm_depth.z_write_enable),
+               uint32_t(norm_depth.stencil_enable));
+      }
+    }
+  }
   bool color_bound = (normalized_color_mask & 0b1111u) != 0;
   auto rt0_info = regs.Get<reg::RB_COLOR_INFO>(
       reg::RB_COLOR_INFO::rt_register_indices[0]);
