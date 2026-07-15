@@ -372,6 +372,71 @@ kernel void k_tile_hash_tex(texture2d<float, access::read> tex [[texture(0)]],
   uint i = gid.y * W + gid.x;
   atomic_fetch_add_explicit(out, xe_hash_mix(word, i), memory_order_relaxed);
 }
+
+// Depth canonical materialize/pack substrate for the cross-MSAA slice. The JC2
+// hot range [720,1440) is kD24FS8 (float24, 20e4): its 20-bit mantissa fits
+// D32Float's 23 bits, so it round-trips through a host depth texture LOSSLESSLY
+// (unlike unorm24/kD24S8 near 1.0 -- a separate precision case). Materialize
+// writes SV_Depth in a fragment shader (depth textures can't be compute-written);
+// pack reads depth2d in compute. The canonical word is (d24 << 8) | stencil;
+// this depth-only rung ignores stencil (stencil plane is the next rung).
+inline float xe_f20e4_to_f32(uint f24) {
+  f24 &= 0xFFFFFFu;
+  if (f24 == 0u) return 0.0;
+  uint mantissa = f24 & 0xFFFFFu;
+  uint exponent = f24 >> 20;
+  if (exponent == 0u) {           // denormal: same normalization as k_20e4
+    uint lz = clz(mantissa) - 11u;
+    exponent = 1u - lz;
+    mantissa = (mantissa << lz) & 0xFFFFFu;
+  }
+  return as_type<float>(((exponent + 112u) << 23) | (mantissa << 3));
+}
+inline uint xe_f32_to_f20e4(float f) {  // inverse; mirrors the d2c encode
+  if (!(f > 0.0)) return 0u;
+  uint u = as_type<uint>(f);
+  if (u >= 0x40000000u) return 0xFFFFFFu;  // >= 2.0 saturates
+  if (u < 0x38800000u) {                   // denormal in 20e4
+    uint shift = min(113u - (u >> 23), 24u);
+    u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
+  } else {
+    u -= 0x38000000u;
+  }
+  return (u >> 3) & 0xFFFFFFu;
+}
+struct DepthVOut { float4 pos [[position]]; };
+vertex DepthVOut xe_depth_vs(uint vid [[vertex_id]]) {
+  DepthVOut o;
+  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+  o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+  return o;
+}
+struct DepthFragOut { float depth [[depth(any)]]; };
+fragment DepthFragOut materialize_depth_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthFragOut o;
+  o.depth = xe_f20e4_to_f32(w >> 8);
+  return o;
+}
+kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
+                      device uint* canonical [[buffer(0)]],
+                      constant SurfaceParams& sp [[buffer(1)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  if (idx >= sp.words) return;
+  float d = tex.read(gid);
+  canonical[idx] = xe_f32_to_f20e4(d) << 8;  // stencil 0 (depth-only rung)
+}
 )MSL";
 
 // Mirrors of the MSL pack/unpack structs -- layouts must match exactly or the
@@ -806,6 +871,93 @@ struct MetalCompute {
       for (uint32_t x = 0; x < w; ++x)
         for (uint32_t s = 0; s < num_samples; ++s)
           out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
+    return out;
+  }
+
+  // Depth (kD24FS8 float24) canonical round-trip: seed canonical with a d24
+  // word at each pixel's DEPTH offset, materialize into a host D32Float depth
+  // texture via an SV_Depth render pass, pack it back with pack_depth, and
+  // return the re-packed canonical words. Identity <=> the float24 decode/encode
+  // and depth addressing are exact inverses through real host depth storage --
+  // the substrate the cross-MSAA slice needs for JC2's kD24FS8 buffers.
+  std::vector<uint32_t> RoundTripDepthFloat24(uint32_t w, uint32_t h,
+                                              const struct SurfaceParams& sp,
+                                              const std::vector<uint32_t>& d24,
+                                              size_t canonical_bytes) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    auto doff = [&](uint32_t x, uint32_t y) {
+      return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa,
+                                        /*is_depth=*/true, 0u, 0u) >> 2;
+    };
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        cwords[doff(x, y)] = (d24[y * w + x] & 0xFFFFFFu) << 8;
+    MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                     width:w
+                                    height:h
+                                 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;  // depth can't be shared.
+    id<MTLTexture> depth = [dev newTextureWithDescriptor:td];
+    REQUIRE(depth != nil);
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(struct SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
+    rpd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_depth_fs"];
+    rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> rps =
+        [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
+    REQUIRE(rps != nil);
+    MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> dss = [dev newDepthStencilStateWithDescriptor:dsd];
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    {  // materialize: full-screen triangle, fragment exports SV_Depth.
+      MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.depthAttachment.texture = depth;
+      rp.depthAttachment.loadAction = MTLLoadActionClear;
+      rp.depthAttachment.clearDepth = 0.0;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:rp];
+      [enc setRenderPipelineState:rps];
+      [enc setDepthStencilState:dss];
+      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    }
+    {  // pack: compute reads the depth texture back to canonical.
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:pk];
+      [enc setTexture:depth atIndex:0];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      NSUInteger tw = pk.threadExecutionWidth;
+      NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, 1)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h);
+    for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x) out[y * w + x] = cwords[doff(x, y)];
     return out;
   }
 
@@ -1304,6 +1456,47 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
     INFO(cfg.name);
     REQUIRE(bad == 0u);
   }
+}
+
+// Depth substrate for the cross-MSAA slice: kD24FS8 (float24) canonical
+// materialize->pack round-trips losslessly through a REAL host D32Float depth
+// texture. This is the format of JC2's hot [720,1440) buffer -- the 50%-of-
+// ownership cross-MSAA target. float24's 20-bit mantissa fits D32Float's 23, so
+// depth survives the host round-trip exactly (unorm24/kD24S8 near 1.0 does not;
+// that's a separate rung). Proving this headless is the substrate the live
+// cross-MSAA-as-canonical-relabel needs, before any M4 wiring.
+TEST_CASE("Canonical kD24FS8 depth materialize->pack round-trips losslessly",
+          "[l1][metal][materialize][depth]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t w = 80, h = 16;  // one 32bpp tile at 1x.
+  const uint32_t pitch = PitchFor(w, 0u, 0u);
+  // Guest depth is [0,1]; float24 encodes that as d24 in [0, 0xF00000] (0xF00000
+  // decodes to exactly 1.0). Values above that are depth > 1.0, which a Metal
+  // depth attachment CLAMPS to 1.0 (out of the real depth domain -- a separate
+  // concern from lossless round-tripping). Sweep the valid [0,1] domain, which
+  // must survive exactly since float24's 20-bit mantissa fits D32Float's 23.
+  const uint32_t kMax = 0xF00000u;  // == depth 1.0 in 20e4
+  std::vector<uint32_t> d24(size_t(w) * h);
+  for (uint32_t i = 0; i < d24.size(); ++i)
+    d24[i] = uint32_t(uint64_t(i) * kMax / (d24.size() - 1));
+  d24[0] = 0u;
+  d24[1] = kMax;        // exactly 1.0
+  d24[2] = 0x800000u;   // exponent boundary, well within [0,1]
+  SurfaceParams sp{0u, pitch, 0u, /*is_depth=*/1u, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / 4u)};
+  auto out = mc.RoundTripDepthFloat24(w, h, sp, d24, xenos::kEdramSizeBytes);
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < d24.size(); ++i) {
+    uint32_t expected = (d24[i] & 0xFFFFFFu) << 8;
+    if (out[i] != expected) {
+      if (bad < 8)
+        WARN("idx " << i << " d24 " << d24[i] << " expected word " << expected
+                    << " got " << out[i]);
+      ++bad;
+    }
+  }
+  REQUIRE(bad == 0u);
 }
 
 // ---------------------------------------------------------------------------
