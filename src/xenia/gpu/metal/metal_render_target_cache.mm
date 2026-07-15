@@ -17,6 +17,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_edram_depth_msl.h"
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
 
@@ -570,6 +571,228 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   }
 }
 
+const MetalRenderTargetCache::ShadowDepthPipelines*
+MetalRenderTargetCache::EnsureShadowDepthPipelines(uint32_t sample_count) {
+  auto it = shadow_pipelines_.find(sample_count);
+  if (it != shadow_pipelines_.end()) {
+    return it->second.pack ? &it->second : nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!shadow_depth_library_) {
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device
+        newLibraryWithSource:[NSString stringWithUTF8String:kEdramDepthMsl]
+                     options:nil
+                       error:&err];
+    if (!lib) {
+      XELOGE("MetalShadow: kEdramDepthMsl failed to compile: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
+      return nullptr;
+    }
+    shadow_depth_library_ = (__bridge_retained void*)lib;
+  }
+  id<MTLLibrary> lib = (__bridge id<MTLLibrary>)shadow_depth_library_;
+  bool ms = sample_count > 1;
+  NSError* err = nil;
+  MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
+  rpd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
+  rpd.fragmentFunction = [lib
+      newFunctionWithName:(ms ? @"materialize_depth_ms_fs" : @"materialize_depth_fs")];
+  rpd.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+  rpd.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
+  rpd.rasterSampleCount = sample_count;
+  id<MTLRenderPipelineState> matd =
+      [device newRenderPipelineStateWithDescriptor:rpd error:&err];
+  rpd.fragmentFunction = [lib
+      newFunctionWithName:(ms ? @"materialize_sten_ms_fs" : @"materialize_sten_fs")];
+  id<MTLRenderPipelineState> mats =
+      [device newRenderPipelineStateWithDescriptor:rpd error:&err];
+  id<MTLComputePipelineState> pack = [device
+      newComputePipelineStateWithFunction:[lib
+          newFunctionWithName:(ms ? @"pack_depth_ms" : @"pack_depth")]
+                                    error:&err];
+  if (!matd || !mats || !pack) {
+    XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
+           err ? err.localizedDescription.UTF8String : "?");
+    shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
+    return nullptr;
+  }
+  ShadowDepthPipelines p;
+  p.sample_count = sample_count;
+  p.materialize_depth = (__bridge_retained void*)matd;
+  p.materialize_sten = (__bridge_retained void*)mats;
+  p.pack = (__bridge_retained void*)pack;
+  // Depth pass writes depth AND REPLACEs stencil to 0 (stencilRef 0) so the
+  // bit-plane passes fully replace stencil -- the partial-write lesson from the
+  // conformance mixed-sequence test, kept here so the substrate behaves the same.
+  MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+  dsd.depthCompareFunction = MTLCompareFunctionAlways;
+  dsd.depthWriteEnabled = YES;
+  MTLStencilDescriptor* zs = [[MTLStencilDescriptor alloc] init];
+  zs.stencilCompareFunction = MTLCompareFunctionAlways;
+  zs.depthStencilPassOperation = MTLStencilOperationReplace;
+  zs.writeMask = 0xFF;
+  dsd.frontFaceStencil = zs;
+  dsd.backFaceStencil = zs;
+  p.depth_state =
+      (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:dsd];
+  for (uint32_t b = 0; b < 8; ++b) {
+    MTLDepthStencilDescriptor* bds = [[MTLDepthStencilDescriptor alloc] init];
+    bds.depthCompareFunction = MTLCompareFunctionAlways;
+    bds.depthWriteEnabled = NO;
+    MTLStencilDescriptor* bs = [[MTLStencilDescriptor alloc] init];
+    bs.stencilCompareFunction = MTLCompareFunctionAlways;
+    bs.depthStencilPassOperation = MTLStencilOperationReplace;
+    bs.writeMask = 1u << b;
+    bds.frontFaceStencil = bs;
+    bds.backFaceStencil = bs;
+    p.bit_states[b] =
+        (__bridge_retained void*)[device newDepthStencilStateWithDescriptor:bds];
+  }
+  auto ins = shadow_pipelines_.emplace(sample_count, p);
+  return &ins.first->second;
+}
+
+void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
+                                                  RenderTarget* source_rt,
+                                                  const Transfer& transfer) {
+  // Cap the sampled transitions: the shadow adds real GPU work per transition,
+  // and a sample is enough to prove the substrate on live data.
+  if (shadow_count_ >= 128u) {
+    return;
+  }
+  auto* source = static_cast<MetalRenderTarget*>(source_rt);
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> src_tex = (__bridge id<MTLTexture>)source->texture();
+  if (!cb || !src_tex) {
+    return;
+  }
+  uint32_t sc = uint32_t(src_tex.sampleCount);
+  const ShadowDepthPipelines* p = EnsureShadowDepthPipelines(sc);
+  if (!p) {
+    return;
+  }
+  ++shadow_count_;
+  // Fresh per-transition buffers (Shared so the completion handler can read
+  // them; retained by the handler block, freed after it runs) -- no reuse, so
+  // no race even if several transitions are shadowed in one frame.
+  const NSUInteger kBytes = 10u * 1024u * 1024u;
+  id<MTLBuffer> canon_a = [device newBufferWithLength:kBytes
+                                             options:MTLResourceStorageModeShared];
+  id<MTLBuffer> canon_b = [device newBufferWithLength:kBytes
+                                             options:MTLResourceStorageModeShared];
+  std::memset(canon_a.contents, 0, kBytes);
+  std::memset(canon_b.contents, 0, kBytes);
+  id<MTLTexture> src_sten =
+      [src_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+  td.textureType = sc > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
+  td.pixelFormat = (MTLPixelFormat)kDepthFormat;
+  td.width = src_tex.width;
+  td.height = src_tex.height;
+  td.sampleCount = sc;
+  td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> scratch = [device newTextureWithDescriptor:td];
+  id<MTLTexture> scratch_sten =
+      [scratch newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  bool f24 = source->key().GetDepthFormat() ==
+             xenos::DepthRenderTargetFormat::kD24FS8;
+  struct SP {
+    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
+  } sp{source->key().base_tiles, source->key().GetPitchTiles(),
+       uint32_t(source->key().msaa_samples), f24 ? 2u : 1u, 0u,
+       uint32_t(kBytes / 4)};
+  id<MTLBuffer> spb = [device newBufferWithBytes:&sp
+                                          length:sizeof(sp)
+                                         options:MTLResourceStorageModeShared];
+  uint32_t w = uint32_t(src_tex.width), h = uint32_t(src_tex.height);
+  id<MTLComputePipelineState> pack_pso =
+      (__bridge id<MTLComputePipelineState>)p->pack;
+  // All shadow work is encoded on the FRAME cb, AFTER the source's draws and the
+  // legacy resample above -- so it reads correct, hazard-tracked source content
+  // and never modifies a real render target (canon/scratch are private to this).
+  auto pack = [&](id<MTLTexture> att, id<MTLTexture> sten, id<MTLBuffer> out) {
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pack_pso];
+    [e setTexture:att atIndex:0];
+    [e setTexture:sten atIndex:1];
+    [e setBuffer:out offset:0 atIndex:0];
+    [e setBuffer:spb offset:0 atIndex:1];
+    NSUInteger tw = pack_pso.threadExecutionWidth;
+    NSUInteger th = pack_pso.maxTotalThreadsPerThreadgroup / tw;
+    [e dispatchThreads:MTLSizeMake(w, h, sc)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [e endEncoding];
+  };
+  auto materialize = [&](id<MTLTexture> att, id<MTLBuffer> src) {
+    MTLRenderPassDescriptor* rp =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.depthAttachment.texture = att;
+    rp.depthAttachment.loadAction = MTLLoadActionClear;
+    rp.depthAttachment.clearDepth = 0.0;
+    rp.depthAttachment.storeAction = MTLStoreActionStore;
+    rp.stencilAttachment.texture = att;
+    rp.stencilAttachment.loadAction = MTLLoadActionClear;
+    rp.stencilAttachment.clearStencil = 0;
+    rp.stencilAttachment.storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e =
+        [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  p->materialize_depth];
+    [e setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->depth_state];
+    [e setStencilReferenceValue:0];
+    [e setFragmentBuffer:src offset:0 atIndex:0];
+    [e setFragmentBuffer:spb offset:0 atIndex:1];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  p->materialize_sten];
+    [e setStencilReferenceValue:0xFF];
+    [e setFragmentBuffer:src offset:0 atIndex:0];
+    [e setFragmentBuffer:spb offset:0 atIndex:1];
+    for (uint32_t b = 0; b < 8; ++b) {
+      uint32_t bit = 1u << b;
+      [e setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->bit_states[b]];
+      [e setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+      [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    }
+    [e endEncoding];
+  };
+  pack(src_tex, src_sten, canon_a);       // 1) source -> canonical A
+  materialize(scratch, canon_a);          // 2) A -> scratch depth attachment
+  pack(scratch, scratch_sten, canon_b);   // 3) scratch -> canonical B
+  // Read A/B once the frame cb completes (NO commit/wait): a match means
+  // materialize(pack(source)) reproduces pack's words, i.e. the shared substrate
+  // round-trips this real source losslessly. Capture the metadata by value.
+  const uint32_t words_per_tile = 80u * 16u;  // depth is 32bpp.
+  uint64_t w0 = uint64_t(transfer.start_tiles) * words_per_tile;
+  uint64_t w1 = uint64_t(transfer.end_tiles) * words_per_tile;
+  uint64_t cap = kBytes / 4;
+  if (w1 > cap) w1 = cap;
+  uint32_t idx = shadow_count_, draw = command_processor_.trace_draw_index();
+  uint32_t st = transfer.start_tiles, et = transfer.end_tiles;
+  std::string name = source->key().GetDebugName();
+  [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+    const uint32_t* a = static_cast<const uint32_t*>(canon_a.contents);
+    const uint32_t* b = static_cast<const uint32_t*>(canon_b.contents);
+    uint32_t mism = 0, nonzero = 0, ha = 2166136261u, hb = 2166136261u;
+    for (uint64_t i = w0; i < w1; ++i) {
+      if (a[i]) ++nonzero;
+      if (a[i] != b[i]) ++mism;
+      ha = (ha ^ a[i]) * 16777619u;
+      hb = (hb ^ b[i]) * 16777619u;
+    }
+    XELOGW("MetalShadowX2X #{} @draw {}: {} sc={} {} tiles [{},{}) words={} "
+           "nonzero={} mism={} hashA={:08x} hashB={:08x} {}",
+           idx, draw, name, sc, f24 ? "f24" : "un24", st, et,
+           uint32_t(w1 - w0), nonzero, mism, ha, hb,
+           mism == 0 ? "ROUNDTRIP-OK" : "MISMATCH");
+    (void)canon_b;  // keep both buffers alive until the handler runs.
+  }];
+}
+
 void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
@@ -592,6 +815,14 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   bool is_depth = dest->key().is_depth != 0;
+  // Stage 2 shadow (XE_METAL_CROSSMSAA_SHADOW): additive on-device proof that the
+  // shared depth substrate round-trips THIS real cross-MSAA source. Depth only;
+  // modifies no render target, so the legacy resample below still runs and the
+  // frame is byte-identical.
+  static const bool s_shadow = std::getenv("XE_METAL_CROSSMSAA_SHADOW");
+  if (s_shadow && is_depth) {
+    ShadowCrossMsaaDepth(command_buffer, source, transfer);
+  }
   // XE_METAL_X2X_PROBE=1: after the first depth transfer, flush and read
   // back dest vs source pixels (verifies the copy lands). =2: at the SECOND
   // depth transfer, read the SOURCE (the msaa RT after the guest draw on it)

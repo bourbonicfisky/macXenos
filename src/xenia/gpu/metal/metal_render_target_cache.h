@@ -287,6 +287,34 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                         const RenderTargetKey& dst_key,
                         const Transfer& transfer);
 
+  // --- Stage 2 of the canonical cross-MSAA slice: additive SHADOW ----------
+  // For a depth cross-MSAA transition, pack the source depth attachment into a
+  // canonical buffer via the SHARED substrate (metal_edram_depth_msl.h),
+  // materialize a scratch depth attachment from it, pack that back, and compare
+  // the two canonicals. A match proves the shared pack/materialize round-trips
+  // real JC2 depth data on-device -- the on-M4 proof before Stage 3 activates
+  // the canonical path. Gated behind XE_METAL_CROSSMSAA_SHADOW; touches NO real
+  // render target, so rendering is byte-identical.
+  // The shadow work is encoded on the FRAME command buffer (correct ordering
+  // after the source's draws; hazard-tracked) and read back in a completion
+  // handler with fresh per-transition buffers -- so NO commit/wait and NO race
+  // with the frame queue writing the source. `command_buffer` is the frame cb.
+  void ShadowCrossMsaaDepth(const void* command_buffer, RenderTarget* source,
+                            const Transfer& transfer);
+  // Per-sample-count shadow pipelines, built lazily from kEdramDepthMsl.
+  struct ShadowDepthPipelines {
+    void* materialize_depth = nullptr;  // id<MTLRenderPipelineState>
+    void* materialize_sten = nullptr;
+    void* pack = nullptr;  // id<MTLComputePipelineState>
+    void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
+    void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
+    uint32_t sample_count = 0;
+  };
+  const ShadowDepthPipelines* EnsureShadowDepthPipelines(uint32_t sample_count);
+  void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramDepthMsl.
+  std::unordered_map<uint32_t, ShadowDepthPipelines> shadow_pipelines_;
+  uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
+
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
 
