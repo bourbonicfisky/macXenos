@@ -580,8 +580,36 @@ MetalRenderTargetCache::EnsureShadowDepthPipelines(uint32_t sample_count) {
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   if (!shadow_depth_library_) {
     NSError* err = nil;
+    // Diagnostic legacy adapter for the LIVE half-res sc=1 store of 4x/2x depth:
+    // it is NOT part of the canonical authority (kEdramDepthMsl stays pristine),
+    // but it shares the exact same addresser by being compiled in the SAME unit
+    // (no duplication, no drift). pack_depth_cov is pack_depth plus a coverage
+    // byte per written sample slot, so the round-trip can TRUTHFULLY separate
+    // slots the collapsed store actually holds (known) from the samples
+    // decimation discarded (missing) -- instead of conflating "missing" with a
+    // zero depth value. For a 1x source every in-region slot is covered; for a
+    // 4x collapsed source only 1 of every 4 (the sample-0 slot) is.
+    static const char* kShadowAdapterMsl = R"MSL(
+kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
+                           texture2d<uint, access::read> sten [[texture(1)]],
+                           device uint* canonical [[buffer(0)]],
+                           constant SurfaceParams& sp [[buffer(1)]],
+                           device uchar* coverage [[buffer(2)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  if (idx >= sp.words) return;
+  float d = tex.read(gid);
+  uint s = sten.read(gid).r & 0xFFu;
+  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  coverage[idx] = 1u;
+}
+)MSL";
+    std::string src = std::string(kEdramDepthMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
-        newLibraryWithSource:[NSString stringWithUTF8String:kEdramDepthMsl]
+        newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
                      options:nil
                        error:&err];
     if (!lib) {
@@ -612,7 +640,13 @@ MetalRenderTargetCache::EnsureShadowDepthPipelines(uint32_t sample_count) {
       newComputePipelineStateWithFunction:[lib
           newFunctionWithName:(ms ? @"pack_depth_ms" : @"pack_depth")]
                                     error:&err];
-  if (!matd || !mats || !pack) {
+  // Coverage-aware pack (sc=1 collapsed store only; the diagnostic legacy path).
+  id<MTLComputePipelineState> pack_cov =
+      ms ? nil
+         : [device newComputePipelineStateWithFunction:
+                       [lib newFunctionWithName:@"pack_depth_cov"]
+                                                 error:&err];
+  if (!matd || !mats || !pack || (!ms && !pack_cov)) {
     XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
            err ? err.localizedDescription.UTF8String : "?");
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
@@ -623,6 +657,7 @@ MetalRenderTargetCache::EnsureShadowDepthPipelines(uint32_t sample_count) {
   p.materialize_depth = (__bridge_retained void*)matd;
   p.materialize_sten = (__bridge_retained void*)mats;
   p.pack = (__bridge_retained void*)pack;
+  p.pack_cov = pack_cov ? (__bridge_retained void*)pack_cov : nullptr;
   // Depth pass writes depth AND REPLACEs stencil to 0 (stencilRef 0) so the
   // bit-plane passes fully replace stencil -- the partial-write lesson from the
   // conformance mixed-sequence test, kept here so the substrate behaves the same.
@@ -679,12 +714,20 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
   // them; retained by the handler block, freed after it runs) -- no reuse, so
   // no race even if several transitions are shadowed in one frame.
   const NSUInteger kBytes = 10u * 1024u * 1024u;
+  const NSUInteger kWords = kBytes / 4u;
   id<MTLBuffer> canon_a = [device newBufferWithLength:kBytes
                                              options:MTLResourceStorageModeShared];
   id<MTLBuffer> canon_b = [device newBufferWithLength:kBytes
                                              options:MTLResourceStorageModeShared];
+  // Coverage: one byte per canonical word slot, marked by the diagnostic legacy
+  // adapter pack for each slot the collapsed sc=1 store actually holds. Slots
+  // left 0 in the transfer's tile range are samples decimation discarded
+  // (MISSING) -- distinct from a slot that holds a genuine zero-depth word.
+  id<MTLBuffer> cov_a = [device newBufferWithLength:kWords
+                                           options:MTLResourceStorageModeShared];
   std::memset(canon_a.contents, 0, kBytes);
   std::memset(canon_b.contents, 0, kBytes);
+  std::memset(cov_a.contents, 0, kWords);
   id<MTLTexture> src_sten =
       [src_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
   MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
@@ -711,18 +754,28 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
   uint32_t w = uint32_t(src_tex.width), h = uint32_t(src_tex.height);
   id<MTLComputePipelineState> pack_pso =
       (__bridge id<MTLComputePipelineState>)p->pack;
+  id<MTLComputePipelineState> pack_cov_pso =
+      (__bridge id<MTLComputePipelineState>)p->pack_cov;
   // All shadow work is encoded on the FRAME cb, AFTER the source's draws and the
   // legacy resample above -- so it reads correct, hazard-tracked source content
   // and never modifies a real render target (canon/scratch are private to this).
-  auto pack = [&](id<MTLTexture> att, id<MTLTexture> sten, id<MTLBuffer> out) {
+  // `cov` non-null -> use the coverage-aware adapter (source pack); null -> the
+  // canonical pack (scratch re-pack, no coverage needed).
+  auto pack = [&](id<MTLTexture> att, id<MTLTexture> sten, id<MTLBuffer> out,
+                  id<MTLBuffer> cov) {
+    bool use_cov = cov && pack_cov_pso;
+    id<MTLComputePipelineState> pso = use_cov ? pack_cov_pso : pack_pso;
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    [e setComputePipelineState:pack_pso];
+    [e setComputePipelineState:pso];
     [e setTexture:att atIndex:0];
     [e setTexture:sten atIndex:1];
     [e setBuffer:out offset:0 atIndex:0];
     [e setBuffer:spb offset:0 atIndex:1];
-    NSUInteger tw = pack_pso.threadExecutionWidth;
-    NSUInteger th = pack_pso.maxTotalThreadsPerThreadgroup / tw;
+    if (use_cov) {
+      [e setBuffer:cov offset:0 atIndex:2];
+    }
+    NSUInteger tw = pso.threadExecutionWidth;
+    NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
     [e dispatchThreads:MTLSizeMake(w, h, sc)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [e endEncoding];
@@ -760,36 +813,49 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
     }
     [e endEncoding];
   };
-  pack(src_tex, src_sten, canon_a);       // 1) source -> canonical A
-  materialize(scratch, canon_a);          // 2) A -> scratch depth attachment
-  pack(scratch, scratch_sten, canon_b);   // 3) scratch -> canonical B
-  // Read A/B once the frame cb completes (NO commit/wait): a match means
-  // materialize(pack(source)) reproduces pack's words, i.e. the shared substrate
-  // round-trips this real source losslessly. Capture the metadata by value.
+  pack(src_tex, src_sten, canon_a, cov_a);  // 1) source -> A (+ coverage)
+  materialize(scratch, canon_a);            // 2) A -> scratch depth attachment
+  pack(scratch, scratch_sten, canon_b, nil);  // 3) scratch -> canonical B
+  // Read A/B once the frame cb completes (NO commit/wait). The round-trip is now
+  // scored ONLY over slots the collapsed store actually holds (coverage==1):
+  // known slots that materialize+re-pack reproduce prove the substrate on the
+  // LIVE representation; the missing 3/4 (coverage==0) are honestly reported, not
+  // silently counted as matching zeros. Capture the metadata by value.
   const uint32_t words_per_tile = 80u * 16u;  // depth is 32bpp.
   uint64_t w0 = uint64_t(transfer.start_tiles) * words_per_tile;
   uint64_t w1 = uint64_t(transfer.end_tiles) * words_per_tile;
-  uint64_t cap = kBytes / 4;
+  uint64_t cap = kWords;
   if (w1 > cap) w1 = cap;
   uint32_t idx = shadow_count_, draw = command_processor_.trace_draw_index();
   uint32_t st = transfer.start_tiles, et = transfer.end_tiles;
+  uint32_t src_msaa = 1u << uint32_t(source->key().msaa_samples);
+  const void* src_ptr = source->texture();
   std::string name = source->key().GetDebugName();
   [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
     const uint32_t* a = static_cast<const uint32_t*>(canon_a.contents);
     const uint32_t* b = static_cast<const uint32_t*>(canon_b.contents);
-    uint32_t mism = 0, nonzero = 0, ha = 2166136261u, hb = 2166136261u;
+    const uint8_t* cov = static_cast<const uint8_t*>(cov_a.contents);
+    uint32_t known = 0, missing = 0, known_nz = 0, mism = 0;
+    uint32_t ha = 2166136261u, hb = 2166136261u;
     for (uint64_t i = w0; i < w1; ++i) {
-      if (a[i]) ++nonzero;
-      if (a[i] != b[i]) ++mism;
-      ha = (ha ^ a[i]) * 16777619u;
-      hb = (hb ^ b[i]) * 16777619u;
+      if (cov[i]) {
+        ++known;
+        if (a[i]) ++known_nz;
+        if (a[i] != b[i]) ++mism;
+        ha = (ha ^ a[i]) * 16777619u;
+        hb = (hb ^ b[i]) * 16777619u;
+      } else {
+        ++missing;
+      }
     }
-    XELOGW("MetalShadowX2X #{} @draw {}: {} sc={} {} tiles [{},{}) words={} "
-           "nonzero={} mism={} hashA={:08x} hashB={:08x} {}",
-           idx, draw, name, sc, f24 ? "f24" : "un24", st, et,
-           uint32_t(w1 - w0), nonzero, mism, ha, hb,
+    XELOGW("MetalShadowX2X #{} @draw {}: {} sc={} msaa={}x {} tiles [{},{}) "
+           "known={} missing={} known_nz={} mism={} hashA={:08x} hashB={:08x} "
+           "srctex={} {}",
+           idx, draw, name, sc, src_msaa, f24 ? "f24" : "un24", st, et, known,
+           missing, known_nz, mism, ha, hb, src_ptr,
            mism == 0 ? "ROUNDTRIP-OK" : "MISMATCH");
-    (void)canon_b;  // keep both buffers alive until the handler runs.
+    (void)canon_b;
+    (void)cov_a;  // keep buffers alive until the handler runs.
   }];
 }
 

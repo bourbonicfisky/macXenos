@@ -306,6 +306,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* materialize_depth = nullptr;  // id<MTLRenderPipelineState>
     void* materialize_sten = nullptr;
     void* pack = nullptr;  // id<MTLComputePipelineState>
+    void* pack_cov = nullptr;  // diagnostic legacy adapter: pack + coverage mark
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
     uint32_t sample_count = 0;
