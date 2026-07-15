@@ -641,13 +641,22 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
   if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, 0u);
-  uint idx = off >> 2;
-  if (idx >= sp.words) return;
   float d = tex.read(gid);
   uint s = sten.read(gid).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  uint word = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  // Missing-sample reconstruction: the live host store is DECIMATED to one
+  // sample per pixel, so a host pixel of a 2x/4x view stands for ALL samples of
+  // its group. Replicate the word across the group's canonical slots (nearest
+  // upscale, matching the legacy resample) so a later 1x view reading full-res
+  // canonical gets a COHERENT depth instead of 3/4 stale slots -> no decimation
+  // streaks, correct depth-based shading. 1x (msaa 0) writes exactly one slot.
+  uint nsamp = 1u << sp.msaa;
+  for (uint sid = 0u; sid < nsamp; ++sid) {
+    uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                     sp.is_depth, 0u, sid);
+    uint idx = off >> 2;
+    if (idx < sp.words) canonical[idx] = word;
+  }
 }
 fragment DepthFragOut materialize_depth_range_fs(
     DepthVOut in [[stage_in]],
