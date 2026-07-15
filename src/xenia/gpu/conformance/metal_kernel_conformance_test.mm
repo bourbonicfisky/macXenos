@@ -27,9 +27,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/metal/metal_edram_depth_msl.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -61,37 +63,12 @@ inline uint32_t XeTileHash(const std::vector<uint32_t>& words) {
 // Inline MSL: one kernel per format decoder. Each reads a uint code from `in`
 // and writes the RESULT BITS to `out` (float results are stored via as_type so
 // the comparison is exact, never through a float round-trip).
+// The extra conformance kernels appended AFTER the shared kEdramDepthMsl
+// (metal_edram_depth_msl.h). The metal_stdlib prelude, the shared addresser
+// xe_edram_offset_bytes, and struct SurfaceParams all come from that shared
+// source -- the SAME one the live cross-MSAA path compiles -- so the test and
+// the live path cannot drift. Init() concatenates kEdramDepthMsl + this.
 static const char* kKernelSource = R"MSL(
-#include <metal_stdlib>
-using namespace metal;
-
-// Shared addresser: edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
-// wrap=false. One MSL definition used by BOTH the offset-parity kernel and the
-// canonical pack/unpack kernels, so they cannot drift. msaa: 0=1x,1=2x,2=4x.
-inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
-                                  uint msaa, uint is_depth, uint fmt_log2,
-                                  uint sample) {
-  uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u,   // x doubles @4x
-                                   msaa >= 1u ? 1u : 0u);   // y doubles @2x
-  s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-  uint2 tsize32 = uint2(80u, 16u);
-  uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
-  uint2 toff = s / tsize;
-  uint b = base + toff.y * pitch + toff.x;
-  s -= toff * tsize;
-  if (is_depth != 0u) {
-    uint half_w = tsize.x >> 1u;  // 'half' is a reserved MSL type name
-    s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
-  }
-  uint address = b * (tsize32.x * tsize32.y) +
-                 ((s.y * tsize.x + s.x) << fmt_log2);
-  return address << 2;
-}
-
-// Per-surface constants for pack/unpack (one surface per dispatch). `words` is
-// the canonical buffer size in 32-bit words, so a bounds guard can skip an
-// over-dispatch instead of reading/writing out of range.
-struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, words; };
 // One (pixel, sample) work item.
 struct Coord { uint px, py, sample; };
 
@@ -373,162 +350,11 @@ kernel void k_tile_hash_tex(texture2d<float, access::read> tex [[texture(0)]],
   atomic_fetch_add_explicit(out, xe_hash_mix(word, i), memory_order_relaxed);
 }
 
-// Depth canonical materialize/pack substrate for the cross-MSAA slice. The JC2
-// hot range [720,1440) is kD24FS8 (float24, 20e4): its 20-bit mantissa fits
-// D32Float's 23 bits, so it round-trips through a host depth texture LOSSLESSLY
-// (unlike unorm24/kD24S8 near 1.0 -- a separate precision case). Materialize
-// writes SV_Depth in a fragment shader (depth textures can't be compute-written);
-// pack reads depth2d in compute. The canonical word is (d24 << 8) | stencil;
-// this depth-only rung ignores stencil (stencil plane is the next rung).
-inline float xe_f20e4_to_f32(uint f24) {
-  f24 &= 0xFFFFFFu;
-  if (f24 == 0u) return 0.0;
-  uint mantissa = f24 & 0xFFFFFu;
-  uint exponent = f24 >> 20;
-  if (exponent == 0u) {           // denormal: same normalization as k_20e4
-    uint lz = clz(mantissa) - 11u;
-    exponent = 1u - lz;
-    mantissa = (mantissa << lz) & 0xFFFFFu;
-  }
-  return as_type<float>(((exponent + 112u) << 23) | (mantissa << 3));
-}
-inline uint xe_f32_to_f20e4(float f) {  // inverse; mirrors the d2c encode
-  if (!(f > 0.0)) return 0u;
-  uint u = as_type<uint>(f);
-  if (u >= 0x40000000u) return 0xFFFFFFu;  // >= 2.0 saturates
-  if (u < 0x38800000u) {                   // denormal in 20e4
-    uint shift = min(113u - (u >> 23), 24u);
-    u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
-  } else {
-    u -= 0x38000000u;
-  }
-  return (u >> 3) & 0xFFFFFFu;
-}
-// UNorm24 (kD24S8): the exact Xenia mapping. The numerator n24+(n24>>23) is an
-// integer <= 2^24 (exactly representable in f32) and the *2^-24 only shifts the
-// exponent, so EVERY decoded value is an exact f32 -- no near-1.0 collision.
-inline float xe_unorm24_to_f32(uint n24) {
-  n24 &= 0xFFFFFFu;
-  return float(n24 + (n24 >> 23)) * (1.0 / 16777216.0);
-}
-inline uint xe_f32_to_unorm24(float d) {
-  // EXACT inverse of xe_unorm24_to_f32: decode is (n24 + (n24>>23)) * 2^-24, so
-  // d * 2^24 reconstructs the integer n24+b EXACTLY (power-of-two multiply, no
-  // rounding), then remove the +b bias (b = 1 above the 0.5 boundary). Using
-  // *2^24 (not *(2^24-1)) avoids the round-even tie that dropped near-boundary
-  // values by 1.
-  uint t = min(uint(rint(saturate(d) * 16777216.0)), 16777216u);
-  return (t > 8388608u ? t - 1u : t) & 0xFFFFFFu;
-}
-// Decode a guest depth word's d24 to a host [0,1] depth value. float24 (fmt 2)
-// spans guest [0,2): pack it to [0,1] with *0.5 so a Metal depth attachment
-// (which clamps to [0,1]) holds the WHOLE domain; unorm24 (fmt 1) is already
-// [0,1]. pack applies the inverse (*2 for float24).
-inline float xe_depth_word_to_host(uint word, uint fmt) {
-  uint d24 = word >> 8;
-  return fmt == 2u ? xe_f20e4_to_f32(d24) * 0.5 : xe_unorm24_to_f32(d24);
-}
-inline uint xe_host_to_depth_d24(float d, uint fmt) {
-  return fmt == 2u ? xe_f32_to_f20e4(d * 2.0) : xe_f32_to_unorm24(d);
-}
-struct DepthVOut { float4 pos [[position]]; };
-vertex DepthVOut xe_depth_vs(uint vid [[vertex_id]]) {
-  DepthVOut o;
-  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
-  o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-  return o;
-}
-struct DepthFragOut { float depth [[depth(any)]]; };
-fragment DepthFragOut materialize_depth_fs(
-    DepthVOut in [[stage_in]],
-    device const uint* canonical [[buffer(0)]],
-    constant SurfaceParams& sp [[buffer(1)]]) {
-  uint2 gid = uint2(in.pos.xy);
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, 0u);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  DepthFragOut o;
-  o.depth = xe_depth_word_to_host(w, sp.is_depth);  // is_depth: 2=float24,1=unorm24
-  return o;
-}
-// Stencil materialize: no shader stencil export in Metal, so the guest stencil
-// byte is rebuilt one bit-plane at a time -- this fragment discards where the
-// source word's stencil bit `bit` is clear, and the caller's REPLACE state ORs
-// the bit in where it survives (mirrors the c2d stencil rebuild).
-fragment void materialize_sten_fs(DepthVOut in [[stage_in]],
-                                  device const uint* canonical [[buffer(0)]],
-                                  constant SurfaceParams& sp [[buffer(1)]],
-                                  constant uint& bit [[buffer(2)]]) {
-  uint2 gid = uint2(in.pos.xy);
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, 0u);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
-}
-// Pack emits the COMPLETE depth/stencil word: (d24 << 8) | stencil. Depth from
-// the depth2d view, stencil from the X32_Stencil8 view of the same attachment.
-kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
-                      texture2d<uint, access::read> sten [[texture(1)]],
-                      device uint* canonical [[buffer(0)]],
-                      constant SurfaceParams& sp [[buffer(1)]],
-                      uint2 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, 0u);
-  uint idx = off >> 2;
-  if (idx >= sp.words) return;
-  float d = tex.read(gid);
-  uint s = sten.read(gid).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
-}
-// Per-sample 4x/2x depth+stencil: the same materialize/pack, but SAMPLE-AWARE.
-// Materialize is sample-rate ([[sample_id]] forces per-sample execution) so each
-// sample gets the canonical word at its own (pixel, sample) offset; pack reads
-// depth2d_ms/texture2d_ms per sample. Reuses xe_depth_word_to_host /
-// xe_host_to_depth_d24 / xe_edram_offset_bytes verbatim (the live path must too).
-fragment DepthFragOut materialize_depth_ms_fs(
-    DepthVOut in [[stage_in]],
-    device const uint* canonical [[buffer(0)]],
-    constant SurfaceParams& sp [[buffer(1)]],
-    uint sid [[sample_id]]) {
-  uint2 gid = uint2(in.pos.xy);
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, sid);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  DepthFragOut o;
-  o.depth = xe_depth_word_to_host(w, sp.is_depth);
-  return o;
-}
-fragment void materialize_sten_ms_fs(DepthVOut in [[stage_in]],
-                                     device const uint* canonical [[buffer(0)]],
-                                     constant SurfaceParams& sp [[buffer(1)]],
-                                     constant uint& bit [[buffer(2)]],
-                                     uint sid [[sample_id]]) {
-  uint2 gid = uint2(in.pos.xy);
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, sid);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
-}
-kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
-                         texture2d_ms<uint, access::read> sten [[texture(1)]],
-                         device uint* canonical [[buffer(0)]],
-                         constant SurfaceParams& sp [[buffer(1)]],
-                         uint3 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
-      gid.z >= tex.get_num_samples()) return;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, gid.z);
-  uint idx = off >> 2;
-  if (idx >= sp.words) return;
-  float d = tex.read(uint2(gid.x, gid.y), gid.z);
-  uint s = sten.read(uint2(gid.x, gid.y), gid.z).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
-}
+// The depth/stencil materialize/pack kernels (xe_depth_vs, materialize_depth_fs,
+// materialize_sten_fs, pack_depth, and the _ms per-sample variants) plus the
+// float24/unorm24 helpers now live in the shared kEdramDepthMsl
+// (metal_edram_depth_msl.h), prepended by Init() -- the SAME source the live
+// cross-MSAA path compiles. The [depth] cases below exercise exactly that source.
 )MSL";
 
 // Mirrors of the MSL pack/unpack structs -- layouts must match exactly or the
@@ -557,7 +383,12 @@ struct MetalCompute {
     if (!dev) return false;
     queue = [dev newCommandQueue];
     NSError* err = nil;
-    lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kKernelSource]
+    // Prepend the SHARED production depth/stencil MSL (the same source the live
+    // cross-MSAA path compiles) so the test exercises the live helpers, not a
+    // copy. The extra conformance kernels in kKernelSource follow it.
+    std::string combined = std::string(xe::gpu::metal::kEdramDepthMsl);
+    combined += kKernelSource;
+    lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:combined.c_str()]
                             options:nil
                               error:&err];
     if (!lib) {
@@ -2010,6 +1841,33 @@ uint32_t CrossMsaaBad(MetalCompute& mc, uint32_t fmt) {
   }
   return bad;
 }
+
+// Round-trips a depth surface at ARBITRARY geometry (nonzero base, any pitch,
+// multi-tile, 1x or 4x) and reports failed complete-words. This is what the
+// single-tile base=0 pitch=1 cases don't cover: JC2's real [720,1440) buffer is
+// base 720, pitch 16, spanning many tiles. Distinct depth+stencil per element.
+uint32_t GeomDepthBad(MetalCompute& mc, uint32_t fmt, uint32_t base,
+                      uint32_t pitch, uint32_t w, uint32_t h, uint32_t msaa,
+                      uint32_t ns) {
+  SurfaceParams sp{base, pitch, msaa, fmt, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / 4u)};
+  std::vector<uint32_t> words(size_t(w) * h * ns);
+  for (uint32_t i = 0; i < words.size(); ++i)
+    words[i] = ((i * 2654435761u & 0xFFFFFFu) << 8) | ((i * 37u + 1u) & 0xFFu);
+  auto out = ns > 1
+                 ? mc.RoundTripDepthMsaa(w, h, ns, sp, words, xenos::kEdramSizeBytes)
+                 : mc.RoundTripDepth(w, h, sp, words, xenos::kEdramSizeBytes);
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < words.size(); ++i) {
+    if (out[i] != words[i]) {
+      if (bad < 8)
+        WARN("fmt " << fmt << " idx " << i << " expected " << words[i]
+                    << " got " << out[i]);
+      ++bad;
+    }
+  }
+  return bad;
+}
 }  // namespace
 
 TEST_CASE("Canonical kD24FS8 (float24) depth+stencil word round-trips over [0,2)",
@@ -2069,6 +1927,21 @@ TEST_CASE("Cross-MSAA 4x->1x->4x preserves samples and propagates a 1x write",
   // up at 4x. Checked against a CPU replay of the same physical-slot writes.
   REQUIRE(CrossMsaaBad(mc, /*float24=*/2u) == 0u);
   REQUIRE(CrossMsaaBad(mc, /*unorm24=*/1u) == 0u);
+}
+
+TEST_CASE("Canonical depth round-trips at JC2 geometry (base 720, pitch 16, multi-tile)",
+          "[l1][metal][materialize][depth][geometry]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // JC2's [720,1440) buffer: base 720, pitch 16. The region is only 2 tiles
+  // wide, so pitch 16 != region-width-in-tiles -> non-contiguous tile rows
+  // (row 1 jumps 16 tiles, not 2), exercising the pitch arithmetic the single-
+  // tile base=0 pitch=1 cases can't. 1x = 160x32 px (2x2 tiles), 4x = 80x16 px
+  // x 4 samples (2x2 tiles). Both guest formats, complete depth+stencil word.
+  REQUIRE(GeomDepthBad(mc, /*float24=*/2u, 720u, 16u, 160u, 32u, 0u, 1u) == 0u);
+  REQUIRE(GeomDepthBad(mc, /*unorm24=*/1u, 720u, 16u, 160u, 32u, 0u, 1u) == 0u);
+  REQUIRE(GeomDepthBad(mc, /*float24=*/2u, 720u, 16u, 80u, 16u, 2u, 4u) == 0u);
+  REQUIRE(GeomDepthBad(mc, /*unorm24=*/1u, 720u, 16u, 80u, 16u, 2u, 4u) == 0u);
 }
 
 // ---------------------------------------------------------------------------
