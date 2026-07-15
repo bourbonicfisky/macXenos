@@ -113,6 +113,46 @@ TEST_CASE("EDRAM 4x holds four independent samples per pixel",
   }
 }
 
+// Contract 1b: cross-MSAA over the SAME tile range is a lossless reinterpret,
+// NOT a resample. This is the manifest's biggest finding: in JC2, cross_msaa is
+// ~50% of all ownership transitions (20210 of 40291 in one run), overwhelmingly
+// full-screen 4x<->1x remaps of the same tiles. An EDRAM tile is 80x16 SAMPLES
+// regardless of MSAA -- 4x packs 40x8 pixels x 4 samples, 1x packs 80x16 pixels
+// x 1 sample, but BOTH are the same 1280 word-slots. So a 4x->1x->4x round-trip
+// preserves every sample: only the pixel<->sample interpretation changes, the
+// words never move. The COLLAPSED host cannot do this (one texel per pixel, so
+// 4x->1x drops 3 of 4 samples and 1x->4x broadcasts) -- which is exactly why
+// PerformCrossMsaaTransfer resamples lossily and why canonical per-sample EDRAM
+// turns these 20210 transfers into free, lossless no-ops. This pins the target.
+TEST_CASE("EDRAM cross-MSAA over the same tiles round-trips losslessly",
+          "[l2][edram][msaa][cross_msaa]") {
+  // One tile (base 0, pitch 1). The 4x view is 40x8 px x 4 samples; the 1x view
+  // is 80x16 px x 1 sample; both bijectively cover the tile's 1280 word slots.
+  EdramRef a;
+  for (uint32_t py = 0; py < 8; ++py)
+    for (uint32_t px = 0; px < 40; ++px)
+      for (uint32_t s = 0; s < 4; ++s)
+        a.Store(px, py, MsaaSamples::k4X, s, false, 0, 1, Val(px, py, s));
+  // Reinterpret as a 1x view of the SAME tile (the cross_msaa 4x->1x leg) and
+  // materialize it into a fresh EDRAM. No resample: each 1x pixel reads one of
+  // the physical words the 4x view wrote.
+  EdramRef b;
+  for (uint32_t py = 0; py < 16; ++py)
+    for (uint32_t px = 0; px < 80; ++px)
+      b.Store(px, py, MsaaSamples::k1X, 0, false, 0, 1,
+              a.Load(px, py, MsaaSamples::k1X, 0, false, 0, 1));
+  // Read b back as a 4x view (the 1x->4x leg): every original sample survives.
+  uint32_t distinct = 0;
+  for (uint32_t py = 0; py < 8; ++py)
+    for (uint32_t px = 0; px < 40; ++px)
+      for (uint32_t s = 0; s < 4; ++s) {
+        REQUIRE(b.Load(px, py, MsaaSamples::k4X, s, false, 0, 1) ==
+                Val(px, py, s));
+        ++distinct;
+      }
+  REQUIRE(distinct == 1280u);  // the full tile, every sample accounted for.
+}
+
 // Contract 2: a sample-select resolve reads EXACTLY the chosen sample. Model
 // resolve(select S) as Load(...,S); it must equal what was stored at S and
 // never any other sample's value.
