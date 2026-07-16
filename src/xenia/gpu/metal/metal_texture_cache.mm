@@ -274,6 +274,26 @@ void MetalTextureCache::DrainPendingInvalidations() {
   }
 }
 
+// --- Snapshot-bridge temporal-loop lineage probe (XE_METAL_LINEAGE=<base hex>,
+// e.g. 11849000 = JC2's composite temporal history buffer). One probe that
+// tags every event on the watched base with the shared draw-index clock, a raw
+// guest-RAM content hash, and the reader's cache HIT/MISS + RAM/bridge decision,
+// so the whole Frame-N-resolve -> RAM-scatter -> Frame-N+1-fetch chain is
+// visible in one run and the failing edge is identified (not iterated visually).
+static uint32_t xe_lineage_base() {
+  static uint32_t b = [] {
+    const char* v = std::getenv("XE_METAL_LINEAGE");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  return b;
+}
+static uint32_t xe_lineage_fnv(const void* p, size_t n) {
+  const uint8_t* b = static_cast<const uint8_t*>(p);
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 16777619u;
+  return h;
+}
+
 uint32_t MetalTextureCache::GetTextureSlot(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   if (!trace_playback_) {
@@ -408,6 +428,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
           ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
               MTLPixelFormatR32Float;
       if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
+        if (xe_lineage_base() && (fetch.base_address << 12) == xe_lineage_base()) {
+          XELOGW(
+              "MetalLineage BRIDGE draw={} base={:08X} served SNAPSHOT rt={}x{} "
+              "fetch={}x{} is_depth={} ram_backed={} covered_r32f={} "
+              "color_bridge={} (RAM bypassed)",
+              lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
+              fetch_w, fetch_h, rt.is_depth, rt.ram_backed, covered_r32f,
+              s_color_bridge);
+        }
         active_textures_.push_back(rt.texture);
         return rt.slot;
       }
@@ -456,6 +485,34 @@ uint32_t MetalTextureCache::GetTextureSlot(
            uint32_t(fetch.endianness)};
   uint64_t key = XXH3_64bits(&kb, sizeof(kb));
   auto it = cache_.find(key);
+  // Lineage probe: this fetch of the watched base is the composite's temporal
+  // read. A cache HIT means the untile is SKIPPED and the STALE cached upload is
+  // served -- the freshly-resolved guest RAM never reaches the composite (the
+  // invalidation/ordering break). ramHash is a strided hash of the guest RAM the
+  // untile WOULD read; compare across frames vs the DRAIN ramHash to see whether
+  // this reads last frame's resolve (correct temporal) or something stale.
+  if (xe_lineage_base() && base == xe_lineage_base()) {
+    const uint8_t* g =
+        static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
+    uint32_t rh = 0;
+    if (g) {
+      size_t region = std::min<size_t>(size_t(pitch_texels) * height * 4u,
+                                       size_t(kPhysicalSize - base));
+      uint32_t h = 2166136261u;
+      for (size_t i = 0; i < region; i += 37) h = (h ^ g[i]) * 16777619u;
+      rh = h;
+    }
+    bool ram_backed = false;
+    auto rit = resolved_targets_.find(base);
+    if (rit != resolved_targets_.end()) ram_backed = rit->second.ram_backed;
+    XELOGW(
+        "MetalLineage FETCH draw={} base={:08X} {}x{} pitch={} fmt={} tiled={} "
+        "endian={} cache={} ram_backed={} ramHash={:08x}",
+        lineage_draw_, base, width, height, pitch_texels,
+        uint32_t(fetch.format), uint32_t(fetch.tiled),
+        uint32_t(fetch.endianness), it != cache_.end() ? "HIT" : "MISS",
+        ram_backed, rh);
+  }
   if (it != cache_.end()) {
     active_textures_.push_back(it->second.texture);
     return it->second.slot;

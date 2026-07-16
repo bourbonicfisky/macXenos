@@ -56,6 +56,11 @@ class MetalTextureCache {
   uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch,
                           bool is_signed = false);
 
+  // Lineage probe (XE_METAL_LINEAGE): the command processor stamps the current
+  // draw index here each draw so the reader's fetch events share the writer's
+  // clock; only read when the probe is active.
+  uint32_t lineage_draw_ = 0;
+
   // RT-as-texture bridge: register a resolved render-target snapshot (owned by
   // the render-target cache) at its guest resolve destination base. A later
   // texture fetch whose base matches samples that snapshot instead of the

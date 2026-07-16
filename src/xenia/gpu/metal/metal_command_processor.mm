@@ -67,6 +67,23 @@ namespace metal {
 
 namespace {
 
+// Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
+// Same base + strided-hash as the reader (metal_texture_cache.mm) so the
+// resolve/writeback/drain events on the watched base share the fetch clock.
+uint32_t xe_lineage_base() {
+  static uint32_t b = [] {
+    const char* v = std::getenv("XE_METAL_LINEAGE");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  return b;
+}
+uint32_t xe_lineage_stridehash(const void* p, size_t n) {
+  const uint8_t* b = static_cast<const uint8_t*>(p);
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < n; i += 37) h = (h ^ b[i]) * 16777619u;
+  return h;
+}
+
 // Top-level argument buffer: 32 uint64 gpuAddress entries, one per root-signature
 // parameter, in the exact order MetalShaderConverter::CreateXbox360RootSignature
 // appends them.
@@ -2297,6 +2314,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // says kUseFetchConst) + the fetch constant's clamp modes. Texture and
   // sampler bindings share one bindless index space (disjoint indices).
   texture_cache_->ResetActive();
+  texture_cache_->lineage_draw_ = trace_draw_index_;  // lineage-probe clock
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
     uint32_t count = 1;
@@ -3225,6 +3243,16 @@ bool MetalCommandProcessor::IssueCopy() {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh,
                                                  /*is_depth=*/false);
+          if (xe_lineage_base() &&
+              resolve_info.copy_dest_base == xe_lineage_base()) {
+            XELOGW(
+                "MetalLineage RESOLVE-REG draw={} base={:08X} {}x{} fmt={} "
+                "(re-registers dims; coverage for the composite fetch)",
+                trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                dest_pixel_format == MetalRenderTargetCache::kColorFormat
+                    ? 0u
+                    : uint32_t(dest_pixel_format));
+          }
         }
         static const bool s_resolve_log2 =
             std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
@@ -3312,6 +3340,18 @@ bool MetalCommandProcessor::IssueCopy() {
             if (texture_cache_) {
               texture_cache_->MarkResolvedTargetRamBacked(
                   resolve_info.copy_dest_base);
+            }
+            if (xe_lineage_base() &&
+                resolve_info.copy_dest_base == xe_lineage_base()) {
+              XELOGW(
+                  "MetalLineage WB-ENQUEUE draw={} base={:08X} {}x{} bpp={} "
+                  "endian={} swap_rb={} pitch={} off=({},{}) (queued -> RAM at "
+                  "drain; ram_backed=true)",
+                  trace_draw_index_, resolve_info.copy_dest_base, rw, rh, wb_bpp,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                  wb_swap_rb, uint32_t(dc.pitch_aligned_div_32) << 5,
+                  uint32_t(dc.offset_x_div_8) << 3,
+                  uint32_t(dc.offset_y_div_8) << 3);
             }
           }
         }
@@ -3708,6 +3748,17 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       // uploaded from that range so the next fetch re-uploads fresh content.
       if (texture_cache_) {
         texture_cache_->InvalidateRange(wb.guest_addr, count * wb.bpp);
+      }
+      if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
+        // RAM now holds this frame's scattered resolve. This ramHash is what a
+        // subsequent fetch's untile WOULD read; compare it to the FETCH ramHash
+        // and to the NEXT frame's DRAIN to place the temporal read/write order.
+        uint32_t rh = xe_lineage_stridehash(dest, size_t(count) * wb.bpp);
+        XELOGW(
+            "MetalLineage DRAIN base={:08X} {}x{} bytes={} invalidate=[{:08X},+{}] "
+            "ramHash={:08x} (scattered -> RAM, cache evicted)",
+            wb.guest_addr, wb.width, wb.height, count * wb.bpp, wb.guest_addr,
+            count * wb.bpp, rh);
       }
       // Exposure telemetry: remember the smallest writeback this frame (the
       // pyramid tip the game's exposure controller actually reads).
