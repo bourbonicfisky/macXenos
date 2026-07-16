@@ -2287,6 +2287,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         XELOGW("MetalPackedC ps={:016X} count={}:{}",
                pixel_shader->ucode_data_hash(), packed, line);
       }
+    } else if (s_expo_ps_hash && float_pixel_alloc.cpu_ptr &&
+               pixel_shader->ucode_data_hash() != s_expo_ps_hash) {
+      // Tonemap-hash DISCOVERY: the real ucode hash is 64-bit; if the supplied
+      // XE_METAL_EXPO_TRACE didn't match any shader, dump each unique pixel
+      // shader's hash + first float constants once (capped). The tonemap is the
+      // full-screen draw whose constants track exposure -- set EXPO_TRACE to its
+      // {:016X} hash to capture expc. grep MetalExpoCandidate.
+      static std::unordered_set<uint64_t> s_seen_expo_ps;
+      if (s_seen_expo_ps.size() < 64 &&
+          s_seen_expo_ps.insert(pixel_shader->ucode_data_hash()).second) {
+        const float* fl = static_cast<const float*>(float_pixel_alloc.cpu_ptr);
+        XELOGW(
+            "MetalExpoCandidate ps={:016X} c0=({:.4f},{:.4f},{:.4f},{:.4f})",
+            pixel_shader->ucode_data_hash(), fl[0], fl[1], fl[2], fl[3]);
+      }
     }
   }
 
@@ -3768,6 +3783,20 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         float f;
         std::memcpy(&f, &src_words[0], sizeof(f));
         expo_last_wb_value_ = f;
+      }
+      // Address-filtered exposure probe (Codex): the "smallest writeback" wb is
+      // ambiguous when several tiny writebacks exist. Log EVERY <=256-word
+      // writeback with its guest ADDRESS + first float, so the true luminance
+      // destination and its per-swap trajectory are unambiguous (grep
+      // MetalExpoWB, group by addr). Gated by XE_METAL_EXPO_TRACE.
+      static const bool s_expo_addr =
+          std::getenv("XE_METAL_EXPO_TRACE") != nullptr;
+      if (s_expo_addr && count <= 256) {
+        float f0, f1;
+        std::memcpy(&f0, &src_words[0], sizeof(f0));
+        std::memcpy(&f1, count > 1 ? &src_words[1] : &src_words[0], sizeof(f1));
+        XELOGI("MetalExpoWB swap#{} addr={:08X} words={} v0={:.6f} v1={:.6f}",
+               swap_count_, wb.guest_addr, count, f0, f1);
       }
       // Exposure death-spiral guard: the game's auto-exposure feedback loop
       // reads these tiny luminance writebacks; an ALL-ZERO one collapses
