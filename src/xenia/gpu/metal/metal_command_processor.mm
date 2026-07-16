@@ -41,6 +41,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
+#include "xenia/gpu/resolve_writeback_log.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
@@ -3344,7 +3345,9 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
-                S7TagsOff() ? 0 : CurrentEncodingSubmission()});
+                S7TagsOff() ? 0 : CurrentEncodingSubmission(),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+                trace_draw_index_, swap_count_});
             if (dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
               ram_color_layouts_[resolve_info.copy_dest_base] = RamColorLayout{
                   uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
@@ -3858,6 +3861,37 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         // hold path re-scatters them like a normal drain).
         auto& held = held_writeback_content_[wb.guest_addr];
         held.assign(src_words, src_words + count * words_per_texel);
+      }
+      // Backend-neutral resolve-writeback record (stabilize task 6.2), after
+      // the scatter (and any zero-hold re-scatter) so word0/hash are what a
+      // guest CPU load observes. Diagnostic-only; no sync, no control flow.
+      if (IsResolveWritebackLogEnabled()) {
+        uint32_t rec_extent =
+            wb.dest_extent_bytes ? wb.dest_extent_bytes : count * wb.bpp;
+        uint32_t first_off = uint32_t(texture_address::Tiled2D(
+            int32_t(wb.dest_offset_x), int32_t(wb.dest_offset_y),
+            pitch_aligned, int32_t(block_log2)));
+        uint32_t word0 = 0;
+        if (first_off + 4 <= rec_extent) {
+          std::memcpy(&word0, dest + first_off, sizeof(word0));
+        }
+        ResolveWritebackRecord record;
+        record.backend = "metal";
+        record.frame = swap_count_;
+        record.sequence = wb.draw_index;
+        record.guest_address = wb.guest_addr;
+        record.width = wb.width;
+        record.height = wb.height;
+        record.format = wb.dest_format;
+        record.endian = wb.endian;
+        record.swap = wb.swap_rb;
+        record.extent_bytes = rec_extent;
+        record.raw_word0 = word0;
+        record.guest_hash = HashResolveWritebackExtent(dest, rec_extent);
+        record.host_virtual =
+            memory_->TranslateVirtual<const void*>(wb.guest_addr);
+        record.readback_age_frames = int32_t(swap_count_ - wb.enqueue_swap);
+        LogResolveWriteback(record);
       }
     }
   }

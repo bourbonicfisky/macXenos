@@ -23,6 +23,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
+#include "xenia/gpu/resolve_writeback_log.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
@@ -3261,6 +3262,61 @@ bool VulkanCommandProcessor::IssueCopy() {
           uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
           memory::vastcpy(dest_ptr, static_cast<uint8_t*>(mapped_data),
                           written_length);
+          // Backend-neutral resolve-writeback record (stabilize task 6.2),
+          // emitted now that guest RAM holds the readback. Diagnostic-only;
+          // no sync, no control flow. The resolve info is re-derived purely
+          // for metadata — registers are unchanged since the Resolve() above.
+          if (IsResolveWritebackLogEnabled()) {
+            draw_util::ResolveInfo wb_resolve_info;
+            if (draw_util::GetResolveInfo(
+                    *register_file_, *memory_, trace_writer_,
+                    render_target_cache_->draw_resolution_scale_x(),
+                    render_target_cache_->draw_resolution_scale_y(),
+                    render_target_cache_->IsFixedRG16TruncatedToMinus1To1(),
+                    render_target_cache_->IsFixedRGBA16TruncatedToMinus1To1(),
+                    wb_resolve_info)) {
+              // Mirror the Metal record: address = dest base, extent measured
+              // from the base (written_address is copy_dest_extent_start, so
+              // extent = offset-to-first-written-byte + written_length).
+              uint32_t rec_base = wb_resolve_info.copy_dest_base;
+              uint32_t rec_extent = written_address >= rec_base
+                                        ? (written_address - rec_base) +
+                                              written_length
+                                        : written_length;
+              const uint8_t* rec_base_ptr =
+                  written_address >= rec_base
+                      ? memory_->TranslatePhysical(rec_base)
+                      : dest_ptr;
+              uint32_t word0 = 0;
+              if (written_length >= sizeof(word0)) {
+                std::memcpy(&word0, dest_ptr, sizeof(word0));
+              }
+              static uint64_t s_resolve_wb_sequence = 0;
+              ResolveWritebackRecord record;
+              record.backend = "vulkan";
+              record.frame = frame_current_;
+              record.sequence = ++s_resolve_wb_sequence;
+              record.guest_address =
+                  written_address >= rec_base ? rec_base : written_address;
+              record.width =
+                  uint32_t(wb_resolve_info.coordinate_info.width_div_8) << 3;
+              record.height = wb_resolve_info.height_div_8 << 3;
+              record.format =
+                  uint32_t(wb_resolve_info.copy_dest_info.copy_dest_format);
+              record.endian =
+                  uint32_t(wb_resolve_info.copy_dest_info.copy_dest_endian);
+              record.swap =
+                  uint32_t(wb_resolve_info.copy_dest_info.copy_dest_swap);
+              record.extent_bytes = rec_extent;
+              record.raw_word0 = word0;
+              record.guest_hash =
+                  HashResolveWritebackExtent(rec_base_ptr, rec_extent);
+              record.host_virtual = memory_->TranslateVirtual<const void*>(
+                  record.guest_address);
+              record.readback_age_frames = read_index == write_index ? 0 : 1;
+              LogResolveWriteback(record);
+            }
+          }
         } else {
           XELOGE(
               "VulkanCommandProcessor: Failed to map readback buffer "

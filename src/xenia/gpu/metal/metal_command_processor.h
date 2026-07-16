@@ -326,6 +326,13 @@ class MetalCommandProcessor : public CommandProcessor {
     // Submission whose command buffer fills `staging` — the drain may only
     // read the staging contents once this submission has completed.
     uint64_t submission;
+    // Resolve provenance for the backend-neutral ResolveWB record
+    // (XE_GPU_RESOLVE_WB_LOG): RB_COPY_DEST_INFO.copy_dest_format, the draw
+    // index of the issuing resolve, and the swap it was enqueued on (drain
+    // swap - enqueue swap = data age in frames).
+    uint32_t dest_format;
+    uint32_t draw_index;
+    uint32_t enqueue_swap;
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
