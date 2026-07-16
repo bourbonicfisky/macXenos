@@ -9,6 +9,11 @@
 
 #include "xenia/gpu/trace_dump.h"
 
+#include <chrono>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+
 #include "third_party/stb/stb_image_write.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
@@ -24,6 +29,8 @@
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/window.h"
 #include "xenia/xbox.h"
+
+#include "version.h"  // XE_BUILD_COMMIT / XE_BUILD_BRANCH (generated)
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #undef _CRT_SECURE_NO_WARNINGS
@@ -91,6 +98,39 @@ TraceDump::TraceDump() = default;
 TraceDump::~TraceDump() = default;
 
 int TraceDump::Main(const std::vector<std::string>& args) {
+  // Binary-identity banner (methodology fix): a stale trace-dump binary --
+  // linked from newer object files but run after an OLDER build left probes
+  // out -- once cost a full diagnostic cycle. version.h's commit only
+  // regenerates on xenia-build.py (not plain ninja), so it can itself be
+  // stale; the ALWAYS-true signal is the executable's own file mtime. Print
+  // both up front so every run states exactly which binary is executing.
+  {
+    std::error_code mtime_ec;
+    std::string built = "unknown";
+    auto self = xe::filesystem::GetExecutablePath();
+    if (!self.empty()) {
+      auto ft = std::filesystem::last_write_time(self, mtime_ec);
+      if (!mtime_ec) {
+        auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ft - std::filesystem::file_time_type::clock::now() +
+            std::chrono::system_clock::now());
+        std::time_t tt = std::chrono::system_clock::to_time_t(sys);
+        char buf[32];
+        std::tm tm_buf;
+#if XE_PLATFORM_WIN32
+        localtime_s(&tm_buf, &tt);
+#else
+        localtime_r(&tt, &tm_buf);
+#endif
+        if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf)) {
+          built = buf;
+        }
+      }
+    }
+    XELOGI("TraceDump BINARY: built {} | src commit {} @ {} (version.h; may lag)",
+           built, XE_BUILD_COMMIT, XE_BUILD_BRANCH);
+  }
+
   // Offline decode mode: no emulator/replay -- just decode a capture directory.
   if (!cvars::decode.empty()) {
     int decoded = DecodeCaptureDirectory(
