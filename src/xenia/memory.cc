@@ -331,6 +331,16 @@ bool Memory::Initialize() {
   memcpy(TranslateVirtual(0x80000000 + 0x1C), &value_to_write,
          sizeof(uint32_t));
 
+  // Host membase bases (ASLR-probed, so they differ every launch): print them
+  // once so a guest address can be turned into a host watch address for an LLDB
+  // hardware read watchpoint -- host_va = virtual_membase + guest_ea. The PPC
+  // JIT reads guest RAM through the VIRTUAL mirror, so watch that one, not the
+  // physical mirror. Backend-agnostic (works under Metal and Vulkan alike).
+  XELOGI("Memory: virtual_membase={} physical_membase={} (host_va = "
+         "virtual_membase + guest_ea; LLDB watch target)",
+         static_cast<void*>(virtual_membase_),
+         static_cast<void*>(physical_membase_));
+
   return true;
 }
 

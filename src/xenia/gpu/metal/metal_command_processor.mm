@@ -3795,8 +3795,33 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
         float f0, f1;
         std::memcpy(&f0, &src_words[0], sizeof(f0));
         std::memcpy(&f1, count > 1 ? &src_words[1] : &src_words[0], sizeof(f1));
-        XELOGI("MetalExpoWB swap#{} addr={:08X} words={} v0={:.6f} v1={:.6f}",
-               swap_count_, wb.guest_addr, count, f0, f1);
+        // Also print the HOST VIRTUAL address the guest PPC read lands on
+        // (virtual_membase_ + ea + heap host_address_offset). This is the
+        // address to hand an LLDB hardware READ watchpoint -- the JIT loads
+        // guest RAM through the virtual mirror, NOT the physical_membase mirror
+        // that TranslatePhysical/`dest` uses, so a watch must target this one.
+        // Given live: `watchpoint set expression -w read -s 4096 -- <hostva>`
+        // on a tip (12EA2000 R32F / 1390B000 8888) catches the exposure read
+        // and its guest+host PC. raw32 is the first packed guest word (compare
+        // Metal vs Vulkan AFTER endian scatter, not the pre-scatter float).
+        // hostva = the VIRTUAL-mirror host address the guest PPC load lands on
+        // (virtual_membase_ + ea + heap offset). THIS is the LLDB hardware READ
+        // watchpoint target -- the JIT reads guest RAM through the virtual
+        // mirror, not the physical_membase mirror our scatter writes.
+        const void* host_va = memory_->TranslateVirtual<const void*>(
+            wb.guest_addr);
+        // raw32 = the word we actually scattered into guest RAM, read back from
+        // the PHYSICAL mirror (`dest`, texel (0,0) == tiled offset 0) AFTER the
+        // GpuSwapInline endian pack. THIS is the post-endian word to compare
+        // Metal vs Vulkan, not the pre-scatter src float. (Read from `dest`, not
+        // host_va: in the trace-dump harness the virtual mirror does not reflect
+        // the physical write; live they alias, so the guest observes this word.)
+        uint32_t raw32;
+        std::memcpy(&raw32, dest, sizeof(raw32));
+        XELOGI(
+            "MetalExpoWB swap#{} addr={:08X} words={} v0={:.6f} v1={:.6f} "
+            "hostva={} raw32_scattered={:08X}",
+            swap_count_, wb.guest_addr, count, f0, f1, host_va, raw32);
       }
       // Exposure death-spiral guard: the game's auto-exposure feedback loop
       // reads these tiny luminance writebacks; an ALL-ZERO one collapses
