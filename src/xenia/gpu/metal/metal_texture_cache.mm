@@ -427,6 +427,25 @@ uint32_t MetalTextureCache::GetTextureSlot(
           !rt.is_depth && rt.width >= fetch_w && rt.height >= fetch_h &&
           ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
               MTLPixelFormatR32Float;
+      // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
+      // fetches (the exposure tips) down the RAM path, bisecting
+      // snapshot-vs-RAM content for the tonemap's exposure input. Diagnostic
+      // only — the RAM path re-introduces the mid-frame commit+wait per
+      // consumer that covered_r32f exists to avoid; a shipping fix must keep
+      // the GPU-ordered snapshot path and correct its content/identity.
+      static const bool s_tip_ram_fetch =
+          std::getenv("XE_METAL_TIP_RAM_FETCH") != nullptr;
+      if (s_tip_ram_fetch && covered_r32f && fetch_w == 1 && fetch_h == 1 &&
+          !rt.is_depth && !s_color_bridge && rt.ram_backed) {
+        covered_r32f = false;
+        if (xe_lineage_base() &&
+            (fetch.base_address << 12) == xe_lineage_base()) {
+          XELOGW(
+              "MetalLineage TIP-RAM draw={} base={:08X} covered_r32f "
+              "OVERRIDDEN -> RAM path (XE_METAL_TIP_RAM_FETCH)",
+              lineage_draw_, fetch.base_address << 12);
+        }
+      }
       if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
         if (xe_lineage_base() && (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
