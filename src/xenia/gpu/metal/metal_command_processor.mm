@@ -1467,9 +1467,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         for (const auto& range : ranges) {
           XELOGW(
               "MetalMemexportSkip draw={} {} shader={:016X} dest={:08X} "
-              "bytes={}",
+              "bytes={} prim={} n={} indexed={}",
               trace_draw_index_, stage, shader->ucode_data_hash(),
-              range.base_address_dwords << 2, range.size_bytes);
+              range.base_address_dwords << 2, range.size_bytes,
+              uint32_t(prim_type), index_count, index_buffer_info != nullptr);
         }
         return !ranges.empty();
       };
