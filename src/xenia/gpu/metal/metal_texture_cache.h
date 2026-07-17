@@ -73,7 +73,9 @@ class MetalTextureCache {
   // Stage 3 hybrid: a resolve at `base` enqueued a guest-RAM writeback, so
   // RAM is authoritative for fetches of this base (the bridge snapshot is a
   // fallback for dests the writer can't encode — e.g. 64bpp HDR).
-  void MarkResolvedTargetRamBacked(uint32_t base);
+  void MarkResolvedTargetRamBacked(uint32_t base, uint32_t wb_width,
+                                   uint32_t wb_height, bool full_rect_geometry,
+                                   uint32_t wb_endian);
   // XE_METAL_TIP_SNAP_VIEW: attach the derived 1x1 texel-(0,0) copy to the
   // registered resolve target at base (allocates/repoints its bindless slot).
   void RegisterResolvedTipView(uint32_t base, void* texture);
@@ -223,6 +225,16 @@ class MetalTextureCache {
     // texel 4,4) — the JC2 exposure-darkness mechanism.
     void* tip_texture = nullptr;  // id<MTLTexture>, owned by the CP.
     uint32_t tip_slot = 0;
+    // Exact-cover reader: true while the NEWEST guest-RAM writeback at this
+    // base wrote the full registered extent at offset (0,0) with
+    // pitch == width. RAM then holds scatter(snapshot) — any channel swap
+    // is baked into the snapshot by the resolve shader itself, and equal
+    // fetch/writeback endian makes untile cancel the scatter — so for a
+    // fetch of the same extent and pitch the snapshot IS the RAM upload's
+    // content and can be served directly. Offset/partial resolves (SF4's
+    // column writes) clear this and keep the exact-address RAM path.
+    bool full_rect = false;
+    uint32_t wb_endian = 0;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;

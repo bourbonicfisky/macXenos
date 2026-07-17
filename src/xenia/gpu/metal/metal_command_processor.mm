@@ -3615,10 +3615,16 @@ bool MetalCommandProcessor::IssueCopy() {
                   wb_swap_rb};
             }
             // Stage-3 hybrid: RAM now holds (will hold) this dest — fetches
-            // of the base must read RAM, not the bridge snapshot.
+            // of the base must read RAM, not the bridge snapshot. Full-rect
+            // geometry (offset 0,0 and pitch == width) lets the exact-cover
+            // reader prove snapshot/RAM value equivalence for equal-extent
+            // fetches.
             if (texture_cache_) {
               texture_cache_->MarkResolvedTargetRamBacked(
-                  resolve_info.copy_dest_base);
+                  resolve_info.copy_dest_base, rw, rh,
+                  dc.offset_x_div_8 == 0 && dc.offset_y_div_8 == 0 &&
+                      (uint32_t(dc.pitch_aligned_div_32) << 5) == rw,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
             }
             if (xe_lineage_base() &&
                 resolve_info.copy_dest_base == xe_lineage_base()) {

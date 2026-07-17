@@ -446,6 +446,34 @@ uint32_t MetalTextureCache::GetTextureSlot(
               lineage_draw_, fetch.base_address << 12);
         }
       }
+      // Exact-cover RGBA8 fast path: serve the snapshot GPU-side when it is
+      // provably the same content the RAM upload would produce (see
+      // ResolvedTarget::full_rect). Conditions, all required:
+      //   - color, RAM-backed, newest writeback full-rect (offset 0,0,
+      //     pitch == width, extent == registered extent);
+      //   - fetch extent, pitch and endian equal the writeback's, format
+      //     k_8_8_8_8. Any dest channel swap is baked into the snapshot by
+      //     the resolve shader, and equal endian makes untile cancel the
+      //     scatter, so snapshot content == uploaded-RAM content.
+      // Offset/partial column resolves (SF4) never set full_rect, so they
+      // keep the exact-address RAM path; assembled multi-resolve fetches
+      // fail the extent equality.
+      if (!rt.is_depth && !s_color_bridge && rt.ram_backed && rt.full_rect &&
+          fetch.format == xenos::TextureFormat::k_8_8_8_8 &&
+          fetch_w == rt.width && fetch_h == rt.height &&
+          (uint32_t(fetch.pitch) << 5) == rt.width &&
+          uint32_t(fetch.endianness) == rt.wb_endian) {
+        if (xe_lineage_base() &&
+            (fetch.base_address << 12) == xe_lineage_base()) {
+          XELOGW(
+              "MetalLineage EXACT-COVER draw={} base={:08X} served snapshot "
+              "{}x{} endian={} (RAM upload avoided)",
+              lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
+              rt.wb_endian);
+        }
+        active_textures_.push_back(rt.texture);
+        return rt.slot;
+      }
       if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
         // XE_METAL_TIP_SNAP_VIEW: a 1x1 guest fetch of a larger snapshot must
         // read guest texel (0,0); binding the full WxH snapshot lands the
@@ -1022,6 +1050,12 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   auto it = resolved_targets_.find(base);
   if (it != resolved_targets_.end()) {
+    // A new snapshot generation or extent invalidates the exact-cover
+    // state: RAM equivalence must be re-established by the next writeback.
+    if (it->second.texture != texture || it->second.width != width ||
+        it->second.height != height) {
+      it->second.full_rect = false;
+    }
     it->second.width = width;
     it->second.height = height;
     if (it->second.texture != texture) {
@@ -1108,13 +1142,27 @@ bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
              MTLPixelFormatR32Float;
 }
 
-void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base) {
+void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
+                                                    uint32_t wb_width,
+                                                    uint32_t wb_height,
+                                                    bool full_rect_geometry,
+                                                    uint32_t wb_endian) {
   auto it = resolved_targets_.find(base);
-  if (it != resolved_targets_.end() && !it->second.ram_backed) {
+  if (it == resolved_targets_.end()) {
+    return;
+  }
+  if (!it->second.ram_backed) {
     it->second.ram_backed = true;
     XELOGI("MetalTex: resolved RT base={:08X} now RAM-backed (bridge retired)",
            base);
   }
+  // The newest writeback governs: a full-extent write makes RAM equal to the
+  // snapshot regardless of history; anything partial/offset means RAM is a
+  // composition the snapshot cannot represent.
+  it->second.full_rect = full_rect_geometry &&
+                         wb_width == it->second.width &&
+                         wb_height == it->second.height;
+  it->second.wb_endian = wb_endian;
 }
 
 void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
