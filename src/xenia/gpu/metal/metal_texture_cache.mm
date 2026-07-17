@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_exact_cover_predicate.h"
 
 #import <Metal/Metal.h>
 
@@ -448,21 +449,49 @@ uint32_t MetalTextureCache::GetTextureSlot(
       }
       // Exact-cover RGBA8 fast path: serve the snapshot GPU-side when it is
       // provably the same content the RAM upload would produce (see
-      // ResolvedTarget::full_rect). Conditions, all required:
+      // ResolvedTarget::full_rect). Every condition below is required; each
+      // guards a distinct way the snapshot and the RAM upload could differ:
       //   - color, RAM-backed, newest writeback full-rect (offset 0,0,
       //     pitch == width, extent == registered extent);
       //   - fetch extent, pitch and endian equal the writeback's, format
       //     k_8_8_8_8. Any dest channel swap is baked into the snapshot by
       //     the resolve shader, and equal endian makes untile cancel the
-      //     scatter, so snapshot content == uploaded-RAM content.
+      //     scatter, so snapshot content == uploaded-RAM content;
+      //   - !is_signed: signed fetches are a SEPARATE binding expecting an
+      //     SNORM view; the RGBA8Unorm snapshot has the wrong interpretation;
+      //   - snapshot pixelFormat == RGBA8Unorm: the snapshot must actually be
+      //     the 8-bit-unorm surface the RAM upload builds, not an aliased or
+      //     reinterpreted target;
+      //   - tiled, 2D (k2DOrStacked), NOT stacked, mip_min/max == 0: the RAM
+      //     path's untile assumes a single tiled 2D base level. Linear,
+      //     stacked, cube/3D or mipped fetches address memory differently, so
+      //     the single-level snapshot is not equivalent to what those uploads
+      //     would read.
       // Offset/partial column resolves (SF4) never set full_rect, so they
       // keep the exact-address RAM path; assembled multi-resolve fetches
       // fail the extent equality.
-      if (!rt.is_depth && !s_color_bridge && rt.ram_backed && rt.full_rect &&
-          fetch.format == xenos::TextureFormat::k_8_8_8_8 &&
-          fetch_w == rt.width && fetch_h == rt.height &&
-          (uint32_t(fetch.pitch) << 5) == rt.width &&
-          uint32_t(fetch.endianness) == rt.wb_endian) {
+      id<MTLTexture> exact_snap = (__bridge id<MTLTexture>)rt.texture;
+      ExactCoverInputs exact_in{
+          rt.is_depth,
+          s_color_bridge,
+          rt.ram_backed,
+          rt.full_rect,
+          is_signed,
+          exact_snap.pixelFormat == MTLPixelFormatRGBA8Unorm,
+          fetch.format,
+          bool(fetch.tiled),
+          fetch.dimension,
+          bool(fetch.stacked),
+          fetch.mip_min_level,
+          fetch.mip_max_level,
+          fetch_w,
+          fetch_h,
+          uint32_t(fetch.pitch) << 5,
+          rt.width,
+          rt.height,
+          uint32_t(fetch.endianness),
+          rt.wb_endian};
+      if (ExactCoverSnapshotEligible(exact_in)) {
         if (xe_lineage_base() &&
             (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
