@@ -1449,6 +1449,41 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (!color_bound && !(kDepthEnabled && depth_bound)) {
     // Writes neither color nor depth — nothing to render (memexport draws are
     // not supported by this backend yet).
+    // XE_METAL_MEMEXPORT_LOG=1: name every skipped draw that would have
+    // exported to guest RAM — shader hash, stream constant ranges, dest EAs.
+    // JC2 suspect: the ambient/indirect lighting term accumulates in RAM via
+    // memexport; skipping the producers leaves the world lit by direct sun
+    // only (live black scenes; trace replays black on BOTH backends because
+    // the captured RAM already has the hole).
+    static const bool s_memexport_log =
+        std::getenv("XE_METAL_MEMEXPORT_LOG") != nullptr;
+    if (s_memexport_log) {
+      auto log_memexport = [&](const char* stage, Shader* shader) {
+        if (!shader || !shader->memexport_eM_written()) {
+          return false;
+        }
+        std::vector<draw_util::MemExportRange> ranges;
+        draw_util::AddMemExportRanges(regs, *shader, ranges);
+        for (const auto& range : ranges) {
+          XELOGW(
+              "MetalMemexportSkip draw={} {} shader={:016X} dest={:08X} "
+              "bytes={}",
+              trace_draw_index_, stage, shader->ucode_data_hash(),
+              range.base_address_dwords << 2, range.size_bytes);
+        }
+        return !ranges.empty();
+      };
+      bool any = log_memexport("VS", vertex_shader);
+      any |= log_memexport("PS", pixel_shader);
+      if (!any) {
+        static uint32_t s_plain_skips = 0;
+        if (s_plain_skips++ < 8) {
+          XELOGW("MetalMemexportSkip draw={} NO-RT draw without memexport "
+                 "(plain skip)",
+                 trace_draw_index_);
+        }
+      }
+    }
     ++draw_skip_count_;
     return true;
   }
