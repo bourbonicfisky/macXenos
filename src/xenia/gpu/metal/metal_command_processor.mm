@@ -1507,9 +1507,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // XE_METAL_MEMEXPORT_LOG=1 logs executions and remaining skips.
   static const bool s_memexport_log =
       std::getenv("XE_METAL_MEMEXPORT_LOG") != nullptr;
+  // XE_METAL_MEMEXPORT=1 enables execution (default OFF until the export
+  // data path is right): stores currently land with correct per-point eA
+  // addressing but constant eM data — live, that means zero-clobbering the
+  // resolve-written content consumers would otherwise read.
+  static const bool s_memexport_exec = [] {
+    const char* v = std::getenv("XE_METAL_MEMEXPORT");
+    return v && v[0] == '1';
+  }();
   bool memexport_draw = false;
   std::vector<draw_util::MemExportRange> memexport_ranges;
-  if (vertex_shader->memexport_eM_written()) {
+  if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
   if (!color_bound && !(kDepthEnabled && depth_bound)) {
