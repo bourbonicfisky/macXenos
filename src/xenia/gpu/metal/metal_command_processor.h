@@ -336,6 +336,11 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
+  // XE_METAL_TIP_SNAP_VIEW: per-base derived 1x1 R32F copies of snapshot
+  // texel (0,0) (retained id<MTLTexture>; experiment-scoped, freed with the
+  // process).
+  std::unordered_map<uint32_t, void*> tip_view_textures_;
+
   // Byte packing used by GPU resolve writebacks at each guest base. RAM
   // frontbuffer presentation reverses this packing back to logical RGBA.
   // Bases with no entry are CPU-produced scanout buffers and retain the

@@ -3259,6 +3259,49 @@ bool MetalCommandProcessor::IssueCopy() {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh,
                                                  /*is_depth=*/false);
+          // XE_METAL_TIP_SNAP_VIEW (stabilize 6.6 experiment, default off):
+          // maintain a derived 1x1 R32F copy of the snapshot's guest texel
+          // (0,0) so 1x1 fetches (the exposure tips) sample the correct
+          // texel instead of the middle of the full snapshot. One 4-byte
+          // GPU-ordered blit per tip resolve; no wait, no control flow.
+          static const bool s_tip_snap_view =
+              std::getenv("XE_METAL_TIP_SNAP_VIEW") != nullptr;
+          if (s_tip_snap_view &&
+              dest_pixel_format == uint64_t(MTLPixelFormatR32Float)) {
+            void*& tip = tip_view_textures_[resolve_info.copy_dest_base];
+            if (!tip) {
+              MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+              td.textureType = MTLTextureType2DArray;
+              td.pixelFormat = MTLPixelFormatR32Float;
+              td.width = 1;
+              td.height = 1;
+              td.arrayLength = 1;
+              td.mipmapLevelCount = 1;
+              td.usage = MTLTextureUsageShaderRead;
+              td.storageMode = MTLStorageModePrivate;
+              id<MTLTexture> t = [((__bridge id<MTLTexture>)snap).device
+                  newTextureWithDescriptor:td];
+              tip = (__bridge_retained void*)t;
+            }
+            if (tip) {
+              id<MTLCommandBuffer> tip_cb =
+                  (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+              id<MTLBlitCommandEncoder> tip_blit = [tip_cb blitCommandEncoder];
+              tip_blit.label = @"cp:tip-view-blit";
+              [tip_blit copyFromTexture:(__bridge id<MTLTexture>)snap
+                            sourceSlice:0
+                            sourceLevel:0
+                           sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                             sourceSize:MTLSizeMake(1, 1, 1)
+                              toTexture:(__bridge id<MTLTexture>)tip
+                       destinationSlice:0
+                       destinationLevel:0
+                      destinationOrigin:MTLOriginMake(0, 0, 0)];
+              [tip_blit endEncoding];
+              texture_cache_->RegisterResolvedTipView(
+                  resolve_info.copy_dest_base, tip);
+            }
+          }
           if (xe_lineage_base() &&
               resolve_info.copy_dest_base == xe_lineage_base()) {
             XELOGW(

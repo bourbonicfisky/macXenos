@@ -447,6 +447,23 @@ uint32_t MetalTextureCache::GetTextureSlot(
         }
       }
       if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
+        // XE_METAL_TIP_SNAP_VIEW: a 1x1 guest fetch of a larger snapshot must
+        // read guest texel (0,0); binding the full WxH snapshot lands the
+        // shader's UV mid-texture (8x8 exposure tip -> texel 4,4 — the JC2
+        // steady-dark mechanism). Serve the derived 1x1 blit instead;
+        // GPU-ordered like the snapshot itself.
+        if (covered_r32f && fetch_w == 1 && fetch_h == 1 &&
+            (rt.width > 1 || rt.height > 1) && rt.tip_texture) {
+          if (xe_lineage_base() &&
+              (fetch.base_address << 12) == xe_lineage_base()) {
+            XELOGW(
+                "MetalLineage TIP-VIEW draw={} base={:08X} served derived 1x1 "
+                "(snapshot texel 0,0; rt={}x{})",
+                lineage_draw_, fetch.base_address << 12, rt.width, rt.height);
+          }
+          active_textures_.push_back(rt.tip_texture);
+          return rt.tip_slot;
+        }
         if (xe_lineage_base() && (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
               "MetalLineage BRIDGE draw={} base={:08X} served SNAPSHOT rt={}x{} "
@@ -1050,6 +1067,32 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
          width, height, slot);
 }
 
+void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
+  if (!texture) {
+    return;
+  }
+  auto it = resolved_targets_.find(base);
+  if (it == resolved_targets_.end() || it->second.tip_texture == texture) {
+    return;  // no registered target yet, or stable object already slotted.
+  }
+  uint32_t new_slot = AllocateSlot();
+  if (!new_slot) {
+    return;  // heap exhausted; keep serving the full snapshot.
+  }
+  if (it->second.tip_slot) {
+    // Same page-fault rule as RegisterResolvedTarget: in-flight draws hold the
+    // old texture by gpuAddress — retire the slot, never repoint in place.
+    stale_slots_.emplace_back(RetireSubmission(), it->second.tip_slot);
+  }
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  IRDescriptorTableSetTexture(&entries[new_slot],
+                              (__bridge id<MTLTexture>)texture, 0.0f, 0);
+  it->second.tip_texture = texture;
+  it->second.tip_slot = new_slot;
+  XELOGI("MetalTex: tip view registered base={:08X} -> slot {}", base,
+         new_slot);
+}
+
 bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
                                      uint32_t height) const {
   auto it = resolved_targets_.find(base);
@@ -1083,6 +1126,9 @@ void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
   for (const auto& pair : resolved_targets_) {
     if (pair.second.texture) {
       out.push_back(pair.second.texture);
+    }
+    if (pair.second.tip_texture) {
+      out.push_back(pair.second.tip_texture);
     }
   }
 }

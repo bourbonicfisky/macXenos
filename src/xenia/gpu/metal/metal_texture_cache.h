@@ -74,6 +74,9 @@ class MetalTextureCache {
   // RAM is authoritative for fetches of this base (the bridge snapshot is a
   // fallback for dests the writer can't encode — e.g. 64bpp HDR).
   void MarkResolvedTargetRamBacked(uint32_t base);
+  // XE_METAL_TIP_SNAP_VIEW: attach the derived 1x1 texel-(0,0) copy to the
+  // registered resolve target at base (allocates/repoints its bindless slot).
+  void RegisterResolvedTipView(uint32_t base, void* texture);
 
   // True if a fetch of (base, width, height) will be served by the bridge
   // snapshot rather than guest RAM — the command processor skips the
@@ -213,6 +216,13 @@ class MetalTextureCache {
     // which keep the bridge (Sonic's tonemap chain went flat gray without
     // this fallback under default-ON stage 3).
     bool ram_backed = false;
+    // XE_METAL_TIP_SNAP_VIEW: derived 1x1 copy of the snapshot's texel (0,0),
+    // blitted at resolve time by the command processor (which owns the
+    // texture). A 1x1 guest fetch must read guest texel (0,0), but binding
+    // the full WxH snapshot puts the shader's UV mid-texture (8x8 tip ->
+    // texel 4,4) — the JC2 exposure-darkness mechanism.
+    void* tip_texture = nullptr;  // id<MTLTexture>, owned by the CP.
+    uint32_t tip_slot = 0;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
