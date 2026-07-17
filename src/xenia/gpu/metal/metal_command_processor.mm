@@ -3926,7 +3926,10 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
       uint8_t* me_dest = memory_->TranslatePhysical<uint8_t*>(me.base_address);
       if (me_dest && me_contents) {
         static uint32_t s_me_drains = 0;
-        bool me_log = s_me_drains++ < 8;
+        // First 8, then a 3-drain sample every 512 (~once per 170 frames at 3
+        // exports/frame) — steady-state gameplay content stays observable.
+        bool me_log = s_me_drains < 8 || (s_me_drains & 511) < 3;
+        ++s_me_drains;
         uint32_t old_hash = 0, new_hash = 0;
         if (me_log) {
           // Store-landing oracle: if the buffer content equals the RAM it was
