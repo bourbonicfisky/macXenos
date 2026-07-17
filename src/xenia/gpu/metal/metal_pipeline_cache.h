@@ -53,6 +53,11 @@ class MetalPipelineCache {
   // vertex + pixel function pair and the given attachment formats. The format
   // values are MTLPixelFormat. Returns null on failure. The pixel translation
   // may be null (depth-only). Both translations must already have functions.
+  // Vertex-only, rasterization-disabled pipeline for memexport draws (VS
+  // eA/eM exports, nothing rasterized, zero attachments). Returns null on
+  // failure.
+  void* GetOrCreateMemexportPipelineState(MetalShader::MetalTranslation* vertex);
+
   void* GetOrCreateRenderPipelineState(MetalShader::MetalTranslation* vertex,
                                        MetalShader::MetalTranslation* pixel,
                                        uint64_t color_pixel_format,

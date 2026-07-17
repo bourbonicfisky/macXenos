@@ -211,6 +211,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // — hardware semantics: z disabled ignores oDepth). Keyed by (w,h);
   // id<MTLTexture>, retained.
   bool dummy_depth_pass_ = false;
+  // Set while encoding a memexport-only draw: BeginFrameEncoder builds an
+  // attachment-less pass (renderTargetWidth/Height = 1) instead of requiring
+  // bound render targets.
+  bool memexport_pass_ = false;
   std::unordered_map<uint64_t, void*> dummy_depth_textures_;
 
   // RAM-frontbuffer present fallback (the mainline/XeniOS RequestSwapTexture
@@ -335,6 +339,20 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t enqueue_swap;
   };
   std::vector<PendingWriteback> pending_writebacks_;
+
+  // Memexport draws executed this frame whose exports are not yet coherent in
+  // guest RAM. The shared-memory buffer is MTLStorageModeShared, so the drain
+  // is a plain memcpy from its contents once `submission` has completed
+  // (exports are linear and already guest-endian — no scatter, no swap).
+  struct PendingMemexport {
+    uint32_t base_address;  // guest physical
+    uint32_t size_bytes;
+    uint64_t submission;
+  };
+  std::vector<PendingMemexport> pending_memexports_;
+  // Same-frame consumer visibility (v1) is handled by the stage-3 lazy flush
+  // in IssueDraw: a draw whose texture fetches overlap a pending memexport
+  // commits + waits + drains before its uploads read guest RAM.
 
   // XE_METAL_TIP_SNAP_VIEW: per-base derived 1x1 R32F copies of snapshot
   // texel (0,0) (retained id<MTLTexture>; experiment-scoped, freed with the

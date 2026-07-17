@@ -120,7 +120,11 @@ enum AbSlot : uint32_t {
 // Entries inside the small fixed system view table.
 constexpr uint32_t kSystemViewSharedMemorySRV = 0;
 constexpr uint32_t kSystemViewNullUAV = 1;
-constexpr uint32_t kSystemViewEntryCount = 2;
+// Shared memory as a writable UAV (u0, space0) for memexport draws — the
+// top-level AB slot kAbUavSpace0 points here only while encoding a draw whose
+// shader actually exports (non-exporting draws keep the null entry).
+constexpr uint32_t kSystemViewSharedMemoryUAV = 2;
+constexpr uint32_t kSystemViewEntryCount = 3;
 
 // Sized for bring-up; a real build would grow these on demand.
 constexpr uint32_t kViewBindlessHeapSlots = 4096;
@@ -789,6 +793,9 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
                              MetalSharedMemory::kBufferSize);
   IRDescriptorTableSetBuffer(&system_entries[kSystemViewNullUAV],
                              [null_buffer gpuAddress], 256);
+  IRDescriptorTableSetBuffer(&system_entries[kSystemViewSharedMemoryUAV],
+                             [shared_buffer gpuAddress],
+                             MetalSharedMemory::kBufferSize);
   system_view_tables_ = (__bridge_retained void*)system_view;
 
   texture_cache_ = std::make_unique<MetalTextureCache>(
@@ -863,6 +870,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // their pipelines carry a depth pixel format the plain pass lacks.
     want_key ^= 0x9E3779B97F4A7C15ull;
   }
+  if (memexport_pass_) {
+    // Memexport draws run in their own attachment-less pass; never share an
+    // encoder with attachment passes.
+    want_key = 0x4D454D4558504F52ull;  // 'MEMEXPOR'
+  }
   if (frame_open_) {
     if (encoder_attachment_key_ == want_key) {
       return frame_render_encoder_;
@@ -875,10 +887,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     return nullptr;
   }
   uint64_t color_pixel_format = 0;
-  void* rt = render_target_cache_->current_color_texture(0, &color_pixel_format);
-  void* depth =
-      kDepthEnabled ? render_target_cache_->current_depth_texture() : nullptr;
-  if (!rt && !depth) {
+  void* rt = memexport_pass_
+                 ? nullptr
+                 : render_target_cache_->current_color_texture(
+                       0, &color_pixel_format);
+  void* depth = (kDepthEnabled && !memexport_pass_)
+                    ? render_target_cache_->current_depth_texture()
+                    : nullptr;
+  if (!rt && !depth && !memexport_pass_) {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
   }
@@ -904,6 +920,44 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // texture (each has its own now).
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
+  if (memexport_pass_) {
+    // Memexport-only draws: exports go to the shared-memory UAV; the raster
+    // output is irrelevant but Metal requires a non-void VS return only when
+    // rasterizing, and MSC shaders always return stage-out — so rasterize
+    // into a small throwaway scratch depth (DontCare load/store), reusing
+    // the dummy-depth texture pool.
+    uint64_t dk = (64ull << 20) | 64ull;
+    id<MTLTexture> scratch = nil;
+    auto dit = dummy_depth_textures_.find(dk);
+    if (dit != dummy_depth_textures_.end()) {
+      scratch = (__bridge id<MTLTexture>)dit->second;
+    } else {
+      MTLTextureDescriptor* dd = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:(MTLPixelFormat)
+                                                 MetalRenderTargetCache::
+                                                     kDepthFormat
+                                       width:64
+                                      height:64
+                                   mipmapped:NO];
+      dd.usage = MTLTextureUsageRenderTarget;
+      dd.storageMode = MTLStorageModePrivate;
+      id<MTLDevice> dev = (__bridge id<MTLDevice>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->device();
+      scratch = [dev newTextureWithDescriptor:dd];
+      scratch.label = @"cp:memexport-scratch-depth";
+      dummy_depth_textures_.emplace(dk, (__bridge_retained void*)scratch);
+    }
+    if (!scratch) {
+      return nullptr;
+    }
+    pass.depthAttachment.texture = scratch;
+    pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+    pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    pass.stencilAttachment.texture = scratch;
+    pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+    pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
+  }
   if (rt) {
     // Always LOAD: textures are cleared at creation; content comes from
     // ownership transfers / persistence, clears from guest resolve clears.
@@ -1446,47 +1500,78 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint32_t(rb_depth_info.depth_format), normalized_color_mask);
     }
   }
+  // Memexport: draws that bind neither color nor depth but whose VS has
+  // valid export streams execute as vertex-only rasterization-disabled
+  // pipelines in an attachment-less pass, writing the shared-memory UAV
+  // (JC2's HDR/lighting chain: 3x2MB point-list exports per frame).
+  // XE_METAL_MEMEXPORT_LOG=1 logs executions and remaining skips.
+  static const bool s_memexport_log =
+      std::getenv("XE_METAL_MEMEXPORT_LOG") != nullptr;
+  bool memexport_draw = false;
+  std::vector<draw_util::MemExportRange> memexport_ranges;
+  if (vertex_shader->memexport_eM_written()) {
+    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
+  }
   if (!color_bound && !(kDepthEnabled && depth_bound)) {
-    // Writes neither color nor depth — nothing to render (memexport draws are
-    // not supported by this backend yet).
-    // XE_METAL_MEMEXPORT_LOG=1: name every skipped draw that would have
-    // exported to guest RAM — shader hash, stream constant ranges, dest EAs.
-    // JC2 suspect: the ambient/indirect lighting term accumulates in RAM via
-    // memexport; skipping the producers leaves the world lit by direct sun
-    // only (live black scenes; trace replays black on BOTH backends because
-    // the captured RAM already has the hole).
-    static const bool s_memexport_log =
-        std::getenv("XE_METAL_MEMEXPORT_LOG") != nullptr;
-    if (s_memexport_log) {
-      auto log_memexport = [&](const char* stage, Shader* shader) {
-        if (!shader || !shader->memexport_eM_written()) {
-          return false;
-        }
-        std::vector<draw_util::MemExportRange> ranges;
-        draw_util::AddMemExportRanges(regs, *shader, ranges);
-        for (const auto& range : ranges) {
-          XELOGW(
-              "MetalMemexportSkip draw={} {} shader={:016X} dest={:08X} "
-              "bytes={} prim={} n={} indexed={}",
-              trace_draw_index_, stage, shader->ucode_data_hash(),
-              range.base_address_dwords << 2, range.size_bytes,
-              uint32_t(prim_type), index_count, index_buffer_info != nullptr);
-        }
-        return !ranges.empty();
-      };
-      bool any = log_memexport("VS", vertex_shader);
-      any |= log_memexport("PS", pixel_shader);
-      if (!any) {
-        static uint32_t s_plain_skips = 0;
-        if (s_plain_skips++ < 8) {
-          XELOGW("MetalMemexportSkip draw={} NO-RT draw without memexport "
-                 "(plain skip)",
+    bool ps_exports = pixel_shader && pixel_shader->memexport_eM_written();
+    if (memexport_ranges.empty() || ps_exports) {
+      // Nothing to render and nothing exportable via the v1 path (plain
+      // no-op draw, or a rasterizing PS export which v1 doesn't run).
+      if (s_memexport_log) {
+        if (ps_exports) {
+          XELOGW("MetalMemexportSkip draw={} PS-export (unsupported in v1)",
                  trace_draw_index_);
+        } else {
+          static uint32_t s_plain_skips = 0;
+          if (s_plain_skips++ < 8) {
+            XELOGW("MetalMemexportSkip draw={} NO-RT draw without memexport "
+                   "(plain skip)",
+                   trace_draw_index_);
+          }
         }
       }
+      ++draw_skip_count_;
+      return true;
     }
-    ++draw_skip_count_;
-    return true;
+    // Commit the destination pages; failure means the exports have nowhere
+    // to land — skip like the reference backends fail the draw.
+    bool ranges_ok = true;
+    for (const auto& range : memexport_ranges) {
+      if (!shared_memory_->RequestRange(range.base_address_dwords << 2,
+                                        range.size_bytes)) {
+        XELOGE("MetalMemexport: failed to request range {:08X}(+{})",
+               range.base_address_dwords << 2, range.size_bytes);
+        ranges_ok = false;
+      }
+    }
+    if (!ranges_ok) {
+      ++draw_skip_count_;
+      return true;
+    }
+    // Rasterization is disabled on this path: the pixel shader (if any) and
+    // geometry emulation are irrelevant; the guest VS runs per-vertex as a
+    // plain vertex function.
+    memexport_draw = true;
+    pixel_shader = nullptr;
+    use_geometry_emulation = false;
+    if (!MapPrimitiveType(prim_type, &mtl_prim)) {
+      if (s_memexport_log) {
+        XELOGW("MetalMemexportSkip draw={} unmappable prim {} for export",
+               trace_draw_index_, uint32_t(prim_type));
+      }
+      ++draw_skip_count_;
+      return true;
+    }
+    if (s_memexport_log) {
+      for (const auto& range : memexport_ranges) {
+        XELOGW(
+            "MetalMemexportExec draw={} VS shader={:016X} dest={:08X} "
+            "bytes={} prim={} n={}",
+            trace_draw_index_, vertex_shader->ucode_data_hash(),
+            range.base_address_dwords << 2, range.size_bytes,
+            uint32_t(prim_type), index_count);
+      }
+    }
   }
   // DIAGNOSTIC: the quarter-res lighting producer — log draws into small-pitch
   // color RTs (the inferred-lighting buffer) with everything they sample.
@@ -1607,7 +1692,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Base-class EDRAM ownership update: derives the RenderTargetKeys from the
   // registers, creates/accumulates the bound host RTs, and computes+executes
   // the ownership transfers this draw needs (stage 2 of the render chain).
-  if (!render_target_cache_->Update(color_bound || depth_bound, norm_depth,
+  // Memexport-only draws touch no EDRAM: skip the update (the next normal
+  // draw re-runs it) and the attachment checks below.
+  if (!memexport_draw &&
+      !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
                                     normalized_color_mask, *vertex_shader)) {
     ++draw_skip_count_;
     return true;
@@ -1629,11 +1717,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // The truth of what's bound now comes from the accumulated RTs.
   uint64_t color_pixel_format = uint64_t(MTLPixelFormatInvalid);
   bool have_color =
+      !memexport_draw &&
       render_target_cache_->current_color_texture(0, &color_pixel_format) !=
-      nullptr;
-  depth_bound =
-      kDepthEnabled && render_target_cache_->current_depth_texture() != nullptr;
-  if (!have_color && !depth_bound) {
+          nullptr;
+  depth_bound = !memexport_draw && kDepthEnabled &&
+                render_target_cache_->current_depth_texture() != nullptr;
+  if (!have_color && !depth_bound && !memexport_draw) {
     ++draw_skip_count_;
     return true;
   }
@@ -1790,7 +1879,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
   uint32_t gs_max_input_primitives = 0;
-  if (kDebugSolidFragment) {
+  if (memexport_draw) {
+    // Vertex-only, rasterization disabled, zero attachments.
+    pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
+  } else if (kDebugSolidFragment) {
     pipeline = GetDebugSolidPipeline(
         static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
             ->device(),
@@ -1879,13 +1971,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // encoder opens (a flush here would kill an open encoder — the
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
-  if (!pending_writebacks_.empty()) {
+  if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
     auto fetch_overlaps_writeback = [&](MetalShader* shader) {
       if (!shader) return false;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         auto f = regs.GetTextureFetch(binding.fetch_constant);
         uint32_t fbase = f.base_address << 12;
         if (!fbase) continue;
+        // Memexport pending on this base: the exported bytes exist only in
+        // the shared-memory buffer until drained — neither RAM nor any
+        // bridge snapshot has them, so flush regardless of BridgeServes.
+        {
+          uint32_t fpitch_me = f.pitch ? (f.pitch << 5) : (f.size_2d.width + 32);
+          uint32_t fbytes_me = fpitch_me * (f.size_2d.height + 1) * 4;
+          uint32_t fend_me =
+              fbase + std::min<uint32_t>(fbytes_me, 8 * 1024 * 1024);
+          for (const PendingMemexport& me : pending_memexports_) {
+            if (fbase < me.base_address + me.size_bytes &&
+                fend_me > me.base_address) {
+              return true;
+            }
+          }
+        }
         // Bridge-served fetches never read guest RAM — the snapshot is
         // GPU-ordered, so no flush is needed. This is the JC2 fast path:
         // the luminance pyramid's resolve->read ping-pong forced a full
@@ -1918,6 +2025,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   dummy_depth_pass_ = dummy_depth;
+  memexport_pass_ = memexport_draw;
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
@@ -1959,6 +2067,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Position-relevant flags.
     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
     uint32_t flags = 0;
+    if (memexport_draw) {
+      // The translator predicates every eA/eM store on this flag (exports
+      // compile in but no-op without it — the "stores did not land" oracle).
+      flags |= DxbcShaderTranslator::kSysFlag_SharedMemoryIsUAV;
+    }
     if (pa_cl_vte_cntl.vtx_xy_fmt) flags |= DxbcShaderTranslator::kSysFlag_XYDividedByW;
     if (pa_cl_vte_cntl.vtx_z_fmt) flags |= DxbcShaderTranslator::kSysFlag_ZDividedByW;
     if (pa_cl_vte_cntl.vtx_w0_fmt) flags |= DxbcShaderTranslator::kSysFlag_WNotReciprocal;
@@ -2167,8 +2280,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
 
-    // Set the host viewport from the integer part.
-    if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
+    // Set the host viewport from the integer part. Memexport passes have a
+    // 1x1 attachment-less render area and rasterization disabled — the guest
+    // viewport would exceed the pass bounds (validation error) and shades
+    // nothing anyway.
+    if (!memexport_draw && viewport_info.xy_extent[0] &&
+        viewport_info.xy_extent[1]) {
       MTLViewport vp;
       vp.originX = viewport_info.xy_offset[0];
       vp.originY = viewport_info.xy_offset[1];
@@ -2472,7 +2589,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   ab[kAbSrvSpace3] = view_heap_gpu;
   ab[kAbSrvSpace10] = view_heap_gpu;
   ab[kAbUavSpace0] =
-      system_view_gpu + kSystemViewNullUAV * sizeof(IRDescriptorTableEntry);
+      system_view_gpu + (memexport_draw ? kSystemViewSharedMemoryUAV
+                                        : kSystemViewNullUAV) *
+                            sizeof(IRDescriptorTableEntry);
   ab[kAbUavSpace1] = view_heap_gpu;
   ab[kAbUavSpace2] = view_heap_gpu;
   ab[kAbUavSpace3] = view_heap_gpu;
@@ -2555,7 +2674,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       use_geometry_emulation
           ? (MTLRenderStageObject | MTLRenderStageMesh | MTLRenderStageFragment)
           : (MTLRenderStageVertex | MTLRenderStageFragment);
-  [encoder useResource:shared_buffer usage:MTLResourceUsageRead stages:stages];
+  [encoder useResource:shared_buffer
+                 usage:memexport_draw
+                           ? (MTLResourceUsageRead | MTLResourceUsageWrite)
+                           : MTLResourceUsageRead
+                stages:stages];
   [encoder useResource:ab_buffer usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:view_heap usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:sampler_heap usage:MTLResourceUsageRead stages:stages];
@@ -2720,6 +2843,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   } else {
     IRRuntimeDrawPrimitives(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
                             uint64_t(index_count));
+  }
+
+  if (memexport_draw) {
+    // The exports now exist (GPU-ordered) in the shared-memory buffer. Mark
+    // the ranges GPU-written (watches + stale-texture invalidation, and so
+    // later RequestRange calls don't upload stale CPU RAM over them) and
+    // queue the RAM drain for when this submission completes.
+    uint64_t export_submission = S7TagsOff() ? 0 : CurrentEncodingSubmission();
+    for (const auto& range : memexport_ranges) {
+      uint32_t range_base = range.base_address_dwords << 2;
+      shared_memory_->RangeWrittenByGpu(range_base, range.size_bytes);
+      pending_memexports_.push_back(
+          PendingMemexport{range_base, range.size_bytes, export_submission});
+    }
   }
 
   frame_has_render_ = true;
@@ -3771,6 +3908,58 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
   // synchronous EndFrameEncoder wait every entry is completed by the time
   // any drain site runs, so this is behavior-neutral until S8).
   uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  // Memexport drains first: exports are linear and already guest-endian in
+  // the shared-memory buffer (MTLStorageModeShared), so RAM coherence is a
+  // plain memcpy once the exporting submission has completed. Invalidate
+  // cached texture uploads overlapping the range so the next fetch re-reads.
+  if (!pending_memexports_.empty()) {
+    std::vector<PendingMemexport> still_pending_exports;
+    id<MTLBuffer> me_shared_buffer =
+        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+    const uint8_t* me_contents =
+        static_cast<const uint8_t*>(me_shared_buffer.contents);
+    for (const PendingMemexport& me : pending_memexports_) {
+      if (me.submission > completed) {
+        still_pending_exports.push_back(me);
+        continue;
+      }
+      uint8_t* me_dest = memory_->TranslatePhysical<uint8_t*>(me.base_address);
+      if (me_dest && me_contents) {
+        static uint32_t s_me_drains = 0;
+        bool me_log = s_me_drains++ < 8;
+        uint32_t old_hash = 0, new_hash = 0;
+        if (me_log) {
+          // Store-landing oracle: if the buffer content equals the RAM it was
+          // primed from, the shader's UAV stores never landed (silent
+          // RAM->buffer->RAM round-trip) — a binding problem, not a content
+          // problem.
+          old_hash = xe_lineage_stridehash(me_dest, me.size_bytes);
+          new_hash =
+              xe_lineage_stridehash(me_contents + me.base_address, me.size_bytes);
+        }
+        std::memcpy(me_dest, me_contents + me.base_address, me.size_bytes);
+        if (texture_cache_) {
+          texture_cache_->InvalidateRange(me.base_address, me.size_bytes);
+        }
+        if (me_log) {
+          const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
+              me_contents + me.base_address);
+          uint32_t nonzero = 0;
+          uint32_t word_count = me.size_bytes / 4;
+          for (uint32_t w = 0; w < word_count; ++w) {
+            nonzero += buf_words[w] != 0;
+          }
+          XELOGI("MetalMemexport: drained {:08X}(+{}) ramHash {:08x} -> "
+                 "bufHash {:08x} nonzero {}/{} w0={:08X} w1={:08X}{}",
+                 me.base_address, me.size_bytes, old_hash, new_hash, nonzero,
+                 word_count, buf_words[0], buf_words[1],
+                 old_hash == new_hash ? " (UNCHANGED — stores did not land?)"
+                                      : " (exported content differs)");
+        }
+      }
+    }
+    pending_memexports_ = std::move(still_pending_exports);
+  }
   std::vector<PendingWriteback> still_pending;
   for (PendingWriteback& wb : pending_writebacks_) {
     if (wb.submission > completed) {
@@ -3991,6 +4180,15 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
     uint32_t length = wb.width * wb.height * wb.bpp;
     if (guest_address >= wb.guest_addr &&
         guest_address < wb.guest_addr + length) {
+      EndFrameEncoderAndWait();
+      DrainPendingWritebacks();
+      return;
+    }
+  }
+  // The guest may also poll memory a memexport writes.
+  for (const PendingMemexport& me : pending_memexports_) {
+    if (guest_address >= me.base_address &&
+        guest_address < me.base_address + me.size_bytes) {
       EndFrameEncoderAndWait();
       DrainPendingWritebacks();
       return;

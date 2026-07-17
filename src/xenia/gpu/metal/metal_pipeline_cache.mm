@@ -19,6 +19,7 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
+#include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/graphics_provider.h"
@@ -314,6 +315,20 @@ MetalShaderConverter::InputTopology GeometryInputTopology(
   }
 }
 }  // namespace
+
+void* MetalPipelineCache::GetOrCreateMemexportPipelineState(
+    MetalShader::MetalTranslation* vertex) {
+  // Memexport-only draws (VS eA/eM exports): Metal requires a void-returning
+  // vertex function for rasterizationEnabled=NO, but MSC-translated shaders
+  // return a stage-out struct — so rasterization stays ON into a throwaway
+  // scratch depth attachment (DontCare load/store; the command processor's
+  // memexport pass provides it). That makes this exactly the existing
+  // depth-only pipeline variant: no fragment function, no color attachment.
+  return GetOrCreateRenderPipelineState(
+      vertex, /*pixel=*/nullptr, uint64_t(MTLPixelFormatInvalid),
+      MetalRenderTargetCache::kDepthFormat, /*blend_control=*/0,
+      /*color_write_mask=*/0);
+}
 
 void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     MetalShader::MetalTranslation* vertex,
