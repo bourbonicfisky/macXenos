@@ -3505,26 +3505,17 @@ bool MetalCommandProcessor::IssueCopy() {
               td.arrayLength = 1;
               td.mipmapLevelCount = 1;
               td.usage = MTLTextureUsageShaderRead;
-              td.storageMode = MTLStorageModePrivate;
+              // Shared: the drain updates this texture CPU-side from the
+              // POST-HOLD guest word, so the zero-luminance guard reaches the
+              // path the tonemap actually samples. A GPU blit from the
+              // snapshot bypassed the guard: one sun-blowout zero tile
+              // latched exposure black (most view angles black live).
+              td.storageMode = MTLStorageModeShared;
               id<MTLTexture> t = [((__bridge id<MTLTexture>)snap).device
                   newTextureWithDescriptor:td];
               tip = (__bridge_retained void*)t;
             }
             if (tip) {
-              id<MTLCommandBuffer> tip_cb =
-                  (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
-              id<MTLBlitCommandEncoder> tip_blit = [tip_cb blitCommandEncoder];
-              tip_blit.label = @"cp:tip-view-blit";
-              [tip_blit copyFromTexture:(__bridge id<MTLTexture>)snap
-                            sourceSlice:0
-                            sourceLevel:0
-                           sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
-                             sourceSize:MTLSizeMake(1, 1, 1)
-                              toTexture:(__bridge id<MTLTexture>)tip
-                       destinationSlice:0
-                       destinationLevel:0
-                      destinationOrigin:MTLOriginMake(0, 0, 0)];
-              [tip_blit endEncoding];
               texture_cache_->RegisterResolvedTipView(
                   resolve_info.copy_dest_base, tip);
             }
@@ -4253,6 +4244,35 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         // hold path re-scatters them like a normal drain).
         auto& held = held_writeback_content_[wb.guest_addr];
         held.assign(src_words, src_words + count * words_per_texel);
+      }
+      // TIP_SNAP_VIEW: refresh the derived 1x1 exposure view from the
+      // POST-HOLD guest word. Updating here (CPU, Shared storage, after the
+      // zero-hold ran) instead of a GPU blit from the snapshot puts the
+      // guard in the exact path the tonemap samples — a zero resolve tile
+      // can no longer latch exposure black. Runs on the GPU thread after
+      // submission completion and before the next frame encodes: no race.
+      {
+        auto tip_it = tip_view_textures_.find(wb.guest_addr);
+        if (tip_it != tip_view_textures_.end() && tip_it->second &&
+            wb.bpp == 4) {
+          uint32_t tip_off = uint32_t(texture_address::Tiled2D(
+              int32_t(wb.dest_offset_x), int32_t(wb.dest_offset_y),
+              pitch_aligned, int32_t(block_log2)));
+          if (!wb.dest_extent_bytes || tip_off + 4 <= wb.dest_extent_bytes) {
+            uint32_t tip_word;
+            std::memcpy(&tip_word, dest + tip_off, sizeof(tip_word));
+            // dest holds the post-endian packed word; the texture needs the
+            // logical float — undo the scatter's endian pack.
+            tip_word = xenos::GpuSwapInline(tip_word, endian);
+            id<MTLTexture> tip_tex = (__bridge id<MTLTexture>)tip_it->second;
+            [tip_tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                       mipmapLevel:0
+                             slice:0
+                         withBytes:&tip_word
+                       bytesPerRow:4
+                     bytesPerImage:4];
+          }
+        }
       }
       // Backend-neutral resolve-writeback record (stabilize task 6.2), after
       // the scatter (and any zero-hold re-scatter) so word0/hash are what a
