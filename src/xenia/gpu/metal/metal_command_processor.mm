@@ -43,6 +43,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/resolve_writeback_log.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -83,6 +84,53 @@ uint32_t xe_lineage_stridehash(const void* p, size_t n) {
   uint32_t h = 2166136261u;
   for (size_t i = 0; i < n; i += 37) h = (h ^ b[i]) * 16777619u;
   return h;
+}
+
+// Precise guest storage ranges of a texture fetch: base level(s) and mip chain
+// as two DISJOINT ranges (mip_address is a separate pointer). Derived from the
+// shared GetGuestTextureLayout, so compressed/tiled/linear/packed-mip/dimension
+// semantics match the upload path exactly. Ends use 64-bit math clamped to
+// UINT32_MAX so no address arithmetic wraps.
+metal::FetchGuestRanges ComputeFetchGuestRanges(
+    const xenos::xe_gpu_texture_fetch_t& f) {
+  metal::FetchGuestRanges r;
+  uint32_t w = 1, h = 1, d = 1;
+  switch (f.dimension) {
+    case xenos::DataDimension::k1D:
+      w = f.size_1d.width + 1;
+      break;
+    case xenos::DataDimension::k2DOrStacked:
+      w = f.size_2d.width + 1;
+      h = f.size_2d.height + 1;
+      d = f.stacked ? (f.size_2d.stack_depth + 1) : 1;
+      break;
+    case xenos::DataDimension::k3D:
+      w = f.size_3d.width + 1;
+      h = f.size_3d.height + 1;
+      d = f.size_3d.depth + 1;
+      break;
+    case xenos::DataDimension::kCube:
+      w = f.size_2d.width + 1;
+      h = f.size_2d.height + 1;
+      d = 6;
+      break;
+  }
+  auto clamp_end = [](uint32_t begin, uint32_t size) -> uint32_t {
+    uint64_t e = uint64_t(begin) + uint64_t(size);
+    return e > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(e);
+  };
+  texture_util::TextureGuestLayout lay = texture_util::GetGuestTextureLayout(
+      f.dimension, f.pitch, w, h, d, f.tiled != 0, f.format,
+      f.packed_mips != 0, /*has_base=*/true, f.mip_max_level);
+  uint32_t base_addr = f.base_address << 12;
+  r.base_begin = base_addr;
+  r.base_end = clamp_end(base_addr, lay.base.level_data_extent_bytes);
+  if (f.mip_max_level > 0 && lay.mips_total_extent_bytes) {
+    uint32_t mip_addr = f.mip_address << 12;
+    r.mip_begin = mip_addr;
+    r.mip_end = clamp_end(mip_addr, lay.mips_total_extent_bytes);
+  }
+  return r;
 }
 
 // Top-level argument buffer: 32 uint64 gpuAddress entries, one per root-signature
@@ -2057,14 +2105,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                          f.size_2d.height + 1)) {
           continue;
         }
-        // Conservative extent: aligned pitch x height x 4B (over-flushing is
-        // harmless; under-flushing reads stale RAM).
-        uint32_t fpitch = f.pitch ? (f.pitch << 5) : (f.size_2d.width + 32);
-        uint32_t fbytes = fpitch * (f.size_2d.height + 1) * 4;
-        uint32_t fend = fbase + std::min<uint32_t>(fbytes, 8 * 1024 * 1024);
+        // Precise guest footprint: base level(s) and mip chain as two disjoint
+        // ranges (see ComputeFetchGuestRanges / metal_fetch_overlap.h). Only a
+        // writeback that lands inside one of those ranges is a real dependency;
+        // the previous conservative pitch*height*4 span from the base also
+        // covered the gap up to the mip pointer, spuriously flushing for
+        // unrelated resolves in adjacent memory (e.g. a 512x512 DXT texture
+        // whose 1 MB span aliased a neighbouring uncompressed pyramid).
+        metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
         for (const PendingWriteback& wb : pending_writebacks_) {
           uint32_t wend = wb.guest_addr + wb.width * wb.height * wb.bpp;
-          if (fbase < wend && fend > wb.guest_addr) {
+          if (metal::WritebackOverlapsFetch(rng, wb.guest_addr, wend)) {
             return true;
           }
         }
