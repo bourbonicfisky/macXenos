@@ -862,22 +862,10 @@ if(APPLE AND XENIA_GPU_METAL)
   set(_xe_dxilconv_root "${CMAKE_CURRENT_SOURCE_DIR}/DirectXShaderCompiler")
   set(_xe_dxilconv_headers_root "${CMAKE_CURRENT_SOURCE_DIR}/DirectX-Headers/include")
 
-  # The fork force-enables SPIR-V codegen on non-Windows, defeating
-  # -DENABLE_SPIRV_CODEGEN=OFF and requiring SPIRV-Tools submodules dxilconv does
-  # not need. Self-apply the opt-out patch if the submodule is at unpatched HEAD
-  # (idempotent; avoids committing to the fork for the spike).
-  file(READ "${_xe_dxilconv_root}/CMakeLists.txt" _xe_dxc_cml)
-  string(FIND "${_xe_dxc_cml}" "XE_DXILCONV_NO_SPIRV" _xe_dxc_patched)
-  if(_xe_dxc_patched EQUAL -1)
-    message(STATUS "Applying dxc-fork-spirv-optout.patch to DirectXShaderCompiler")
-    execute_process(
-      COMMAND git -C "${_xe_dxilconv_root}" apply
-              "${PROJECT_SOURCE_DIR}/openspec/changes/reduce-apple-gpu-frametime/dxc-fork-spirv-optout.patch"
-      RESULT_VARIABLE _xe_dxc_patch_rc)
-    if(NOT _xe_dxc_patch_rc EQUAL 0)
-      message(FATAL_ERROR "Failed to apply dxc-fork-spirv-optout.patch (rc=${_xe_dxc_patch_rc})")
-    endif()
-  endif()
+  # The XE_DXILCONV_NO_SPIRV opt-out (skip the fork's non-Windows SPIR-V
+  # codegen auto-enable so SPIRV-Tools submodules are not required) is
+  # committed on the submodule's pinned branch; the configure step no longer
+  # mutates the submodule working tree.
 
   if(XE_TARGET_X86_64)
     set(_xe_dxilconv_build_dir "${_xe_dxilconv_root}/build_dxilconv_macos_x86_64")
