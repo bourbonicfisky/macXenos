@@ -932,4 +932,10 @@ if(APPLE AND XENIA_GPU_METAL)
     IMPORTED_LOCATION_RELEASE "${_xe_dxilconv_dylib}"
     INTERFACE_INCLUDE_DIRECTORIES
       "${_xe_dxilconv_root}/include;${_xe_dxilconv_root}/projects/dxilconv/include")
+  # libdxilconv.dylib's install name is @rpath/...; CMake only infers build
+  # rpaths from imported locations that exist at generate time, so a fresh
+  # checkout (dylib not yet built) would link consumers without the rpath.
+  # Declare it explicitly as a usage requirement.
+  set_property(TARGET xenia-third-party-dxilconv APPEND PROPERTY
+    INTERFACE_LINK_OPTIONS "SHELL:-Wl,-rpath,${_xe_dxilconv_build_dir}/lib")
 endif()
