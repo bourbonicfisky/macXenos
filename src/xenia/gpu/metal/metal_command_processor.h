@@ -116,7 +116,12 @@ class MetalCommandProcessor : public CommandProcessor {
   // WAIT_REG_MEMs on an address a pending writeback covers (deferring to
   // swap alone deadlocks such waits; draining everything at every wait fed
   // the auto-exposure loop mid-frame values — black flicker).
-  void DrainPendingWritebacks();
+  // Drains completed writebacks/memexports to guest RAM. With a filter range,
+  // only entries overlapping [filter_base, filter_base+filter_size) drain —
+  // the same-frame vfetch barrier must NOT drain unrelated writebacks (the
+  // exposure ping-pong reads mid-frame luminance otherwise: black flicker).
+  void DrainPendingWritebacks(uint32_t filter_base = 0,
+                              uint32_t filter_size = 0xFFFFFFFFu);
   void FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   // --- Draw path helpers (metal_command_processor.mm) ---
@@ -337,6 +342,11 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t dest_format;
     uint32_t draw_index;
     uint32_t enqueue_swap;
+    // DEPTH resolve writeback: staging holds R32Float depth from the snapshot
+    // conversion; the drain packs each float to the guest D24S8 word
+    // (depth24 << 8, stencil 0 in v1) before the endian scatter.
+    // 0 = color (no conversion), 1 = unorm24 (k_24_8), 2 = float24 (20e4).
+    uint32_t depth_encode;
   };
   std::vector<PendingWriteback> pending_writebacks_;
 

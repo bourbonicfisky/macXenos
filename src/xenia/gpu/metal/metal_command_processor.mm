@@ -1579,6 +1579,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             range.base_address_dwords << 2, range.size_bytes,
             uint32_t(prim_type), index_count);
       }
+      // The export VS's index math runs off these — log once per draw so the
+      // CPU-side simulation of the ucode has ground-truth inputs.
+      auto logc = [&](uint32_t creg) {
+        const float* c = reinterpret_cast<const float*>(
+            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + creg * 4]);
+        XELOGW("MetalMemexportExec   c{}=({:g}, {:g}, {:g}, {:g})", creg, c[0],
+               c[1], c[2], c[3]);
+      };
+      logc(0);
+      logc(1);
+      logc(2);
+      logc(253);
+      logc(254);
+      logc(255);
     }
   }
   // DIAGNOSTIC: the quarter-res lighting producer — log draws into small-pitch
@@ -1964,6 +1978,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (fetch.type != xenos::FetchConstantType::kVertex &&
           fetch.type != xenos::FetchConstantType::kInvalidVertex) {
         continue;
+      }
+      // Same-frame producer -> VFETCH consumer: if a pending resolve
+      // writeback (or memexport) covers this vfetch range, the data exists
+      // only GPU-side — commit + wait + drain BEFORE the upload below, or
+      // the shader reads stale RAM. JC2's light-atlas chain is exactly this:
+      // depth resolve at draw N, memexport VFETCHES it at draw N+2.
+      if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
+        uint32_t vf_base = fetch.address << 2;
+        uint32_t vf_end = vf_base + (fetch.size << 2);
+        bool overlap = false;
+        for (const PendingWriteback& wb : pending_writebacks_) {
+          uint32_t wend = wb.guest_addr + wb.width * wb.height * wb.bpp;
+          if (vf_base < wend && vf_end > wb.guest_addr) {
+            overlap = true;
+            break;
+          }
+        }
+        if (!overlap) {
+          for (const PendingMemexport& me : pending_memexports_) {
+            if (vf_base < me.base_address + me.size_bytes &&
+                vf_end > me.base_address) {
+              overlap = true;
+              break;
+            }
+          }
+        }
+        if (overlap) {
+          EndFrameEncoderAndWait();
+          // Range-scoped: draining unrelated writebacks here would hand the
+          // exposure loop mid-frame luminance (the black-flicker class).
+          DrainPendingWritebacks(vf_base, vf_end - vf_base);
+        }
       }
       // Page-tracked: uploads only pages invalidated since their last use;
       // the intra-frame rewrite hazard flush runs inside when needed.
@@ -3571,7 +3617,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
                 S7TagsOff() ? 0 : CurrentEncodingSubmission(),
                 uint32_t(resolve_info.copy_dest_info.copy_dest_format),
-                trace_draw_index_, swap_count_});
+                trace_draw_index_, swap_count_, /*depth_encode=*/0u});
             if (dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
               ram_color_layouts_[resolve_info.copy_dest_base] = RamColorLayout{
                   uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
@@ -3670,6 +3716,53 @@ bool MetalCommandProcessor::IssueCopy() {
       if (resolved && is_new_snapshot) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                snap, rw, rh, /*is_depth=*/true);
+      }
+      // DEPTH RAM writeback: texture consumers get the snapshot (bridge),
+      // but VFETCH consumers read guest RAM — JC2's memexport light-atlas VS
+      // vfetches the 1024x1024 depth resolve at 121E1000, which stayed
+      // permanently zero without this (the black-ambient root, one level
+      // above the skipped exports). Blit the R32F snapshot to staging; the
+      // drain packs floats to guest D24S8 words (stencil 0 in v1) and
+      // scatters tiled+endian like color writebacks.
+      static const bool s_no_writeback_d =
+          std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
+      const uint32_t wb_cap_d = 4u * 1024 * 1024;
+      if (resolved && !s_no_writeback_d && rw * rh * 4 <= wb_cap_d) {
+        id<MTLDevice> wb_device = ((__bridge id<MTLTexture>)snap).device;
+        id<MTLBuffer> staging =
+            [wb_device newBufferWithLength:rw * rh * 4
+                                   options:MTLResourceStorageModeShared];
+        if (staging) {
+          id<MTLCommandBuffer> wb_cb =
+              (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+          id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
+          wb_blit.label = @"cp:depth-writeback-blit";
+          [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
+                        sourceSlice:0
+                        sourceLevel:0
+                       sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                         sourceSize:MTLSizeMake(rw, rh, 1)
+                           toBuffer:staging
+                  destinationOffset:0
+             destinationBytesPerRow:rw * 4
+           destinationBytesPerImage:rw * rh * 4];
+          [wb_blit endEncoding];
+          const auto& dc = resolve_info.copy_dest_coordinate_info;
+          uint32_t extent_bytes = resolve_info.copy_dest_extent_start -
+                                  resolve_info.copy_dest_base +
+                                  resolve_info.copy_dest_extent_length;
+          pending_writebacks_.push_back(PendingWriteback{
+              (__bridge_retained void*)staging, resolve_info.copy_dest_base,
+              rw, rh, 4u,
+              uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+              uint32_t(dc.pitch_aligned_div_32) << 5,
+              uint32_t(dc.offset_x_div_8) << 3,
+              uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
+              /*swap_rb=*/0u, S7TagsOff() ? 0 : CurrentEncodingSubmission(),
+              uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+              trace_draw_index_, swap_count_,
+              /*depth_encode=*/is_float24 ? 2u : 1u});
+        }
       }
     }
   }
@@ -3909,7 +4002,11 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
   return fb_ram_texture_;
 }
 
-void MetalCommandProcessor::DrainPendingWritebacks() {
+void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
+                                                   uint32_t filter_size) {
+  auto in_filter = [&](uint32_t base, uint32_t size) {
+    return base < filter_base + filter_size && base + size > filter_base;
+  };
   // Resolve guest-memory writebacks (the CPU-side exposure loop and any
   // fence-after-copy data). S7: a staging buffer is final only once its
   // submission completed — process those, keep the rest pending (with the
@@ -3927,7 +4024,8 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
     const uint8_t* me_contents =
         static_cast<const uint8_t*>(me_shared_buffer.contents);
     for (const PendingMemexport& me : pending_memexports_) {
-      if (me.submission > completed) {
+      if (me.submission > completed ||
+          !in_filter(me.base_address, me.size_bytes)) {
         still_pending_exports.push_back(me);
         continue;
       }
@@ -3973,7 +4071,8 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
   }
   std::vector<PendingWriteback> still_pending;
   for (PendingWriteback& wb : pending_writebacks_) {
-    if (wb.submission > completed) {
+    if (wb.submission > completed ||
+        !in_filter(wb.guest_addr, wb.width * wb.height * wb.bpp)) {
       still_pending.push_back(wb);
       continue;
     }
@@ -4009,6 +4108,20 @@ void MetalCommandProcessor::DrainPendingWritebacks() {
               &words[(y * wb.width + x) * words_per_texel];
           for (uint32_t w = 0; w < words_per_texel; ++w) {
             uint32_t v = texel[w];
+            if (wb.depth_encode) {
+              // Staging holds R32Float depth from the snapshot conversion;
+              // pack to the guest D24S8 word (stencil 0 in v1 — extend from
+              // the d2c stencil plane if a title needs it in RAM).
+              float df;
+              std::memcpy(&df, &v, sizeof(df));
+              uint32_t d24 =
+                  wb.depth_encode == 2
+                      ? xenos::Float32To20e4(df, true)
+                      : uint32_t(
+                            std::min(std::max(df, 0.0f), 1.0f) * 16777215.0f +
+                            0.5f);
+              v = d24 << 8;
+            }
             if (wb.swap_rb) {
               // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra
               // (resolve.xesli) — staging is RGBA8, exchange bytes 0/2.
