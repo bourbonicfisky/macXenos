@@ -193,8 +193,10 @@ target_include_directories(pugixml PUBLIC pugixml/src)
 # ==============================================================================
 # snappy
 # ==============================================================================
-# Generate snappy-stubs-public.h if missing
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/snappy/snappy-stubs-public.h")
+# Generate snappy-stubs-public.h if missing. The nested configure targets a
+# build-tree directory so the submodule working tree stays pristine.
+set(_snappy_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/snappy-gen")
+if(NOT EXISTS "${_snappy_gen_dir}/snappy-stubs-public.h")
   if(XE_TARGET_X86_64)
     set(_snappy_avx_flag "-DSNAPPY_REQUIRE_AVX=ON")
   else()
@@ -206,7 +208,7 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/snappy/snappy-stubs-public.h")
       -DSNAPPY_BUILD_BENCHMARKS=OFF
       ${_snappy_avx_flag}
       ${CMAKE_CURRENT_SOURCE_DIR}/snappy
-      -B${CMAKE_CURRENT_SOURCE_DIR}/snappy
+      -B${_snappy_gen_dir}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 endif()
@@ -216,11 +218,11 @@ add_library(snappy STATIC
   snappy/snappy-sinksource.h
   snappy/snappy-stubs-internal.cc
   snappy/snappy-stubs-internal.h
-  snappy/snappy-stubs-public.h
+  "${_snappy_gen_dir}/snappy-stubs-public.h"
   snappy/snappy.cc
   snappy/snappy.h
 )
-target_include_directories(snappy PUBLIC snappy)
+target_include_directories(snappy PUBLIC "${_snappy_gen_dir}" snappy)
 
 # ==============================================================================
 # xxhash
