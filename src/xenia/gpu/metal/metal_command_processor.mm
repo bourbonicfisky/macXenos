@@ -4362,6 +4362,20 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         record.readback_age_frames = int32_t(swap_count_ - wb.enqueue_swap);
         LogResolveWriteback(record);
       }
+      // Writer-audit correction (see the gpu-texture-loads design): the tiled
+      // scatter — and any zero-hold re-scatter or tip refresh above — wrote
+      // guest RAM through the host physical view, which the guest-mirror
+      // write protection does not cover, so the shared-memory authority never
+      // sees these writes on its own. Invalidate exactly the extent the
+      // scatter's own bound check admits writes into
+      // ([guest_addr, guest_addr + dest_extent_bytes); enqueue guarantees the
+      // extent is nonzero), after ALL RAM writes for this record, so a later
+      // shared-memory consumer revalidates the pages. The shared BUFFER was
+      // not written — invalidation, never RangeWrittenByGpu.
+      if (shared_memory_) {
+        shared_memory_->MemoryInvalidationCallback(
+            wb.guest_addr, wb.dest_extent_bytes, true);
+      }
     }
   }
   pending_writebacks_ = std::move(still_pending);
