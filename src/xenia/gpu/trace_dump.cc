@@ -56,6 +56,12 @@ DEFINE_int32(replay_loops, 1,
              "Replay the traced frame N times before capturing (async-race "
              "stress; see TraceDump::Run).",
              "GPU");
+DEFINE_path(recapture_trace_path, "",
+            "Re-capture the replayed frame as a NEW trace into this "
+            "directory (slice-4 trace-compatibility gate: compares CPU-route "
+            "vs GPU-route captures of the same frame through the standard "
+            "single-frame capture machinery; no format change).",
+            "GPU");
 DEFINE_bool(dump_edram, false,
             "After playback, dump the raw 10 MB EDRAM contents (per-sample, "
             "tile-major) next to the output image as <output>.edram.bin.",
@@ -263,6 +269,22 @@ int TraceDump::Run() {
       XELOGW("--edram_determinism: baseline EDRAM dump failed; skipping check");
       determinism = false;
     }
+  }
+  // --recapture_trace_path: arm the standard single-frame capture and
+  // replay once more so the frame re-records through the ACTIVE backend's
+  // normal capture path (same writer, same format, same synchronization).
+  if (!cvars::recapture_trace_path.empty()) {
+    std::filesystem::create_directories(cvars::recapture_trace_path);
+    graphics_system_->command_processor()->RequestFrameTrace(
+        cvars::recapture_trace_path);
+    // Single-frame capture OPENS at the first replay-ending swap and records
+    // the FOLLOWING frame (closing at its swap) -- replay twice.
+    player_->ReplayCurrentFrame();
+    player_->WaitOnPlayback();
+    player_->ReplayCurrentFrame();
+    player_->WaitOnPlayback();
+    XELOGI("TraceDump: recapture pass complete -> {}",
+           xe::path_to_utf8(cvars::recapture_trace_path));
   }
   for (int32_t loop = 1; loop < replay_loops; ++loop) {
     player_->ReplayCurrentFrame();

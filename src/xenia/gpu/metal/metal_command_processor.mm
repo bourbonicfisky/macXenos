@@ -854,6 +854,12 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
   InstallShadowStageHook();
+  route_rgba8_enabled_ = std::getenv("XE_METAL_ROUTE_RGBA8") != nullptr;
+  if (route_rgba8_enabled_) {
+    XELOGI(
+        "MetalRouteRGBA8: ENABLED (diagnostic; strict class served by the "
+        "GPU load shader; all failures fall back to the CPU path)");
+  }
   return true;
 }
 
@@ -908,6 +914,15 @@ void MetalCommandProcessor::ShutdownContext() {
   }
   shadow_staged_.clear();
   LogShadowSummary("shutdown");
+  for (void* p : routed_staging_pending_) {
+    id<MTLBuffer> buffer = (__bridge_transfer id<MTLBuffer>)p;
+    (void)buffer;
+  }
+  routed_staging_pending_.clear();
+  LogRouteSummary("shutdown");
+  if (texture_cache_) {
+    texture_cache_->DropRoutedReady();
+  }
   shadow_pipelines_.reset();
   ShutdownDrawResources();
   shared_memory_.reset();
@@ -1398,6 +1413,172 @@ void MetalCommandProcessor::ArmPendingShadowStages() {
   }
 }
 
+// Slice-4 routed-load prepass. Runs ONLY at the IssueDraw pre-encoder seam.
+void MetalCommandProcessor::PrepareRoutedTextureLoads(
+    MetalShader* vertex_shader, MetalShader* pixel_shader) {
+  if (!route_rgba8_enabled_ || !texture_cache_ || !shared_memory_) {
+    return;
+  }
+  auto& regs = *register_file_;
+  std::vector<MetalTextureCache::RoutedLoadPrep> preps;
+  for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+    if (!shader) {
+      continue;
+    }
+    for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+      auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+      MetalTextureCache::RoutedLoadPrep prep;
+      if (texture_cache_->PrepareRoutedLoad(fetch, binding.is_signed, &prep)) {
+        preps.push_back(std::move(prep));
+      }
+    }
+  }
+  if (preps.empty()) {
+    return;
+  }
+  route_stats_.prepared += preps.size();
+  if (!EnsureShadowPipelines()) {  // Same load-pipeline set as the shadow.
+    for (auto& prep : preps) {
+      texture_cache_->ReleaseRoutedPrep(std::move(prep));
+      ++route_stats_.alloc_failed;
+    }
+    return;
+  }
+  // Validate the exact ranges FIRST (the hazard-flush-safe seam; a flush
+  // here commits prior work before any of this draw's routed encoding).
+  std::vector<MetalTextureCache::RoutedLoadPrep> valid;
+  for (auto& prep : preps) {
+    if (!shared_memory_->RequestConsumedRange(
+            prep.range.begin, prep.range.end - prep.range.begin)) {
+      texture_cache_->ReleaseRoutedPrep(std::move(prep));
+      ++route_stats_.request_failed;
+      continue;
+    }
+    valid.push_back(std::move(prep));
+  }
+  if (valid.empty()) {
+    return;
+  }
+  bool was_frame_open = frame_open_;
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge id<MTLCommandBuffer>)PrepareTransferCommandBuffer();
+  if (!command_buffer) {
+    for (auto& prep : valid) {
+      texture_cache_->ReleaseRoutedPrep(std::move(prep));
+      ++route_stats_.no_command_buffer;
+    }
+    return;
+  }
+  if (was_frame_open) {
+    ++route_stats_.encoder_transitions;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  id<MTLDevice> device = (__bridge id<MTLDevice>)provider->device();
+  id<MTLComputeCommandEncoder> compute = [command_buffer computeCommandEncoder];
+  compute.label = @"routed-texture-load";
+  [compute setComputePipelineState:
+               (__bridge id<MTLComputePipelineState>)shadow_pipelines_->pipeline(
+                   size_t(shadow_pipeline_32bpb_))];
+  [compute setBuffer:(__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+              offset:0
+             atIndex:MetalLoadShaderPipelines::kBufferIndexSource];
+  struct Encoded {
+    MetalTextureCache::RoutedLoadPrep prep;
+    id<MTLBuffer> staging;
+  };
+  std::vector<Encoded> encoded;
+  for (auto& prep : valid) {
+    id<MTLBuffer> staging =
+        [device newBufferWithLength:prep.layout.total_size
+                            options:MTLResourceStorageModePrivate];
+    if (!staging) {
+      texture_cache_->ReleaseRoutedPrep(std::move(prep));
+      ++route_stats_.alloc_failed;
+      continue;
+    }
+    MetalLoadShaderPipelines::LoadConstants constants = {};
+    constants.is_tiled_3d_endian_scale = 1u | (prep.endian << 2);
+    constants.guest_offset = prep.base;
+    constants.guest_pitch_aligned = prep.pitch_blocks_aligned;
+    constants.size_blocks[0] = prep.blocks_w;
+    constants.size_blocks[1] = prep.blocks_h;
+    constants.size_blocks[2] = 1;
+    constants.host_offset = 0;
+    constants.host_pitch = prep.layout.host_pitch;
+    constants.height_texels = prep.blocks_h;
+    [compute setBytes:&constants
+               length:sizeof(constants)
+              atIndex:MetalLoadShaderPipelines::kBufferIndexPushConstants];
+    [compute setBuffer:staging
+                offset:0
+               atIndex:MetalLoadShaderPipelines::kBufferIndexDest];
+    uint32_t threads_x = (prep.blocks_w + 7u) / 8u;
+    MTLSize group = MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
+                                MetalLoadShaderPipelines::kThreadgroupSizeY,
+                                1);
+    MTLSize groups =
+        MTLSizeMake((threads_x + group.width - 1) / group.width,
+                    (prep.blocks_h + group.height - 1) / group.height, 1);
+    [compute dispatchThreadgroups:groups threadsPerThreadgroup:group];
+    route_stats_.staging_bytes += prep.layout.total_size;
+    route_stats_.pending_staging_bytes += prep.layout.total_size;
+    route_stats_.high_water_staging_bytes =
+        std::max(route_stats_.high_water_staging_bytes,
+                 route_stats_.pending_staging_bytes);
+    encoded.push_back(Encoded{std::move(prep), staging});
+  }
+  [compute endEncoding];
+  if (encoded.empty()) {
+    return;
+  }
+  id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+  blit.label = @"routed-texture-copy";
+  for (auto& e : encoded) {
+    [blit copyFromBuffer:e.staging
+             sourceOffset:0
+        sourceBytesPerRow:e.prep.layout.host_pitch
+      sourceBytesPerImage:0
+               sourceSize:MTLSizeMake(e.prep.width, e.prep.height, 1)
+                toTexture:(__bridge id<MTLTexture>)e.prep.texture
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+  }
+  [blit endEncoding];
+  for (auto& e : encoded) {
+    routed_staging_pending_.push_back((__bridge_retained void*)e.staging);
+    texture_cache_->CommitRoutedLoad(std::move(e.prep));
+    ++route_stats_.routed_encoded;
+  }
+  // Aggregate visibility that survives a hard stop: log the first few routed
+  // encodes and every 64th thereafter.
+  if (route_stats_.routed_encoded < 16 ||
+      (route_stats_.routed_encoded & 63) == 0) {
+    LogRouteSummary("periodic");
+  }
+}
+
+void MetalCommandProcessor::LogRouteSummary(const char* when) {
+  if (!route_rgba8_enabled_) {
+    return;
+  }
+  const auto& r = route_stats_;
+  XELOGI(
+      "MetalRouteRGBA8[{}]: prepared={} routed={} servedByDraw={} "
+      "fallbacks(reqFail={} allocFail={} noCb={}) encTransitions={} "
+      "staging(total={} pending={} highWater={}) cpuUntile(ops={} bytes={} "
+      "usec={}) routedReadyPending={}",
+      when, r.prepared, r.routed_encoded,
+      texture_cache_ ? texture_cache_->routed_served() : 0, r.request_failed,
+      r.alloc_failed, r.no_command_buffer, r.encoder_transitions,
+      r.staging_bytes, r.pending_staging_bytes, r.high_water_staging_bytes,
+      texture_cache_ ? texture_cache_->untile_ops() : 0,
+      texture_cache_ ? texture_cache_->untile_bytes() : 0,
+      texture_cache_ ? texture_cache_->untile_usec() : 0,
+      texture_cache_ ? texture_cache_->routed_ready_pending() : 0);
+}
+
 void MetalCommandProcessor::LogShadowSummary(const char* when) {
   if (!shadow_enabled_ && !shadow_stats_.eligible_uploads) {
     return;
@@ -1503,6 +1684,20 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  if (!routed_staging_pending_.empty()) {
+    auto staging = std::make_shared<std::vector<void*>>(
+        std::move(routed_staging_pending_));
+    routed_staging_pending_.clear();
+    completion_actions_.emplace_back(submission, [this, staging]() {
+      for (void* p : *staging) {
+        id<MTLBuffer> buffer = (__bridge_transfer id<MTLBuffer>)p;
+        uint64_t length = [buffer length];
+        (void)buffer;
+        route_stats_.pending_staging_bytes -= std::min<uint64_t>(
+            route_stats_.pending_staging_bytes, length);
+      }
+    });
+  }
   if (shadow_batch) {
     completion_actions_.emplace_back(submission, [this, shadow_batch]() {
       for (auto& armed : *shadow_batch) {
@@ -1689,6 +1884,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // class as the vfetch RequestConsumedRange below): a hazard flush inside
   // is safe here, and never fires with THIS draw's encoder state open.
   ArmPendingShadowStages();
+  // Slice-4 routed loads prepare at the same seam: exact-range validation,
+  // then compute+blit encoded at a pass boundary BEFORE this draw's render
+  // encoder — same command buffer and submission, no commit, no wait.
+  PrepareRoutedTextureLoads(vertex_shader, pixel_shader);
 
   // Rectangle and quad lists (fullscreen/composite surfaces) and point lists
   // (light-volume sprites — plain Metal points can't expand size/texcoords,
