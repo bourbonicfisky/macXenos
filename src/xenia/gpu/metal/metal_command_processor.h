@@ -300,6 +300,33 @@ class MetalCommandProcessor : public CommandProcessor {
   void ArmPendingShadowStages();
   void ReleaseShadowEntry(ShadowArmed& armed);
   void LogShadowSummary(const char* when);
+  // Strict-RGBA8 GPU-load ROUTE (slice 5R, default-off:
+  // XE_METAL_ROUTE_RGBA8R=1). PrepareRoutedTextureLoads runs at the POST-DRAIN
+  // pre-encoder seam (after the writeback-overlap flush): per eligible cache-missing fetch it
+  // validates the exact shared-memory range, encodes the compute load +
+  // buffer->texture blit on the frame command buffer (via the existing
+  // PrepareTransferCommandBuffer pass boundary), and parks the finished
+  // texture for the draw's GetTextureSlot to consume — CPU untile skipped
+  // only for committed successes; every failure falls back untouched.
+  struct RouteStats {
+    uint64_t prepared = 0;
+    uint64_t routed_encoded = 0;
+    uint64_t request_failed = 0;
+    uint64_t alloc_failed = 0;
+    uint64_t no_command_buffer = 0;
+    uint64_t encoder_transitions = 0;  // Render encoder ended by a prepass.
+    uint64_t staging_bytes = 0;        // Lifetime total.
+    uint64_t pending_staging_bytes = 0;
+    uint64_t high_water_staging_bytes = 0;
+  };
+  void PrepareRoutedTextureLoads(class MetalShader* vertex_shader,
+                                 class MetalShader* pixel_shader);
+  void LogRouteSummary(const char* when);
+  bool route_rgba8_enabled_ = false;
+  RouteStats route_stats_;
+  // Retained staging id<MTLBuffer>s awaiting the next commit's completion.
+  std::vector<void*> routed_staging_pending_;
+
   bool shadow_enabled_ = false;
   bool shadow_pipelines_failed_ = false;
   std::unique_ptr<MetalLoadShaderPipelines> shadow_pipelines_;

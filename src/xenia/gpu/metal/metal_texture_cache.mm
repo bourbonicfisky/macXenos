@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include "third_party/xxhash/xxhash.h"
@@ -197,6 +198,7 @@ MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
 }
 
 MetalTextureCache::~MetalTextureCache() {
+  DropRoutedReady();
   if (shared_memory_watch_) {
     shared_memory_->UnregisterGlobalWatch(shared_memory_watch_);
     shared_memory_watch_ = nullptr;
@@ -663,6 +665,28 @@ uint32_t MetalTextureCache::GetTextureSlot(
               : size_t(pitch_blocks_aligned) * blocks_h * bpb;
   uint32_t watched_base_bytes = uint32_t(std::min<size_t>(
       base_source_bytes, size_t(kPhysicalSize - base)));
+  // Slice-5R routed load (default-off): if the pre-encoder
+  // prepass produced this key's texture via the GPU load shader (compute +
+  // blit already encoded BEFORE this draw's render pass in the same command
+  // buffer), consume it instead of running the CPU untile. The finalize
+  // tail below is byte-for-byte the CPU path's — identical slot/swizzle/
+  // trace-record/cache semantics. Absence of a prepared entry (any prep
+  // failure) means the unchanged CPU path runs.
+  {
+    auto routed_it = routed_ready_.find(key);
+    if (routed_it != routed_ready_.end()) {
+      void* routed_tex = routed_it->second.texture;
+      routed_ready_.erase(routed_it);
+      ++routed_served_;
+      id<MTLTexture> routed_texture =
+          (__bridge_transfer id<MTLTexture>)routed_tex;
+      return FinalizeTexture(key, fetch, (__bridge void*)routed_texture,
+                             uint64_t(plan.host_format), /*is_cube=*/false,
+                             /*host_levels=*/1, base, watched_base_bytes,
+                             /*mip_base=*/0, /*mip_bytes=*/0);
+    }
+  }
+
   // NOTE: this cache deliberately does NOT call SharedMemory::RequestRange to
   // register these pages for CPU write-watching. RequestRange does host-GPU
   // buffer residency + guest-page write protection (EnsureHostGpuMemoryAllocated
@@ -699,6 +723,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
       }
     }
   };
+  auto untile_t0 = std::chrono::steady_clock::now();
   if (size_t(blocks_w) * blocks_h * bpb >= 512 * 1024) {
     dispatch_apply(blocks_h, DISPATCH_APPLY_AUTO,
                    ^(size_t by) { untile_row(by); });
@@ -707,6 +732,12 @@ uint32_t MetalTextureCache::GetTextureSlot(
       untile_row(by);
     }
   }
+  ++untile_ops_;
+  untile_bytes_ += uint64_t(blocks_w) * blocks_h * bpb;
+  untile_usec_ += uint64_t(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - untile_t0)
+          .count());
 
   // Slice-5R shadow staging (temporary; hook null unless
   // XE_METAL_SHADOW_RGBA8R=1): the RESOLVE-BACKED strict class only — a
@@ -1125,6 +1156,132 @@ uint32_t MetalTextureCache::FinalizeTexture(
   return slot;
 }
 
+// Slice-5R routed-load prepass (called from the command processor's
+// pre-encoder seam — never with a render encoder open). Mirrors
+// GetTextureSlot's derivations for the strict class; the KEY comes from the
+// shared MakeTextureKey, so any derivation divergence degrades to a cache
+// miss on consumption (safe CPU fallback), never to wrong content.
+bool MetalTextureCache::PrepareRoutedLoad(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+    RoutedLoadPrep* out) {
+  if (fetch.type != xenos::FetchConstantType::kTexture) {
+    return false;
+  }
+  uint32_t width = fetch.size_2d.width + 1;
+  uint32_t height = fetch.size_2d.height + 1;
+  uint32_t base = fetch.base_address << 12;
+  uint32_t pitch_texels = fetch.pitch << 5;
+  if (!pitch_texels) {
+    pitch_texels = (width + 31) & ~31u;
+  }
+  if (!IsStrictRgba8Eligible(fetch, is_signed, width, height, pitch_texels)) {
+    return false;
+  }
+  if (!base || width > 8192 || height > 8192 || base >= kPhysicalSize) {
+    return false;
+  }
+  // Slice 5R: ONLY the resolve-backed RAM-authoritative class routes —
+  // classification kRamContent through the shared classifier (excludes
+  // bridge AND exact-cover snapshot service with the production guards,
+  // never a re-implementation). Non-resolve strict RGBA8 stays CPU-routed
+  // per the approved 4.4 decision. The endian-calibration override would
+  // make routes diverge from the CPU path on purpose — don't route under
+  // it.
+  if (ClassifyFetchService(fetch, is_signed) !=
+      ResolvedFetchService::kRamContent) {
+    return false;
+  }
+  static const bool s_history_endian_active =
+      std::getenv("XE_METAL_HISTORY_ENDIAN") != nullptr;
+  if (s_history_endian_active) {
+    return false;
+  }
+  uint64_t key = MakeTextureKey(fetch, is_signed, base, width, height,
+                                pitch_texels);
+  if (cache_.find(key) != cache_.end() ||
+      routed_ready_.find(key) != routed_ready_.end()) {
+    return false;  // Hit or already prepared: nothing to do.
+  }
+  if (next_slot_ >= view_heap_slots_ && free_slots_.empty()) {
+    return false;
+  }
+  uint32_t blocks_w = width;   // 1x1 blocks for k_8_8_8_8.
+  uint32_t blocks_h = height;
+  uint32_t pitch_blocks_aligned = ((pitch_texels) + 31u) & ~31u;
+  uint64_t range_key = (uint64_t(blocks_w) << 40) |
+                       (uint64_t(blocks_h) << 16) |
+                       uint64_t(pitch_blocks_aligned);
+  auto rit = shadow_range_cache_.find(range_key);
+  if (rit == shadow_range_cache_.end()) {
+    rit = shadow_range_cache_
+              .emplace(range_key, ComputeStrictRgba8SourceRange(
+                                      0, blocks_w, blocks_h,
+                                      pitch_blocks_aligned, kPhysicalSize))
+              .first;
+  }
+  const ShadowSourceRange& rel = rit->second;
+  if (!rel.valid || uint64_t(base) + rel.end > kPhysicalSize) {
+    return false;
+  }
+  // Destination texture — same properties GetTextureSlot creates for this
+  // class (RGBA8, 2D array, single level, shared storage); the finalize
+  // tail applies the same swizzle-view logic on consumption.
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+  desc.textureType = MTLTextureType2DArray;
+  desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
+  desc.width = width;
+  desc.height = height;
+  desc.arrayLength = 1;
+  desc.mipmapLevelCount = 1;
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModeShared;
+  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  if (!texture) {
+    return false;
+  }
+  out->key = key;
+  out->base = base;
+  out->width = width;
+  out->height = height;
+  out->blocks_w = blocks_w;
+  out->blocks_h = blocks_h;
+  out->pitch_blocks_aligned = pitch_blocks_aligned;
+  out->endian = uint32_t(fetch.endianness);
+  out->range.begin = base + rel.begin;
+  out->range.end = base + rel.end;
+  out->range.valid = true;
+  out->guest_bytes = uint32_t(std::min<uint64_t>(
+      uint64_t(pitch_blocks_aligned) * blocks_h * 4, kPhysicalSize - base));
+  out->layout = ComputeShadowDestLayout(blocks_w, blocks_h);
+  out->texture = (__bridge_retained void*)texture;
+  return true;
+}
+
+void MetalTextureCache::CommitRoutedLoad(RoutedLoadPrep&& prep) {
+  // Ownership of the retained texture moves into routed_ready_.
+  routed_ready_[prep.key] =
+      RoutedReadyEntry{prep.texture, prep.base, prep.guest_bytes};
+  prep.texture = nullptr;
+}
+
+void MetalTextureCache::ReleaseRoutedPrep(RoutedLoadPrep&& prep) {
+  if (prep.texture) {
+    id<MTLTexture> texture = (__bridge_transfer id<MTLTexture>)prep.texture;
+    (void)texture;
+    prep.texture = nullptr;
+  }
+}
+
+void MetalTextureCache::DropRoutedReady() {
+  for (auto& pair : routed_ready_) {
+    id<MTLTexture> texture =
+        (__bridge_transfer id<MTLTexture>)pair.second.texture;
+    (void)texture;
+  }
+  routed_ready_.clear();
+}
+
 void MetalTextureCache::WriteAllCachedTexturesToTrace(
     TraceWriter& trace_writer) const {
   for (const auto& pair : cache_) {
@@ -1328,6 +1485,19 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
 uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
   uint32_t evicted = 0;
   uint32_t end = base + length;
+  // Pending routed entries are subject to the SAME invalidation as cache
+  // entries: their content predates the write that landed here.
+  for (auto it = routed_ready_.begin(); it != routed_ready_.end();) {
+    const RoutedReadyEntry& e = it->second;
+    if (e.base < end && e.base + e.guest_bytes > base) {
+      id<MTLTexture> texture = (__bridge_transfer id<MTLTexture>)e.texture;
+      (void)texture;
+      it = routed_ready_.erase(it);
+      ++routed_ready_invalidated_;
+    } else {
+      ++it;
+    }
+  }
   for (auto it = cache_.begin(); it != cache_.end();) {
     const Entry& e = it->second;
     if (e.guest_base < end && e.guest_base + e.guest_bytes > base) {
