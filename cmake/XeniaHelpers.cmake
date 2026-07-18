@@ -196,6 +196,60 @@ function(xe_shader_rules_spirv target shader_dir)
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
+# xe_shader_rules_metal(target shader_dir)
+#
+# Ensures Metal texture-load compute shaders are compiled before the target
+# builds (Apple hosts only; no-op elsewhere). Compiles the MSL branch of the
+# shared polyglot texture_load_*.cs.xesl sources via
+# tools/build/compile_shader_metal.py into
+# ${shader_dir}/bytecode/metal/<id>.h (`const uint8_t <id>_metallib[]`),
+# mirroring the SPIR-V rule's generated-not-committed convention.
+#
+# Unlike the SPIR-V/DXBC rules, the compile work is owned by ONE global
+# custom target per shader directory, and consumers only add a dependency on
+# it -- two consumers must never race writing the same generated headers.
+# The stamp depends on the load sources AND every .xesli in both the shader
+# dir and ui/shaders (cross-directory includes like xesl.xesli).
+function(xe_shader_rules_metal target shader_dir)
+  if(NOT APPLE)
+    return()
+  endif()
+  get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
+  string(SHA1 _dir_hash "${shader_dir}")
+  string(SUBSTRING "${_dir_hash}" 0 8 _dir_hash)
+  set(_owner_target xe-metal-shaders-${_dir_hash})
+  if(NOT TARGET ${_owner_target})
+    file(GLOB _sources "${shader_dir}/texture_load_*.cs.xesl")
+    file(GLOB _includes
+      "${shader_dir}/*.xesli"
+      "${PROJECT_SOURCE_DIR}/src/xenia/ui/shaders/*.xesli")
+    set(_stamp "${PROJECT_BINARY_DIR}/${_owner_target}.stamp")
+    set(_script "${PROJECT_SOURCE_DIR}/tools/build/compile_shader_metal.py")
+    set(_bytecode_dir "${shader_dir}/bytecode/metal")
+    set(_commands)
+    list(APPEND _commands
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_bytecode_dir}")
+    foreach(src ${_sources})
+      get_filename_component(_name ${src} NAME)
+      string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
+      string(REPLACE "." "_" _id "${_basename}")
+      list(APPEND _commands
+        COMMAND ${Python3_EXECUTABLE} "${_script}" "${src}"
+                "${_bytecode_dir}/${_id}.h")
+    endforeach()
+    add_custom_command(
+      OUTPUT "${_stamp}"
+      ${_commands}
+      COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
+      DEPENDS ${_sources} ${_includes} "${_script}"
+      COMMENT "Compiling Metal texture-load shaders (${shader_dir})..."
+      VERBATIM
+    )
+    add_custom_target(${_owner_target} DEPENDS "${_stamp}")
+  endif()
+  add_dependencies(${target} ${_owner_target})
+endfunction()
+
 # xe_shader_rules_dxbc(target shader_dir)
 #
 # Ensures DXBC shaders are compiled before the target builds.

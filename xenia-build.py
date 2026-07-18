@@ -1212,7 +1212,8 @@ class BuildShadersCommand(Command):
             """,
             *args, **kwargs)
         self.parser.add_argument(
-            "--target", action="append", choices=["dxbc", "spirv"], default=[],
+            "--target", action="append",
+            choices=["dxbc", "spirv", "metal"], default=[],
             help="Builds only the given target(s).")
 
     def execute(self, args, pass_args, cwd):
@@ -1225,25 +1226,41 @@ def build_shaders(targets=None):
     Delegates to the per-file compile scripts in tools/build/.
 
     Args:
-        targets: List of targets ("dxbc", "spirv"), or None/empty for all.
+        targets: List of targets ("dxbc", "spirv", "metal"), or None/empty
+            for all targets buildable on this host.
 
     Returns:
         0 on success, non-zero on error.
     """
-    # Check if shaders need rebuilding by comparing source vs generated timestamps
-    gpu_shaders = "src/xenia/gpu/shaders"
-    ui_shaders = "src/xenia/ui/shaders"
-    # DXBC directories only on Windows, SPIR-V everywhere
-    bytecode_dirs = [
-        "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
-        "src/xenia/ui/shaders/bytecode/vulkan_spirv",
-    ]
-    if sys.platform == "win32":
-        bytecode_dirs.extend([
+    if not targets:
+        # All targets buildable on this host.
+        targets = ["spirv"]
+        if sys.platform == "win32":
+            targets.append("dxbc")
+        if sys.platform == "darwin":
+            targets.append("metal")
+
+    # Generation and cleanup are target-specific: requesting one target must
+    # neither delete nor regenerate another target's bytecode directories.
+    target_bytecode_dirs = {
+        "dxbc": [
             "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
             "src/xenia/ui/shaders/bytecode/d3d12_5_1",
-        ])
+        ],
+        "spirv": [
+            "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
+            "src/xenia/ui/shaders/bytecode/vulkan_spirv",
+        ],
+        "metal": [
+            "src/xenia/gpu/shaders/bytecode/metal",
+        ],
+    }
+    bytecode_dirs = [d for t in targets for d in target_bytecode_dirs[t]]
 
+    # Check if shaders need rebuilding by comparing source vs generated
+    # timestamps, over the requested targets' output dirs only.
+    gpu_shaders = "src/xenia/gpu/shaders"
+    ui_shaders = "src/xenia/ui/shaders"
     newest_source = max(get_dir_newest_mtime(gpu_shaders),
                        get_dir_newest_mtime(ui_shaders))
     oldest_generated = min((get_dir_oldest_mtime(d) for d in bytecode_dirs),
@@ -1254,8 +1271,9 @@ def build_shaders(targets=None):
         print("Shaders are up-to-date, skipping generation.")
         return 0
 
-    # Clean old bytecode before regenerating to remove stale files from deleted sources
-    clean_shader_bytecode()
+    # Clean old bytecode before regenerating to remove stale files from
+    # deleted sources -- only for the targets being regenerated.
+    clean_shader_bytecode(bytecode_dirs)
 
     src_paths = [os.path.join(root, name)
                  for root, dirs, files in os.walk("src")
@@ -1263,16 +1281,14 @@ def build_shaders(targets=None):
                  if (name.endswith(".glsl") or
                      name.endswith(".hlsl") or
                      name.endswith(".xesl"))]
-    if targets is None:
-        targets = []
-    all_targets = len(targets) == 0
 
     valid_stages = ["vs", "hs", "ds", "gs", "ps", "cs"]
     compile_spirv = os.path.join(self_path, "tools", "build", "compile_shader_spirv.py")
     compile_dxbc = os.path.join(self_path, "tools", "build", "compile_shader_dxbc.py")
+    compile_metal = os.path.join(self_path, "tools", "build", "compile_shader_metal.py")
 
     # Direct3D DXBC (Windows only).
-    if (all_targets or "dxbc" in targets) and sys.platform == "win32":
+    if "dxbc" in targets and sys.platform == "win32":
         print("Building Direct3D 12 Shader Model 5.1 DXBC shaders...")
         for src_path in src_paths:
             src_name = os.path.basename(src_path)
@@ -1291,7 +1307,7 @@ def build_shaders(targets=None):
                 return result
 
     # Vulkan SPIR-V.
-    if all_targets or "spirv" in targets:
+    if "spirv" in targets:
         print("Building Vulkan SPIR-V shaders...")
         for src_path in src_paths:
             src_name = os.path.basename(src_path)
@@ -1306,6 +1322,24 @@ def build_shaders(targets=None):
             output = os.path.join(src_dir, "bytecode", "vulkan_spirv", f"{identifier}.h")
             print(f"- {src_path} > vulkan_spirv")
             result = subprocess.call([sys.executable, compile_spirv, src_path, output])
+            if result != 0:
+                return result
+
+    # Metal (Apple hosts only): the texture-load compute family's MSL branch.
+    # Scope matches the cmake rule (xe_shader_rules_metal); widen both
+    # together when more static shaders gain Metal consumers.
+    if "metal" in targets and sys.platform == "darwin":
+        print("Building Metal texture-load shaders...")
+        for src_path in src_paths:
+            src_name = os.path.basename(src_path)
+            if (not src_name.startswith("texture_load_") or
+                    not src_name.endswith(".cs.xesl")):
+                continue
+            identifier = src_name[:-5].replace(".", "_")
+            src_dir = os.path.dirname(src_path)
+            output = os.path.join(src_dir, "bytecode", "metal", f"{identifier}.h")
+            print(f"- {src_path} > metal")
+            result = subprocess.call([sys.executable, compile_metal, src_path, output])
             if result != 0:
                 return result
 
@@ -1629,14 +1663,24 @@ class CleanCommand(Command):
         return 0
 
 
-def clean_shader_bytecode():
-    """Removes generated shader bytecode files."""
-    bytecode_dirs = [
-        "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
-        "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
-        "src/xenia/ui/shaders/bytecode/d3d12_5_1",
-        "src/xenia/ui/shaders/bytecode/vulkan_spirv",
-    ]
+ALL_SHADER_BYTECODE_DIRS = [
+    "src/xenia/gpu/shaders/bytecode/d3d12_5_1",
+    "src/xenia/gpu/shaders/bytecode/metal",
+    "src/xenia/gpu/shaders/bytecode/vulkan_spirv",
+    "src/xenia/ui/shaders/bytecode/d3d12_5_1",
+    "src/xenia/ui/shaders/bytecode/vulkan_spirv",
+]
+
+
+def clean_shader_bytecode(bytecode_dirs=None):
+    """Removes generated shader bytecode files.
+
+    Args:
+        bytecode_dirs: Directories to remove, or None for every target's
+            output (full clean, e.g. from `xb nuke`).
+    """
+    if bytecode_dirs is None:
+        bytecode_dirs = ALL_SHADER_BYTECODE_DIRS
     for bytecode_dir in bytecode_dirs:
         if os.path.isdir(bytecode_dir):
             print(f"- removing {bytecode_dir}/...")

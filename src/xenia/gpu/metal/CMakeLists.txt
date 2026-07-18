@@ -45,7 +45,11 @@ add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_upload_arena.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/ir_runtime_impl.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_pipelines.mm
 )
+# Generated texture-load metallib headers (bytecode/metal/*.h) consumed by
+# metal_load_shader_pipelines.mm.
+xe_shader_rules_metal(xenia-gpu-metal-backend ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
 target_include_directories(xenia-gpu-metal-backend PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(xenia-gpu-metal-backend PUBLIC
   xenia-base
