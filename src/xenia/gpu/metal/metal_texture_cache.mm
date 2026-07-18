@@ -705,46 +705,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
-  // Strict-RGBA8 shadow-load staging (slice-3 diagnostic; hook null unless
-  // XE_METAL_SHADOW_RGBA8 is set). The untile above has fully completed —
-  // dispatch_apply is synchronous — so the snapshot preserves the exact
-  // authoritative bytes, and NO shared-memory call happens here (the frame
-  // render encoder is open; the command processor arms staged entries at its
-  // pre-draw seam). Endian must be the fetch's own — the history-endian
-  // calibration override would make the CPU and shader paths intentionally
-  // disagree, so overridden uploads are not staged.
-  if (shadow_stage_hook_ && !is_cube && !is_3d &&
-      endian == fetch.endianness &&
-      IsStrictRgba8Eligible(fetch, is_signed, width, height, pitch_texels)) {
-    uint64_t range_key = (uint64_t(blocks_w) << 40) |
-                         (uint64_t(blocks_h) << 16) |
-                         uint64_t(pitch_blocks_aligned);
-    auto rit = shadow_range_cache_.find(range_key);
-    if (rit == shadow_range_cache_.end()) {
-      rit = shadow_range_cache_
-                .emplace(range_key,
-                         ComputeStrictRgba8SourceRange(
-                             0, blocks_w, blocks_h, pitch_blocks_aligned,
-                             kPhysicalSize))
-                .first;
-    }
-    const ShadowSourceRange& rel = rit->second;
-    if (rel.valid && uint64_t(base) + rel.end <= kPhysicalSize) {
-      TextureLoadShadowStage stage;
-      stage.base = base;
-      stage.blocks_w = blocks_w;
-      stage.blocks_h = blocks_h;
-      stage.pitch_blocks_aligned = pitch_blocks_aligned;
-      stage.endian = uint32_t(endian);
-      stage.source_range.begin = base + rel.begin;
-      stage.source_range.end = base + rel.end;
-      stage.source_range.valid = true;
-      stage.source_hash =
-          XXH3_64bits(guest + rel.begin, rel.end - rel.begin);
-      stage.cpu_linear = linear;  // Completed authoritative untile output.
-      shadow_stage_hook_(std::move(stage));
-    }
-  }
 
   // Data + row stride handed to Metal. k_4_4_4_4 is CPU-expanded here from its
   // 16bpp linear form to RGBA8 (each 4-bit channel -> 8 bits via *17), in the

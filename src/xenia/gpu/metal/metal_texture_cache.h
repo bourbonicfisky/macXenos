@@ -16,7 +16,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "xenia/gpu/metal/metal_texture_load_shadow.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
 
@@ -110,18 +109,6 @@ class MetalTextureCache {
   void ReclaimStaleSlots(uint64_t completed_submission);
 
   // Tags retires with the submission that may last reference them.
-  // Strict-RGBA8 shadow-load staging (slice-3 diagnostic): when set, an
-  // ELIGIBLE real upload (cache miss reaching the CPU untile) stages a
-  // snapshot of the completed CPU linear output plus the exact source range
-  // and its raw-content hash. The hook must not call into shared memory —
-  // GetTextureSlot runs with the frame render encoder open; arming happens
-  // at the command processor's pre-draw seam. Null (default) disables all
-  // shadow work.
-  void SetShadowStageHook(
-      std::function<void(TextureLoadShadowStage&&)> hook) {
-    shadow_stage_hook_ = std::move(hook);
-  }
-
   void SetSubmissionProvider(std::function<uint64_t()> provider) {
     submission_provider_ = std::move(provider);
   }
@@ -196,7 +183,6 @@ class MetalTextureCache {
   // complete.
   std::vector<std::pair<uint64_t, void*>> retired_textures_;
   std::function<uint64_t()> submission_provider_;
-  std::function<void(TextureLoadShadowStage&&)> shadow_stage_hook_;
   // Shared finalize tail (swizzle view, slot, trace record, cache entry) —
   // the ONE place upload finalization semantics live. texture_bridge:
   // id<MTLTexture> at +0. host_format: MTLPixelFormat.
@@ -206,9 +192,6 @@ class MetalTextureCache {
                            bool is_cube, uint32_t host_levels, uint32_t base,
                            uint32_t guest_bytes, uint32_t mip_base,
                            uint32_t mip_bytes);
-  // Exact-source-range scan cache for the shadow predicate, keyed by
-  // (blocks_w, blocks_h, pitch_blocks_aligned) — offsets are base-relative.
-  std::unordered_map<uint64_t, ShadowSourceRange> shadow_range_cache_;
   uint64_t RetireSubmission() const {
     return submission_provider_ ? submission_provider_() : UINT64_MAX;
   }
