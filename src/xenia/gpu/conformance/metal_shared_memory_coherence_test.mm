@@ -35,6 +35,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_shared_memory.h"
+#include "xenia/gpu/conformance/test_shared_physical_memory.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -45,7 +46,7 @@ namespace {
 constexpr uint32_t kPage = 4096;
 
 struct CoherenceHarness {
-  std::unique_ptr<Memory> memory;
+  Memory* memory = nullptr;
   std::unique_ptr<MetalSharedMemory> shared;
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
@@ -57,9 +58,8 @@ struct CoherenceHarness {
     if (!device) {
       return;
     }
-    memory = std::make_unique<Memory>();
-    if (!memory->Initialize()) {
-      memory.reset();
+    memory = conformance::TestPhysicalMemory();
+    if (!memory) {
       return;
     }
     shared = std::make_unique<MetalSharedMemory>(*memory,
@@ -285,6 +285,31 @@ TEST_CASE("SM coherence: physical-memory boundary is checked",
   h.shared->MemoryInvalidationCallback(addr, end - addr + kPage, true);
   REQUIRE(h.shared->RequestRange(addr, kPage));
   REQUIRE(h.GpuRead(addr, kPage) == new_bytes);
+}
+
+TEST_CASE("SM coherence: RangeWrittenByGpu protects GPU-written buffer "
+          "bytes from stale CPU re-upload (device)",
+          "[l1][metal][sharedmem]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  const uint32_t addr = 0x0AB00000;
+  auto ram = h.Pattern(kPage, 0xB0);
+  h.RamWrite(addr, ram);
+  REQUIRE(h.shared->RequestRange(addr, kPage));
+  REQUIRE(h.GpuRead(addr, kPage) == ram);
+  // "GPU write": newest bytes land in the real shared MTLBuffer only.
+  auto gpu = h.Pattern(kPage, 0xC0);
+  uint8_t* contents = static_cast<uint8_t*>(
+      [(__bridge id<MTLBuffer>)h.shared->GetBuffer() contents]);
+  std::memcpy(contents + addr, gpu.data(), kPage);
+  h.shared->RangeWrittenByGpu(addr, kPage);
+  // A later request must not clobber the GPU-produced bytes with stale RAM.
+  REQUIRE(h.shared->RequestRange(addr, kPage));
+  REQUIRE(h.GpuRead(addr, kPage) == gpu);
+  // Memexport-drain convergence: RAM := buffer, no invalidation, bytes stay.
+  h.RamWrite(addr, gpu);
+  REQUIRE(h.shared->RequestRange(addr, kPage));
+  REQUIRE(h.GpuRead(addr, kPage) == gpu);
 }
 
 TEST_CASE("SM coherence: repeated invalidation/revalidation cycles",

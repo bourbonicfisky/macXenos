@@ -20,6 +20,14 @@ endif()
 
 add_executable(xenia-gpu-conformance
   ${_conformance_sources}
+  # Shared-memory foundation closure (platform-neutral): the REAL Memory +
+  # SharedMemory validity logic for the device-free L0 logic tests; the
+  # APPLE block below adds the MetalSharedMemory device surface on top.
+  ${PROJECT_SOURCE_DIR}/src/xenia/memory.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/cpu/mmio_handler.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/shared_memory.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/gpu_flags.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_writer.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/xenos.cc
   # EDRAM tile/sample addressing oracle (mirror of edram.xesli). Pure math +
   # fmt/base/stb — no command_processor, so it stays in the lean target.
@@ -37,7 +45,9 @@ target_include_directories(xenia-gpu-conformance PRIVATE
   ${PROJECT_SOURCE_DIR}/tools/build/src
   ${PROJECT_SOURCE_DIR}/tools/build/third_party/catch/include
 )
-target_link_libraries(xenia-gpu-conformance PRIVATE fmt xenia-base)
+target_include_directories(xenia-gpu-conformance PRIVATE
+  ${CMAKE_BINARY_DIR})  # version.h (trace_writer)
+target_link_libraries(xenia-gpu-conformance PRIVATE fmt xenia-base snappy)
 
 # Level 1: Metal compute kernels checked against the L0 CPU oracles. Compiled
 # only on Apple (needs a Metal device); on other platforms the executable is
@@ -51,16 +61,9 @@ if(APPLE)
     # cvar definitions + trace writer (referenced by MetalSharedMemory) —
     # kept minimal so the target stays a fast isolated contract check.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_memory_coherence_test.mm
-    ${PROJECT_SOURCE_DIR}/src/xenia/memory.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/cpu/mmio_handler.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/shared_memory.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/gpu_flags.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_writer.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_memory.mm)
-  target_include_directories(xenia-gpu-conformance PRIVATE
-    ${CMAKE_BINARY_DIR})  # version.h (trace_writer)
   target_link_libraries(xenia-gpu-conformance PRIVATE
-    snappy "-framework Metal" "-framework Foundation")
+    "-framework Metal" "-framework Foundation")
 endif()
 
 xe_target_defaults(xenia-gpu-conformance)
