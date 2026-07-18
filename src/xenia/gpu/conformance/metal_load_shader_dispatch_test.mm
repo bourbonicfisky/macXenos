@@ -24,6 +24,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
+#include "xenia/gpu/metal/metal_texture_load_shadow.h"
 #include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/xenos.h"
 
@@ -33,22 +34,8 @@ namespace {
 
 using metal::MetalLoadShaderPipelines;
 
-// Host mirror of the MSL push_const_struct_xe for the texture-load family
-// (texture_load.xesli). MSL uint3 is 16-byte aligned AND 16-byte sized, so
-// xe_texture_load_host_offset lands at offset 32, not 28.
-struct LoadConstants {
-  uint32_t is_tiled_3d_endian_scale;               // 0
-  uint32_t guest_offset;                           // 4
-  uint32_t guest_pitch_aligned;                    // 8
-  uint32_t guest_z_stride_block_rows_aligned;      // 12
-  uint32_t size_blocks[3];                         // 16
-  uint32_t pad_uint3_w;                            // 28 (uint3 padding)
-  uint32_t host_offset;                            // 32
-  uint32_t host_pitch;                             // 36
-  uint32_t height_texels;                          // 40
-  uint32_t pad_tail;                               // 44 (struct align 16)
-};
-static_assert(sizeof(LoadConstants) == 48, "MSL push-const ABI");
+// The production packing definition — the single ABI source of truth.
+using LoadConstants = MetalLoadShaderPipelines::LoadConstants;
 static_assert(offsetof(LoadConstants, host_offset) == 32, "MSL uint3 size");
 
 struct DispatchHarness {
@@ -276,6 +263,104 @@ TEST_CASE("load shaders: deterministic tiled 32bpb dispatch matches the "
   REQUIRE(h.Dispatch(h.pipelines.pipeline(size_t(index)), constants, dest,
                      source, kWidthBlocks / 8, kHeightBlocks, 1));
   REQUIRE(std::memcmp(dest.contents, expected.data(), dest_size) == 0);
+}
+
+// ---- Slice-3 shadow-layout coverage: the exact dest layout, source range,
+// and comparison the production shadow path uses, driven end-to-end on
+// device against the production CPU layout helpers. ----
+
+static void RunShadowShapeCase(uint32_t blocks_w, uint32_t blocks_h,
+                               uint32_t pitch_aligned, xenos::Endian endian) {
+  auto& h = H();
+  REQUIRE(h.ok);
+  int index = h.pipelines.FindIndex("texture_load_32bpb_cs");
+  REQUIRE(index >= 0);
+
+  metal::ShadowDestLayout layout =
+      metal::ComputeShadowDestLayout(blocks_w, blocks_h);
+  metal::ShadowSourceRange range = metal::ComputeStrictRgba8SourceRange(
+      0, blocks_w, blocks_h, pitch_aligned, 512u << 20);
+  REQUIRE(range.valid);
+
+  // Synthetic guest bytes over the exact stated read range.
+  std::vector<uint8_t> guest(range.end);
+  for (uint32_t i = 0; i < range.end; ++i) {
+    guest[i] = uint8_t(i * 11 + (i >> 9) * 7 + 3);
+  }
+  // The authoritative CPU untile output via the production helpers.
+  std::vector<uint8_t> cpu(size_t(blocks_w) * 4 * blocks_h);
+  for (uint32_t y = 0; y < blocks_h; ++y) {
+    for (uint32_t x = 0; x < blocks_w; ++x) {
+      uint32_t src = uint32_t(texture_address::Tiled2D(
+          int32_t(x), int32_t(y), pitch_aligned, 2));
+      uint32_t word;
+      std::memcpy(&word, &guest[src], 4);
+      word = xenos::GpuSwap(word, endian);
+      std::memcpy(&cpu[(size_t(y) * blocks_w + x) * 4], &word, 4);
+    }
+  }
+
+  id<MTLBuffer> source =
+      [h.device newBufferWithLength:range.end
+                            options:MTLResourceStorageModeShared];
+  id<MTLBuffer> dest =
+      [h.device newBufferWithLength:layout.total_size
+                            options:MTLResourceStorageModeShared];
+  std::memcpy(source.contents, guest.data(), range.end);
+
+  LoadConstants constants = {};
+  constants.is_tiled_3d_endian_scale = 1u | (uint32_t(endian) << 2);
+  constants.guest_offset = 0;
+  constants.guest_pitch_aligned = pitch_aligned;
+  constants.size_blocks[0] = blocks_w;
+  constants.size_blocks[1] = blocks_h;
+  constants.size_blocks[2] = 1;
+  constants.host_offset = 0;
+  constants.host_pitch = layout.host_pitch;
+  constants.height_texels = blocks_h;
+
+  // Twice: repeated dispatch over a re-sentineled dest must be deterministic.
+  for (int pass = 0; pass < 2; ++pass) {
+    std::memset(dest.contents, metal::kShadowDestSentinel, layout.total_size);
+    REQUIRE(h.Dispatch(h.pipelines.pipeline(size_t(index)), constants, dest,
+                       source, (blocks_w + 7) / 8, blocks_h, 1));
+    metal::ShadowCompareResult result = metal::CompareShadowDest(
+        static_cast<const uint8_t*>(dest.contents), cpu.data(), layout);
+    INFO("shape " << blocks_w << "x" << blocks_h << " pitch " << pitch_aligned
+                  << " endian " << uint32_t(endian) << " pass " << pass);
+    if (!result.match) {
+      FAIL("shadow compare failed: guard=" << result.guard_violation
+           << " off="
+           << (result.guard_violation ? result.guard_offset
+                                      : result.first_mismatch_offset));
+    }
+    REQUIRE(result.bytes_compared == uint64_t(blocks_w) * 4 * blocks_h);
+  }
+  SUCCEED();
+}
+
+TEST_CASE("shadow layout: representative strict RGBA8 matches CPU untile "
+          "byte-for-byte on device",
+          "[l1][metal][loadshader][shadow]") {
+  REQUIRE_DEVICE();
+  RunShadowShapeCase(128, 128, 128, xenos::Endian::k8in32);
+}
+
+TEST_CASE("shadow layout: odd non-aligned dimensions and pitch",
+          "[l1][metal][loadshader][shadow]") {
+  REQUIRE_DEVICE();
+  RunShadowShapeCase(41, 17, 64, xenos::Endian::k8in32);
+  RunShadowShapeCase(33, 47, 64, xenos::Endian::k8in32);
+  RunShadowShapeCase(100, 7, 128, xenos::Endian::k8in32);
+}
+
+TEST_CASE("shadow layout: every 32bpb endian mode matches the CPU helper",
+          "[l1][metal][loadshader][shadow]") {
+  REQUIRE_DEVICE();
+  RunShadowShapeCase(24, 8, 32, xenos::Endian::kNone);
+  RunShadowShapeCase(24, 8, 32, xenos::Endian::k8in16);
+  RunShadowShapeCase(24, 8, 32, xenos::Endian::k8in32);
+  RunShadowShapeCase(24, 8, 32, xenos::Endian::k16in32);
 }
 
 }  // namespace

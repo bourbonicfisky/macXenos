@@ -47,6 +47,25 @@ class MetalLoadShaderPipelines {
   static constexpr uint32_t kBufferIndexDest = 1;
   static constexpr uint32_t kBufferIndexSource = 2;
 
+  // Host mirror of the MSL push_const_struct_xe for the texture-load family
+  // (texture_load.xesli) — the ONE packing definition every dispatcher and
+  // test must use. MSL uint3 is 16-byte aligned AND 16-byte sized, so
+  // xe_texture_load_host_offset lands at offset 32, not 28 (verified on
+  // device by the slice-2 dispatch conformance).
+  struct LoadConstants {
+    uint32_t is_tiled_3d_endian_scale;           // 0
+    uint32_t guest_offset;                       // 4
+    uint32_t guest_pitch_aligned;                // 8
+    uint32_t guest_z_stride_block_rows_aligned;  // 12
+    uint32_t size_blocks[3];                     // 16
+    uint32_t pad_uint3_w;                        // 28 (uint3 padding)
+    uint32_t host_offset;                        // 32
+    uint32_t host_pitch;                         // 36
+    uint32_t height_texels;                      // 40
+    uint32_t pad_tail;                           // 44 (struct align 16)
+  };
+  static_assert(sizeof(LoadConstants) == 48, "MSL push-const ABI");
+
   // The full compiled texture-load family, in stable (sorted) order.
   static const ShaderInfo* shaders(size_t* count_out);
 

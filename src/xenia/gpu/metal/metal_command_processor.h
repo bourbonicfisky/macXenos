@@ -22,6 +22,8 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_load_shader_pipelines.h"
+#include "xenia/gpu/metal/metal_texture_load_shadow.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
 
@@ -276,6 +278,35 @@ class MetalCommandProcessor : public CommandProcessor {
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
+
+  // Strict-RGBA8 texture-load SHADOW experiment (OpenSpec gpu-texture-loads
+  // slice 3): diagnostic, default-off (XE_METAL_SHADOW_RGBA8=1). Eligible
+  // real CPU uploads stage a snapshot (texture-cache hook, no shared-memory
+  // calls while the render encoder is open); staged entries are ARMED at the
+  // IssueDraw pre-encoder seam (RequestConsumedRange + source-hash check);
+  // armed entries are ENCODED as compute dispatches on the frame command
+  // buffer inside EndFrameEncoder after the render encoder closes; the byte
+  // comparison runs from completion_actions_ once the submission completes.
+  // CPU-generated texture content stays authoritative for ALL rendering.
+  struct ShadowArmed {
+    TextureLoadShadowStage stage;
+    ShadowDestLayout layout;
+    void* dest_buffer = nullptr;  // Retained id<MTLBuffer>.
+  };
+  static constexpr uint64_t kShadowMaxPendingBytes = 96ull << 20;
+  static constexpr uint64_t kShadowMaxPendingEntries = 512;
+  void InstallShadowStageHook();
+  bool EnsureShadowPipelines();
+  void ArmPendingShadowStages();
+  void ReleaseShadowEntry(ShadowArmed& armed);
+  void LogShadowSummary(const char* when);
+  bool shadow_enabled_ = false;
+  bool shadow_pipelines_failed_ = false;
+  std::unique_ptr<MetalLoadShaderPipelines> shadow_pipelines_;
+  int shadow_pipeline_32bpb_ = -1;
+  std::vector<TextureLoadShadowStage> shadow_staged_;
+  std::vector<ShadowArmed> shadow_armed_;
+  TextureLoadShadowStats shadow_stats_;
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
   // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
