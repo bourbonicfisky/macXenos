@@ -1450,25 +1450,48 @@ void MetalCommandProcessor::PrepareRoutedTextureLoads(
   if (!route_rgba8_enabled_ || !texture_cache_ || !shared_memory_) {
     return;
   }
+  // Stale-queue flush FIRST: the writeback drain that just ran queued its
+  // shared-memory-watch invalidation; draining it here (instead of at the
+  // consuming draw's marshal) keeps it from sweeping the entries prepped
+  // below. Guest-CPU writes racing in later still evict correctly.
+  texture_cache_->DrainPendingInvalidationsNow();
   auto& regs = *register_file_;
   std::vector<MetalTextureCache::RoutedLoadPrep> preps;
-  // Enumerate the 32 texture fetch constants directly from the register
-  // file rather than the shaders' translated binding lists: at this
-  // pre-encoder seam a FIRST-USE shader has not been translated yet
-  // (translation runs later in IssueDraw), so its binding list is empty —
-  // single-frame trace replays would prepare nothing. Raw fetch-constant
-  // enumeration is translation-independent and self-limiting: non-texture
-  // slots, non-strict formats, snapshot-served classes and cache hits all
-  // reject in PrepareRoutedLoad, and an over-approximated prep (a constant
-  // no draw consumes) is a bounded routed_ready_ entry consumed by the
-  // next matching miss or dropped at shutdown (counted). Signed bindings
-  // key separately and stay on the CPU path (strict class is unsigned).
-  for (uint32_t slot = 0; slot < 32; ++slot) {
-    auto fetch = regs.GetTextureFetch(slot);
-    MetalTextureCache::RoutedLoadPrep prep;
-    if (texture_cache_->PrepareRoutedLoad(fetch, /*is_signed=*/false,
-                                          &prep)) {
-      preps.push_back(std::move(prep));
+  // Enumeration is HYBRID (live finding: prep timing decides survival).
+  // Preferred: the shaders' translated binding lists — they name exactly
+  // what THIS draw samples, so the prep lands at the consuming draw's own
+  // post-drain seam and no writeback can intervene before consumption
+  // (fetch-constant scanning prepped whole frames early and ~92% of
+  // entries died to mid-frame writeback invalidation: 11,904 prepared /
+  // 825 served in the live JC2 probe run, with ~35 GB of wasted staging).
+  // Fallback: a FIRST-USE shader is untranslated at this seam (translation
+  // runs later in IssueDraw), its binding list empty — there, scan the 32
+  // texture fetch constants (single-frame trace replays are all first-use;
+  // the scan is self-limiting via the strict/service/key checks and the
+  // routed_ready_ invalidation sweep keeps stale preps out of draws).
+  bool have_bindings = false;
+  for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+    if (!shader) {
+      continue;
+    }
+    for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+      have_bindings = true;
+      auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+      MetalTextureCache::RoutedLoadPrep prep;
+      if (texture_cache_->PrepareRoutedLoad(fetch, binding.is_signed,
+                                            &prep)) {
+        preps.push_back(std::move(prep));
+      }
+    }
+  }
+  if (!have_bindings) {
+    for (uint32_t slot = 0; slot < 32; ++slot) {
+      auto fetch = regs.GetTextureFetch(slot);
+      MetalTextureCache::RoutedLoadPrep prep;
+      if (texture_cache_->PrepareRoutedLoad(fetch, /*is_signed=*/false,
+                                            &prep)) {
+        preps.push_back(std::move(prep));
+      }
     }
   }
   if (preps.empty()) {
@@ -5283,16 +5306,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         frontbuffer_height, frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
-  }
-  // TEMP 5R.3 perf probe (removed after the matched-run measurement):
-  // cumulative CPU-untile + route counters every 600 swaps so settled-window
-  // per-frame deltas are computable from the log in BOTH route modes.
-  if (texture_cache_ && count && (count % 600) == 0) {
-    XELOGI("MetalPerf5R swap={} untileOps={} untileBytes={} untileUsec={} "
-           "routedServed={} routedInval={}",
-           count, texture_cache_->untile_ops(), texture_cache_->untile_bytes(),
-           texture_cache_->untile_usec(), texture_cache_->routed_served(),
-           texture_cache_->routed_ready_invalidated());
   }
 
   // MetalFlicker probe (testing framework): async center-strip readback of

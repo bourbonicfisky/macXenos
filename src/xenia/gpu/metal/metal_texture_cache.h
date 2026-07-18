@@ -159,6 +159,13 @@ class MetalTextureCache {
   void CommitRoutedLoad(RoutedLoadPrep&& prep);
   void ReleaseRoutedPrep(RoutedLoadPrep&& prep);
   uint64_t routed_served() const { return routed_served_; }
+  // Slice 5R: the routed prepass drains the pending-invalidation queue
+  // BEFORE preparing — a queued invalidation from the just-completed
+  // writeback drain is chronologically stale (its write predates the
+  // prep), and letting it drain at the consuming draw's marshal was
+  // sweeping every freshly-prepped entry (live: 14,016 prepped / 68
+  // served before this ordering fix).
+  void DrainPendingInvalidationsNow() { DrainPendingInvalidations(); }
   uint64_t routed_ready_invalidated() const {
     return routed_ready_invalidated_;
   }
