@@ -42,15 +42,24 @@ inline bool IsStrictRgba8Eligible(const xenos::xe_gpu_texture_fetch_t& fetch,
   if (fetch.format != xenos::TextureFormat::k_8_8_8_8) {
     return false;
   }
-  // Unsigned only: the binding must not be signed, and every per-component
-  // sign must be unsigned (strictly stronger than the binding bit alone).
+  // Unsigned binding only (signed fetches are a separate SNORM-view
+  // binding). Per-component signs may be kUnsigned or kGamma —
+  // both sample the same unorm BYTES (gamma is a sampling-time transfer
+  // curve in the translated shader, not an upload transform), and the
+  // shipped exact-cover snapshot reader serves this class without
+  // consulting component signs at all. kSigned/kUnsignedBiased components
+  // change value interpretation classes and stay excluded.
+  // (5R amendment, user-approved 2026-07-18: the entire live JC2
+  // resolve-backed pool is gamma-signed; unsigned-only excluded it.)
   if (is_signed) {
     return false;
   }
-  if (fetch.sign_x != xenos::TextureSign::kUnsigned ||
-      fetch.sign_y != xenos::TextureSign::kUnsigned ||
-      fetch.sign_z != xenos::TextureSign::kUnsigned ||
-      fetch.sign_w != xenos::TextureSign::kUnsigned) {
+  auto sign_ok = [](xenos::TextureSign s) {
+    return s == xenos::TextureSign::kUnsigned ||
+           s == xenos::TextureSign::kGamma;
+  };
+  if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
+      !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
     return false;
   }
   if (!fetch.tiled) {

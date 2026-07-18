@@ -5230,6 +5230,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
   }
+  // TEMP 5R.3 perf probe (removed after the matched-run measurement):
+  // cumulative CPU-untile + route counters every 600 swaps so settled-window
+  // per-frame deltas are computable from the log in BOTH route modes.
+  if (texture_cache_ && count && (count % 600) == 0) {
+    XELOGI("MetalPerf5R swap={} untileOps={} untileBytes={} untileUsec={} "
+           "routedServed={} routedInval={}",
+           count, texture_cache_->untile_ops(), texture_cache_->untile_bytes(),
+           texture_cache_->untile_usec(), texture_cache_->routed_served(),
+           texture_cache_->routed_ready_invalidated());
+  }
 
   // MetalFlicker probe (testing framework): async center-strip readback of
   // the presented texture; each swap reads the PREVIOUS swap's strip (a full
