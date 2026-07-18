@@ -708,6 +708,46 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
+  // Slice-5R shadow staging (temporary; hook null unless
+  // XE_METAL_SHADOW_RGBA8R=1): the RESOLVE-BACKED strict class only — a
+  // resolved-target base reaching this untile is service==kRamContent by
+  // construction (snapshot services returned above). The untile has fully
+  // completed (dispatch_apply is synchronous); the snapshot preserves the
+  // exact authoritative bytes; NO shared-memory call happens here.
+  if (shadow_stage_hook_ && !is_cube && !is_3d &&
+      endian == fetch.endianness &&
+      resolved_targets_.find(base) != resolved_targets_.end() &&
+      IsStrictRgba8Eligible(fetch, is_signed, width, height, pitch_texels)) {
+    uint64_t range_key = (uint64_t(blocks_w) << 40) |
+                         (uint64_t(blocks_h) << 16) |
+                         uint64_t(pitch_blocks_aligned);
+    auto srit = shadow_range_cache_.find(range_key);
+    if (srit == shadow_range_cache_.end()) {
+      srit = shadow_range_cache_
+                 .emplace(range_key,
+                          ComputeStrictRgba8SourceRange(
+                              0, blocks_w, blocks_h, pitch_blocks_aligned,
+                              kPhysicalSize))
+                 .first;
+    }
+    const ShadowSourceRange& rel = srit->second;
+    if (rel.valid && uint64_t(base) + rel.end <= kPhysicalSize) {
+      TextureLoadShadowStage stage;
+      stage.base = base;
+      stage.blocks_w = blocks_w;
+      stage.blocks_h = blocks_h;
+      stage.pitch_blocks_aligned = pitch_blocks_aligned;
+      stage.endian = uint32_t(endian);
+      stage.source_range.begin = base + rel.begin;
+      stage.source_range.end = base + rel.end;
+      stage.source_range.valid = true;
+      stage.source_hash =
+          XXH3_64bits(guest + rel.begin, rel.end - rel.begin);
+      stage.cpu_linear = linear;
+      shadow_stage_hook_(std::move(stage));
+    }
+  }
+
 
   // Data + row stride handed to Metal. k_4_4_4_4 is CPU-expanded here from its
   // 16bpp linear form to RGBA8 (each 4-bit channel -> 8 bits via *17), in the

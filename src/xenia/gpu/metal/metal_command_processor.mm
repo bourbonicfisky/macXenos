@@ -853,6 +853,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
+  InstallShadowStageHook();
   return true;
 }
 
@@ -889,6 +890,26 @@ void MetalCommandProcessor::ShutdownContext() {
     EndFrameEncoderAndWait();
   }
   PumpCompletedActions();
+  // Shadow-load retirement: the wait above published the last submission —
+  // pump so every in-flight comparison retires, then drop entries that never
+  // reached a commit and report the aggregate result exactly once.
+  PumpCompletedActions();
+  for (auto& armed : shadow_armed_) {
+    ReleaseShadowEntry(armed);
+    ++shadow_stats_.dropped_no_command_buffer;
+  }
+  shadow_armed_.clear();
+  for (auto& stage : shadow_staged_) {
+    shadow_stats_.pending_bytes -= std::min<uint64_t>(
+        shadow_stats_.pending_bytes, stage.cpu_linear.size());
+    if (shadow_stats_.pending_entries) {
+      --shadow_stats_.pending_entries;
+    }
+    ++shadow_stats_.dropped_no_command_buffer;
+  }
+  shadow_staged_.clear();
+  LogShadowSummary("shutdown");
+  shadow_pipelines_.reset();
   ShutdownDrawResources();
   shared_memory_.reset();
   render_target_cache_.reset();
@@ -1234,6 +1255,175 @@ void MetalCommandProcessor::PumpCompletedActions() {
   }
 }
 
+// ---- Strict-RGBA8 texture-load shadow (slice 5R, temporary gate instrumentation) ----
+
+void MetalCommandProcessor::InstallShadowStageHook() {
+  shadow_enabled_ = std::getenv("XE_METAL_SHADOW_RGBA8R") != nullptr;
+  if (!shadow_enabled_ || !texture_cache_) {
+    return;
+  }
+  XELOGI(
+      "MetalShadowRGBA8: ENABLED (diagnostic; CPU path stays authoritative "
+      "for all rendering)");
+  texture_cache_->SetShadowStageHook([this](TextureLoadShadowStage&& stage) {
+    ++shadow_stats_.eligible_uploads;
+    uint64_t stage_bytes = stage.cpu_linear.size();
+    if (shadow_stats_.pending_entries >= kShadowMaxPendingEntries ||
+        shadow_stats_.pending_bytes + stage_bytes > kShadowMaxPendingBytes) {
+      ++shadow_stats_.dropped_over_budget;
+      return;
+    }
+    shadow_stats_.pending_bytes += stage_bytes;
+    ++shadow_stats_.pending_entries;
+    shadow_stats_.high_water_bytes =
+        std::max(shadow_stats_.high_water_bytes, shadow_stats_.pending_bytes);
+    shadow_stats_.high_water_entries = std::max(
+        shadow_stats_.high_water_entries, shadow_stats_.pending_entries);
+    ++shadow_stats_.staged;
+    shadow_staged_.push_back(std::move(stage));
+  });
+}
+
+bool MetalCommandProcessor::EnsureShadowPipelines() {
+  if (shadow_pipelines_ && shadow_pipeline_32bpb_ >= 0) {
+    return true;
+  }
+  if (shadow_pipelines_failed_) {
+    return false;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  void* device = provider ? provider->device() : nullptr;
+  auto pipelines = std::make_unique<MetalLoadShaderPipelines>();
+  if (!device || !pipelines->Initialize(device)) {
+    XELOGE("MetalShadowRGBA8: load-shader pipeline init failed; disabling");
+    shadow_pipelines_failed_ = true;
+    shadow_enabled_ = false;
+    return false;
+  }
+  shadow_pipeline_32bpb_ = pipelines->FindIndex("texture_load_32bpb_cs");
+  if (shadow_pipeline_32bpb_ < 0) {
+    XELOGE("MetalShadowRGBA8: texture_load_32bpb_cs missing; disabling");
+    shadow_pipelines_failed_ = true;
+    shadow_enabled_ = false;
+    return false;
+  }
+  shadow_pipelines_ = std::move(pipelines);
+  return true;
+}
+
+void MetalCommandProcessor::ReleaseShadowEntry(ShadowArmed& armed) {
+  if (armed.dest_buffer) {
+    id<MTLBuffer> dest = (__bridge_transfer id<MTLBuffer>)armed.dest_buffer;
+    (void)dest;
+    armed.dest_buffer = nullptr;
+  }
+  uint64_t bytes = armed.stage.cpu_linear.size() + armed.layout.total_size;
+  shadow_stats_.pending_bytes -=
+      std::min<uint64_t>(shadow_stats_.pending_bytes, bytes);
+  if (shadow_stats_.pending_entries) {
+    --shadow_stats_.pending_entries;
+  }
+}
+
+// Arms staged shadow entries at the pre-encoder seam: validates the exact
+// source range into the shared buffer (the SAME RequestConsumedRange +
+// hazard-flush semantics the vfetch path uses at this seam — a flush here
+// commits the open frame, which encodes any already-armed entries first, so
+// they read the pre-rewrite bytes their snapshots saw), then verifies the
+// buffer content still hashes to the snapshot-time source hash. A mutated
+// source is dropped and counted — never dispatched into a false mismatch.
+void MetalCommandProcessor::ArmPendingShadowStages() {
+  if (!shadow_enabled_ || shadow_staged_.empty()) {
+    return;
+  }
+  if (!EnsureShadowPipelines() || !shared_memory_) {
+    for (auto& stage : shadow_staged_) {
+      shadow_stats_.pending_bytes -= std::min<uint64_t>(
+          shadow_stats_.pending_bytes, stage.cpu_linear.size());
+      if (shadow_stats_.pending_entries) {
+        --shadow_stats_.pending_entries;
+      }
+      ++shadow_stats_.dropped_request_failed;
+    }
+    shadow_staged_.clear();
+    return;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  id<MTLDevice> device =
+      provider ? (__bridge id<MTLDevice>)provider->device() : nil;
+  id<MTLBuffer> sm_buffer =
+      (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  std::vector<TextureLoadShadowStage> staged = std::move(shadow_staged_);
+  shadow_staged_.clear();
+  for (auto& stage : staged) {
+    uint32_t begin = stage.source_range.begin;
+    uint32_t length = stage.source_range.end - begin;
+    auto drop = [&](uint64_t& counter) {
+      shadow_stats_.pending_bytes -= std::min<uint64_t>(
+          shadow_stats_.pending_bytes, stage.cpu_linear.size());
+      if (shadow_stats_.pending_entries) {
+        --shadow_stats_.pending_entries;
+      }
+      ++counter;
+    };
+    if (!shared_memory_->RequestConsumedRange(begin, length)) {
+      drop(shadow_stats_.dropped_request_failed);
+      continue;
+    }
+    const uint8_t* contents =
+        static_cast<const uint8_t*>([sm_buffer contents]);
+    if (XXH3_64bits(contents + begin, length) != stage.source_hash) {
+      drop(shadow_stats_.dropped_source_mutated);
+      continue;
+    }
+    ShadowDestLayout layout =
+        ComputeShadowDestLayout(stage.blocks_w, stage.blocks_h);
+    id<MTLBuffer> dest =
+        [device newBufferWithLength:layout.total_size
+                            options:MTLResourceStorageModeShared];
+    if (!dest) {
+      drop(shadow_stats_.dropped_request_failed);
+      continue;
+    }
+    std::memset(dest.contents, kShadowDestSentinel, layout.total_size);
+    shadow_stats_.pending_bytes += layout.total_size;
+    shadow_stats_.high_water_bytes =
+        std::max(shadow_stats_.high_water_bytes, shadow_stats_.pending_bytes);
+    ShadowArmed armed;
+    armed.stage = std::move(stage);
+    armed.layout = layout;
+    armed.dest_buffer = (__bridge_retained void*)dest;
+    shadow_armed_.push_back(std::move(armed));
+  }
+}
+
+void MetalCommandProcessor::LogShadowSummary(const char* when) {
+  if (!shadow_enabled_ && !shadow_stats_.eligible_uploads) {
+    return;
+  }
+  const auto& s = shadow_stats_;
+  XELOGI(
+      "MetalShadowRGBA8[{}]: eligible={} staged={} dispatched={} "
+      "bytesCompared={} matches={} mismatches={} guardViol={} "
+      "drops(budget={} srcMut={} reqFail={} noCb={}) pending(entries={} "
+      "bytes={}) highWater(entries={} bytes={})",
+      when, s.eligible_uploads, s.staged, s.dispatches_completed,
+      s.bytes_compared, s.exact_matches, s.mismatches, s.guard_violations,
+      s.dropped_over_budget, s.dropped_source_mutated,
+      s.dropped_request_failed, s.dropped_no_command_buffer,
+      s.pending_entries, s.pending_bytes, s.high_water_entries,
+      s.high_water_bytes);
+  if (s.have_first_mismatch) {
+    XELOGW(
+        "MetalShadowRGBA8[{}]: first mismatch base={:08X} destOff={} "
+        "expected={:02X} actual={:02X}",
+        when, s.first_mismatch_base, s.first_mismatch_offset,
+        s.first_mismatch_expected, s.first_mismatch_actual);
+  }
+}
+
 void MetalCommandProcessor::EndRenderEncoder() {
   if (!frame_open_) {
     return;
@@ -1255,11 +1445,111 @@ void MetalCommandProcessor::EndFrameEncoder() {
   frame_command_buffer_ = nullptr;
   ++frame_commit_count_;
   draws_since_commit_ = 0;
+  // Shadow-load dispatches: encoded HERE, after the render encoder closed
+  // naturally and before this command buffer commits — same submission, no
+  // extra queue/commit/wait. The deferred comparison retires through
+  // completion_actions_ below once the submission completes.
+  std::shared_ptr<std::vector<ShadowArmed>> shadow_batch;
+  if (!shadow_armed_.empty()) {
+    if (shadow_pipelines_ && shadow_pipeline_32bpb_ >= 0 && shared_memory_) {
+      shadow_batch = std::make_shared<std::vector<ShadowArmed>>(
+          std::move(shadow_armed_));
+      shadow_armed_.clear();
+      id<MTLComputeCommandEncoder> shadow_enc =
+          [command_buffer computeCommandEncoder];
+      [shadow_enc
+          setComputePipelineState:
+              (__bridge id<MTLComputePipelineState>)shadow_pipelines_->pipeline(
+                  size_t(shadow_pipeline_32bpb_))];
+      [shadow_enc setBuffer:(__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+                     offset:0
+                    atIndex:MetalLoadShaderPipelines::kBufferIndexSource];
+      for (auto& armed : *shadow_batch) {
+        MetalLoadShaderPipelines::LoadConstants constants = {};
+        constants.is_tiled_3d_endian_scale = 1u | (armed.stage.endian << 2);
+        constants.guest_offset = armed.stage.base;
+        constants.guest_pitch_aligned = armed.stage.pitch_blocks_aligned;
+        constants.size_blocks[0] = armed.stage.blocks_w;
+        constants.size_blocks[1] = armed.stage.blocks_h;
+        constants.size_blocks[2] = 1;
+        constants.host_offset = 0;
+        constants.host_pitch = armed.layout.host_pitch;
+        constants.height_texels = armed.stage.blocks_h;
+        [shadow_enc setBytes:&constants
+                      length:sizeof(constants)
+                     atIndex:MetalLoadShaderPipelines::kBufferIndexPushConstants];
+        [shadow_enc setBuffer:(__bridge id<MTLBuffer>)armed.dest_buffer
+                       offset:0
+                      atIndex:MetalLoadShaderPipelines::kBufferIndexDest];
+        uint32_t threads_x = (armed.stage.blocks_w + 7u) / 8u;
+        MTLSize group =
+            MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
+                        MetalLoadShaderPipelines::kThreadgroupSizeY, 1);
+        MTLSize groups = MTLSizeMake(
+            (threads_x + group.width - 1) / group.width,
+            (armed.stage.blocks_h + group.height - 1) / group.height, 1);
+        [shadow_enc dispatchThreadgroups:groups threadsPerThreadgroup:group];
+      }
+      [shadow_enc endEncoding];
+    } else {
+      for (auto& armed : shadow_armed_) {
+        ReleaseShadowEntry(armed);
+        ++shadow_stats_.dropped_no_command_buffer;
+      }
+      shadow_armed_.clear();
+    }
+  }
   // S7/S8: assign this commit its submission id; the completion handler
   // publishes it and records faults (drained + logged + auto-recovered on
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  if (shadow_batch) {
+    completion_actions_.emplace_back(submission, [this, shadow_batch]() {
+      for (auto& armed : *shadow_batch) {
+        const uint8_t* dest = static_cast<const uint8_t*>(
+            [(__bridge id<MTLBuffer>)armed.dest_buffer contents]);
+        ShadowCompareResult result = CompareShadowDest(
+            dest, armed.stage.cpu_linear.data(), armed.layout);
+        ++shadow_stats_.dispatches_completed;
+        shadow_stats_.bytes_compared += result.bytes_compared;
+        if (result.guard_violation) {
+          ++shadow_stats_.guard_violations;
+        }
+        if (result.match) {
+          ++shadow_stats_.exact_matches;
+        } else if (!result.guard_violation) {
+          ++shadow_stats_.mismatches;
+        }
+        if (!result.match && !shadow_stats_.have_first_mismatch) {
+          shadow_stats_.have_first_mismatch = true;
+          shadow_stats_.first_mismatch_base = armed.stage.base;
+          shadow_stats_.first_mismatch_offset =
+              result.guard_violation ? result.guard_offset
+                                     : result.first_mismatch_offset;
+          shadow_stats_.first_mismatch_expected =
+              result.guard_violation ? kShadowDestSentinel
+                                     : result.expected_value;
+          shadow_stats_.first_mismatch_actual =
+              result.guard_violation ? dest[result.guard_offset]
+                                     : result.actual_value;
+          XELOGW(
+              "MetalShadowRGBA8: FIRST {} base={:08X} {}x{} destOff={} "
+              "expected={:02X} actual={:02X}",
+              result.guard_violation ? "GUARD-VIOLATION" : "MISMATCH",
+              armed.stage.base, armed.stage.blocks_w, armed.stage.blocks_h,
+              shadow_stats_.first_mismatch_offset,
+              shadow_stats_.first_mismatch_expected,
+              shadow_stats_.first_mismatch_actual);
+        }
+        ReleaseShadowEntry(armed);
+      }
+      if (shadow_stats_.dispatches_completed < 64 ||
+          (shadow_stats_.dispatches_completed & 63) == 0) {
+        LogShadowSummary("periodic");
+      }
+    });
+  }
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -2130,6 +2420,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       DrainPendingWritebacks();
     }
   }
+
+  // Slice-5R POST-DRAIN seam: shadow arming (and later the routed prepass)
+  // runs strictly AFTER the pre-draw writeback-overlap flush above, so
+  // every armed source range reflects post-scatter RAM (the 5R invariant).
+  // Still pre-encoder: BeginFrameEncoder for this draw runs below.
+  ArmPendingShadowStages();
 
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
