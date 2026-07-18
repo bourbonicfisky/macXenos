@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
-#include "xenia/gpu/metal/metal_texture_load_shadow.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
 
@@ -58,11 +57,12 @@ class MetalTextureCache {
   uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch,
                           bool is_signed = false);
 
-  // Slice 5R: the shared service classification for a fetch whose base may
-  // be a registered resolve target. The serve chain in GetTextureSlot and
-  // the routed-load prepass both use this — one decision, no duplicated
-  // exact-cover/bridge guards. Stable within a draw (resolved_targets_
-  // mutates only at IssueCopy).
+  // The ONE resolve-backed service classification for a fetch whose base may
+  // be a registered resolve target. The serve chain in GetTextureSlot (and
+  // any future consumer deciding how a resolve-backed fetch is served)
+  // classifies through this — one decision, no duplicated exact-cover/bridge
+  // guards. Stable within a draw (resolved_targets_ mutates only at
+  // IssueCopy).
   ResolvedFetchService ClassifyFetchService(
       const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) const;
 
@@ -119,64 +119,6 @@ class MetalTextureCache {
   void ReclaimStaleSlots(uint64_t completed_submission);
 
   // Tags retires with the submission that may last reference them.
-  // Slice-5R shadow staging (temporary gate instrumentation): an eligible
-  // RESOLVE-BACKED real upload (strict predicate + service==kRamContent,
-  // which is guaranteed at the untile since snapshot services returned
-  // earlier) stages a snapshot of the completed CPU linear output plus the
-  // exact source range and its raw-content hash. No shared-memory calls in
-  // the hook (render encoder open); arming happens at the command
-  // processor's POST-DRAIN seam. Null (default) disables all shadow work.
-  void SetShadowStageHook(
-      std::function<void(TextureLoadShadowStage&&)> hook) {
-    shadow_stage_hook_ = std::move(hook);
-  }
-
-  // Strict-RGBA8 GPU-load ROUTE (slice 5R, default-off). The
-  // command processor prepares eligible cache-missing fetches at its
-  // pre-encoder seam: PrepareRoutedLoad checks eligibility + miss and
-  // creates the destination MTLTexture; after the compute-load + blit are
-  // encoded, CommitRoutedLoad parks the texture; the draw's GetTextureSlot
-  // then consumes it in place of the CPU untile and finalizes through the
-  // IDENTICAL tail (swizzle view, slot, trace record, cache entry) — same
-  // key, same trace ranges, same lifetime. Any failure before commit means
-  // the entry never exists and the unchanged CPU path runs.
-  struct RoutedLoadPrep {
-    uint64_t key = 0;
-    uint32_t base = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t blocks_w = 0;
-    uint32_t blocks_h = 0;
-    uint32_t pitch_blocks_aligned = 0;
-    uint32_t endian = 0;
-    ShadowSourceRange range;      // Absolute guest byte range the shader reads.
-    uint32_t guest_bytes = 0;     // Watched extent for invalidation overlap.
-    ShadowDestLayout layout;      // Staging layout (256-aligned rows).
-    void* texture = nullptr;      // Retained id<MTLTexture> (dest).
-  };
-  bool PrepareRoutedLoad(const xenos::xe_gpu_texture_fetch_t& fetch,
-                         bool is_signed, RoutedLoadPrep* out);
-  void CommitRoutedLoad(RoutedLoadPrep&& prep);
-  void ReleaseRoutedPrep(RoutedLoadPrep&& prep);
-  uint64_t routed_served() const { return routed_served_; }
-  // Slice 5R: the routed prepass drains the pending-invalidation queue
-  // BEFORE preparing — a queued invalidation from the just-completed
-  // writeback drain is chronologically stale (its write predates the
-  // prep), and letting it drain at the consuming draw's marshal was
-  // sweeping every freshly-prepped entry (live: 14,016 prepped / 68
-  // served before this ordering fix).
-  void DrainPendingInvalidationsNow() { DrainPendingInvalidations(); }
-  uint64_t routed_ready_invalidated() const {
-    return routed_ready_invalidated_;
-  }
-  // Perf accounting (the CPU cost routing eliminates); temporary 5R.3
-  // instrumentation surface.
-  uint64_t untile_ops() const { return untile_ops_; }
-  uint64_t untile_bytes() const { return untile_bytes_; }
-  uint64_t untile_usec() const { return untile_usec_; }
-  size_t routed_ready_pending() const { return routed_ready_.size(); }
-  void DropRoutedReady();
-
   void SetSubmissionProvider(std::function<uint64_t()> provider) {
     submission_provider_ = std::move(provider);
   }
@@ -251,25 +193,6 @@ class MetalTextureCache {
   // complete.
   std::vector<std::pair<uint64_t, void*>> retired_textures_;
   std::function<uint64_t()> submission_provider_;
-  std::function<void(TextureLoadShadowStage&&)> shadow_stage_hook_;
-  // Prepared-but-not-yet-consumed routed textures, keyed by texture key.
-  // Entries obey the SAME invalidation as cache entries — a writeback or
-  // CPU write overlapping [base, base+guest_bytes) drops the pending entry
-  // (its content predates the write). Bounded: consumed by the next miss
-  // for the key, invalidated, or dropped at shutdown.
-  struct RoutedReadyEntry {
-    void* texture = nullptr;  // Retained id<MTLTexture>.
-    uint32_t base = 0;
-    uint32_t guest_bytes = 0;
-  };
-  std::unordered_map<uint64_t, RoutedReadyEntry> routed_ready_;
-  uint64_t routed_served_ = 0;
-  uint64_t routed_ready_invalidated_ = 0;
-  uint64_t untile_ops_ = 0;
-  uint64_t untile_bytes_ = 0;
-  uint64_t untile_usec_ = 0;
-
-  std::unordered_map<uint64_t, ShadowSourceRange> shadow_range_cache_;
   bool BuildResolvedServiceInputs(const xenos::xe_gpu_texture_fetch_t& fetch,
                                   bool is_signed,
                                   ResolvedFetchServiceInputs* out) const;

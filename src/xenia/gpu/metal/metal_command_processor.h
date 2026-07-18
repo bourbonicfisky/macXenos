@@ -21,8 +21,6 @@
 #include <vector>
 
 #include "xenia/gpu/command_processor.h"
-#include "xenia/gpu/metal/metal_load_shader_pipelines.h"
-#include "xenia/gpu/metal/metal_texture_load_shadow.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
@@ -277,75 +275,14 @@ class MetalCommandProcessor : public CommandProcessor {
   std::atomic<uint64_t> completed_submission_{0};
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
   // Submissions whose command buffer FAULTED (GPU error status): their GPU
-  // work never executed. Shadow comparisons attribute these as fault-drops
-  // (the dispatch was lost with the rest of the buffer — not load-path
-  // divergence), and routed texture-cache entries created by them are
-  // evicted (their content was never written). GPU-thread only; bounded.
+  // work never executed, yet the submission still publishes as completed
+  // for reclamation. Recorded (GPU-thread only; bounded) as the seed
+  // evidence for the command-buffer fault-attribution task, which
+  // attributes the first failing submission by encoder label and resource
+  // class before any lifetime fix.
   std::unordered_set<uint64_t> faulted_submissions_;
-  // Guest ranges of routed loads encoded into the OPEN command buffer;
-  // attached to its submission at commit for fault-time eviction.
-  std::vector<std::pair<uint32_t, uint32_t>> routed_ranges_open_cb_;
-  std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>
-      routed_ranges_by_submission_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
-
-  // Strict-RGBA8 texture-load SHADOW experiment (OpenSpec gpu-texture-loads
-  // slice 3): diagnostic, default-off (XE_METAL_SHADOW_RGBA8R=1). Eligible
-  // real CPU uploads stage a snapshot (texture-cache hook, no shared-memory
-  // calls while the render encoder is open); staged entries are ARMED at the
-  // IssueDraw pre-encoder seam (RequestConsumedRange + source-hash check);
-  // armed entries are ENCODED as compute dispatches on the frame command
-  // buffer inside EndFrameEncoder after the render encoder closes; the byte
-  // comparison runs from completion_actions_ once the submission completes.
-  // CPU-generated texture content stays authoritative for ALL rendering.
-  struct ShadowArmed {
-    TextureLoadShadowStage stage;
-    ShadowDestLayout layout;
-    void* dest_buffer = nullptr;  // Retained id<MTLBuffer>.
-  };
-  static constexpr uint64_t kShadowMaxPendingBytes = 96ull << 20;
-  static constexpr uint64_t kShadowMaxPendingEntries = 512;
-  void InstallShadowStageHook();
-  bool EnsureShadowPipelines();
-  void ArmPendingShadowStages();
-  void ReleaseShadowEntry(ShadowArmed& armed);
-  void LogShadowSummary(const char* when);
-  // Strict-RGBA8 GPU-load ROUTE (slice 5R, default-off:
-  // XE_METAL_ROUTE_RGBA8R=1). PrepareRoutedTextureLoads runs at the POST-DRAIN
-  // pre-encoder seam (after the writeback-overlap flush): per eligible cache-missing fetch it
-  // validates the exact shared-memory range, encodes the compute load +
-  // buffer->texture blit on the frame command buffer (via the existing
-  // PrepareTransferCommandBuffer pass boundary), and parks the finished
-  // texture for the draw's GetTextureSlot to consume — CPU untile skipped
-  // only for committed successes; every failure falls back untouched.
-  struct RouteStats {
-    uint64_t prepared = 0;
-    uint64_t routed_encoded = 0;
-    uint64_t request_failed = 0;
-    uint64_t alloc_failed = 0;
-    uint64_t no_command_buffer = 0;
-    uint64_t encoder_transitions = 0;  // Render encoder ended by a prepass.
-    uint64_t staging_bytes = 0;        // Lifetime total.
-    uint64_t pending_staging_bytes = 0;
-    uint64_t high_water_staging_bytes = 0;
-  };
-  void PrepareRoutedTextureLoads(class MetalShader* vertex_shader,
-                                 class MetalShader* pixel_shader);
-  void LogRouteSummary(const char* when);
-  bool route_rgba8_enabled_ = false;
-  RouteStats route_stats_;
-  // Retained staging id<MTLBuffer>s awaiting the next commit's completion.
-  std::vector<void*> routed_staging_pending_;
-
-  bool shadow_enabled_ = false;
-  bool shadow_pipelines_failed_ = false;
-  std::unique_ptr<MetalLoadShaderPipelines> shadow_pipelines_;
-  int shadow_pipeline_32bpb_ = -1;
-  std::vector<TextureLoadShadowStage> shadow_staged_;
-  std::vector<ShadowArmed> shadow_armed_;
-  TextureLoadShadowStats shadow_stats_;
-
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
   // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
