@@ -59,12 +59,23 @@ class InputDriver {
   virtual X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                                    X_INPUT_CAPABILITIES* out_caps) = 0;
   virtual X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) = 0;
+  // Host UI and hotkey polling must be able to inspect a controller without
+  // advancing deterministic or event-driven input. Physical drivers keep
+  // their existing behavior by default.
+  virtual X_RESULT GetStateSnapshot(uint32_t user_index,
+                                    X_INPUT_STATE* out_state) {
+    return GetState(user_index, out_state);
+  }
   virtual X_RESULT SetState(uint32_t user_index,
                             X_INPUT_VIBRATION* vibration) = 0;
   virtual X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                                 X_INPUT_KEYSTROKE* out_keystroke) = 0;
 
   virtual InputType GetInputType() const = 0;
+
+  // Physical controller drivers use the host-configured stick deadzone by
+  // default. Deterministic or already-normalized drivers may opt out.
+  virtual bool AppliesInputDeadzone() const { return true; }
 
   // Reports the identity of the controller in the given slot for UI display.
   // Returns false (and leaves out_identity untouched) for drivers that have no

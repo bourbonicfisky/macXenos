@@ -84,6 +84,7 @@ target_link_libraries(xenia-app PRIVATE
   xenia-gpu-null
   xenia-hid
   xenia-hid-nop
+  xenia-hid-scripted
   xenia-kernel
   xenia-patcher
   xenia-ui

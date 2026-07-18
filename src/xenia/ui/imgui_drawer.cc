@@ -956,7 +956,8 @@ void ImGuiDrawer::UpdateGamepads() {
   uint8_t controller_to_poke = XUserIndexNone;
   hid::X_INPUT_STATE gamepad_state;
   for (uint8_t i = 0; i < XUserMaxUserCount; i++) {
-    if (input_system_->GetState(i, 1, &gamepad_state) == X_ERROR_SUCCESS) {
+    if (input_system_->GetStateSnapshot(i, 1, &gamepad_state) ==
+        X_ERROR_SUCCESS) {
       if (gamepad_state.gamepad.buttons != 0) {
         controller_to_poke = i;
         break;

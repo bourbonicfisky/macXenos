@@ -277,7 +277,8 @@ void HidDemoApp::DrawUserInputGetState(uint32_t user_index) const {
   ImGui::Text("User %u:", user_index);
 
   X_INPUT_STATE state;
-  if (input_system_->GetState(user_index, &state) != X_ERROR_SUCCESS) {
+  if (input_system_->GetStateSnapshot(user_index, X_INPUT_FLAG_GAMEPAD,
+                                      &state) != X_ERROR_SUCCESS) {
     ImGui::Text(" No controller detected");
     return;
   }

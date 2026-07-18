@@ -2277,7 +2277,7 @@ void EmulatorWindow::GamepadHotKeys() {
         auto input_lock = input_sys->lock();
         for (uint32_t user_index = 0; user_index < XUserMaxUserCount;
              ++user_index) {
-          X_RESULT result = input_sys->GetState(
+          X_RESULT result = input_sys->GetStateSnapshot(
               user_index, X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD, &state);
           controller_states[user_index] = {result == X_ERROR_SUCCESS, state};
         }

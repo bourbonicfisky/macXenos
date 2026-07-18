@@ -14,7 +14,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input_driver.h"
-#include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/util/input_notification.h"
 
 #ifdef XE_PLATFORM_WIN32
 #include "xenia/hid/portal/hardware_portal.h"
@@ -74,10 +74,7 @@ void InputSystem::UpdateUsedSlot(InputDriver* driver, uint8_t slot,
 
   XELOGI(controller_slot_state_change_message[connected].c_str(), slot);
   connected_slots.flip(slot);
-  if (kernel::kernel_state()) {
-    kernel::kernel_state()->BroadcastNotification(
-        kXNotificationSystemInputDevicesChanged, 0);
-  }
+  kernel::BroadcastInputDevicesChanged();
 
   if (driver) {
     X_INPUT_CAPABILITIES capabilities = {};
@@ -208,6 +205,17 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
                                X_INPUT_STATE* out_state) {
+  return GetStateInternal(user_index, flags, out_state, false);
+}
+
+X_RESULT InputSystem::GetStateSnapshot(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_STATE* out_state) {
+  return GetStateInternal(user_index, flags, out_state, true);
+}
+
+X_RESULT InputSystem::GetStateInternal(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_STATE* out_state,
+                                       bool snapshot_only) {
   SCOPE_profile_cpu_f("hid");
 
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
@@ -216,10 +224,14 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
   }
 
   for (auto& driver : filtered_drivers) {
-    X_RESULT result = driver->GetState(user_index, out_state);
+    X_RESULT result = snapshot_only
+                          ? driver->GetStateSnapshot(user_index, out_state)
+                          : driver->GetState(user_index, out_state);
     if (result == X_ERROR_SUCCESS) {
       UpdateUsedSlot(driver, user_index, true);
-      AdjustDeadzoneLevels(user_index, &out_state->gamepad);
+      if (driver->AppliesInputDeadzone()) {
+        AdjustDeadzoneLevels(user_index, &out_state->gamepad);
+      }
 
       if (out_state->gamepad.buttons != 0) {
         last_used_slot = user_index;

@@ -19,6 +19,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
@@ -60,6 +61,7 @@
 
 // Available input drivers:
 #include "xenia/hid/nop/nop_hid.h"
+#include "xenia/hid/scripted/scripted_hid.h"
 #if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -71,20 +73,24 @@
 #if XE_PLATFORM_WIN32
 #define APU_OPTIONS "[any, nop, sdl, xaudio2]"
 #define GPU_OPTIONS "[any, d3d12, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl, winkey, xinput]"
+#define HID_OPTIONS "[any, nop, scripted, sdl, winkey, xinput]"
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[any, alsa, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl]"
+#define HID_OPTIONS "[any, nop, scripted, sdl]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl]"
+#define HID_OPTIONS "[any, nop, scripted, sdl]"
 #endif
 
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
+DEFINE_transient_path(input_script, "",
+                      "Versioned TOML input timeline used only with "
+                      "--hid=scripted.",
+                      "HID");
 
 DEFINE_path(
     storage_root, "",
@@ -139,6 +145,10 @@ DECLARE_string(window_guest_resolution_mode);
 
 namespace xe {
 namespace app {
+
+namespace {
+std::shared_ptr<const hid::scripted::InputScript> prepared_input_script;
+}  // namespace
 
 class EmulatorApp final : public xe::ui::WindowedApp {
  public:
@@ -295,6 +305,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   std::atomic<bool> emulator_thread_quit_requested_;
   std::unique_ptr<xe::threading::Event> emulator_thread_event_;
   std::thread emulator_thread_;
+  bool scripted_input_startup_failed_ = false;
 };
 
 void EmulatorApp::DebugWindowClosedListener::OnClosing(xe::ui::UIEvent& e) {
@@ -448,7 +459,15 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
-  if (cvars::hid.compare("nop") == 0) {
+  if (cvars::hid.compare("scripted") == 0) {
+    auto driver = xe::hid::scripted::Create(
+        window, EmulatorWindow::kZOrderHidInput, prepared_input_script);
+    if (driver && XSUCCEEDED(driver->Setup())) {
+      drivers.emplace_back(std::move(driver));
+    } else {
+      XELOGE("Scripted input preflight invariant failed; refusing fallback");
+    }
+  } else if (cvars::hid.compare("nop") == 0) {
     drivers.emplace_back(
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
   } else {
@@ -500,6 +519,30 @@ bool EmulatorApp::OnInitialize() {
   XELOGI("Storage root: {}", storage_root);
 
   config::SetupConfig(storage_root);
+
+  if (cvars::hid == "scripted") {
+    auto load_result = hid::scripted::LoadInputScript(cvars::input_script);
+    if (!load_result) {
+      XELOGE("Scripted input startup failed: {}", load_result.error);
+      scripted_input_startup_failed_ = true;
+      return false;
+    }
+    prepared_input_script = std::move(load_result.script);
+    XELOGI(
+        "Scripted input loaded: path='{}' xxh3_64={:016X} version={} "
+        "player={} source_steps={} expanded_transitions={} nominal_ms={} "
+        "expected_title_id={} name='{}'",
+        xe::path_to_utf8(prepared_input_script->canonical_path()),
+        prepared_input_script->content_digest(),
+        prepared_input_script->version(), prepared_input_script->player(),
+        prepared_input_script->source_step_count(),
+        prepared_input_script->expanded_transition_count(),
+        prepared_input_script->nominal_duration().count(),
+        prepared_input_script->expected_title_id(),
+        prepared_input_script->name());
+  } else {
+    prepared_input_script.reset();
+  }
 
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();
@@ -604,7 +647,7 @@ void EmulatorApp::OnDestroy() {
 
   xe::FlushLog();
 
-  std::quick_exit(EXIT_SUCCESS);
+  std::quick_exit(scripted_input_startup_failed_ ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
 void EmulatorApp::EmulatorThread() {
