@@ -2604,12 +2604,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   texture_cache_->lineage_draw_ = trace_draw_index_;  // lineage-probe clock
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
+    // The cbuffer must cover every FLAT INDEX the translated shader reads:
+    // [0, max bindless_descriptor_index]. The translator's index space can be
+    // SPARSE (JC2's exposure shader assigns 1..6 with no 0: 4 textures + 2
+    // samplers but max index 6), so sizing by list-count under-allocates and
+    // the shader reads adjacent arena bytes as a descriptor-heap index — a
+    // wild texture pointer and a GPU page fault (the live JC2
+    // lost-command-buffer storm). Unassigned gaps read 0 = the null
+    // texture/sampler slot, which is always valid.
     uint32_t count = 1;
     if (shader) {
-      count = std::max<uint32_t>(
-          uint32_t(shader->GetTextureBindingsAfterTranslation().size() +
-                   shader->GetSamplerBindingsAfterTranslation().size()),
-          1u);
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        count = std::max(count, binding.bindless_descriptor_index + 1);
+      }
+      for (const auto& sb : shader->GetSamplerBindingsAfterTranslation()) {
+        count = std::max(count, sb.bindless_descriptor_index + 1);
+      }
     }
     if (!upload_arena_->Allocate(count * sizeof(uint32_t), 256, out)) {
       return false;
