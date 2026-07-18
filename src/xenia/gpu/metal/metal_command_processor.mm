@@ -1196,9 +1196,37 @@ bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
 
 void MetalCommandProcessor::DrainFaultedCommandBuffers() {
   std::vector<void*> faulted;
+  std::vector<uint64_t> faulted_ids;
   {
     std::lock_guard<std::mutex> lock(fault_mutex_);
     faulted.swap(faulted_command_buffers_);
+    faulted_ids.swap(faulted_submission_ids_);
+  }
+  for (uint64_t id : faulted_ids) {
+    faulted_submissions_.insert(id);
+    // Bounded: ids older than the completed horizon can never be queried
+    // again (comparisons/evictions pump at completion time).
+    if (faulted_submissions_.size() > 256) {
+      faulted_submissions_.clear();
+      faulted_submissions_.insert(id);
+    }
+    // Routed loads encoded into a faulted submission never wrote their
+    // textures: evict those cache entries (and any pending routed_ready_)
+    // so the next fetch re-produces the content instead of serving an
+    // unwritten texture.
+    auto rit = routed_ranges_by_submission_.find(id);
+    if (rit != routed_ranges_by_submission_.end()) {
+      if (texture_cache_) {
+        for (const auto& range : rit->second) {
+          texture_cache_->InvalidateRange(range.first, range.second);
+        }
+        XELOGW(
+            "MetalRouteRGBA8R: submission {} FAULTED — evicted {} routed "
+            "range(s)",
+            id, rit->second.size());
+      }
+      routed_ranges_by_submission_.erase(rit);
+    }
   }
   for (void* cb_ptr : faulted) {
     id<MTLCommandBuffer> command_buffer =
@@ -1558,6 +1586,7 @@ void MetalCommandProcessor::PrepareRoutedTextureLoads(
   [blit endEncoding];
   for (auto& e : encoded) {
     routed_staging_pending_.push_back((__bridge_retained void*)e.staging);
+    routed_ranges_open_cb_.emplace_back(e.prep.base, e.prep.guest_bytes);
     texture_cache_->CommitRoutedLoad(std::move(e.prep));
     ++route_stats_.routed_encoded;
   }
@@ -1597,12 +1626,14 @@ void MetalCommandProcessor::LogShadowSummary(const char* when) {
   XELOGI(
       "MetalShadowRGBA8[{}]: eligible={} staged={} dispatched={} "
       "bytesCompared={} matches={} mismatches={} guardViol={} "
-      "drops(budget={} srcMut={} reqFail={} noCb={}) pending(entries={} "
+      "drops(budget={} srcMut={} reqFail={} noCb={} subFault={}) "
+      "pending(entries={} "
       "bytes={}) highWater(entries={} bytes={})",
       when, s.eligible_uploads, s.staged, s.dispatches_completed,
       s.bytes_compared, s.exact_matches, s.mismatches, s.guard_violations,
       s.dropped_over_budget, s.dropped_source_mutated,
       s.dropped_request_failed, s.dropped_no_command_buffer,
+      s.dropped_submission_fault,
       s.pending_entries, s.pending_bytes, s.high_water_entries,
       s.high_water_bytes);
   if (s.have_first_mismatch) {
@@ -1694,6 +1725,16 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  if (!routed_ranges_open_cb_.empty()) {
+    routed_ranges_by_submission_[submission] =
+        std::move(routed_ranges_open_cb_);
+    routed_ranges_open_cb_.clear();
+    // Retire the record once the submission completes cleanly (fault drain
+    // erases it first when faulted).
+    completion_actions_.emplace_back(submission, [this, submission]() {
+      routed_ranges_by_submission_.erase(submission);
+    });
+  }
   if (!routed_staging_pending_.empty()) {
     auto staging = std::make_shared<std::vector<void*>>(
         std::move(routed_staging_pending_));
@@ -1709,7 +1750,19 @@ void MetalCommandProcessor::EndFrameEncoder() {
     });
   }
   if (shadow_batch) {
-    completion_actions_.emplace_back(submission, [this, shadow_batch]() {
+    completion_actions_.emplace_back(submission, [this, shadow_batch,
+                                                  submission]() {
+      // A faulted submission never executed its GPU work — the dispatches
+      // were lost with the rest of the buffer (pre-existing live fault
+      // storms; the CPU path's draws in the same buffer were lost too).
+      // Not load-path evidence either way: attribute separately.
+      if (faulted_submissions_.count(submission)) {
+        for (auto& armed : *shadow_batch) {
+          ++shadow_stats_.dropped_submission_fault;
+          ReleaseShadowEntry(armed);
+        }
+        return;
+      }
       for (auto& armed : *shadow_batch) {
         const uint8_t* dest = static_cast<const uint8_t*>(
             [(__bridge id<MTLBuffer>)armed.dest_buffer contents]);
@@ -1758,6 +1811,7 @@ void MetalCommandProcessor::EndFrameEncoder() {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
       faulted_command_buffers_.push_back((__bridge_retained void*)cb);
+      faulted_submission_ids_.push_back(submission);
     }
     PublishCompletedSubmission(submission);
   }];

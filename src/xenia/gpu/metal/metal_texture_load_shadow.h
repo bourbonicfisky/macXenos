@@ -246,6 +246,7 @@ struct TextureLoadShadowStats {
   uint64_t dropped_over_budget = 0;
   uint64_t dropped_source_mutated = 0;
   uint64_t dropped_request_failed = 0;
+  uint64_t dropped_submission_fault = 0;
   uint64_t dropped_no_command_buffer = 0;
   uint64_t dispatches_completed = 0;
   uint64_t bytes_compared = 0;

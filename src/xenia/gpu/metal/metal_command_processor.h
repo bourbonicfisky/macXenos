@@ -276,6 +276,17 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t submission_counter_ = 0;
   std::atomic<uint64_t> completed_submission_{0};
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
+  // Submissions whose command buffer FAULTED (GPU error status): their GPU
+  // work never executed. Shadow comparisons attribute these as fault-drops
+  // (the dispatch was lost with the rest of the buffer — not load-path
+  // divergence), and routed texture-cache entries created by them are
+  // evicted (their content was never written). GPU-thread only; bounded.
+  std::unordered_set<uint64_t> faulted_submissions_;
+  // Guest ranges of routed loads encoded into the OPEN command buffer;
+  // attached to its submission at commit for fault-time eviction.
+  std::vector<std::pair<uint32_t, uint32_t>> routed_ranges_open_cb_;
+  std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>
+      routed_ranges_by_submission_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
 
@@ -355,6 +366,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::condition_variable completion_cv_;
   std::mutex fault_mutex_;
   std::vector<void*> faulted_command_buffers_;  // id<MTLCommandBuffer>, retained.
+  std::vector<uint64_t> faulted_submission_ids_;  // Same lock as above.
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;
