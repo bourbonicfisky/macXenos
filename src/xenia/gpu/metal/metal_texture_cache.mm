@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
+#include "xenia/gpu/metal/metal_resolved_fetch_service.h"
 
 #import <Metal/Metal.h>
 
@@ -311,6 +312,78 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
   return XXH3_64bits(&kb, sizeof(kb));
 }
 
+
+// Shared service-classification input builder (slice 5R): the ONE place the
+// exact-cover and bridge inputs are computed. GetTextureSlot's serve chain
+// and the routed-load prepass both classify through this — the guards live
+// in ClassifyResolvedFetch/ExactCoverSnapshotEligible and are never
+// duplicated. Returns false when the base has no registered resolve target.
+bool MetalTextureCache::BuildResolvedServiceInputs(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+    ResolvedFetchServiceInputs* out) const {
+  // Stage 3 is DEFAULT ON (XE_METAL_STAGE3=0 disables) — keep in sync with
+  // the writeback-cap reader in metal_command_processor.mm.
+  static const bool s_stage3 = [] {
+    const char* v = std::getenv("XE_METAL_STAGE3");
+    return !v || v[0] != '0';
+  }();
+  static const bool s_color_bridge =
+      !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
+  static const bool s_tip_ram_fetch =
+      std::getenv("XE_METAL_TIP_RAM_FETCH") != nullptr;
+  out->has_resolved_target = false;
+  auto rit = resolved_targets_.find(fetch.base_address << 12);
+  if (rit == resolved_targets_.end() || !rit->second.texture) {
+    return false;
+  }
+  const ResolvedTarget& rt = rit->second;
+  uint32_t fetch_w = fetch.size_2d.width + 1;
+  uint32_t fetch_h = fetch.size_2d.height + 1;
+  // Covered-fetch fast path: R32Float ONLY (see the serve chain's rationale;
+  // covered RGBA8 snapshots regressed the gate and need the RAM path).
+  bool covered_r32f =
+      !rt.is_depth && rt.width >= fetch_w && rt.height >= fetch_h &&
+      ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
+          MTLPixelFormatR32Float;
+  // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
+  // fetches (the exposure tips) down the RAM path.
+  if (s_tip_ram_fetch && covered_r32f && fetch_w == 1 && fetch_h == 1 &&
+      !rt.is_depth && !s_color_bridge && rt.ram_backed) {
+    covered_r32f = false;
+  }
+  id<MTLTexture> exact_snap = (__bridge id<MTLTexture>)rt.texture;
+  out->exact = ExactCoverInputs{
+      rt.is_depth,
+      s_color_bridge,
+      rt.ram_backed,
+      rt.full_rect,
+      is_signed,
+      exact_snap.pixelFormat == MTLPixelFormatRGBA8Unorm,
+      fetch.format,
+      bool(fetch.tiled),
+      fetch.dimension,
+      bool(fetch.stacked),
+      fetch.mip_min_level,
+      fetch.mip_max_level,
+      fetch_w,
+      fetch_h,
+      uint32_t(fetch.pitch) << 5,
+      rt.width,
+      rt.height,
+      uint32_t(fetch.endianness),
+      rt.wb_endian};
+  out->covered_r32f = covered_r32f;
+  out->has_resolved_target = true;
+  return true;
+}
+
+ResolvedFetchService MetalTextureCache::ClassifyFetchService(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) const {
+  ResolvedFetchServiceInputs in;
+  BuildResolvedServiceInputs(fetch, is_signed, &in);
+  return ClassifyResolvedFetch(in);
+}
+
 uint32_t MetalTextureCache::GetTextureSlot(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   if (!trace_playback_) {
@@ -421,93 +494,22 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // coverage fails -> RAM, exactly the case the bridge can't represent.
   // XE_METAL_COLOR_BRIDGE=1 restores bridge-for-all-color for A/B.
   {
-    // Stage 3 is DEFAULT ON (XE_METAL_STAGE3=0 disables) — keep in sync with
-    // the writeback-cap reader in metal_command_processor.mm.
-    static const bool s_stage3 = [] {
-      const char* v = std::getenv("XE_METAL_STAGE3");
-      return !v || v[0] != '0';
-    }();
-    static const bool s_color_bridge =
-        !s_stage3 || std::getenv("XE_METAL_COLOR_BRIDGE") != nullptr;
     auto rit = resolved_targets_.find(fetch.base_address << 12);
     if (rit != resolved_targets_.end() && rit->second.texture) {
       const ResolvedTarget& rt = rit->second;
       uint32_t fetch_w = fetch.size_2d.width + 1;
       uint32_t fetch_h = fetch.size_2d.height + 1;
-      // Covered-fetch fast path: R32Float ONLY. Single-channel float has no
-      // guest-swizzle/channel-order ambiguity, and it is exactly the JC2
-      // luminance-pyramid ping-pong whose RAM path forced a commit+wait per
-      // level. Serving covered RGBA8 snapshots regressed the gate (51776
-      // 12.90 -> 13.18 = old bridge number, SF4 4.21 -> 9.38): those need
-      // the RAM path's hardware channel order + fetch swizzle.
-      bool covered_r32f =
-          !rt.is_depth && rt.width >= fetch_w && rt.height >= fetch_h &&
-          ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
-              MTLPixelFormatR32Float;
-      // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
-      // fetches (the exposure tips) down the RAM path, bisecting
-      // snapshot-vs-RAM content for the tonemap's exposure input. Diagnostic
-      // only — the RAM path re-introduces the mid-frame commit+wait per
-      // consumer that covered_r32f exists to avoid; a shipping fix must keep
-      // the GPU-ordered snapshot path and correct its content/identity.
-      static const bool s_tip_ram_fetch =
-          std::getenv("XE_METAL_TIP_RAM_FETCH") != nullptr;
-      if (s_tip_ram_fetch && covered_r32f && fetch_w == 1 && fetch_h == 1 &&
-          !rt.is_depth && !s_color_bridge && rt.ram_backed) {
-        covered_r32f = false;
-        if (xe_lineage_base() &&
-            (fetch.base_address << 12) == xe_lineage_base()) {
-          XELOGW(
-              "MetalLineage TIP-RAM draw={} base={:08X} covered_r32f "
-              "OVERRIDDEN -> RAM path (XE_METAL_TIP_RAM_FETCH)",
-              lineage_draw_, fetch.base_address << 12);
-        }
-      }
-      // Exact-cover RGBA8 fast path: serve the snapshot GPU-side when it is
-      // provably the same content the RAM upload would produce (see
-      // ResolvedTarget::full_rect). Every condition below is required; each
-      // guards a distinct way the snapshot and the RAM upload could differ:
-      //   - color, RAM-backed, newest writeback full-rect (offset 0,0,
-      //     pitch == width, extent == registered extent);
-      //   - fetch extent, pitch and endian equal the writeback's, format
-      //     k_8_8_8_8. Any dest channel swap is baked into the snapshot by
-      //     the resolve shader, and equal endian makes untile cancel the
-      //     scatter, so snapshot content == uploaded-RAM content;
-      //   - !is_signed: signed fetches are a SEPARATE binding expecting an
-      //     SNORM view; the RGBA8Unorm snapshot has the wrong interpretation;
-      //   - snapshot pixelFormat == RGBA8Unorm: the snapshot must actually be
-      //     the 8-bit-unorm surface the RAM upload builds, not an aliased or
-      //     reinterpreted target;
-      //   - tiled, 2D (k2DOrStacked), NOT stacked, mip_min/max == 0: the RAM
-      //     path's untile assumes a single tiled 2D base level. Linear,
-      //     stacked, cube/3D or mipped fetches address memory differently, so
-      //     the single-level snapshot is not equivalent to what those uploads
-      //     would read.
-      // Offset/partial column resolves (SF4) never set full_rect, so they
-      // keep the exact-address RAM path; assembled multi-resolve fetches
-      // fail the extent equality.
-      id<MTLTexture> exact_snap = (__bridge id<MTLTexture>)rt.texture;
-      ExactCoverInputs exact_in{
-          rt.is_depth,
-          s_color_bridge,
-          rt.ram_backed,
-          rt.full_rect,
-          is_signed,
-          exact_snap.pixelFormat == MTLPixelFormatRGBA8Unorm,
-          fetch.format,
-          bool(fetch.tiled),
-          fetch.dimension,
-          bool(fetch.stacked),
-          fetch.mip_min_level,
-          fetch.mip_max_level,
-          fetch_w,
-          fetch_h,
-          uint32_t(fetch.pitch) << 5,
-          rt.width,
-          rt.height,
-          uint32_t(fetch.endianness),
-          rt.wb_endian};
-      if (ExactCoverSnapshotEligible(exact_in)) {
+      // ONE shared decision (slice 5R): exact-cover and bridge conditions
+      // are composed by ClassifyResolvedFetch in this serve order; the
+      // routed prepass consults the identical classification.
+      ResolvedFetchServiceInputs service_in;
+      BuildResolvedServiceInputs(fetch, is_signed, &service_in);
+      ResolvedFetchService service = ClassifyResolvedFetch(service_in);
+      bool covered_r32f = service_in.covered_r32f;
+      if (service == ResolvedFetchService::kExactCoverSnapshot) {
+        // Exact-cover RGBA8 fast path: the snapshot is provably the same
+        // content the RAM upload would produce (per-condition rationale in
+        // metal_exact_cover_predicate.h and the design doc).
         if (xe_lineage_base() &&
             (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
@@ -519,7 +521,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         active_textures_.push_back(rt.texture);
         return rt.slot;
       }
-      if (rt.is_depth || s_color_bridge || !rt.ram_backed || covered_r32f) {
+      if (service == ResolvedFetchService::kBridgeSnapshot) {
         // XE_METAL_TIP_SNAP_VIEW: a 1x1 guest fetch of a larger snapshot must
         // read guest texel (0,0); binding the full WxH snapshot lands the
         // shader's UV mid-texture (8x8 exposure tip -> texel 4,4 — the JC2
@@ -541,14 +543,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
           XELOGW(
               "MetalLineage BRIDGE draw={} base={:08X} served SNAPSHOT rt={}x{} "
               "fetch={}x{} is_depth={} ram_backed={} covered_r32f={} "
-              "color_bridge={} (RAM bypassed)",
+              "(RAM bypassed)",
               lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
-              fetch_w, fetch_h, rt.is_depth, rt.ram_backed, covered_r32f,
-              s_color_bridge);
+              fetch_w, fetch_h, rt.is_depth, rt.ram_backed, covered_r32f);
         }
         active_textures_.push_back(rt.texture);
         return rt.slot;
       }
+      // kRamContent: RAM authoritative — fall through to the cache/untile
+      // path below (and, under slice 5R, the routed GPU load).
     }
   }
   // 2D (or stacked), 3D and CUBE are handled; 3D is sampled as its slice 0 as

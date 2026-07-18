@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_resolved_fetch_service.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
 
@@ -55,6 +56,14 @@ class MetalTextureCache {
   // bindings expecting -1..1 texels).
   uint32_t GetTextureSlot(const xenos::xe_gpu_texture_fetch_t& fetch,
                           bool is_signed = false);
+
+  // Slice 5R: the shared service classification for a fetch whose base may
+  // be a registered resolve target. The serve chain in GetTextureSlot and
+  // the routed-load prepass both use this — one decision, no duplicated
+  // exact-cover/bridge guards. Stable within a draw (resolved_targets_
+  // mutates only at IssueCopy).
+  ResolvedFetchService ClassifyFetchService(
+      const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) const;
 
   // Lineage probe (XE_METAL_LINEAGE): the command processor stamps the current
   // draw index here each draw so the reader's fetch events share the writer's
@@ -183,6 +192,9 @@ class MetalTextureCache {
   // complete.
   std::vector<std::pair<uint64_t, void*>> retired_textures_;
   std::function<uint64_t()> submission_provider_;
+  bool BuildResolvedServiceInputs(const xenos::xe_gpu_texture_fetch_t& fetch,
+                                  bool is_signed,
+                                  ResolvedFetchServiceInputs* out) const;
   // Shared finalize tail (swizzle view, slot, trace record, cache entry) —
   // the ONE place upload finalization semantics live. texture_bridge:
   // id<MTLTexture> at +0. host_format: MTLPixelFormat.
