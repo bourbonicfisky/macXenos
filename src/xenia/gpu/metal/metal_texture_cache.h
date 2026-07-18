@@ -110,40 +110,6 @@ class MetalTextureCache {
   void ReclaimStaleSlots(uint64_t completed_submission);
 
   // Tags retires with the submission that may last reference them.
-  // Strict-RGBA8 GPU-load ROUTE (slice-4 diagnostic, default-off). The
-  // command processor prepares eligible cache-missing fetches at its
-  // pre-encoder seam: PrepareRoutedLoad checks eligibility + miss and
-  // creates the destination MTLTexture; after the compute-load + blit are
-  // encoded, CommitRoutedLoad parks the texture; the draw's GetTextureSlot
-  // then consumes it in place of the CPU untile and finalizes through the
-  // IDENTICAL tail (swizzle view, slot, trace record, cache entry) — same
-  // key, same trace ranges, same lifetime. Any failure before commit means
-  // the entry never exists and the unchanged CPU path runs.
-  struct RoutedLoadPrep {
-    uint64_t key = 0;
-    uint32_t base = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t blocks_w = 0;
-    uint32_t blocks_h = 0;
-    uint32_t pitch_blocks_aligned = 0;
-    uint32_t endian = 0;
-    ShadowSourceRange range;      // Absolute guest byte range the shader reads.
-    ShadowDestLayout layout;      // Staging layout (256-aligned rows).
-    void* texture = nullptr;      // Retained id<MTLTexture> (dest).
-  };
-  bool PrepareRoutedLoad(const xenos::xe_gpu_texture_fetch_t& fetch,
-                         bool is_signed, RoutedLoadPrep* out);
-  void CommitRoutedLoad(RoutedLoadPrep&& prep);
-  void ReleaseRoutedPrep(RoutedLoadPrep&& prep);
-  // Perf accounting (CPU-route cost that routing eliminates).
-  uint64_t untile_ops() const { return untile_ops_; }
-  uint64_t untile_bytes() const { return untile_bytes_; }
-  uint64_t untile_usec() const { return untile_usec_; }
-  uint64_t routed_served() const { return routed_served_; }
-  size_t routed_ready_pending() const { return routed_ready_.size(); }
-  void DropRoutedReady();
-
   // Strict-RGBA8 shadow-load staging (slice-3 diagnostic): when set, an
   // ELIGIBLE real upload (cache miss reaching the CPU untile) stages a
   // snapshot of the completed CPU linear output plus the exact source range
@@ -231,23 +197,15 @@ class MetalTextureCache {
   std::vector<std::pair<uint64_t, void*>> retired_textures_;
   std::function<uint64_t()> submission_provider_;
   std::function<void(TextureLoadShadowStage&&)> shadow_stage_hook_;
-  // Prepared-but-not-yet-consumed routed textures, keyed by texture key
-  // (retained id<MTLTexture>). Bounded: consumed by the next GetTextureSlot
-  // miss for the key; leftovers dropped at shutdown/DropRoutedReady.
-  std::unordered_map<uint64_t, void*> routed_ready_;
-  // Shared finalize tail (swizzle view, slot, trace record, cache entry) for
-  // the CPU-untile and routed GPU-load paths. texture_bridge: id<MTLTexture>
-  // at +0. host_format: MTLPixelFormat.
+  // Shared finalize tail (swizzle view, slot, trace record, cache entry) —
+  // the ONE place upload finalization semantics live. texture_bridge:
+  // id<MTLTexture> at +0. host_format: MTLPixelFormat.
   uint32_t FinalizeTexture(uint64_t key,
                            const xenos::xe_gpu_texture_fetch_t& fetch,
                            void* texture_bridge, uint64_t host_format,
                            bool is_cube, uint32_t host_levels, uint32_t base,
                            uint32_t guest_bytes, uint32_t mip_base,
                            uint32_t mip_bytes);
-  uint64_t untile_ops_ = 0;
-  uint64_t untile_bytes_ = 0;
-  uint64_t untile_usec_ = 0;
-  uint64_t routed_served_ = 0;
   // Exact-source-range scan cache for the shadow predicate, keyed by
   // (blocks_w, blocks_h, pitch_blocks_aligned) — offsets are base-relative.
   std::unordered_map<uint64_t, ShadowSourceRange> shadow_range_cache_;
