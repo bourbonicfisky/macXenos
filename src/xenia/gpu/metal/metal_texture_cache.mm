@@ -10,6 +10,7 @@
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
+#include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 
 #import <Metal/Metal.h>
 
@@ -659,11 +660,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t pitch_blocks_aligned = (pitch_blocks + 31u) & ~31u;
 
   uint32_t blocks_h_aligned = (blocks_h + 31u) & ~31u;
-  size_t base_source_bytes =
-      is_cube ? size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6
-              : size_t(pitch_blocks_aligned) * blocks_h * bpb;
-  uint32_t watched_base_bytes = uint32_t(std::min<size_t>(
-      base_source_bytes, size_t(kPhysicalSize - base)));
+  // Non-cube extent shared with the routed serve's trace records
+  // (metal_texture_load_eligibility.h) — recorded ranges must be identical
+  // by construction across producers.
+  uint32_t watched_base_bytes =
+      is_cube ? uint32_t(std::min<size_t>(
+                    size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6,
+                    size_t(kPhysicalSize - base)))
+              : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h, bpb,
+                                        base, kPhysicalSize);
   // NOTE: this cache deliberately does NOT call SharedMemory::RequestRange to
   // register these pages for CPU write-watching. RequestRange does host-GPU
   // buffer residency + guest-page write protection (EnsureHostGpuMemoryAllocated
@@ -1237,6 +1242,15 @@ void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
       out.push_back(pair.second.tip_texture);
     }
   }
+}
+
+void MetalTextureCache::BindExternalSlot(uint32_t slot, void* texture_bridge) {
+  if (!slot || slot >= view_heap_slots_) {
+    return;
+  }
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  IRDescriptorTableSetTexture(&entries[slot],
+                              (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
 }
 
 uint32_t MetalTextureCache::AllocateSlot() {

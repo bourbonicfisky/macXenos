@@ -158,6 +158,26 @@ class MetalTextureCache {
     return n;
   }
 
+  // --- C1T-R shared-subclass adapter (single slot/residency authority) ---
+  // MetalSharedTextureCache allocates, binds, and retires bindless view-heap
+  // slots and registers per-draw residency exclusively through these; a
+  // second allocator over the same heap is forbidden (seam audit, proof 1).
+  uint32_t AllocateExternalSlot() { return AllocateSlot(); }
+  // Points `slot` at a retained id<MTLTexture> the caller keeps alive.
+  void BindExternalSlot(uint32_t slot, void* texture_bridge);
+  void RetireExternalSlot(uint32_t slot) {
+    stale_slots_.emplace_back(RetireSubmission(), slot);
+  }
+  // Takes ownership of a retained id<MTLTexture> (+1); released once the
+  // submissions that may reference it complete (same pool as evictions).
+  void RetireExternalTexture(void* texture_bridge) {
+    retired_textures_.emplace_back(RetireSubmission(), texture_bridge);
+  }
+  // Per-draw residency registration for a texture served by the subclass.
+  void AddActiveTexture(void* texture_bridge) {
+    active_textures_.push_back(texture_bridge);
+  }
+
  private:
   static void SharedMemoryGlobalWatchCallback(
       const global_unique_lock_type& global_lock, void* context,

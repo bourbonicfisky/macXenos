@@ -32,6 +32,7 @@ namespace metal {
 class MetalPipelineCache;
 class MetalRenderTargetCache;
 class MetalSharedMemory;
+class MetalSharedTextureCache;
 class MetalTextureCache;
 class MetalUploadArena;
 struct MetalUploadAllocation;
@@ -164,6 +165,15 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
   std::unique_ptr<MetalTextureCache> texture_cache_;
+  // C1T-R (default-off, --metal_shared_texture_cache): the real shared
+  // xe::gpu::TextureCache subclass serving strict tiled RGBA8 kRamContent
+  // misses; null when the route is off. Destroyed before texture_cache_
+  // (its slot/retirement adapter).
+  std::unique_ptr<MetalSharedTextureCache> shared_texture_cache_;
+  // Per-draw eligible fetch-constant mask computed by the pre-encoder
+  // prepass; descriptor marshalling serves exactly these indices from the
+  // shared subclass (seam audit M2 — prep and serve share one decision).
+  uint32_t draw_shared_route_mask_ = 0;
   std::unique_ptr<MetalUploadArena> upload_arena_;
 
   // Bindless / fixed-resource infrastructure for the MSC argument buffer. All

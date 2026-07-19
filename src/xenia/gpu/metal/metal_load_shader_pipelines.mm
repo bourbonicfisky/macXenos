@@ -22,6 +22,7 @@
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_16bpb_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_16bpb_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_32bpb_cs.h"
+#include "xenia/gpu/shaders/bytecode/metal/texture_load_32bpb_direct_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_32bpb_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_64bpb_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_64bpb_scaled_cs.h"
@@ -240,6 +241,53 @@ void MetalLoadShaderPipelines::Shutdown() {
     (void)pipeline;
   }
   pipelines_.clear();
+}
+
+void* MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(void* device) {
+  if (!device) {
+    return nullptr;
+  }
+  id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;
+  dispatch_data_t data = dispatch_data_create(
+      texture_load_32bpb_direct_cs_metallib,
+      sizeof(texture_load_32bpb_direct_cs_metallib), nullptr,
+      ^{
+      });
+  NSError* error = nil;
+  id<MTLLibrary> library = [mtl_device newLibraryWithData:data error:&error];
+#if !__has_feature(objc_arc)
+  dispatch_release(data);
+#endif
+  if (!library) {
+    XELOGE(
+        "MetalLoadShaderPipelines: newLibraryWithData failed for "
+        "texture_load_32bpb_direct: {}",
+        error ? [[error localizedDescription] UTF8String] : "unknown");
+    return nullptr;
+  }
+  id<MTLFunction> function = [library newFunctionWithName:@"entry_xe"];
+  if (!function) {
+    XELOGE("MetalLoadShaderPipelines: no entry_xe in texture_load_32bpb_direct");
+#if !__has_feature(objc_arc)
+    [library release];
+#endif
+    return nullptr;
+  }
+  error = nil;
+  id<MTLComputePipelineState> pipeline =
+      [mtl_device newComputePipelineStateWithFunction:function error:&error];
+#if !__has_feature(objc_arc)
+  [function release];
+  [library release];
+#endif
+  if (!pipeline) {
+    XELOGE(
+        "MetalLoadShaderPipelines: pipeline creation failed for "
+        "texture_load_32bpb_direct: {}",
+        error ? [[error localizedDescription] UTF8String] : "unknown");
+    return nullptr;
+  }
+  return (__bridge_retained void*)pipeline;
 }
 
 int MetalLoadShaderPipelines::FindIndex(const char* name) const {

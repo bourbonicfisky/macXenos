@@ -69,6 +69,16 @@ class MetalLoadShaderPipelines {
   // The full compiled texture-load family, in stable (sorted) order.
   static const ShaderInfo* shaders(size_t* count_out);
 
+  // C1T-R: the direct-to-tiled RGBA8 variant (texture_load_32bpb_direct) is
+  // not part of the family table above (it writes a texture, not the linear
+  // dest buffer); this builds just its pipeline for the shared-subclass
+  // route so load-shader pipeline creation keeps a single owner. Returns a
+  // RETAINED id<MTLComputePipelineState> as void* (caller releases), or
+  // nullptr on any failure. Dispatch with the same threadgroup shape and
+  // push-constant/source bindings as the family; the dest binds at
+  // texture(1).
+  static void* CreateDirectRgba8Pipeline(void* device);
+
   MetalLoadShaderPipelines() = default;
   ~MetalLoadShaderPipelines();
   MetalLoadShaderPipelines(const MetalLoadShaderPipelines&) = delete;

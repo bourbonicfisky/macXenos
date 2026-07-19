@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 
@@ -575,6 +576,15 @@ class TextureCache {
   // create the texture - if it's nullptr, occasionally a recreation attempt
   // should be made.
   Texture* FindOrCreateTexture(TextureKey key);
+
+  // Narrow enumeration of every live texture, for implementations that must
+  // sweep the full set (trace warm-entry recording, faulted-submission
+  // eviction) without maintaining a second texture registry.
+  void ForEachTexture(const std::function<void(Texture&)>& callback) {
+    for (auto& pair : textures_) {
+      callback(*pair.second);
+    }
+  }
 
   static const LoadShaderInfo& GetLoadShaderInfo(
       LoadShaderIndex load_shader_index) {

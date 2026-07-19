@@ -82,6 +82,35 @@ inline bool IsStrictRgba8Eligible(const xenos::xe_gpu_texture_fetch_t& fetch,
   return true;
 }
 
+// C1T-R route eligibility: the shared-subclass route additionally requires a
+// nonzero fetch pitch — the shared TextureKey carries the RAW fetch pitch,
+// so the legacy cache's align32(width) default for pitch==0 fetches is not
+// representable there; such fetches stay on the legacy CPU path. This is a
+// NARROWING for one consumer, never a weakening of the contract above.
+inline bool IsStrictRgba8RouteEligible(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed, uint32_t width,
+    uint32_t height, uint32_t pitch_texels) {
+  return IsStrictRgba8Eligible(fetch, is_signed, width, height, pitch_texels) &&
+         fetch.pitch != 0;
+}
+
+// ---- Trace-record extent ----
+
+// The guest byte extent the legacy cache records for a non-cube texture
+// upload (watched_base_bytes in MetalTextureCache::GetTextureSlot) and the
+// warm-entry trace sweep. Factored here as the documented single expression
+// of that contract. (The C1T-R route needs no matching record: it disengages
+// for captured frames, so the legacy path records the CPU-oracle read-set —
+// the gate-C identical-ranges property holds by construction.)
+inline uint32_t ComputeWatchedBaseBytes(uint32_t pitch_blocks_aligned,
+                                        uint32_t blocks_h, uint32_t bpb,
+                                        uint32_t base,
+                                        uint32_t physical_size) {
+  uint64_t bytes = uint64_t(pitch_blocks_aligned) * blocks_h * bpb;
+  uint64_t max_bytes = physical_size > base ? physical_size - base : 0;
+  return uint32_t(std::min<uint64_t>(bytes, max_bytes));
+}
+
 // ---- Exact source range ----
 
 // The 32bpb load shader reads 16-byte groups at Tiled2D(4g, y) byte offsets
