@@ -165,10 +165,11 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
   std::unique_ptr<MetalTextureCache> texture_cache_;
-  // C1T-R (default-off, --metal_shared_texture_cache): the real shared
-  // xe::gpu::TextureCache subclass serving strict tiled RGBA8 kRamContent
-  // misses; null when the route is off. Destroyed before texture_cache_
-  // (its slot/retirement adapter).
+  // C1T-R: the real shared xe::gpu::TextureCache subclass serving strict
+  // tiled RGBA8 kRamContent misses (canonical for that class); null only if
+  // its pipeline initialization failed, in which case the legacy cache
+  // serves everything. Destroyed before texture_cache_ (its slot/retirement
+  // adapter).
   std::unique_ptr<MetalSharedTextureCache> shared_texture_cache_;
   // Per-draw eligible fetch-constant mask computed by the pre-encoder
   // prepass; descriptor marshalling serves exactly these indices from the

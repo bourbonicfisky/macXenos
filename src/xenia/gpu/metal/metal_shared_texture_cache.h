@@ -30,8 +30,8 @@ class MetalTextureCache;
 // C1T-R (OpenSpec implement-metal-gpu-texture-loads): the real
 // xe::gpu::TextureCache subclass serving ONLY strict tiled single-mip 2D
 // k_8_8_8_8 kRamContent cache misses through the proven direct-to-tiled
-// compute load (texture_load_32bpb_direct), default-off behind
-// --metal_shared_texture_cache. The legacy MetalTextureCache remains the
+// compute load (texture_load_32bpb_direct) — the canonical route for that
+// class. The legacy MetalTextureCache remains the
 // universal fallback and the single bindless-slot authority (this class
 // allocates/retires slots and registers residency through its narrow
 // external-slot adapter). Seam contract: docs/
@@ -106,23 +106,6 @@ class MetalSharedTextureCache : public TextureCache {
   // every texture a live subclass-bound slot can reach.
   void AppendAllTextures(std::vector<void*>& out) const;
 
-  // Gate-D telemetry (reported by the A-E ladder; removal decided at
-  // closure per the recorded rule): loads encoded / prep or serve failures.
-  uint32_t routed_loads() const { return routed_loads_; }
-  uint32_t route_failures() const { return route_failures_; }
-  uint32_t served_count() const { return served_count_; }
-  // Deltas since the last call, for the periodic frame-stats line (the only
-  // engagement evidence that survives the harness SIGKILL).
-  void ConsumeStatsDelta(uint32_t* loads, uint32_t* served,
-                         uint32_t* failures) {
-    *loads = routed_loads_ - last_stat_loads_;
-    *served = served_count_ - last_stat_served_;
-    *failures = route_failures_ - last_stat_failures_;
-    last_stat_loads_ = routed_loads_;
-    last_stat_served_ = served_count_;
-    last_stat_failures_ = route_failures_;
-  }
-
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override {
     // k_8_8_8_8 signed is a view over the same bytes; signed bindings are
@@ -187,13 +170,6 @@ class MetalSharedTextureCache : public TextureCache {
     bool valid;
   };
   std::unordered_map<ShapeKey, ShapeRange, ShapeKeyHasher> shape_ranges_;
-
-  uint32_t routed_loads_ = 0;
-  uint32_t route_failures_ = 0;
-  uint32_t served_count_ = 0;
-  uint32_t last_stat_loads_ = 0;
-  uint32_t last_stat_served_ = 0;
-  uint32_t last_stat_failures_ = 0;
 };
 
 }  // namespace metal

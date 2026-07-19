@@ -66,16 +66,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 // constants, IRDescriptorTableSet*, and the IRRuntimeDraw* helpers.
 #include "metal_irconverter_runtime.h"
 
-DEFINE_bool(
-    metal_shared_texture_cache, false,
-    "C1T-R (default-off candidate): route strict tiled single-mip 2D "
-    "k_8_8_8_8 kRamContent texture-cache misses through the shared "
-    "xe::gpu::TextureCache subclass's direct-to-tiled GPU compute load. The "
-    "legacy Metal cache serves everything else and is the universal "
-    "fallback. Removal condition: deleted at default-on or at kill "
-    "(OpenSpec implement-metal-gpu-texture-loads, C1T-R).",
-    "GPU");
-
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -866,37 +856,33 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
-  // C1T-R (default-off): the shared TextureCache subclass route. All wiring
-  // uses existing mechanisms only (seam audit M1-M5): the legacy cache is
+  // C1T-R shared TextureCache subclass route (canonical for strict tiled
+  // single-mip 2D k_8_8_8_8 kRamContent misses; the legacy cache serves
+  // everything else and remains the universal fallback). All wiring uses
+  // existing mechanisms only (seam audit M1-M5): the legacy cache is
   // the slot/residency/retirement authority, loads encode through
   // PrepareTransferCommandBuffer, lifetime keys off the same submission ids,
   // and faulted submissions are queried from the existing GPU-thread fault
   // recording.
-  if (cvars::metal_shared_texture_cache) {
-    shared_texture_cache_ = std::make_unique<MetalSharedTextureCache>(
-        *register_file_, *shared_memory_, device_ptr, texture_cache_.get());
-    shared_texture_cache_->SetPrepareTransferCallback(
-        [this]() { return PrepareTransferCommandBuffer(); });
-    // NOT gated on S7TagsOff: these ids drive the subclass's BeginSubmission
-    // advance, LRU gating, and M4 faulted-submission matching — equality
-    // bookkeeping that needs real monotonic ids in both sync and async
-    // modes. (Retirement tags still flow through the legacy adapter's
-    // S7-governed RetireSubmission.)
-    shared_texture_cache_->SetSubmissionProvider(
-        [this]() { return CurrentEncodingSubmission(); });
-    shared_texture_cache_->SetSubmissionFaultQuery([this](uint64_t submission) {
-      return faulted_submissions_.count(submission) != 0;
-    });
-    if (!shared_texture_cache_->Initialize()) {
-      XELOGE(
-          "MetalCommandProcessor: shared texture cache init failed; route "
-          "disabled, legacy cache serves everything");
-      shared_texture_cache_.reset();
-    } else {
-      XELOGI(
-          "MetalCommandProcessor: shared texture cache route ENABLED "
-          "(strict tiled RGBA8 kRamContent misses)");
-    }
+  shared_texture_cache_ = std::make_unique<MetalSharedTextureCache>(
+      *register_file_, *shared_memory_, device_ptr, texture_cache_.get());
+  shared_texture_cache_->SetPrepareTransferCallback(
+      [this]() { return PrepareTransferCommandBuffer(); });
+  // NOT gated on S7TagsOff: these ids drive the subclass's BeginSubmission
+  // advance, LRU gating, and M4 faulted-submission matching — equality
+  // bookkeeping that needs real monotonic ids in both sync and async
+  // modes. (Retirement tags still flow through the legacy adapter's
+  // S7-governed RetireSubmission.)
+  shared_texture_cache_->SetSubmissionProvider(
+      [this]() { return CurrentEncodingSubmission(); });
+  shared_texture_cache_->SetSubmissionFaultQuery([this](uint64_t submission) {
+    return faulted_submissions_.count(submission) != 0;
+  });
+  if (!shared_texture_cache_->Initialize()) {
+    XELOGE(
+        "MetalCommandProcessor: shared texture cache init failed; route "
+        "disabled, legacy cache serves everything");
+    shared_texture_cache_.reset();
   }
   return true;
 }
@@ -2204,7 +2190,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  // C1T-R prepass (default-off): prepare eligible strict-RGBA8 kRamContent
+  // C1T-R prepass: prepare eligible strict-RGBA8 kRamContent
   // misses through the shared TextureCache subclass at the proven
   // post-overlap/drain pre-encoder seam. The mask computed here is THE
   // per-draw routing decision — descriptor marshalling serves exactly these
@@ -4689,15 +4675,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
-      if (shared_texture_cache_) {
-        uint32_t route_loads, route_served, route_failures;
-        shared_texture_cache_->ConsumeStatsDelta(&route_loads, &route_served,
-                                                 &route_failures);
-        XELOGI(
-            "MetalSharedTexCacheStats swap#{}: {} loads, {} served, {} "
-            "failures (last 128 swaps)",
-            count, route_loads, route_served, route_failures);
-      }
     }
   }
   // Cycle-transfer instrument (XE_METAL_DUMP_SNAPSHOT=<hexbase>): dump the

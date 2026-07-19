@@ -11,8 +11,6 @@
 
 #import <Metal/Metal.h>
 
-#include "xenia/base/cvar.h"
-#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -83,11 +81,6 @@ MetalSharedTextureCache::MetalSharedTextureCache(
       legacy_(legacy_adapter) {}
 
 MetalSharedTextureCache::~MetalSharedTextureCache() {
-  // Engagement evidence for the gate ladder (route stats always; removal
-  // decided at closure).
-  XELOGI(
-      "MetalSharedTexCache FINAL: {} loads encoded, {} served, {} failures",
-      routed_loads_, served_count_, route_failures_);
   for (BindingSlot& binding_slot : binding_slots_) {
     ReleaseBindingSlot(binding_slot);
   }
@@ -136,7 +129,6 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
-    ++route_failures_;
     return nullptr;
   }
   return std::unique_ptr<Texture>(
@@ -147,7 +139,6 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     Texture& texture, bool load_base, bool load_mips) {
   // The routed class is single-mip base-only by CreateTexture's guard.
   if (!load_base || load_mips) {
-    ++route_failures_;
     return false;
   }
   MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
@@ -173,7 +164,6 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   const ShapeRange& range = shape_it->second;
   if (!range.valid ||
       uint64_t(base) + range.end_off > SharedMemory::kBufferSize) {
-    ++route_failures_;
     return false;
   }
 
@@ -185,20 +175,17 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
   if (!metal_shared_memory.RequestConsumedRange(
           base + range.begin_off, range.end_off - range.begin_off)) {
-    ++route_failures_;
     return false;
   }
 
   void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_() : nullptr;
   if (!command_buffer_ptr || !direct_pipeline_) {
-    ++route_failures_;
     return false;
   }
   id<MTLCommandBuffer> command_buffer =
       (__bridge id<MTLCommandBuffer>)command_buffer_ptr;
   id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
   if (!encoder) {
-    ++route_failures_;
     return false;
   }
   encoder.label = @"shared-texcache direct load";
@@ -243,7 +230,6 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   // No trace recording here (M5 revised by gate-C evidence): the route
   // disengages while a capture is open, so a load never encodes during a
   // captured frame and the legacy path records the CPU-oracle read-set.
-  ++routed_loads_;
   return true;
 }
 
@@ -289,12 +275,10 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
                                slices:NSMakeRange(0, 1)
                               swizzle:channels];
     if (!view || !legacy_) {
-      ++route_failures_;
       continue;  // Unserved; the legacy path serves this index.
     }
     uint32_t slot = legacy_->AllocateExternalSlot();
     if (!slot) {
-      ++route_failures_;
       continue;  // Heap exhausted; fall back rather than corrupt slot 0.
     }
     void* view_ptr = (__bridge_retained void*)view;
@@ -376,7 +360,6 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index) {
   if (legacy_) {
     legacy_->AddActiveTexture(binding_slot.sampled_view);
   }
-  ++served_count_;
   return binding_slot.slot;
 }
 
