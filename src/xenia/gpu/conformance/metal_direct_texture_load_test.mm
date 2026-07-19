@@ -19,10 +19,12 @@
 // docs/metal_texture_cache_integration_adr.md "C1T G0 outcome".
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
 #import <Metal/Metal.h>
+#import <simd/simd.h>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
@@ -93,6 +95,29 @@ struct GuestImage {
   uint32_t width, height, pitch_aligned, host_pitch;
 };
 
+// The exact end (exclusive) of the guest byte range the direct shader reads.
+// Each thread handles 8 texels along X starting at a multiple of 8, so the X
+// read set is the PADDED width round_up(width, 8); the shader reads two 16-byte
+// (uint4) groups per thread. The read set must be covered by the source
+// allocation or the shader reads out of bounds on odd widths (e.g. 47 -> the
+// thread at x=40 reads the group covering texels 44..47, i.e. Tiled2D(44, y)
+// bytes, even though texel 47 is never STORED). We bound it over every 4-block
+// group start Tiled2D(gx, y) + 16 for gx in {0,4,..,padded-4}, all y.
+uint32_t DirectShaderReadEnd(uint32_t width, uint32_t height,
+                             uint32_t pitch_aligned) {
+  uint32_t padded_w = (width + 7u) & ~7u;
+  int32_t max_off = 0;
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t gx = 0; gx < padded_w; gx += 4) {
+      max_off = std::max(max_off, texture_address::Tiled2D(int32_t(gx),
+                                                           int32_t(y),
+                                                           int32_t(pitch_aligned),
+                                                           2));
+    }
+  }
+  return uint32_t(max_off) + 16u;  // + one uint4 (16 bytes) read.
+}
+
 GuestImage MakeGuestImage(uint32_t width, uint32_t height,
                           xenos::Endian endian) {
   GuestImage img;
@@ -100,16 +125,10 @@ GuestImage MakeGuestImage(uint32_t width, uint32_t height,
   img.height = height;
   img.pitch_aligned = (width + 31u) & ~31u;
   img.host_pitch = ((width * 4u) + (kRowAlign - 1)) & ~(kRowAlign - 1);
-  int32_t max_off = 0;
-  for (uint32_t y = 0; y < height; ++y) {
-    for (uint32_t x = 0; x < width; ++x) {
-      max_off = std::max(max_off, texture_address::Tiled2D(int32_t(x),
-                                                           int32_t(y),
-                                                           img.pitch_aligned,
-                                                           2));
-    }
-  }
-  img.tiled.resize(uint32_t(max_off) + 16);
+  // Size the source over the PADDED read set the shader actually touches, not
+  // just the [0,width) stored texels.
+  uint32_t read_end = DirectShaderReadEnd(width, height, img.pitch_aligned);
+  img.tiled.resize(read_end);
   for (size_t i = 0; i < img.tiled.size(); ++i) {
     img.tiled[i] = uint8_t(i * 5 + (i >> 7) * 11 + 3);
   }
@@ -161,6 +180,33 @@ id<MTLComputePipelineState> ReadKernel(id<MTLDevice> device) {
   NSError* e = nil;
   id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&e];
   id<MTLFunction> fn = [lib newFunctionWithName:@"read_texels"];
+  ps = [device newComputePipelineStateWithFunction:fn error:&e];
+  return ps;
+}
+
+// Samples an RGBA8Unorm texture with a LINEAR sampler at a list of normalized
+// coordinates and writes the raw float4 results — the real filtered path a
+// consuming draw uses, not raw texel reads.
+id<MTLComputePipelineState> SampleKernel(id<MTLDevice> device) {
+  static id<MTLComputePipelineState> ps = nil;
+  if (ps) return ps;
+  NSString* src = @R"MSL(
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void sample_coords(texture2d<float, access::sample> tex
+                                  [[texture(0)]],
+                              device const float2* coords [[buffer(0)]],
+                              device float4* out [[buffer(1)]],
+                              constant uint& n [[buffer(2)]],
+                              uint i [[thread_position_in_grid]]) {
+      if (i >= n) return;
+      constexpr sampler s(coord::normalized, address::clamp_to_edge,
+                          filter::linear);
+      out[i] = tex.sample(s, coords[i]);
+    })MSL";
+  NSError* e = nil;
+  id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&e];
+  id<MTLFunction> fn = [lib newFunctionWithName:@"sample_coords"];
   ps = [device newComputePipelineStateWithFunction:fn error:&e];
   return ps;
 }
@@ -303,6 +349,101 @@ std::vector<uint8_t> OracleTexels(const GuestImage& img) {
   return t;
 }
 
+// Produce a sampleable RGBA8Unorm texture via the DIRECT path (returns the
+// texture; the producing dispatch is complete on return).
+id<MTLTexture> ProduceDirectTexture(const GuestImage& img,
+                                    xenos::Endian endian) {
+  auto& h = H();
+  id<MTLBuffer> source =
+      [h.device newBufferWithBytes:img.tiled.data() length:img.tiled.size()
+                           options:MTLResourceStorageModeShared];
+  id<MTLTexture> tex = MakeTexture(h.device, img.width, img.height, true);
+  LoadConstants c = MakeConstants(img, endian, 0);
+  id<MTLCommandBuffer> cmd = [h.queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:h.direct];
+  [enc setBytes:&c length:sizeof(c) atIndex:0];
+  [enc setTexture:tex atIndex:1];
+  [enc setBuffer:source offset:0 atIndex:2];
+  MTLSize grp = MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
+                            MetalLoadShaderPipelines::kThreadgroupSizeY, 1);
+  uint32_t tx = (img.width + 7u) / 8u;
+  [enc dispatchThreadgroups:MTLSizeMake((tx + grp.width - 1) / grp.width,
+                                        (img.height + grp.height - 1) /
+                                            grp.height, 1)
+      threadsPerThreadgroup:grp];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+  return cmd.status == MTLCommandBufferStatusCompleted ? tex : nil;
+}
+
+// Produce the same texture via the EXISTING buffer+blit path.
+id<MTLTexture> ProduceBufferBlitTexture(const GuestImage& img,
+                                        xenos::Endian endian) {
+  auto& h = H();
+  id<MTLBuffer> source =
+      [h.device newBufferWithBytes:img.tiled.data() length:img.tiled.size()
+                           options:MTLResourceStorageModeShared];
+  uint32_t linear_size = img.host_pitch * img.height;
+  id<MTLBuffer> linear = [h.device newBufferWithLength:linear_size
+                                              options:MTLResourceStorageModePrivate];
+  id<MTLTexture> tex = MakeTexture(h.device, img.width, img.height, false);
+  LoadConstants c = MakeConstants(img, endian, 0);
+  id<MTLCommandBuffer> cmd = [h.queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)
+                                   h.pipelines.pipeline(size_t(h.buffer_index))];
+  [enc setBytes:&c length:sizeof(c) atIndex:0];
+  [enc setBuffer:linear offset:0 atIndex:1];
+  [enc setBuffer:source offset:0 atIndex:2];
+  MTLSize grp = MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
+                            MetalLoadShaderPipelines::kThreadgroupSizeY, 1);
+  uint32_t tx = (img.width + 7u) / 8u;
+  [enc dispatchThreadgroups:MTLSizeMake((tx + grp.width - 1) / grp.width,
+                                        (img.height + grp.height - 1) /
+                                            grp.height, 1)
+      threadsPerThreadgroup:grp];
+  [enc endEncoding];
+  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+  [blit copyFromBuffer:linear sourceOffset:0 sourceBytesPerRow:img.host_pitch
+    sourceBytesPerImage:linear_size
+             sourceSize:MTLSizeMake(img.width, img.height, 1)
+              toTexture:tex destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake(0, 0, 0)];
+  [blit endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+  return cmd.status == MTLCommandBufferStatusCompleted ? tex : nil;
+}
+
+// Linear-sample `tex` at the given normalized coordinates.
+std::vector<simd_float4> SampleAt(id<MTLTexture> tex,
+                                  const std::vector<simd_float2>& coords) {
+  auto& h = H();
+  uint32_t n = uint32_t(coords.size());
+  id<MTLBuffer> cbuf = [h.device newBufferWithBytes:coords.data()
+                                             length:n * sizeof(simd_float2)
+                                            options:MTLResourceStorageModeShared];
+  id<MTLBuffer> out = [h.device newBufferWithLength:n * sizeof(simd_float4)
+                                           options:MTLResourceStorageModeShared];
+  id<MTLCommandBuffer> cmd = [h.queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:SampleKernel(h.device)];
+  [enc setTexture:tex atIndex:0];
+  [enc setBuffer:cbuf offset:0 atIndex:0];
+  [enc setBuffer:out offset:0 atIndex:1];
+  [enc setBytes:&n length:sizeof(n) atIndex:2];
+  [enc dispatchThreadgroups:MTLSizeMake((n + 63) / 64, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+  if (cmd.status != MTLCommandBufferStatusCompleted) return {};
+  const simd_float4* p = static_cast<const simd_float4*>(out.contents);
+  return std::vector<simd_float4>(p, p + n);
+}
+
 TEST_CASE("direct texture load: variant pipeline builds on device",
           "[l1][metal][directtex]") {
   REQUIRE_DEVICE();
@@ -339,6 +480,97 @@ TEST_CASE("direct texture load: byte-identical to CPU oracle AND buffer+blit",
     REQUIRE(direct == bufblit);   // G0b: direct matches buffer+blit exactly.
     // Repeat determinism.
     REQUIRE(RunDirect(img, s.e) == direct);
+  }
+}
+
+TEST_CASE("direct texture load: 47x33 source covers every padded read group",
+          "[l1][metal][directtex]") {
+  // The shader reads 8-texel groups over the PADDED width; assert the source
+  // allocation MakeGuestImage produces covers the exact read set (pinned so a
+  // future change to the sizing can't silently under-allocate on odd widths).
+  GuestImage img = MakeGuestImage(47, 33, xenos::Endian::k8in32);
+  uint32_t need = DirectShaderReadEnd(47, 33, img.pitch_aligned);
+  REQUIRE(img.tiled.size() >= need);
+  // The padded width is strictly greater than the width here (47 -> 48), so
+  // the shader's read set genuinely extends past the [0,width) stored texels.
+  REQUIRE(((47u + 7u) & ~7u) == 48u);
+  // The single source allocation must also cover what the CPU oracle reads:
+  // 4 bytes at each individual texel offset Tiled2D(x, y), x in [0,width).
+  // (The shader reads 16-byte uint4 groups from group-aligned starts; the
+  // oracle reads 4 bytes per texel — both must fit.)
+  uint32_t oracle_end = 0;
+  for (uint32_t y = 0; y < 33; ++y) {
+    for (uint32_t x = 0; x < 47; ++x) {
+      oracle_end = std::max(
+          oracle_end,
+          uint32_t(texture_address::Tiled2D(int32_t(x), int32_t(y),
+                                            int32_t(img.pitch_aligned), 2)) +
+              4u);
+    }
+  }
+  REQUIRE(img.tiled.size() >= oracle_end);
+  // The shader's 16-byte group read set subsumes the oracle's 4-byte per-texel
+  // read set (the last texel, 46, lives inside the group at gx=44).
+  REQUIRE(need >= oracle_end);
+}
+
+TEST_CASE("direct texture load: filtered (linear-sampler) parity with "
+          "buffer+blit",
+          "[l1][metal][directtex]") {
+  REQUIRE_DEVICE();
+  REQUIRE(H().ok);
+  struct Shape {
+    uint32_t w, h;
+    xenos::Endian e;
+  };
+  const Shape shapes[] = {
+      {320, 180, xenos::Endian::k8in32},
+      {1280, 720, xenos::Endian::k8in32},
+      {47, 33, xenos::Endian::k8in16},
+  };
+  for (const Shape& s : shapes) {
+    INFO("shape " << s.w << "x" << s.h << " endian " << uint32_t(s.e));
+    GuestImage img = MakeGuestImage(s.w, s.h, s.e);
+    id<MTLTexture> dtex = ProduceDirectTexture(img, s.e);
+    id<MTLTexture> btex = ProduceBufferBlitTexture(img, s.e);
+    REQUIRE(dtex != nil);
+    REQUIRE(btex != nil);
+    // Representative interior coordinates (between texel centers, forcing real
+    // bilinear blends) plus every edge/corner (clamp-to-edge behavior).
+    std::vector<simd_float2> coords;
+    for (uint32_t gy = 0; gy <= 6; ++gy) {
+      for (uint32_t gx = 0; gx <= 6; ++gx) {
+        // Off-center by a quarter texel so the sampler blends four texels.
+        float u = (float(gx) / 6.0f) + (0.25f / float(s.w));
+        float v = (float(gy) / 6.0f) + (0.25f / float(s.h));
+        coords.push_back(simd_make_float2(u, v));
+      }
+    }
+    // Explicit edges and corners.
+    for (float e : {0.0f, 1.0f}) {
+      coords.push_back(simd_make_float2(e, 0.5f));
+      coords.push_back(simd_make_float2(0.5f, e));
+      for (float e2 : {0.0f, 1.0f}) coords.push_back(simd_make_float2(e, e2));
+    }
+    std::vector<simd_float4> ds = SampleAt(dtex, coords);
+    std::vector<simd_float4> bs = SampleAt(btex, coords);
+    REQUIRE(ds.size() == coords.size());
+    REQUIRE(bs.size() == coords.size());
+    // Both textures hold byte-identical RGBA8Unorm content and are sampled by
+    // the same linear sampler at identical coordinates, so the filtered
+    // results must match. Compare within half a unorm8 quantum
+    // (0.5/255 ~= 0.00196) as a justified RGBA8 quantization bound; in
+    // practice they are bit-identical.
+    const float kBound = 0.5f / 255.0f;
+    for (size_t i = 0; i < coords.size(); ++i) {
+      for (int c = 0; c < 4; ++c) {
+        float diff = std::fabs(ds[i][c] - bs[i][c]);
+        if (diff > kBound) {
+          FAIL("coord " << i << " channel " << c << " diff " << diff
+                        << " exceeds " << kBound);
+        }
+      }
+    }
   }
 }
 
