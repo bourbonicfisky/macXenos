@@ -685,6 +685,7 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
   #define texture_2d_ms_xe texture2DMS
   #define sampler_2d_xe sampler2D
   #define image_2d_xe image2D
+  #define image_format_rgba8_xe rgba8
   #define image_format_rgb10_a2_xe rgb10_a2
   #define image_format_rgba16f_xe rgba16f
   // Binding declarations.
@@ -737,6 +738,7 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
   #define texture_2d_xe Texture2D<float4_xe>
   #define texture_2d_ms_xe Texture2DMS<float4_xe>
   #define image_2d_xe RWTexture2D
+  #define image_format_rgba8_xe unorm float4
   #define image_format_rgb10_a2_xe unorm float4
   #define image_format_rgba16f_xe float4
   // Binding declarations.
@@ -775,6 +777,7 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
   #define texture_2d_xe texture2d<float>
   #define texture_2d_ms_xe texture2d_ms<float>
   #define image_2d_xe texture2d
+  #define image_format_rgba8_xe float
   #define image_format_rgb10_a2_xe float
   #define image_format_rgba16f_xe float
   // Binding declarations.

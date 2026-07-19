@@ -1,0 +1,83 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// C1T G0 (task/metal-direct-texture-load-g0): narrow RGBA8-only variant of
+// texture_load_32bpb that writes DIRECTLY into an ordinary (optimally tiled)
+// 2D image instead of a linear byte buffer. It REUSES the shared source-side
+// semantic logic verbatim — XeTextureLoadGetInfo, XeTextureLoadSourceAddress,
+// XeTextureLoadLocalXAddressXor, XeEndianSwap32 from texture_load.xesli — and
+// stores through the existing single-source image primitive
+// image_store_2d_rgba_xe. The ONLY variant-specific code is the destination
+// binding, the texel-coordinate store, and the raw-byte -> unorm float4 store
+// convention (RGBA8Unorm .write() takes a normalized float4). No guest
+// tiled-address or endian math is duplicated.
+
+#include "texture_load.xesli"
+
+// Destination is a write-only RGBA8 2D image (Metal: texture2d<..,write>),
+// declared inline in the bindings block exactly as apply_gamma_table's
+// compute path does. The source byte buffer keeps its existing declaration
+// and binding, so XeTextureLoadInfo is unchanged.
+byte_buffer_align16_declare_xe(xe_texture_load_source, set=1, binding=0, t0,
+                               space0)
+entry_bindings_begin_compute_xe
+  XE_TEXTURE_LOAD_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  image_wo_xe(image_2d_xe, image_format_rgba8_xe, xe_texture_load_dest,
+              set=0, binding=0, u0, space0, texture(1))
+  entry_binding_next_xe
+  byte_buffer_binding_xe(xe_texture_load_source, buffer(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  // 1 thread = 8 texels along X in one row (same thread contract as the
+  // buffer 32bpb shader). block == texel for 32bpb.
+  XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint3_xe block_index = in_global_thread_id_xe << uint3_xe(3u, 0u, 0u);
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
+    return;
+  }
+  uint block_offset_guest =
+      XeTextureLoadSourceAddress(load_info, block_index, 2u);
+  // First 4 texels (x .. x+3).
+  uint4_xe g0 = XeEndianSwap32(
+      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  // Second 4 texels (x+4 .. x+7): the buffer shader advances the guest
+  // address by the SAME local-X XOR step; reuse it verbatim.
+  block_offset_guest +=
+      XeTextureLoadLocalXAddressXor(4u, 2u, load_info.is_tiled);
+  uint4_xe g1 = XeEndianSwap32(
+      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  // Store convention only: each guest word holds one texel's RGBA8 bytes in
+  // little-endian channel order (byte0=R..byte3=A); an RGBA8Unorm write takes
+  // the normalized float4, so unpack bytes and divide by 255. This produces
+  // the identical texture content the buffer+blit path would, because the
+  // blit interprets those same raw bytes as RGBA8Unorm.
+  uint gw[8];
+  gw[0] = g0.x; gw[1] = g0.y; gw[2] = g0.z; gw[3] = g0.w;
+  gw[4] = g1.x; gw[5] = g1.y; gw[6] = g1.z; gw[7] = g1.w;
+  for (uint k = 0u; k < 8u; ++k) {
+    uint x = block_index.x + k;
+    if (x >= load_info.size_blocks.x) {
+      continue;
+    }
+    uint w = gw[k];
+    float4_xe texel = float4_xe(float(w & 0xFFu), float((w >> 8u) & 0xFFu),
+                                float((w >> 16u) & 0xFFu),
+                                float((w >> 24u) & 0xFFu)) *
+                      (1.0f / 255.0f);
+    image_store_2d_rgba_xe(xe_texture_load_dest,
+                           uint2_xe(x, block_index.y), texel);
+  }
+}
+entry_code_end_compute_xe
