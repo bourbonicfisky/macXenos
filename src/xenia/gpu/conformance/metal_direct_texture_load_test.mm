@@ -489,15 +489,35 @@ TEST_CASE("direct texture load: 47x33 source covers every padded read group",
   // allocation MakeGuestImage produces covers the exact read set (pinned so a
   // future change to the sizing can't silently under-allocate on odd widths).
   GuestImage img = MakeGuestImage(47, 33, xenos::Endian::k8in32);
-  uint32_t need = DirectShaderReadEnd(47, 33, img.pitch_aligned);
-  REQUIRE(img.tiled.size() >= need);
-  // The padded width is strictly greater than the width here (47 -> 48), so
-  // the shader's read set genuinely extends past the [0,width) stored texels.
+  // 47 rounds to a 32-aligned pitch of 64 and a padded (8-group) width of 48.
+  REQUIRE(img.pitch_aligned == 64u);
   REQUIRE(((47u + 7u) & ~7u) == 48u);
-  // The single source allocation must also cover what the CPU oracle reads:
-  // 4 bytes at each individual texel offset Tiled2D(x, y), x in [0,width).
-  // (The shader reads 16-byte uint4 groups from group-aligned starts; the
-  // oracle reads 4 bytes per texel — both must fit.)
+  // Independently enumerate EVERY 16-byte uint4 group the direct shader reads
+  // — group starts gx in {0,4,...,44} (padded width 48), all rows — and
+  // require each read [Tiled2D(gx,y), +16) to fit inside the ACTUAL source
+  // allocation `img.tiled.size()`. This is NOT `img.tiled.size() >=
+  // DirectShaderReadEnd(...)` (which would be tautological); it fails if
+  // DirectShaderReadEnd is ever made too small, because MakeGuestImage would
+  // then under-allocate and one of these group reads would run past the end.
+  uint32_t group_read_end = 0;
+  for (uint32_t y = 0; y < 33; ++y) {
+    for (uint32_t gx = 0; gx < 48; gx += 4) {
+      uint32_t end = uint32_t(texture_address::Tiled2D(
+                         int32_t(gx), int32_t(y), int32_t(img.pitch_aligned),
+                         2)) +
+                     16u;
+      if (end > img.tiled.size()) {
+        FAIL("group read (gx=" << gx << ", y=" << y << ") ends at " << end
+                               << " > source size " << img.tiled.size());
+      }
+      group_read_end = std::max(group_read_end, end);
+    }
+  }
+  // Pin the exact end so a layout/pitch regression is caught (this literal is
+  // the byte just past the highest group read for 47x33 @ pitch 64).
+  REQUIRE(group_read_end == 12400u);
+  // The single allocation must also cover the CPU oracle's per-texel 4-byte
+  // reads at Tiled2D(x, y), x in [0,width) — kept as an independent check.
   uint32_t oracle_end = 0;
   for (uint32_t y = 0; y < 33; ++y) {
     for (uint32_t x = 0; x < 47; ++x) {
@@ -509,9 +529,6 @@ TEST_CASE("direct texture load: 47x33 source covers every padded read group",
     }
   }
   REQUIRE(img.tiled.size() >= oracle_end);
-  // The shader's 16-byte group read set subsumes the oracle's 4-byte per-texel
-  // read set (the last texel, 46, lives inside the group at gx=44).
-  REQUIRE(need >= oracle_end);
 }
 
 TEST_CASE("direct texture load: filtered (linear-sampler) parity with "
@@ -557,17 +574,14 @@ TEST_CASE("direct texture load: filtered (linear-sampler) parity with "
     REQUIRE(ds.size() == coords.size());
     REQUIRE(bs.size() == coords.size());
     // Both textures hold byte-identical RGBA8Unorm content and are sampled by
-    // the same linear sampler at identical coordinates, so the filtered
-    // results must match. Compare within half a unorm8 quantum
-    // (0.5/255 ~= 0.00196) as a justified RGBA8 quantization bound; in
-    // practice they are bit-identical.
-    const float kBound = 0.5f / 255.0f;
+    // the identical linear sampler/pipeline at identical coordinates, so the
+    // filtered results must be EXACTLY equal (bit-for-bit) — not merely within
+    // a quantization bound.
     for (size_t i = 0; i < coords.size(); ++i) {
       for (int c = 0; c < 4; ++c) {
-        float diff = std::fabs(ds[i][c] - bs[i][c]);
-        if (diff > kBound) {
-          FAIL("coord " << i << " channel " << c << " diff " << diff
-                        << " exceeds " << kBound);
+        if (ds[i][c] != bs[i][c]) {
+          FAIL("coord " << i << " channel " << c << " direct " << ds[i][c]
+                        << " != buffer+blit " << bs[i][c]);
         }
       }
     }
