@@ -11,12 +11,28 @@
 // texture_load_32bpb that writes DIRECTLY into an ordinary (optimally tiled)
 // 2D image instead of a linear byte buffer. It REUSES the shared source-side
 // semantic logic verbatim — XeTextureLoadGetInfo, XeTextureLoadSourceAddress,
-// XeTextureLoadLocalXAddressXor, XeEndianSwap32 from texture_load.xesli — and
-// stores through the existing single-source image primitive
-// image_store_2d_rgba_xe. The ONLY variant-specific code is the destination
-// binding, the texel-coordinate store, and the raw-byte -> unorm float4 store
-// convention (RGBA8Unorm .write() takes a normalized float4). No guest
-// tiled-address or endian math is duplicated.
+// XeEndianSwap32 from texture_load.xesli — and stores through the existing
+// single-source image primitive image_store_2d_rgba_xe. The ONLY
+// variant-specific code is the destination binding, the texel-coordinate
+// store, and the raw-byte -> unorm float4 store convention (RGBA8Unorm
+// .write() takes a normalized float4). No guest tiled-address or endian math
+// is duplicated.
+//
+// 6.1-G0 (task/metal-texture-load-mip-tail-g0): to load an individual mip
+// level directly into a level-scoped Metal texture view, the dispatch binds
+// that view (its mip 0 aliases host mip N) and passes the level's own
+// guest_offset/pitch/size — no shader change needed for non-packed levels
+// (read position == write position). A PACKED mip-tail sub-mip, however,
+// shares the tail's byte base but sits at a non-additive sub-tile (px,py)
+// block offset within it (texture_util::GetPackedMipOffset), so the source
+// READ position must be decoupled from the destination WRITE position. That
+// (px,py) block offset is carried in the direct variant's otherwise-UNUSED
+// host_offset push-constant field (px in the low 16 bits, py in the high 16),
+// so the shared texture_load push-constant struct and the whole load-shader
+// family ABI are UNCHANGED. host_offset == 0 (base and every non-packed
+// level, and the existing C1T-R production route) gives read == write and is
+// byte-identical to the pre-6.1 shader. The offset feeds the existing
+// XeTextureLoadSourceAddress; no tiled/packing math is duplicated here.
 
 #include "texture_load.xesli"
 
@@ -45,18 +61,28 @@ entry_inputs_end_code_begin_compute_xe
   if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
     return;
   }
-  uint block_offset_guest =
-      XeTextureLoadSourceAddress(load_info, block_index, 2u);
+  // Source READ position: the destination block plus the packed sub-mip
+  // sub-tile offset (host_offset low/high 16 bits; 0 for base/non-packed and
+  // the production route, giving read == write). The (px,py) can be non-8-
+  // aligned (a 4x4 packed mip sits at x_blocks==4), so the second 4-texel
+  // group's address is recomputed from scratch through the shared
+  // XeTextureLoadSourceAddress rather than via the 8-aligned LocalXAddressXor
+  // step the buffer shader uses — the full computation is correct for any x
+  // and is byte-identical to the XOR step when the offset is 0.
+  uint3_xe src_read = block_index + uint3_xe(load_info.host_offset & 0xFFFFu,
+                                             load_info.host_offset >> 16u, 0u);
   // First 4 texels (x .. x+3).
   uint4_xe g0 = XeEndianSwap32(
-      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      byte_buffer_align16_load16_xe(
+          xe_texture_load_source,
+          XeTextureLoadSourceAddress(load_info, src_read, 2u)),
       load_info.endian_32);
-  // Second 4 texels (x+4 .. x+7): the buffer shader advances the guest
-  // address by the SAME local-X XOR step; reuse it verbatim.
-  block_offset_guest +=
-      XeTextureLoadLocalXAddressXor(4u, 2u, load_info.is_tiled);
+  // Second 4 texels (x+4 .. x+7).
   uint4_xe g1 = XeEndianSwap32(
-      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      byte_buffer_align16_load16_xe(
+          xe_texture_load_source,
+          XeTextureLoadSourceAddress(load_info, src_read + uint3_xe(4u, 0u, 0u),
+                                     2u)),
       load_info.endian_32);
   // Store convention only: each guest word holds one texel's RGBA8 bytes in
   // little-endian channel order (byte0=R..byte3=A); an RGBA8Unorm write takes

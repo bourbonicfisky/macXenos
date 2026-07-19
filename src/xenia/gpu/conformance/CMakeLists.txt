@@ -62,6 +62,13 @@ if(APPLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_dispatch_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_buffer_backed_texture_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_direct_texture_load_test.mm
+    # 6.1-G0: the direct mip-chain/packed-tail test drives its per-level
+    # dispatch plan from the production guest-layout helpers (no re-implemented
+    # tiled/packing math). GetGuestTextureLayout/GetPackedMipOffset live in
+    # texture_util.cc; FormatInfo (its only dependency) in
+    # texture_info_formats.cc. Both are lean (pure math + the format table).
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_util.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_info_formats.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_load_shader_pipelines.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm
     # Shared-memory coherence surface (L1): links the REAL Memory +
