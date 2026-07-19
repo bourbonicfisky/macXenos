@@ -32,10 +32,11 @@ struct ExpectedProfile {
   std::chrono::milliseconds duration;
 };
 
-constexpr std::array<ExpectedProfile, 3> kExpectedProfiles = {{
+constexpr std::array<ExpectedProfile, 4> kExpectedProfiles = {{
     {"53450848-sonic-generations.toml", "53450848", 5, 7, 21100ms},
     {"434307FC-ultra-street-fighter-iv.toml", "434307FC", 17, 29, 48000ms},
     {"534307E7-just-cause-2.toml", "534307E7", 3, 8, 16000ms},
+    {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", 3, 4, 12800ms},
 }};
 
 }  // namespace
