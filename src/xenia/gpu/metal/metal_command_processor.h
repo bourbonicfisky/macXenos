@@ -30,6 +30,7 @@ namespace gpu {
 namespace metal {
 
 class MetalPipelineCache;
+class MetalPrimitiveProcessor;
 class MetalRenderTargetCache;
 class MetalSharedMemory;
 class MetalSharedTextureCache;
@@ -176,6 +177,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // shared subclass (seam audit M2 — prep and serve share one decision).
   uint32_t draw_shared_route_mask_ = 0;
   std::unique_ptr<MetalUploadArena> upload_arena_;
+  // PP1: shared xe::gpu::PrimitiveProcessor subclass, the single normalization
+  // authority for routed native non-expanded restart-disabled line/triangle
+  // list/strip draws. Null only if its initialization failed, in which case
+  // every draw stays on the inline path.
+  std::unique_ptr<MetalPrimitiveProcessor> primitive_processor_;
 
   // Bindless / fixed-resource infrastructure for the MSC argument buffer. All
   // are id<...> held as retained void*.

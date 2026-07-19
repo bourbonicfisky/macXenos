@@ -29,6 +29,13 @@ add_executable(xenia-gpu-conformance
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/gpu_flags.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_writer.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/xenos.cc
+  # PP1 (device-free): the REAL shared PrimitiveProcessor normalization logic +
+  # the REAL production MetalPrimitiveProcessor subclass (pure C++, no device)
+  # + the register file it reads. metal_primitive_processor_pp1_test.cc
+  # instantiates MetalPrimitiveProcessor directly.
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/primitive_processor.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_primitive_processor.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/register_file.cc
   # EDRAM tile/sample addressing oracle (mirror of edram.xesli). Pure math +
   # fmt/base/stb — no command_processor, so it stays in the lean target.
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_analysis_decode.cc

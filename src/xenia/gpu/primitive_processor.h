@@ -317,6 +317,25 @@ class PrimitiveProcessor {
       xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
       uint32_t coalignment_original_address, size_t& backend_handle_out) = 0;
 
+  // Makes the guest index buffer resident where the host GPU will read it for a
+  // kGuestDMA / kHostBuiltinForDMA draw. The default reproduces the historical
+  // behavior exactly (a shared-memory RequestRange), so backends that draw
+  // indices straight out of the shared-memory buffer (Direct3D 12, Vulkan) get
+  // it unchanged by not overriding. A backend that materializes guest indices
+  // by another owner (Metal copies them into its upload arena in the command
+  // processor, never binding the shared-memory buffer as an index source) may
+  // override this as a true no-op so Process performs no shared-memory upload,
+  // avoiding an unneeded upload and its intra-frame hazard flush (commit/wait).
+  // Overriding does NOT change normalization: Process remains the sole
+  // authority for the ProcessingResult fields.
+  virtual bool RequestGuestIndexSharedMemoryRange(
+      uint32_t guest_index_base, uint32_t guest_index_buffer_needed_bytes,
+      ProcessedIndexBufferType index_buffer_type) {
+    (void)index_buffer_type;
+    return shared_memory_.RequestRange(guest_index_base,
+                                       guest_index_buffer_needed_bytes);
+  }
+
  private:
 #if XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE
 #if XE_ARCH_AMD64

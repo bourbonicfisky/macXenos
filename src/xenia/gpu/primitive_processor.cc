@@ -1132,10 +1132,14 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
   if (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA ||
       cacheable.index_buffer_type ==
           ProcessedIndexBufferType::kHostBuiltinForDMA) {
-    // Request the index buffer memory.
+    // Request the index buffer memory. Routed through a virtual so a backend
+    // that materializes guest indices by another owner (e.g. Metal's upload
+    // arena) can make this a no-op; the default is the historical RequestRange
+    // and is what Direct3D 12 / Vulkan use unchanged.
     // TODO(Triang3l): Shared memory request cache.
-    if (!shared_memory_.RequestRange(guest_index_base,
-                                     guest_index_buffer_needed_bytes)) {
+    if (!RequestGuestIndexSharedMemoryRange(guest_index_base,
+                                            guest_index_buffer_needed_bytes,
+                                            cacheable.index_buffer_type)) {
       XELOGE(
           "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
           "bytes needed, in the shared memory",
