@@ -60,6 +60,7 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/shaders)
   target_sources(xenia-gpu-conformance PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_dispatch_test.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_buffer_backed_texture_test.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_load_shader_pipelines.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm
     # Shared-memory coherence surface (L1): links the REAL Memory +
