@@ -434,6 +434,16 @@ constexpr float UNorm24To32(uint32_t n24) {
   // Division by 16777215.0f behaves this way.
   return float(n24 + (n24 >> 23)) * (1.0f / float(1 << 24));
 }
+// Converts an IEEE-754 32-bit floating-point number to 24-bit unorm depth,
+// clamping to [0, 1] and saturating the rounded result: float32 spacing at
+// 2^24 is 1.0, so 1.0f * 16777215.0f + 0.5f rounds to 16777216.0f — without
+// the saturation the extra bit overflows 24 bits (and a subsequent << 8
+// wraps a far-plane depth to 0).
+constexpr uint32_t Float32ToUNorm24(float f32) {
+  float clamped = f32 < 0.0f ? 0.0f : (f32 > 1.0f ? 1.0f : f32);
+  uint32_t n24 = uint32_t(clamped * 16777215.0f + 0.5f);
+  return n24 > 0xFFFFFFu ? 0xFFFFFFu : n24;
+}
 
 // Scale for conversion of slope scales from PA_SU_POLY_OFFSET_FRONT/BACK_SCALE
 // units to those used when the slope is computed from the difference between

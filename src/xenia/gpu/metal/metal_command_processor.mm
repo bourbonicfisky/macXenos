@@ -4185,12 +4185,9 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
               // the d2c stencil plane if a title needs it in RAM).
               float df;
               std::memcpy(&df, &v, sizeof(df));
-              uint32_t d24 =
-                  wb.depth_encode == 2
-                      ? xenos::Float32To20e4(df, true)
-                      : uint32_t(
-                            std::min(std::max(df, 0.0f), 1.0f) * 16777215.0f +
-                            0.5f);
+              uint32_t d24 = wb.depth_encode == 2
+                                 ? xenos::Float32To20e4(df, true)
+                                 : xenos::Float32ToUNorm24(df);
               v = d24 << 8;
             }
             if (wb.swap_rb) {

@@ -100,6 +100,30 @@ TEST_CASE("unorm24 endpoints are exact and 0xC00000 rounds up", "[l0][unorm24]")
   REQUIRE(xenos::UNorm24To32(0xC00000u) - 0.75f < 1.0e-6f);
 }
 
+TEST_CASE("unorm24 encode saturates at the far plane", "[l0][unorm24]") {
+  // float32 spacing at 2^24 is 1.0: 1.0f * 16777215.0f + 0.5f rounds to
+  // 16777216.0f, one past the 24-bit maximum. The unsaturated cast overflowed
+  // 24 bits and (d24 << 8) wrapped a far-plane depth to 0 — JC2's shadow
+  // atlas (cleared to 1.0) wrote back all-zero and every shadow test failed.
+  REQUIRE(uint32_t(1.0f * 16777215.0f + 0.5f) == 0x1000000u);  // the trap
+  REQUIRE(xenos::Float32ToUNorm24(1.0f) == 0xFFFFFFu);
+  REQUIRE(xenos::Float32ToUNorm24(0.0f) == 0u);
+  REQUIRE(xenos::Float32ToUNorm24(2.0f) == 0xFFFFFFu);   // clamps high
+  REQUIRE(xenos::Float32ToUNorm24(-1.0f) == 0u);         // clamps low
+  // Representative interior values keep the established +0.5/truncate
+  // rounding (this helper only adds saturation; it does NOT redefine midpoint
+  // behavior, and UNorm24To32's (n>>23)-nudged decode is deliberately NOT
+  // assumed to be exactly invertible).
+  REQUIRE(xenos::Float32ToUNorm24(0.5f) ==
+          uint32_t(0.5f * 16777215.0f + 0.5f));
+  REQUIRE(xenos::Float32ToUNorm24(0.75f) ==
+          uint32_t(0.75f * 16777215.0f + 0.5f));
+  // Near-far values below the overflow tie stay unsaturated and monotonic.
+  REQUIRE(xenos::Float32ToUNorm24(0.9999999f) == 0xFFFFFEu);
+  REQUIRE(xenos::Float32ToUNorm24(0.9999999f) <
+          xenos::Float32ToUNorm24(1.0f));
+}
+
 // --- 7e3 guest color float (Float7e3To32) ------------------------------------
 TEST_CASE("7e3 color endpoints and monotonicity", "[l0][float7e3]") {
   REQUIRE(xenos::Float7e3To32(0u) == 0.0f);
