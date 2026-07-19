@@ -1,0 +1,135 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// 6.2-G0 (task/metal-dxt-direct-load-g0): narrow direct-to-tiled variant of
+// texture_load_dxt5_rgba8. It DECODES guest k_DXT4_5 blocks and writes the
+// resulting RGBA8 texels DIRECTLY into an ordinary (optimally tiled) 2D image
+// (Metal texture2d<..,write>) instead of the linear byte buffer the shared
+// shader targets — the compressed-format analog of texture_load_32bpb_direct.
+//
+// It REUSES the shared DXT5 block->four-RGBA8-rows decode VERBATIM through the
+// single shared helper XeDXT5BlockToRGBA8Rows in pixel_formats.xesli (the same
+// helper texture_load_dxt5_rgba8's linear store consumes) and the shared
+// source-address/endian logic from texture_load.xesli
+// (XeTextureLoadSourceAddress, XeEndianSwap32). NO decode, tiled-address, or
+// endian math is duplicated; only the destination store convention differs.
+//
+// The output is byte-identical to the shared texture_load_dxt5_rgba8 shader's
+// RGBA8 result — a DECODE-to-RGBA8 representation. This is explicitly NOT the
+// canonical Metal DXT4_5 path, which uploads raw endian-corrected blocks to a
+// hardware-sampled BC3 texture (MTLPixelFormatBC3_RGBA); the choice between
+// RGBA8-decode and BC3-hardware-sampling is a production routing decision, not
+// part of this isolated G0 foundation.
+//
+// Mip chains and packed mip tails (6.1 mechanism, block granularity): a packed
+// sub-mip shares the tail's byte base but sits at a non-additive sub-tile
+// (px,py) BLOCK offset (texture_util::GetPackedMipOffset, block units for the
+// compressed format), so the source READ block decouples from the destination
+// WRITE block. That offset rides the direct variant's host_offset push
+// constant (px low 16 bits, py high 16); the destination texel bounds ride
+// host_pitch (level width in texels) and height_texels (level height), which
+// the linear store used for its layout but the image store repurposes as
+// bounds. host_offset == 0 gives read == write (base and non-packed levels).
+
+#include "pixel_formats.xesli"
+#include "texture_load.xesli"
+
+// Destination is a write-only RGBA8 2D image (Metal: texture2d<..,write>),
+// declared exactly as texture_load_32bpb_direct does.
+byte_buffer_align16_declare_xe(xe_texture_load_source, set=1, binding=0, t0,
+                               space0)
+entry_bindings_begin_compute_xe
+  XE_TEXTURE_LOAD_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  image_wo_xe(image_2d_xe, image_format_rgba8_xe, xe_texture_load_dest,
+              set=0, binding=0, u0, space0, texture(1))
+  entry_binding_next_xe
+  byte_buffer_binding_xe(xe_texture_load_source, buffer(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  // 1 thread = 2 DXT5 blocks -> 8x4 R8G8B8A8 texels (same thread contract as
+  // the shared dxt5 shader). block_index is in 4x4-block units.
+  XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint3_xe block_index = in_global_thread_id_xe << uint3_xe(1u, 0u, 0u);
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
+    return;
+  }
+  // Source READ block = destination block + packed sub-tile block offset
+  // (host_offset low/high 16 bits; 0 for base/non-packed). Destination texel
+  // bounds for NPOT / partial edge blocks.
+  uint2_xe src_block_off =
+      uint2_xe(load_info.host_offset & 0xFFFFu, load_info.host_offset >> 16u);
+  uint width_texels = load_info.host_pitch;
+  uint height_texels = load_info.height_texels;
+
+  uint i;
+  unroll_xe for (i = 0u; i < 2u; ++i) {
+    uint3_xe dst_block = block_index + uint3_xe(i, 0u, 0u);
+    dont_flatten_xe
+    if (dst_block.x >= load_info.size_blocks.x) {
+      continue;
+    }
+    // Full source-address recompute per block (correct for a non-2-aligned
+    // packed block x; byte-identical to the shared shader's
+    // XeTextureLoadLocalXAddressXor advance when the offset is 0).
+    uint3_xe src_block =
+        uint3_xe(dst_block.x + src_block_off.x, dst_block.y + src_block_off.y,
+                 dst_block.z);
+    uint block_offset_guest =
+        XeTextureLoadSourceAddress(load_info, src_block, 4u);
+    uint4_xe block = XeEndianSwap32(
+        byte_buffer_align16_load16_xe(xe_texture_load_source,
+                                      block_offset_guest),
+        load_info.endian_32);
+
+    // Shared block->four-RGBA8-rows decode (single source; identical to the
+    // linear texture_load_dxt5_rgba8 path). Flatten for a bounded per-texel
+    // image store.
+    XeDXT5Rgba8Rows rows = XeDXT5BlockToRGBA8Rows(block);
+    uint words[16];
+    words[0] = rows.row0.x; words[1] = rows.row0.y;
+    words[2] = rows.row0.z; words[3] = rows.row0.w;
+    words[4] = rows.row1.x; words[5] = rows.row1.y;
+    words[6] = rows.row1.z; words[7] = rows.row1.w;
+    words[8] = rows.row2.x; words[9] = rows.row2.y;
+    words[10] = rows.row2.z; words[11] = rows.row2.w;
+    words[12] = rows.row3.x; words[13] = rows.row3.y;
+    words[14] = rows.row3.z; words[15] = rows.row3.w;
+
+    // Store convention (same as texture_load_32bpb_direct): each guest word
+    // holds one texel's RGBA8 bytes in little-endian channel order; an
+    // RGBA8Unorm write takes a normalized float4, so unpack and divide by 255.
+    uint base_x = dst_block.x << 2u;
+    uint base_y = dst_block.y << 2u;
+    uint r;
+    for (r = 0u; r < 4u; ++r) {
+      uint ty = base_y + r;
+      if (ty >= height_texels) {
+        continue;
+      }
+      uint c;
+      for (c = 0u; c < 4u; ++c) {
+        uint tx = base_x + c;
+        if (tx >= width_texels) {
+          continue;
+        }
+        uint w = words[(r << 2u) + c];
+        float4_xe texel = float4_xe(float(w & 0xFFu), float((w >> 8u) & 0xFFu),
+                                    float((w >> 16u) & 0xFFu),
+                                    float((w >> 24u) & 0xFFu)) *
+                          (1.0f / 255.0f);
+        image_store_2d_rgba_xe(xe_texture_load_dest, uint2_xe(tx, ty), texel);
+      }
+    }
+  }
+}
+entry_code_end_compute_xe

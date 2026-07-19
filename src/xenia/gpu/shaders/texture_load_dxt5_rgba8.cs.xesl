@@ -38,43 +38,26 @@ XE_TEXTURE_LOAD_ENTRY(16)
         byte_buffer_align16_load16_xe(xe_texture_load_source,
                                       block_offset_guest),
         load_info.endian_32);
-    uint2_xe bgr_end_8in10 = XeDXTColorEndpointsToBGR8In10(block.z);
-    // Sort the color indices so they can be used as weights for the second
-    // endpoint.
-    uint bgr_weights = XeDXTHighColorWeights(block.w);
-    uint2_xe alpha_end = (block.xx >> uint2_xe(0u, 8u)) & 0xFFu;
-    uint alpha_weights = XeDXT5HighAlphaWeights(
-        alpha_end, (block.x >> 16u) | ((block.y & 0xFFu) << 16u));
-    byte_buffer_align16_store16_xe(
-        xe_texture_load_dest, block_offset_host,
-        XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights) |
-        ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights)) <<
-              uint4_xe(24u, 16u, 8u, 0u))
-             & 0xFF000000u));
+    // Shared block->four-RGBA8-rows decode (single source, also used by
+    // texture_load_dxt5_rgba8_direct). Behavior-neutral vs the previous inline
+    // decode: identical endpoint/weight/row expressions, only hoisted into the
+    // helper (rows beyond the height are still not stored).
+    XeDXT5Rgba8Rows rows = XeDXT5BlockToRGBA8Rows(block);
+    byte_buffer_align16_store16_xe(xe_texture_load_dest, block_offset_host,
+                                   rows.row0);
     dont_flatten_xe if (texel_index_host.y + 1u < load_info.height_texels) {
       byte_buffer_align16_store16_xe(
           xe_texture_load_dest, block_offset_host + load_info.host_pitch,
-          XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 8u) |
-          ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights >> 12u)) <<
-                uint4_xe(24u, 16u, 8u, 0u))
-               & 0xFF000000u));
+          rows.row1);
       dont_flatten_xe if (texel_index_host.y + 2u < load_info.height_texels) {
-        alpha_weights = XeDXT5HighAlphaWeights(alpha_end, block.y >> 8u);
         byte_buffer_align16_store16_xe(
             xe_texture_load_dest, block_offset_host + 2u * load_info.host_pitch,
-            XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 16u) |
-            ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights)) <<
-                  uint4_xe(24u, 16u, 8u, 0u))
-                 & 0xFF000000u));
+            rows.row2);
         dont_flatten_xe
         if (texel_index_host.y + 3u < load_info.height_texels) {
           byte_buffer_align16_store16_xe(
               xe_texture_load_dest,
-              block_offset_host + 3u * load_info.host_pitch,
-              XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 24u) |
-              ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights >> 12u)) <<
-                    uint4_xe(24u, 16u, 8u, 0u))
-                   & 0xFF000000u));
+              block_offset_host + 3u * load_info.host_pitch, rows.row3);
         }
       }
     }

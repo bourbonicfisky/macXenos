@@ -1026,6 +1026,51 @@ uint2_xe XeDXT5RowToA8In16(uint2_xe end, uint weights) {
                           : XeDXT58StepRowToA8In16(end, weights);
 }
 
+// The four decoded R8G8B8A8 rows (four texels each, packed one texel per uint
+// in little-endian channel order) of one DXT5 (k_DXT4_5) block.
+struct XeDXT5Rgba8Rows {
+  uint4_xe row0;
+  uint4_xe row1;
+  uint4_xe row2;
+  uint4_xe row3;
+};
+
+// Decodes one endian-corrected DXT5 block (block.x/.y = alpha endpoints +
+// 3-bit indices, block.z = color endpoints, block.w = 2-bit color indices)
+// into its four R8G8B8A8 rows. This is the single source of the DXT5
+// block->rows orchestration shared by texture_load_dxt5_rgba8 (linear store)
+// and texture_load_dxt5_rgba8_direct (image store); neither reimplements it.
+// Endpoint/weight extraction and the per-row RGB+A assembly are unchanged from
+// the original inline decode (the color weights are shifted 8*row and the
+// alpha weights 12*(row&1), with rows 0/1 using the first alpha-index dword
+// and rows 2/3 the second).
+XeDXT5Rgba8Rows XeDXT5BlockToRGBA8Rows(uint4_xe block) {
+  uint2_xe bgr_end_8in10 = XeDXTColorEndpointsToBGR8In10(block.z);
+  uint bgr_weights = XeDXTHighColorWeights(block.w);
+  uint2_xe alpha_end = (block.xx >> uint2_xe(0u, 8u)) & 0xFFu;
+  uint alpha_weights_01 = XeDXT5HighAlphaWeights(
+      alpha_end, (block.x >> 16u) | ((block.y & 0xFFu) << 16u));
+  uint alpha_weights_23 = XeDXT5HighAlphaWeights(alpha_end, block.y >> 8u);
+  XeDXT5Rgba8Rows rows;
+  rows.row0 =
+      XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights) |
+      ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights_01)) <<
+            uint4_xe(24u, 16u, 8u, 0u)) & 0xFF000000u);
+  rows.row1 =
+      XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 8u) |
+      ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights_01 >> 12u)) <<
+            uint4_xe(24u, 16u, 8u, 0u)) & 0xFF000000u);
+  rows.row2 =
+      XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 16u) |
+      ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights_23)) <<
+            uint4_xe(24u, 16u, 8u, 0u)) & 0xFF000000u);
+  rows.row3 =
+      XeDXTOpaqueRowToRGB8(bgr_end_8in10, bgr_weights >> 24u) |
+      ((uint_x4_xe(XeDXT5RowToA8(alpha_end, alpha_weights_23 >> 12u)) <<
+            uint4_xe(24u, 16u, 8u, 0u)) & 0xFF000000u);
+  return rows;
+}
+
 // Converts one row of two CTX1 blocks to R8G8. Endpoints of block 0 in XY and
 // of block 1 in ZW must be unpacked from 0xRRGGrrgg to 0x00gg00rr 0x00GG00RR so
 // they can be multiplied by weights with room for overflow. Weights can be
