@@ -173,12 +173,14 @@ DEFINE_string(
 
 DEFINE_bool(
     capture_edram_hashes, false,
-    "With --capture_dir: after EVERY draw, append per-tile XXH3-64 hashes "
-    "of the raw EDRAM image to <dir>/edram_hashes.bin (16-byte header: "
-    "'XEDH', version, tile_count, tile_bytes; then records of uint32 draw "
-    "index + tile_count uint64 hashes, little-endian). Full-frame "
-    "first-divergence scanning at ~16 KB/draw instead of 10 MB snapshots. "
-    "Forces a submission + queue drain per draw (NOT passive, design D3).",
+    "With --capture_dir: after EVERY draw, append per-tile, per-physical-"
+    "sample-plane XXH3-64 hashes of the raw EDRAM image to "
+    "<dir>/edram_hashes.bin (16-byte header: 'XEDH', version, tile_count, "
+    "tile_bytes; then records of uint32 draw index + tile_count*4 uint64 "
+    "hashes, little-endian). Sample planes use the canonical 32bpp 4x "
+    "physical layout. Full-frame first-divergence scanning at ~64 KB/draw "
+    "instead of 10 MB snapshots. Forces a submission + queue drain per draw "
+    "(NOT passive, design D3).",
     "GPU");
 
 DEFINE_string(
@@ -2224,7 +2226,18 @@ void CommandProcessor::AppendCaptureEdramHashes(
   constexpr uint32_t kTileBytes = xenos::kEdramTileWidthSamples *
                                   xenos::kEdramTileHeightSamples * 4;
   constexpr uint32_t kTileCount = xenos::kEdramTileCount;
+  constexpr uint32_t kSamplePlaneCount = 4;
+  constexpr uint32_t kWordsPerSamplePlane =
+      xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples /
+      kSamplePlaneCount;
   static_assert(kTileBytes * kTileCount == xenos::kEdramSizeBytes);
+  static_assert(kWordsPerSamplePlane * kSamplePlaneCount * sizeof(uint32_t) ==
+                kTileBytes);
+  if (edram.size() != xenos::kEdramSizeBytes) {
+    XELOGE("capture_dir: expected {} EDRAM bytes for hashing, got {}",
+           xenos::kEdramSizeBytes, edram.size());
+    return;
+  }
   if (!capture_hashes_file_) {
     std::filesystem::path capture_dir =
         std::filesystem::path(cvars::capture_dir);
@@ -2236,17 +2249,46 @@ void CommandProcessor::AppendCaptureEdramHashes(
       XELOGE("capture_dir: failed to open {}", hashes_path.string());
       return;
     }
-    const uint32_t header[4] = {0x48444558u /* 'XEDH' */, 1u, kTileCount,
+    const uint32_t header[4] = {0x48444558u /* 'XEDH' */, 2u, kTileCount,
                                 kTileBytes};
     fwrite(header, sizeof(header), 1, capture_hashes_file_);
   }
-  uint64_t hashes[kTileCount];
+  uint64_t hashes[kTileCount * kSamplePlaneCount];
+  uint32_t sample_plane_words[kSamplePlaneCount][kWordsPerSamplePlane];
   for (uint32_t tile = 0; tile < kTileCount; ++tile) {
-    hashes[tile] =
-        XXH3_64bits(edram.data() + size_t(tile) * kTileBytes, kTileBytes);
+    uint32_t sample_plane_word_counts[kSamplePlaneCount] = {};
+    const uint8_t* tile_bytes = edram.data() + size_t(tile) * kTileBytes;
+    for (uint32_t y = 0; y < xenos::kEdramTileHeightSamples; ++y) {
+      for (uint32_t x = 0; x < xenos::kEdramTileWidthSamples; ++x) {
+        // XeEdramOffsetBytes places the 4x sample index as
+        // ((sample >> 1) & 1, sample & 1). Classifying the raw 80x16 dword
+        // tile by x/y parity therefore yields the canonical 32bpp physical
+        // sample plane without needing render-target metadata. The 40-column
+        // depth swap preserves parity.
+        uint32_t sample_plane = ((x & 1u) << 1u) | (y & 1u);
+        uint32_t word;
+        std::memcpy(&word,
+                    tile_bytes +
+                        size_t(y * xenos::kEdramTileWidthSamples + x) *
+                            sizeof(uint32_t),
+                    sizeof(word));
+        uint32_t& sample_plane_word_count =
+            sample_plane_word_counts[sample_plane];
+        sample_plane_words[sample_plane][sample_plane_word_count++] = word;
+      }
+    }
+    for (uint32_t sample_plane = 0; sample_plane < kSamplePlaneCount;
+         ++sample_plane) {
+      assert_true(sample_plane_word_counts[sample_plane] ==
+                  kWordsPerSamplePlane);
+      hashes[tile * kSamplePlaneCount + sample_plane] =
+          XXH3_64bits(sample_plane_words[sample_plane],
+                      sizeof(sample_plane_words[sample_plane]));
+    }
   }
   fwrite(&draw_index, sizeof(draw_index), 1, capture_hashes_file_);
-  fwrite(hashes, sizeof(uint64_t), kTileCount, capture_hashes_file_);
+  fwrite(hashes, sizeof(uint64_t), kTileCount * kSamplePlaneCount,
+         capture_hashes_file_);
   // Flush per record: the two-machine workflow may SIGALRM-kill the replay
   // before stdio buffers drain (same policy as the manifest).
   fflush(capture_hashes_file_);

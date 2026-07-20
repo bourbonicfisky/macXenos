@@ -620,7 +620,7 @@ class CommandProcessor {
   // empty.
   bool IsCaptureEdramDraw(uint32_t draw_index) const;
   // Snapshots raw EDRAM to <capture_dir>/draw_NNNNNN.edram.bin if this draw
-  // is selected, and/or appends its per-tile hash record when
+  // is selected, and/or appends its per-tile/sample-plane hash record when
   // --capture_edram_hashes (one EDRAM download serves both). May perturb
   // (design D3): forces a submission + queue drain.
   void MaybeCaptureEdramSnapshot(uint32_t draw_index);
@@ -633,9 +633,9 @@ class CommandProcessor {
   // Backend hook for MaybeSerializeDraw: commit all encoded GPU work and wait
   // for completion, leaving state ready for the next draw. Default no-op.
   virtual void FlushForDrawSerialization() {}
-  // Appends one record (u32 draw index + kEdramTileCount u64 XXH3-64 tile
-  // hashes) to <capture_dir>/edram_hashes.bin, writing the 16-byte header
-  // ('XEDH', version, tile_count, tile_bytes) on first use.
+  // Appends one record (u32 draw index + kEdramTileCount*4 u64 XXH3-64
+  // tile/sample-plane hashes) to <capture_dir>/edram_hashes.bin, writing the
+  // 16-byte header ('XEDH', version, tile_count, tile_bytes) on first use.
   void AppendCaptureEdramHashes(uint32_t draw_index,
                                 const std::vector<uint8_t>& edram);
 

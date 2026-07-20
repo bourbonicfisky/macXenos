@@ -1564,8 +1564,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
       // Selective EDRAM capture AFTER this draw issued (design D3, §2):
       // writes <capture_dir>/draw_NNNNNN.edram.bin for draws chosen by
       // --capture_draw_range / --capture_edram_at, and/or appends the
-      // per-tile hash record when --capture_edram_hashes. May perturb
-      // (forces a submission + queue drain); no-op when not selected.
+      // per-tile/sample-plane hash record when --capture_edram_hashes. May
+      // perturb (forces a submission + queue drain); no-op when not selected.
       COMMAND_PROCESSOR::MaybeCaptureEdramSnapshot(draw_index);
       // Hazard-bisection probe (--serialize_draw_range): submission + wait
       // after selected draws, no capture output.
