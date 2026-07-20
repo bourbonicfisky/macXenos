@@ -47,6 +47,20 @@ struct MetalCullFrontFaceState {
   bool culls_all() const { return cull_mode == MetalCullMode::kAll; }
 };
 
+// Device-independent representation of Metal's dynamic triangle fill and
+// depth-bias state. Metal has no point polygon fill mode, so Xenos point fill
+// is conservatively represented as lines, matching the shared D3D12 fallback.
+enum class MetalTriangleFillMode : uint32_t {
+  kFill,
+  kLines,
+};
+
+struct MetalFillDepthBiasState {
+  MetalTriangleFillMode triangle_fill_mode;
+  float depth_bias_constant;
+  float depth_bias_slope;
+};
+
 // Xenos culling and faceness apply only to polygonal primitives. Lines,
 // points, and rectangle-list geometry must establish safe no-cull state on
 // every draw so a preceding triangle draw can't leak encoder state into them.
@@ -64,6 +78,46 @@ inline MetalCullFrontFaceState GetMetalCullFrontFaceState(
     cull_mode = MetalCullMode::kBack;
   }
   return {cull_mode, mode.face != 0};
+}
+
+// Xenos dual polygon mode may select fill independently for front and back
+// faces. Metal has one fill mode for the draw, so use the most conservative
+// non-culled face: either points or lines becomes line fill. Reserved/disabled
+// polygon modes and non-polygon primitives explicitly restore solid fill.
+inline MetalTriangleFillMode GetMetalTriangleFillMode(
+    reg::PA_SU_SC_MODE_CNTL mode, bool primitive_polygonal) {
+  if (!primitive_polygonal ||
+      mode.poly_mode != xenos::PolygonModeEnable::kDualMode) {
+    return MetalTriangleFillMode::kFill;
+  }
+  xenos::PolygonType polygon_type = xenos::PolygonType::kTriangles;
+  if (!mode.cull_front) {
+    polygon_type = std::min(polygon_type, mode.polymode_front_ptype);
+  }
+  if (!mode.cull_back) {
+    polygon_type = std::min(polygon_type, mode.polymode_back_ptype);
+  }
+  return polygon_type == xenos::PolygonType::kTriangles
+             ? MetalTriangleFillMode::kFill
+             : MetalTriangleFillMode::kLines;
+}
+
+// Converts the shared preferred-face polygon offset to a complete Metal value.
+// The caller obtains scale/offset through GetPreferredFacePolygonOffset so
+// culling and the distinct non-polygon enable have one guest-semantics owner.
+// The shared D3D10 conversion preserves useful guest depth separation for
+// unorm24 and float24 host depth representations.
+inline MetalFillDepthBiasState GetMetalFillDepthBiasState(
+    reg::PA_SU_SC_MODE_CNTL mode, bool primitive_polygonal,
+    xenos::DepthRenderTargetFormat depth_format, float polygon_offset_scale,
+    float polygon_offset, uint32_t draw_resolution_scale = 1) {
+  return {
+      GetMetalTriangleFillMode(mode, primitive_polygonal),
+      float(draw_util::GetD3D10IntegerPolygonOffset(
+          depth_format, polygon_offset)),
+      polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit *
+          float(std::max(draw_resolution_scale, uint32_t(1))),
+  };
 }
 
 // Intersects the shared guest-normalized scissor with the active Metal render

@@ -7,10 +7,10 @@
  ******************************************************************************
  */
 
-// L0 (device-free) coverage for the production Metal scissor attachment clamp.
-// Guest register semantics are normalized by draw_util::GetScissor; these tests
-// pin the Metal-specific second step that makes the rectangle valid for the
-// active render attachments without expanding guest coverage.
+// L0 (device-free) coverage for production Metal fixed-function state
+// derivation. Guest register semantics remain shared; these tests pin the
+// Metal-specific mappings, reset behavior, numeric conversion, and attachment
+// clamping without requiring a device or Objective-C++.
 
 #include <cstdint>
 #include <limits>
@@ -87,6 +87,97 @@ TEST_CASE("Metal non-polygons always establish safe no-cull state",
   CHECK(state.cull_mode == MetalCullMode::kNone);
   CHECK_FALSE(state.front_face_clockwise);
   CHECK_FALSE(state.culls_all());
+}
+
+TEST_CASE("Metal triangle fill mode follows visible dual-mode faces",
+          "[l0][metal][fill-depth-bias]") {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  mode.poly_mode = xenos::PolygonModeEnable::kDualMode;
+  mode.polymode_front_ptype = xenos::PolygonType::kLines;
+  mode.polymode_back_ptype = xenos::PolygonType::kTriangles;
+  CHECK(GetMetalTriangleFillMode(mode, true) ==
+        MetalTriangleFillMode::kLines);
+
+  // A culled line face must not force the visible triangle face to wireframe.
+  mode.cull_front = 1;
+  CHECK(GetMetalTriangleFillMode(mode, true) ==
+        MetalTriangleFillMode::kFill);
+
+  // Metal has no point polygon fill, so preserve the non-fill intent as lines.
+  mode.cull_front = 0;
+  mode.polymode_front_ptype = xenos::PolygonType::kPoints;
+  CHECK(GetMetalTriangleFillMode(mode, true) ==
+        MetalTriangleFillMode::kLines);
+}
+
+TEST_CASE("Metal fill state resets across disabled and non-polygon draws",
+          "[l0][metal][fill-depth-bias]") {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  mode.poly_mode = xenos::PolygonModeEnable::kDualMode;
+  mode.polymode_front_ptype = xenos::PolygonType::kLines;
+  mode.polymode_back_ptype = xenos::PolygonType::kLines;
+  CHECK(GetMetalTriangleFillMode(mode, true) ==
+        MetalTriangleFillMode::kLines);
+
+  mode.poly_mode = xenos::PolygonModeEnable::kDisabled;
+  CHECK(GetMetalTriangleFillMode(mode, true) ==
+        MetalTriangleFillMode::kFill);
+  mode.poly_mode = xenos::PolygonModeEnable::kDualMode;
+  CHECK(GetMetalTriangleFillMode(mode, false) ==
+        MetalTriangleFillMode::kFill);
+}
+
+TEST_CASE("Metal constant depth bias depends on the guest depth format",
+          "[l0][metal][fill-depth-bias]") {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  mode.poly_offset_front_enable = 1;
+  MetalFillDepthBiasState unorm = GetMetalFillDepthBiasState(
+      mode, true, xenos::DepthRenderTargetFormat::kD24S8, 0.0f, 0.000002f);
+  MetalFillDepthBiasState floating = GetMetalFillDepthBiasState(
+      mode, true, xenos::DepthRenderTargetFormat::kD24FS8, 0.0f, 0.000002f);
+  CHECK(unorm.depth_bias_constant == 34.0f);
+  CHECK(floating.depth_bias_constant == 40.0f);
+  CHECK(unorm.depth_bias_constant != floating.depth_bias_constant);
+}
+
+TEST_CASE("Metal slope bias uses preferred visible face and resolution scale",
+          "[l0][metal][fill-depth-bias]") {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  mode.poly_offset_front_enable = 1;
+  mode.poly_offset_back_enable = 1;
+  MetalFillDepthBiasState front = GetMetalFillDepthBiasState(
+      mode, true, xenos::DepthRenderTargetFormat::kD24S8, 32.0f, 0.0f, 2);
+  CHECK(front.depth_bias_slope == 4.0f);
+
+  // The shared preferred-face selector returns the back-face value when the
+  // front is culled; verify that value is converted without stale front state.
+  mode.cull_front = 1;
+  MetalFillDepthBiasState back = GetMetalFillDepthBiasState(
+      mode, true, xenos::DepthRenderTargetFormat::kD24S8, 8.0f, 0.0f, 2);
+  CHECK(back.depth_bias_slope == 1.0f);
+}
+
+TEST_CASE("Metal disabled and non-polygon bias state does not leak",
+          "[l0][metal][fill-depth-bias]") {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  MetalFillDepthBiasState polygon = GetMetalFillDepthBiasState(
+      mode, true, xenos::DepthRenderTargetFormat::kD24S8, 0.0f, 0.0f);
+  CHECK(polygon.depth_bias_constant == 0.0f);
+  CHECK(polygon.depth_bias_slope == 0.0f);
+
+  mode.poly_offset_front_enable = 1;
+  // GetPreferredFacePolygonOffset returns zero for a non-polygon unless the
+  // para enable is set, even if the front-face enable/value is nonzero.
+  MetalFillDepthBiasState non_polygon = GetMetalFillDepthBiasState(
+      mode, false, xenos::DepthRenderTargetFormat::kD24S8, 0.0f, 0.0f);
+  CHECK(non_polygon.depth_bias_constant == 0.0f);
+  CHECK(non_polygon.depth_bias_slope == 0.0f);
+
+  mode.poly_offset_para_enable = 1;
+  MetalFillDepthBiasState enabled_non_polygon = GetMetalFillDepthBiasState(
+      mode, false, xenos::DepthRenderTargetFormat::kD24S8, 16.0f, 0.25f);
+  CHECK(enabled_non_polygon.depth_bias_constant != 0.0f);
+  CHECK(enabled_non_polygon.depth_bias_slope == 1.0f);
 }
 
 TEST_CASE("Metal scissor preserves in-bounds coverage", "[l0][metal][scissor]") {

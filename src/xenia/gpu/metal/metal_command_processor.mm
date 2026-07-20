@@ -2607,9 +2607,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Both guest faces culled is a successful raster no-op. Memexport bypasses
     // raster state because its vertex-stage shared-memory stores must execute.
     if (!memexport_draw) {
+      bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
-          regs.Get<reg::PA_SU_SC_MODE_CNTL>(),
-          draw_util::IsPrimitivePolygonal(regs));
+          regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal);
       if (face_state.culls_all()) {
         return true;
       }
@@ -2624,6 +2624,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           setFrontFacingWinding:face_state.front_face_clockwise
                                     ? MTLWindingClockwise
                                     : MTLWindingCounterClockwise];
+
+      // Apply a complete fill/depth-bias value every draw so state cannot leak
+      // across guest transitions or newly opened render encoders. The local
+      // Metal path currently renders at 1x; the helper keeps resolution scale
+      // explicit for the eventual scaled-render-target path.
+      float polygon_offset_scale = 0.0f;
+      float polygon_offset = 0.0f;
+      draw_util::GetPreferredFacePolygonOffset(
+          regs, primitive_polygonal, polygon_offset_scale, polygon_offset);
+      MetalFillDepthBiasState fill_bias = GetMetalFillDepthBiasState(
+          regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal,
+          regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset_scale,
+          polygon_offset, 1);
+      [encoder
+          setTriangleFillMode:fill_bias.triangle_fill_mode ==
+                                      MetalTriangleFillMode::kLines
+                                  ? MTLTriangleFillModeLines
+                                  : MTLTriangleFillModeFill];
+      [encoder setDepthBias:fill_bias.depth_bias_constant
+                 slopeScale:fill_bias.depth_bias_slope
+                      clamp:0.0f];
     }
     // Stage 17: apply the guest scissor on every normal raster draw. Shared
     // draw_util owns Xenos window/screen/offset/pitch semantics; the Metal-only
