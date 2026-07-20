@@ -740,6 +740,8 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     for (size_t i = 0; i < xe::countof(last_update_transfers_); ++i) {
       last_update_transfers_[i].clear();
     }
+    std::memset(last_update_used_render_target_lengths_tiles_, 0,
+                sizeof(last_update_used_render_target_lengths_tiles_));
   }
 
   if (!depth_and_color_rts_used_bits) {
@@ -913,6 +915,11 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
     last_update_used_render_targets_[i] =
         (depth_and_color_rts_used_bits & (uint32_t(1) << i)) ? rts[i] : nullptr;
+  }
+  for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+    uint32_t rt_bit_index = edram_bases_sorted[i].second;
+    last_update_used_render_target_lengths_tiles_[rt_bit_index] =
+        rt_lengths_tiles[i];
   }
   if (are_accumulated_render_targets_valid_) {
     // Check if the only re-enabling a previously bound render target.

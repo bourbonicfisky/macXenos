@@ -180,6 +180,23 @@ inline uint xe_stencil_bit_mask(uint bit_index) {
   return 1u << (bit_index & 7u);
 }
 
+struct AuthorityRangeParams {
+  uint start_tiles;
+  uint end_tiles;
+};
+inline uint xe_authority_tile_of(uint px, uint py, constant SurfaceParams& sp,
+                                 uint sample) {
+  uint2 sample_xy = uint2(px, py) << xe_edram_msaa_shifts(sp.msaa);
+  sample_xy += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
+  return sp.base + (sample_xy.y / 16u) * sp.pitch + sample_xy.x / 80u;
+}
+inline bool xe_authority_in_range(uint px, uint py,
+                                  constant SurfaceParams& sp, uint sample,
+                                  constant AuthorityRangeParams& range) {
+  uint tile = xe_authority_tile_of(px, py, sp, sample);
+  return tile >= range.start_tiles && tile < range.end_tiles;
+}
+
 // Canonical RGBA8Unorm materialize/pack kernels. These are shared verbatim by
 // the live cache and the Metal conformance suite.
 kernel void materialize_8888(
@@ -230,6 +247,35 @@ kernel void pack_color(
     constant uint& format [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  if (idx < sp.words) canonical[idx] = xe_pack_color32(tex.read(gid), format);
+}
+kernel void materialize_color_range(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  tex.write(xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format),
+            gid);
+}
+kernel void pack_color_range(
+    texture2d<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
@@ -324,6 +370,40 @@ kernel void pack_color_ms(
     uint3 gid [[thread_position_in_grid]]) {
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32(tex.read(uint2(gid.x, gid.y), gid.z),
+                                     format);
+  }
+}
+fragment float4 materialize_color_ms_range_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  if (!xe_authority_in_range(pixel.x, pixel.y, sp, sample, range)) {
+    discard_fragment();
+  }
+  uint off = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 0u, sample);
+  uint idx = off >> 2u;
+  return xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format);
+}
+kernel void pack_color_ms_range(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, gid.z, range)) return;
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, gid.z);
   uint idx = off >> 2u;
@@ -477,6 +557,60 @@ kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
                          uint3 gid [[thread_position_in_grid]]) {
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, gid.z);
+  uint idx = off >> 2;
+  if (idx >= sp.words) return;
+  float d = tex.read(uint2(gid.x, gid.y), gid.z);
+  uint s = sten.read(uint2(gid.x, gid.y), gid.z).r & 0xFFu;
+  canonical[idx] =
+      xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
+}
+fragment DepthFragOut materialize_depth_ms_range_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    uint sid [[sample_id]]) {
+  uint2 gid = uint2(in.pos.xy);
+  if (!xe_authority_in_range(gid.x, gid.y, sp, sid, range)) {
+    discard_fragment();
+  }
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, sid);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthFragOut o;
+  o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  return o;
+}
+fragment void materialize_sten_ms_range_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    constant uint& bit [[buffer(3)]],
+    uint sid [[sample_id]]) {
+  uint2 gid = uint2(in.pos.xy);
+  if (!xe_authority_in_range(gid.x, gid.y, sp, sid, range)) {
+    discard_fragment();
+  }
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, sid);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  if ((xe_stencil(w) & bit) == 0u) discard_fragment();
+}
+kernel void pack_depth_ms_range(
+    depth2d_ms<float, access::read> tex [[texture(0)]],
+    texture2d_ms<uint, access::read> sten [[texture(1)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, gid.z, range)) return;
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    sp.is_depth, 0u, gid.z);
   uint idx = off >> 2;

@@ -73,6 +73,25 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // id<MTLTexture> of the bound depth / color-0 target, or nullptr.
   void* current_depth_texture() const;
   void* current_color_texture(uint32_t index, uint64_t* pixel_format_out) const;
+  // Raster-only working views. Under the staged 4.1 gate, multisampled keys
+  // return their real 2x/4x companions while compatibility consumers keep
+  // using current_*_texture() until resolves migrate in task 4.3.
+  void* current_depth_raster_texture() const;
+  void* current_color_raster_texture(uint32_t index,
+                                     uint64_t* pixel_format_out) const;
+  uint32_t current_raster_sample_count() const;
+  // Makes the current draw's exact attachment tile spans coherent with the
+  // canonical per-sample EDRAM before the render pass opens. Returns false if
+  // a required scheduled conversion couldn't be encoded.
+  bool PrepareCurrentRasterViews();
+  // Packs every dirty attachment interval needed by canonical diagnostics.
+  // The caller must submit/wait the returned command-buffer work before
+  // reading canonical storage.
+  bool PrepareCanonicalEdramForReadback();
+  // Records successful raster writes after a draw has been emitted. Only the
+  // exact spans and slots actually used by that draw become authoritative.
+  void MarkCurrentRasterTargetsWritten(uint32_t color_write_mask,
+                                       bool depth_or_stencil_written);
   // A stable identity for "did the attachment set change" pass management.
   uint64_t current_attachment_key() const;
 
@@ -169,6 +188,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // shared staging and is used by capture/hashing while the gate is enabled.
   // `command_queue` is id<MTLCommandQueue> passed opaquely.
   bool sample_edram_enabled() const { return sample_edram_enabled_; }
+  bool sample_edram_raster_enabled() const {
+    return sample_edram_raster_enabled_;
+  }
   bool DumpCanonicalEdram(void* command_queue,
                           std::vector<uint8_t>& edram_out);
 
@@ -319,6 +341,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* pack_range = nullptr;      // canonical authority: pack, tile-range guard
     void* mat_depth_range = nullptr; // canonical authority: materialize depth, ranged
     void* mat_sten_range = nullptr;  // canonical authority: materialize stencil, ranged
+    void* pack_ms_range = nullptr;   // real-MSAA canonical authority, ranged
+    void* mat_depth_ms_range = nullptr;
+    void* mat_sten_ms_range = nullptr;
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
     uint32_t sample_count = 0;
@@ -328,9 +353,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // attachments. Task 3.5 decides when their view or canonical words are
   // authoritative; task 3.4 owns the lossless encoder contract.
   bool EncodeCanonicalDepthMsaaMaterialize(const void* command_buffer,
-                                           RenderTarget* render_target);
+                                           RenderTarget* render_target,
+                                           uint32_t start_tiles,
+                                           uint32_t end_tiles);
   bool EncodeCanonicalDepthMsaaPack(const void* command_buffer,
-                                    RenderTarget* render_target);
+                                    RenderTarget* render_target,
+                                    uint32_t start_tiles,
+                                    uint32_t end_tiles);
+  bool EncodeCanonicalDepthMaterialize(const void* command_buffer,
+                                       RenderTarget* render_target,
+                                       uint32_t start_tiles,
+                                       uint32_t end_tiles);
+  bool EncodeCanonicalDepthPack(const void* command_buffer,
+                                RenderTarget* render_target,
+                                uint32_t start_tiles, uint32_t end_tiles);
   void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramMsl.
   std::unordered_map<uint32_t, ShadowDepthPipelines> shadow_pipelines_;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
@@ -348,6 +384,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // (task 2.1) — no visible rendering change.
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
   bool sample_edram_enabled_ = false;
+  bool sample_edram_raster_enabled_ = false;
   // Diagnostic ordering oracle: when explicitly enabled with the canonical
   // gate, commit and wait after every ownership-transfer batch. This is an
   // intentionally expensive upper bound for finding missing producer/consumer
@@ -360,6 +397,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // resolve, clear, and writeback paths to canonical EDRAM.
   MetalEdramAuthorityTracker canonical_authority_;
   uint64_t canonical_authority_order_ = 0;
+  static MetalEdramAuthorityTracker::AttachmentId GetCanonicalAttachmentId(
+      const RenderTarget* render_target);
+  RenderTarget* FindCanonicalAttachment(
+      MetalEdramAuthorityTracker::AttachmentId attachment) const;
+  bool EncodeCanonicalAuthorityOperation(
+      const void* command_buffer,
+      const MetalEdramAuthorityTracker::SyncOperation& operation);
 
   // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the
   // authority for depth ownership flips, single-sample rendering). Gated behind
@@ -392,13 +436,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // range authority and decides when to schedule them; task 3.1 owns their
   // lossless format conversion and encoder contract.
   bool EncodeCanonicalColorMaterialize(const void* command_buffer,
-                                       RenderTarget* render_target);
+                                       RenderTarget* render_target,
+                                       uint32_t start_tiles,
+                                       uint32_t end_tiles);
   bool EncodeCanonicalColorPack(const void* command_buffer,
-                                RenderTarget* render_target);
+                                RenderTarget* render_target,
+                                uint32_t start_tiles, uint32_t end_tiles);
   bool EncodeCanonicalColorMsaaMaterialize(const void* command_buffer,
-                                           RenderTarget* render_target);
+                                           RenderTarget* render_target,
+                                           uint32_t start_tiles,
+                                           uint32_t end_tiles);
   bool EncodeCanonicalColorMsaaPack(const void* command_buffer,
-                                    RenderTarget* render_target);
+                                    RenderTarget* render_target,
+                                    uint32_t start_tiles,
+                                    uint32_t end_tiles);
   // Gated, ADDITIVE snapshot operations. RestoreCanonicalEdram copies the
   // already-physical-order snapshot to the private buffer. The self-check then
   // reads it back through DumpCanonicalEdram, materializes it into a scratch

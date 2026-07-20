@@ -363,6 +363,13 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
     // command processor's per-tile/sample hashes all read the same private raw
     // physical-layout buffer. Attachment writes begin advancing it in tasks
     // 3.x; until then this intentionally exposes restored canonical state.
+    if (!render_target_cache_->PrepareCanonicalEdramForReadback()) {
+      return false;
+    }
+    // The pack operations above use the ordinary frame command buffer so they
+    // remain ordered after the producing draws. Complete them before the dump
+    // command buffer reads the private canonical buffer.
+    EndFrameEncoderAndWait();
     return render_target_cache_->DumpCanonicalEdram((__bridge void*)queue,
                                                      edram_out);
   }
@@ -958,6 +965,10 @@ static constexpr bool kDepthEnabled = true;
 void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
+  if (!memexport_pass_ &&
+      !render_target_cache_->PrepareCurrentRasterViews()) {
+    return nullptr;
+  }
   uint64_t want_key = render_target_cache_->current_attachment_key();
   if (dummy_depth_pass_) {
     // Scratch-depth passes are distinct from same-color passes without one:
@@ -981,12 +992,23 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     return nullptr;
   }
   uint64_t color_pixel_format = 0;
-  void* rt = memexport_pass_
-                 ? nullptr
-                 : render_target_cache_->current_color_texture(
-                       0, &color_pixel_format);
+  uint32_t raster_sample_count =
+      memexport_pass_ ? 1u : render_target_cache_->current_raster_sample_count();
+  void* rt_resolve =
+      memexport_pass_
+          ? nullptr
+          : render_target_cache_->current_color_texture(0, nullptr);
+  void* rt =
+      memexport_pass_
+          ? nullptr
+          : render_target_cache_->current_color_raster_texture(
+                0, &color_pixel_format);
+  void* depth_resolve =
+      (kDepthEnabled && !memexport_pass_)
+          ? render_target_cache_->current_depth_texture()
+          : nullptr;
   void* depth = (kDepthEnabled && !memexport_pass_)
-                    ? render_target_cache_->current_depth_texture()
+                    ? render_target_cache_->current_depth_raster_texture()
                     : nullptr;
   if (!rt && !depth && !memexport_pass_) {
     // Nothing to attach (the caller should have skipped such draws).
@@ -1057,7 +1079,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // ownership transfers / persistence, clears from guest resolve clears.
     pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
     pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    if (raster_sample_count > 1u) {
+      pass.colorAttachments[0].resolveTexture =
+          (__bridge id<MTLTexture>)rt_resolve;
+      pass.colorAttachments[0].storeAction =
+          MTLStoreActionStoreAndMultisampleResolve;
+    } else {
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
   }
   // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
   // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
@@ -1066,28 +1095,49 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (depth) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction = MTLLoadActionLoad;
-    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    if (raster_sample_count > 1u) {
+      pass.depthAttachment.resolveTexture =
+          (__bridge id<MTLTexture>)depth_resolve;
+      pass.depthAttachment.depthResolveFilter =
+          MTLMultisampleDepthResolveFilterSample0;
+      pass.depthAttachment.storeAction =
+          MTLStoreActionStoreAndMultisampleResolve;
+    } else {
+      pass.depthAttachment.storeAction = MTLStoreActionStore;
+    }
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-    pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    if (raster_sample_count > 1u) {
+      pass.stencilAttachment.resolveTexture =
+          (__bridge id<MTLTexture>)depth_resolve;
+      pass.stencilAttachment.stencilResolveFilter =
+          MTLMultisampleStencilResolveFilterSample0;
+      pass.stencilAttachment.storeAction =
+          MTLStoreActionStoreAndMultisampleResolve;
+    } else {
+      pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    }
   } else if (rt && dummy_depth_pass_) {
     // The draw's PS exports depth with no depth target bound — attach a
     // throwaway scratch depth so the pipeline is valid (see dummy_depth in
     // IssueDraw). Never loaded, never stored; content is irrelevant.
     id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt;
-    uint64_t dk = (uint64_t(rt_tex.width) << 20) | uint64_t(rt_tex.height);
+    uint64_t dk = (1ull << 63) | (uint64_t(rt_tex.width) << 32) |
+                  (uint64_t(rt_tex.height) << 8) | raster_sample_count;
     id<MTLTexture> dummy_tex = nil;
     auto dit = dummy_depth_textures_.find(dk);
     if (dit != dummy_depth_textures_.end()) {
       dummy_tex = (__bridge id<MTLTexture>)dit->second;
     } else {
-      MTLTextureDescriptor* dd = [MTLTextureDescriptor
-          texture2DDescriptorWithPixelFormat:(MTLPixelFormat)
-                                                 MetalRenderTargetCache::
-                                                     kDepthFormat
-                                       width:rt_tex.width
-                                      height:rt_tex.height
-                                   mipmapped:NO];
+      MTLTextureDescriptor* dd = [[MTLTextureDescriptor alloc] init];
+      dd.textureType = raster_sample_count > 1u
+                           ? MTLTextureType2DMultisample
+                           : MTLTextureType2D;
+      dd.pixelFormat =
+          (MTLPixelFormat)MetalRenderTargetCache::kDepthFormat;
+      dd.width = rt_tex.width;
+      dd.height = rt_tex.height;
+      dd.sampleCount = raster_sample_count;
       dd.usage = MTLTextureUsageRenderTarget;
       dd.storageMode = MTLStorageModePrivate;
       dummy_tex = [rt_tex.device newTextureWithDescriptor:dd];
@@ -2021,10 +2071,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
   uint32_t gs_max_input_primitives = 0;
-  // Task 3.3 makes the pipeline cache sample-count aware. Attachment authority
-  // remains collapsed until task 3.5 selects a real MSAA working view, so the
-  // currently bound render pass and its pipeline both stay at one sample.
-  uint32_t raster_sample_count = 1;
+  // The pipeline sample count must exactly match the selected raster working
+  // views. The default and sample-only gates remain single-sample; task 4.1's
+  // strict raster gate selects the common real 2x/4x attachment count.
+  uint32_t raster_sample_count =
+      memexport_draw ? 1u : render_target_cache_->current_raster_sample_count();
   if (memexport_draw) {
     // Vertex-only, rasterization disabled, zero attachments.
     pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
@@ -3146,6 +3197,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                   stages:stages];
   }
 
+  auto mark_raster_targets_written = [&] {
+    render_target_cache_->MarkCurrentRasterTargetsWritten(
+        normalized_color_mask & 0xFu,
+        norm_depth.z_write_enable || norm_depth.stencil_enable);
+  };
+
   // --- Draw. ---
   // Rectangle/point/quad geometry emulation: the guest VS runs
   // as the object stage and a generated GS as the mesh stage; the runtime
@@ -3208,6 +3265,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           /*instanceCount=*/1, index_count, /*baseVertex=*/0,
           /*baseInstance=*/0);
     }
+    mark_raster_targets_written();
     frame_has_render_ = true;
     ++draw_count_;
     ++geo_draw_count_;
@@ -3269,6 +3327,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                    host_index_count, MTLIndexTypeUInt32, fan_ib,
                                    fan_alloc.offset, /*instanceCount=*/1,
                                    /*baseVertex=*/0, /*baseInstance=*/0);
+    mark_raster_targets_written();
     frame_has_render_ = true;
     ++draw_count_;
     return true;
@@ -3375,6 +3434,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     IRRuntimeDrawPrimitives(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
                             uint64_t(index_count));
   }
+
+  mark_raster_targets_written();
 
   if (memexport_draw) {
     // The exports now exist (GPU-ordered) in the shared-memory buffer. Mark

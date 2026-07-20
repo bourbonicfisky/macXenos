@@ -532,6 +532,20 @@ class RenderTargetCache {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_accumulated_render_targets_;
   }
+  RenderTarget* const* last_update_used_render_targets() const {
+    assert_true(GetPath() == Path::kHostRenderTargets);
+    return last_update_used_render_targets_;
+  }
+  const uint32_t* last_update_used_render_target_lengths_tiles() const {
+    assert_true(GetPath() == Path::kHostRenderTargets);
+    return last_update_used_render_target_lengths_tiles_;
+  }
+  RenderTarget* FindCachedRenderTarget(uint32_t key) const {
+    RenderTargetKey render_target_key;
+    render_target_key.key = key;
+    auto found = render_targets_.find(render_target_key);
+    return found != render_targets_.end() ? found->second : nullptr;
+  }
 
   const std::vector<Transfer>* last_update_transfers() const {
     assert_true(GetPath() == Path::kHostRenderTargets);
@@ -727,6 +741,11 @@ class RenderTargetCache {
   // Only valid for non-pixel-shader-interlock paths.
   RenderTarget*
       last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets];
+  // Exact ownership span used by the last draw for each slot, in physical
+  // EDRAM tiles. Backends with attachment/canonical authority use this instead
+  // of conservatively dirtying an entire render-target allocation.
+  uint32_t last_update_used_render_target_lengths_tiles_[
+      1 + xenos::kMaxColorRenderTargets] = {};
   // Render targets used by the draw call with the last successful update or
   // previous updates, unless a different or a totally new one was bound (or
   // surface info was changed), to avoid unneeded render target switching (which

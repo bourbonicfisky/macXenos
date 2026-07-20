@@ -127,6 +127,15 @@ bool MetalRenderTargetCache::Initialize() {
   // task 2.1.
   sample_edram_enabled_ =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM");
+  const bool sample_edram_raster_requested =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER");
+  sample_edram_raster_enabled_ =
+      sample_edram_enabled_ && sample_edram_raster_requested;
+  if (sample_edram_raster_requested && !sample_edram_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: ignoring XE_METAL_SAMPLE_EDRAM_RASTER=1 "
+        "because XE_METAL_SAMPLE_EDRAM=1 is not active");
+  }
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
   const bool canonical_depth_requested =
@@ -148,6 +157,7 @@ bool MetalRenderTargetCache::Initialize() {
           "falling back to the collapsed path",
           kCanonicalEdramSize / (1024 * 1024));
       sample_edram_enabled_ = false;
+      sample_edram_raster_enabled_ = false;
       canonical_depth_enabled_ = false;
     } else {
       buffer.label = @"xe_canonical_edram";
@@ -157,6 +167,11 @@ bool MetalRenderTargetCache::Initialize() {
           "({} MB private buffer){}",
           kCanonicalEdramSize / (1024 * 1024),
           canonical_depth_enabled_ ? " [depth authority]" : "");
+      if (sample_edram_raster_enabled_) {
+        XELOGW(
+            "MetalRenderTargetCache: canonical real-MSAA raster authority "
+            "enabled (staged task 4.1 path)");
+      }
     }
   }
   if (sample_edram_enabled_) {
@@ -233,6 +248,9 @@ void MetalRenderTargetCache::Shutdown() {
     release_compute_pipeline(pipelines.pack_range);
     release_render_pipeline(pipelines.mat_depth_range);
     release_render_pipeline(pipelines.mat_sten_range);
+    release_compute_pipeline(pipelines.pack_ms_range);
+    release_render_pipeline(pipelines.mat_depth_ms_range);
+    release_render_pipeline(pipelines.mat_sten_ms_range);
     release_depth_state(pipelines.depth_state);
     for (void*& bit_state : pipelines.bit_states) {
       release_depth_state(bit_state);
@@ -437,6 +455,210 @@ void* MetalRenderTargetCache::current_color_texture(
   return rt->texture();
 }
 
+void* MetalRenderTargetCache::current_depth_raster_texture() const {
+  auto* rt = static_cast<MetalRenderTarget*>(
+      last_update_accumulated_render_targets()[0]);
+  if (!rt) {
+    return nullptr;
+  }
+  return current_raster_sample_count() > 1u ? rt->msaa_texture()
+                                            : rt->texture();
+}
+
+void* MetalRenderTargetCache::current_color_raster_texture(
+    uint32_t index, uint64_t* pixel_format_out) const {
+  auto* rt = static_cast<MetalRenderTarget*>(
+      last_update_accumulated_render_targets()[1 + index]);
+  if (!rt) {
+    return nullptr;
+  }
+  if (pixel_format_out) {
+    *pixel_format_out = rt->pixel_format();
+  }
+  return current_raster_sample_count() > 1u ? rt->msaa_texture()
+                                            : rt->texture();
+}
+
+uint32_t MetalRenderTargetCache::current_raster_sample_count() const {
+  if (!sample_edram_raster_enabled_) {
+    return 1u;
+  }
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  uint32_t common_sample_count = 0u;
+  for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+    auto* rt = static_cast<MetalRenderTarget*>(accumulated[i]);
+    if (!rt) {
+      continue;
+    }
+    uint32_t required_sample_count =
+        1u << uint32_t(rt->key().msaa_samples);
+    if (required_sample_count == 1u || !rt->msaa_texture() ||
+        rt->sample_count() != required_sample_count) {
+      return 1u;
+    }
+    if (common_sample_count && common_sample_count != required_sample_count) {
+      return 1u;
+    }
+    common_sample_count = required_sample_count;
+  }
+  return common_sample_count ? common_sample_count : 1u;
+}
+
+MetalEdramAuthorityTracker::AttachmentId
+MetalRenderTargetCache::GetCanonicalAttachmentId(
+    const RenderTarget* render_target) {
+  // RenderTargetKey is the stable cache identity. Zero is reserved by the
+  // authority tracker for "no attachment".
+  return render_target ? render_target->key().key + 1u : 0u;
+}
+
+RenderTargetCache::RenderTarget*
+MetalRenderTargetCache::FindCanonicalAttachment(
+    MetalEdramAuthorityTracker::AttachmentId attachment) const {
+  if (!attachment) {
+    return nullptr;
+  }
+  return FindCachedRenderTarget(uint32_t(attachment - 1u));
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
+    const void* command_buffer,
+    const MetalEdramAuthorityTracker::SyncOperation& operation) {
+  RenderTarget* render_target = FindCanonicalAttachment(operation.attachment);
+  if (!render_target) {
+    return false;
+  }
+  bool materialize =
+      operation.kind ==
+      MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical;
+  const RenderTargetKey& key = render_target->key();
+  if (key.is_depth) {
+    if (key.msaa_samples == xenos::MsaaSamples::k1X) {
+      return materialize
+                 ? EncodeCanonicalDepthMaterialize(
+                       command_buffer, render_target, operation.start_tiles,
+                       operation.end_tiles)
+                 : EncodeCanonicalDepthPack(command_buffer, render_target,
+                                            operation.start_tiles,
+                                            operation.end_tiles);
+    }
+    return materialize
+               ? EncodeCanonicalDepthMsaaMaterialize(
+                     command_buffer, render_target, operation.start_tiles,
+                     operation.end_tiles)
+               : EncodeCanonicalDepthMsaaPack(command_buffer, render_target,
+                                              operation.start_tiles,
+                                              operation.end_tiles);
+  }
+  if (key.msaa_samples == xenos::MsaaSamples::k1X) {
+    return materialize
+               ? EncodeCanonicalColorMaterialize(
+                     command_buffer, render_target, operation.start_tiles,
+                     operation.end_tiles)
+               : EncodeCanonicalColorPack(command_buffer, render_target,
+                                          operation.start_tiles,
+                                          operation.end_tiles);
+  }
+  return materialize
+             ? EncodeCanonicalColorMsaaMaterialize(
+                   command_buffer, render_target, operation.start_tiles,
+                   operation.end_tiles)
+             : EncodeCanonicalColorMsaaPack(command_buffer, render_target,
+                                            operation.start_tiles,
+                                            operation.end_tiles);
+}
+
+bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
+  if (!sample_edram_raster_enabled_) {
+    return true;
+  }
+  RenderTarget* const* used = last_update_used_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  id<MTLCommandBuffer> command_buffer = nil;
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    RenderTarget* render_target = used[slot];
+    if (!render_target || !lengths[slot]) {
+      continue;
+    }
+    const uint32_t start_tiles = render_target->key().base_tiles;
+    const uint32_t end_tiles = start_tiles + lengths[slot];
+    auto operations = canonical_authority_.SynchronizeAttachment(
+        GetCanonicalAttachmentId(render_target), start_tiles, end_tiles,
+        ++canonical_authority_order_);
+    for (const auto& operation : operations) {
+      if (!command_buffer) {
+        command_buffer = (__bridge id<MTLCommandBuffer>)
+            command_processor_.PrepareTransferCommandBuffer();
+      }
+      if (!command_buffer || !EncodeCanonicalAuthorityOperation(
+                                 (__bridge const void*)command_buffer,
+                                 operation)) {
+        XELOGE(
+            "MetalRenderTargetCache: canonical authority operation failed "
+            "for attachment {:016X}, tiles [{},{})",
+            operation.attachment, operation.start_tiles,
+            operation.end_tiles);
+        // The scheduler has already advanced optimistically. Forget all
+        // authority rather than claiming a conversion that wasn't encoded.
+        canonical_authority_.ResetUnknown();
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
+  if (!sample_edram_raster_enabled_) {
+    return true;
+  }
+  auto operations = canonical_authority_.SynchronizeCanonical(
+      0, xenos::kEdramTileCount, ++canonical_authority_order_);
+  if (operations.empty()) {
+    return true;
+  }
+  id<MTLCommandBuffer> command_buffer = (__bridge id<MTLCommandBuffer>)
+      command_processor_.PrepareTransferCommandBuffer();
+  if (!command_buffer) {
+    canonical_authority_.ResetUnknown();
+    return false;
+  }
+  for (const auto& operation : operations) {
+    if (!EncodeCanonicalAuthorityOperation(
+            (__bridge const void*)command_buffer, operation)) {
+      XELOGE(
+          "MetalRenderTargetCache: canonical readback pack failed for "
+          "attachment {:016X}, tiles [{},{})",
+          operation.attachment, operation.start_tiles, operation.end_tiles);
+      canonical_authority_.ResetUnknown();
+      return false;
+    }
+  }
+  return true;
+}
+
+void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
+    uint32_t color_write_mask, bool depth_or_stencil_written) {
+  if (!sample_edram_raster_enabled_) {
+    return;
+  }
+  RenderTarget* const* used = last_update_used_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    bool written = slot == 0 ? depth_or_stencil_written
+                             : (color_write_mask &
+                                (uint32_t(0xFu) << ((slot - 1u) * 4u))) != 0;
+    RenderTarget* render_target = used[slot];
+    if (!written || !render_target || !lengths[slot]) {
+      continue;
+    }
+    uint32_t start_tiles = render_target->key().base_tiles;
+    canonical_authority_.MarkAttachment(
+        GetCanonicalAttachmentId(render_target), start_tiles,
+        start_tiles + lengths[slot], ++canonical_authority_order_);
+  }
+}
+
 uint64_t MetalRenderTargetCache::current_attachment_key() const {
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   uint64_t key = 0;
@@ -501,6 +723,25 @@ void MetalRenderTargetCache::PerformTransfers(
           dest->pixel_format() == uint64_t(MTLPixelFormatR32Float);
       TransferKind kind = ClassifyTransfer(tci);
       RecordTransition(kind, src_key, dest_key, transfer);
+      bool exact_guest_format =
+          src_key.is_depth == dest_key.is_depth &&
+          (src_key.is_depth
+               ? src_key.GetDepthFormat() == dest_key.GetDepthFormat()
+               : src_key.GetColorFormat() == dest_key.GetColorFormat());
+      if (sample_edram_raster_enabled_ && exact_guest_format &&
+          !src_key.Is64bpp() && !dest_key.Is64bpp()) {
+        // Task 4.1: exact-format ownership no longer reconstructs a destination
+        // from a collapsed host view. PrepareCurrentRasterViews consumes the
+        // same physical interval through the authority scheduler, packing the
+        // authoritative attachment and materializing every canonical sample.
+        // Reinterpret/conversion classes remain on the legacy branches until
+        // task 4.2.
+        if (blit) {
+          [blit endEncoding];
+          blit = nil;
+        }
+        continue;
+      }
       if (source->pixel_format() == dest->pixel_format() && sxs == dxs &&
           sys == dys) {
         // Same host format + same MSAA (equal pixel block sizes): copy
@@ -867,6 +1108,9 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
                                                  error:&err];
   id<MTLRenderPipelineState> mat_depth_range = nil;
   id<MTLRenderPipelineState> mat_sten_range = nil;
+  id<MTLComputePipelineState> pack_ms_range = nil;
+  id<MTLRenderPipelineState> mat_depth_ms_range = nil;
+  id<MTLRenderPipelineState> mat_sten_ms_range = nil;
   if (!ms) {
     rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_depth_range_fs"];
     mat_depth_range = [device newRenderPipelineStateWithDescriptor:rpd
@@ -874,9 +1118,24 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
     rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_sten_range_fs"];
     mat_sten_range = [device newRenderPipelineStateWithDescriptor:rpd
                                                             error:&err];
+  } else {
+    pack_ms_range = [device
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"pack_depth_ms_range"]
+                                      error:&err];
+    rpd.fragmentFunction =
+        [lib newFunctionWithName:@"materialize_depth_ms_range_fs"];
+    mat_depth_ms_range =
+        [device newRenderPipelineStateWithDescriptor:rpd error:&err];
+    rpd.fragmentFunction =
+        [lib newFunctionWithName:@"materialize_sten_ms_range_fs"];
+    mat_sten_ms_range =
+        [device newRenderPipelineStateWithDescriptor:rpd error:&err];
   }
   if (!matd || !mats || !pack ||
-      (!ms && (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range))) {
+      (!ms &&
+       (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range)) ||
+      (ms && (!pack_ms_range || !mat_depth_ms_range || !mat_sten_ms_range))) {
     XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
            err ? err.localizedDescription.UTF8String : "?");
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
@@ -893,6 +1152,14 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
       mat_depth_range ? (__bridge_retained void*)mat_depth_range : nullptr;
   p.mat_sten_range =
       mat_sten_range ? (__bridge_retained void*)mat_sten_range : nullptr;
+  p.pack_ms_range =
+      pack_ms_range ? (__bridge_retained void*)pack_ms_range : nullptr;
+  p.mat_depth_ms_range = mat_depth_ms_range
+                             ? (__bridge_retained void*)mat_depth_ms_range
+                             : nullptr;
+  p.mat_sten_ms_range = mat_sten_ms_range
+                            ? (__bridge_retained void*)mat_sten_ms_range
+                            : nullptr;
   // Depth pass writes depth AND REPLACEs stencil to 0 (stencilRef 0) so the
   // bit-plane passes fully replace stencil -- the partial-write lesson from the
   // conformance mixed-sequence test, kept here so the substrate behaves the same.
@@ -924,8 +1191,126 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
   return &ins.first->second;
 }
 
+bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || !render_target->key().is_depth ||
+      render_target->key().msaa_samples != xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  const ShadowDepthPipelines* pipelines = EnsureShadowDepthPipelines(1u);
+  if (!texture || !pipelines || !pipelines->mat_depth_range ||
+      !pipelines->mat_sten_range) {
+    return false;
+  }
+  uint32_t depth_format =
+      target->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+          ? 2u
+          : 1u;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), depth_format, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.depthAttachment.texture = texture;
+  pass.depthAttachment.loadAction = MTLLoadActionLoad;
+  pass.depthAttachment.storeAction = MTLStoreActionStore;
+  pass.stencilAttachment.texture = texture;
+  pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+  pass.stencilAttachment.storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:pass];
+  encoder.label = @"rtcache:canonical-depth-materialize-range";
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      pipelines->mat_depth_range];
+  [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                    pipelines->depth_state];
+  [encoder setStencilReferenceValue:0];
+  [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+  [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      pipelines->mat_sten_range];
+  [encoder setStencilReferenceValue:0xFF];
+  for (uint32_t bit_index = 0; bit_index < 8u; ++bit_index) {
+    uint32_t bit = 1u << bit_index;
+    [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                      pipelines->bit_states[bit_index]];
+    [encoder setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                 vertexStart:0
+                 vertexCount:3];
+  }
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || !render_target->key().is_depth ||
+      render_target->key().msaa_samples != xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  const ShadowDepthPipelines* pipelines = EnsureShadowDepthPipelines(1u);
+  if (!texture || !pipelines || !pipelines->pack_range) {
+    return false;
+  }
+  id<MTLTexture> stencil =
+      [texture newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  if (!stencil) {
+    return false;
+  }
+  uint32_t depth_format =
+      target->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+          ? 2u
+          : 1u;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), depth_format, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)pipelines->pack_range;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-depth-pack-range";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setTexture:stencil atIndex:1];
+  [encoder setBuffer:canonical offset:0 atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&range length:sizeof(range) atIndex:2];
+  NSUInteger thread_width = pipeline.threadExecutionWidth;
+  NSUInteger thread_height =
+      pipeline.maxTotalThreadsPerThreadgroup / thread_width;
+  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+      threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
+  [encoder endEncoding];
+  return true;
+}
+
 bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || !render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -951,40 +1336,44 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = texture;
-  pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+  pass.depthAttachment.loadAction = MTLLoadActionLoad;
   pass.depthAttachment.storeAction = MTLStoreActionStore;
   pass.stencilAttachment.texture = texture;
-  pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+  pass.stencilAttachment.loadAction = MTLLoadActionLoad;
   pass.stencilAttachment.storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
-  encoder.label = @"rtcache:canonical-depth-materialize-msaa-full";
+  encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
 
   // The first pass writes every depth sample and replaces stencil with zero.
   // Eight masked REPLACE passes then reconstruct the complete stencil byte per
   // sample without relying on a shader stencil export Metal doesn't provide.
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                      pipelines->materialize_depth];
+                                      pipelines->mat_depth_ms_range];
   [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                     pipelines->depth_state];
   [encoder setStencilReferenceValue:0];
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                      pipelines->materialize_sten];
+                                      pipelines->mat_sten_ms_range];
   [encoder setStencilReferenceValue:0xFF];
   for (uint32_t bit_index = 0; bit_index < 8u; ++bit_index) {
     uint32_t bit = 1u << bit_index;
     [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                       pipelines->bit_states[bit_index]];
-    [encoder setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+    [encoder setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                  vertexStart:0
                  vertexCount:3];
@@ -994,7 +1383,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || !render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -1025,18 +1415,22 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)pipelines->pack;
+      (__bridge id<MTLComputePipelineState>)pipelines->pack_ms_range;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-depth-pack-msaa-full";
+  encoder.label = @"rtcache:canonical-depth-pack-msaa-range";
   [encoder setComputePipelineState:pipeline];
   [encoder setTexture:texture atIndex:0];
   [encoder setTexture:stencil atIndex:1];
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&range length:sizeof(range) atIndex:2];
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
@@ -3048,10 +3442,12 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   id<MTLLibrary> lib = (__bridge id<MTLLibrary>)canonical_materialize_library_;
   NSError* err = nil;
   id<MTLComputePipelineState> pso = [device
-      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_color"]
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"materialize_color_range"]
                                     error:&err];
   id<MTLComputePipelineState> pack = [device
-      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_color"]
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"pack_color_range"]
                                     error:&err];
   if (!pso || !pack) {
     XELOGE("MetalRenderTargetCache: canonical materialize/pack pipeline "
@@ -3087,7 +3483,7 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
       [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.vertexFunction = [library newFunctionWithName:@"xe_color_vs"];
   descriptor.fragmentFunction =
-      [library newFunctionWithName:@"materialize_color_ms_fs"];
+      [library newFunctionWithName:@"materialize_color_ms_range_fs"];
   descriptor.colorAttachments[0].pixelFormat =
       (MTLPixelFormat)render_target->pixel_format();
   descriptor.rasterSampleCount = render_target->sample_count();
@@ -3104,7 +3500,7 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
   if (!canonical_color_msaa_pack_pipeline_) {
     id<MTLComputePipelineState> pack = [device
         newComputePipelineStateWithFunction:
-            [library newFunctionWithName:@"pack_color_ms"]
+            [library newFunctionWithName:@"pack_color_ms_range"]
                                       error:&error];
     if (!pack) {
       XELOGE("MetalRenderTargetCache: canonical color MSAA pack pipeline "
@@ -3120,7 +3516,8 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || render_target->key().is_depth ||
       render_target->key().msaa_samples != xenos::MsaaSamples::k1X ||
@@ -3144,13 +3541,17 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-materialize-full";
+  encoder.label = @"rtcache:canonical-color-materialize-range";
   [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setTexture:texture atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  [encoder setBytes:&range length:sizeof(range) atIndex:3];
   NSUInteger tw = pipeline.threadExecutionWidth;
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
@@ -3160,7 +3561,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalColorPack(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || render_target->key().is_depth ||
       render_target->key().msaa_samples != xenos::MsaaSamples::k1X ||
@@ -3184,13 +3586,17 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-pack-full";
+  encoder.label = @"rtcache:canonical-color-pack-range";
   [encoder setComputePipelineState:pipeline];
   [encoder setTexture:texture atIndex:0];
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  [encoder setBytes:&range length:sizeof(range) atIndex:3];
   NSUInteger tw = pipeline.threadExecutionWidth;
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
@@ -3200,7 +3606,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -3230,25 +3637,30 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = texture;
-  pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
-  encoder.label = @"rtcache:canonical-color-materialize-msaa-full";
+  encoder.label = @"rtcache:canonical-color-materialize-msaa-range";
   [encoder setRenderPipelineState:pipeline];
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&format length:sizeof(format) atIndex:2];
+  [encoder setFragmentBytes:&range length:sizeof(range) atIndex:3];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder endEncoding];
   return true;
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
-    const void* command_buffer, RenderTarget* render_target) {
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -3274,13 +3686,17 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u, 0u,
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-pack-msaa-full";
+  encoder.label = @"rtcache:canonical-color-pack-msaa-range";
   [encoder setComputePipelineState:pipeline];
   [encoder setTexture:texture atIndex:0];
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  [encoder setBytes:&range length:sizeof(range) atIndex:3];
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
@@ -3417,6 +3833,9 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
                         0u, kCanonicalEdramSize / 4u};
   uint32_t color_format =
       uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } full_range{0u, xenos::kEdramTileCount};
   id<MTLBuffer> sp_buf = [device newBufferWithBytes:&sp
                                             length:sizeof(sp)
                                            options:MTLResourceStorageModeShared];
@@ -3441,6 +3860,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setTexture:scratch atIndex:0];
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
+    [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
@@ -3453,6 +3873,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:canonical2 offset:0 atIndex:0];
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
+    [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
