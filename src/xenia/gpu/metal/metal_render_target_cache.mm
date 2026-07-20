@@ -127,6 +127,8 @@ bool MetalRenderTargetCache::Initialize() {
   // task 2.1.
   sample_edram_enabled_ =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM");
+  const bool canonical_full_sync_requested =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
   canonical_depth_enabled_ = std::getenv("XE_METAL_CANONICAL_DEPTH") != nullptr;
   if (sample_edram_enabled_ || canonical_depth_enabled_) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -149,6 +151,17 @@ bool MetalRenderTargetCache::Initialize() {
           kCanonicalEdramSize / (1024 * 1024),
           canonical_depth_enabled_ ? " [depth authority]" : "");
     }
+  }
+  canonical_full_sync_enabled_ =
+      sample_edram_enabled_ && canonical_full_sync_requested;
+  if (canonical_full_sync_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: canonical FULL SYNC diagnostic enabled "
+        "(commit+wait after every ownership-transfer batch)");
+  } else if (canonical_full_sync_requested) {
+    XELOGW(
+        "MetalRenderTargetCache: ignoring XE_METAL_SAMPLE_EDRAM_FULL_SYNC=1 "
+        "because XE_METAL_SAMPLE_EDRAM=1 is not active");
   }
   return true;
 }
@@ -568,6 +581,17 @@ void MetalRenderTargetCache::PerformTransfers(
   if (blit) {
     [blit endEncoding];
   }
+  if (canonical_full_sync_enabled_) {
+    ++canonical_full_sync_count_;
+    if (canonical_full_sync_count_ <= 64 ||
+        (canonical_full_sync_count_ & 255u) == 0) {
+      XELOGW(
+          "MetalCanonicalFullSync #{} @draw {}: ownership-transfer batch "
+          "commit+wait",
+          canonical_full_sync_count_, command_processor_.trace_draw_index());
+    }
+    command_processor_.EndFrameEncoderAndWait();
+  }
 }
 
 void MetalRenderTargetCache::RecordTransition(TransferKind kind,
@@ -881,10 +905,11 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
   // `cov` non-null -> use the coverage-aware adapter (source pack); null -> the
   // canonical pack (scratch re-pack, no coverage needed).
   auto pack = [&](id<MTLTexture> att, id<MTLTexture> sten, id<MTLBuffer> out,
-                  id<MTLBuffer> cov) {
+                  id<MTLBuffer> cov, NSString* label) {
     bool use_cov = cov && pack_cov_pso;
     id<MTLComputePipelineState> pso = use_cov ? pack_cov_pso : pack_pso;
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    e.label = label;
     [e setComputePipelineState:pso];
     [e setTexture:att atIndex:0];
     [e setTexture:sten atIndex:1];
@@ -899,7 +924,8 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [e endEncoding];
   };
-  auto materialize = [&](id<MTLTexture> att, id<MTLBuffer> src) {
+  auto materialize = [&](id<MTLTexture> att, id<MTLBuffer> src,
+                         NSString* label) {
     MTLRenderPassDescriptor* rp =
         [MTLRenderPassDescriptor renderPassDescriptor];
     rp.depthAttachment.texture = att;
@@ -912,6 +938,7 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
     rp.stencilAttachment.storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e =
         [cb renderCommandEncoderWithDescriptor:rp];
+    e.label = label;
     [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   p->materialize_depth];
     [e setDepthStencilState:(__bridge id<MTLDepthStencilState>)p->depth_state];
@@ -932,9 +959,12 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
     }
     [e endEncoding];
   };
-  pack(src_tex, src_sten, canon_a, cov_a);  // 1) source -> A (+ coverage)
-  materialize(scratch, canon_a);            // 2) A -> scratch depth attachment
-  pack(scratch, scratch_sten, canon_b, nil);  // 3) scratch -> canonical B
+  pack(src_tex, src_sten, canon_a, cov_a,
+       @"rtcache:shadow-depth-pack-source");  // 1) source -> A (+ coverage)
+  materialize(scratch, canon_a,
+              @"rtcache:shadow-depth-materialize");  // 2) A -> scratch
+  pack(scratch, scratch_sten, canon_b, nil,
+       @"rtcache:shadow-depth-pack-roundtrip");  // 3) scratch -> B
   // Read A/B once the frame cb completes (NO commit/wait). The round-trip is now
   // scored ONLY over slots the collapsed store actually holds (coverage==1):
   // known slots that materialize+re-pack reproduce prove the substrate on the

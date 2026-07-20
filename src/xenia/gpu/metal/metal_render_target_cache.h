@@ -340,6 +340,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // (task 2.1) — no visible rendering change.
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
   bool sample_edram_enabled_ = false;
+  // Diagnostic ordering oracle: when explicitly enabled with the canonical
+  // gate, commit and wait after every ownership-transfer batch. This is an
+  // intentionally expensive upper bound for finding missing producer/consumer
+  // synchronization as attachment pack/materialize operations are migrated.
+  bool canonical_full_sync_enabled_ = false;
+  uint32_t canonical_full_sync_count_ = 0;
   void* canonical_edram_ = nullptr;  // id<MTLBuffer>, private, retained.
 
   // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the
