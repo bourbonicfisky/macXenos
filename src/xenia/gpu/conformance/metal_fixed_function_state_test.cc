@@ -28,6 +28,67 @@ draw_util::Scissor Scissor(uint32_t x, uint32_t y, uint32_t width,
   return {{x, y}, {width, height}};
 }
 
+reg::PA_SU_SC_MODE_CNTL CullMode(bool cull_front, bool cull_back,
+                                 bool front_face_clockwise) {
+  reg::PA_SU_SC_MODE_CNTL mode = {};
+  mode.cull_front = cull_front;
+  mode.cull_back = cull_back;
+  mode.face = front_face_clockwise;
+  return mode;
+}
+
+TEST_CASE("Metal polygon cull modes map without stale state",
+          "[l0][metal][cull-front-face]") {
+  MetalCullFrontFaceState none =
+      GetMetalCullFrontFaceState(CullMode(false, false, false), true);
+  CHECK(none.cull_mode == MetalCullMode::kNone);
+  CHECK_FALSE(none.front_face_clockwise);
+  CHECK_FALSE(none.culls_all());
+
+  MetalCullFrontFaceState front =
+      GetMetalCullFrontFaceState(CullMode(true, false, false), true);
+  CHECK(front.cull_mode == MetalCullMode::kFront);
+  CHECK_FALSE(front.front_face_clockwise);
+
+  MetalCullFrontFaceState back =
+      GetMetalCullFrontFaceState(CullMode(false, true, false), true);
+  CHECK(back.cull_mode == MetalCullMode::kBack);
+  CHECK_FALSE(back.front_face_clockwise);
+
+  // Re-deriving no-cull after the two culling variants models both a state
+  // transition on one encoder and the first draw of a newly opened encoder.
+  MetalCullFrontFaceState reset =
+      GetMetalCullFrontFaceState(CullMode(false, false, false), true);
+  CHECK(reset.cull_mode == MetalCullMode::kNone);
+  CHECK_FALSE(reset.front_face_clockwise);
+}
+
+TEST_CASE("Metal polygon winding follows Xenos face state",
+          "[l0][metal][cull-front-face]") {
+  CHECK_FALSE(GetMetalCullFrontFaceState(CullMode(false, false, false), true)
+                  .front_face_clockwise);
+  CHECK(GetMetalCullFrontFaceState(CullMode(false, false, true), true)
+            .front_face_clockwise);
+}
+
+TEST_CASE("Metal both-face culling is a successful raster no-op",
+          "[l0][metal][cull-front-face]") {
+  MetalCullFrontFaceState state =
+      GetMetalCullFrontFaceState(CullMode(true, true, true), true);
+  CHECK(state.cull_mode == MetalCullMode::kAll);
+  CHECK(state.front_face_clockwise);
+  CHECK(state.culls_all());
+}
+
+TEST_CASE("Metal non-polygons always establish safe no-cull state",
+          "[l0][metal][cull-front-face]") {
+  MetalCullFrontFaceState state =
+      GetMetalCullFrontFaceState(CullMode(true, true, true), false);
+  CHECK(state.cull_mode == MetalCullMode::kNone);
+  CHECK_FALSE(state.front_face_clockwise);
+  CHECK_FALSE(state.culls_all());
+}
+
 TEST_CASE("Metal scissor preserves in-bounds coverage", "[l0][metal][scissor]") {
   MetalScissorRect rect =
       ClampScissorToRenderExtent(Scissor(10, 20, 30, 40), 1280, 720);

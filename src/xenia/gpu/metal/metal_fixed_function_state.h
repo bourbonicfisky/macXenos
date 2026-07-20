@@ -31,6 +31,41 @@ struct MetalScissorRect {
   bool empty() const { return width == 0 || height == 0; }
 };
 
+// Device-independent representation of Metal's dynamic face-raster state.
+// kAll is a draw no-op because Metal has no front-and-back cull enum.
+enum class MetalCullMode : uint32_t {
+  kNone,
+  kFront,
+  kBack,
+  kAll,
+};
+
+struct MetalCullFrontFaceState {
+  MetalCullMode cull_mode;
+  bool front_face_clockwise;
+
+  bool culls_all() const { return cull_mode == MetalCullMode::kAll; }
+};
+
+// Xenos culling and faceness apply only to polygonal primitives. Lines,
+// points, and rectangle-list geometry must establish safe no-cull state on
+// every draw so a preceding triangle draw can't leak encoder state into them.
+inline MetalCullFrontFaceState GetMetalCullFrontFaceState(
+    reg::PA_SU_SC_MODE_CNTL mode, bool primitive_polygonal) {
+  if (!primitive_polygonal) {
+    return {MetalCullMode::kNone, false};
+  }
+  MetalCullMode cull_mode = MetalCullMode::kNone;
+  if (mode.cull_front && mode.cull_back) {
+    cull_mode = MetalCullMode::kAll;
+  } else if (mode.cull_front) {
+    cull_mode = MetalCullMode::kFront;
+  } else if (mode.cull_back) {
+    cull_mode = MetalCullMode::kBack;
+  }
+  return {cull_mode, mode.face != 0};
+}
+
 // Intersects the shared guest-normalized scissor with the active Metal render
 // extent. Widened end arithmetic is required because a malformed or extreme
 // guest rectangle must collapse/clip, never wrap and expose unrelated pixels.

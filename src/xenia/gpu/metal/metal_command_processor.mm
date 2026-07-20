@@ -2601,6 +2601,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
     }
+    // Apply Xenos polygon culling and front-face winding per normal draw.
+    // Metal encoder state persists across draws, so non-polygons explicitly
+    // restore no-cull/CCW rather than inheriting the preceding triangle state.
+    // Both guest faces culled is a successful raster no-op. Memexport bypasses
+    // raster state because its vertex-stage shared-memory stores must execute.
+    if (!memexport_draw) {
+      MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
+          regs.Get<reg::PA_SU_SC_MODE_CNTL>(),
+          draw_util::IsPrimitivePolygonal(regs));
+      if (face_state.culls_all()) {
+        return true;
+      }
+      MTLCullMode cull_mode = MTLCullModeNone;
+      if (face_state.cull_mode == MetalCullMode::kFront) {
+        cull_mode = MTLCullModeFront;
+      } else if (face_state.cull_mode == MetalCullMode::kBack) {
+        cull_mode = MTLCullModeBack;
+      }
+      [encoder setCullMode:cull_mode];
+      [encoder
+          setFrontFacingWinding:face_state.front_face_clockwise
+                                    ? MTLWindingClockwise
+                                    : MTLWindingCounterClockwise];
+    }
     // Stage 17: apply the guest scissor on every normal raster draw. Shared
     // draw_util owns Xenos window/screen/offset/pitch semantics; the Metal-only
     // helper then intersects that result with every active attachment so the
