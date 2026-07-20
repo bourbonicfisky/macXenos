@@ -42,6 +42,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
+#include "xenia/gpu/metal/metal_fixed_function_state.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -2599,6 +2600,48 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.znear = viewport_info.z_min;
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
+    }
+    // Stage 17: apply the guest scissor on every normal raster draw. Shared
+    // draw_util owns Xenos window/screen/offset/pitch semantics; the Metal-only
+    // helper then intersects that result with every active attachment so the
+    // MTLScissorRect is validation-safe without expanding guest coverage.
+    // Memexport is intentionally excluded: its vertex-stage stores must execute
+    // even though raster output is irrelevant.
+    if (!memexport_draw) {
+      uint32_t render_width = UINT32_MAX;
+      uint32_t render_height = UINT32_MAX;
+      bool have_render_extent = false;
+      auto intersect_render_extent = [&](void* texture_ptr) {
+        if (!texture_ptr) {
+          return;
+        }
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;
+        render_width = std::min(render_width, uint32_t(texture.width));
+        render_height = std::min(render_height, uint32_t(texture.height));
+        have_render_extent = true;
+      };
+      if (have_color) {
+        intersect_render_extent(
+            render_target_cache_->current_color_texture(0, nullptr));
+      }
+      if (depth_bound) {
+        intersect_render_extent(render_target_cache_->current_depth_texture());
+      }
+      if (!have_render_extent) {
+        ++draw_skip_count_;
+        return true;
+      }
+      draw_util::Scissor guest_scissor;
+      draw_util::GetScissor(regs, guest_scissor);
+      MetalScissorRect metal_scissor = ClampScissorToRenderExtent(
+          guest_scissor, render_width, render_height);
+      if (metal_scissor.empty()) {
+        // Empty guest coverage is a successful no-op, not a backend failure.
+        return true;
+      }
+      MTLScissorRect scissor_rect{metal_scissor.x, metal_scissor.y,
+                                  metal_scissor.width, metal_scissor.height};
+      [encoder setScissorRect:scissor_rect];
     }
     // Diagnostic (scene depth stuck at clear): log each unique depth
     // configuration of depth-bound draws once — z range, func, write, target.
