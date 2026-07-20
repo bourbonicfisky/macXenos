@@ -11,6 +11,7 @@
 
 #import <Metal/Metal.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -33,6 +34,15 @@ const uint64_t MetalRenderTargetCache::kDepthFormat =
     MTLPixelFormatDepth32Float_Stencil8;
 
 namespace {
+// Experimental Metal feature gates use explicit value semantics so a tracked
+// `NAME=0` environment entry is a real disable, not an accidental enable just
+// because the variable exists. Keep this strict: the onboarding contract uses
+// 0 and 1, and any other value should stay safely off.
+bool IsMetalEnvironmentFlagEnabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value && value[0] == '1' && value[1] == '\0';
+}
+
 // Guest color RESOURCE format (gamma already collapsed by the base class since
 // IsGammaFormatHostStorageSeparate()==false) -> host MTLPixelFormat.
 MTLPixelFormat ColorResourceFormatToMetal(
@@ -113,7 +123,8 @@ bool MetalRenderTargetCache::Initialize() {
   // path). Allocated only when gated on, so the default collapsed path stays
   // byte-for-byte unchanged. See openspec implement-sample-accurate-metal-edram
   // task 2.1.
-  sample_edram_enabled_ = std::getenv("XE_METAL_SAMPLE_EDRAM") != nullptr;
+  sample_edram_enabled_ =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM");
   canonical_depth_enabled_ = std::getenv("XE_METAL_CANONICAL_DEPTH") != nullptr;
   if (sample_edram_enabled_ || canonical_depth_enabled_) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -1100,7 +1111,8 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
   // shared depth substrate round-trips THIS real cross-MSAA source. Depth only;
   // modifies no render target, so the legacy resample below still runs and the
   // frame is byte-identical.
-  static const bool s_shadow = std::getenv("XE_METAL_CROSSMSAA_SHADOW");
+  static const bool s_shadow =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_CROSSMSAA_SHADOW");
   if (s_shadow && is_depth) {
     ShadowCrossMsaaDepth(command_buffer, source, transfer);
   }
