@@ -1841,12 +1841,14 @@ uint32_t DepthRoundTripBad(MetalCompute& mc, const std::vector<uint32_t>& d24,
   return bad;
 }
 
-// Per-sample 4x variant: one 4x tile (40x8 px x 4 samples = 1280 words), a
-// DISTINCT (d24, stencil) per (pixel, sample). Returns failed-word count.
-uint32_t MsaaDepthBad(MetalCompute& mc, uint32_t fmt) {
-  const uint32_t w = 40, h = 8, ns = 4;
-  const uint32_t pitch = PitchFor(w, /*4x=*/2u, 0u);
-  SurfaceParams sp{0u, pitch, /*4x=*/2u, fmt, 0u,
+// Per-sample 2x/4x variant: one physical EDRAM tile, with a DISTINCT (d24,
+// stencil) per (pixel, sample). Returns failed-word count.
+uint32_t MsaaDepthBad(MetalCompute& mc, uint32_t fmt, uint32_t msaa) {
+  const uint32_t w = msaa == 2u ? 40u : 80u;
+  const uint32_t h = 8u;
+  const uint32_t ns = 1u << msaa;
+  const uint32_t pitch = PitchFor(w, msaa, 0u);
+  SurfaceParams sp{0u, pitch, msaa, fmt, 0u,
                    uint32_t(xenos::kEdramSizeBytes / 4u)};
   std::vector<uint32_t> words(size_t(w) * h * ns);
   for (uint32_t i = 0; i < words.size(); ++i) {
@@ -1969,16 +1971,18 @@ TEST_CASE("Canonical kD24S8 (unorm24) depth+stencil word round-trips exactly nea
   REQUIRE(DepthRoundTripBad(mc, sweep, /*unorm24=*/1u) == 0u);
 }
 
-TEST_CASE("Canonical 4x per-sample depth+stencil round-trips every sample",
+TEST_CASE("Canonical 2x/4x per-sample depth+stencil round-trips every sample",
           "[l1][metal][materialize][depth][msaa]") {
   MetalCompute mc;
   if (!mc.Init()) { SUCCEED("no device"); return; }
-  // Both guest depth formats, all four samples independent: the sample
+  // Both guest depth formats, every 2x/4x sample independent: the sample
   // dimension the collapsed host cannot hold and the cross-MSAA slice depends
   // on. Distinct depth AND stencil per (pixel, sample) makes any collapse or
   // cross-sample leak fail loudly.
-  REQUIRE(MsaaDepthBad(mc, /*float24=*/2u) == 0u);
-  REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u) == 0u);
+  REQUIRE(MsaaDepthBad(mc, /*float24=*/2u, /*2x=*/1u) == 0u);
+  REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*2x=*/1u) == 0u);
+  REQUIRE(MsaaDepthBad(mc, /*float24=*/2u, /*4x=*/2u) == 0u);
+  REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*4x=*/2u) == 0u);
 }
 
 TEST_CASE("Cross-MSAA 4x->1x->4x preserves samples and propagates a 1x write",

@@ -159,6 +159,24 @@ bool MetalRenderTargetCache::Initialize() {
           canonical_depth_enabled_ ? " [depth authority]" : "");
     }
   }
+  if (sample_edram_enabled_) {
+    // Build both real-MSAA depth/stencil pipeline sets while the gate is
+    // initialized. This makes a gated corpus run validate the exact live PSOs
+    // task 3.5 will schedule, rather than deferring the first compile until an
+    // authority transition is already in flight.
+    bool depth_2x_ready = EnsureShadowDepthPipelines(2u) != nullptr;
+    bool depth_4x_ready = EnsureShadowDepthPipelines(4u) != nullptr;
+    if (depth_2x_ready && depth_4x_ready) {
+      XELOGI(
+          "MetalRenderTargetCache: canonical per-sample depth/stencil "
+          "pipelines ready (2x, 4x)");
+    } else {
+      XELOGE(
+          "MetalRenderTargetCache: canonical per-sample depth/stencil "
+          "pipeline initialization failed (2x={}, 4x={})",
+          depth_2x_ready, depth_4x_ready);
+    }
+  }
   canonical_full_sync_enabled_ =
       sample_edram_enabled_ && canonical_full_sync_requested;
   if (canonical_full_sync_enabled_) {
@@ -182,6 +200,51 @@ void MetalRenderTargetCache::Shutdown() {
     }
   }
   resolve_snapshots_.clear();
+  auto release_render_pipeline = [](void*& opaque) {
+    if (opaque) {
+      id<MTLRenderPipelineState> released =
+          (__bridge_transfer id<MTLRenderPipelineState>)opaque;
+      (void)released;
+      opaque = nullptr;
+    }
+  };
+  auto release_compute_pipeline = [](void*& opaque) {
+    if (opaque) {
+      id<MTLComputePipelineState> released =
+          (__bridge_transfer id<MTLComputePipelineState>)opaque;
+      (void)released;
+      opaque = nullptr;
+    }
+  };
+  auto release_depth_state = [](void*& opaque) {
+    if (opaque) {
+      id<MTLDepthStencilState> released =
+          (__bridge_transfer id<MTLDepthStencilState>)opaque;
+      (void)released;
+      opaque = nullptr;
+    }
+  };
+  for (auto& pair : shadow_pipelines_) {
+    ShadowDepthPipelines& pipelines = pair.second;
+    release_render_pipeline(pipelines.materialize_depth);
+    release_render_pipeline(pipelines.materialize_sten);
+    release_compute_pipeline(pipelines.pack);
+    release_compute_pipeline(pipelines.pack_cov);
+    release_compute_pipeline(pipelines.pack_range);
+    release_render_pipeline(pipelines.mat_depth_range);
+    release_render_pipeline(pipelines.mat_sten_range);
+    release_depth_state(pipelines.depth_state);
+    for (void*& bit_state : pipelines.bit_states) {
+      release_depth_state(bit_state);
+    }
+  }
+  shadow_pipelines_.clear();
+  if (shadow_depth_library_) {
+    id<MTLLibrary> released =
+        (__bridge_transfer id<MTLLibrary>)shadow_depth_library_;
+    (void)released;
+    shadow_depth_library_ = nullptr;
+  }
   if (canonical_edram_) {
     id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)canonical_edram_;
     (void)released;
@@ -859,6 +922,129 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
   }
   auto ins = shadow_pipelines_.emplace(sample_count, p);
   return &ins.first->second;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || !render_target->key().is_depth ||
+      render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  id<MTLTexture> texture =
+      (__bridge id<MTLTexture>)target->msaa_texture();
+  if (!texture || (target->sample_count() != 2u &&
+                   target->sample_count() != 4u)) {
+    return false;
+  }
+  const ShadowDepthPipelines* pipelines =
+      EnsureShadowDepthPipelines(target->sample_count());
+  if (!pipelines) {
+    return false;
+  }
+  uint32_t depth_format =
+      target->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+          ? 2u
+          : 1u;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), depth_format, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.depthAttachment.texture = texture;
+  pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+  pass.depthAttachment.storeAction = MTLStoreActionStore;
+  pass.stencilAttachment.texture = texture;
+  pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+  pass.stencilAttachment.storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:pass];
+  encoder.label = @"rtcache:canonical-depth-materialize-msaa-full";
+
+  // The first pass writes every depth sample and replaces stencil with zero.
+  // Eight masked REPLACE passes then reconstruct the complete stencil byte per
+  // sample without relying on a shader stencil export Metal doesn't provide.
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      pipelines->materialize_depth];
+  [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                    pipelines->depth_state];
+  [encoder setStencilReferenceValue:0];
+  [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+  [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      pipelines->materialize_sten];
+  [encoder setStencilReferenceValue:0xFF];
+  for (uint32_t bit_index = 0; bit_index < 8u; ++bit_index) {
+    uint32_t bit = 1u << bit_index;
+    [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                      pipelines->bit_states[bit_index]];
+    [encoder setFragmentBytes:&bit length:sizeof(bit) atIndex:2];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                 vertexStart:0
+                 vertexCount:3];
+  }
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || !render_target->key().is_depth ||
+      render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  id<MTLTexture> texture =
+      (__bridge id<MTLTexture>)target->msaa_texture();
+  if (!texture || (target->sample_count() != 2u &&
+                   target->sample_count() != 4u)) {
+    return false;
+  }
+  const ShadowDepthPipelines* pipelines =
+      EnsureShadowDepthPipelines(target->sample_count());
+  if (!pipelines) {
+    return false;
+  }
+  id<MTLTexture> stencil =
+      [texture newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  if (!stencil) {
+    return false;
+  }
+  uint32_t depth_format =
+      target->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+          ? 2u
+          : 1u;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), depth_format, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)pipelines->pack;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-depth-pack-msaa-full";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setTexture:stencil atIndex:1];
+  [encoder setBuffer:canonical offset:0 atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  NSUInteger thread_width = pipeline.threadExecutionWidth;
+  NSUInteger thread_height =
+      pipeline.maxTotalThreadsPerThreadgroup / thread_width;
+  [encoder dispatchThreads:
+               MTLSizeMake(texture.width, texture.height, texture.sampleCount)
+      threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
+  [encoder endEncoding];
+  return true;
 }
 
 void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,

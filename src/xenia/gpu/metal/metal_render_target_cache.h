@@ -323,6 +323,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint32_t sample_count = 0;
   };
   const ShadowDepthPipelines* EnsureShadowDepthPipelines(uint32_t sample_count);
+  // Full-view per-sample depth/stencil conversions for real 2x/4x working
+  // attachments. Task 3.5 decides when their view or canonical words are
+  // authoritative; task 3.4 owns the lossless encoder contract.
+  bool EncodeCanonicalDepthMsaaMaterialize(const void* command_buffer,
+                                           RenderTarget* render_target);
+  bool EncodeCanonicalDepthMsaaPack(const void* command_buffer,
+                                    RenderTarget* render_target);
   void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramMsl.
   std::unordered_map<uint32_t, ShadowDepthPipelines> shadow_pipelines_;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
