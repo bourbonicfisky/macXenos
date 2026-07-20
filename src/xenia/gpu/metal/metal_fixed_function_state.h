@@ -61,6 +61,20 @@ struct MetalFillDepthBiasState {
   float depth_bias_slope;
 };
 
+// Device-independent representation of Metal's per-draw blend color and
+// stencil reference state. References are zeroed while stencil is disabled so
+// the helper has a deterministic safe state; an applicable stencil draw always
+// establishes its complete front/back values on the encoder.
+struct MetalBlendStencilState {
+  float blend_color_red;
+  float blend_color_green;
+  float blend_color_blue;
+  float blend_color_alpha;
+  bool stencil_enabled;
+  uint32_t stencil_reference_front;
+  uint32_t stencil_reference_back;
+};
+
 // Xenos culling and faceness apply only to polygonal primitives. Lines,
 // points, and rectangle-list geometry must establish safe no-cull state on
 // every draw so a preceding triangle draw can't leak encoder state into them.
@@ -118,6 +132,33 @@ inline MetalFillDepthBiasState GetMetalFillDepthBiasState(
       polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit *
           float(std::max(draw_resolution_scale, uint32_t(1))),
   };
+}
+
+// Metal supports separate front/back stencil references. Xenos back-face
+// stencil state applies only to polygonal primitives when enabled in the
+// normalized depth control; lines, points, and other non-polygons use the
+// front reference even if the raw back-face-enable bit was set.
+inline MetalBlendStencilState GetMetalBlendStencilState(
+    float blend_color_red, float blend_color_green, float blend_color_blue,
+    float blend_color_alpha,
+    reg::RB_DEPTHCONTROL normalized_depth_control, bool primitive_polygonal,
+    reg::RB_STENCILREFMASK stencil_ref_mask,
+    reg::RB_STENCILREFMASK stencil_ref_mask_back) {
+  bool stencil_enabled = normalized_depth_control.stencil_enable != 0;
+  uint32_t stencil_reference_front =
+      stencil_enabled ? stencil_ref_mask.stencilref : 0;
+  uint32_t stencil_reference_back = stencil_reference_front;
+  if (stencil_enabled && primitive_polygonal &&
+      normalized_depth_control.backface_enable) {
+    stencil_reference_back = stencil_ref_mask_back.stencilref;
+  }
+  return {blend_color_red,
+          blend_color_green,
+          blend_color_blue,
+          blend_color_alpha,
+          stencil_enabled,
+          stencil_reference_front,
+          stencil_reference_back};
 }
 
 // Intersects the shared guest-normalized scissor with the active Metal render

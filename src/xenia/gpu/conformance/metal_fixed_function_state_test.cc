@@ -180,6 +180,79 @@ TEST_CASE("Metal disabled and non-polygon bias state does not leak",
   CHECK(enabled_non_polygon.depth_bias_slope == 1.0f);
 }
 
+TEST_CASE("Metal blend colors follow consecutive guest values",
+          "[l0][metal][blend-stencil]") {
+  reg::RB_DEPTHCONTROL depth = {};
+  reg::RB_STENCILREFMASK stencil = {};
+  reg::RB_STENCILREFMASK stencil_back = {};
+  MetalBlendStencilState first = GetMetalBlendStencilState(
+      0.125f, 0.25f, 0.5f, 1.0f, depth, true, stencil, stencil_back);
+  CHECK(first.blend_color_red == 0.125f);
+  CHECK(first.blend_color_green == 0.25f);
+  CHECK(first.blend_color_blue == 0.5f);
+  CHECK(first.blend_color_alpha == 1.0f);
+
+  // Re-deriving all four values models both a consecutive draw transition and
+  // the first draw on a newly opened encoder.
+  MetalBlendStencilState second = GetMetalBlendStencilState(
+      -1.0f, 2.0f, 0.0f, 0.75f, depth, true, stencil, stencil_back);
+  CHECK(second.blend_color_red == -1.0f);
+  CHECK(second.blend_color_green == 2.0f);
+  CHECK(second.blend_color_blue == 0.0f);
+  CHECK(second.blend_color_alpha == 0.75f);
+}
+
+TEST_CASE("Metal stencil references select normalized polygon faces",
+          "[l0][metal][blend-stencil]") {
+  reg::RB_DEPTHCONTROL depth = {};
+  depth.stencil_enable = 1;
+  depth.backface_enable = 1;
+  reg::RB_STENCILREFMASK stencil = {};
+  stencil.stencilref = 0x12;
+  reg::RB_STENCILREFMASK stencil_back = {};
+  stencil_back.stencilref = 0xE7;
+  MetalBlendStencilState state = GetMetalBlendStencilState(
+      0.0f, 0.0f, 0.0f, 0.0f, depth, true, stencil, stencil_back);
+  CHECK(state.stencil_enabled);
+  CHECK(state.stencil_reference_front == 0x12);
+  CHECK(state.stencil_reference_back == 0xE7);
+}
+
+TEST_CASE("Metal non-polygons use the front stencil reference",
+          "[l0][metal][blend-stencil]") {
+  reg::RB_DEPTHCONTROL depth = {};
+  depth.stencil_enable = 1;
+  depth.backface_enable = 1;
+  reg::RB_STENCILREFMASK stencil = {};
+  stencil.stencilref = 0x34;
+  reg::RB_STENCILREFMASK stencil_back = {};
+  stencil_back.stencilref = 0xAB;
+  MetalBlendStencilState state = GetMetalBlendStencilState(
+      0.0f, 0.0f, 0.0f, 0.0f, depth, false, stencil, stencil_back);
+  CHECK(state.stencil_enabled);
+  CHECK(state.stencil_reference_front == 0x34);
+  CHECK(state.stencil_reference_back == 0x34);
+
+  depth.backface_enable = 0;
+  state = GetMetalBlendStencilState(0.0f, 0.0f, 0.0f, 0.0f, depth, true,
+                                    stencil, stencil_back);
+  CHECK(state.stencil_reference_back == 0x34);
+}
+
+TEST_CASE("Metal disabled stencil state has deterministic safe references",
+          "[l0][metal][blend-stencil]") {
+  reg::RB_DEPTHCONTROL depth = {};
+  reg::RB_STENCILREFMASK stencil = {};
+  stencil.stencilref = 0x55;
+  reg::RB_STENCILREFMASK stencil_back = {};
+  stencil_back.stencilref = 0xAA;
+  MetalBlendStencilState state = GetMetalBlendStencilState(
+      0.0f, 0.0f, 0.0f, 0.0f, depth, true, stencil, stencil_back);
+  CHECK_FALSE(state.stencil_enabled);
+  CHECK(state.stencil_reference_front == 0);
+  CHECK(state.stencil_reference_back == 0);
+}
+
 TEST_CASE("Metal scissor preserves in-bounds coverage", "[l0][metal][scissor]") {
   MetalScissorRect rect =
       ClampScissorToRenderExtent(Scissor(10, 20, 30, 40), 1280, 720);

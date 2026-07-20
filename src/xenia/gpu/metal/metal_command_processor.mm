@@ -2586,6 +2586,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
 
+    bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
+
     // Set the host viewport from the integer part. Memexport passes have a
     // 1x1 attachment-less render area and rasterization disabled — the guest
     // viewport would exceed the pass bounds (validation error) and shades
@@ -2607,7 +2609,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Both guest faces culled is a successful raster no-op. Memexport bypasses
     // raster state because its vertex-stage shared-memory stores must execute.
     if (!memexport_draw) {
-      bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
           regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal);
       if (face_state.culls_all()) {
@@ -3024,22 +3025,45 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+
+  // Apply complete blend/stencil dynamic values on every normal draw. Metal
+  // encoder state persists across draws, while a new encoder begins with its
+  // own defaults, so even blend colors that a particular pipeline doesn't
+  // consume are established rather than assumed. Memexport has no raster
+  // output and stays outside this state. The helper also prevents raw
+  // back-face stencil state from leaking into non-polygon primitives.
+  reg::RB_STENCILREFMASK stencil_ref_mask =
+      regs.Get<reg::RB_STENCILREFMASK>();
+  reg::RB_STENCILREFMASK stencil_ref_mask_back =
+      regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
+  MetalBlendStencilState blend_stencil = GetMetalBlendStencilState(
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+      regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA), norm_depth,
+      draw_util::IsPrimitivePolygonal(regs), stencil_ref_mask,
+      stencil_ref_mask_back);
+  if (!memexport_draw) {
+    [encoder setBlendColorRed:blend_stencil.blend_color_red
+                        green:blend_stencil.blend_color_green
+                         blue:blend_stencil.blend_color_blue
+                        alpha:blend_stencil.blend_color_alpha];
+  }
   if (kDepthEnabled && depth_bound) {
     // Only when the pass has a depth attachment — setting a depth-test state on
     // an encoder without one is a Metal validation error. norm_depth already
     // collapsed "always, no write" to disabled.
-    uint32_t srm_value = regs[XE_GPU_REG_RB_STENCILREFMASK];
-    uint32_t srm_bf_value = regs[XE_GPU_REG_RB_STENCILREFMASK_BF];
     void* depth_state = GetOrCreateDepthStencilState(
-        norm_depth.value, srm_value, srm_bf_value);
+        norm_depth.value, stencil_ref_mask.value, stencil_ref_mask_back.value);
     if (depth_state) {
       [encoder
           setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
-      if (norm_depth.stencil_enable) {
-        uint32_t back_ref =
-            norm_depth.backface_enable ? srm_bf_value : srm_value;
-        [encoder setStencilFrontReferenceValue:srm_value & 0xFF
-                            backReferenceValue:back_ref & 0xFF];
+      if (blend_stencil.stencil_enabled) {
+        [encoder
+            setStencilFrontReferenceValue:
+                blend_stencil.stencil_reference_front
+                      backReferenceValue:
+                          blend_stencil.stencil_reference_back];
       }
     }
   }
