@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "xenia/base/math.h"
 #include "xenia/gpu/primitive_processor.h"
@@ -162,37 +163,76 @@ inline bool IsPp1DrawViewConsistent(const RegisterFile& regs,
   return true;
 }
 
-// PP1 slice: a real shared-`PrimitiveProcessor` subclass that is the single
-// guest-semantic NORMALIZATION authority for the routed native, non-expanded,
-// non-tessellated, restart-disabled topologies (line list/strip, triangle
-// list/strip).
+// PP2-auto routing predicate. Returns true for exactly the auto-indexed
+// triangle-fan draws that the shared PrimitiveProcessor normalizes to a
+// kHostBuiltinForAuto triangle list. DMA/index-buffer fans (including
+// reset-enabled fans) return false and stay on the existing inline converter;
+// tessellated fans stay inline too. Auto fans carry no guest index memory and
+// have no primitive reset, so no reset/DMA checks are needed. Kept pure (no
+// Metal types) so the command processor and the device-free test share one
+// contract, mirroring IsPp1Routable without weakening it.
+inline bool IsAutoFanRoutable(const RegisterFile& regs,
+                              xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kTriangleFan) {
+    return false;
+  }
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  // The local prim_type must match the register Process reads.
+  if (prim_type != vgt_draw_initiator.prim_type) {
+    return false;
+  }
+  // Only auto-indexed fans: DMA (and reset) fans stay on the inline converter.
+  if (vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
+    return false;
+  }
+  // Tessellated fans make Process emit a domain host vertex-shader type; the
+  // inline path draws them as plain primitives. Exclude to stay behavior-neutral.
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  return true;
+}
+
+// PP1 + PP2-auto slice: a real shared-`PrimitiveProcessor` subclass that is the
+// single guest-semantic NORMALIZATION authority for the routed native,
+// non-expanded, non-tessellated, restart-disabled topologies (line list/strip,
+// triangle list/strip) AND for auto-indexed triangle fans.
 //
 // The Metal backend keeps its existing index MECHANISM: the command processor
 // CPU-swaps the guest indices into MetalUploadArena and binds that transient as
 // the index source; it never binds the shared-memory buffer as an index source.
-// Which draws reach this processor is decided externally by IsPp1Routable, not
-// by the configuration. This subclass therefore:
-//   - configures InitializeCommon so the routed pass-through needs NO
-//     conversion / built-in / host-converted machinery (builtin_index_buffer_
-//     size == 0), and with host_primitive_reset_always_enabled = false so the
-//     16->32 primitive-reset widening path stays statically unreachable (a
-//     later capability slice, not PP1). Because nothing is ever converted, this
-//     class adds no allocator or resource system of its own: the two
-//     index-buffer virtuals are unreachable invariant guards.
+// Which draws reach this processor is decided externally by IsPp1Routable /
+// IsAutoFanRoutable, not by the configuration. This subclass therefore:
+//   - configures InitializeCommon with triangle_fans_supported = false (so the
+//     shared code provisions the auto-index fan built-in table) and
+//     convert_triangle_fans_first_provoking = true (so both the built-in table
+//     and TriangleFanToList emit Metal's historical center-first fan order).
+//     host_primitive_reset_always_enabled = false keeps the 16->32
+//     primitive-reset widening path statically unreachable (a later capability
+//     slice). No host-CONVERTED buffer is ever provisioned for the routed set,
+//     because only AUTO fans are routed (DMA/reset fans stay inline).
+//   - implements InitializeBuiltinIndexBuffer to own the immutable fan table on
+//     the CPU (no persistent MTL resource); the command processor materializes
+//     each auto-fan draw's slice into the same transient upload arena via
+//     CopyBuiltinIndexData. RequestHostConvertedIndexBufferForCurrentFrame stays
+//     an unreachable invariant guard (no DMA fan is routed).
 //   - overrides RequestGuestIndexSharedMemoryRange as a true no-op so Process
 //     performs no shared-memory RequestRange for the routed set. That avoids
 //     the unwanted shared-memory-buffer upload and its intra-frame hazard flush
-//     (EndFrameEncoderAndWait / commit+wait). Separately: a routed
-//     no-conversion Process emits no trace record of its own, and the command
-//     processor's existing explicit WriteMemoryRead of the index range
-//     preserves capture. These are distinct facts.
-// Point/rectangle/quad expansion (MSC mesh shaders), triangle fans, line loops,
-// primitive reset, and tessellation are NOT routed here and stay wholly on the
-// existing inline path.
+//     (EndFrameEncoderAndWait / commit+wait). Separately: a routed Process emits
+//     no trace record of its own for the routed set (auto fans read no guest
+//     index memory), and the command processor's existing explicit
+//     WriteMemoryRead of any DMA index range preserves capture. Distinct facts.
+// Point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle fans,
+// line loops, primitive reset, and tessellation are NOT routed here and stay
+// wholly on the existing inline path.
 //
-// Pure C++ (no Metal types): the routed set never allocates a host buffer, so
-// this class holds no device or MTLBuffer, which also lets the device-free
-// conformance test instantiate the real production class.
+// Pure C++ (no Metal types): the built-in fan table is a CPU byte vector and the
+// routed draws allocate only from the command processor's arena, so this class
+// holds no device or MTLBuffer, which also lets the device-free conformance test
+// instantiate the real production class.
 class MetalPrimitiveProcessor final : public PrimitiveProcessor {
  public:
   MetalPrimitiveProcessor(const RegisterFile& register_file, Memory& memory,
@@ -204,16 +244,27 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
 
   bool Initialize();
 
+  // Copies `byte_count` bytes of the immutable built-in index data starting at
+  // `handle` (a shared byte offset, i.e. the ProcessingResult
+  // host_index_buffer_handle) into `dst`. Returns false if the range is out of
+  // the owned buffer's bounds (the caller must then skip the draw rather than
+  // read past the table). The data never escapes this processor by reference.
+  bool CopyBuiltinIndexData(size_t handle, size_t byte_count, void* dst) const;
+
  protected:
-  // Unreachable in PP1: InitializeCommon provisions zero built-in index buffers
-  // (builtin_index_buffer_size == 0), so this is never called. Fail loudly as
-  // an invariant guard rather than owning an allocator PP1 does not need.
+  // PP2-auto: provisions the auto-index triangle-fan built-in index table. The
+  // shared InitializeCommon calls this once with the full table size; the
+  // processor owns the bytes (a CPU vector) and runs the shared fill callback.
+  // The Metal command processor copies the needed slice into its transient
+  // upload arena per draw (CopyBuiltinIndexData) — no persistent MTL resource.
   bool InitializeBuiltinIndexBuffer(
       size_t size_bytes, std::function<void(void*)> fill_callback) override;
 
-  // Unreachable in PP1: the routed set (reset-disabled line/triangle
-  // list/strip) returns kNone / kGuestDMA and never requests a host-converted
-  // buffer. Fail loudly as an invariant guard.
+  // Unreachable in PP1/PP2-auto: the routed set (reset-disabled line/triangle
+  // list/strip, and AUTO triangle fans) returns kNone / kGuestDMA /
+  // kHostBuiltinForAuto and never requests a host-converted buffer. Host
+  // conversion only happens for DMA/reset fans, which stay inline. Fail loudly
+  // as an invariant guard.
   void* RequestHostConvertedIndexBufferForCurrentFrame(
       xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
       uint32_t coalignment_original_address,
@@ -231,6 +282,12 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
     (void)index_buffer_type;
     return true;
   }
+
+ private:
+  // Immutable built-in index table (auto-index fan expansion), filled once in
+  // InitializeBuiltinIndexBuffer. Lifetime is the processor's; never handed out
+  // by reference.
+  std::vector<uint8_t> builtin_index_data_;
 };
 
 }  // namespace metal

@@ -131,9 +131,11 @@ bool PrimitiveProcessor::InitializeCommon(
     bool line_loops_supported, bool quad_lists_supported,
     bool point_sprites_supported_without_vs_expansion,
     bool rectangle_lists_supported_without_vs_expansion,
-    bool host_primitive_reset_always_enabled) {
+    bool host_primitive_reset_always_enabled,
+    bool convert_triangle_fans_first_provoking) {
   full_32bit_vertex_indices_used_ = full_32bit_vertex_indices_supported;
   host_primitive_reset_always_enabled_ = host_primitive_reset_always_enabled;
+  convert_triangle_fans_first_provoking_ = convert_triangle_fans_first_provoking;
   convert_triangle_fans_to_lists_ =
       !triangle_fans_supported || cvars::force_convert_triangle_fans_to_lists;
   convert_line_loops_to_strips_ =
@@ -224,15 +226,23 @@ bool PrimitiveProcessor::InitializeCommon(
               uint16_t* mapping_16bit = reinterpret_cast<uint16_t*>(mapping);
               if (builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX) {
                 // Triangle fans as triangle lists.
-                // Ordered as (v1, v2, v0), (v2, v3, v0) in Direct3D.
+                // Default Direct3D order (v1,v2,v0),(v2,v3,v0); Metal selects
+                // center-first (v0,v1,v2),(v0,v2,v3) via
+                // convert_triangle_fans_first_provoking_.
                 // https://docs.microsoft.com/en-us/windows/desktop/direct3d9/triangle-fans
                 uint16_t* triangle_list_ptr =
                     mapping_16bit + builtin_ib_offset_triangle_fans_to_lists_ /
                                         sizeof(uint16_t);
                 for (uint32_t i = 2; i < UINT16_MAX; ++i) {
-                  *(triangle_list_ptr++) = uint16_t(i - 1);
-                  *(triangle_list_ptr++) = uint16_t(i);
-                  *(triangle_list_ptr++) = 0;
+                  if (convert_triangle_fans_first_provoking_) {
+                    *(triangle_list_ptr++) = 0;
+                    *(triangle_list_ptr++) = uint16_t(i - 1);
+                    *(triangle_list_ptr++) = uint16_t(i);
+                  } else {
+                    *(triangle_list_ptr++) = uint16_t(i - 1);
+                    *(triangle_list_ptr++) = uint16_t(i);
+                    *(triangle_list_ptr++) = 0;
+                  }
                 }
               }
               if (builtin_ib_offset_quad_lists_to_triangle_lists_ != SIZE_MAX) {
@@ -767,7 +777,8 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
           ConvertSinglePrimitiveRanges(
               host_indices, guest_indices, guest_primitive_type,
               PassthroughIndexTransform(), single_primitive_ranges_.cbegin(),
-              single_primitive_ranges_.cend());
+              single_primitive_ranges_.cend(),
+              convert_triangle_fans_first_provoking_);
         } else {
           // 32-bit indices - may need to pre-swap and pre-mask also if the host
           // doesn't support full 32-bit vertex indices.
@@ -805,7 +816,8 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             ConvertSinglePrimitiveRanges(
                 host_indices, guest_indices, guest_primitive_type,
                 PassthroughIndexTransform(), single_primitive_ranges_beginning,
-                single_primitive_ranges_end);
+                single_primitive_ranges_end,
+                convert_triangle_fans_first_provoking_);
           } else {
             switch (guest_index_endian) {
               case xenos::Endian::kNone:
@@ -813,28 +825,32 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                                              guest_primitive_type,
                                              To24NonSwappingIndexTransform(),
                                              single_primitive_ranges_beginning,
-                                             single_primitive_ranges_end);
+                                             single_primitive_ranges_end,
+                                             convert_triangle_fans_first_provoking_);
                 break;
               case xenos::Endian::k8in16:
                 ConvertSinglePrimitiveRanges(host_indices, guest_indices,
                                              guest_primitive_type,
                                              To24Swapping8In16IndexTransform(),
                                              single_primitive_ranges_beginning,
-                                             single_primitive_ranges_end);
+                                             single_primitive_ranges_end,
+                                             convert_triangle_fans_first_provoking_);
                 break;
               case xenos::Endian::k8in32:
                 ConvertSinglePrimitiveRanges(host_indices, guest_indices,
                                              guest_primitive_type,
                                              To24Swapping8In32IndexTransform(),
                                              single_primitive_ranges_beginning,
-                                             single_primitive_ranges_end);
+                                             single_primitive_ranges_end,
+                                             convert_triangle_fans_first_provoking_);
                 break;
               case xenos::Endian::k16in32:
                 ConvertSinglePrimitiveRanges(host_indices, guest_indices,
                                              guest_primitive_type,
                                              To24Swapping16In32IndexTransform(),
                                              single_primitive_ranges_beginning,
-                                             single_primitive_ranges_end);
+                                             single_primitive_ranges_end,
+                                             convert_triangle_fans_first_provoking_);
                 break;
               default:
                 assert_unhandled_case(guest_index_endian);
@@ -1489,7 +1505,31 @@ PrimitiveProcessor::ReplaceResetIndex32To24<xenos::Endian::k16in32>(
       const PassthroughIndexTransform& index_transform);                   \
   XE_GPU_PRIMITIVE_PROCESSOR_INSTANTIATE_CONVERSION_NO_PASSTHROUGH(        \
       ConverterName)
-XE_GPU_PRIMITIVE_PROCESSOR_INSTANTIATE_CONVERSION(TriangleFanToList)
+// TriangleFanToList gained a trailing `bool first_provoking` (the PP2 Metal fan
+// order selector), so it can no longer use the shared 4-argument macro; its
+// explicit instantiations spell the full signature. QuadListToTriangleList is
+// unchanged and still uses the macro.
+template void PrimitiveProcessor::TriangleFanToList(
+    uint16_t* dest, const uint16_t* source, uint32_t source_index_count,
+    const PassthroughIndexTransform& index_transform, bool first_provoking);
+template void PrimitiveProcessor::TriangleFanToList(
+    uint32_t* dest, const uint32_t* source, uint32_t source_index_count,
+    const PassthroughIndexTransform& index_transform, bool first_provoking);
+template void PrimitiveProcessor::TriangleFanToList(
+    uint32_t* dest, const uint32_t* source, uint32_t source_index_count,
+    const To24NonSwappingIndexTransform& index_transform, bool first_provoking);
+template void PrimitiveProcessor::TriangleFanToList(
+    uint32_t* dest, const uint32_t* source, uint32_t source_index_count,
+    const To24Swapping8In16IndexTransform& index_transform,
+    bool first_provoking);
+template void PrimitiveProcessor::TriangleFanToList(
+    uint32_t* dest, const uint32_t* source, uint32_t source_index_count,
+    const To24Swapping8In32IndexTransform& index_transform,
+    bool first_provoking);
+template void PrimitiveProcessor::TriangleFanToList(
+    uint32_t* dest, const uint32_t* source, uint32_t source_index_count,
+    const To24Swapping16In32IndexTransform& index_transform,
+    bool first_provoking);
 XE_GPU_PRIMITIVE_PROCESSOR_INSTANTIATE_CONVERSION_NO_PASSTHROUGH(
     LineLoopToStrip)
 // TODO(Triang3l): SIMD quad conversion maybe - 2 vectors to 3 vectors (though

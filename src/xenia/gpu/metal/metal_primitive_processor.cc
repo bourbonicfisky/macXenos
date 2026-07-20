@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 
+#include <cstring>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 
@@ -39,29 +41,45 @@ bool MetalPrimitiveProcessor::Initialize() {
   //     classifier are gated on this being true; keeping it false makes both
   //     statically unreachable, so the routed set is byte-neutral with the
   //     current inline path (which does no widening).
+  // PP2-auto: triangle_fans_supported = false enables shared fan-to-list
+  // conversion. Only auto-indexed fans are routed into Process by the command
+  // processor (kHostBuiltinForAuto); DMA/reset fans stay on the inline path.
+  // convert_triangle_fans_first_provoking = true makes both the built-in table
+  // and TriangleFanToList emit the center-first (v0,v1,v2),(v0,v2,v3) order,
+  // preserving Metal's historical inline fan order and provoking behavior.
   return InitializeCommon(
       /*full_32bit_vertex_indices_supported=*/true,
-      /*triangle_fans_supported=*/true,
+      /*triangle_fans_supported=*/false,
       /*line_loops_supported=*/true,
       /*quad_lists_supported=*/true,
       /*point_sprites_supported_without_vs_expansion=*/true,
       /*rectangle_lists_supported_without_vs_expansion=*/true,
-      /*host_primitive_reset_always_enabled=*/false);
+      /*host_primitive_reset_always_enabled=*/false,
+      /*convert_triangle_fans_first_provoking=*/true);
 }
 
 bool MetalPrimitiveProcessor::InitializeBuiltinIndexBuffer(
     size_t size_bytes, std::function<void(void*)> fill_callback) {
-  (void)size_bytes;
-  (void)fill_callback;
-  // Invariant guard: the PP1 configuration provisions zero built-in index
-  // buffers (builtin_index_buffer_size == 0), so InitializeCommon never calls
-  // this. Reaching here means the configuration changed without adding an owner
-  // for the buffer. PP1 adds no allocator, so fail loudly.
-  XELOGE(
-      "MetalPrimitiveProcessor: InitializeBuiltinIndexBuffer called, but "
-      "PP1 provisions no built-in index buffer. Configuration bug.");
-  assert_always();
-  return false;
+  // PP2-auto: own the built-in auto-index fan table on the CPU. The command
+  // processor materializes each draw's slice into its transient upload arena,
+  // so no persistent MTL resource is created here.
+  if (!size_bytes) {
+    return false;
+  }
+  builtin_index_data_.resize(size_bytes);
+  fill_callback(builtin_index_data_.data());
+  return true;
+}
+
+bool MetalPrimitiveProcessor::CopyBuiltinIndexData(size_t handle,
+                                                   size_t byte_count,
+                                                   void* dst) const {
+  if (handle > builtin_index_data_.size() ||
+      byte_count > builtin_index_data_.size() - handle) {
+    return false;
+  }
+  std::memcpy(dst, builtin_index_data_.data() + handle, byte_count);
+  return true;
 }
 
 void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(

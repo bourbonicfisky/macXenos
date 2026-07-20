@@ -258,7 +258,8 @@ class PrimitiveProcessor {
                         bool quad_lists_supported,
                         bool point_sprites_supported_without_vs_expansion,
                         bool rectangle_lists_supported_without_vs_expansion,
-                        bool host_primitive_reset_always_enabled = false);
+                        bool host_primitive_reset_always_enabled = false,
+                        bool convert_triangle_fans_first_provoking = false);
   // If any primitive type conversion is needed for auto-indexed draws, called
   // from InitializeCommon (thus only once in the primitive processor's
   // lifetime) to set up the backend's index buffer containing indices for
@@ -560,6 +561,11 @@ class PrimitiveProcessor {
     return 4 * strip_count + (std::max(strip_count, UINT32_C(1)) - 1);
   }
 
+ public:
+  // Public so the Metal command processor can size the routed auto-fan draw and
+  // the device-free conformance test can pin both fan emit orders. Pure
+  // stateless helpers — exposing them changes no behavior.
+  //
   // Triangle fan test cases:
   // - 4D5307E6 - main menu - game logo, developer logo, backgrounds of the menu
   //   item list (the whole menu and individual items) - no index buffer.
@@ -578,7 +584,8 @@ class PrimitiveProcessor {
   template <typename Index, typename IndexTransform>
   static void TriangleFanToList(Index* dest, const Index* source,
                                 uint32_t source_index_count,
-                                const IndexTransform& index_transform) {
+                                const IndexTransform& index_transform,
+                                bool first_provoking = false) {
     if (source_index_count <= 2) {
       // To match GetTriangleFanListIndexCount.
       return;
@@ -587,13 +594,23 @@ class PrimitiveProcessor {
     Index index_previous = index_transform(source[1]);
     for (uint32_t i = 2; i < source_index_count; ++i) {
       Index index_current = index_transform(source[i]);
-      *(dest++) = index_previous;
-      *(dest++) = index_current;
-      *(dest++) = index_first;
+      if (first_provoking) {
+        // Center-first order (v0,v1,v2),(v0,v2,v3),... — Metal's historical
+        // inline fan order, preserving provoking-vertex behavior.
+        *(dest++) = index_first;
+        *(dest++) = index_previous;
+        *(dest++) = index_current;
+      } else {
+        // Direct3D order (v1,v2,v0),(v2,v3,v0),... — D3D12/Vulkan default.
+        *(dest++) = index_previous;
+        *(dest++) = index_current;
+        *(dest++) = index_first;
+      }
       index_previous = index_current;
     }
   }
 
+ private:
   static constexpr uint32_t GetLineLoopStripIndexCount(
       uint32_t loop_index_count) {
     // Even if 2 vertices are supplied, two lines are still drawn between them.
@@ -684,14 +701,16 @@ class PrimitiveProcessor {
       xenos::PrimitiveType source_primitive_type,
       const IndexTransform& index_transform,
       PrimitiveRangeIterator ranges_beginning,
-      PrimitiveRangeIterator ranges_end) {
+      PrimitiveRangeIterator ranges_end,
+      bool triangle_fan_first_provoking = false) {
     Index* dest_write_ptr = dest;
     switch (source_primitive_type) {
       case xenos::PrimitiveType::kTriangleFan:
         for (PrimitiveRangeIterator range_it = ranges_beginning;
              range_it != ranges_end; ++range_it) {
           TriangleFanToList(dest_write_ptr, source + range_it->guest_offset,
-                            range_it->guest_index_count, index_transform);
+                            range_it->guest_index_count, index_transform,
+                            triangle_fan_first_provoking);
           dest_write_ptr += range_it->host_index_count;
         }
         break;
@@ -735,6 +754,13 @@ class PrimitiveProcessor {
   // drop the primitive, so such buffers are widened to 32-bit (0xFFFF -> 0x0000FFFF,
   // which is never the 32-bit restart sentinel).
   bool host_primitive_reset_always_enabled_ = false;
+  // Fan-to-list vertex order within each output triangle. Default (false) is the
+  // Direct3D order (v1,v2,v0),(v2,v3,v0),... used by D3D12/Vulkan unchanged. When
+  // true, emit the center-first order (v0,v1,v2),(v0,v2,v3),... which the Metal
+  // backend uses to preserve its historical inline fan expansion exactly
+  // (identical provoking-vertex behavior). Affects both the auto-index built-in
+  // fan table and TriangleFanToList.
+  bool convert_triangle_fans_first_provoking_ = false;
 
   // Byte offsets used, for simplicity, directly as handles.
   size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;
