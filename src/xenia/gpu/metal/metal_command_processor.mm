@@ -351,12 +351,6 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   // is a commit + wait; the next draw's BeginFrameEncoder starts a fresh
   // command buffer and LOADs the (persistent) render-target contents.
   EndFrameEncoderAndWait();
-  std::vector<MetalRenderTargetCache::EdramOwnerDump> owners;
-  render_target_cache_->GetEdramOwnersForDump(owners);
-  // The EDRAM image: 2048 tiles x 80x16 samples x 4 bytes, tile-major.
-  constexpr uint32_t kTileBytes = 80 * 16 * 4;
-  edram_out.assign(xenos::kEdramSizeBytes, 0);
-  std::vector<uint8_t>& edram = edram_out;
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   if (!provider || !provider->command_queue()) {
@@ -364,6 +358,20 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   }
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
+  if (render_target_cache_->sample_edram_enabled()) {
+    // Canonical mode capture contract: snapshots, full dumps, and the base
+    // command processor's per-tile/sample hashes all read the same private raw
+    // physical-layout buffer. Attachment writes begin advancing it in tasks
+    // 3.x; until then this intentionally exposes restored canonical state.
+    return render_target_cache_->DumpCanonicalEdram((__bridge void*)queue,
+                                                     edram_out);
+  }
+  std::vector<MetalRenderTargetCache::EdramOwnerDump> owners;
+  render_target_cache_->GetEdramOwnersForDump(owners);
+  // The EDRAM image: 2048 tiles x 80x16 samples x 4 bytes, tile-major.
+  constexpr uint32_t kTileBytes = 80 * 16 * 4;
+  edram_out.assign(xenos::kEdramSizeBytes, 0);
+  std::vector<uint8_t>& edram = edram_out;
   static const bool s_dump_owner_log = std::getenv("XE_METAL_DUMP_OWNER_LOG");
   for (const auto& owner : owners) {
     if (owner.is_64bpp) {

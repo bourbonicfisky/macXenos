@@ -2899,22 +2899,113 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   return true;
 }
 
+bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !snapshot) {
+    return false;
+  }
+  @autoreleasepool {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+    id<MTLBuffer> staging =
+        [device newBufferWithBytes:snapshot
+                            length:kCanonicalEdramSize
+                           options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    if (!staging || !queue) {
+      XELOGE("MetalRenderTargetCache: canonical EDRAM restore allocation failed");
+      return false;
+    }
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+    blit.label = @"rtcache:canonical-restore";
+    [blit copyFromBuffer:staging
+             sourceOffset:0
+                 toBuffer:canonical
+        destinationOffset:0
+                     size:kCanonicalEdramSize];
+    [blit endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    if (command_buffer.error) {
+      XELOGE("MetalRenderTargetCache: canonical EDRAM restore failed: {}",
+             command_buffer.error.localizedDescription.UTF8String);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::DumpCanonicalEdram(
+    void* command_queue, std::vector<uint8_t>& edram_out) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_queue) {
+    return false;
+  }
+  @autoreleasepool {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)command_queue;
+    id<MTLBuffer> staging =
+        [device newBufferWithLength:kCanonicalEdramSize
+                            options:MTLResourceStorageModeShared];
+    if (!staging) {
+      XELOGE("MetalRenderTargetCache: canonical EDRAM dump allocation failed");
+      return false;
+    }
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+    blit.label = @"rtcache:canonical-dump";
+    [blit copyFromBuffer:canonical
+            sourceOffset:0
+                toBuffer:staging
+       destinationOffset:0
+                    size:kCanonicalEdramSize];
+    [blit endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    if (command_buffer.error) {
+      XELOGE("MetalRenderTargetCache: canonical EDRAM dump failed: {}",
+             command_buffer.error.localizedDescription.UTF8String);
+      return false;
+    }
+    edram_out.resize(kCanonicalEdramSize);
+    std::memcpy(edram_out.data(), staging.contents, kCanonicalEdramSize);
+  }
+  return true;
+}
+
 void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     const void* snapshot, const void* reordered_reference, uint32_t width,
     uint32_t height, uint32_t row_bytes) {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+  std::vector<uint8_t> canonical_dump;
+  if (!queue || !DumpCanonicalEdram((__bridge void*)queue, canonical_dump)) {
+    XELOGE("MetalRenderTargetCache: canonical restore->dump self-check failed");
+    return;
+  }
+  if (canonical_dump.size() != kCanonicalEdramSize ||
+      std::memcmp(canonical_dump.data(), snapshot, kCanonicalEdramSize) != 0) {
+    size_t first_bad = 0;
+    const uint8_t* expected = static_cast<const uint8_t*>(snapshot);
+    while (first_bad < canonical_dump.size() &&
+           canonical_dump[first_bad] == expected[first_bad]) {
+      ++first_bad;
+    }
+    XELOGE(
+        "MetalRenderTargetCache: canonical restore->dump FAIL at byte {}",
+        first_bad);
+    return;
+  }
+  XELOGI(
+      "MetalRenderTargetCache: canonical restore->dump PASS ({} bytes "
+      "byte-exact)",
+      canonical_dump.size());
   if (!EnsureCanonicalMaterializePipeline()) {
     return;
   }
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
   id<MTLComputePipelineState> pso =
       (__bridge id<MTLComputePipelineState>)canonical_materialize_pipeline_;
-  // The snapshot is tile-major physical order == the canonical layout, so
-  // populating canonical is a straight copy (blit staging -> private buffer).
-  id<MTLBuffer> staging =
-      [device newBufferWithBytes:snapshot
-                          length:kCanonicalEdramSize
-                         options:MTLResourceStorageModeShared];
   // Scratch host attachment: RGBA8Unorm, shared so we can read it back and
   // compare. tiles-per-row = width/80 gives the pitch in tiles (16 for 1280).
   MTLTextureDescriptor* td = [MTLTextureDescriptor
@@ -2925,7 +3016,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
   td.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
   td.storageMode = MTLStorageModeShared;
   id<MTLTexture> scratch = [device newTextureWithDescriptor:td];
-  if (!staging || !scratch) {
+  if (!scratch) {
     return;
   }
   EdramSurfaceParams sp{0u, width / xenos::kEdramTileWidthSamples, 0u, 0u,
@@ -2943,18 +3034,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
   if (canonical2) {
     std::memset(canonical2.contents, 0, kCanonicalEdramSize);
   }
-  id<MTLCommandQueue> queue = [device newCommandQueue];
   id<MTLCommandBuffer> cb = [queue commandBuffer];
-  {
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    blit.label = @"rtcache:canonical-populate";
-    [blit copyFromBuffer:staging
-             sourceOffset:0
-                 toBuffer:canonical
-        destinationOffset:0
-                     size:kCanonicalEdramSize];
-    [blit endEncoding];
-  }
   NSUInteger tw = pso.threadExecutionWidth;
   NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
   {
@@ -3123,8 +3203,10 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   // Gated, additive: exercise + self-check the canonical materialize path on
   // this real snapshot without touching the restored RT above.
   if (sample_edram_enabled_ && canonical_edram_) {
-    RunCanonicalRestoreSelfCheck(snapshot, reordered.get(), width, height,
-                                 row_bytes);
+    if (RestoreCanonicalEdram(snapshot)) {
+      RunCanonicalRestoreSelfCheck(snapshot, reordered.get(), width, height,
+                                   row_bytes);
+    }
   }
 }
 

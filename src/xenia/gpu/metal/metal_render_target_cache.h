@@ -163,6 +163,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // tiles (base-class PrepareFullEdram1280xRenderTargetForSnapshotRestoration).
   void RestoreEdramSnapshot(const void* snapshot);
 
+  // Canonical sample-accurate diagnostics. The restore is a direct raw copy to
+  // the private 10 MiB physical-layout buffer; dump reads that exact buffer via
+  // shared staging and is used by capture/hashing while the gate is enabled.
+  // `command_queue` is id<MTLCommandQueue> passed opaquely.
+  bool sample_edram_enabled() const { return sample_edram_enabled_; }
+  bool DumpCanonicalEdram(void* command_queue,
+                          std::vector<uint8_t>& edram_out);
+
  protected:
   uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
   uint32_t GetMaxRenderTargetHeight() const override { return 8192; }
@@ -354,11 +362,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* canonical_materialize_pipeline_ = nullptr;   // id<MTLComputePipelineState>.
   void* canonical_pack_pipeline_ = nullptr;          // id<MTLComputePipelineState>.
   bool EnsureCanonicalMaterializePipeline();
-  // Gated, ADDITIVE self-check run during snapshot restore: populate the
-  // canonical buffer from the (already physical-order) snapshot, materialize it
-  // into a scratch texture, and verify byte-for-byte against the legacy CPU
-  // reorder. No effect on the restored render target — proves the canonical
-  // materialize path on real trace data. Logs PASS or the first divergence.
+  // Gated, ADDITIVE snapshot operations. RestoreCanonicalEdram copies the
+  // already-physical-order snapshot to the private buffer. The self-check then
+  // reads it back through DumpCanonicalEdram, materializes it into a scratch
+  // texture, and verifies byte-for-byte against the raw snapshot and legacy CPU
+  // reorder. No effect on the restored render target.
+  bool RestoreCanonicalEdram(const void* snapshot);
   void RunCanonicalRestoreSelfCheck(const void* snapshot,
                                     const void* reordered_reference,
                                     uint32_t width, uint32_t height,
