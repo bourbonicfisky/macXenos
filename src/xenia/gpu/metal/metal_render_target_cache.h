@@ -365,9 +365,16 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // Materialize pipeline (canonical words -> host RGBA8Unorm attachment). Built
   // lazily; retained. See metal_kernel_conformance_test.mm for the proven kernel.
   void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.
-  void* canonical_materialize_pipeline_ = nullptr;   // id<MTLComputePipelineState>.
-  void* canonical_pack_pipeline_ = nullptr;          // id<MTLComputePipelineState>.
+  void* canonical_materialize_pipeline_ = nullptr;  // Generic corpus color.
+  void* canonical_pack_pipeline_ = nullptr;         // Generic corpus color.
   bool EnsureCanonicalMaterializePipeline();
+  // Full-view single-sample conversion primitives. Task 3.5 supplies dirty
+  // range authority and decides when to schedule them; task 3.1 owns their
+  // lossless format conversion and encoder contract.
+  bool EncodeCanonicalColorMaterialize(const void* command_buffer,
+                                       RenderTarget* render_target);
+  bool EncodeCanonicalColorPack(const void* command_buffer,
+                                RenderTarget* render_target);
   // Gated, ADDITIVE snapshot operations. RestoreCanonicalEdram copies the
   // already-physical-order snapshot to the private buffer. The self-check then
   // reads it back through DumpCanonicalEdram, materializes it into a scratch

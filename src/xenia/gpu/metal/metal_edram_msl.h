@@ -78,6 +78,99 @@ inline uint xe_pack_8888(float4 color) {
   uint4 bytes = uint4(round(color * 255.0)) & 0xFFu;
   return bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
 }
+
+// Color storage classes used by the pinned Katamari + Red Dead corpus. Values
+// are the Xenos ColorRenderTargetFormat enum after GetStorageColorFormat:
+// 0 = 8_8_8_8 (gamma has the same raw storage), 3 = 2_10_10_10_FLOAT,
+// 4 = 16_16 fixed, 14 = 32_FLOAT.
+inline float xe_7e3_to_f32(uint value) {
+  value &= 0x3FFu;
+  if (value == 0u) return 0.0;
+  uint mantissa = value & 0x7Fu;
+  uint exponent = value >> 7u;
+  if (exponent == 0u) {
+    uint lz = clz(mantissa) - 24u;
+    exponent = 1u - lz;
+    mantissa = (mantissa << lz) & 0x7Fu;
+  }
+  return as_type<float>(((exponent + 124u) << 23u) | (mantissa << 16u));
+}
+inline uint xe_f32_to_7e3(float value) {
+  if (!(value > 0.0)) return 0u;
+  if (value >= 31.875) return 0x3FFu;
+  uint bits = as_type<uint>(value);
+  int exponent = int((bits >> 23u) & 0xFFu) - 124;
+  uint mantissa = (bits >> 16u) & 0x7Fu;
+  uint round_up = (bits >> 15u) & 1u;
+  if (exponent <= 0) {
+    uint shift = uint(1 - exponent);
+    if (shift > 8u) return 0u;
+    uint full = 0x80u | mantissa;
+    uint result = (full >> shift) + ((full >> (shift - 1u)) & 1u);
+    return min(result, 0x7Fu);
+  }
+  mantissa += round_up;
+  if (mantissa > 0x7Fu) {
+    mantissa = 0u;
+    ++exponent;
+    if (exponent >= 8) return 0x3FFu;
+  }
+  return (uint(exponent) << 7u) | mantissa;
+}
+inline float4 xe_unpack_color32(uint word, uint format) {
+  switch (format) {
+    default:
+    case 0u:
+      return xe_unpack_8888(word);
+    case 2u:
+      return float4(float(word & 0x3FFu) / 1023.0,
+                    float((word >> 10u) & 0x3FFu) / 1023.0,
+                    float((word >> 20u) & 0x3FFu) / 1023.0,
+                    float(word >> 30u) / 3.0);
+    case 3u:
+      return float4(xe_7e3_to_f32(word), xe_7e3_to_f32(word >> 10u),
+                    xe_7e3_to_f32(word >> 20u), float(word >> 30u) / 3.0);
+    case 4u: {
+      int2 fixed = int2(as_type<int>(word << 16u) >> 16,
+                        as_type<int>(word) >> 16);
+      return float4(float2(fixed) * (32.0 / 32767.0), 0.0, 1.0);
+    }
+    case 14u:
+      return float4(as_type<float>(word), 0.0, 0.0, 0.0);
+  }
+}
+inline int xe_f32_to_fixed16(float value) {
+  // -32768 decodes slightly below -32. Preserve that otherwise-unreachable raw
+  // code during materialize->pack, while guest draw output at exactly -32 uses
+  // the normal Xenos signed rounding and becomes -32767.
+  if (value < -32.0) return -32768;
+  value = clamp(value, -32.0, 32.0);
+  float scaled = value * (32767.0 / 32.0);
+  return int(scaled + (scaled >= 0.0 ? 0.5 : -0.5));
+}
+inline uint xe_pack_color32(float4 color, uint format) {
+  switch (format) {
+    default:
+    case 0u:
+      return xe_pack_8888(color);
+    case 2u:
+      return uint(round(saturate(color.r) * 1023.0)) |
+             (uint(round(saturate(color.g) * 1023.0)) << 10u) |
+             (uint(round(saturate(color.b) * 1023.0)) << 20u) |
+             (uint(round(saturate(color.a) * 3.0)) << 30u);
+    case 3u:
+      return xe_f32_to_7e3(color.r) | (xe_f32_to_7e3(color.g) << 10u) |
+             (xe_f32_to_7e3(color.b) << 20u) |
+             (uint(round(saturate(color.a) * 3.0)) << 30u);
+    case 4u: {
+      int2 fixed = int2(xe_f32_to_fixed16(color.r),
+                        xe_f32_to_fixed16(color.g));
+      return (uint(fixed.x) & 0xFFFFu) | (uint(fixed.y) << 16u);
+    }
+    case 14u:
+      return as_type<uint>(color.r);
+  }
+}
 inline uint xe_pack_depth_stencil(uint depth24, uint stencil) {
   return ((depth24 & 0xFFFFFFu) << 8u) | (stencil & 0xFFu);
 }
@@ -111,6 +204,36 @@ kernel void pack_8888(
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
   if (idx < sp.words) canonical[idx] = xe_pack_8888(tex.read(gid));
+}
+
+// Generic single-sample color working-view conversion for the formats used by
+// the deterministic corpus. The attachment format supplies the lossless host
+// container (RGBA8Unorm, RGBA16Float, RG32Float, or R32Float); `format` supplies
+// the guest raw-word interpretation.
+kernel void materialize_color(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  tex.write(xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format),
+            gid);
+}
+kernel void pack_color(
+    texture2d<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  if (idx < sp.words) canonical[idx] = xe_pack_color32(tex.read(gid), format);
 }
 
 // Array-slice per-sample representation used by the isolated compute oracle.

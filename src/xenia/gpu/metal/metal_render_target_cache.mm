@@ -242,6 +242,14 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   MTLPixelFormat pixel_format =
       key.is_depth ? (MTLPixelFormat)kDepthFormat
                    : ColorResourceFormatToMetal(key.GetColorFormat());
+  if (sample_edram_enabled_ && !key.is_depth &&
+      key.GetColorFormat() == xenos::ColorRenderTargetFormat::k_16_16) {
+    // RG16Snorm collapses the guest's fixed -32..32 domain to -1..1 and cannot
+    // distinguish every raw signed-16 code. RG32Float holds the decoded values
+    // losslessly for the canonical path; the generic pack kernel reconstructs
+    // both original signed words exactly.
+    pixel_format = MTLPixelFormatRG32Float;
+  }
   // Mainline sizing: pitch_tiles_at_32bpp is SAMPLE-space (a 4x key's pitch is
   // doubled), GetWidth()/GetRenderTargetHeight() convert to msaa-aware PIXEL
   // dimensions. Textures are still single-sample (no host MSAA) — MSAA'd guest
@@ -1383,10 +1391,9 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
 // word. Source texel -> 32-bit word (per source host format) -> dest texel
 // (per dest format), with the same dest-pixel -> tile -> source-pixel remap
 // as the cross-MSAA pass, so one pipeline handles reinterpret, cross-MSAA,
-// and both combined. Format classes: 0=RGBA8 (bytes are the word),
-// 1=R32Float (bits are the word), 2=RGBA16F holding 7e3-packed
-// k_2_10_10_10_FLOAT (10:10:10 7e3 floats + 2-bit alpha),
-// 3=RGB10A2Unorm (raw 2:10:10:10 unorm).
+// and both combined. Format values are the Xenos storage-format enum and the
+// conversion itself comes from the shared canonical MSL: 0=RGBA8, 2=RGB10A2,
+// 3=RGBA16F holding 7e3-packed k_2_10_10_10_FLOAT, 14=R32Float.
 void MetalRenderTargetCache::PerformColorConvertTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
@@ -1395,13 +1402,13 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
   auto fmt_class = [](uint64_t pf) -> int32_t {
     switch ((MTLPixelFormat)pf) {
       case MTLPixelFormatRGBA8Unorm:
-        return 0;
+        return uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
       case MTLPixelFormatR32Float:
-        return 1;
+        return uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT);
       case MTLPixelFormatRGBA16Float:
-        return 2;
+        return uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT);
       case MTLPixelFormatRGB10A2Unorm:
-        return 3;
+        return uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10);
       default:
         return -1;
     }
@@ -1419,9 +1426,8 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   if (!transfer_conv_library_) {
-    NSString* src = @R"METAL(
-      #include <metal_stdlib>
-      using namespace metal;
+    NSString* shared = [NSString stringWithUTF8String:kEdramMsl];
+    NSString* src = [shared stringByAppendingString:@R"METAL(
       struct ConvParams {
         uint src_base; uint src_pitch; uint dst_base; uint dst_pitch;
         uint start_tiles; uint end_tiles; uint src_fmt; uint shifts;
@@ -1432,83 +1438,6 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
         float2 t = float2(float((vid << 1) & 2), float(vid & 2));
         o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
         return o;
-      }
-      // Xenos 7e3 (7-bit mantissa, 3-bit exponent, bias -124 vs f32): the
-      // packed channel format of k_2_10_10_10_FLOAT EDRAM words.
-      static float xe_7e3_to_f32(uint v) {
-        v &= 0x3FFu;
-        if (v == 0u) { return 0.0; }
-        uint m = v & 0x7Fu;
-        int e = int(v >> 7);
-        if (e == 0) {
-          // Denormal: normalize into the f32 encoding.
-          int lz = clz(m) - 24;  // m in [1,0x7F] -> lz in [1,7]
-          e = 1 - lz;
-          m = (m << uint(lz)) & 0x7Fu;
-        }
-        return as_type<float>(uint(e + 124) << 23 | (m << 16));
-      }
-      static uint xe_f32_to_7e3(float f) {
-        if (!(f > 0.0)) { return 0u; }
-        if (f >= 31.875) { return 0x3FFu; }
-        uint u = as_type<uint>(f);
-        int e = int((u >> 23) & 0xFFu) - 124;
-        uint m = (u >> 16) & 0x7Fu;
-        uint round = (u >> 15) & 1u;
-        if (e <= 0) {
-          uint shift = uint(1 - e);
-          if (shift > 8u) { return 0u; }
-          uint full = 0x80u | m;
-          uint r = (full >> shift) + ((full >> (shift - 1u)) & 1u);
-          return min(r, 0x7Fu);
-        }
-        m += round;
-        if (m > 0x7Fu) {
-          m = 0u;
-          ++e;
-          if (e >= 8) { return 0x3FFu; }
-        }
-        return (uint(e) << 7) | m;
-      }
-      static uint xe_encode(float4 c, uint fmt) {
-        switch (fmt) {
-          default:
-          case 0u:  // RGBA8: storage bytes ARE the guest word.
-            return uint(round(saturate(c.r) * 255.0)) |
-                   (uint(round(saturate(c.g) * 255.0)) << 8) |
-                   (uint(round(saturate(c.b) * 255.0)) << 16) |
-                   (uint(round(saturate(c.a) * 255.0)) << 24);
-          case 1u:  // R32F: bits are the word.
-            return as_type<uint>(c.r);
-          case 2u:  // RGBA16F container of 7e3 floats + 2-bit alpha.
-            return xe_f32_to_7e3(c.r) | (xe_f32_to_7e3(c.g) << 10) |
-                   (xe_f32_to_7e3(c.b) << 20) |
-                   (uint(round(saturate(c.a) * 3.0)) << 30);
-          case 3u:  // RGB10A2 unorm raw.
-            return uint(round(saturate(c.r) * 1023.0)) |
-                   (uint(round(saturate(c.g) * 1023.0)) << 10) |
-                   (uint(round(saturate(c.b) * 1023.0)) << 20) |
-                   (uint(round(saturate(c.a) * 3.0)) << 30);
-        }
-      }
-      static float4 xe_decode(uint w, uint fmt) {
-        switch (fmt) {
-          default:
-          case 0u:
-            return float4(float(w & 0xFFu), float((w >> 8) & 0xFFu),
-                          float((w >> 16) & 0xFFu), float(w >> 24)) /
-                   255.0;
-          case 1u:
-            return float4(as_type<float>(w), 0.0, 0.0, 0.0);
-          case 2u:
-            return float4(xe_7e3_to_f32(w), xe_7e3_to_f32(w >> 10),
-                          xe_7e3_to_f32(w >> 20), float(w >> 30) / 3.0);
-          case 3u:
-            return float4(float(w & 0x3FFu) / 1023.0,
-                          float((w >> 10) & 0x3FFu) / 1023.0,
-                          float((w >> 20) & 0x3FFu) / 1023.0,
-                          float(w >> 30) / 3.0);
-        }
       }
       fragment float4 xe_conv_fs(VOut in [[stage_in]],
                                  texture2d<float> src [[texture(0)]],
@@ -1529,9 +1458,9 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
-        return xe_decode(xe_encode(c, p.src_fmt), dst_fmt);
+        return xe_unpack_color32(xe_pack_color32(c, p.src_fmt), dst_fmt);
       }
-    )METAL";
+    )METAL"];
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
                                                 error:&err];
@@ -2913,10 +2842,10 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   id<MTLLibrary> lib = (__bridge id<MTLLibrary>)canonical_materialize_library_;
   NSError* err = nil;
   id<MTLComputePipelineState> pso = [device
-      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_8888"]
+      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_color"]
                                     error:&err];
   id<MTLComputePipelineState> pack = [device
-      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_8888"]
+      newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_color"]
                                     error:&err];
   if (!pso || !pack) {
     XELOGE("MetalRenderTargetCache: canonical materialize/pack pipeline "
@@ -2926,6 +2855,86 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   }
   canonical_materialize_pipeline_ = (__bridge_retained void*)pso;
   canonical_pack_pipeline_ = (__bridge_retained void*)pack;
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || render_target->key().is_depth ||
+      render_target->key().msaa_samples != xenos::MsaaSamples::k1X ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  uint32_t format = uint32_t(target->key().GetColorFormat());
+  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)canonical_materialize_pipeline_;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), 0u, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-color-materialize-full";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:canonical offset:0 atIndex:0];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  NSUInteger tw = pipeline.threadExecutionWidth;
+  NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
+  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+      threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalColorPack(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || render_target->key().is_depth ||
+      render_target->key().msaa_samples != xenos::MsaaSamples::k1X ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  uint32_t format = uint32_t(target->key().GetColorFormat());
+  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)canonical_pack_pipeline_;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), 0u, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-color-pack-full";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setBuffer:canonical offset:0 atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  NSUInteger tw = pipeline.threadExecutionWidth;
+  NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
+  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+      threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+  [encoder endEncoding];
   return true;
 }
 
@@ -3051,6 +3060,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
   }
   EdramSurfaceParams sp{0u, width / xenos::kEdramTileWidthSamples, 0u, 0u,
                         0u, kCanonicalEdramSize / 4u};
+  uint32_t color_format =
+      uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
   id<MTLBuffer> sp_buf = [device newBufferWithBytes:&sp
                                             length:sizeof(sp)
                                            options:MTLResourceStorageModeShared];
@@ -3074,6 +3085,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:canonical offset:0 atIndex:0];
     [enc setTexture:scratch atIndex:0];
     [enc setBuffer:sp_buf offset:0 atIndex:1];
+    [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
@@ -3085,6 +3097,7 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setTexture:scratch atIndex:0];
     [enc setBuffer:canonical2 offset:0 atIndex:0];
     [enc setBuffer:sp_buf offset:0 atIndex:1];
+    [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];

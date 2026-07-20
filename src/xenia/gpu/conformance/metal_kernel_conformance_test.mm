@@ -519,6 +519,84 @@ struct MetalCompute {
     return out;
   }
 
+  std::vector<uint32_t> RoundTripMaterializeColor(
+      uint32_t w, uint32_t h, const SurfaceParams& sp,
+      const std::vector<uint32_t>& words, size_t canonical_bytes,
+      MTLPixelFormat pixel_format, uint32_t color_format) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch,
+                                                  sp.msaa, false, 0u, 0u);
+        cwords[off >> 2] = words[y * w + x];
+      }
+    }
+    MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:pixel_format
+                                     width:w
+                                    height:h
+                                 mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    REQUIRE(tex != nil);
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    NSError* err = nil;
+    id<MTLComputePipelineState> mat = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"materialize_color"]
+                                      error:&err];
+    REQUIRE(mat != nil);
+    id<MTLComputePipelineState> pk = [dev
+        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_color"]
+                                      error:&err];
+    REQUIRE(pk != nil);
+    auto dispatch = [&](id<MTLComputeCommandEncoder> enc,
+                        id<MTLComputePipelineState> pso) {
+      [enc setComputePipelineState:pso];
+      NSUInteger tw = pso.threadExecutionWidth;
+      NSUInteger th = pso.maxTotalThreadsPerThreadgroup / tw;
+      [enc dispatchThreads:MTLSizeMake(w, h, 1)
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    };
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
+      dispatch(enc, mat);
+      [enc endEncoding];
+    }
+    {
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setTexture:tex atIndex:0];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:sp_buf offset:0 atIndex:1];
+      [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
+      dispatch(enc, pk);
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> out(size_t(w) * h);
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t off = XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch,
+                                                  sp.msaa, false, 0u, 0u);
+        out[y * w + x] = cwords[off >> 2];
+      }
+    }
+    return out;
+  }
+
   // Per-sample MSAA variant: seed canonical with a distinct word for every
   // (pixel, sample), materialize into a texture2d_array (slice per sample),
   // pack it back, and return the re-packed words. Identity <=> all 2x/4x
@@ -1549,6 +1627,60 @@ TEST_CASE("Canonical k_8_8_8_8 materialize->pack round-trips through a texture",
       }
     }
     INFO("w=" << cfg.w << " h=" << cfg.h << " base=" << cfg.base);
+    REQUIRE(bad == 0u);
+  }
+}
+
+TEST_CASE("Canonical corpus color formats round-trip through lossless views",
+          "[l1][metal][materialize][color]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct Cfg {
+    const char* name;
+    uint32_t format;
+    MTLPixelFormat pixel_format;
+  } cfgs[] = {
+      {"2_10_10_10_FLOAT", 3u, MTLPixelFormatRGBA16Float},
+      {"16_16", 4u, MTLPixelFormatRG32Float},
+      {"32_FLOAT", 14u, MTLPixelFormatR32Float},
+  };
+  constexpr uint32_t w = 83u, h = 19u, base = 11u;
+  const uint32_t pitch = PitchFor(w, 0u, 0u);
+  SurfaceParams sp{base, pitch, 0u, 0u, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / 4u)};
+  for (const Cfg& cfg : cfgs) {
+    std::vector<uint32_t> words(size_t(w) * h);
+    for (size_t i = 0; i < words.size(); ++i) {
+      if (cfg.format == 3u) {
+        uint32_t r = uint32_t(i * 17u) & 0x3FFu;
+        uint32_t g = uint32_t(i * 37u + 1u) & 0x3FFu;
+        uint32_t b = uint32_t(i * 73u + 127u) & 0x3FFu;
+        words[i] = r | (g << 10u) | (b << 20u) |
+                   ((uint32_t(i) & 3u) << 30u);
+      } else if (cfg.format == 4u) {
+        // Exercise all signed quadrants, including the otherwise unreachable
+        // -32768 endpoint that the shared converter preserves explicitly.
+        uint32_t lo = uint32_t(i * 40503u + 0x8000u) & 0xFFFFu;
+        uint32_t hi = uint32_t(i * 25173u + 0x7FFFu) & 0xFFFFu;
+        words[i] = lo | (hi << 16u);
+      } else {
+        float value = float(int32_t(i % 257u) - 128) * 0.25f;
+        std::memcpy(&words[i], &value, sizeof(value));
+      }
+    }
+    auto out = mc.RoundTripMaterializeColor(
+        w, h, sp, words, xenos::kEdramSizeBytes, cfg.pixel_format, cfg.format);
+    uint32_t bad = 0;
+    for (size_t i = 0; i < words.size(); ++i) {
+      if (out[i] != words[i]) {
+        if (bad < 8) {
+          WARN(cfg.name << " pixel " << (i % w) << "," << (i / w)
+                        << " expected " << words[i] << " got " << out[i]);
+        }
+        ++bad;
+      }
+    }
+    INFO(cfg.name);
     REQUIRE(bad == 0u);
   }
 }
