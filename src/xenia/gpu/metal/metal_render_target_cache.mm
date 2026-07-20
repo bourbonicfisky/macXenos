@@ -3324,6 +3324,8 @@ bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
       return false;
     }
   }
+  canonical_authority_.MarkCanonical(0, xenos::kEdramTileCount,
+                                     ++canonical_authority_order_);
   return true;
 }
 

@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
@@ -354,6 +355,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   bool canonical_full_sync_enabled_ = false;
   uint32_t canonical_full_sync_count_ = 0;
   void* canonical_edram_ = nullptr;  // id<MTLBuffer>, private, retained.
+  // Tile-granular submission-order scheduler. Task 3.5 establishes the state
+  // machine; tasks 4.1+ consume its operations while migrating ownership,
+  // resolve, clear, and writeback paths to canonical EDRAM.
+  MetalEdramAuthorityTracker canonical_authority_;
+  uint64_t canonical_authority_order_ = 0;
 
   // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the
   // authority for depth ownership flips, single-sample rendering). Gated behind

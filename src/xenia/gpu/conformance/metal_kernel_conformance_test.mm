@@ -32,6 +32,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/edram_layout.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_edram_msl.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
@@ -41,6 +42,8 @@ namespace gpu {
 namespace test {
 
 namespace {
+
+using metal::MetalEdramAuthorityTracker;
 
 // CPU reference for the tile-range content hash (mirror of xe_hash_mix /
 // k_tile_hash in the MSL below). The live ownership-transition manifest hashes
@@ -1536,6 +1539,99 @@ static uint32_t PitchFor(uint32_t w, uint32_t msaa, uint32_t fmt_log2) {
   uint32_t tile_w = 80u >> fmt_log2;
   uint32_t width_samples = w << (msaa >= 2u ? 1u : 0u);  // 4x doubles x
   return (width_samples + tile_w - 1u) / tile_w;
+}
+
+TEST_CASE("Metal EDRAM authority synchronizes only overlapping dirty tiles",
+          "[l1][metal][authority]") {
+  using Location = MetalEdramAuthorityTracker::Location;
+  using SyncKind = MetalEdramAuthorityTracker::SyncKind;
+  constexpr uint64_t kAttachmentA = 0xA1u;
+  constexpr uint64_t kAttachmentB = 0xB2u;
+
+  MetalEdramAuthorityTracker tracker;
+  tracker.MarkCanonical(0u, 64u, 1u);
+  tracker.MarkAttachment(kAttachmentA, 10u, 20u, 2u);
+
+  // B consumes [15,25): only A's overlap is packed, then exactly the requested
+  // interval is materialized. A's non-overlapping [10,15) stays authoritative.
+  auto operations =
+      tracker.SynchronizeAttachment(kAttachmentB, 15u, 25u, 3u);
+  REQUIRE(operations.size() == 2u);
+  CHECK(operations[0].kind == SyncKind::kPackToCanonical);
+  CHECK(operations[0].attachment == kAttachmentA);
+  CHECK(operations[0].start_tiles == 15u);
+  CHECK(operations[0].end_tiles == 20u);
+  CHECK(operations[0].producer_order == 2u);
+  CHECK(operations[0].consumer_order == 3u);
+  CHECK(operations[1].kind == SyncKind::kMaterializeFromCanonical);
+  CHECK(operations[1].attachment == kAttachmentB);
+  CHECK(operations[1].start_tiles == 15u);
+  CHECK(operations[1].end_tiles == 25u);
+  CHECK(tracker.tile(12u).location == Location::kAttachment);
+  CHECK(tracker.tile(12u).authority_attachment == kAttachmentA);
+  CHECK(tracker.tile(17u).location == Location::kCanonical);
+  CHECK(tracker.tile(17u).clean_attachment == kAttachmentB);
+
+  // Reusing B is compatible and emits no redundant synchronization.
+  CHECK(tracker.SynchronizeAttachment(kAttachmentB, 15u, 25u, 4u).empty());
+  // A canonical consumer of a smaller overlap packs only that subrange.
+  operations = tracker.SynchronizeCanonical(10u, 12u, 5u);
+  REQUIRE(operations.size() == 1u);
+  CHECK(operations[0].kind == SyncKind::kPackToCanonical);
+  CHECK(operations[0].start_tiles == 10u);
+  CHECK(operations[0].end_tiles == 12u);
+  CHECK(tracker.tile(12u).location == Location::kAttachment);
+}
+
+TEST_CASE("Metal EDRAM authority preserves submission order and batches sources",
+          "[l1][metal][authority]") {
+  using Location = MetalEdramAuthorityTracker::Location;
+  using SyncKind = MetalEdramAuthorityTracker::SyncKind;
+  constexpr uint64_t kAttachmentA = 0xA1u;
+  constexpr uint64_t kAttachmentB = 0xB2u;
+  constexpr uint64_t kAttachmentC = 0xC3u;
+
+  MetalEdramAuthorityTracker tracker;
+  tracker.MarkCanonical(0u, 64u, 1u);
+  tracker.MarkAttachment(kAttachmentA, 30u, 34u, 2u);
+  tracker.MarkAttachment(kAttachmentB, 34u, 38u, 3u);
+  auto operations =
+      tracker.SynchronizeAttachment(kAttachmentC, 32u, 36u, 4u);
+  REQUIRE(operations.size() == 3u);
+  CHECK(operations[0].kind == SyncKind::kPackToCanonical);
+  CHECK(operations[0].attachment == kAttachmentA);
+  CHECK(operations[0].start_tiles == 32u);
+  CHECK(operations[0].end_tiles == 34u);
+  CHECK(operations[1].kind == SyncKind::kPackToCanonical);
+  CHECK(operations[1].attachment == kAttachmentB);
+  CHECK(operations[1].start_tiles == 34u);
+  CHECK(operations[1].end_tiles == 36u);
+  CHECK(operations[2].kind == SyncKind::kMaterializeFromCanonical);
+  CHECK(operations[2].attachment == kAttachmentC);
+  CHECK(operations[2].start_tiles == 32u);
+  CHECK(operations[2].end_tiles == 36u);
+
+  // A delayed producer event and an older consumer cannot overwrite or pack a
+  // tile whose newer canonical write has already been observed.
+  tracker.MarkCanonical(33u, 35u, 8u);
+  tracker.MarkAttachment(kAttachmentA, 33u, 35u, 7u);
+  CHECK(tracker.tile(33u).location == Location::kCanonical);
+  CHECK(tracker.tile(33u).submission_order == 8u);
+  CHECK(tracker.SynchronizeAttachment(kAttachmentB, 33u, 35u, 7u).empty());
+  operations = tracker.SynchronizeAttachment(kAttachmentB, 33u, 35u, 9u);
+  REQUIRE(operations.size() == 1u);
+  CHECK(operations[0].kind == SyncKind::kMaterializeFromCanonical);
+  CHECK(operations[0].start_tiles == 33u);
+  CHECK(operations[0].end_tiles == 35u);
+
+  // Range clamping never emits an operation outside physical EDRAM.
+  tracker.MarkAttachment(kAttachmentA, xenos::kEdramTileCount - 2u,
+                         xenos::kEdramTileCount + 10u, 10u);
+  operations = tracker.SynchronizeCanonical(
+      xenos::kEdramTileCount - 1u, xenos::kEdramTileCount + 20u, 11u);
+  REQUIRE(operations.size() == 1u);
+  CHECK(operations[0].start_tiles == xenos::kEdramTileCount - 1u);
+  CHECK(operations[0].end_tiles == xenos::kEdramTileCount);
 }
 
 // The 2.3 groundwork: run the canonical EDRAM pack/unpack against a REAL
