@@ -367,7 +367,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.
   void* canonical_materialize_pipeline_ = nullptr;  // Generic corpus color.
   void* canonical_pack_pipeline_ = nullptr;         // Generic corpus color.
+  // Real 2x/4x color conversion pipelines. Materialize PSOs are keyed by host
+  // pixel format and sample count; the texture2d_ms pack kernel is generic.
+  std::unordered_map<uint64_t, void*>
+      canonical_color_msaa_materialize_pipelines_;
+  void* canonical_color_msaa_pack_pipeline_ = nullptr;
   bool EnsureCanonicalMaterializePipeline();
+  void* EnsureCanonicalColorMsaaMaterializePipeline(
+      MetalRenderTarget* render_target);
   // Full-view single-sample conversion primitives. Task 3.5 supplies dirty
   // range authority and decides when to schedule them; task 3.1 owns their
   // lossless format conversion and encoder contract.
@@ -375,6 +382,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        RenderTarget* render_target);
   bool EncodeCanonicalColorPack(const void* command_buffer,
                                 RenderTarget* render_target);
+  bool EncodeCanonicalColorMsaaMaterialize(const void* command_buffer,
+                                           RenderTarget* render_target);
+  bool EncodeCanonicalColorMsaaPack(const void* command_buffer,
+                                    RenderTarget* render_target);
   // Gated, ADDITIVE snapshot operations. RestoreCanonicalEdram copies the
   // already-physical-order snapshot to the private buffer. The self-check then
   // reads it back through DumpCanonicalEdram, materializes it into a scratch

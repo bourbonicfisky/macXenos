@@ -199,6 +199,19 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
     canonical_pack_pipeline_ = nullptr;
   }
+  for (auto& pair : canonical_color_msaa_materialize_pipelines_) {
+    id<MTLRenderPipelineState> released =
+        (__bridge_transfer id<MTLRenderPipelineState>)pair.second;
+    (void)released;
+  }
+  canonical_color_msaa_materialize_pipelines_.clear();
+  if (canonical_color_msaa_pack_pipeline_) {
+    id<MTLComputePipelineState> released =
+        (__bridge_transfer id<MTLComputePipelineState>)
+            canonical_color_msaa_pack_pipeline_;
+    (void)released;
+    canonical_color_msaa_pack_pipeline_ = nullptr;
+  }
   if (canonical_materialize_library_) {
     id<MTLLibrary> released =
         (__bridge_transfer id<MTLLibrary>)canonical_materialize_library_;
@@ -2865,6 +2878,61 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   return true;
 }
 
+void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
+    MetalRenderTarget* render_target) {
+  if (!render_target || !render_target->msaa_texture() ||
+      (render_target->sample_count() != 2u &&
+       render_target->sample_count() != 4u) ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return nullptr;
+  }
+  const uint64_t key =
+      render_target->pixel_format() |
+      (uint64_t(render_target->sample_count()) << 32u);
+  auto found = canonical_color_msaa_materialize_pipelines_.find(key);
+  if (found != canonical_color_msaa_materialize_pipelines_.end()) {
+    return found->second;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLLibrary> library =
+      (__bridge id<MTLLibrary>)canonical_materialize_library_;
+  NSError* error = nil;
+  MTLRenderPipelineDescriptor* descriptor =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  descriptor.vertexFunction = [library newFunctionWithName:@"xe_color_vs"];
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"materialize_color_ms_fs"];
+  descriptor.colorAttachments[0].pixelFormat =
+      (MTLPixelFormat)render_target->pixel_format();
+  descriptor.rasterSampleCount = render_target->sample_count();
+  id<MTLRenderPipelineState> materialize =
+      [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (!materialize) {
+    XELOGE(
+        "MetalRenderTargetCache: {}x canonical color MSAA materialize "
+        "pipeline failed for format {}: {}",
+        render_target->sample_count(), render_target->pixel_format(),
+        error ? error.localizedDescription.UTF8String : "?");
+    return nullptr;
+  }
+  if (!canonical_color_msaa_pack_pipeline_) {
+    id<MTLComputePipelineState> pack = [device
+        newComputePipelineStateWithFunction:
+            [library newFunctionWithName:@"pack_color_ms"]
+                                      error:&error];
+    if (!pack) {
+      XELOGE("MetalRenderTargetCache: canonical color MSAA pack pipeline "
+             "failed: {}",
+             error ? error.localizedDescription.UTF8String : "?");
+      return nullptr;
+    }
+    canonical_color_msaa_pack_pipeline_ = (__bridge_retained void*)pack;
+  }
+  void* retained = (__bridge_retained void*)materialize;
+  canonical_color_msaa_materialize_pipelines_.emplace(key, retained);
+  return retained;
+}
+
 bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
     const void* command_buffer, RenderTarget* render_target) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
@@ -2941,6 +3009,98 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || render_target->key().is_depth ||
+      render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  uint32_t format = uint32_t(target->key().GetColorFormat());
+  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+    return false;
+  }
+  void* pipeline_opaque =
+      EnsureCanonicalColorMsaaMaterializePipeline(target);
+  if (!pipeline_opaque) {
+    return false;
+  }
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> texture =
+      (__bridge id<MTLTexture>)target->msaa_texture();
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLRenderPipelineState> pipeline =
+      (__bridge id<MTLRenderPipelineState>)pipeline_opaque;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), 0u, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = texture;
+  pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:pass];
+  encoder.label = @"rtcache:canonical-color-materialize-msaa-full";
+  [encoder setRenderPipelineState:pipeline];
+  [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+  [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setFragmentBytes:&format length:sizeof(format) atIndex:2];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
+    const void* command_buffer, RenderTarget* render_target) {
+  if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
+      !render_target || render_target->key().is_depth ||
+      render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  uint32_t format = uint32_t(target->key().GetColorFormat());
+  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
+      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT) ||
+      !EnsureCanonicalColorMsaaMaterializePipeline(target)) {
+    return false;
+  }
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLTexture> texture =
+      (__bridge id<MTLTexture>)target->msaa_texture();
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)canonical_color_msaa_pack_pipeline_;
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), 0u, 0u,
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-color-pack-msaa-full";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setBuffer:canonical offset:0 atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&format length:sizeof(format) atIndex:2];
+  NSUInteger thread_width = pipeline.threadExecutionWidth;
+  NSUInteger thread_height =
+      pipeline.maxTotalThreadsPerThreadgroup / thread_width;
+  [encoder dispatchThreads:
+               MTLSizeMake(texture.width, texture.height, texture.sampleCount)
+      threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
 }

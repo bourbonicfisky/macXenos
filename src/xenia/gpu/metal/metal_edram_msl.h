@@ -300,6 +300,39 @@ kernel void pack_ms(
   }
 }
 
+// Format-generic real-MSAA color working-view conversions. The fragment runs
+// once per covered sample because it consumes [[sample_id]], preserving every
+// Xenos physical sample in the actual multisample attachment. The compute pack
+// explicitly reads each sample back into the canonical physical layout.
+fragment float4 materialize_color_ms_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 0u, sample);
+  uint idx = off >> 2u;
+  return xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format);
+}
+kernel void pack_color_ms(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32(tex.read(uint2(gid.x, gid.y), gid.z),
+                                     format);
+  }
+}
+
 inline float xe_f20e4_to_f32(uint f24) {
   f24 &= 0xFFFFFFu;
   if (f24 == 0u) return 0.0;

@@ -686,7 +686,9 @@ struct MetalCompute {
                                           uint32_t num_samples,
                                           const SurfaceParams& sp,
                                           const std::vector<uint32_t>& values,
-                                          size_t canonical_bytes) {
+                                          size_t canonical_bytes,
+                                          MTLPixelFormat pixel_format,
+                                          uint32_t color_format) {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
@@ -703,7 +705,7 @@ struct MetalCompute {
     // Real MSAA attachment (private; MSAA can't be shared). Store all samples.
     MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
     td.textureType = MTLTextureType2DMultisample;
-    td.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    td.pixelFormat = pixel_format;
     td.width = w;
     td.height = h;
     td.sampleCount = num_samples;
@@ -717,14 +719,16 @@ struct MetalCompute {
     NSError* err = nil;
     MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
     rpd.vertexFunction = [lib newFunctionWithName:@"xe_color_vs"];
-    rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_ms_fs"];
-    rpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    rpd.fragmentFunction =
+        [lib newFunctionWithName:@"materialize_color_ms_fs"];
+    rpd.colorAttachments[0].pixelFormat = pixel_format;
     rpd.rasterSampleCount = num_samples;
     id<MTLRenderPipelineState> rps =
         [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
     REQUIRE(rps != nil);
     id<MTLComputePipelineState> pk = [dev
-        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_ms"]
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"pack_color_ms"]
                                       error:&err];
     REQUIRE(pk != nil);
     id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -740,6 +744,9 @@ struct MetalCompute {
       [enc setRenderPipelineState:rps];
       [enc setFragmentBuffer:canonical offset:0 atIndex:0];
       [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
+      [enc setFragmentBytes:&color_format
+                     length:sizeof(color_format)
+                    atIndex:2];
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
       [enc endEncoding];
     }
@@ -750,6 +757,7 @@ struct MetalCompute {
       [enc setTexture:ms atIndex:0];
       [enc setBuffer:canonical offset:0 atIndex:0];
       [enc setBuffer:sp_buf offset:0 atIndex:1];
+      [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
       NSUInteger tw = pk.threadExecutionWidth;
       NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
       [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
@@ -1732,39 +1740,71 @@ TEST_CASE("Canonical per-sample MSAA materialize->pack keeps all samples",
 // back via compute. This is exactly what the cache will do -- draws render into
 // a real MSAA attachment, resolves/ownership read individual samples -- so
 // proving the round-trip here de-risks the rendering technique before it
-// touches the draw path. Distinct per-sample seeds catch any sample loss.
+// touches the draw path. Every corpus storage format is exercised through its
+// lossless working view, and distinct per-sample seeds catch any sample loss.
 TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
           "[l1][metal][msaa][live]") {
   MetalCompute mc;
   if (!mc.Init()) { SUCCEED("no device"); return; }
-  struct Cfg { uint32_t w, h, base, msaa, samples; const char* name; } cfgs[] = {
+  struct SurfaceCfg {
+    uint32_t w, h, base, msaa, samples;
+    const char* name;
+  } surface_cfgs[] = {
       {48, 24, 0, 1u, 2u, "2x"},
-      {48, 24, 0, 2u, 4u, "4x"},
       {40, 16, 5, 2u, 4u, "4x base=5"},
   };
-  for (const Cfg& cfg : cfgs) {
-    const uint32_t pitch = PitchFor(cfg.w, cfg.msaa, 0u);
-    std::vector<uint32_t> values(size_t(cfg.w) * cfg.h * cfg.samples);
-    for (uint32_t y = 0; y < cfg.h; ++y)
-      for (uint32_t x = 0; x < cfg.w; ++x)
-        for (uint32_t s = 0; s < cfg.samples; ++s)
-          values[(y * cfg.w + x) * cfg.samples + s] =
-              (uint32_t((y * cfg.w + x) * cfg.samples + s) * 2246822519u) ^
-              0x1234ABCDu;
-    SurfaceParams sp{cfg.base, pitch, cfg.msaa, 0u, 0u,
+  struct FormatCfg {
+    const char* name;
+    uint32_t format;
+    MTLPixelFormat pixel_format;
+  } format_cfgs[] = {
+      {"8_8_8_8", 0u, MTLPixelFormatRGBA8Unorm},
+      {"2_10_10_10_FLOAT", 3u, MTLPixelFormatRGBA16Float},
+      {"16_16", 4u, MTLPixelFormatRG32Float},
+      {"32_FLOAT", 14u, MTLPixelFormatR32Float},
+  };
+  for (const SurfaceCfg& surface : surface_cfgs) {
+    const uint32_t pitch = PitchFor(surface.w, surface.msaa, 0u);
+    SurfaceParams sp{surface.base, pitch, surface.msaa, 0u, 0u,
                      uint32_t(xenos::kEdramSizeBytes / 4u)};
-    auto out = mc.RoundTripMsaaReal(cfg.w, cfg.h, cfg.samples, sp, values,
-                                    xenos::kEdramSizeBytes);
-    uint32_t bad = 0;
-    for (size_t i = 0; i < values.size(); ++i) {
-      if (out[i] != values[i]) {
-        if (bad < 8) WARN(cfg.name << " idx " << i << " expected " << values[i]
-                                   << " got " << out[i]);
-        ++bad;
+    for (const FormatCfg& format : format_cfgs) {
+      std::vector<uint32_t> values(size_t(surface.w) * surface.h *
+                                   surface.samples);
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (format.format == 0u) {
+          values[i] = uint32_t(i * 2246822519u) ^ 0x1234ABCDu;
+        } else if (format.format == 3u) {
+          uint32_t r = uint32_t(i * 17u) & 0x3FFu;
+          uint32_t g = uint32_t(i * 37u + 1u) & 0x3FFu;
+          uint32_t b = uint32_t(i * 73u + 127u) & 0x3FFu;
+          values[i] = r | (g << 10u) | (b << 20u) |
+                      ((uint32_t(i) & 3u) << 30u);
+        } else if (format.format == 4u) {
+          uint32_t lo = uint32_t(i * 40503u + 0x8000u) & 0xFFFFu;
+          uint32_t hi = uint32_t(i * 25173u + 0x7FFFu) & 0xFFFFu;
+          values[i] = lo | (hi << 16u);
+        } else {
+          float value = float(int32_t(i % 257u) - 128) * 0.25f;
+          std::memcpy(&values[i], &value, sizeof(value));
+        }
       }
+      auto out = mc.RoundTripMsaaReal(
+          surface.w, surface.h, surface.samples, sp, values,
+          xenos::kEdramSizeBytes, format.pixel_format, format.format);
+      uint32_t bad = 0;
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (out[i] != values[i]) {
+          if (bad < 8) {
+            WARN(surface.name << " " << format.name << " idx " << i
+                              << " expected " << values[i] << " got "
+                              << out[i]);
+          }
+          ++bad;
+        }
+      }
+      INFO(surface.name << " " << format.name);
+      REQUIRE(bad == 0u);
     }
-    INFO(cfg.name);
-    REQUIRE(bad == 0u);
   }
 }
 

@@ -326,14 +326,16 @@ void* MetalPipelineCache::GetOrCreateMemexportPipelineState(
   // depth-only pipeline variant: no fragment function, no color attachment.
   return GetOrCreateRenderPipelineState(
       vertex, /*pixel=*/nullptr, uint64_t(MTLPixelFormatInvalid),
-      MetalRenderTargetCache::kDepthFormat, /*blend_control=*/0,
+      MetalRenderTargetCache::kDepthFormat, /*raster_sample_count=*/1,
+      /*blend_control=*/0,
       /*color_write_mask=*/0);
 }
 
 void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     MetalShader::MetalTranslation* vertex,
     MetalShader::MetalTranslation* pixel, uint64_t color_pixel_format,
-    uint64_t depth_pixel_format, uint32_t blend_control,
+    uint64_t depth_pixel_format, uint32_t raster_sample_count,
+    uint32_t blend_control,
     uint32_t color_write_mask) {
   if (!vertex || !vertex->has_metal_function()) {
     return nullptr;
@@ -347,11 +349,14 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     void* ps;
     uint64_t color;
     uint64_t depth;
+    uint32_t sample_count;
     uint32_t blend;
     uint32_t write_mask;
+    uint32_t pad;
   } key_bytes{vertex->metal_function(),
-              pixel ? pixel->metal_function() : nullptr, color_pixel_format,
-              depth_pixel_format, blend_control, color_write_mask};
+               pixel ? pixel->metal_function() : nullptr, color_pixel_format,
+               depth_pixel_format, raster_sample_count, blend_control,
+              color_write_mask, 0u};
   uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
   auto it = render_pipeline_states_.find(key);
   if (it != render_pipeline_states_.end()) {
@@ -361,6 +366,7 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLRenderPipelineDescriptor* desc =
       [[MTLRenderPipelineDescriptor alloc] init];
+  desc.rasterSampleCount = raster_sample_count;
   desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
   if (pixel && pixel->has_metal_function()) {
     desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
@@ -535,7 +541,8 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     DxbcShaderTranslator::Modification vertex_modification,
     DxbcShaderTranslator::Modification pixel_modification,
     uint64_t color_pixel_format, uint64_t depth_pixel_format,
-    uint32_t blend_control, uint32_t color_write_mask,
+    uint32_t raster_sample_count, uint32_t blend_control,
+    uint32_t color_write_mask,
     uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out) {
   if (gs_vertex_size_out) {
     *gs_vertex_size_out = 0;
@@ -564,11 +571,13 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     void* ps;  // fragment function identity.
     uint64_t color;
     uint64_t depth;
+    uint32_t sample_count;
     uint32_t blend;
     uint32_t write_mask;
+    uint32_t pad;
   } key_bytes{gs_key.key, static_cast<void*>(vertex), pixel->metal_function(),
-              color_pixel_format, depth_pixel_format, blend_control,
-              color_write_mask};
+              color_pixel_format, depth_pixel_format, raster_sample_count,
+              blend_control, color_write_mask, 0u};
   uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
   auto cache_it = geometry_pipelines_.find(key);
   if (cache_it != geometry_pipelines_.end()) {
@@ -613,7 +622,7 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
       desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
     }
   }
-  desc.rasterSampleCount = 1;
+  desc.rasterSampleCount = raster_sample_count;
   desc.alphaToCoverageEnabled = NO;
 
   id<MTLFunction> ps_fn = (__bridge id<MTLFunction>)pixel->metal_function();

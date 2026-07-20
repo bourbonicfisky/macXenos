@@ -2021,6 +2021,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
   uint32_t gs_max_input_primitives = 0;
+  // Task 3.3 makes the pipeline cache sample-count aware. Attachment authority
+  // remains collapsed until task 3.5 selects a real MSAA working view, so the
+  // currently bound render pass and its pipeline both stay at one sample.
+  uint32_t raster_sample_count = 1;
   if (memexport_draw) {
     // Vertex-only, rasterization disabled, zero attachments.
     pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
@@ -2037,14 +2041,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         vs_translation, ps_translation, geometry_type,
         DxbcShaderTranslator::Modification(vs_mod),
         DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_format,
-        pipeline_depth_format, blend_control, color_write_mask,
+        pipeline_depth_format, raster_sample_count, blend_control,
+        color_write_mask,
         &gs_vertex_size, &gs_max_input_primitives);
   } else {
     uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
     uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_format,
-        pipeline_depth_format, blend_control, color_write_mask);
+        pipeline_depth_format, raster_sample_count, blend_control,
+        color_write_mask);
   }
   if (!pipeline) {
     if (use_geometry_emulation) {
