@@ -31,7 +31,8 @@
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
-#include "xenia/gpu/metal/metal_edram_depth_msl.h"
+#include "xenia/gpu/edram_layout.h"
+#include "xenia/gpu/metal/metal_edram_msl.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -63,11 +64,11 @@ inline uint32_t XeTileHash(const std::vector<uint32_t>& words) {
 // Inline MSL: one kernel per format decoder. Each reads a uint code from `in`
 // and writes the RESULT BITS to `out` (float results are stored via as_type so
 // the comparison is exact, never through a float round-trip).
-// The extra conformance kernels appended AFTER the shared kEdramDepthMsl
-// (metal_edram_depth_msl.h). The metal_stdlib prelude, the shared addresser
+// The extra conformance kernels appended AFTER the shared kEdramMsl
+// (metal_edram_msl.h). The metal_stdlib prelude, the shared addresser
 // xe_edram_offset_bytes, and struct SurfaceParams all come from that shared
 // source -- the SAME one the live cross-MSAA path compiles -- so the test and
-// the live path cannot drift. Init() concatenates kEdramDepthMsl + this.
+// the live path cannot drift. Init() concatenates kEdramMsl + this.
 static const char* kKernelSource = R"MSL(
 // One (pixel, sample) work item.
 struct Coord { uint px, py, sample; };
@@ -100,115 +101,9 @@ kernel void unpack_words(device const Coord* coords [[buffer(0)]],
   out[i] = canonical[off >> 2];
 }
 
-// MATERIALIZE (canonical -> host attachment) for k_8_8_8_8 into an RGBA8Unorm
-// texture: decode the EDRAM word's four byte lanes to normalized float4 and
-// write the resolved pixel. 1x/single-sample. This is the exact 3.1 operation
-// the cache will run to reconstruct a host render target from canonical EDRAM.
-kernel void materialize_8888(device const uint* canonical [[buffer(0)]],
-                            texture2d<float, access::write> tex [[texture(0)]],
-                            constant SurfaceParams& sp [[buffer(1)]],
-                            uint2 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   0u, 0u, 0u);
-  uint w = canonical[off >> 2];
-  float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
-                    (w >> 24) & 0xFFu) * (1.0 / 255.0);
-  tex.write(c, gid);
-}
-
-// PACK (host attachment -> canonical) for k_8_8_8_8: the inverse -- read the
-// RGBA8Unorm texel, re-encode the four byte lanes into the EDRAM word. Exact
-// for 8-bit unorm (byte/255 rounds back to byte). materialize->pack == identity.
-kernel void pack_8888(texture2d<float, access::read> tex [[texture(0)]],
-                     device uint* canonical [[buffer(0)]],
-                     constant SurfaceParams& sp [[buffer(1)]],
-                     uint2 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
-  float4 c = tex.read(gid);
-  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
-  uint w = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   0u, 0u, 0u);
-  canonical[off >> 2] = w;
-}
-
-// PER-SAMPLE MSAA materialize/pack (task 3.3, the sample-collapse fix). A true
-// MSAA texture can't be per-sample-written from compute, so each of the 2x/4x
-// samples lives in its own slice of a texture2d_array (sample s -> slice s).
-// gid.z is the sample index; the canonical offset carries it. This is what
-// keeps the samples the collapsed 1x path throws away.
-kernel void materialize_8888_msaa(
-    device const uint* canonical [[buffer(0)]],
-    texture2d_array<float, access::write> tex [[texture(0)]],
-    constant SurfaceParams& sp [[buffer(1)]],
-    uint3 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
-      gid.z >= tex.get_array_size()) return;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   0u, 0u, gid.z);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
-                    (w >> 24) & 0xFFu) * (1.0 / 255.0);
-  tex.write(c, uint2(gid.x, gid.y), gid.z);
-}
-kernel void pack_8888_msaa(
-    texture2d_array<float, access::read> tex [[texture(0)]],
-    device uint* canonical [[buffer(0)]],
-    constant SurfaceParams& sp [[buffer(1)]],
-    uint3 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
-      gid.z >= tex.get_array_size()) return;
-  float4 c = tex.read(uint2(gid.x, gid.y), gid.z);
-  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   0u, 0u, gid.z);
-  uint idx = off >> 2;
-  if (idx < sp.words) canonical[idx] = b.x | (b.y << 8) | (b.z << 16) |
-                                       (b.w << 24);
-}
-
-// The LIVE MSAA representation (task 3.3 wiring): a real texture2d_ms
-// attachment. Materialize is a fullscreen RENDER pass with sample-rate shading
-// -- [[sample_id]] forces per-sample execution, so each sample writes its own
-// canonical word. This is the only way to get per-sample data into a true MSAA
-// attachment (compute can't per-sample-write one).
-struct FsOut { float4 pos [[position]]; };
-vertex FsOut xe_fs_vs(uint vid [[vertex_id]]) {
-  FsOut o;
-  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
-  o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-  return o;
-}
-fragment float4 materialize_ms_fs(FsOut in [[stage_in]],
-                                 device const uint* canonical [[buffer(0)]],
-                                 constant SurfaceParams& sp [[buffer(1)]],
-                                 uint sid [[sample_id]]) {
-  uint2 p = uint2(in.pos.xy);
-  uint off = xe_edram_offset_bytes(p.x, p.y, sp.base, sp.pitch, sp.msaa, 0u, 0u,
-                                   sid);
-  uint idx = off >> 2;
-  uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  return float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
-                (w >> 24) & 0xFFu) * (1.0 / 255.0);
-}
-// Pack from the real MSAA attachment: compute reads each sample via
-// texture2d_ms.read(coord, sample). This is the live resolve/ownership pack.
-kernel void pack_ms(texture2d_ms<float, access::read> tex [[texture(0)]],
-                   device uint* canonical [[buffer(0)]],
-                   constant SurfaceParams& sp [[buffer(1)]],
-                   uint3 gid [[thread_position_in_grid]]) {
-  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
-      gid.z >= tex.get_num_samples()) return;
-  float4 c = tex.read(uint2(gid.x, gid.y), gid.z);
-  uint4 b = uint4(round(c * 255.0)) & 0xFFu;
-  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   0u, 0u, gid.z);
-  uint idx = off >> 2;
-  if (idx < sp.words) canonical[idx] = b.x | (b.y << 8) | (b.z << 16) |
-                                       (b.w << 24);
-}
+// Color materialize/pack helpers and kernels live in the shared kEdramMsl
+// production source prepended by Init(). The tests below invoke those exact
+// functions, so the live cache and the conformance oracle cannot drift.
 
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
                       device uint* out [[buffer(1)]],
@@ -350,10 +245,9 @@ kernel void k_tile_hash_tex(texture2d<float, access::read> tex [[texture(0)]],
   atomic_fetch_add_explicit(out, xe_hash_mix(word, i), memory_order_relaxed);
 }
 
-// The depth/stencil materialize/pack kernels (xe_depth_vs, materialize_depth_fs,
-// materialize_sten_fs, pack_depth, and the _ms per-sample variants) plus the
-// float24/unorm24 helpers now live in the shared kEdramDepthMsl
-// (metal_edram_depth_msl.h), prepended by Init() -- the SAME source the live
+// Color/depth/stencil materialize/pack kernels plus their addressing and format
+// helpers live in the shared kEdramMsl
+// (metal_edram_msl.h), prepended by Init() -- the SAME source the live
 // cross-MSAA path compiles. The [depth] cases below exercise exactly that source.
 )MSL";
 
@@ -362,9 +256,7 @@ kernel void k_tile_hash_tex(texture2d<float, access::read> tex [[texture(0)]],
 struct Coord {
   uint32_t px, py, sample;
 };
-struct SurfaceParams {
-  uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
-};
+using SurfaceParams = EdramSurfaceParams;
 
 // A minimal compute harness: compile the library once, dispatch one kernel over
 // a code vector, return the output bits. All buffers are shared storage so the
@@ -386,7 +278,7 @@ struct MetalCompute {
     // Prepend the SHARED production depth/stencil MSL (the same source the live
     // cross-MSAA path compiles) so the test exercises the live helpers, not a
     // copy. The extra conformance kernels in kKernelSource follow it.
-    std::string combined = std::string(xe::gpu::metal::kEdramDepthMsl);
+    std::string combined = std::string(xe::gpu::metal::kEdramMsl);
     combined += kKernelSource;
     lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:combined.c_str()]
                             options:nil
@@ -476,7 +368,7 @@ struct MetalCompute {
   // Returns the unpacked values; identity <=> correct addressing + no aliasing.
   std::vector<uint32_t> RoundTripCanonical(const std::vector<Coord>& coords,
                                            const std::vector<uint32_t>& values,
-                                           const struct SurfaceParams& sp,
+                                           const SurfaceParams& sp,
                                            size_t canonical_bytes) {
     const size_t n = coords.size();
     id<MTLBuffer> coord_buf =
@@ -495,7 +387,7 @@ struct MetalCompute {
                          options:MTLResourceStorageModeShared];
     std::memset(canonical.contents, 0, canonical_bytes);  // not zero-guaranteed
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     id<MTLComputePipelineState> pack =
@@ -552,7 +444,7 @@ struct MetalCompute {
   // materialize/pack will perform. `words` holds one word per (y*w+x); returns
   // the re-packed words read back from the canonical buffer at the same offsets.
   std::vector<uint32_t> RoundTripMaterialize8888(uint32_t w, uint32_t h,
-                                                 const struct SurfaceParams& sp,
+                                                 const SurfaceParams& sp,
                                                  const std::vector<uint32_t>& words,
                                                  size_t canonical_bytes) {
     id<MTLBuffer> canonical =
@@ -577,7 +469,7 @@ struct MetalCompute {
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     id<MTLComputePipelineState> mat = [dev
@@ -634,7 +526,7 @@ struct MetalCompute {
   // `values` is indexed [(y*w + x) * num_samples + s].
   std::vector<uint32_t> RoundTripMaterializeMsaa(uint32_t w, uint32_t h,
                                                  uint32_t num_samples,
-                                                 const struct SurfaceParams& sp,
+                                                 const SurfaceParams& sp,
                                                  const std::vector<uint32_t>& values,
                                                  size_t canonical_bytes) {
     id<MTLBuffer> canonical =
@@ -660,7 +552,7 @@ struct MetalCompute {
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     id<MTLComputePipelineState> mat = [dev
@@ -714,7 +606,7 @@ struct MetalCompute {
   // [(y*w+x)*num_samples + s]; returns the re-packed words.
   std::vector<uint32_t> RoundTripMsaaReal(uint32_t w, uint32_t h,
                                           uint32_t num_samples,
-                                          const struct SurfaceParams& sp,
+                                          const SurfaceParams& sp,
                                           const std::vector<uint32_t>& values,
                                           size_t canonical_bytes) {
     id<MTLBuffer> canonical =
@@ -742,11 +634,11 @@ struct MetalCompute {
     id<MTLTexture> ms = [dev newTextureWithDescriptor:td];
     REQUIRE(ms != nil);
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
-    rpd.vertexFunction = [lib newFunctionWithName:@"xe_fs_vs"];
+    rpd.vertexFunction = [lib newFunctionWithName:@"xe_color_vs"];
     rpd.fragmentFunction = [lib newFunctionWithName:@"materialize_ms_fs"];
     rpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     rpd.rasterSampleCount = num_samples;
@@ -805,7 +697,7 @@ struct MetalCompute {
   // inverses through real host depth storage -- the substrate the cross-MSAA
   // slice needs for JC2's kD24FS8/kD24S8 buffers.
   std::vector<uint32_t> RoundTripDepth(uint32_t w, uint32_t h,
-                                       const struct SurfaceParams& sp,
+                                       const SurfaceParams& sp,
                                        const std::vector<uint32_t>& words,
                                        size_t canonical_bytes) {
     id<MTLBuffer> canonical =
@@ -836,7 +728,7 @@ struct MetalCompute {
         [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
     REQUIRE(sten_view != nil);
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];
@@ -938,7 +830,7 @@ struct MetalCompute {
   // collapsed host loses).
   std::vector<uint32_t> RoundTripDepthMsaa(uint32_t w, uint32_t h,
                                            uint32_t num_samples,
-                                           const struct SurfaceParams& sp,
+                                           const SurfaceParams& sp,
                                            const std::vector<uint32_t>& words,
                                            size_t canonical_bytes) {
     id<MTLBuffer> canonical =
@@ -968,7 +860,7 @@ struct MetalCompute {
         [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
     REQUIRE(sten_view != nil);
     id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
-                                            length:sizeof(struct SurfaceParams)
+                                            length:sizeof(SurfaceParams)
                                            options:MTLResourceStorageModeShared];
     NSError* err = nil;
     MTLRenderPipelineDescriptor* rpd = [[MTLRenderPipelineDescriptor alloc] init];

@@ -17,8 +17,9 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
-#include "xenia/gpu/metal/metal_edram_depth_msl.h"
+#include "xenia/gpu/metal/metal_edram_msl.h"
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
 
@@ -80,8 +81,9 @@ namespace {
 // samples, 4x doubles both).
 void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
                    uint32_t& y_shift) {
-  x_shift = msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1 : 0;
-  y_shift = msaa_samples >= uint32_t(xenos::MsaaSamples::k2X) ? 1 : 0;
+  EdramMsaaShifts shifts = GetEdramMsaaShifts(msaa_samples);
+  x_shift = shifts.x;
+  y_shift = shifts.y;
 }
 }  // namespace
 
@@ -604,7 +606,7 @@ MetalRenderTargetCache::EnsureShadowDepthPipelines(uint32_t sample_count) {
   if (!shadow_depth_library_) {
     NSError* err = nil;
     // Diagnostic legacy adapter for the LIVE half-res sc=1 store of 4x/2x depth:
-    // it is NOT part of the canonical authority (kEdramDepthMsl stays pristine),
+    // it is NOT part of the canonical authority (kEdramMsl stays pristine),
     // but it shares the exact same addresser by being compiled in the SAME unit
     // (no duplication, no drift). pack_depth_cov is pack_depth plus a coverage
     // byte per written sample slot, so the round-trip can TRUTHFULLY separate
@@ -626,7 +628,8 @@ kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
   if (idx >= sp.words) return;
   float d = tex.read(gid);
   uint s = sten.read(gid).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  canonical[idx] =
+      xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
   coverage[idx] = 1u;
 }
 // --- Canonical DEPTH authority kernels (Option 1). Same addresser/helpers as
@@ -639,7 +642,7 @@ struct RangeParams { uint start_tiles; uint end_tiles; };
 // fmt_log2 = 0 for 32bpp depth, so the tile grid is 80x16 samples).
 inline uint xe_edram_tile_of(uint px, uint py, uint base, uint pitch, uint msaa,
                              uint sample) {
-  uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u, msaa >= 1u ? 1u : 0u);
+  uint2 s = uint2(px, py) << xe_edram_msaa_shifts(msaa);
   s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
   return base + (s.y / 16u) * pitch + (s.x / 80u);
 }
@@ -654,7 +657,8 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
   if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
   float d = tex.read(gid);
   uint s = sten.read(gid).r & 0xFFu;
-  uint word = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  uint word =
+      xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
   // Missing-sample reconstruction: the live host store is DECIMATED to one
   // sample per pixel, so a host pixel of a 2x/4x view stands for ALL samples of
   // its group. Replicate the word across the group's canonical slots (nearest
@@ -697,16 +701,16 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
                                    sp.is_depth, 0u, 0u);
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+  if ((xe_stencil(w) & bit) == 0u) discard_fragment();
 }
 )MSL";
-    std::string src = std::string(kEdramDepthMsl) + kShadowAdapterMsl;
+    std::string src = std::string(kEdramMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
         newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
                      options:nil
                        error:&err];
     if (!lib) {
-      XELOGE("MetalShadow: kEdramDepthMsl failed to compile: {}",
+      XELOGE("MetalShadow: kEdramMsl failed to compile: {}",
              err ? err.localizedDescription.UTF8String : "?");
       shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
       return nullptr;
@@ -859,11 +863,10 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
       [scratch newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
   bool f24 = source->key().GetDepthFormat() ==
              xenos::DepthRenderTargetFormat::kD24FS8;
-  struct SP {
-    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
-  } sp{source->key().base_tiles, source->key().GetPitchTiles(),
-       uint32_t(source->key().msaa_samples), f24 ? 2u : 1u, 0u,
-       uint32_t(kBytes / 4)};
+  EdramSurfaceParams sp{source->key().base_tiles,
+                        source->key().GetPitchTiles(),
+                        uint32_t(source->key().msaa_samples),
+                        f24 ? 2u : 1u, 0u, uint32_t(kBytes / 4)};
   id<MTLBuffer> spb = [device newBufferWithBytes:&sp
                                           length:sizeof(sp)
                                          options:MTLResourceStorageModeShared];
@@ -1006,15 +1009,13 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
                ? 2u
                : 1u;
   };
-  struct SP {
-    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
-  };
   const uint32_t kWords = kCanonicalEdramSize / 4u;
-  SP sp_src{source->key().base_tiles, source->key().GetPitchTiles(),
-            uint32_t(source->key().msaa_samples), fmt_is_depth(source), 0u,
-            kWords};
-  SP sp_dst{dest->key().base_tiles, dest->key().GetPitchTiles(),
-            uint32_t(dest->key().msaa_samples), fmt_is_depth(dest), 0u, kWords};
+  EdramSurfaceParams sp_src{
+      source->key().base_tiles, source->key().GetPitchTiles(),
+      uint32_t(source->key().msaa_samples), fmt_is_depth(source), 0u, kWords};
+  EdramSurfaceParams sp_dst{
+      dest->key().base_tiles, dest->key().GetPitchTiles(),
+      uint32_t(dest->key().msaa_samples), fmt_is_depth(dest), 0u, kWords};
   struct RP {
     uint32_t start_tiles, end_tiles;
   } rp{transfer.start_tiles, transfer.end_tiles};
@@ -2865,63 +2866,10 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   if (!canonical_materialize_library_) {
-    // Mirror of the proven materialize_8888 kernel (see the L1 conformance
-    // suite). Reads a canonical EDRAM word at each pixel's physical offset and
-    // decodes the four byte lanes to an RGBA8Unorm texel. SurfaceParams.pad
-    // carries the canonical word count so an over-dispatch can't read OOB.
-    NSString* src = @R"METAL(
-      #include <metal_stdlib>
-      using namespace metal;
-      struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, words; };
-      inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
-                                        uint msaa, uint is_depth, uint fmt_log2,
-                                        uint sample) {
-        uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u,
-                                         msaa >= 1u ? 1u : 0u);
-        s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-        uint2 tsize32 = uint2(80u, 16u);
-        uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
-        uint2 toff = s / tsize;
-        uint b = base + toff.y * pitch + toff.x;
-        s -= toff * tsize;
-        if (is_depth != 0u) {
-          uint half_w = tsize.x >> 1u;
-          s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
-        }
-        uint address = b * (tsize32.x * tsize32.y) +
-                       ((s.y * tsize.x + s.x) << fmt_log2);
-        return address << 2;
-      }
-      kernel void materialize_8888(
-          device const uint* canonical [[buffer(0)]],
-          texture2d<float, access::write> tex [[texture(0)]],
-          constant SurfaceParams& sp [[buffer(1)]],
-          uint2 gid [[thread_position_in_grid]]) {
-        if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
-        uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch,
-                                         sp.msaa, 0u, 0u, 0u);
-        uint idx = off >> 2;
-        uint w = (idx < sp.words) ? canonical[idx] : 0u;
-        float4 c = float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu,
-                          (w >> 24) & 0xFFu) * (1.0 / 255.0);
-        tex.write(c, gid);
-      }
-      // Inverse: pack an RGBA8Unorm texel back to its canonical EDRAM word.
-      kernel void pack_8888(
-          texture2d<float, access::read> tex [[texture(0)]],
-          device uint* canonical [[buffer(0)]],
-          constant SurfaceParams& sp [[buffer(1)]],
-          uint2 gid [[thread_position_in_grid]]) {
-        if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
-        uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch,
-                                         sp.msaa, 0u, 0u, 0u);
-        uint idx = off >> 2;
-        if (idx >= sp.words) return;
-        float4 c = tex.read(gid);
-        uint4 b = uint4(round(c * 255.0)) & 0xFFu;
-        canonical[idx] = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);
-      }
-    )METAL";
+    // Compile the same shared source used by the Metal conformance harness.
+    // This keeps live color materialize/pack, addressing, depth formats, and
+    // stencil word helpers under one source contract.
+    NSString* src = [NSString stringWithUTF8String:kEdramMsl];
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
                                                 error:&err];
@@ -2980,10 +2928,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
   if (!staging || !scratch) {
     return;
   }
-  struct SurfaceParamsCPU {
-    uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
-  } sp{0u, width / xenos::kEdramTileWidthSamples, 0u, 0u, 0u,
-       kCanonicalEdramSize / 4u};
+  EdramSurfaceParams sp{0u, width / xenos::kEdramTileWidthSamples, 0u, 0u,
+                        0u, kCanonicalEdramSize / 4u};
   id<MTLBuffer> sp_buf = [device newBufferWithBytes:&sp
                                             length:sizeof(sp)
                                            options:MTLResourceStorageModeShared];

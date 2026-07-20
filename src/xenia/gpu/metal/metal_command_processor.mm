@@ -40,6 +40,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
@@ -442,10 +443,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
     // >=3/>=2 count-style thresholds read 4x owners with xs=0 — the right half
     // of every sample row fell out of bounds and dumped as zeros (the phantom
     // "half-screen" divergence at the 7282/6756 draw-25 MSAA clears).
-    uint32_t xs =
-        owner.msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1 : 0;
-    uint32_t ys =
-        owner.msaa_samples >= uint32_t(xenos::MsaaSamples::k2X) ? 1 : 0;
+    EdramMsaaShifts msaa_shifts = GetEdramMsaaShifts(owner.msaa_samples);
     // The rect covers full-EDRAM 16-tile rows [row_first, row_first+rows).
     for (uint32_t er = owner.row_first; er < owner.row_first + owner.rows;
          ++er) {
@@ -465,11 +463,14 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
         // sample from the other half.
         for (uint32_t sy = 0; sy < 16; ++sy) {
           for (uint32_t sx = 0; sx < 80; ++sx) {
-            uint32_t host_sx =
-                owner.is_depth ? (sx < 40 ? sx + 40 : sx - 40) : sx;
+            uint32_t host_sx = owner.is_depth
+                                   ? EdramDepthSwapX(
+                                         sx, xenos::kEdramTileWidthSamples)
+                                   : sx;
             uint32_t sample_x = (local % owner.pitch_tiles) * 80 + host_sx;
             uint32_t sample_y = (local / owner.pitch_tiles) * 16 + sy;
-            uint32_t px = sample_x >> xs, py = sample_y >> ys;
+            uint32_t px = sample_x >> msaa_shifts.x;
+            uint32_t py = sample_y >> msaa_shifts.y;
             uint32_t word = 0;
             if (px < tw && py < th) {
               const uint8_t* p = pixels + (size_t(py) * tw + px) * 4;
@@ -486,16 +487,14 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
                         : uint32_t(std::rint(
                               std::min(1.0f, std::max(0.0f, d)) *
                               16777215.0f));
-                word = d24 << 8;
-                if (stencil_plane) {
-                  word |= stencil_plane[size_t(py) * tw + px];
-                }
+                uint32_t stencil =
+                    stencil_plane ? stencil_plane[size_t(py) * tw + px] : 0u;
+                word = PackEdramDepthStencil(d24, stencil);
               } else if (owner.pixel_format == uint64_t(MTLPixelFormatR32Float)) {
                 std::memcpy(&word, p, 4);
               } else {
                 // Canonical RGBA8 storage: bytes ARE the guest EDRAM word.
-                word = uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
-                       (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+                word = PackEdramColor8888(p[0], p[1], p[2], p[3]);
               }
             }
             std::memcpy(tile_out + (size_t(sy) * 80 + sx) * 4, &word, 4);
@@ -4585,7 +4584,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
               uint32_t d24 = wb.depth_encode == 2
                                  ? xenos::Float32To20e4(df, true)
                                  : xenos::Float32ToUNorm24(df);
-              v = d24 << 8;
+              v = PackEdramDepthStencil(d24, 0u);
             }
             if (wb.swap_rb) {
               // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs .bgra

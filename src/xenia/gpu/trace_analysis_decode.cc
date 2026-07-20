@@ -23,46 +23,6 @@
 namespace xe {
 namespace gpu {
 
-uint32_t XeEdramSnapshotOffsetBytes(uint32_t pixel_x, uint32_t pixel_y,
-                                    uint32_t base_tiles, uint32_t pitch_tiles,
-                                    uint32_t msaa_samples, bool is_depth,
-                                    uint32_t format_ints_log2,
-                                    uint32_t pixel_sample_index) {
-  // Mirrors edram.xesli XeEdramOffsetBytes (resolution_scale = 1, wrap = false).
-  // x is doubled at 4x MSAA (enum 2), y is doubled at >=2x MSAA (enum >=1).
-  uint32_t sx = pixel_x << (msaa_samples >= uint32_t(xenos::MsaaSamples::k4X)
-                                ? 1u
-                                : 0u);
-  uint32_t sy = pixel_y << (msaa_samples >= uint32_t(xenos::MsaaSamples::k2X)
-                                ? 1u
-                                : 0u);
-  sx += (pixel_sample_index >> 1) & 1u;
-  sy += pixel_sample_index & 1u;
-  const uint32_t tile_w = 80u >> format_ints_log2;
-  const uint32_t tile_h = 16u;
-  uint32_t tile_off_x = sx / tile_w;
-  uint32_t tile_off_y = sy / tile_h;
-  base_tiles += tile_off_y * pitch_tiles + tile_off_x;
-  sx -= tile_off_x * tile_w;
-  sy -= tile_off_y * tile_h;
-  if (is_depth) {
-    uint32_t half = tile_w >> 1;
-    sx = (sx >= half) ? (sx - half) : (sx + half);
-  }
-  uint32_t address =
-      base_tiles * (80u * 16u) + ((sy * tile_w + sx) << format_ints_log2);
-  return address << 2;
-}
-
-uint32_t XeEdramPitchTiles(uint32_t surface_pitch_pixels,
-                           uint32_t msaa_samples) {
-  // Width in samples is doubled at 4x MSAA; a tile spans 80 samples wide.
-  uint32_t width_samples =
-      surface_pitch_pixels
-      << (msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1u : 0u);
-  return (width_samples + 79u) / 80u;
-}
-
 static void WriteRgba(std::vector<uint8_t>& rgba, size_t px, uint8_t r,
                       uint8_t g, uint8_t b, uint8_t a) {
   rgba[px * 4 + 0] = r;
@@ -100,8 +60,11 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
         case xenos::ColorRenderTargetFormat::k_8_8_8_8:
         case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
           // 32bpp RGBA8 as stored; low byte = R.
-          WriteRgba(out->rgba, px, uint8_t(v & 0xFF), uint8_t((v >> 8) & 0xFF),
-                    uint8_t((v >> 16) & 0xFF), uint8_t((v >> 24) & 0xFF));
+          WriteRgba(out->rgba, px,
+                    uint8_t(GetEdramColor8888Channel(v, 0u)),
+                    uint8_t(GetEdramColor8888Channel(v, 1u)),
+                    uint8_t(GetEdramColor8888Channel(v, 2u)),
+                    uint8_t(GetEdramColor8888Channel(v, 3u)));
         } break;
         case xenos::ColorRenderTargetFormat::k_2_10_10_10:
         case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
@@ -122,30 +85,6 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
     }
   }
   return true;
-}
-
-// Mirrors pixel_formats.xesli XeFloat20e4To32 (remap_to_0_to_0_5=false):
-// converts a 24-bit 20e4 float to a real float in [0, 2).
-static float XeFloat20e4ToFloat(uint32_t f24) {
-  if (f24 == 0) {
-    return 0.0f;
-  }
-  uint32_t mantissa = f24 & 0xFFFFFu;
-  uint32_t exponent = f24 >> 20u;
-  if (exponent == 0u) {
-    // Denormalized: normalize (first_one_bit_high over the 20-bit mantissa).
-    int hb = 19;
-    while (hb >= 0 && !((mantissa >> hb) & 1u)) {
-      --hb;
-    }
-    uint32_t lzcnt = 20u - uint32_t(hb);
-    exponent = 1u - lzcnt;
-    mantissa = (mantissa << lzcnt) & 0xFFFFFu;
-  }
-  uint32_t f32bits = ((exponent + 112u) << 23u) | (mantissa << 3u);
-  float f;
-  std::memcpy(&f, &f32bits, sizeof(f));
-  return f;
 }
 
 bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
@@ -176,13 +115,13 @@ bool DecodeEdramDepth(const uint8_t* edram, size_t edram_size,
       std::memcpy(&v, edram + off, sizeof(v));
       // Xenos EDRAM depth/stencil word: depth in the high 24 bits, stencil in
       // the low 8.
-      uint32_t depth24 = v >> 8;
+      uint32_t depth24 = GetEdramDepth24(v);
       if (out_depth24) {
         (*out_depth24)[px] = depth24;
       }
       uint8_t gray;
       if (format == xenos::DepthRenderTargetFormat::kD24FS8) {
-        float d = XeFloat20e4ToFloat(depth24);          // [0, 2)
+        float d = xenos::Float20e4To32(depth24);        // [0, 2)
         float n = d * 0.5f;                             // -> [0, 1)
         n = n < 0.0f ? 0.0f : (n > 1.0f ? 1.0f : n);
         gray = uint8_t(n * 255.0f + 0.5f);
@@ -562,7 +501,7 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
             xenos::DepthRenderTargetFormat(depth_fmt) ==
             xenos::DepthRenderTargetFormat::kD24FS8;
         for (size_t i = 0; i < depth24.size(); ++i) {
-          depthf[i] = is_f24 ? XeFloat20e4ToFloat(depth24[i])
+          depthf[i] = is_f24 ? xenos::Float20e4To32(depth24[i])
                              : float(depth24[i]) / float(0xFFFFFF);
         }
         std::filesystem::path fbin =

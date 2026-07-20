@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -38,6 +39,52 @@ TEST_CASE("EDRAM pitch in tiles", "[l0][edram]") {
   REQUIRE(XeEdramPitchTiles(1280u, uint32_t(MsaaSamples::k2X)) == 16u);  // y only
   REQUIRE(XeEdramPitchTiles(1280u, uint32_t(MsaaSamples::k4X)) == 32u);  // x doubles
   REQUIRE(XeEdramPitchTiles(1u, uint32_t(MsaaSamples::k1X)) == 1u);      // ceil
+  REQUIRE(XeEdramPitchTiles(40u, uint32_t(MsaaSamples::k1X), 1u) == 1u);
+  REQUIRE(XeEdramPitchTiles(41u, uint32_t(MsaaSamples::k1X), 1u) == 2u);
+}
+
+TEST_CASE("EDRAM centralized MSAA shifts and depth swap", "[l0][edram]") {
+  EdramMsaaShifts shifts_1x =
+      GetEdramMsaaShifts(uint32_t(MsaaSamples::k1X));
+  EdramMsaaShifts shifts_2x =
+      GetEdramMsaaShifts(uint32_t(MsaaSamples::k2X));
+  EdramMsaaShifts shifts_4x =
+      GetEdramMsaaShifts(uint32_t(MsaaSamples::k4X));
+  REQUIRE(shifts_1x.x == 0u);
+  REQUIRE(shifts_1x.y == 0u);
+  REQUIRE(shifts_2x.x == 0u);
+  REQUIRE(shifts_2x.y == 1u);
+  REQUIRE(shifts_4x.x == 1u);
+  REQUIRE(shifts_4x.y == 1u);
+  for (uint32_t x = 0; x < 80u; ++x) {
+    uint32_t swapped = EdramDepthSwapX(x, 80u);
+    REQUIRE(swapped < 80u);
+    REQUIRE(EdramDepthSwapX(swapped, 80u) == x);
+  }
+}
+
+TEST_CASE("EDRAM centralized color depth stencil and sample-plane words",
+          "[l0][edram][format]") {
+  uint32_t color = PackEdramColor8888(0x12u, 0x34u, 0x56u, 0x78u);
+  REQUIRE(color == 0x78563412u);
+  REQUIRE(GetEdramColor8888Channel(color, 0u) == 0x12u);
+  REQUIRE(GetEdramColor8888Channel(color, 1u) == 0x34u);
+  REQUIRE(GetEdramColor8888Channel(color, 2u) == 0x56u);
+  REQUIRE(GetEdramColor8888Channel(color, 3u) == 0x78u);
+
+  uint32_t depth_stencil = PackEdramDepthStencil(0xABCDEFu, 0x5Au);
+  REQUIRE(depth_stencil == 0xABCDEF5Au);
+  REQUIRE(GetEdramDepth24(depth_stencil) == 0xABCDEFu);
+  REQUIRE(GetEdramStencil(depth_stencil) == 0x5Au);
+  for (uint32_t bit = 0; bit < 8u; ++bit) {
+    REQUIRE(GetEdramStencilBitMask(bit) == (1u << bit));
+  }
+
+  REQUIRE(EdramSamplePlaneForTileWord(0u) == 0u);
+  REQUIRE(EdramSamplePlaneForTileWord(80u) == 1u);
+  REQUIRE(EdramSamplePlaneForTileWord(1u) == 2u);
+  REQUIRE(EdramSamplePlaneForTileWord(81u) == 3u);
+  REQUIRE(sizeof(EdramSurfaceParams) == 24u);
 }
 
 // The core contract: over a surface, every (pixel, physical sample) maps to a

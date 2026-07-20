@@ -26,6 +26,7 @@
 #include <sys/clonefile.h>
 #endif
 #include "xenia/emulator.h"
+#include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -2265,12 +2266,11 @@ void CommandProcessor::AppendCaptureEdramHashes(
         // tile by x/y parity therefore yields the canonical 32bpp physical
         // sample plane without needing render-target metadata. The 40-column
         // depth swap preserves parity.
-        uint32_t sample_plane = ((x & 1u) << 1u) | (y & 1u);
+        uint32_t tile_word = y * xenos::kEdramTileWidthSamples + x;
+        uint32_t sample_plane = EdramSamplePlaneForTileWord(tile_word);
         uint32_t word;
         std::memcpy(&word,
-                    tile_bytes +
-                        size_t(y * xenos::kEdramTileWidthSamples + x) *
-                            sizeof(uint32_t),
+                    tile_bytes + size_t(tile_word) * sizeof(uint32_t),
                     sizeof(word));
         uint32_t& sample_plane_word_count =
             sample_plane_word_counts[sample_plane];

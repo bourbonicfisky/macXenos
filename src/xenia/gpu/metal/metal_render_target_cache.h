@@ -289,7 +289,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
 
   // --- Stage 2 of the canonical cross-MSAA slice: additive SHADOW ----------
   // For a depth cross-MSAA transition, pack the source depth attachment into a
-  // canonical buffer via the SHARED substrate (metal_edram_depth_msl.h),
+  // canonical buffer via the SHARED substrate (metal_edram_msl.h),
   // materialize a scratch depth attachment from it, pack that back, and compare
   // the two canonicals. A match proves the shared pack/materialize round-trips
   // real JC2 depth data on-device -- the on-M4 proof before Stage 3 activates
@@ -301,7 +301,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // with the frame queue writing the source. `command_buffer` is the frame cb.
   void ShadowCrossMsaaDepth(const void* command_buffer, RenderTarget* source,
                             const Transfer& transfer);
-  // Per-sample-count shadow pipelines, built lazily from kEdramDepthMsl.
+  // Per-sample-count shadow pipelines, built lazily from kEdramMsl.
   struct ShadowDepthPipelines {
     void* materialize_depth = nullptr;  // id<MTLRenderPipelineState>
     void* materialize_sten = nullptr;
@@ -315,7 +315,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint32_t sample_count = 0;
   };
   const ShadowDepthPipelines* EnsureShadowDepthPipelines(uint32_t sample_count);
-  void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramDepthMsl.
+  void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramMsl.
   std::unordered_map<uint32_t, ShadowDepthPipelines> shadow_pipelines_;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
 
@@ -339,7 +339,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // XE_METAL_CANONICAL_DEPTH. For a depth cross-MSAA transition it REPLACES the
   // lossy legacy spatial resample with: pack(source depth+stencil) -> canonical
   // EDRAM, then materialize(dest) <- canonical EDRAM, both range-guarded to the
-  // transfer's tiles, using the conformance-proven kEdramDepthMsl helpers. The
+  // transfer's tiles, using the conformance-proven kEdramMsl helpers. The
   // canonical buffer persists across frames/RT instances, so content survives the
   // ownership churn that the transient-RT companion-resolve persistence loses --
   // that old persistence model is NOT reused here. Changes visible output (the

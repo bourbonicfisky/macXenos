@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <vector>
 
+#include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/xenos.h"
 
 // In-tree authoritative decoder for the headless trace-analysis suite
@@ -25,20 +26,6 @@
 
 namespace xe {
 namespace gpu {
-
-// Byte offset of one sample into a raw EDRAM snapshot. Faithful C++ mirror of
-// edram.xesli `XeEdramOffsetBytes` for resolution_scale = 1 (headless capture
-// is unscaled: InitializeTraceSubmitDownloads refuses scaled draws).
-uint32_t XeEdramSnapshotOffsetBytes(uint32_t pixel_x, uint32_t pixel_y,
-                                    uint32_t base_tiles, uint32_t pitch_tiles,
-                                    uint32_t msaa_samples, bool is_depth,
-                                    uint32_t format_ints_log2,
-                                    uint32_t pixel_sample_index);
-
-// EDRAM tile pitch (in tiles) for a color/depth surface of the given guest
-// surface pitch (in pixels) at the given MSAA level.
-uint32_t XeEdramPitchTiles(uint32_t surface_pitch_pixels,
-                           uint32_t msaa_samples);
 
 // A decoded RGBA8 image.
 struct DecodedImage {

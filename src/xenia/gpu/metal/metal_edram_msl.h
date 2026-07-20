@@ -7,15 +7,15 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_GPU_METAL_METAL_EDRAM_DEPTH_MSL_H_
-#define XENIA_GPU_METAL_METAL_EDRAM_DEPTH_MSL_H_
+#ifndef XENIA_GPU_METAL_METAL_EDRAM_MSL_H_
+#define XENIA_GPU_METAL_METAL_EDRAM_MSL_H_
 
 namespace xe {
 namespace gpu {
 namespace metal {
 
-// The canonical depth/stencil EDRAM materialize/pack MSL, extracted as a SHARED
-// production source. It is compiled verbatim by BOTH the conformance harness
+// The canonical color/depth/stencil EDRAM materialize/pack MSL, extracted as a
+// SHARED production source. It is compiled verbatim by BOTH the conformance harness
 // (metal_kernel_conformance_test.mm, which appends its extra kernels after it)
 // and the live render-target cache's cross-MSAA path, so the tested helpers and
 // the live path are byte-identical and cannot drift -- the ladder's core
@@ -31,9 +31,17 @@ namespace metal {
 // depth kernels: 2 = float24 (kD24FS8, [0,2) via *0.5//*2), 1 = unorm24
 // (kD24S8, [0,1]); any nonzero value triggers the 40-column depth swap in the
 // addresser. Color kernels pass is_depth = 0.
-static constexpr const char* kEdramDepthMsl = R"MSL(
+static constexpr const char* kEdramMsl = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
+
+inline uint2 xe_edram_msaa_shifts(uint msaa) {
+  return uint2(msaa >= 2u ? 1u : 0u, msaa >= 1u ? 1u : 0u);
+}
+inline uint xe_edram_depth_swap_x(uint x, uint tile_width) {
+  uint half_width = tile_width >> 1u;
+  return x >= half_width ? x - half_width : x + half_width;
+}
 
 // Shared addresser: edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
 // wrap=false. One MSL definition used by BOTH the offset-parity kernel and the
@@ -41,8 +49,7 @@ using namespace metal;
 inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
                                   uint msaa, uint is_depth, uint fmt_log2,
                                   uint sample) {
-  uint2 s = uint2(px, py) << uint2(msaa >= 2u ? 1u : 0u,   // x doubles @4x
-                                   msaa >= 1u ? 1u : 0u);   // y doubles @2x
+  uint2 s = uint2(px, py) << xe_edram_msaa_shifts(msaa);
   s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
   uint2 tsize32 = uint2(80u, 16u);
   uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
@@ -50,8 +57,7 @@ inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
   uint b = base + toff.y * pitch + toff.x;
   s -= toff * tsize;
   if (is_depth != 0u) {
-    uint half_w = tsize.x >> 1u;  // 'half' is a reserved MSL type name
-    s.x = (s.x >= half_w) ? (s.x - half_w) : (s.x + half_w);
+    s.x = xe_edram_depth_swap_x(s.x, tsize.x);
   }
   uint address = b * (tsize32.x * tsize32.y) +
                  ((s.y * tsize.x + s.x) << fmt_log2);
@@ -62,6 +68,114 @@ inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
 // the canonical buffer size in 32-bit words, so a bounds guard can skip an
 // over-dispatch instead of reading/writing out of range.
 struct SurfaceParams { uint base, pitch, msaa, is_depth, fmt_log2, words; };
+
+inline float4 xe_unpack_8888(uint word) {
+  return float4(word & 0xFFu, (word >> 8u) & 0xFFu,
+                (word >> 16u) & 0xFFu, (word >> 24u) & 0xFFu) *
+         (1.0 / 255.0);
+}
+inline uint xe_pack_8888(float4 color) {
+  uint4 bytes = uint4(round(color * 255.0)) & 0xFFu;
+  return bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
+}
+inline uint xe_pack_depth_stencil(uint depth24, uint stencil) {
+  return ((depth24 & 0xFFFFFFu) << 8u) | (stencil & 0xFFu);
+}
+inline uint xe_depth24(uint word) { return word >> 8u; }
+inline uint xe_stencil(uint word) { return word & 0xFFu; }
+inline uint xe_stencil_bit_mask(uint bit_index) {
+  return 1u << (bit_index & 7u);
+}
+
+// Canonical RGBA8Unorm materialize/pack kernels. These are shared verbatim by
+// the live cache and the Metal conformance suite.
+kernel void materialize_8888(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  uint word = idx < sp.words ? canonical[idx] : 0u;
+  tex.write(xe_unpack_8888(word), gid);
+}
+kernel void pack_8888(
+    texture2d<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u);
+  uint idx = off >> 2u;
+  if (idx < sp.words) canonical[idx] = xe_pack_8888(tex.read(gid));
+}
+
+// Array-slice per-sample representation used by the isolated compute oracle.
+kernel void materialize_8888_msaa(
+    device const uint* canonical [[buffer(0)]],
+    texture2d_array<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_array_size()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2u;
+  uint word = idx < sp.words ? canonical[idx] : 0u;
+  tex.write(xe_unpack_8888(word), uint2(gid.x, gid.y), gid.z);
+}
+kernel void pack_8888_msaa(
+    texture2d_array<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_array_size()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_8888(tex.read(uint2(gid.x, gid.y), gid.z));
+  }
+}
+
+// Real multisample attachment representation used by the live path: sample-
+// rate materialize and explicit per-sample compute packing.
+struct ColorVOut { float4 pos [[position]]; };
+vertex ColorVOut xe_color_vs(uint vid [[vertex_id]]) {
+  ColorVOut out;
+  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+  out.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+  return out;
+}
+fragment float4 materialize_ms_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  uint off = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 0u, sample);
+  uint idx = off >> 2u;
+  return xe_unpack_8888(idx < sp.words ? canonical[idx] : 0u);
+}
+kernel void pack_ms(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples()) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z);
+  uint idx = off >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_8888(tex.read(uint2(gid.x, gid.y), gid.z));
+  }
+}
 
 inline float xe_f20e4_to_f32(uint f24) {
   f24 &= 0xFFFFFFu;
@@ -108,7 +222,7 @@ inline uint xe_f32_to_unorm24(float d) {
 // (which clamps to [0,1]) holds the WHOLE domain; unorm24 (fmt 1) is already
 // [0,1]. pack applies the inverse (*2 for float24).
 inline float xe_depth_word_to_host(uint word, uint fmt) {
-  uint d24 = word >> 8;
+  uint d24 = xe_depth24(word);
   return fmt == 2u ? xe_f20e4_to_f32(d24) * 0.5 : xe_unorm24_to_f32(d24);
 }
 inline uint xe_host_to_depth_d24(float d, uint fmt) {
@@ -150,7 +264,7 @@ fragment void materialize_sten_fs(DepthVOut in [[stage_in]],
                                    sp.is_depth, 0u, 0u);
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+  if ((xe_stencil(w) & bit) == 0u) discard_fragment();
 }
 // Pack emits the COMPLETE depth/stencil word: (d24 << 8) | stencil. Depth from
 // the depth2d view, stencil from the X32_Stencil8 view of the same attachment.
@@ -166,7 +280,8 @@ kernel void pack_depth(depth2d<float, access::read> tex [[texture(0)]],
   if (idx >= sp.words) return;
   float d = tex.read(gid);
   uint s = sten.read(gid).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  canonical[idx] =
+      xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
 }
 // Per-sample 4x/2x depth+stencil: the same materialize/pack, but SAMPLE-AWARE.
 // Materialize is sample-rate ([[sample_id]] forces per-sample execution) so each
@@ -197,7 +312,7 @@ fragment void materialize_sten_ms_fs(DepthVOut in [[stage_in]],
                                    sp.is_depth, 0u, sid);
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
-  if (((w & 0xFFu) & bit) == 0u) discard_fragment();
+  if ((xe_stencil(w) & bit) == 0u) discard_fragment();
 }
 kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
                          texture2d_ms<uint, access::read> sten [[texture(1)]],
@@ -212,7 +327,8 @@ kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
   if (idx >= sp.words) return;
   float d = tex.read(uint2(gid.x, gid.y), gid.z);
   uint s = sten.read(uint2(gid.x, gid.y), gid.z).r & 0xFFu;
-  canonical[idx] = (xe_host_to_depth_d24(d, sp.is_depth) << 8) | s;
+  canonical[idx] =
+      xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
 }
 )MSL";
 
@@ -220,4 +336,4 @@ kernel void pack_depth_ms(depth2d_ms<float, access::read> tex [[texture(0)]],
 }  // namespace gpu
 }  // namespace xe
 
-#endif  // XENIA_GPU_METAL_METAL_EDRAM_DEPTH_MSL_H_
+#endif  // XENIA_GPU_METAL_METAL_EDRAM_MSL_H_
