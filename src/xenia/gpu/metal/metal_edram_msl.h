@@ -171,6 +171,68 @@ inline uint xe_pack_color32(float4 color, uint format) {
       return as_type<uint>(color.r);
   }
 }
+inline float4 xe_unpack_color64(uint2 words, uint format) {
+  switch (format) {
+    default:
+    case 5u: {
+      int4 fixed = int4(as_type<int>(words.x << 16u) >> 16,
+                        as_type<int>(words.x) >> 16,
+                        as_type<int>(words.y << 16u) >> 16,
+                        as_type<int>(words.y) >> 16);
+      return float4(fixed) * (32.0 / 32767.0);
+    }
+    case 7u:
+      return float4(as_type<half4>(words));
+    case 15u:
+      return float4(as_type<float>(words.x), as_type<float>(words.y), 0.0,
+                    0.0);
+  }
+}
+inline uint2 xe_pack_color64(float4 color, uint format) {
+  switch (format) {
+    default:
+    case 5u: {
+      int4 fixed = int4(xe_f32_to_fixed16(color.r),
+                        xe_f32_to_fixed16(color.g),
+                        xe_f32_to_fixed16(color.b),
+                        xe_f32_to_fixed16(color.a));
+      return uint2((uint(fixed.x) & 0xFFFFu) |
+                       (uint(fixed.y) << 16u),
+                   (uint(fixed.z) & 0xFFFFu) |
+                       (uint(fixed.w) << 16u));
+    }
+    case 7u:
+      return as_type<uint2>(half4(color));
+    case 15u:
+      return uint2(as_type<uint>(color.r), as_type<uint>(color.g));
+  }
+}
+inline uint4 xe_unpack_color32_raw(uint word, uint format) {
+  if (format == 6u) {
+    return uint4(word & 0xFFFFu, word >> 16u, 0u, 0u);
+  }
+  return uint4(word, 0u, 0u, 0u);
+}
+inline uint xe_pack_color32_raw(uint4 color, uint format) {
+  if (format == 6u) {
+    return (color.x & 0xFFFFu) | ((color.y & 0xFFFFu) << 16u);
+  }
+  return color.x;
+}
+inline uint4 xe_unpack_color64_raw(uint2 words, uint format) {
+  if (format == 7u) {
+    return uint4(words.x & 0xFFFFu, words.x >> 16u,
+                 words.y & 0xFFFFu, words.y >> 16u);
+  }
+  return uint4(words.x, words.y, 0u, 0u);
+}
+inline uint2 xe_pack_color64_raw(uint4 color, uint format) {
+  if (format == 7u) {
+    return uint2((color.x & 0xFFFFu) | ((color.y & 0xFFFFu) << 16u),
+                 (color.z & 0xFFFFu) | ((color.w & 0xFFFFu) << 16u));
+  }
+  return color.xy;
+}
 inline uint xe_pack_depth_stencil(uint depth24, uint stencil) {
   return ((depth24 & 0xFFFFFFu) << 8u) | (stencil & 0xFFu);
 }
@@ -188,7 +250,9 @@ inline uint xe_authority_tile_of(uint px, uint py, constant SurfaceParams& sp,
                                  uint sample) {
   uint2 sample_xy = uint2(px, py) << xe_edram_msaa_shifts(sp.msaa);
   sample_xy += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-  return sp.base + (sample_xy.y / 16u) * sp.pitch + sample_xy.x / 80u;
+  uint tile_width_samples = 80u >> sp.fmt_log2;
+  return sp.base + (sample_xy.y / 16u) * sp.pitch +
+         sample_xy.x / tile_width_samples;
 }
 inline bool xe_authority_in_range(uint px, uint py,
                                   constant SurfaceParams& sp, uint sample,
@@ -280,6 +344,101 @@ kernel void pack_color_range(
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
   if (idx < sp.words) canonical[idx] = xe_pack_color32(tex.read(gid), format);
+}
+kernel void materialize_color64_range(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<float, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, 0u) >> 2u;
+  uint2 words = idx + 1u < sp.words
+                    ? uint2(canonical[idx], canonical[idx + 1u])
+                    : uint2(0u);
+  tex.write(xe_unpack_color64(words, format), gid);
+}
+kernel void pack_color64_range(
+    texture2d<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, 0u) >> 2u;
+  if (idx + 1u < sp.words) {
+    uint2 words = xe_pack_color64(tex.read(gid), format);
+    canonical[idx] = words.x;
+    canonical[idx + 1u] = words.y;
+  }
+}
+kernel void materialize_color_raw_range(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<uint, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u) >> 2u;
+  uint word = idx < sp.words ? canonical[idx] : 0u;
+  tex.write(xe_unpack_color32_raw(word, format), gid);
+}
+kernel void pack_color_raw_range(
+    texture2d<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, 0u) >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32_raw(tex.read(gid), format);
+  }
+}
+kernel void materialize_color64_raw_range(
+    device const uint* canonical [[buffer(0)]],
+    texture2d<uint, access::write> tex [[texture(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, 0u) >> 2u;
+  uint2 words = idx + 1u < sp.words
+                    ? uint2(canonical[idx], canonical[idx + 1u])
+                    : uint2(0u);
+  tex.write(xe_unpack_color64_raw(words, format), gid);
+}
+kernel void pack_color64_raw_range(
+    texture2d<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, 0u) >> 2u;
+  if (idx + 1u < sp.words) {
+    uint2 words = xe_pack_color64_raw(tex.read(gid), format);
+    canonical[idx] = words.x;
+    canonical[idx + 1u] = words.y;
+  }
 }
 
 // Array-slice per-sample representation used by the isolated compute oracle.
@@ -410,6 +569,113 @@ kernel void pack_color_ms_range(
   if (idx < sp.words) {
     canonical[idx] = xe_pack_color32(tex.read(uint2(gid.x, gid.y), gid.z),
                                      format);
+  }
+}
+fragment float4 materialize_color64_ms_range_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  if (!xe_authority_in_range(pixel.x, pixel.y, sp, sample, range)) {
+    discard_fragment();
+  }
+  uint idx = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 1u, sample) >> 2u;
+  uint2 words = idx + 1u < sp.words
+                    ? uint2(canonical[idx], canonical[idx + 1u])
+                    : uint2(0u);
+  return xe_unpack_color64(words, format);
+}
+kernel void pack_color64_ms_range(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, gid.z, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, gid.z) >> 2u;
+  if (idx + 1u < sp.words) {
+    uint2 words = xe_pack_color64(
+        tex.read(uint2(gid.x, gid.y), gid.z), format);
+    canonical[idx] = words.x;
+    canonical[idx + 1u] = words.y;
+  }
+}
+fragment uint4 materialize_color_raw_ms_range_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  if (!xe_authority_in_range(pixel.x, pixel.y, sp, sample, range)) {
+    discard_fragment();
+  }
+  uint idx = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 0u, sample) >> 2u;
+  uint word = idx < sp.words ? canonical[idx] : 0u;
+  return xe_unpack_color32_raw(word, format);
+}
+kernel void pack_color_raw_ms_range(
+    texture2d_ms<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, gid.z, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 0u, gid.z) >> 2u;
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32_raw(
+        tex.read(uint2(gid.x, gid.y), gid.z), format);
+  }
+}
+fragment uint4 materialize_color64_raw_ms_range_fs(
+    ColorVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint sample [[sample_id]]) {
+  uint2 pixel = uint2(in.pos.xy);
+  if (!xe_authority_in_range(pixel.x, pixel.y, sp, sample, range)) {
+    discard_fragment();
+  }
+  uint idx = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
+                                   sp.msaa, 0u, 1u, sample) >> 2u;
+  uint2 words = idx + 1u < sp.words
+                    ? uint2(canonical[idx], canonical[idx + 1u])
+                    : uint2(0u);
+  return xe_unpack_color64_raw(words, format);
+}
+kernel void pack_color64_raw_ms_range(
+    texture2d_ms<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, gid.z, range)) return;
+  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   0u, 1u, gid.z) >> 2u;
+  if (idx + 1u < sp.words) {
+    uint2 words = xe_pack_color64_raw(
+        tex.read(uint2(gid.x, gid.y), gid.z), format);
+    canonical[idx] = words.x;
+    canonical[idx + 1u] = words.y;
   }
 }
 

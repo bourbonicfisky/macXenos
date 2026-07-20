@@ -778,6 +778,234 @@ struct MetalCompute {
     return out;
   }
 
+  // Range synchronization through the same 32/64bpp kernels used by the live
+  // cache. Input and output canonical buffers are deliberately separate: only
+  // pixels in [start_tile, end_tile) may be copied, while all other output
+  // words must retain `sentinel`.
+  std::vector<uint32_t> RoundTripColorRange(
+      uint32_t w, uint32_t h, uint32_t num_samples, const SurfaceParams& sp,
+      const std::vector<uint32_t>& values, size_t canonical_bytes,
+      MTLPixelFormat pixel_format, uint32_t color_format,
+      uint32_t start_tile, uint32_t end_tile, uint32_t sentinel) {
+    REQUIRE(sp.format_ints_log2 <= 1u);
+    const uint32_t words_per_sample = 1u << sp.format_ints_log2;
+    REQUIRE(values.size() ==
+            size_t(w) * h * num_samples * words_per_sample);
+    id<MTLBuffer> canonical_in =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> canonical_out =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    REQUIRE(canonical_in != nil);
+    REQUIRE(canonical_out != nil);
+    std::memset(canonical_in.contents, 0, canonical_bytes);
+    uint32_t* in_words = static_cast<uint32_t*>(canonical_in.contents);
+    uint32_t* out_words = static_cast<uint32_t*>(canonical_out.contents);
+    std::fill_n(out_words, canonical_bytes / sizeof(uint32_t), sentinel);
+    auto word_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
+      return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa,
+                                        false, sp.format_ints_log2, s) >> 2;
+    };
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        for (uint32_t s = 0; s < num_samples; ++s) {
+          size_t value_index =
+              ((size_t(y) * w + x) * num_samples + s) * words_per_sample;
+          uint32_t offset = word_offset(x, y, s);
+          for (uint32_t word = 0; word < words_per_sample; ++word) {
+            in_words[offset + word] = values[value_index + word];
+          }
+        }
+      }
+    }
+
+    struct RangeParams {
+      uint32_t start_tiles, end_tiles;
+    } range{start_tile, end_tile};
+    id<MTLBuffer> sp_buf = [dev newBufferWithBytes:&sp
+                                            length:sizeof(SurfaceParams)
+                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> range_buf =
+        [dev newBufferWithBytes:&range
+                         length:sizeof(range)
+                        options:MTLResourceStorageModeShared];
+    REQUIRE(sp_buf != nil);
+    REQUIRE(range_buf != nil);
+    NSError* err = nil;
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    REQUIRE(cb != nil);
+    const bool wide = sp.format_ints_log2 != 0u;
+    const bool raw_view = color_format == 6u || color_format == 7u ||
+                          color_format == 14u || color_format == 15u;
+    const MTLPixelFormat sync_pixel_format =
+        color_format == 6u    ? MTLPixelFormatRG16Uint
+        : color_format == 7u  ? MTLPixelFormatRGBA16Uint
+        : color_format == 14u ? MTLPixelFormatR32Uint
+        : color_format == 15u ? MTLPixelFormatRG32Uint
+                              : pixel_format;
+    if (num_samples == 1u) {
+      MTLTextureDescriptor* td = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:pixel_format
+                                       width:w
+                                      height:h
+                                   mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
+                 MTLTextureUsagePixelFormatView;
+      td.storageMode = MTLStorageModeShared;
+      id<MTLTexture> storage_texture = [dev newTextureWithDescriptor:td];
+      REQUIRE(storage_texture != nil);
+      id<MTLTexture> texture =
+          raw_view ? [storage_texture
+                         newTextureViewWithPixelFormat:sync_pixel_format]
+                   : storage_texture;
+      REQUIRE(texture != nil);
+      id<MTLComputePipelineState> materialize = [dev
+          newComputePipelineStateWithFunction:
+              [lib newFunctionWithName:
+                       raw_view
+                           ? (wide ? @"materialize_color64_raw_range"
+                                   : @"materialize_color_raw_range")
+                           : (wide ? @"materialize_color64_range"
+                                   : @"materialize_color_range")]
+                                        error:&err];
+      REQUIRE(materialize != nil);
+      id<MTLComputePipelineState> pack = [dev
+          newComputePipelineStateWithFunction:
+              [lib newFunctionWithName:
+                       raw_view
+                           ? (wide ? @"pack_color64_raw_range"
+                                   : @"pack_color_raw_range")
+                           : (wide ? @"pack_color64_range"
+                                   : @"pack_color_range")]
+                                        error:&err];
+      REQUIRE(pack != nil);
+      auto dispatch = [&](id<MTLComputeCommandEncoder> encoder,
+                          id<MTLComputePipelineState> pipeline) {
+        [encoder setComputePipelineState:pipeline];
+        NSUInteger tw = pipeline.threadExecutionWidth;
+        NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
+        [encoder dispatchThreads:MTLSizeMake(w, h, 1u)
+            threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
+      };
+      {
+        id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+        [encoder setBuffer:canonical_in offset:0 atIndex:0];
+        [encoder setTexture:texture atIndex:0];
+        [encoder setBuffer:sp_buf offset:0 atIndex:1];
+        [encoder setBytes:&color_format length:sizeof(color_format) atIndex:2];
+        [encoder setBuffer:range_buf offset:0 atIndex:3];
+        dispatch(encoder, materialize);
+        [encoder endEncoding];
+      }
+      {
+        id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+        [encoder setTexture:texture atIndex:0];
+        [encoder setBuffer:canonical_out offset:0 atIndex:0];
+        [encoder setBuffer:sp_buf offset:0 atIndex:1];
+        [encoder setBytes:&color_format length:sizeof(color_format) atIndex:2];
+        [encoder setBuffer:range_buf offset:0 atIndex:3];
+        dispatch(encoder, pack);
+        [encoder endEncoding];
+      }
+    } else {
+      MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+      td.textureType = MTLTextureType2DMultisample;
+      td.pixelFormat = pixel_format;
+      td.width = w;
+      td.height = h;
+      td.sampleCount = num_samples;
+      td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                 MTLTextureUsagePixelFormatView;
+      td.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> storage_texture = [dev newTextureWithDescriptor:td];
+      REQUIRE(storage_texture != nil);
+      id<MTLTexture> texture =
+          raw_view ? [storage_texture
+                         newTextureViewWithPixelFormat:sync_pixel_format]
+                   : storage_texture;
+      REQUIRE(texture != nil);
+      MTLRenderPipelineDescriptor* rpd =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      rpd.vertexFunction = [lib newFunctionWithName:@"xe_color_vs"];
+      rpd.fragmentFunction =
+          [lib newFunctionWithName:
+                   raw_view
+                       ? (wide ? @"materialize_color64_raw_ms_range_fs"
+                               : @"materialize_color_raw_ms_range_fs")
+                       : (wide ? @"materialize_color64_ms_range_fs"
+                               : @"materialize_color_ms_range_fs")];
+      rpd.colorAttachments[0].pixelFormat = sync_pixel_format;
+      rpd.rasterSampleCount = num_samples;
+      id<MTLRenderPipelineState> materialize =
+          [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
+      REQUIRE(materialize != nil);
+      id<MTLComputePipelineState> pack = [dev
+          newComputePipelineStateWithFunction:
+              [lib newFunctionWithName:
+                       raw_view
+                           ? (wide ? @"pack_color64_raw_ms_range"
+                                   : @"pack_color_raw_ms_range")
+                           : (wide ? @"pack_color64_ms_range"
+                                   : @"pack_color_ms_range")]
+                                        error:&err];
+      REQUIRE(pack != nil);
+      {
+        MTLRenderPassDescriptor* rp =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = texture;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        id<MTLRenderCommandEncoder> encoder =
+            [cb renderCommandEncoderWithDescriptor:rp];
+        [encoder setRenderPipelineState:materialize];
+        [encoder setFragmentBuffer:canonical_in offset:0 atIndex:0];
+        [encoder setFragmentBuffer:sp_buf offset:0 atIndex:1];
+        [encoder setFragmentBytes:&color_format
+                           length:sizeof(color_format)
+                          atIndex:2];
+        [encoder setFragmentBuffer:range_buf offset:0 atIndex:3];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:3];
+        [encoder endEncoding];
+      }
+      {
+        id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+        [encoder setComputePipelineState:pack];
+        [encoder setTexture:texture atIndex:0];
+        [encoder setBuffer:canonical_out offset:0 atIndex:0];
+        [encoder setBuffer:sp_buf offset:0 atIndex:1];
+        [encoder setBytes:&color_format length:sizeof(color_format) atIndex:2];
+        [encoder setBuffer:range_buf offset:0 atIndex:3];
+        NSUInteger tw = pack.threadExecutionWidth;
+        NSUInteger th = pack.maxTotalThreadsPerThreadgroup / tw;
+        [encoder dispatchThreads:MTLSizeMake(w, h, num_samples)
+            threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
+        [encoder endEncoding];
+      }
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+
+    std::vector<uint32_t> result(values.size());
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        for (uint32_t s = 0; s < num_samples; ++s) {
+          size_t value_index =
+              ((size_t(y) * w + x) * num_samples + s) * words_per_sample;
+          uint32_t offset = word_offset(x, y, s);
+          for (uint32_t word = 0; word < words_per_sample; ++word) {
+            result[value_index + word] = out_words[offset + word];
+          }
+        }
+      }
+    }
+    return result;
+  }
+
   // Depth canonical round-trip: seed canonical with a d24 word at each pixel's
   // DEPTH offset, materialize into a host D32Float depth texture via an SV_Depth
   // render pass, pack it back with pack_depth, and return the re-packed canonical
@@ -1899,6 +2127,169 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
         }
       }
       INFO(surface.name << " " << format.name);
+      REQUIRE(bad == 0u);
+    }
+  }
+}
+
+TEST_CASE("Canonical 64bpp range transfers preserve both words per sample",
+          "[l1][metal][materialize][color64][range][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct SurfaceCfg {
+    uint32_t msaa, samples;
+    const char* name;
+  } surface_cfgs[] = {
+      {0u, 1u, "1x"}, {1u, 2u, "2x"}, {2u, 4u, "4x"}};
+  struct FormatCfg {
+    const char* name;
+    uint32_t format;
+    MTLPixelFormat pixel_format;
+  } format_cfgs[] = {
+      {"16_16_16_16", 5u, MTLPixelFormatRGBA32Float},
+      {"16_16_16_16_FLOAT", 7u, MTLPixelFormatRGBA16Float},
+      {"32_32_FLOAT", 15u, MTLPixelFormatRG32Float},
+  };
+  constexpr uint32_t w = 48u, h = 24u, base = 5u;
+  constexpr uint32_t range_start = base, range_end = base + 1u;
+  constexpr uint32_t sentinel = 0xD15EA5EDu;
+  constexpr uint32_t tile_bytes = 80u * 16u * sizeof(uint32_t);
+  for (const SurfaceCfg& surface : surface_cfgs) {
+    const uint32_t pitch = PitchFor(w, surface.msaa, 1u);
+    SurfaceParams sp{base, pitch, surface.msaa, 0u, 1u,
+                     uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))};
+    for (const FormatCfg& format : format_cfgs) {
+      const size_t sample_count = size_t(w) * h * surface.samples;
+      std::vector<uint32_t> values(sample_count * 2u);
+      for (size_t i = 0; i < sample_count; ++i) {
+        if (format.format == 5u) {
+          // Every signed-16 lane is exactly representable in the float32
+          // working view, including the -32768 endpoint.
+          values[i * 2u] = uint32_t(i * 40503u + 0x8000u) |
+                            (uint32_t(i * 25173u + 0x7FFFu) << 16u);
+          values[i * 2u + 1u] = uint32_t(i * 32771u + 0xFFFFu) |
+                                 (uint32_t(i * 16411u) << 16u);
+        } else if (format.format == 7u) {
+          // Raw half lanes, including explicit signaling/quiet NaN payloads,
+          // catch float-path canonicalization instead of merely testing finite
+          // values that happen to survive a numeric round trip.
+          values[i * 2u] = uint32_t(i * 40503u + 0x7C01u) |
+                            (uint32_t(i * 25173u + 0x7E55u) << 16u);
+          values[i * 2u + 1u] = uint32_t(i * 32771u + 0xFC01u) |
+                                 (uint32_t(i * 16411u + 0x3555u) << 16u);
+        } else {
+          // Raw float words, likewise forcing both NaN kinds and payloads.
+          values[i * 2u] = uint32_t(i * 2654435761u) ^ 0x7F800001u;
+          values[i * 2u + 1u] = uint32_t(i * 2246822519u) ^ 0x7FC12345u;
+        }
+      }
+      auto out = mc.RoundTripColorRange(
+          w, h, surface.samples, sp, values, xenos::kEdramSizeBytes,
+          format.pixel_format, format.format, range_start, range_end, sentinel);
+      uint32_t bad = 0u;
+      uint32_t outside_bad = 0u;
+      for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+          for (uint32_t s = 0; s < surface.samples; ++s) {
+            const size_t sample_index =
+                (size_t(y) * w + x) * surface.samples + s;
+            const size_t value_index = sample_index * 2u;
+            uint32_t offset = XeEdramSnapshotOffsetBytes(
+                x, y, base, pitch, surface.msaa, false, 1u, s);
+            uint32_t tile = offset / tile_bytes;
+            const bool in_range = tile >= range_start && tile < range_end;
+            for (uint32_t word = 0; word < 2u; ++word) {
+              uint32_t expected =
+                  in_range ? values[value_index + word] : sentinel;
+              if (out[value_index + word] != expected) {
+                if (bad < 8u) {
+                  WARN(surface.name << " " << format.name << " pixel " << x
+                                    << "," << y << " sample " << s << " word "
+                                    << word << " tile " << tile << " expected "
+                                    << expected << " got "
+                                    << out[value_index + word]);
+                }
+                ++bad;
+                if (!in_range) {
+                  ++outside_bad;
+                }
+              }
+            }
+          }
+        }
+      }
+      INFO(surface.name << " " << format.name);
+      CHECK(outside_bad == 0u);
+      REQUIRE(bad == 0u);
+    }
+  }
+}
+
+TEST_CASE("Canonical float-storage range transfers preserve raw 32-bit words",
+          "[l1][metal][materialize][color32][raw][range][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct SurfaceCfg {
+    uint32_t msaa, samples;
+    const char* name;
+  } surface_cfgs[] = {
+      {0u, 1u, "1x"}, {1u, 2u, "2x"}, {2u, 4u, "4x"}};
+  struct FormatCfg {
+    const char* name;
+    uint32_t format;
+    MTLPixelFormat pixel_format;
+  } format_cfgs[] = {
+      {"16_16_FLOAT", 6u, MTLPixelFormatRG16Float},
+      {"32_FLOAT", 14u, MTLPixelFormatR32Float},
+  };
+  constexpr uint32_t w = 88u, h = 20u, base = 9u;
+  constexpr uint32_t range_start = base, range_end = base + 1u;
+  constexpr uint32_t sentinel = 0xA11A51A5u;
+  constexpr uint32_t tile_bytes = 80u * 16u * sizeof(uint32_t);
+  for (const SurfaceCfg& surface : surface_cfgs) {
+    const uint32_t pitch = PitchFor(w, surface.msaa, 0u);
+    SurfaceParams sp{base, pitch, surface.msaa, 0u, 0u,
+                     uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))};
+    for (const FormatCfg& format : format_cfgs) {
+      const size_t sample_count = size_t(w) * h * surface.samples;
+      std::vector<uint32_t> values(sample_count);
+      for (size_t i = 0; i < sample_count; ++i) {
+        values[i] = format.format == 6u
+                        ? (uint32_t(i * 40503u + 0x7C01u) |
+                           (uint32_t(i * 25173u + 0xFE55u) << 16u))
+                        : (uint32_t(i * 2654435761u) ^ 0x7F812345u);
+      }
+      auto out = mc.RoundTripColorRange(
+          w, h, surface.samples, sp, values, xenos::kEdramSizeBytes,
+          format.pixel_format, format.format, range_start, range_end, sentinel);
+      uint32_t bad = 0u;
+      uint32_t outside_bad = 0u;
+      for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+          for (uint32_t s = 0; s < surface.samples; ++s) {
+            const size_t index = (size_t(y) * w + x) * surface.samples + s;
+            uint32_t offset = XeEdramSnapshotOffsetBytes(
+                x, y, base, pitch, surface.msaa, false, 0u, s);
+            uint32_t tile = offset / tile_bytes;
+            const bool in_range = tile >= range_start && tile < range_end;
+            uint32_t expected = in_range ? values[index] : sentinel;
+            if (out[index] != expected) {
+              if (bad < 8u) {
+                WARN(surface.name << " " << format.name << " pixel " << x
+                                  << "," << y << " sample " << s << " tile "
+                                  << tile << " expected " << expected << " got "
+                                  << out[index]);
+              }
+              ++bad;
+              if (!in_range) {
+                ++outside_bad;
+              }
+            }
+          }
+        }
+      }
+      INFO(surface.name << " " << format.name);
+      CHECK(outside_bad == 0u);
       REQUIRE(bad == 0u);
     }
   }

@@ -424,11 +424,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* canonical_materialize_library_ = nullptr;   // id<MTLLibrary>.
   void* canonical_materialize_pipeline_ = nullptr;  // Generic corpus color.
   void* canonical_pack_pipeline_ = nullptr;         // Generic corpus color.
+  void* canonical_materialize64_pipeline_ = nullptr;
+  void* canonical_pack64_pipeline_ = nullptr;
+  void* canonical_materialize_raw_pipeline_ = nullptr;
+  void* canonical_pack_raw_pipeline_ = nullptr;
+  void* canonical_materialize64_raw_pipeline_ = nullptr;
+  void* canonical_pack64_raw_pipeline_ = nullptr;
   // Real 2x/4x color conversion pipelines. Materialize PSOs are keyed by host
   // pixel format and sample count; the texture2d_ms pack kernel is generic.
   std::unordered_map<uint64_t, void*>
       canonical_color_msaa_materialize_pipelines_;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
+  void* canonical_color64_msaa_pack_pipeline_ = nullptr;
+  void* canonical_color_raw_msaa_pack_pipeline_ = nullptr;
+  void* canonical_color64_raw_msaa_pack_pipeline_ = nullptr;
   bool EnsureCanonicalMaterializePipeline();
   void* EnsureCanonicalColorMsaaMaterializePipeline(
       MetalRenderTarget* render_target);

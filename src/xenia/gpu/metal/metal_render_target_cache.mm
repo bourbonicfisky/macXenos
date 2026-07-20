@@ -85,6 +85,58 @@ void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
   x_shift = shifts.x;
   y_shift = shifts.y;
 }
+bool IsCanonicalColorFormatSupported(xenos::ColorRenderTargetFormat format) {
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return true;
+    default:
+      return false;
+  }
+}
+bool IsCanonicalColorRawViewFormat(
+    xenos::ColorRenderTargetFormat format) {
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return true;
+    default:
+      return false;
+  }
+}
+MTLPixelFormat CanonicalColorSyncPixelFormat(
+    xenos::ColorRenderTargetFormat format, MTLPixelFormat storage_format) {
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+      return MTLPixelFormatRG16Uint;
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      return MTLPixelFormatRGBA16Uint;
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+      return MTLPixelFormatR32Uint;
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return MTLPixelFormatRG32Uint;
+    default:
+      return storage_format;
+  }
+}
+id<MTLTexture> GetCanonicalColorSyncTexture(
+    id<MTLTexture> storage_texture, xenos::ColorRenderTargetFormat format) {
+  if (!storage_texture || !IsCanonicalColorRawViewFormat(format)) {
+    return storage_texture;
+  }
+  return [storage_texture
+      newTextureViewWithPixelFormat:CanonicalColorSyncPixelFormat(
+                                        format, storage_texture.pixelFormat)];
+}
 }  // namespace
 
 MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
@@ -280,6 +332,12 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
     canonical_pack_pipeline_ = nullptr;
   }
+  release_compute_pipeline(canonical_materialize64_pipeline_);
+  release_compute_pipeline(canonical_pack64_pipeline_);
+  release_compute_pipeline(canonical_materialize_raw_pipeline_);
+  release_compute_pipeline(canonical_pack_raw_pipeline_);
+  release_compute_pipeline(canonical_materialize64_raw_pipeline_);
+  release_compute_pipeline(canonical_pack64_raw_pipeline_);
   for (auto& pair : canonical_color_msaa_materialize_pipelines_) {
     id<MTLRenderPipelineState> released =
         (__bridge_transfer id<MTLRenderPipelineState>)pair.second;
@@ -293,6 +351,9 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
     canonical_color_msaa_pack_pipeline_ = nullptr;
   }
+  release_compute_pipeline(canonical_color64_msaa_pack_pipeline_);
+  release_compute_pipeline(canonical_color_raw_msaa_pack_pipeline_);
+  release_compute_pipeline(canonical_color64_raw_msaa_pack_pipeline_);
   if (canonical_materialize_library_) {
     id<MTLLibrary> released =
         (__bridge_transfer id<MTLLibrary>)canonical_materialize_library_;
@@ -351,6 +412,14 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     // both original signed words exactly.
     pixel_format = MTLPixelFormatRG32Float;
   }
+  if (sample_edram_enabled_ && !key.is_depth &&
+      key.GetColorFormat() ==
+          xenos::ColorRenderTargetFormat::k_16_16_16_16) {
+    // The four-component fixed format has the same -32..32 guest domain. A
+    // normalized 16-bit host target would clamp it to -1..1 before canonical
+    // packing, so retain the decoded values in a float32 working view.
+    pixel_format = MTLPixelFormatRGBA32Float;
+  }
   // Mainline sizing: pitch_tiles_at_32bpp is SAMPLE-space (a 4x key's pitch is
   // doubled), GetWidth()/GetRenderTargetHeight() convert to msaa-aware PIXEL
   // dimensions. Textures are still single-sample (no host MSAA) — MSAA'd guest
@@ -369,6 +438,10 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
                                mipmapped:NO];
   // Sampled by the depth-convert / snapshot-blit paths and by transfers.
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  if (sample_edram_enabled_ && !key.is_depth &&
+      IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+    desc.usage |= MTLTextureUsagePixelFormatView;
+  }
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
@@ -397,6 +470,10 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     mdesc.height = height;
     mdesc.sampleCount = sample_count;
     mdesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    if (!key.is_depth &&
+        IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+      mdesc.usage |= MTLTextureUsagePixelFormatView;
+    }
     mdesc.storageMode = MTLStorageModePrivate;
     id<MTLTexture> msaa_texture = [device newTextureWithDescriptor:mdesc];
     if (msaa_texture) {
@@ -723,19 +800,22 @@ void MetalRenderTargetCache::PerformTransfers(
           dest->pixel_format() == uint64_t(MTLPixelFormatR32Float);
       TransferKind kind = ClassifyTransfer(tci);
       RecordTransition(kind, src_key, dest_key, transfer);
-      bool exact_guest_format =
-          src_key.is_depth == dest_key.is_depth &&
-          (src_key.is_depth
-               ? src_key.GetDepthFormat() == dest_key.GetDepthFormat()
-               : src_key.GetColorFormat() == dest_key.GetColorFormat());
-      if (sample_edram_raster_enabled_ && exact_guest_format &&
-          !src_key.Is64bpp() && !dest_key.Is64bpp()) {
-        // Task 4.1: exact-format ownership no longer reconstructs a destination
-        // from a collapsed host view. PrepareCurrentRasterViews consumes the
-        // same physical interval through the authority scheduler, packing the
-        // authoritative attachment and materializing every canonical sample.
-        // Reinterpret/conversion classes remain on the legacy branches until
-        // task 4.2.
+      auto canonical_format_supported = [](const RenderTargetKey& key) {
+        if (key.is_depth) {
+          return true;
+        }
+        return IsCanonicalColorFormatSupported(key.GetColorFormat());
+      };
+      if (sample_edram_raster_enabled_ &&
+          canonical_format_supported(src_key) &&
+          canonical_format_supported(dest_key)) {
+        // Tasks 4.1/4.2: canonical raw words make exact-format copies,
+        // cross-MSAA ownership, color-format reinterpretation, and
+        // color<->depth/stencil aliasing the same operation. The scheduler
+        // packs through the producer's interpretation, then materializes
+        // through the consumer's, preserving the physical words in between.
+        // Two-word 64bpp views use the same physical scheduler with wide
+        // materialize/pack kernels.
         if (blit) {
           [blit endEncoding];
           blit = nil;
@@ -3420,7 +3500,11 @@ uint32_t MetalRenderTargetCache::GetTraceDrawIndexForOwnershipTrace() const {
 }
 
 bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
-  if (canonical_materialize_pipeline_) {
+  if (canonical_materialize_pipeline_ && canonical_pack_pipeline_ &&
+      canonical_materialize64_pipeline_ && canonical_pack64_pipeline_ &&
+      canonical_materialize_raw_pipeline_ && canonical_pack_raw_pipeline_ &&
+      canonical_materialize64_raw_pipeline_ &&
+      canonical_pack64_raw_pipeline_) {
     return true;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
@@ -3449,7 +3533,32 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
       newComputePipelineStateWithFunction:
           [lib newFunctionWithName:@"pack_color_range"]
                                     error:&err];
-  if (!pso || !pack) {
+  id<MTLComputePipelineState> pso64 = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"materialize_color64_range"]
+                                    error:&err];
+  id<MTLComputePipelineState> pack64 = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"pack_color64_range"]
+                                    error:&err];
+  id<MTLComputePipelineState> pso_raw = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"materialize_color_raw_range"]
+                                    error:&err];
+  id<MTLComputePipelineState> pack_raw = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"pack_color_raw_range"]
+                                    error:&err];
+  id<MTLComputePipelineState> pso64_raw = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"materialize_color64_raw_range"]
+                                    error:&err];
+  id<MTLComputePipelineState> pack64_raw = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:@"pack_color64_raw_range"]
+                                    error:&err];
+  if (!pso || !pack || !pso64 || !pack64 || !pso_raw || !pack_raw ||
+      !pso64_raw || !pack64_raw) {
     XELOGE("MetalRenderTargetCache: canonical materialize/pack pipeline "
            "failed: {}",
            err ? err.localizedDescription.UTF8String : "?");
@@ -3457,6 +3566,13 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
   }
   canonical_materialize_pipeline_ = (__bridge_retained void*)pso;
   canonical_pack_pipeline_ = (__bridge_retained void*)pack;
+  canonical_materialize64_pipeline_ = (__bridge_retained void*)pso64;
+  canonical_pack64_pipeline_ = (__bridge_retained void*)pack64;
+  canonical_materialize_raw_pipeline_ = (__bridge_retained void*)pso_raw;
+  canonical_pack_raw_pipeline_ = (__bridge_retained void*)pack_raw;
+  canonical_materialize64_raw_pipeline_ =
+      (__bridge_retained void*)pso64_raw;
+  canonical_pack64_raw_pipeline_ = (__bridge_retained void*)pack64_raw;
   return true;
 }
 
@@ -3468,9 +3584,16 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
       !EnsureCanonicalMaterializePipeline()) {
     return nullptr;
   }
+  const xenos::ColorRenderTargetFormat format =
+      render_target->key().GetColorFormat();
+  const bool raw_view = IsCanonicalColorRawViewFormat(format);
+  const bool is_64bpp = render_target->key().Is64bpp();
+  const MTLPixelFormat sync_pixel_format = CanonicalColorSyncPixelFormat(
+      format, (MTLPixelFormat)render_target->pixel_format());
   const uint64_t key =
-      render_target->pixel_format() |
-      (uint64_t(render_target->sample_count()) << 32u);
+      uint64_t(sync_pixel_format) |
+      (uint64_t(render_target->sample_count()) << 32u) |
+      (uint64_t(raw_view) << 62u) | (uint64_t(is_64bpp) << 63u);
   auto found = canonical_color_msaa_materialize_pipelines_.find(key);
   if (found != canonical_color_msaa_materialize_pipelines_.end()) {
     return found->second;
@@ -3482,10 +3605,14 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
   MTLRenderPipelineDescriptor* descriptor =
       [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.vertexFunction = [library newFunctionWithName:@"xe_color_vs"];
+  NSString* materialize_name =
+      raw_view ? (is_64bpp ? @"materialize_color64_raw_ms_range_fs"
+                           : @"materialize_color_raw_ms_range_fs")
+               : (is_64bpp ? @"materialize_color64_ms_range_fs"
+                            : @"materialize_color_ms_range_fs");
   descriptor.fragmentFunction =
-      [library newFunctionWithName:@"materialize_color_ms_range_fs"];
-  descriptor.colorAttachments[0].pixelFormat =
-      (MTLPixelFormat)render_target->pixel_format();
+      [library newFunctionWithName:materialize_name];
+  descriptor.colorAttachments[0].pixelFormat = sync_pixel_format;
   descriptor.rasterSampleCount = render_target->sample_count();
   id<MTLRenderPipelineState> materialize =
       [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
@@ -3493,14 +3620,25 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
     XELOGE(
         "MetalRenderTargetCache: {}x canonical color MSAA materialize "
         "pipeline failed for format {}: {}",
-        render_target->sample_count(), render_target->pixel_format(),
+        render_target->sample_count(), uint32_t(sync_pixel_format),
         error ? error.localizedDescription.UTF8String : "?");
     return nullptr;
   }
-  if (!canonical_color_msaa_pack_pipeline_) {
+  void*& pack_pipeline =
+      raw_view
+          ? (is_64bpp ? canonical_color64_raw_msaa_pack_pipeline_
+                      : canonical_color_raw_msaa_pack_pipeline_)
+          : (is_64bpp ? canonical_color64_msaa_pack_pipeline_
+                      : canonical_color_msaa_pack_pipeline_);
+  if (!pack_pipeline) {
     id<MTLComputePipelineState> pack = [device
         newComputePipelineStateWithFunction:
-            [library newFunctionWithName:@"pack_color_ms_range"]
+            [library newFunctionWithName:
+                         raw_view
+                             ? (is_64bpp ? @"pack_color64_raw_ms_range"
+                                         : @"pack_color_raw_ms_range")
+                             : (is_64bpp ? @"pack_color64_ms_range"
+                                         : @"pack_color_ms_range")]
                                       error:&error];
     if (!pack) {
       XELOGE("MetalRenderTargetCache: canonical color MSAA pack pipeline "
@@ -3508,7 +3646,7 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
              error ? error.localizedDescription.UTF8String : "?");
       return nullptr;
     }
-    canonical_color_msaa_pack_pipeline_ = (__bridge_retained void*)pack;
+    pack_pipeline = (__bridge_retained void*)pack;
   }
   void* retained = (__bridge_retained void*)materialize;
   canonical_color_msaa_materialize_pipelines_.emplace(key, retained);
@@ -3525,27 +3663,43 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
     return false;
   }
   auto* target = static_cast<MetalRenderTarget*>(render_target);
-  uint32_t format = uint32_t(target->key().GetColorFormat());
-  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+  const xenos::ColorRenderTargetFormat color_format =
+      target->key().GetColorFormat();
+  uint32_t format = uint32_t(color_format);
+  if (!IsCanonicalColorFormatSupported(color_format)) {
     return false;
   }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
-  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  id<MTLTexture> texture = GetCanonicalColorSyncTexture(
+      (__bridge id<MTLTexture>)target->texture(), color_format);
+  if (!texture) {
+    return false;
+  }
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  const bool raw_view = IsCanonicalColorRawViewFormat(color_format);
+  const bool is_64bpp = target->key().Is64bpp();
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)canonical_materialize_pipeline_;
+      (__bridge id<MTLComputePipelineState>)(
+          raw_view ? (is_64bpp ? canonical_materialize64_raw_pipeline_
+                               : canonical_materialize_raw_pipeline_)
+                   : (is_64bpp ? canonical_materialize64_pipeline_
+                               : canonical_materialize_pipeline_));
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), 0u, 0u,
+      uint32_t(target->key().msaa_samples), 0u,
+      uint32_t(target->key().Is64bpp()),
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-materialize-range";
+  encoder.label = raw_view
+                      ? (is_64bpp
+                             ? @"rtcache:canonical-color64-raw-materialize-range"
+                             : @"rtcache:canonical-color-raw-materialize-range")
+                      : (is_64bpp
+                             ? @"rtcache:canonical-color64-materialize-range"
+                             : @"rtcache:canonical-color-materialize-range");
   [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setTexture:texture atIndex:0];
@@ -3570,27 +3724,42 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
     return false;
   }
   auto* target = static_cast<MetalRenderTarget*>(render_target);
-  uint32_t format = uint32_t(target->key().GetColorFormat());
-  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+  const xenos::ColorRenderTargetFormat color_format =
+      target->key().GetColorFormat();
+  uint32_t format = uint32_t(color_format);
+  if (!IsCanonicalColorFormatSupported(color_format)) {
     return false;
   }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
-  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  id<MTLTexture> texture = GetCanonicalColorSyncTexture(
+      (__bridge id<MTLTexture>)target->texture(), color_format);
+  if (!texture) {
+    return false;
+  }
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  const bool raw_view = IsCanonicalColorRawViewFormat(color_format);
+  const bool is_64bpp = target->key().Is64bpp();
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)canonical_pack_pipeline_;
+      (__bridge id<MTLComputePipelineState>)(
+          raw_view ? (is_64bpp ? canonical_pack64_raw_pipeline_
+                               : canonical_pack_raw_pipeline_)
+                   : (is_64bpp ? canonical_pack64_pipeline_
+                               : canonical_pack_pipeline_));
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), 0u, 0u,
+      uint32_t(target->key().msaa_samples), 0u,
+      uint32_t(target->key().Is64bpp()),
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-pack-range";
+  encoder.label = raw_view
+                      ? (is_64bpp
+                             ? @"rtcache:canonical-color64-raw-pack-range"
+                             : @"rtcache:canonical-color-raw-pack-range")
+                      : (is_64bpp ? @"rtcache:canonical-color64-pack-range"
+                                  : @"rtcache:canonical-color-pack-range");
   [encoder setComputePipelineState:pipeline];
   [encoder setTexture:texture atIndex:0];
   [encoder setBuffer:canonical offset:0 atIndex:0];
@@ -3614,11 +3783,10 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
     return false;
   }
   auto* target = static_cast<MetalRenderTarget*>(render_target);
-  uint32_t format = uint32_t(target->key().GetColorFormat());
-  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT)) {
+  const xenos::ColorRenderTargetFormat color_format =
+      target->key().GetColorFormat();
+  uint32_t format = uint32_t(color_format);
+  if (!IsCanonicalColorFormatSupported(color_format)) {
     return false;
   }
   void* pipeline_opaque =
@@ -3628,14 +3796,18 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
   }
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
-  id<MTLTexture> texture =
-      (__bridge id<MTLTexture>)target->msaa_texture();
+  id<MTLTexture> texture = GetCanonicalColorSyncTexture(
+      (__bridge id<MTLTexture>)target->msaa_texture(), color_format);
+  if (!texture) {
+    return false;
+  }
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
   id<MTLRenderPipelineState> pipeline =
       (__bridge id<MTLRenderPipelineState>)pipeline_opaque;
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), 0u, 0u,
+      uint32_t(target->key().msaa_samples), 0u,
+      uint32_t(target->key().Is64bpp()),
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
@@ -3647,7 +3819,16 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
-  encoder.label = @"rtcache:canonical-color-materialize-msaa-range";
+  const bool raw_view = IsCanonicalColorRawViewFormat(color_format);
+  const bool is_64bpp = target->key().Is64bpp();
+  encoder.label =
+      raw_view
+          ? (is_64bpp
+                 ? @"rtcache:canonical-color64-raw-materialize-msaa-range"
+                 : @"rtcache:canonical-color-raw-materialize-msaa-range")
+          : (is_64bpp
+                 ? @"rtcache:canonical-color64-materialize-msaa-range"
+                 : @"rtcache:canonical-color-materialize-msaa-range");
   [encoder setRenderPipelineState:pipeline];
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
@@ -3667,30 +3848,46 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
     return false;
   }
   auto* target = static_cast<MetalRenderTarget*>(render_target);
-  uint32_t format = uint32_t(target->key().GetColorFormat());
-  if (format != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_16_16) &&
-      format != uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT) ||
+  const xenos::ColorRenderTargetFormat color_format =
+      target->key().GetColorFormat();
+  uint32_t format = uint32_t(color_format);
+  if (!IsCanonicalColorFormatSupported(color_format) ||
       !EnsureCanonicalColorMsaaMaterializePipeline(target)) {
     return false;
   }
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
-  id<MTLTexture> texture =
-      (__bridge id<MTLTexture>)target->msaa_texture();
+  id<MTLTexture> texture = GetCanonicalColorSyncTexture(
+      (__bridge id<MTLTexture>)target->msaa_texture(), color_format);
+  if (!texture) {
+    return false;
+  }
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  const bool raw_view = IsCanonicalColorRawViewFormat(color_format);
+  const bool is_64bpp = target->key().Is64bpp();
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)canonical_color_msaa_pack_pipeline_;
+      (__bridge id<MTLComputePipelineState>)(
+          raw_view
+              ? (is_64bpp ? canonical_color64_raw_msaa_pack_pipeline_
+                          : canonical_color_raw_msaa_pack_pipeline_)
+              : (is_64bpp ? canonical_color64_msaa_pack_pipeline_
+                          : canonical_color_msaa_pack_pipeline_));
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), 0u, 0u,
+      uint32_t(target->key().msaa_samples), 0u,
+      uint32_t(target->key().Is64bpp()),
       kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-color-pack-msaa-range";
+  encoder.label = raw_view
+                      ? (is_64bpp
+                             ? @"rtcache:canonical-color64-raw-pack-msaa-range"
+                             : @"rtcache:canonical-color-raw-pack-msaa-range")
+                      : (is_64bpp
+                             ? @"rtcache:canonical-color64-pack-msaa-range"
+                             : @"rtcache:canonical-color-pack-msaa-range");
   [encoder setComputePipelineState:pipeline];
   [encoder setTexture:texture atIndex:0];
   [encoder setBuffer:canonical offset:0 atIndex:0];
