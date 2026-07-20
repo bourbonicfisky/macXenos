@@ -129,7 +129,14 @@ bool MetalRenderTargetCache::Initialize() {
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM");
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
-  canonical_depth_enabled_ = std::getenv("XE_METAL_CANONICAL_DEPTH") != nullptr;
+  const bool canonical_depth_requested =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_CANONICAL_DEPTH");
+  canonical_depth_enabled_ = sample_edram_enabled_ && canonical_depth_requested;
+  if (canonical_depth_requested && !sample_edram_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: ignoring XE_METAL_CANONICAL_DEPTH=1 because "
+        "XE_METAL_SAMPLE_EDRAM=1 is not active");
+  }
   if (sample_edram_enabled_ || canonical_depth_enabled_) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
     id<MTLBuffer> buffer =
