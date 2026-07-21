@@ -217,82 +217,92 @@ bool MetalPipelineCache::TranslateShader(
 }
 
 namespace {
-MTLBlendFactor ToMetalBlendFactor(xenos::BlendFactor factor) {
+MTLBlendFactor ToMetalBlendFactor(MetalBlendFactor factor) {
   switch (factor) {
-    case xenos::BlendFactor::kZero:
+    case MetalBlendFactor::kZero:
       return MTLBlendFactorZero;
-    case xenos::BlendFactor::kOne:
+    case MetalBlendFactor::kOne:
       return MTLBlendFactorOne;
-    case xenos::BlendFactor::kSrcColor:
+    case MetalBlendFactor::kSourceColor:
       return MTLBlendFactorSourceColor;
-    case xenos::BlendFactor::kOneMinusSrcColor:
+    case MetalBlendFactor::kOneMinusSourceColor:
       return MTLBlendFactorOneMinusSourceColor;
-    case xenos::BlendFactor::kSrcAlpha:
+    case MetalBlendFactor::kSourceAlpha:
       return MTLBlendFactorSourceAlpha;
-    case xenos::BlendFactor::kOneMinusSrcAlpha:
+    case MetalBlendFactor::kOneMinusSourceAlpha:
       return MTLBlendFactorOneMinusSourceAlpha;
-    case xenos::BlendFactor::kDstColor:
+    case MetalBlendFactor::kDestinationColor:
       return MTLBlendFactorDestinationColor;
-    case xenos::BlendFactor::kOneMinusDstColor:
+    case MetalBlendFactor::kOneMinusDestinationColor:
       return MTLBlendFactorOneMinusDestinationColor;
-    case xenos::BlendFactor::kDstAlpha:
+    case MetalBlendFactor::kDestinationAlpha:
       return MTLBlendFactorDestinationAlpha;
-    case xenos::BlendFactor::kOneMinusDstAlpha:
+    case MetalBlendFactor::kOneMinusDestinationAlpha:
       return MTLBlendFactorOneMinusDestinationAlpha;
-    case xenos::BlendFactor::kConstantColor:
+    case MetalBlendFactor::kBlendColor:
       return MTLBlendFactorBlendColor;
-    case xenos::BlendFactor::kOneMinusConstantColor:
+    case MetalBlendFactor::kOneMinusBlendColor:
       return MTLBlendFactorOneMinusBlendColor;
-    case xenos::BlendFactor::kConstantAlpha:
+    case MetalBlendFactor::kBlendAlpha:
       return MTLBlendFactorBlendAlpha;
-    case xenos::BlendFactor::kOneMinusConstantAlpha:
+    case MetalBlendFactor::kOneMinusBlendAlpha:
       return MTLBlendFactorOneMinusBlendAlpha;
-    case xenos::BlendFactor::kSrcAlphaSaturate:
+    case MetalBlendFactor::kSourceAlphaSaturated:
       return MTLBlendFactorSourceAlphaSaturated;
     default:
-      return MTLBlendFactorOne;
+      return MTLBlendFactorZero;
   }
 }
 
-MTLBlendOperation ToMetalBlendOp(xenos::BlendOp op) {
-  switch (op) {
-    case xenos::BlendOp::kAdd:
+MTLBlendOperation ToMetalBlendOperation(MetalBlendOperation operation) {
+  switch (operation) {
+    case MetalBlendOperation::kAdd:
       return MTLBlendOperationAdd;
-    case xenos::BlendOp::kSubtract:
+    case MetalBlendOperation::kSubtract:
       return MTLBlendOperationSubtract;
-    case xenos::BlendOp::kMin:
+    case MetalBlendOperation::kMin:
       return MTLBlendOperationMin;
-    case xenos::BlendOp::kMax:
+    case MetalBlendOperation::kMax:
       return MTLBlendOperationMax;
-    case xenos::BlendOp::kRevSubtract:
+    case MetalBlendOperation::kReverseSubtract:
       return MTLBlendOperationReverseSubtract;
     default:
       return MTLBlendOperationAdd;
   }
 }
 
-// Applies one RB_BLENDCONTROL + its RB_COLOR_MASK nibble to a color-attachment
-// descriptor. Shared by the standard render pipeline and the geometry-emulation
-// mesh pipeline (both use MTLRenderPipelineColorAttachmentDescriptor). Blending
-// is always enabled; the no-op case (One*src + Zero*dst, Add) yields opaque
-// output, so this is safe for non-blended draws too.
+// Applies one normalized RB_BLENDCONTROL + RB_COLOR_MASK nibble to a color-
+// attachment descriptor. Shared by the standard render pipeline and the
+// geometry-emulation mesh pipeline (both use
+// MTLRenderPipelineColorAttachmentDescriptor).
 void ApplyRtBlendState(MTLRenderPipelineColorAttachmentDescriptor* rt,
                        uint32_t blend_control, uint32_t color_write_mask) {
-  reg::RB_BLENDCONTROL bc;
-  bc.value = blend_control;
-  rt.blendingEnabled = YES;
-  rt.sourceRGBBlendFactor = ToMetalBlendFactor(bc.color_srcblend);
-  rt.destinationRGBBlendFactor = ToMetalBlendFactor(bc.color_destblend);
-  rt.rgbBlendOperation = ToMetalBlendOp(bc.color_comb_fcn);
-  rt.sourceAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_srcblend);
-  rt.destinationAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_destblend);
-  rt.alphaBlendOperation = ToMetalBlendOp(bc.alpha_comb_fcn);
+  MetalColorAttachmentBlendState state =
+      GetMetalColorAttachmentBlendState(blend_control, color_write_mask);
   MTLColorWriteMask write_mask = MTLColorWriteMaskNone;
-  if (color_write_mask & 0b0001) write_mask |= MTLColorWriteMaskRed;
-  if (color_write_mask & 0b0010) write_mask |= MTLColorWriteMaskGreen;
-  if (color_write_mask & 0b0100) write_mask |= MTLColorWriteMaskBlue;
-  if (color_write_mask & 0b1000) write_mask |= MTLColorWriteMaskAlpha;
+  if (state.write_mask & 0b0001) {
+    write_mask |= MTLColorWriteMaskRed;
+  }
+  if (state.write_mask & 0b0010) {
+    write_mask |= MTLColorWriteMaskGreen;
+  }
+  if (state.write_mask & 0b0100) {
+    write_mask |= MTLColorWriteMaskBlue;
+  }
+  if (state.write_mask & 0b1000) {
+    write_mask |= MTLColorWriteMaskAlpha;
+  }
   rt.writeMask = write_mask;
+  rt.blendingEnabled = state.blending_required;
+  if (!state.blending_required) {
+    return;
+  }
+  rt.sourceRGBBlendFactor = ToMetalBlendFactor(state.rgb.source_factor);
+  rt.destinationRGBBlendFactor = ToMetalBlendFactor(state.rgb.destination_factor);
+  rt.rgbBlendOperation = ToMetalBlendOperation(state.rgb.operation);
+  rt.sourceAlphaBlendFactor = ToMetalBlendFactor(state.alpha.source_factor);
+  rt.destinationAlphaBlendFactor = ToMetalBlendFactor(state.alpha.destination_factor);
+  rt.alphaBlendOperation = ToMetalBlendOperation(state.alpha.operation);
 }
 
 // Maps a geometry-shader type to the MSC input topology the guest primitive

@@ -89,6 +89,161 @@ struct MetalBlendStencilState {
   uint32_t stencil_reference_back;
 };
 
+// Device-independent color-attachment blend state. RGB and alpha factors are
+// normalized separately because Xenos color factors in an alpha equation refer
+// to the corresponding alpha component, matching the D3D12 pipeline contract.
+// Unknown guest factors fail closed to zero; unknown operations fall back to
+// add. The normalized write-mask nibble is the sole write-eligibility source.
+enum class MetalBlendFactor : uint32_t {
+  kZero,
+  kOne,
+  kSourceColor,
+  kOneMinusSourceColor,
+  kSourceAlpha,
+  kOneMinusSourceAlpha,
+  kDestinationColor,
+  kOneMinusDestinationColor,
+  kDestinationAlpha,
+  kOneMinusDestinationAlpha,
+  kBlendColor,
+  kOneMinusBlendColor,
+  kBlendAlpha,
+  kOneMinusBlendAlpha,
+  kSourceAlphaSaturated,
+};
+
+enum class MetalBlendOperation : uint32_t {
+  kAdd,
+  kSubtract,
+  kMin,
+  kMax,
+  kReverseSubtract,
+};
+
+struct MetalBlendEquationState {
+  MetalBlendFactor source_factor;
+  MetalBlendFactor destination_factor;
+  MetalBlendOperation operation;
+
+  bool is_opaque_replacement() const {
+    return source_factor == MetalBlendFactor::kOne &&
+           destination_factor == MetalBlendFactor::kZero &&
+           operation == MetalBlendOperation::kAdd;
+  }
+};
+
+struct MetalColorAttachmentBlendState {
+  uint32_t write_mask;
+  MetalBlendEquationState rgb;
+  MetalBlendEquationState alpha;
+  bool blending_required;
+};
+
+inline MetalBlendFactor GetMetalRgbBlendFactor(xenos::BlendFactor factor) {
+  switch (factor) {
+    case xenos::BlendFactor::kZero:
+      return MetalBlendFactor::kZero;
+    case xenos::BlendFactor::kOne:
+      return MetalBlendFactor::kOne;
+    case xenos::BlendFactor::kSrcColor:
+      return MetalBlendFactor::kSourceColor;
+    case xenos::BlendFactor::kOneMinusSrcColor:
+      return MetalBlendFactor::kOneMinusSourceColor;
+    case xenos::BlendFactor::kSrcAlpha:
+      return MetalBlendFactor::kSourceAlpha;
+    case xenos::BlendFactor::kOneMinusSrcAlpha:
+      return MetalBlendFactor::kOneMinusSourceAlpha;
+    case xenos::BlendFactor::kDstColor:
+      return MetalBlendFactor::kDestinationColor;
+    case xenos::BlendFactor::kOneMinusDstColor:
+      return MetalBlendFactor::kOneMinusDestinationColor;
+    case xenos::BlendFactor::kDstAlpha:
+      return MetalBlendFactor::kDestinationAlpha;
+    case xenos::BlendFactor::kOneMinusDstAlpha:
+      return MetalBlendFactor::kOneMinusDestinationAlpha;
+    case xenos::BlendFactor::kConstantColor:
+      return MetalBlendFactor::kBlendColor;
+    case xenos::BlendFactor::kOneMinusConstantColor:
+      return MetalBlendFactor::kOneMinusBlendColor;
+    case xenos::BlendFactor::kConstantAlpha:
+      return MetalBlendFactor::kBlendAlpha;
+    case xenos::BlendFactor::kOneMinusConstantAlpha:
+      return MetalBlendFactor::kOneMinusBlendAlpha;
+    case xenos::BlendFactor::kSrcAlphaSaturate:
+      return MetalBlendFactor::kSourceAlphaSaturated;
+    default:
+      return MetalBlendFactor::kZero;
+  }
+}
+
+inline MetalBlendFactor GetMetalAlphaBlendFactor(xenos::BlendFactor factor) {
+  switch (factor) {
+    case xenos::BlendFactor::kZero:
+      return MetalBlendFactor::kZero;
+    case xenos::BlendFactor::kOne:
+      return MetalBlendFactor::kOne;
+    case xenos::BlendFactor::kSrcColor:
+    case xenos::BlendFactor::kSrcAlpha:
+      return MetalBlendFactor::kSourceAlpha;
+    case xenos::BlendFactor::kOneMinusSrcColor:
+    case xenos::BlendFactor::kOneMinusSrcAlpha:
+      return MetalBlendFactor::kOneMinusSourceAlpha;
+    case xenos::BlendFactor::kDstColor:
+    case xenos::BlendFactor::kDstAlpha:
+      return MetalBlendFactor::kDestinationAlpha;
+    case xenos::BlendFactor::kOneMinusDstColor:
+    case xenos::BlendFactor::kOneMinusDstAlpha:
+      return MetalBlendFactor::kOneMinusDestinationAlpha;
+    case xenos::BlendFactor::kConstantColor:
+    case xenos::BlendFactor::kConstantAlpha:
+      return MetalBlendFactor::kBlendAlpha;
+    case xenos::BlendFactor::kOneMinusConstantColor:
+    case xenos::BlendFactor::kOneMinusConstantAlpha:
+      return MetalBlendFactor::kOneMinusBlendAlpha;
+    case xenos::BlendFactor::kSrcAlphaSaturate:
+      return MetalBlendFactor::kSourceAlphaSaturated;
+    default:
+      return MetalBlendFactor::kZero;
+  }
+}
+
+inline MetalBlendOperation GetMetalBlendOperation(xenos::BlendOp operation) {
+  switch (operation) {
+    case xenos::BlendOp::kAdd:
+      return MetalBlendOperation::kAdd;
+    case xenos::BlendOp::kSubtract:
+      return MetalBlendOperation::kSubtract;
+    case xenos::BlendOp::kMin:
+      return MetalBlendOperation::kMin;
+    case xenos::BlendOp::kMax:
+      return MetalBlendOperation::kMax;
+    case xenos::BlendOp::kRevSubtract:
+      return MetalBlendOperation::kReverseSubtract;
+    default:
+      return MetalBlendOperation::kAdd;
+  }
+}
+
+inline MetalColorAttachmentBlendState GetMetalColorAttachmentBlendState(
+    uint32_t blend_control, uint32_t normalized_color_mask_nibble) {
+  reg::RB_BLENDCONTROL control = {};
+  control.value = blend_control;
+  MetalColorAttachmentBlendState state = {
+      normalized_color_mask_nibble & 0xFu,
+      {GetMetalRgbBlendFactor(control.color_srcblend),
+       GetMetalRgbBlendFactor(control.color_destblend),
+       GetMetalBlendOperation(control.color_comb_fcn)},
+      {GetMetalAlphaBlendFactor(control.alpha_srcblend),
+       GetMetalAlphaBlendFactor(control.alpha_destblend),
+       GetMetalBlendOperation(control.alpha_comb_fcn)},
+      false,
+  };
+  state.blending_required =
+      state.write_mask != 0 && (!state.rgb.is_opaque_replacement() ||
+                                !state.alpha.is_opaque_replacement());
+  return state;
+}
+
 // Pipeline-compatible sample state plus the dynamic shader constants used for
 // Xenos alpha-to-mask. The translated pixel shader writes the exact guest
 // coverage mask (including the per-pixel offsets), so Metal hardware

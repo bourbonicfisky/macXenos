@@ -37,6 +37,23 @@ reg::PA_SU_SC_MODE_CNTL CullMode(bool cull_front, bool cull_back,
   return mode;
 }
 
+reg::RB_BLENDCONTROL BlendControl(
+    xenos::BlendFactor color_source = xenos::BlendFactor::kOne,
+    xenos::BlendFactor color_destination = xenos::BlendFactor::kZero,
+    xenos::BlendOp color_operation = xenos::BlendOp::kAdd,
+    xenos::BlendFactor alpha_source = xenos::BlendFactor::kOne,
+    xenos::BlendFactor alpha_destination = xenos::BlendFactor::kZero,
+    xenos::BlendOp alpha_operation = xenos::BlendOp::kAdd) {
+  reg::RB_BLENDCONTROL control = {};
+  control.color_srcblend = color_source;
+  control.color_destblend = color_destination;
+  control.color_comb_fcn = color_operation;
+  control.alpha_srcblend = alpha_source;
+  control.alpha_destblend = alpha_destination;
+  control.alpha_comb_fcn = alpha_operation;
+  return control;
+}
+
 TEST_CASE("Metal polygon cull modes map without stale state",
           "[l0][metal][cull-front-face]") {
   MetalCullFrontFaceState none =
@@ -281,6 +298,150 @@ TEST_CASE("Metal gamma conversion is derived per MRT slot",
   color_infos[2].color_format =
       xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
   CHECK(GetMetalGammaRenderTargetMask(color_infos) == 0b1111u);
+}
+
+TEST_CASE("Metal MRT blend state preserves sparse and mixed write nibbles",
+          "[l0][metal][mrt][blend]") {
+  reg::RB_BLENDCONTROL opaque = BlendControl();
+
+  constexpr uint32_t kRt1OnlyMask = 0x00F0u;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    MetalColorAttachmentBlendState state = GetMetalColorAttachmentBlendState(
+        opaque.value, kRt1OnlyMask >> (i * 4u));
+    CHECK(state.write_mask == (i == 1 ? 0xFu : 0u));
+    CHECK_FALSE(state.blending_required);
+  }
+
+  constexpr uint32_t kMixedMask = 0xA05Fu;
+  constexpr uint32_t kExpectedMasks[xenos::kMaxColorRenderTargets] = {
+      0xFu, 0x5u, 0x0u, 0xAu};
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    MetalColorAttachmentBlendState state =
+        GetMetalColorAttachmentBlendState(opaque.value, kMixedMask >> (i * 4u));
+    CHECK(state.write_mask == kExpectedMasks[i]);
+  }
+}
+
+TEST_CASE("Metal dormant MRT attachments disable writes and blending",
+          "[l0][metal][mrt][blend]") {
+  reg::RB_BLENDCONTROL nontrivial = BlendControl(
+      xenos::BlendFactor::kSrcAlpha, xenos::BlendFactor::kOneMinusSrcAlpha,
+      xenos::BlendOp::kAdd, xenos::BlendFactor::kDstAlpha,
+      xenos::BlendFactor::kOneMinusDstAlpha, xenos::BlendOp::kRevSubtract);
+  MetalColorAttachmentBlendState state =
+      GetMetalColorAttachmentBlendState(nontrivial.value, 0);
+  CHECK(state.write_mask == 0);
+  CHECK_FALSE(state.blending_required);
+}
+
+TEST_CASE("Metal opaque MRT replacement does not enable blending",
+          "[l0][metal][mrt][blend]") {
+  MetalColorAttachmentBlendState opaque =
+      GetMetalColorAttachmentBlendState(BlendControl().value, 0xFu);
+  CHECK(opaque.write_mask == 0xFu);
+  CHECK(opaque.rgb.is_opaque_replacement());
+  CHECK(opaque.alpha.is_opaque_replacement());
+  CHECK_FALSE(opaque.blending_required);
+
+  reg::RB_BLENDCONTROL color_blend = BlendControl(
+      xenos::BlendFactor::kSrcAlpha, xenos::BlendFactor::kOneMinusSrcAlpha);
+  MetalColorAttachmentBlendState color_state =
+      GetMetalColorAttachmentBlendState(color_blend.value, 0xFu);
+  CHECK(color_state.blending_required);
+
+  reg::RB_BLENDCONTROL alpha_blend = BlendControl(
+      xenos::BlendFactor::kOne, xenos::BlendFactor::kZero, xenos::BlendOp::kAdd,
+      xenos::BlendFactor::kOne, xenos::BlendFactor::kOne, xenos::BlendOp::kAdd);
+  MetalColorAttachmentBlendState alpha_state =
+      GetMetalColorAttachmentBlendState(alpha_blend.value, 0xFu);
+  CHECK(alpha_state.blending_required);
+}
+
+TEST_CASE("Metal MRT blend equations remain independent per slot",
+          "[l0][metal][mrt][blend]") {
+  const std::array<reg::RB_BLENDCONTROL, xenos::kMaxColorRenderTargets>
+      controls = {
+          BlendControl(),
+          BlendControl(xenos::BlendFactor::kSrcAlpha,
+                       xenos::BlendFactor::kOneMinusSrcAlpha),
+          BlendControl(xenos::BlendFactor::kDstColor,
+                       xenos::BlendFactor::kOneMinusDstColor,
+                       xenos::BlendOp::kSubtract),
+          BlendControl(
+              xenos::BlendFactor::kConstantColor,
+              xenos::BlendFactor::kOneMinusConstantColor,
+              xenos::BlendOp::kRevSubtract, xenos::BlendFactor::kConstantColor,
+              xenos::BlendFactor::kOneMinusConstantColor, xenos::BlendOp::kMax),
+      };
+  constexpr uint32_t kMixedMask = 0xA05Fu;
+  std::array<MetalColorAttachmentBlendState, xenos::kMaxColorRenderTargets>
+      states;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    states[i] = GetMetalColorAttachmentBlendState(controls[i].value,
+                                                  kMixedMask >> (i * 4u));
+  }
+
+  CHECK_FALSE(states[0].blending_required);
+  CHECK(states[1].blending_required);
+  CHECK(states[1].rgb.source_factor == MetalBlendFactor::kSourceAlpha);
+  CHECK(states[1].rgb.destination_factor ==
+        MetalBlendFactor::kOneMinusSourceAlpha);
+  CHECK(states[2].write_mask == 0);
+  CHECK_FALSE(states[2].blending_required);
+  CHECK(states[3].blending_required);
+  CHECK(states[3].rgb.source_factor == MetalBlendFactor::kBlendColor);
+  CHECK(states[3].rgb.operation == MetalBlendOperation::kReverseSubtract);
+  CHECK(states[3].alpha.source_factor == MetalBlendFactor::kBlendAlpha);
+  CHECK(states[3].alpha.operation == MetalBlendOperation::kMax);
+}
+
+TEST_CASE("Metal alpha blend equations normalize color factors",
+          "[l0][metal][mrt][blend]") {
+  struct AlphaFactorCase {
+    xenos::BlendFactor guest;
+    MetalBlendFactor normalized;
+  };
+  constexpr AlphaFactorCase kCases[] = {
+      {xenos::BlendFactor::kSrcColor, MetalBlendFactor::kSourceAlpha},
+      {xenos::BlendFactor::kOneMinusSrcColor,
+       MetalBlendFactor::kOneMinusSourceAlpha},
+      {xenos::BlendFactor::kDstColor, MetalBlendFactor::kDestinationAlpha},
+      {xenos::BlendFactor::kOneMinusDstColor,
+       MetalBlendFactor::kOneMinusDestinationAlpha},
+      {xenos::BlendFactor::kConstantColor, MetalBlendFactor::kBlendAlpha},
+      {xenos::BlendFactor::kOneMinusConstantColor,
+       MetalBlendFactor::kOneMinusBlendAlpha},
+  };
+  for (const AlphaFactorCase& factor_case : kCases) {
+    reg::RB_BLENDCONTROL control = BlendControl(
+        xenos::BlendFactor::kOne, xenos::BlendFactor::kZero,
+        xenos::BlendOp::kAdd, factor_case.guest, factor_case.guest);
+    MetalColorAttachmentBlendState state =
+        GetMetalColorAttachmentBlendState(control.value, 0xFu);
+    CHECK(state.alpha.source_factor == factor_case.normalized);
+    CHECK(state.alpha.destination_factor == factor_case.normalized);
+  }
+}
+
+TEST_CASE("Metal unknown blend state fails closed deterministically",
+          "[l0][metal][mrt][blend]") {
+  reg::RB_BLENDCONTROL control = BlendControl();
+  control.color_srcblend = xenos::BlendFactor(31);
+  control.color_destblend = xenos::BlendFactor(30);
+  control.color_comb_fcn = xenos::BlendOp(7);
+  control.alpha_srcblend = xenos::BlendFactor(29);
+  control.alpha_destblend = xenos::BlendFactor(28);
+  control.alpha_comb_fcn = xenos::BlendOp(6);
+  MetalColorAttachmentBlendState state =
+      GetMetalColorAttachmentBlendState(control.value, 0x1Fu);
+  CHECK(state.write_mask == 0xFu);
+  CHECK(state.rgb.source_factor == MetalBlendFactor::kZero);
+  CHECK(state.rgb.destination_factor == MetalBlendFactor::kZero);
+  CHECK(state.rgb.operation == MetalBlendOperation::kAdd);
+  CHECK(state.alpha.source_factor == MetalBlendFactor::kZero);
+  CHECK(state.alpha.destination_factor == MetalBlendFactor::kZero);
+  CHECK(state.alpha.operation == MetalBlendOperation::kAdd);
+  CHECK(state.blending_required);
 }
 
 TEST_CASE("Metal disabled stencil state has deterministic safe references",
