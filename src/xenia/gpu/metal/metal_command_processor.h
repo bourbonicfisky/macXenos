@@ -22,6 +22,7 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
 
@@ -122,9 +123,17 @@ class MetalCommandProcessor : public CommandProcessor {
   // only entries overlapping [filter_base, filter_base+filter_size) drain —
   // the same-frame vfetch barrier must NOT drain unrelated writebacks (the
   // exposure ping-pong reads mid-frame luminance otherwise: black flicker).
-  void DrainPendingWritebacks(uint32_t filter_base = 0,
-                              uint32_t filter_size = 0xFFFFFFFFu);
+  metal::LegacyDrainOutcome DrainPendingWritebacks(
+      uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu);
   void FlushPendingWritebacksForWait(uint32_t guest_address) override;
+
+  // Cross-writer memory-authority observer seam (OpenSpec
+  // implement-metal-cross-writer-memory-authority, task 2.4). Snapshots the
+  // current pending resolve/memexport records into the device-free authority
+  // vocabulary so the observer can compare the seam's selective prediction with
+  // the legacy call-site action. Non-owning and side-effect free: it reads the
+  // existing queues, never mutates them.
+  std::vector<metal::PendingProducer> SnapshotPendingProducers() const;
 
   // --- Draw path helpers (metal_command_processor.mm) ---
 
@@ -307,7 +316,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // EndFrameEncoderAndWait. Faults are recorded by the completion handler
   // and drained (logged + auto-recovered) on the GPU thread from
   // PumpCompletedActions.
-  void EndFrameEncoderAndWait();
+  metal::LegacySyncOutcome EndFrameEncoderAndWait();
   // Blocks until `submission` completes (condition variable signaled by the
   // completion handler). Returns false on timeout — a wedged GPU.
   bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000);
@@ -386,6 +395,9 @@ class MetalCommandProcessor : public CommandProcessor {
     // (depth24 << 8, stencil 0 in v1) before the endian scatter.
     // 0 = color (no conversion), 1 = unorm24 (k_24_8), 2 = float24 (20e4).
     uint32_t depth_encode;
+    // Monotonic cross-kind registration order for observer/seam chronology.
+    // This lives on the existing pending record; it is not a second queue.
+    uint64_t authority_sequence;
 
     // Guest-memory extent this writeback touches, for overlap / wait / drain-
     // filter tests. Tiled pitch, offsets, and row padding make the real extent
@@ -406,11 +418,20 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t base_address;  // guest physical
     uint32_t size_bytes;
     uint64_t submission;
+    uint64_t authority_sequence;
   };
   std::vector<PendingMemexport> pending_memexports_;
+  uint64_t memory_authority_sequence_ = 0;
   // Same-frame consumer visibility (v1) is handled by the stage-3 lazy flush
   // in IssueDraw: a draw whose texture fetches overlap a pending memexport
   // commits + waits + drains before its uploads read guest RAM.
+
+  // Observer-only cross-writer authority telemetry (task 2.4). Records the
+  // seam's predicted selective action alongside the legacy vertex/texture/WAIT
+  // action and writer publication, bounded/throttled. It executes NO behavior
+  // and holds only counters -- it is telemetry, never a second authority. A
+  // periodic summary is emitted from IssueSwap.
+  metal::AuthorityObserver authority_observer_;
 
   // XE_METAL_TIP_SNAP_VIEW: per-base derived 1x1 R32F copies of snapshot
   // texel (0,0) (retained id<MTLTexture>; experiment-scoped, freed with the

@@ -292,9 +292,22 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   // capture (the blur chain ping-pongs draw -> resolve -> RAM -> fetch
   // through the SAME addresses), so a fetch must re-upload the fresh bytes
   // or it replays a stale earlier-era upload.
+  uint32_t invalidated_entries = 0;
   if (texture_cache_) {
     texture_cache_->SetTracePlayback();
-    texture_cache_->InvalidateRange(base_ptr, length);
+    invalidated_entries = texture_cache_->InvalidateRange(base_ptr, length);
+  }
+  // Observer-only (task 2.4): trace restore publishes restored bytes to RAM via
+  // the shared + legacy invalidation above. Record the writer transition; the
+  // seam predicts the same invalidate-RAM publication. Never acts.
+  if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kTraceRestore)) {
+    metal::GuestRangeSet ranges;
+    ranges.Add(metal::GuestRange::FromBaseLength(base_ptr, length));
+    authority_observer_.RecordWriter(
+        metal::WriterKind::kTraceRestore, ranges,
+        metal::DecideWriterPublication(metal::WriterKind::kTraceRestore),
+        {/*action=*/metal::AuthorityAction::kInvalidateRamWrite,
+         invalidated_entries, /*committed=*/false, /*waited=*/false});
   }
 }
 
@@ -1412,7 +1425,7 @@ void MetalCommandProcessor::EndFrameEncoder() {
   PumpCompletedActions();
 }
 
-void MetalCommandProcessor::EndFrameEncoderAndWait() {
+metal::LegacySyncOutcome MetalCommandProcessor::EndFrameEncoderAndWait() {
   // For sites that read GPU results on the CPU right after the commit
   // (writeback drains, guest fence waits, EDRAM/RT readbacks, shutdown):
   // full synchronous semantics.
@@ -1422,6 +1435,7 @@ void MetalCommandProcessor::EndFrameEncoderAndWait() {
     WaitForSubmission(submission_counter_);
     PumpCompletedActions();
   }
+  return {/*committed=*/had_buffer, /*waited=*/had_buffer};
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -2180,11 +2194,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             }
           }
         }
+        bool authority_sample = authority_observer_.ShouldSampleConsumer(
+            metal::ConsumerKind::kVertex);
+        metal::ConsumerDecision authority_decision;
+        if (authority_sample) {
+          metal::GuestRangeSet requested;
+          requested.Add(
+              metal::GuestRange::FromBaseLength(vf_base, fetch.size << 2));
+          authority_decision = metal::DecideConsumer(
+              metal::ConsumerKind::kVertex, requested,
+              SnapshotPendingProducers(),
+              completed_submission_.load(std::memory_order_acquire));
+        }
+        metal::LegacySyncOutcome sync_outcome;
+        metal::LegacyDrainOutcome drain_outcome;
         if (overlap) {
-          EndFrameEncoderAndWait();
+          sync_outcome = EndFrameEncoderAndWait();
           // Range-scoped: draining unrelated writebacks here would hand the
           // exposure loop mid-frame luminance (the black-flicker class).
-          DrainPendingWritebacks(vf_base, vf_end - vf_base);
+          drain_outcome =
+              DrainPendingWritebacks(vf_base, vf_end - vf_base);
+        }
+        // Observer-only (task 2.4): compare the seam's selective prediction with
+        // this legacy range-scoped decision. Records, never acts; throttled.
+        if (authority_sample) {
+          metal::LegacyConsumerOutcome legacy;
+          legacy.overlap = overlap;
+          legacy.committed = sync_outcome.committed;
+          legacy.waited = sync_outcome.waited;
+          legacy.drained = overlap;
+          legacy.drain_range_scoped = true;  // the vfetch drain is range-scoped.
+          legacy.drained_records = drain_outcome.drained_records;
+          authority_observer_.RecordConsumer(authority_decision, legacy);
         }
       }
       // Page-tracked: uploads only pages invalidated since their last use;
@@ -2250,10 +2291,76 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       return false;
     };
-    if (fetch_overlaps_writeback(pixel_shader) ||
-        fetch_overlaps_writeback(vertex_shader)) {
-      EndFrameEncoderAndWait();
-      DrainPendingWritebacks();
+    // Capture the legacy overlap decision in a bool so the observer below can
+    // read it without re-evaluating (fetch_overlaps_writeback is a pure query;
+    // the || short-circuit and drain behavior are unchanged).
+    bool tex_overlap = fetch_overlaps_writeback(pixel_shader) ||
+                       fetch_overlaps_writeback(vertex_shader);
+    bool authority_sample = authority_observer_.ShouldSampleConsumer(
+        metal::ConsumerKind::kTexture);
+    metal::ConsumerDecision authority_decision;
+    if (authority_sample) {
+      auto collect_texture_ranges = [&](MetalShader* shader,
+                                        metal::ConsumerRequest& request) {
+        if (!shader) return;
+        for (const auto& binding :
+             shader->GetTextureBindingsAfterTranslation()) {
+          auto f = regs.GetTextureFetch(binding.fetch_constant);
+          uint32_t fbase = f.base_address << 12;
+          if (!fbase) continue;
+
+          metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
+          auto base_range =
+              metal::GuestRange::FromBounds(rng.base_begin, rng.base_end);
+          auto mip_range =
+              metal::GuestRange::FromBounds(rng.mip_begin, rng.mip_end);
+
+          // Every RAM-backed fetch can depend on memexport. A bridge-served
+          // resolve is the producer-state-specific exception: its snapshot is
+          // already GPU-ordered and legacy deliberately doesn't converge it.
+          request.memexport_ranges.Add(base_range);
+          if (rng.mip_end > rng.mip_begin) {
+            request.memexport_ranges.Add(mip_range);
+          }
+          bool bridge_served =
+              texture_cache_ &&
+              texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
+                                            f.size_2d.height + 1);
+          if (!bridge_served) {
+            request.resolve_ranges.Add(base_range);
+            if (rng.mip_end > rng.mip_begin) {
+              request.resolve_ranges.Add(mip_range);
+            }
+          }
+        }
+      };
+      metal::ConsumerRequest request;
+      collect_texture_ranges(pixel_shader, request);
+      collect_texture_ranges(vertex_shader, request);
+      auto producers = SnapshotPendingProducers();
+      authority_decision = metal::DecideConsumer(
+          metal::ConsumerKind::kTexture, request, producers,
+          completed_submission_.load(std::memory_order_acquire));
+    }
+    metal::LegacySyncOutcome sync_outcome;
+    metal::LegacyDrainOutcome drain_outcome;
+    if (tex_overlap) {
+      sync_outcome = EndFrameEncoderAndWait();
+      drain_outcome = DrainPendingWritebacks();
+    }
+    // Observer-only (task 2.4): the legacy texture path drains ALL records on
+    // any overlap (audit blocker 6). Feed the seam the precise base/mip range
+    // set and record the selective prediction against the unfiltered legacy
+    // drain -- expected as a scope divergence until the seam is routed.
+    if (authority_sample) {
+      metal::LegacyConsumerOutcome legacy;
+      legacy.overlap = tex_overlap;
+      legacy.committed = sync_outcome.committed;
+      legacy.waited = sync_outcome.waited;
+      legacy.drained = tex_overlap;
+      legacy.drain_range_scoped = false;  // unfiltered: drains every record.
+      legacy.drained_records = drain_outcome.drained_records;
+      authority_observer_.RecordConsumer(authority_decision, legacy);
     }
   }
 
@@ -3492,7 +3599,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       uint32_t range_base = range.base_address_dwords << 2;
       shared_memory_->RangeWrittenByGpu(range_base, range.size_bytes);
       pending_memexports_.push_back(
-          PendingMemexport{range_base, range.size_bytes, export_submission});
+          PendingMemexport{range_base, range.size_bytes, export_submission,
+                           ++memory_authority_sequence_});
+      // Observer-only (task 2.4): this is the one ordered publish-GPU-write
+      // transition (RangeWrittenByGpu + pending record). Record, never act.
+      if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kMemexport)) {
+        metal::GuestRangeSet ranges;
+        ranges.Add(
+            metal::GuestRange::FromBaseLength(range_base, range.size_bytes));
+        authority_observer_.RecordWriter(
+            metal::WriterKind::kMemexport, ranges,
+            metal::DecideWriterPublication(metal::WriterKind::kMemexport),
+            {/*action=*/metal::AuthorityAction::kPublishGpuWrite,
+             /*invalidated_entries=*/0, /*committed=*/false,
+             /*waited=*/false});
+      }
     }
   }
 
@@ -4291,7 +4412,8 @@ bool MetalCommandProcessor::IssueCopy() {
                   dest_format,
                   trace_draw_index_,
                   swap_count_,
-                  /*depth_encode=*/0u});
+                  /*depth_encode=*/0u,
+                  ++memory_authority_sequence_});
             }
             if (writeback_encoded &&
                 dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
@@ -4522,7 +4644,8 @@ bool MetalCommandProcessor::IssueCopy() {
                 trace_draw_index_, swap_count_,
                 /*depth_encode=*/canonical_depth_writeback
                     ? 0u
-                    : (is_float24 ? 2u : 1u)});
+                    : (is_float24 ? 2u : 1u),
+                ++memory_authority_sequence_});
           }
         }
       }
@@ -4829,8 +4952,43 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
   return fb_ram_texture_;
 }
 
-void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
-                                                   uint32_t filter_size) {
+std::vector<metal::PendingProducer>
+MetalCommandProcessor::SnapshotPendingProducers() const {
+  // Non-owning read of the two existing pending-producer queues into the
+  // device-free authority vocabulary. Ranges are normalized/clamped by
+  // GuestRange; a record whose extent has no in-bounds byte is skipped (it can
+  // never be a real dependency). The existing records carry one cross-kind
+  // registration sequence so the seam sees chronological producer order even
+  // though the two legacy queues are stored and drained separately.
+  std::vector<metal::PendingProducer> producers;
+  producers.reserve(pending_writebacks_.size() + pending_memexports_.size());
+  for (const PendingWriteback& wb : pending_writebacks_) {
+    auto range = metal::GuestRange::FromBaseLength(wb.guest_addr,
+                                                   wb.range_bytes());
+    if (range) {
+      producers.push_back({*range, metal::TransitState::kPendingResolve,
+                           wb.submission, wb.authority_sequence});
+    }
+  }
+  for (const PendingMemexport& me : pending_memexports_) {
+    auto range =
+        metal::GuestRange::FromBaseLength(me.base_address, me.size_bytes);
+    if (range) {
+      producers.push_back({*range, metal::TransitState::kPendingMemexport,
+                           me.submission, me.authority_sequence});
+    }
+  }
+  std::stable_sort(producers.begin(), producers.end(),
+                   [](const metal::PendingProducer& a,
+                      const metal::PendingProducer& b) {
+                     return a.sequence < b.sequence;
+                   });
+  return producers;
+}
+
+metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
+    uint32_t filter_base, uint32_t filter_size) {
+  metal::LegacyDrainOutcome outcome;
   auto in_filter = [&](uint32_t base, uint32_t size) {
     return base < filter_base + filter_size && base + size > filter_base;
   };
@@ -4856,7 +5014,11 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         still_pending_exports.push_back(me);
         continue;
       }
+      ++outcome.drained_records;
+      ++outcome.memexport_records;
       uint8_t* me_dest = memory_->TranslatePhysical<uint8_t*>(me.base_address);
+      bool copied_to_ram = false;
+      uint32_t invalidated_entries = 0;
       if (me_dest && me_contents) {
         static uint32_t s_me_drains = 0;
         // First 8, then a 3-drain sample every 512 (~once per 170 frames at 3
@@ -4874,8 +5036,11 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
               xe_lineage_stridehash(me_contents + me.base_address, me.size_bytes);
         }
         std::memcpy(me_dest, me_contents + me.base_address, me.size_bytes);
+        copied_to_ram = true;
         if (texture_cache_) {
-          texture_cache_->InvalidateRange(me.base_address, me.size_bytes);
+          invalidated_entries =
+              texture_cache_->InvalidateRange(me.base_address, me.size_bytes);
+          outcome.invalidated_entries += invalidated_entries;
         }
         if (me_log) {
           const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
@@ -4893,6 +5058,19 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
                                       : " (exported content differs)");
         }
       }
+      if (authority_observer_.ShouldSampleWriter(
+              metal::WriterKind::kMemexport)) {
+        metal::GuestRangeSet ranges;
+        ranges.Add(metal::GuestRange::FromBaseLength(me.base_address,
+                                                     me.size_bytes));
+        authority_observer_.RecordWriter(
+            metal::WriterKind::kMemexport, ranges,
+            metal::AuthorityAction::kConvergeRamFromBuffer,
+            {/*action=*/copied_to_ram
+                 ? metal::AuthorityAction::kConvergeRamFromBuffer
+                 : metal::AuthorityAction::kNoDependency,
+             invalidated_entries, /*committed=*/false, /*waited=*/false});
+      }
     }
     pending_memexports_ = std::move(still_pending_exports);
   }
@@ -4903,6 +5081,10 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       still_pending.push_back(wb);
       continue;
     }
+    ++outcome.drained_records;
+    ++outcome.resolve_records;
+    uint32_t invalidated_entries = 0;
+    bool published_to_ram = false;
     id<MTLBuffer> staging = (__bridge_transfer id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
     if (dest && staging) {
@@ -5014,7 +5196,9 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       // STAGE 3: the writeback changed guest RAM — evict cached textures
       // uploaded from that range so the next fetch re-uploads fresh content.
       if (texture_cache_) {
-        texture_cache_->InvalidateRange(wb.guest_addr, wb.range_bytes());
+        invalidated_entries =
+            texture_cache_->InvalidateRange(wb.guest_addr, wb.range_bytes());
+        outcome.invalidated_entries += invalidated_entries;
       }
       if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
         // RAM now holds this frame's scattered resolve. This ramHash is what a
@@ -5182,9 +5366,26 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         shared_memory_->MemoryInvalidationCallback(
             wb.guest_addr, wb.dest_extent_bytes, true);
       }
+      published_to_ram = true;
+    }
+    // Observer-only (task 2.4): record after every corrective RAM write and
+    // publication operation has run. A missing mapping/staging resource is an
+    // observed disagreement rather than a silently presumed publication.
+    if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kResolve)) {
+      metal::GuestRangeSet ranges;
+      ranges.Add(metal::GuestRange::FromBaseLength(wb.guest_addr,
+                                                   wb.dest_extent_bytes));
+      authority_observer_.RecordWriter(
+          metal::WriterKind::kResolve, ranges,
+          metal::DecideWriterPublication(metal::WriterKind::kResolve),
+          {/*action=*/published_to_ram
+               ? metal::AuthorityAction::kInvalidateRamWrite
+               : metal::AuthorityAction::kNoDependency,
+           invalidated_entries, /*committed=*/false, /*waited=*/false});
     }
   }
   pending_writebacks_ = std::move(still_pending);
+  return outcome;
 }
 
 void MetalCommandProcessor::FlushPendingWritebacksForWait(
@@ -5197,12 +5398,42 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
   // only when the polled address actually lies inside a pending writeback;
   // all other writebacks keep the swap cadence (the reference backends'
   // readback is likewise a frame behind).
+  // Observer-only (task 2.4): the seam models the WAIT as a 4-byte RAM read and
+  // selects only intersecting producers; the legacy loops below drain ALL
+  // records on any single-address hit (audit blocker 6). Record the comparison
+  // without changing the legacy control flow.
+  bool authority_sample = authority_observer_.ShouldSampleConsumer(
+      metal::ConsumerKind::kWait);
+  metal::ConsumerDecision authority_decision;
+  if (authority_sample) {
+    metal::GuestRangeSet requested;
+    requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
+    authority_decision = metal::DecideConsumer(
+        metal::ConsumerKind::kWait, requested, SnapshotPendingProducers(),
+        completed_submission_.load(std::memory_order_acquire));
+  }
+  auto record_legacy = [&](bool overlap,
+                           const metal::LegacySyncOutcome& sync_outcome,
+                           const metal::LegacyDrainOutcome& drain_outcome) {
+    if (!authority_sample) {
+      return;
+    }
+    metal::LegacyConsumerOutcome legacy;
+    legacy.overlap = overlap;
+    legacy.committed = sync_outcome.committed;
+    legacy.waited = sync_outcome.waited;
+    legacy.drained = overlap;
+    legacy.drain_range_scoped = false;  // unfiltered: drains every record.
+    legacy.drained_records = drain_outcome.drained_records;
+    authority_observer_.RecordConsumer(authority_decision, legacy);
+  };
   for (const PendingWriteback& wb : pending_writebacks_) {
     uint32_t length = wb.range_bytes();
     if (guest_address >= wb.guest_addr &&
         guest_address < wb.guest_addr + length) {
-      EndFrameEncoderAndWait();
-      DrainPendingWritebacks();
+      metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
+      metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
+      record_legacy(true, sync_outcome, drain_outcome);
       return;
     }
   }
@@ -5210,11 +5441,13 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
   for (const PendingMemexport& me : pending_memexports_) {
     if (guest_address >= me.base_address &&
         guest_address < me.base_address + me.size_bytes) {
-      EndFrameEncoderAndWait();
-      DrainPendingWritebacks();
+      metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
+      metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
+      record_legacy(true, sync_outcome, drain_outcome);
       return;
     }
   }
+  record_legacy(false, {}, {});
 }
 
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
@@ -5339,6 +5572,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
+      // Observer-only (task 2.4): emit the bounded cross-writer authority
+      // agreement summary on the same 128-swap cadence (counters, not a
+      // per-frame log). No behavior is executed.
+      authority_observer_.ReportSummary();
     }
   }
   // Cycle-transfer instrument (XE_METAL_DUMP_SNAPSHOT=<hexbase>): dump the
