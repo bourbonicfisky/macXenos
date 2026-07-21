@@ -12,6 +12,12 @@
 # On arm64 there is no shrunk __PAGEZERO, so this binary runs in restricted
 # environments (agent/CI) unlike the full app.
 
+# Every *_test.cc here is a device-free Level 0 case. New L0 suites are picked
+# up by this glob (re-run CMake after adding one). Current L0 sources include
+# the EDRAM address/format oracles, the Stage 19 system-constant checks, PP1,
+# and metal_guest_range_conformance_test.cc (the cross-writer memory-authority
+# normalized-range contract: wrap/overflow, end-of-memory clamping, overlap
+# classification, and range-set operations -- header-only, no device).
 file(GLOB _conformance_sources "${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc")
 
 if(NOT _conformance_sources)
