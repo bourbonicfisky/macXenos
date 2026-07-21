@@ -748,13 +748,20 @@ inline uint xe_f32_to_unorm24(float d) {
   uint t = min(uint(rint(saturate(d) * 16777216.0)), 16777216u);
   return (t > 8388608u ? t - 1u : t) & 0xFFFFFFu;
 }
-// Decode a guest depth word's d24 to a host [0,1] depth value. float24 (fmt 2)
-// spans guest [0,2): pack it to [0,1] with *0.5 so a Metal depth attachment
-// (which clamps to [0,1]) holds the WHOLE domain; unorm24 (fmt 1) is already
-// [0,1]. pack applies the inverse (*2 for float24).
+// Decode a guest depth word's d24 to the internal host depth-attachment domain.
+// float24 (fmt 2) spans guest [0,2): pack it to [0,1] with *0.5 so a Metal
+// depth attachment holds the whole domain; unorm24 (fmt 1) is already [0,1].
+// pack applies the inverse (*2 for float24).
 inline float xe_depth_word_to_host(uint word, uint fmt) {
   uint d24 = xe_depth24(word);
   return fmt == 2u ? xe_f20e4_to_f32(d24) * 0.5 : xe_unorm24_to_f32(d24);
+}
+// Resolve snapshots are guest-visible numeric textures, not internal depth
+// attachments. Decode them in the guest domain so a D24FS8 value g sampled
+// after a resolve is still g rather than the host attachment encoding 0.5*g.
+inline float xe_depth_word_to_guest(uint word, uint fmt) {
+  uint d24 = xe_depth24(word);
+  return fmt == 2u ? xe_f20e4_to_f32(d24) : xe_unorm24_to_f32(d24);
 }
 inline uint xe_host_to_depth_d24(float d, uint fmt) {
   return fmt == 2u ? xe_f32_to_f20e4(d * 2.0) : xe_f32_to_unorm24(d);
@@ -1228,7 +1235,7 @@ fragment float4 resolve_canonical_depth_fs(
                  p.sample_select) >>
              2u;
   uint word = canonical[idx % p.surface.words];
-  return float4(xe_depth_word_to_host(word, p.surface.is_depth), 0.0, 0.0,
+  return float4(xe_depth_word_to_guest(word, p.surface.is_depth), 0.0, 0.0,
                 0.0);
 }
 kernel void resolve_canonical_depth_raw(

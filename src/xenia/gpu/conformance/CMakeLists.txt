@@ -29,6 +29,8 @@ add_executable(xenia-gpu-conformance
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/gpu_flags.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_writer.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/xenos.cc
+  # Shared viewport normalization used by the Stage 19 system-constant tests.
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/draw_util.cc
   # PP1 (device-free): the REAL shared PrimitiveProcessor normalization logic +
   # the REAL production MetalPrimitiveProcessor subclass (pure C++, no device)
   # + the register file it reads. metal_primitive_processor_pp1_test.cc

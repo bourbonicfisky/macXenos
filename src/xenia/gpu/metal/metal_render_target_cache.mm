@@ -2552,7 +2552,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
         // exact exponent-shift division by 2^24 with the >>23 bias trick;
         // /16777215.0 is off by an ULP for common values like 0xC00000.
         o.depth = p.is_float24 != 0u
-                      ? xe_f20e4_to_f32(d24)
+                      ? xe_f20e4_to_f32(d24) * 0.5f
                       : float(d24 + (d24 >> 23)) * (1.0 / 16777216.0);
         return o;
       }
@@ -2753,7 +2753,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
         // rint = roundEven: the canonical unorm24 encode (the Vulkan dump
         // shader uses GLSL RoundEven; round-half-away differs at exact .5).
         uint d24 = p.is_float24 != 0u
-                       ? xe_f32_to_f20e4(d)
+                       ? xe_f32_to_f20e4(d * 2.0f)
                        : uint(rint(saturate(d) * 16777215.0));
         // DEFAULT: zero words. Rationale: a color pass claiming depth-owned
         // tiles only ever CONSUMES this content when the real producer draws
@@ -3109,7 +3109,11 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
         uint tile = p.span_base + (ds.y / 16u) * p.span_pitch + (ds.x / 80u);
         uint sl = tile - p.src_base;
         uint2 sp = xe_src_pixel(sl, p.src_pitch, ds, p.shifts);
-        return src.read(sp);
+        float host_depth = src.read(sp);
+        // The depth attachment stores the full float24 guest [0,2) domain in
+        // host [0,1]. Resolve snapshots are guest-visible numeric textures, so
+        // undo that attachment encoding just like the canonical resolve path.
+        return p.is_float24 != 0u ? host_depth * 2.0f : host_depth;
       }
     )METAL";
     NSError* err = nil;

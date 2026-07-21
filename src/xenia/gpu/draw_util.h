@@ -124,6 +124,34 @@ extern const int8_t kD3D10StandardSamplePositions4x[4][2];
 
 reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs);
 
+struct NormalizedUserClipPlanes {
+  uint32_t count;
+  float equations[6][4];
+};
+
+// The translated vertex shader only knows how many user clip planes are
+// enabled, not their guest indices. Pack the enabled equations in increasing
+// index order so this array matches the shader modification's compact layout.
+inline NormalizedUserClipPlanes GetNormalizedUserClipPlanes(
+    const RegisterFile& regs) {
+  NormalizedUserClipPlanes result = {};
+  reg::PA_CL_CLIP_CNTL clip_control = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  if (clip_control.clip_disable) {
+    return result;
+  }
+  for (uint32_t plane_index = 0; plane_index < 6; ++plane_index) {
+    if (!(clip_control.ucp_ena & (uint32_t(1) << plane_index))) {
+      continue;
+    }
+    for (uint32_t component = 0; component < 4; ++component) {
+      result.equations[result.count][component] = regs.Get<float>(
+          XE_GPU_REG_PA_CL_UCP_0_X + plane_index * 4 + component);
+    }
+    ++result.count;
+  }
+  return result;
+}
+
 // Direct3D 9 and Xenos constant polygon offset is an absolute floating-point
 // value.
 // It's possibly treated just as an absolute offset by the Xenos too - the
@@ -287,6 +315,52 @@ struct ViewportInfo {
   float ndc_scale[3];
   float ndc_offset[3];
 };
+
+struct NormalizedPointParameters {
+  float vertex_diameter_min;
+  float vertex_diameter_max;
+  float constant_diameter[2];
+  float screen_diameter_to_ndc_radius[2];
+};
+
+// Xenos point size registers contain a 12.4 fixed-point radius. Translated
+// shaders and the shared point-list geometry shader consume diameters.
+inline NormalizedPointParameters GetNormalizedPointParameters(
+    const RegisterFile& regs, const ViewportInfo& viewport_info,
+    uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y) {
+  NormalizedPointParameters result = {};
+  if (regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type !=
+      xenos::PrimitiveType::kPointList) {
+    return result;
+  }
+
+  reg::PA_SU_POINT_MINMAX point_minmax =
+      regs.Get<reg::PA_SU_POINT_MINMAX>();
+  reg::PA_SU_POINT_SIZE point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
+  constexpr float kPointRadiusFixedToDiameter = 2.0f / 16.0f;
+  result.vertex_diameter_min =
+      float(point_minmax.min_size) * kPointRadiusFixedToDiameter;
+  result.vertex_diameter_max =
+      float(point_minmax.max_size) * kPointRadiusFixedToDiameter;
+  result.constant_diameter[0] =
+      float(point_size.width) * kPointRadiusFixedToDiameter;
+  result.constant_diameter[1] =
+      float(point_size.height) * kPointRadiusFixedToDiameter;
+
+  // One NDC unit is half the viewport axis, while the point value is a
+  // diameter, so the factor of two and the diameter-to-radius factor cancel.
+  uint32_t extent_x = viewport_info.xy_extent[0]
+                          ? viewport_info.xy_extent[0]
+                          : uint32_t(1);
+  uint32_t extent_y = viewport_info.xy_extent[1]
+                          ? viewport_info.xy_extent[1]
+                          : uint32_t(1);
+  result.screen_diameter_to_ndc_radius[0] =
+      float(draw_resolution_scale_x) / float(extent_x);
+  result.screen_diameter_to_ndc_radius[1] =
+      float(draw_resolution_scale_y) / float(extent_y);
+  return result;
+}
 static_assert(sizeof(xenos::DepthRenderTargetFormat) == sizeof(uint32_t),
               "Change in depthrendertargetformat throws off "
               "getviewportinfoargs by a bit");

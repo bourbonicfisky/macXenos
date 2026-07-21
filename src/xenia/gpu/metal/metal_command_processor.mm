@@ -231,14 +231,6 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   }
 }
 
-bool IsPolygonalPrimitive(xenos::PrimitiveType type) {
-  return type == xenos::PrimitiveType::kTriangleList ||
-         type == xenos::PrimitiveType::kTriangleStrip ||
-         type == xenos::PrimitiveType::kTriangleFan ||
-         type == xenos::PrimitiveType::kRectangleList ||
-         type == xenos::PrimitiveType::kQuadList;
-}
-
 // SwapIndicesInto (guest index byte-swap into the host arena) and IsPp1Routable
 // (the routing predicate) are the shared production contracts, defined once in
 // metal_primitive_processor.h so the device-free conformance test exercises the
@@ -2434,9 +2426,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   DxbcShaderTranslator::SystemConstants system_constants;
   std::memset(&system_constants, 0, sizeof(system_constants));
   {
+    MetalSystemConstantGuestState system_constant_guest_state =
+        GetMetalSystemConstantGuestState(regs);
     // Viewport -> ndc_scale/offset (position-critical: zeroing collapses output).
     draw_util::ViewportInfo viewport_info;
-    draw_util::GetViewportInfoArgs vp_args;
     // x_max/y_max is the maximum host viewport extent, NOT the render-target
     // size. Both reference backends pass the device max (D3D12:
     // D3D12_VIEWPORT_BOUNDS_MAX, Vulkan: maxViewportDimensions) and let the
@@ -2446,20 +2439,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // guest RT extent (8192, already the clip-disabled cap and within Metal's
     // 16384 viewport limit) so guest content beyond 1280x720 is clipped, not
     // scaled.
-    vp_args.Setup(1, 1, divisors::MagicDiv(1), divisors::MagicDiv(1),
-                  /*origin_bottom_left=*/true,
-                  xenos::kTexture2DCubeMaxWidthHeight,
-                  xenos::kTexture2DCubeMaxWidthHeight,
-                  /*allow_reverse_z=*/true, regs.Get<reg::RB_DEPTHCONTROL>(),
-                  /*convert_z_to_float24=*/false,
-                  /*full_float24_in_0_to_1=*/false,
-                  /*pixel_shader_writes_depth=*/false);
-    vp_args.SetupRegisterValues(regs);
+    draw_util::GetViewportInfoArgs vp_args = GetMetalViewportInfoArgs(
+        regs, norm_depth, pixel_shader && pixel_shader->writes_depth());
     draw_util::GetHostViewportInfo(&vp_args, viewport_info);
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
     }
+    draw_util::NormalizedUserClipPlanes user_clip_planes =
+        draw_util::GetNormalizedUserClipPlanes(regs);
+    std::memcpy(system_constants.user_clip_planes,
+                user_clip_planes.equations,
+                sizeof(system_constants.user_clip_planes));
+    draw_util::NormalizedPointParameters point_parameters =
+        draw_util::GetNormalizedPointParameters(regs, viewport_info, 1, 1);
+    system_constants.point_vertex_diameter_min =
+        point_parameters.vertex_diameter_min;
+    system_constants.point_vertex_diameter_max =
+        point_parameters.vertex_diameter_max;
+    system_constants.point_constant_diameter[0] =
+        point_parameters.constant_diameter[0];
+    system_constants.point_constant_diameter[1] =
+        point_parameters.constant_diameter[1];
+    system_constants.point_screen_diameter_to_ndc_radius[0] =
+        point_parameters.screen_diameter_to_ndc_radius[0];
+    system_constants.point_screen_diameter_to_ndc_radius[1] =
+        point_parameters.screen_diameter_to_ndc_radius[1];
     // Position-relevant flags.
     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
     uint32_t flags = 0;
@@ -2471,12 +2476,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (pa_cl_vte_cntl.vtx_xy_fmt) flags |= DxbcShaderTranslator::kSysFlag_XYDividedByW;
     if (pa_cl_vte_cntl.vtx_z_fmt) flags |= DxbcShaderTranslator::kSysFlag_ZDividedByW;
     if (pa_cl_vte_cntl.vtx_w0_fmt) flags |= DxbcShaderTranslator::kSysFlag_WNotReciprocal;
-    if (IsPolygonalPrimitive(prim_type)) {
+    if (system_constant_guest_state.primitive_polygonal) {
       flags |= DxbcShaderTranslator::kSysFlag_PrimitivePolygonal;
     }
     if (prim_type == xenos::PrimitiveType::kLineList ||
         prim_type == xenos::PrimitiveType::kLineStrip) {
       flags |= DxbcShaderTranslator::kSysFlag_PrimitiveLine;
+    }
+    if (system_constant_guest_state.depth_float24) {
+      flags |= DxbcShaderTranslator::kSysFlag_DepthFloat24;
     }
     // Alpha test: the compare function is a 3-bit (less|equal|greater) mask in
     // the flags. Leaving it 0 means kNever -> the pixel shader discards EVERY
@@ -2577,9 +2585,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // (terrain chunks as giant wedges; chunks whose swapped indices left
     // the lattice rasterized nothing).
     system_constants.vertex_index_endian = xenos::Endian::kNone;
-    system_constants.vertex_index_offset = regs[XE_GPU_REG_VGT_INDX_OFFSET];
-    system_constants.vertex_index_min = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
-    system_constants.vertex_index_max = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
+    system_constants.vertex_index_offset =
+        system_constant_guest_state.vertex_index_offset;
+    system_constants.vertex_index_min =
+        system_constant_guest_state.vertex_index_min;
+    system_constants.vertex_index_max =
+        system_constant_guest_state.vertex_index_max;
 
     // Diagnostic (rides XE_METAL_EXPO_TRACE=<ps hash>): log the host viewport
     // + window-offset registers for draws using that pixel shader — the

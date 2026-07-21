@@ -269,6 +269,48 @@ struct MetalPipelineRasterState {
   MetalPipelineRasterKey pipeline_key() const { return {raster_sample_count}; }
 };
 
+// Guest-derived inputs consumed by Metal's translated-shader system constants.
+// Keeping this seam free of Metal types gives the conformance target coverage
+// of the exact shared primitive classification and typed register reads.
+struct MetalSystemConstantGuestState {
+  bool primitive_polygonal;
+  bool depth_float24;
+  uint32_t vertex_index_offset;
+  uint32_t vertex_index_min;
+  uint32_t vertex_index_max;
+};
+
+inline MetalSystemConstantGuestState GetMetalSystemConstantGuestState(
+    const RegisterFile& regs) {
+  return {
+      draw_util::IsPrimitivePolygonal(regs),
+      regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+          xenos::DepthRenderTargetFormat::kD24FS8,
+      regs.Get<reg::VGT_INDX_OFFSET>().indx_offset,
+      regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx,
+      regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx,
+  };
+}
+
+// Metal's canonical depth transfer stores the full guest float24 [0, 2)
+// domain in host [0, 1]. These arguments keep interpolated raster depth and
+// explicit pixel-shader depth in that same domain.
+inline draw_util::GetViewportInfoArgs GetMetalViewportInfoArgs(
+    const RegisterFile& regs,
+    reg::RB_DEPTHCONTROL normalized_depth_control,
+    bool pixel_shader_writes_depth) {
+  draw_util::GetViewportInfoArgs args;
+  args.Setup(1, 1, divisors::MagicDiv(1), divisors::MagicDiv(1),
+             /*origin_bottom_left=*/true,
+             xenos::kTexture2DCubeMaxWidthHeight,
+             xenos::kTexture2DCubeMaxWidthHeight,
+             /*allow_reverse_z=*/true, normalized_depth_control,
+             /*convert_z_to_float24=*/false,
+             /*full_float24_in_0_to_1=*/true, pixel_shader_writes_depth);
+  args.SetupRegisterValues(regs);
+  return args;
+}
+
 inline MetalPipelineRasterState GetMetalPipelineRasterState(
     uint32_t raster_sample_count, reg::RB_COLORCONTROL color_control) {
   // Render-target selection is expected to provide a Metal-supported count.

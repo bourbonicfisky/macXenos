@@ -188,6 +188,20 @@ kernel void k_unorm24(device const uint* in [[buffer(0)]],
   out[i] = as_type<uint>(r);
 }
 
+kernel void k_depth_word_to_host(device const uint* in [[buffer(0)]],
+                                 device uint* out [[buffer(1)]],
+                                 constant uint& fmt [[buffer(2)]],
+                                 uint i [[thread_position_in_grid]]) {
+  out[i] = as_type<uint>(xe_depth_word_to_host(in[i], fmt));
+}
+
+kernel void k_depth_word_to_guest(device const uint* in [[buffer(0)]],
+                                  device uint* out [[buffer(1)]],
+                                  constant uint& fmt [[buffer(2)]],
+                                  uint i [[thread_position_in_grid]]) {
+  out[i] = as_type<uint>(xe_depth_word_to_guest(in[i], fmt));
+}
+
 // EDRAM tile/sample byte offset -- a faithful transcription of the SHIPPING
 // GPU addresser edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
 // wrap=false. Checked against the CPU oracle XeEdramSnapshotOffsetBytes so the
@@ -1865,6 +1879,38 @@ TEST_CASE("Metal unorm24 decode matches CPU oracle bit-for-bit", "[l1][metal][un
   }
   auto gpu = mc.Run("k_unorm24", codes);
   REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Canonical depth resolve exposes guest rather than attachment domain",
+          "[l1][metal][canonical][resolve][depth]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+
+  std::vector<uint32_t> words;
+  for (uint32_t d24 = 0u; d24 < (1u << 24); d24 += 251u) {
+    words.push_back((d24 << 8u) | 0x5Au);
+  }
+  words.push_back(0x000000A5u);
+  words.push_back(0x800000A5u);
+  words.push_back(0xFFFFFFA5u);
+
+  std::vector<uint32_t> guest_float24(words.size());
+  std::vector<uint32_t> host_float24(words.size());
+  std::vector<uint32_t> guest_unorm24(words.size());
+  for (size_t i = 0; i < words.size(); ++i) {
+    uint32_t d24 = words[i] >> 8u;
+    float guest_float = xenos::Float20e4To32(d24);
+    float host_float = guest_float * 0.5f;
+    float guest_unorm = xenos::UNorm24To32(d24);
+    std::memcpy(&guest_float24[i], &guest_float, sizeof(uint32_t));
+    std::memcpy(&host_float24[i], &host_float, sizeof(uint32_t));
+    std::memcpy(&guest_unorm24[i], &guest_unorm, sizeof(uint32_t));
+  }
+
+  CHECK(mc.Run("k_depth_word_to_guest", words, true, 2u) == guest_float24);
+  CHECK(mc.Run("k_depth_word_to_host", words, true, 2u) == host_float24);
+  CHECK(mc.Run("k_depth_word_to_guest", words, true, 1u) == guest_unorm24);
+  CHECK(mc.Run("k_depth_word_to_host", words, true, 1u) == guest_unorm24);
 }
 
 TEST_CASE("Metal GpuSwap matches CPU oracle bit-for-bit", "[l1][metal][endian]") {
