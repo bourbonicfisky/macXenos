@@ -343,6 +343,90 @@ TEST_CASE("Authority: empty and out-of-domain RAM publications are rejected",
       DecideRamWritePublication(WriterKind::kGuestCpu, kEnd, 0x1000u));
 }
 
+// Task 3.2: completed resolve publication routes through the same typed seam
+// used by trace restore (task 3.1), using the checked destination extent
+// (metal_command_processor.mm's wb.guest_addr / wb.dest_extent_bytes) rather
+// than RangeWrittenByGpu. Resolve's policy executes shared-page invalidation
+// only -- legacy texture-cache fan-out for resolve remains the global watch,
+// unlike trace restore's independently-required direct call (audit blocker 3
+// does not apply to resolve).
+TEST_CASE("Authority: resolve executes normalized RAM publication",
+          "[l0][authority][publication]") {
+  auto publication =
+      DecideRamWritePublication(WriterKind::kResolve, 0x20000u, 0x800u);
+  REQUIRE(publication);
+  REQUIRE(publication->range.start() == 0x20000u);
+  REQUIRE(publication->range.length() == 0x800u);
+  REQUIRE(publication->action == AuthorityAction::kInvalidateRamWrite);
+  REQUIRE(publication->policy.execute_shared_invalidation);
+  REQUIRE(publication->policy.exact_range);
+  REQUIRE_FALSE(publication->policy.execute_legacy_invalidation);
+
+  RecordingRamWriteTarget target;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE(target.shared_calls == 1u);
+  REQUIRE(target.shared_base == 0x20000u);
+  REQUIRE(target.shared_length == 0x800u);
+  REQUIRE(target.shared_exact);
+  // Resolve's policy never calls the legacy-texture port; cache invalidation
+  // for resolve stays on the existing STAGE-3 direct call at the drain site,
+  // not the seam's independently-required trace-restore path.
+  REQUIRE(target.legacy_calls == 0u);
+  REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+  REQUIRE(outcome.shared_invalidation_executed);
+  REQUIRE_FALSE(outcome.legacy_invalidation_executed);
+  REQUIRE(outcome.invalidated_entries == 0u);
+}
+
+TEST_CASE(
+    "Authority: resolve publication uses the checked/clamped destination "
+    "extent",
+    "[l0][authority][publication]") {
+  const uint32_t kEnd = uint32_t(GuestRange::kGuestPhysicalSize);
+  // A checked scatter destination extent that runs past the 512 MiB guest
+  // physical boundary (e.g. a corrupted/edge dest_extent_bytes) must clamp
+  // rather than publish an out-of-bounds or wrapped range.
+  auto publication = DecideRamWritePublication(WriterKind::kResolve,
+                                               kEnd - 0x40u, 0x1000u);
+  REQUIRE(publication);
+  REQUIRE(publication->range.start() == kEnd - 0x40u);
+  REQUIRE(publication->range.length() == 0x40u);
+
+  RecordingRamWriteTarget target;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE(target.shared_base == kEnd - 0x40u);
+  REQUIRE(target.shared_length == 0x40u);
+  REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+}
+
+TEST_CASE(
+    "Authority: resolve publication with zero checked extent is rejected",
+    "[l0][authority][publication]") {
+  // wb.dest_extent_bytes == 0 must never reach InvalidateSharedPages as a
+  // publication -- the enqueue side guarantees nonzero, but the seam itself
+  // must not fabricate a publication for an empty range.
+  REQUIRE_FALSE(
+      DecideRamWritePublication(WriterKind::kResolve, 0x9000u, 0u));
+}
+
+TEST_CASE(
+    "Authority: resolve publication reports no dependency when the target "
+    "operation fails",
+    "[l0][authority][publication]") {
+  // A null/missing RAM mapping must not be falsely published as an executed
+  // invalidate-RAM action (metal_command_processor.mm's MetalRamWritePublica-
+  // tionTarget returns false when shared_memory_ is null).
+  auto publication =
+      DecideRamWritePublication(WriterKind::kResolve, 0x30000u, 0x200u);
+  REQUIRE(publication);
+  RecordingRamWriteTarget target;
+  target.shared_result = false;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE(target.shared_calls == 1u);
+  REQUIRE_FALSE(outcome.shared_invalidation_executed);
+  REQUIRE(outcome.action == AuthorityAction::kNoDependency);
+}
+
 TEST_CASE("Authority: full consumer x producer action matrix", "[l0][authority]") {
   const ConsumerKind consumers[] = {ConsumerKind::kTexture, ConsumerKind::kVertex,
                                     ConsumerKind::kWait,

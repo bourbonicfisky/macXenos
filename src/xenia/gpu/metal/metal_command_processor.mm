@@ -5122,11 +5122,13 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       still_pending.push_back(wb);
       continue;
     }
-    ++outcome.drained_records;
-    ++outcome.resolve_records;
     uint32_t invalidated_entries = 0;
-    bool published_to_ram = false;
-    id<MTLBuffer> staging = (__bridge_transfer id<MTLBuffer>)wb.staging;
+    metal::LegacyWriterOutcome publish_outcome;
+    // Borrow the retained staging buffer until RAM publication succeeds. A
+    // failed mapping/invalidation must keep both the record and its staging
+    // ownership so a later drain can retry rather than silently retiring
+    // GPU-newer data.
+    id<MTLBuffer> staging = (__bridge id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
     if (dest && staging) {
       const uint32_t* src_words =
@@ -5397,33 +5399,54 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // scatter — and any zero-hold re-scatter or tip refresh above — wrote
       // guest RAM through the host physical view, which the guest-mirror
       // write protection does not cover, so the shared-memory authority never
-      // sees these writes on its own. Invalidate exactly the extent the
-      // scatter's own bound check admits writes into
+      // sees these writes on its own. Route the publication through the typed
+      // task-3.2 seam using the checked destination extent
       // ([guest_addr, guest_addr + dest_extent_bytes); enqueue guarantees the
       // extent is nonzero), after ALL RAM writes for this record, so a later
       // shared-memory consumer revalidates the pages. The shared BUFFER was
       // not written — invalidation, never RangeWrittenByGpu.
-      if (shared_memory_) {
-        shared_memory_->MemoryInvalidationCallback(
-            wb.guest_addr, wb.dest_extent_bytes, true);
+      auto publication = metal::DecideRamWritePublication(
+          metal::WriterKind::kResolve, wb.guest_addr, wb.dest_extent_bytes);
+      if (publication) {
+        MetalRamWritePublicationTarget target(shared_memory_.get(),
+                                              texture_cache_.get());
+        publish_outcome = metal::PublishRamWrite(*publication, target);
       }
-      published_to_ram = true;
     }
     // Observer-only (task 2.4): record after every corrective RAM write and
-    // publication operation has run. A missing mapping/staging resource is an
-    // observed disagreement rather than a silently presumed publication.
+    // publication operation has run. The legacy outcome is the seam's own
+    // factual result (whether InvalidateSharedPages actually ran), merged with
+    // the STAGE-3 texture-cache invalidation count from above -- never
+    // rederived from the same decision the observer compares against.
     if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kResolve)) {
       metal::GuestRangeSet ranges;
       ranges.Add(metal::GuestRange::FromBaseLength(wb.guest_addr,
                                                    wb.dest_extent_bytes));
+      publish_outcome.invalidated_entries = invalidated_entries;
       authority_observer_.RecordWriter(
           metal::WriterKind::kResolve, ranges,
           metal::DecideWriterPublication(metal::WriterKind::kResolve),
-          {/*action=*/published_to_ram
-               ? metal::AuthorityAction::kInvalidateRamWrite
-               : metal::AuthorityAction::kNoDependency,
-           invalidated_entries, /*committed=*/false, /*waited=*/false});
+          publish_outcome);
     }
+    if (publish_outcome.action !=
+        metal::AuthorityAction::kInvalidateRamWrite) {
+      static uint32_t s_failed_resolve_publications = 0;
+      if (s_failed_resolve_publications++ < 8) {
+        XELOGE(
+            "MetalCommandProcessor: retaining unpublished resolve {:08X}+{} "
+            "(dest={}, staging={}, shared={})",
+            wb.guest_addr, wb.dest_extent_bytes, dest != nullptr,
+            staging != nil, shared_memory_ != nullptr);
+      }
+      still_pending.push_back(wb);
+      continue;
+    }
+    ++outcome.drained_records;
+    ++outcome.resolve_records;
+    id<MTLBuffer> released_staging =
+        (__bridge_transfer id<MTLBuffer>)wb.staging;
+    (void)released_staging;
+    wb.staging = nullptr;
   }
   pending_writebacks_ = std::move(still_pending);
   return outcome;
