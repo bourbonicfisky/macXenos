@@ -89,6 +89,20 @@ TEST_CASE("Metal non-polygons always establish safe no-cull state",
   CHECK_FALSE(state.culls_all());
 }
 
+TEST_CASE("Metal depth clipping follows guest clip-disable state",
+          "[l0][metal][depth-clip]") {
+  reg::PA_CL_CLIP_CNTL clip = {};
+  CHECK(GetMetalDepthClipMode(clip) == MetalDepthClipMode::kClip);
+
+  clip.clip_disable = 1;
+  CHECK(GetMetalDepthClipMode(clip) == MetalDepthClipMode::kClamp);
+
+  // Re-derivation must restore clipping on a later draw rather than leaking
+  // the previous encoder's clamp state.
+  clip.clip_disable = 0;
+  CHECK(GetMetalDepthClipMode(clip) == MetalDepthClipMode::kClip);
+}
+
 TEST_CASE("Metal triangle fill mode follows visible dual-mode faces",
           "[l0][metal][fill-depth-bias]") {
   reg::PA_SU_SC_MODE_CNTL mode = {};
@@ -237,6 +251,36 @@ TEST_CASE("Metal non-polygons use the front stencil reference",
   state = GetMetalBlendStencilState(0.0f, 0.0f, 0.0f, 0.0f, depth, true,
                                     stencil, stencil_back);
   CHECK(state.stencil_reference_back == 0x34);
+}
+
+TEST_CASE("Metal color binding recognizes every MRT slot",
+          "[l0][metal][mrt]") {
+  CHECK_FALSE(HasMetalColorTarget(0));
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    CHECK(HasMetalColorTarget(0xFu << (i * 4u)));
+    CHECK(HasMetalColorTarget(1u << (i * 4u + 3u)));
+  }
+  CHECK_FALSE(HasMetalColorTarget(1u << 16u));
+}
+
+TEST_CASE("Metal gamma conversion is derived per MRT slot",
+          "[l0][metal][mrt][gamma]") {
+  std::array<reg::RB_COLOR_INFO, xenos::kMaxColorRenderTargets> color_infos =
+      {};
+  for (auto& color_info : color_infos) {
+    color_info.color_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+  }
+  CHECK(GetMetalGammaRenderTargetMask(color_infos) == 0u);
+  color_infos[1].color_format =
+      xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+  color_infos[3].color_format =
+      xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+  CHECK(GetMetalGammaRenderTargetMask(color_infos) == 0b1010u);
+  color_infos[0].color_format =
+      xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+  color_infos[2].color_format =
+      xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+  CHECK(GetMetalGammaRenderTargetMask(color_infos) == 0b1111u);
 }
 
 TEST_CASE("Metal disabled stencil state has deterministic safe references",

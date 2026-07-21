@@ -209,6 +209,25 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   cache_.clear();
+  // Per-swizzle exact-cover views are ours (retained +1); the resolved target
+  // snapshots and tip textures are owned elsewhere and are not released here.
+  for (auto& pair : resolved_targets_) {
+    for (auto& sv : pair.second.swizzle_views) {
+      if (sv.second.view) {
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)sv.second.view;
+        (void)released;
+      }
+    }
+    pair.second.swizzle_views.clear();
+    for (auto& sv : pair.second.tip_swizzle_views) {
+      if (sv.second.view) {
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)sv.second.view;
+        (void)released;
+      }
+    }
+    pair.second.tip_swizzle_views.clear();
+  }
+  resolved_targets_.clear();
 }
 
 void MetalTextureCache::SetTracePlayback() {
@@ -307,10 +326,16 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
   struct KeyBytes {
     uint32_t base, width, height, pitch;
     uint32_t format_tiled_endian;
+    // FinalizeTexture bakes the 12-bit guest fetch swizzle into the sampled
+    // view, so two fetches identical in every other field but differing in
+    // swizzle must NOT share a cache entry (the second would reuse the first's
+    // wrong-channel view — alpha read from the wrong channel discards draws).
+    uint32_t swizzle;
   } kb{base, width, height, pitch_texels,
        (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
            (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
-           uint32_t(fetch.endianness)};
+           uint32_t(fetch.endianness),
+       uint32_t(fetch.swizzle & 0xFFF)};
   return XXH3_64bits(&kb, sizeof(kb));
 }
 
@@ -342,10 +367,13 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   const ResolvedTarget& rt = rit->second;
   uint32_t fetch_w = fetch.size_2d.width + 1;
   uint32_t fetch_h = fetch.size_2d.height + 1;
-  // Covered-fetch fast path: R32Float ONLY (see the serve chain's rationale;
-  // covered RGBA8 snapshots regressed the gate and need the RAM path).
+  // A RAM-backed R32 resolve must use RAM unless the full texture-fetch layout
+  // is proven equivalent (format, tiling, pitch, mips, extent, endian). The
+  // former dimensions-only shortcut could bypass partial/offset writebacks.
+  // Non-RAM-backed R32 destinations still use the ordinary bridge condition.
   bool covered_r32f =
-      !rt.is_depth && rt.width >= fetch_w && rt.height >= fetch_h &&
+      !rt.is_depth && !rt.ram_backed && rt.width >= fetch_w &&
+      rt.height >= fetch_h &&
       ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
           MTLPixelFormatR32Float;
   // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
@@ -385,6 +413,41 @@ ResolvedFetchService MetalTextureCache::ClassifyFetchService(
   ResolvedFetchServiceInputs in;
   BuildResolvedServiceInputs(fetch, is_signed, &in);
   return ClassifyResolvedFetch(in);
+}
+
+uint32_t MetalTextureCache::GetSwizzledSnapshotSlot(
+    void* source, uint32_t guest_swizzle,
+    std::unordered_map<uint32_t, ResolvedTarget::SwizzleView>& views) {
+  auto sv_it = views.find(guest_swizzle);
+  if (sv_it != views.end()) {
+    active_textures_.push_back(sv_it->second.view);
+    return sv_it->second.slot;
+  }
+  id<MTLTexture> src = (__bridge id<MTLTexture>)source;
+  MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
+      GuestSwizzleComponentToMetal((guest_swizzle >> 0) & 0b111),
+      GuestSwizzleComponentToMetal((guest_swizzle >> 3) & 0b111),
+      GuestSwizzleComponentToMetal((guest_swizzle >> 6) & 0b111),
+      GuestSwizzleComponentToMetal((guest_swizzle >> 9) & 0b111));
+  id<MTLTexture> view =
+      [src newTextureViewWithPixelFormat:src.pixelFormat
+                            textureType:src.textureType
+                                 levels:NSMakeRange(0, src.mipmapLevelCount)
+                                 slices:NSMakeRange(0, src.arrayLength)
+                                swizzle:channels];
+  if (!view) {
+    return 0;
+  }
+  uint32_t view_slot = AllocateSlot();
+  if (!view_slot) {
+    return 0;
+  }
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  IRDescriptorTableSetTexture(&entries[view_slot], view, 0.0f, 0);
+  void* view_ptr = (__bridge_retained void*)view;
+  views.emplace(guest_swizzle, ResolvedTarget::SwizzleView{view_ptr, view_slot});
+  active_textures_.push_back(view_ptr);
+  return view_slot;
 }
 
 uint32_t MetalTextureCache::GetTextureSlot(
@@ -520,10 +583,43 @@ uint32_t MetalTextureCache::GetTextureSlot(
               lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
               rt.wb_endian);
         }
-        active_textures_.push_back(rt.texture);
-        return rt.slot;
+        // The raw snapshot slot carries no swizzle; the ordinary RAM upload
+        // bakes the fetch swizzle into a texture view (FinalizeTexture). Serve
+        // the identity case from the raw slot, and every nonidentity guest
+        // swizzle from a per-swizzle cached view so the exact-cover fast path
+        // reads the same channels the RAM path would.
+        uint32_t guest_swizzle = fetch.swizzle & 0xFFF;
+        if (!rt.requires_fetch_swizzle ||
+            GuestSwizzleIsIdentity(guest_swizzle)) {
+          active_textures_.push_back(rt.texture);
+          return rt.slot;
+        }
+        ResolvedTarget& rt_mut = rit->second;
+        uint32_t swz_slot = GetSwizzledSnapshotSlot(
+            rt_mut.texture, guest_swizzle, rt_mut.swizzle_views);
+        if (swz_slot) {
+          return swz_slot;
+        }
+        // View creation or heap allocation failed: fall through to the guest
+        // RAM path below (which bakes the swizzle into its own view) rather
+        // than serve the unswizzled raw snapshot (wrong channels) or null.
+        // Exact-cover is RAM-backed by definition (RAM holds scatter(snapshot)),
+        // so the untile reproduces the content.
       }
       if (service == ResolvedFetchService::kBridgeSnapshot) {
+        // The raw snapshot / tip slots carry no swizzle, exactly like the
+        // exact-cover path; the ordinary RAM upload would bake the guest fetch
+        // swizzle into a view. Honor a non-identity swizzle here too so the
+        // bridge reads the same channels the RAM path would.
+        uint32_t guest_swizzle = fetch.swizzle & 0xFFF;
+        bool identity = !rt.requires_fetch_swizzle ||
+                        GuestSwizzleIsIdentity(guest_swizzle);
+        // RAM-backed color is the ONLY bridge source with a safe fallback when
+        // a swizzled view can't be built (its guest RAM holds the content, so
+        // the untile below reproduces it). Depth and non-RAM-backed color have
+        // no RAM decode — they must fail (null) rather than bind the raw slot
+        // with the wrong channels.
+        bool ram_fallback = rt.ram_backed && !rt.is_depth;
         // XE_METAL_TIP_SNAP_VIEW: a 1x1 guest fetch of a larger snapshot must
         // read guest texel (0,0); binding the full WxH snapshot lands the
         // shader's UV mid-texture (8x8 exposure tip -> texel 4,4 — the JC2
@@ -538,8 +634,21 @@ uint32_t MetalTextureCache::GetTextureSlot(
                 "(snapshot texel 0,0; rt={}x{})",
                 lineage_draw_, fetch.base_address << 12, rt.width, rt.height);
           }
-          active_textures_.push_back(rt.tip_texture);
-          return rt.tip_slot;
+          if (identity) {
+            active_textures_.push_back(rt.tip_texture);
+            return rt.tip_slot;
+          }
+          // Swizzle a view of the TIP texture (not the full snapshot), cached
+          // separately so it retires with the tip's own generation.
+          uint32_t tip_swz_slot = GetSwizzledSnapshotSlot(
+              rit->second.tip_texture, guest_swizzle,
+              rit->second.tip_swizzle_views);
+          if (tip_swz_slot) {
+            return tip_swz_slot;
+          }
+          // covered_r32f implies !ram_backed: the tip has no RAM fallback.
+          log_null("tip-swizzle-view");
+          return 0;
         }
         if (xe_lineage_base() && (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
@@ -549,8 +658,21 @@ uint32_t MetalTextureCache::GetTextureSlot(
               lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
               fetch_w, fetch_h, rt.is_depth, rt.ram_backed, covered_r32f);
         }
-        active_textures_.push_back(rt.texture);
-        return rt.slot;
+        if (identity) {
+          active_textures_.push_back(rt.texture);
+          return rt.slot;
+        }
+        uint32_t swz_slot = GetSwizzledSnapshotSlot(
+            rit->second.texture, guest_swizzle, rit->second.swizzle_views);
+        if (swz_slot) {
+          return swz_slot;
+        }
+        if (!ram_fallback) {
+          log_null("bridge-swizzle-view");
+          return 0;
+        }
+        // RAM-backed color: fall through to the guest RAM path below, which
+        // bakes the swizzle into its own view.
       }
       // kRamContent: RAM authoritative — fall through to the cache/untile
       // path below.
@@ -1106,7 +1228,8 @@ void MetalTextureCache::WriteAllCachedTexturesToTrace(
 
 void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
                                                uint32_t width, uint32_t height,
-                                               bool is_depth) {
+                                               bool is_depth,
+                                               bool requires_fetch_swizzle) {
   if (!texture) {
     return;
   }
@@ -1121,7 +1244,18 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     }
     it->second.width = width;
     it->second.height = height;
+    it->second.is_depth = is_depth;
+    it->second.requires_fetch_swizzle = requires_fetch_swizzle;
     if (it->second.texture != texture) {
+      // The snapshot generation is changing: every per-swizzle exact-cover
+      // view aliases the OLD texture, so retire them all (slot + retained
+      // view) through the same in-flight-safe pool as the base slot. In-flight
+      // draws keep sampling the old views/slots until their submissions drain.
+      for (auto& sv : it->second.swizzle_views) {
+        stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+        retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
+      }
+      it->second.swizzle_views.clear();
       // FAULT INJECTOR (XE_METAL_FAULT_INJECT=1): restore the old in-place
       // repoint, which reproduces the GPU page fault deliberately — used to
       // verify fault attribution (S2) and auto-recovery (S6) end-to-end.
@@ -1159,7 +1293,8 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   }
   id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
   IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
-  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot, is_depth};
+  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot,
+                                           is_depth, requires_fetch_swizzle};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
 }
@@ -1181,6 +1316,14 @@ void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
     // old texture by gpuAddress — retire the slot, never repoint in place.
     stale_slots_.emplace_back(RetireSubmission(), it->second.tip_slot);
   }
+  // Per-tip swizzled views alias the OLD tip texture — retire them (slot +
+  // retained view) through the same in-flight-safe pool so in-flight draws keep
+  // sampling them until their submissions drain.
+  for (auto& sv : it->second.tip_swizzle_views) {
+    stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+    retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
+  }
+  it->second.tip_swizzle_views.clear();
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   IRDescriptorTableSetTexture(&entries[new_slot],
                               (__bridge id<MTLTexture>)texture, 0.0f, 0);
@@ -1200,9 +1343,7 @@ bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
   if (rt.is_depth || !rt.ram_backed) {
     return true;
   }
-  return rt.width >= width && rt.height >= height &&
-         ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
-             MTLPixelFormatR32Float;
+  return false;
 }
 
 void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
@@ -1240,6 +1381,16 @@ void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
     }
     if (pair.second.tip_texture) {
       out.push_back(pair.second.tip_texture);
+    }
+    for (const auto& sv : pair.second.swizzle_views) {
+      if (sv.second.view) {
+        out.push_back(sv.second.view);
+      }
+    }
+    for (const auto& sv : pair.second.tip_swizzle_views) {
+      if (sv.second.view) {
+        out.push_back(sv.second.view);
+      }
     }
   }
 }

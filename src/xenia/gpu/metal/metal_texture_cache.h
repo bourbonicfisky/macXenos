@@ -78,7 +78,8 @@ class MetalTextureCache {
   // slot is allocated once per base and reused; the snapshot's contents update
   // in place, so re-registering the same base/texture is a cheap no-op.
   void RegisterResolvedTarget(uint32_t base, void* texture, uint32_t width,
-                              uint32_t height, bool is_depth);
+                              uint32_t height, bool is_depth,
+                              bool requires_fetch_swizzle);
 
   // Stage 3 hybrid: a resolve at `base` enqueued a guest-RAM writeback, so
   // RAM is authoritative for fetches of this base (the bridge snapshot is a
@@ -254,6 +255,11 @@ class MetalTextureCache {
     // Stage 3: DEPTH bridges and non-RAM-backed color bridges are served to
     // fetches; RAM-backed color reads guest RAM (exact-address placement).
     bool is_depth;
+    // True when the snapshot contains guest resolve-destination channel
+    // representation, so sampling it must apply the texture fetch swizzle just
+    // like the RAM upload path. Legacy resolve snapshots are already logical
+    // host color and must not be decoded a second time.
+    bool requires_fetch_swizzle;
     // True once any resolve at this base enqueued a guest-RAM writeback: the
     // writer could encode the dest, so RAM (not the per-base snapshot) is
     // the truth. Stays false for dests the writer skips (64bpp HDR etc.),
@@ -277,9 +283,39 @@ class MetalTextureCache {
     // column writes) clear this and keep the exact-address RAM path.
     bool full_rect = false;
     uint32_t wb_endian = 0;
+    // Per-swizzle sampled views for the exact-cover fast path. Serving the raw
+    // snapshot slot (rt.slot) bypasses the fetch swizzle the ordinary RAM
+    // upload bakes into a texture view, so a nonidentity guest swizzle would
+    // read the wrong channels. Identity RGBA reuses the raw slot; every other
+    // 12-bit guest swizzle gets its own channel-swizzled MTLTexture view in a
+    // fresh bindless slot, cached here. The views are ours (retained +1);
+    // retired wholesale (slot -> stale_slots_, view -> retired_textures_) when
+    // the snapshot texture generation changes, and released at destruction.
+    struct SwizzleView {
+      void* view;  // id<MTLTexture>, retained by us.
+      uint32_t slot;
+    };
+    std::unordered_map<uint32_t, SwizzleView> swizzle_views;
+    // Per-swizzle sampled views of the derived 1x1 tip_texture (bridge 1x1
+    // fetch path). Kept separate from swizzle_views because they alias a
+    // DIFFERENT source object with its own lifetime: they retire when the tip
+    // texture generation changes (RegisterResolvedTipView), not when the full
+    // snapshot changes.
+    std::unordered_map<uint32_t, SwizzleView> tip_swizzle_views;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+
+  // Returns the bindless slot for a channel-swizzled sampled view of `source`
+  // (a resolved snapshot or its 1x1 tip), creating and caching it in `views`
+  // keyed by the 12-bit guest swizzle, and marks it active for residency. The
+  // caller must have already checked the swizzle is non-identity. Returns 0 on
+  // view creation or heap exhaustion — the caller then picks the safe fallback
+  // (RAM re-upload for RAM-backed color, null for bridge-only sources) rather
+  // than bind the unswizzled raw slot with the wrong channels.
+  uint32_t GetSwizzledSnapshotSlot(
+      void* source, uint32_t guest_swizzle,
+      std::unordered_map<uint32_t, ResolvedTarget::SwizzleView>& views);
 };
 
 }  // namespace metal

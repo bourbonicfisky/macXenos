@@ -272,8 +272,8 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
         newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
                           textureType:MTLTextureType2DArray
                                levels:NSMakeRange(0, 1)
-                               slices:NSMakeRange(0, 1)
-                              swizzle:channels];
+                              slices:NSMakeRange(0, 1)
+                             swizzle:channels];
     if (!view || !legacy_) {
       continue;  // Unserved; the legacy path serves this index.
     }

@@ -508,6 +508,59 @@ TEST_CASE("Transfer classify: precedence — blit wins over reinterpret",
   REQUIRE(ClassifyTransfer(MakeInput(c8888, c8888)) == TransferKind::kBlit);
 }
 
+// ---------------------------------------------------------------------------
+// The canonical-path POLICY gate. ShouldUseCanonicalTransferPath decides whether
+// the live cascade (metal_render_target_cache.mm ~863) bypasses every legacy
+// transfer branch and routes through canonical per-sample EDRAM instead. When it
+// returns true, the legacy policies retired above — kDepthToColor's d2c
+// skip/zero default and kCrossMsaa's collapsed missing-sample synthesis — no
+// longer run; the physical words are transported verbatim.
+TEST_CASE("Canonical path: true only when all three inputs are true",
+          "[l3b][transfer][canonical]") {
+  // The single true case: canonical raster on + both formats supported.
+  REQUIRE(ShouldUseCanonicalTransferPath(true, true, true));
+  // Every other combination falls back to the legacy branch cascade.
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(false, true, true));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(true, false, true));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(true, true, false));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(false, false, true));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(false, true, false));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(true, false, false));
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(false, false, false));
+}
+
+TEST_CASE("Canonical path: a classified depth->color bypasses the d2c "
+          "skip/zero default when enabled",
+          "[l3b][transfer][canonical][d2c]") {
+  Surf depth{true, false, MsaaSamples::k1X, 2};
+  Surf color{false, false, MsaaSamples::k1X, 0};
+  // The transition still classifies as kDepthToColor (the manifest records the
+  // handoff either way)...
+  REQUIRE(ClassifyTransfer(MakeInput(depth, color)) ==
+          TransferKind::kDepthToColor);
+  // ...but with canonical raster on and both formats supported, the live cascade
+  // takes the canonical path — NOT the legacy d2c skip/zero branch.
+  REQUIRE(ShouldUseCanonicalTransferPath(/*canonical_raster_enabled=*/true,
+                                         /*source_format_supported=*/true,
+                                         /*destination_format_supported=*/true));
+  // With canonical raster off it stays on the legacy d2c policy.
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(false, true, true));
+}
+
+TEST_CASE("Canonical path: a classified cross-MSAA bypasses collapsed "
+          "missing-sample synthesis when enabled",
+          "[l3b][transfer][canonical][cross_msaa]") {
+  Surf lo{false, false, MsaaSamples::k1X, 0};
+  Surf hi{false, false, MsaaSamples::k4X, 0};
+  // The transition classifies as kCrossMsaa...
+  REQUIRE(ClassifyTransfer(MakeInput(lo, hi)) == TransferKind::kCrossMsaa);
+  // ...and the canonical path (all three true) preserves the physical words,
+  // retiring the legacy lossy resample/missing-sample synthesis.
+  REQUIRE(ShouldUseCanonicalTransferPath(true, true, true));
+  // An unsupported destination format forces the legacy cross-MSAA branch.
+  REQUIRE_FALSE(ShouldUseCanonicalTransferPath(true, true, false));
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe

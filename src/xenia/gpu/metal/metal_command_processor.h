@@ -344,8 +344,13 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t guest_addr;
     uint32_t width;
     uint32_t height;
-    uint32_t bpp;     // dest bytes per texel: 4 (8888/R32F) or 8 (RGBA16F).
-    uint32_t endian;  // xenos::Endian of the resolve dest.
+    uint32_t bpp;     // destination bytes per texel (1, 2, 4, 8, or 16).
+    // Scatter operation endian. Zero when a canonical packed kernel already
+    // produced guest-endian bytes; otherwise the Endian128 value to apply.
+    uint32_t endian;
+    // Guest layout provenance retained even when staging is already endian-
+    // transformed (used by presentation, logs, and sampling metadata).
+    uint32_t layout_endian;
     // Tiled-dest layout (stage 3): resolve destinations are TILED guest
     // textures — the drain scatters rows through the tiled addresser (a
     // linear memcpy made every tiled fetch of the dest read block garbage).
@@ -353,10 +358,19 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t dest_offset_x;
     uint32_t dest_offset_y;
     uint32_t dest_extent_bytes;   // write bound relative to guest_addr
+    uint32_t dest_height_aligned;
+    uint32_t dest_slice;
+    uint32_t dest_is_3d;
     // RB_COPY_DEST_INFO.copy_dest_swap: hardware packs resolved pixels .bgra
     // (artist-texture channel order) — the scatter must too, or every fetch
     // of the dest through the game's swizzle reads R/B swapped.
     uint32_t swap_rb;
+    // Guest layout provenance, independent of whether the snapshot shader has
+    // already applied the swap before staging (and CPU scatter therefore must
+    // not apply it again).
+    uint32_t layout_swap_rb;
+    // Staging already contains final guest-format, guest-endian texel bytes.
+    uint32_t packed_bytes;
     // Submission whose command buffer fills `staging` — the drain may only
     // read the staging contents once this submission has completed.
     uint64_t submission;
@@ -372,6 +386,15 @@ class MetalCommandProcessor : public CommandProcessor {
     // (depth24 << 8, stencil 0 in v1) before the endian scatter.
     // 0 = color (no conversion), 1 = unorm24 (k_24_8), 2 = float24 (20e4).
     uint32_t depth_encode;
+
+    // Guest-memory extent this writeback touches, for overlap / wait / drain-
+    // filter tests. Tiled pitch, offsets, and row padding make the real extent
+    // larger than a packed width*height*bpp span, so prefer the addresser-
+    // computed dest_extent_bytes when it was carried; fall back to the packed
+    // span only when it is zero (pre-tiled-layout enqueue paths).
+    uint32_t range_bytes() const {
+      return dest_extent_bytes ? dest_extent_bytes : width * height * bpp;
+    }
   };
   std::vector<PendingWriteback> pending_writebacks_;
 
@@ -401,8 +424,22 @@ class MetalCommandProcessor : public CommandProcessor {
   struct RamColorLayout {
     uint32_t endian;
     uint32_t swap_rb;
+    // Snapshot generation this layout was recorded for (see
+    // resolve_snapshot_generation_). ram_color_layouts_ entries are never
+    // erased, so a base once resolved as canonical color keeps a layout entry
+    // forever; presenting canonical RAM must only trust it when it still
+    // matches the base's current snapshot generation. A later depth or
+    // non-encodable resolve at the same base advances the generation without
+    // rewriting the layout, so the stale layout is correctly rejected.
+    uint32_t generation = 0;
   };
   std::unordered_map<uint32_t, RamColorLayout> ram_color_layouts_;
+  // Monotonic per-base resolve generation: bumped after every successful
+  // color or depth resolve, including resolves into an existing/coalesced
+  // snapshot. A color writeback stamps its RamColorLayout with the value
+  // bumped by the same resolve, so layout.generation == current generation
+  // iff the newest resolved content at the base produced that layout.
+  std::unordered_map<uint32_t, uint32_t> resolve_snapshot_generation_;
 
   // Gamma-parity diagnostic state (XE_METAL_GAMMA_PARITY=1).
   std::unordered_map<uint32_t, bool> gamma_parity_resolves_;

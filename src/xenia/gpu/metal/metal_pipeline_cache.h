@@ -60,10 +60,10 @@ class MetalPipelineCache {
 
   void* GetOrCreateRenderPipelineState(MetalShader::MetalTranslation* vertex,
                                        MetalShader::MetalTranslation* pixel,
-                                       uint64_t color_pixel_format,
+                                       const uint64_t* color_pixel_formats,
                                        uint64_t depth_pixel_format,
                                        uint32_t raster_sample_count,
-                                       uint32_t blend_control,
+                                       const uint32_t* blend_controls,
                                        uint32_t color_write_mask);
 
   // Builds (or returns the cached) MESH id<MTLRenderPipelineState> that expands a
@@ -82,8 +82,8 @@ class MetalPipelineCache {
       PipelineGeometryShader geometry_type,
       DxbcShaderTranslator::Modification vertex_modification,
       DxbcShaderTranslator::Modification pixel_modification,
-      uint64_t color_pixel_format, uint64_t depth_pixel_format,
-      uint32_t raster_sample_count, uint32_t blend_control,
+      const uint64_t* color_pixel_formats, uint64_t depth_pixel_format,
+      uint32_t raster_sample_count, const uint32_t* blend_controls,
       uint32_t color_write_mask,
       uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out);
 

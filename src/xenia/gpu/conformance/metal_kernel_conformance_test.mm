@@ -104,6 +104,17 @@ kernel void unpack_words(device const Coord* coords [[buffer(0)]],
   out[i] = canonical[off >> 2];
 }
 
+kernel void k_resolve_color_value(
+    device const uint* canonical [[buffer(0)]],
+    device uint4* out [[buffer(1)]],
+    constant CanonicalResolveParams& p [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= p.width || gid.y >= p.height) return;
+  float4 value = xe_resolve_color_value(
+      canonical, p, uint2(p.source_x + gid.x, p.source_y + gid.y));
+  out[gid.y * p.width + gid.x] = as_type<uint4>(value);
+}
+
 // Color materialize/pack helpers and kernels live in the shared kEdramMsl
 // production source prepended by Init(). The tests below invoke those exact
 // functions, so the live cache and the conformance oracle cannot drift.
@@ -141,6 +152,13 @@ kernel void k_7e3(device const uint* in [[buffer(0)]],
     mantissa = (mantissa << lz) & 0x7Fu;
   }
   out[i] = ((exponent + 124u) << 23) | (mantissa << 3);
+}
+
+kernel void k_metal_sample_to_guest(device const uint* in [[buffer(0)]],
+                                    device uint* out [[buffer(1)]],
+                                    uint i [[thread_position_in_grid]]) {
+  uint packed = in[i];
+  out[i] = xe_metal_sample_to_guest(packed >> 8u, packed & 0xFFu);
 }
 
 kernel void k_20e4(device const uint* in [[buffer(0)]],
@@ -260,6 +278,27 @@ struct Coord {
   uint32_t px, py, sample;
 };
 using SurfaceParams = EdramSurfaceParams;
+struct CanonicalResolveParamsHost {
+  SurfaceParams surface;
+  uint32_t source_x, source_y, dest_y, sample_select;
+  uint32_t color_format;
+  uint32_t dest_swap;
+  uint32_t dest_red_only;
+  float exp_bias_scale;
+  uint32_t width, height;
+  uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+};
+static_assert(sizeof(CanonicalResolveParamsHost) == 20u * sizeof(uint32_t));
+
+// Host mirror of the shared MSL CanonicalClearParams (metal_edram_msl.h). The
+// clear scatter writes one clear word (two for 64bpp) at each declared
+// (pixel, sample) physical offset -- so the layout must match dword-for-dword.
+struct CanonicalClearParamsHost {
+  SurfaceParams surface;  // base, pitch, msaa, is_depth, fmt_log2, words
+  uint32_t source_x, source_y, width, height;
+  uint32_t clear_lo, clear_hi;
+};
+static_assert(sizeof(CanonicalClearParamsHost) == 12u * sizeof(uint32_t));
 
 // A minimal compute harness: compile the library once, dispatch one kernel over
 // a code vector, return the output bits. All buffers are shared storage so the
@@ -442,6 +481,164 @@ struct MetalCompute {
     return out;
   }
 
+  std::vector<uint32_t> ResolveRawDepth(
+      uint32_t w, uint32_t h, const SurfaceParams& sp,
+      uint32_t sample_select, const std::vector<uint32_t>& values,
+      size_t canonical_bytes) {
+    REQUIRE(values.size() == size_t(w) * h);
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* canonical_words =
+        static_cast<uint32_t*>(canonical.contents);
+    const uint32_t word_count = uint32_t(canonical_bytes / sizeof(uint32_t));
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t word = XeEdramSnapshotOffsetBytes(
+                            x, y, sp.base, sp.pitch, sp.msaa, true, 0u,
+                            sample_select) >>
+                        2u;
+        canonical_words[word % word_count] = values[y * w + x];
+      }
+    }
+    id<MTLBuffer> out =
+        [dev newBufferWithLength:values.size() * sizeof(uint32_t)
+                         options:MTLResourceStorageModeShared];
+    CanonicalResolveParamsHost params{sp, 0u, 0u, 0u, sample_select,
+                                      0u, 0u, 0u, 1.0f, w, h,
+                                      0u, 0u, 0u, 0u};
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline = [dev
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"resolve_canonical_depth_raw"]
+                                      error:&error];
+    REQUIRE(pipeline != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:canonical offset:0 atIndex:0];
+    [encoder setBuffer:out offset:0 atIndex:1];
+    [encoder setBytes:&params length:sizeof(params) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(w, h, 1)
+        threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+    [encoder endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> result(values.size());
+    std::memcpy(result.data(), out.contents,
+                result.size() * sizeof(uint32_t));
+    return result;
+  }
+
+  std::vector<uint32_t> ResolveColorOne(
+      const SurfaceParams& sp, uint32_t sample_select, bool dest_swap,
+      bool dest_red_only, uint32_t color_format, float exp_bias_scale,
+      const std::array<uint32_t, 4>& sample_words,
+      size_t canonical_bytes,
+      const std::array<uint32_t, 4>* second_sample_words = nullptr) {
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* words = static_cast<uint32_t*>(canonical.contents);
+    const uint32_t word_count = uint32_t(canonical_bytes / 4u);
+    for (uint32_t sample = 0; sample < 4u; ++sample) {
+      uint32_t offset = XeEdramSnapshotOffsetBytes(
+                            0u, 0u, sp.base, sp.pitch, sp.msaa, false,
+                            sp.format_ints_log2, sample) >>
+                        2u;
+      words[offset % word_count] = sample_words[sample];
+      if (second_sample_words) {
+        words[(offset + 1u) % word_count] = (*second_sample_words)[sample];
+      }
+    }
+    id<MTLBuffer> out =
+        [dev newBufferWithLength:4u * sizeof(uint32_t)
+                         options:MTLResourceStorageModeShared];
+    CanonicalResolveParamsHost params{sp, 0u, 0u, 0u, sample_select, 0u,
+                                      uint32_t(dest_swap),
+                                      uint32_t(dest_red_only), exp_bias_scale,
+                                      1u, 1u, 0u, 0u, 0u, 0u};
+    params.color_format = color_format;
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline = [dev
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"k_resolve_color_value"]
+                                      error:&error];
+    REQUIRE(pipeline != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:canonical offset:0 atIndex:0];
+    [encoder setBuffer:out offset:0 atIndex:1];
+    [encoder setBytes:&params length:sizeof(params) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::vector<uint32_t> result(4u);
+    std::memcpy(result.data(), out.contents, 4u * sizeof(uint32_t));
+    return result;
+  }
+
+  std::array<uint8_t, 16> ResolveColorPackedOne(
+      const SurfaceParams& sp, uint32_t sample_select, bool dest_swap,
+      uint32_t color_format, float exp_bias_scale, uint32_t dest_format,
+      uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
+      const std::array<uint32_t, 4>& sample_words,
+      const std::array<uint32_t, 4>* second_sample_words = nullptr) {
+    const size_t canonical_bytes = xenos::kEdramSizeBytes;
+    id<MTLBuffer> canonical =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(canonical.contents, 0, canonical_bytes);
+    uint32_t* words = static_cast<uint32_t*>(canonical.contents);
+    const uint32_t word_count = uint32_t(canonical_bytes / 4u);
+    for (uint32_t sample = 0; sample < 4u; ++sample) {
+      uint32_t offset = XeEdramSnapshotOffsetBytes(
+                            0u, 0u, sp.base, sp.pitch, sp.msaa, false,
+                            sp.format_ints_log2, sample) >>
+                        2u;
+      words[offset % word_count] = sample_words[sample];
+      if (second_sample_words) {
+        words[(offset + 1u) % word_count] = (*second_sample_words)[sample];
+      }
+    }
+    id<MTLBuffer> out =
+        [dev newBufferWithLength:16u options:MTLResourceStorageModeShared];
+    std::memset(out.contents, 0xCD, 16u);
+    CanonicalResolveParamsHost params{
+        sp, 0u, 0u, 0u, sample_select, color_format, uint32_t(dest_swap),
+        uint32_t(dest_bpp_log2 == 0u),
+        exp_bias_scale, 1u, 1u, dest_format, dest_bpp_log2, dest_endian,
+        uint32_t(raw_copy)};
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline = [dev
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"resolve_canonical_color_packed"]
+                                      error:&error];
+    REQUIRE(pipeline != nil);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:canonical offset:0 atIndex:0];
+    [encoder setBuffer:out offset:0 atIndex:1];
+    [encoder setBytes:&params length:sizeof(params) atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    std::array<uint8_t, 16> result;
+    std::memcpy(result.data(), out.contents, result.size());
+    return result;
+  }
+
   // Materialize k_8_8_8_8 canonical words into a host RGBA8Unorm texture, then
   // pack the texture back to canonical -- the round-trip the cache's 3.1
   // materialize/pack will perform. `words` holds one word per (y*w+x); returns
@@ -529,6 +726,7 @@ struct MetalCompute {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
+    REQUIRE(canonical != nil);
     std::memset(canonical.contents, 0, canonical_bytes);
     uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
     for (uint32_t y = 0; y < h; ++y) {
@@ -613,6 +811,7 @@ struct MetalCompute {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
+    REQUIRE(canonical != nil);
     std::memset(canonical.contents, 0, canonical_bytes);
     uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
     auto seed_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
@@ -692,11 +891,18 @@ struct MetalCompute {
                                           size_t canonical_bytes,
                                           MTLPixelFormat pixel_format,
                                           uint32_t color_format) {
-    id<MTLBuffer> canonical =
+    id<MTLBuffer> canonical_in =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
-    std::memset(canonical.contents, 0, canonical_bytes);
-    uint32_t* cwords = static_cast<uint32_t*>(canonical.contents);
+    id<MTLBuffer> canonical_out =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    REQUIRE(canonical_in != nil);
+    REQUIRE(canonical_out != nil);
+    std::memset(canonical_in.contents, 0, canonical_bytes);
+    std::memset(canonical_out.contents, 0xCD, canonical_bytes);
+    uint32_t* input_words = static_cast<uint32_t*>(canonical_in.contents);
+    uint32_t* output_words = static_cast<uint32_t*>(canonical_out.contents);
     auto seed_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
       return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa, false,
                                         0u, s) >> 2;
@@ -704,7 +910,8 @@ struct MetalCompute {
     for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
         for (uint32_t s = 0; s < num_samples; ++s)
-          cwords[seed_offset(x, y, s)] = values[(y * w + x) * num_samples + s];
+          input_words[seed_offset(x, y, s)] =
+              values[(y * w + x) * num_samples + s];
     // Real MSAA attachment (private; MSAA can't be shared). Store all samples.
     MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
     td.textureType = MTLTextureType2DMultisample;
@@ -745,7 +952,7 @@ struct MetalCompute {
       id<MTLRenderCommandEncoder> enc =
           [cb renderCommandEncoderWithDescriptor:rp];
       [enc setRenderPipelineState:rps];
-      [enc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [enc setFragmentBuffer:canonical_in offset:0 atIndex:0];
       [enc setFragmentBuffer:sp_buf offset:0 atIndex:1];
       [enc setFragmentBytes:&color_format
                      length:sizeof(color_format)
@@ -758,7 +965,7 @@ struct MetalCompute {
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
       [enc setComputePipelineState:pk];
       [enc setTexture:ms atIndex:0];
-      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:canonical_out offset:0 atIndex:0];
       [enc setBuffer:sp_buf offset:0 atIndex:1];
       [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
       NSUInteger tw = pk.threadExecutionWidth;
@@ -774,7 +981,8 @@ struct MetalCompute {
     for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
         for (uint32_t s = 0; s < num_samples; ++s)
-          out[(y * w + x) * num_samples + s] = cwords[seed_offset(x, y, s)];
+          out[(y * w + x) * num_samples + s] =
+              output_words[seed_offset(x, y, s)];
     return out;
   }
 
@@ -1577,6 +1785,39 @@ TEST_CASE("Metal device is available for L1", "[l1][metal]") {
   SUCCEED("Metal device present");
 }
 
+TEST_CASE("Metal native MSAA sample IDs map to Xenos storage order",
+          "[l1][metal][msaa][sample-order]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+
+  // Query the device instead of assuming an undocumented sample-ID order.
+  // Metal's default locations on Apple GPUs are the D3D10 standard locations
+  // used by the Vulkan backend: 2x is bottom/top, and 4x is TL/TR/BL/BR.
+  MTLSamplePosition positions_2x[2];
+  MTLSamplePosition positions_4x[4];
+  [mc.dev getDefaultSamplePositions:positions_2x count:2u];
+  [mc.dev getDefaultSamplePositions:positions_4x count:4u];
+  CHECK(positions_2x[0].y > positions_2x[1].y);
+  CHECK(positions_4x[0].x < 0.5f);
+  CHECK(positions_4x[0].y < 0.5f);
+  CHECK(positions_4x[1].x > 0.5f);
+  CHECK(positions_4x[1].y < 0.5f);
+  CHECK(positions_4x[2].x < 0.5f);
+  CHECK(positions_4x[2].y > 0.5f);
+  CHECK(positions_4x[3].x > 0.5f);
+  CHECK(positions_4x[3].y > 0.5f);
+
+  // Xenos slots are T/B for 2x and TL/BL/TR/BR for 4x. Exercise the shared
+  // production MSL helper directly so a materialize+pack round trip cannot
+  // hide an equal and opposite permutation at its two boundaries.
+  const std::vector<uint32_t> native = {
+      (1u << 8u) | 0u, (1u << 8u) | 1u,
+      (2u << 8u) | 0u, (2u << 8u) | 1u,
+      (2u << 8u) | 2u, (2u << 8u) | 3u};
+  const std::vector<uint32_t> expected = {1u, 0u, 0u, 2u, 1u, 3u};
+  CHECK(mc.Run("k_metal_sample_to_guest", native) == expected);
+}
+
 TEST_CASE("Metal 7e3 decode matches CPU oracle bit-for-bit", "[l1][metal][float7e3]") {
   MetalCompute mc;
   if (!mc.Init()) { SUCCEED("no device"); return; }
@@ -1802,8 +2043,19 @@ TEST_CASE("Metal EDRAM authority synchronizes only overlapping dirty tiles",
 
   // Reusing B is compatible and emits no redundant synchronization.
   CHECK(tracker.SynchronizeAttachment(kAttachmentB, 15u, 25u, 4u).empty());
+  // A resolve clear is a new canonical producer. Even if A was retained as a
+  // clean cache by the preceding pack, MarkCanonical must invalidate it so the
+  // next A consumer rematerializes the cleared words rather than reusing the
+  // pre-clear attachment contents.
+  tracker.MarkCanonical(15u, 20u, 5u);
+  operations = tracker.SynchronizeAttachment(kAttachmentA, 15u, 20u, 6u);
+  REQUIRE(operations.size() == 1u);
+  CHECK(operations[0].kind == SyncKind::kMaterializeFromCanonical);
+  CHECK(operations[0].attachment == kAttachmentA);
+  CHECK(operations[0].start_tiles == 15u);
+  CHECK(operations[0].end_tiles == 20u);
   // A canonical consumer of a smaller overlap packs only that subrange.
-  operations = tracker.SynchronizeCanonical(10u, 12u, 5u);
+  operations = tracker.SynchronizeCanonical(10u, 12u, 7u);
   REQUIRE(operations.size() == 1u);
   CHECK(operations[0].kind == SyncKind::kPackToCanonical);
   CHECK(operations[0].start_tiles == 10u);
@@ -1922,6 +2174,325 @@ TEST_CASE("Canonical EDRAM pack->unpack round-trips a surface's samples",
     }
     INFO(cfg.name);
     REQUIRE(bad == 0u);
+  }
+}
+
+TEST_CASE("Canonical raw depth resolve preserves sample, stencil, and wrap",
+          "[l1][metal][canonical][resolve]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  constexpr uint32_t w = 16u;
+  constexpr uint32_t h = 16u;
+  constexpr uint32_t sample = 2u;
+  const uint32_t pitch = PitchFor(w, 2u, 0u);
+  SurfaceParams sp{xenos::kEdramTileCount - 1u, pitch, 2u, 1u, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))};
+  std::vector<uint32_t> expected(size_t(w) * h);
+  for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t x = 0; x < w; ++x) {
+      // Distinct depth and stencil bits make any float round-trip or sample
+      // replication fail byte-exactly.
+      uint32_t i = y * w + x;
+      expected[i] = (((i * 0x10203u) ^ 0x5A1234u) & 0xFFFFFFu) << 8u |
+                    ((i * 37u + 0x5Bu) & 0xFFu);
+    }
+  }
+  auto actual = mc.ResolveRawDepth(w, h, sp, sample, expected,
+                                   xenos::kEdramSizeBytes);
+  REQUIRE(actual == expected);
+}
+
+TEST_CASE("Canonical color resolve selects, averages, biases, and swaps",
+          "[l1][metal][canonical][resolve]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t pitch = PitchFor(1u, 2u, 0u);
+  SurfaceParams sp{0u, pitch, 2u, 0u, 0u,
+                   uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))};
+  const std::array<uint32_t, 4> words = {
+      0x281E140Au, 0x50463C32u, 0x786E645Au, 0xA0968C82u};
+  struct Selection { uint32_t value, first, count; } selections[] = {
+      {0u, 0u, 1u}, {1u, 1u, 1u}, {2u, 2u, 1u}, {3u, 3u, 1u},
+      {4u, 0u, 2u}, {5u, 2u, 2u}, {6u, 0u, 4u}};
+  for (const Selection& selection : selections) {
+    auto bits = mc.ResolveColorOne(sp, selection.value, /*dest_swap=*/true,
+                                   /*dest_red_only=*/false,
+                                   /*color_format=*/0u,
+                                   /*exp_bias_scale=*/2.0f, words,
+                                   xenos::kEdramSizeBytes);
+    float actual[4];
+    std::memcpy(actual, bits.data(), sizeof(actual));
+    float expected[4] = {};
+    for (uint32_t i = 0; i < selection.count; ++i) {
+      uint32_t word = words[selection.first + i];
+      expected[0] += float(word & 0xFFu);
+      expected[1] += float((word >> 8u) & 0xFFu);
+      expected[2] += float((word >> 16u) & 0xFFu);
+      expected[3] += float((word >> 24u) & 0xFFu);
+    }
+    for (float& lane : expected) {
+      lane *= 2.0f / (255.0f * float(selection.count));
+    }
+    std::swap(expected[0], expected[2]);
+    INFO("sample select " << selection.value);
+    for (uint32_t lane = 0; lane < 4u; ++lane) {
+      CHECK(std::abs(actual[lane] - expected[lane]) < 1.0e-6f);
+    }
+  }
+  // A red-only R32 destination must not turn an R/RG source into zero when
+  // copy_dest_swap is set, while an RGBA source selects its stored blue lane.
+  std::array<uint32_t, 4> r32_words;
+  float r32_value = 3.5f;
+  uint32_t r32_bits;
+  std::memcpy(&r32_bits, &r32_value, sizeof(r32_bits));
+  r32_words.fill(r32_bits);
+  auto r32_result = mc.ResolveColorOne(
+      SurfaceParams{0u, pitch, 2u, 0u, 0u,
+                    uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))},
+      0u, /*dest_swap=*/true, /*dest_red_only=*/true,
+      /*color_format=*/14u, 1.0f, r32_words, xenos::kEdramSizeBytes);
+  float r32_actual;
+  std::memcpy(&r32_actual, r32_result.data(), sizeof(r32_actual));
+  CHECK(r32_actual == r32_value);
+  auto rgba_red_result = mc.ResolveColorOne(
+      sp, 0u, /*dest_swap=*/true, /*dest_red_only=*/true,
+      /*color_format=*/0u, 1.0f, words, xenos::kEdramSizeBytes);
+  float rgba_red_actual;
+  std::memcpy(&rgba_red_actual, rgba_red_result.data(),
+              sizeof(rgba_red_actual));
+  CHECK(std::abs(rgba_red_actual - (30.0f / 255.0f)) < 1.0e-6f);
+  float rg_r = 1.25f;
+  float rg_g = 4.5f;
+  uint32_t rg_r_bits, rg_g_bits;
+  std::memcpy(&rg_r_bits, &rg_r, sizeof(rg_r_bits));
+  std::memcpy(&rg_g_bits, &rg_g, sizeof(rg_g_bits));
+  std::array<uint32_t, 4> rg_r_words, rg_g_words;
+  rg_r_words.fill(rg_r_bits);
+  rg_g_words.fill(rg_g_bits);
+  auto rg_result = mc.ResolveColorOne(
+      SurfaceParams{0u, PitchFor(1u, 2u, 1u), 2u, 0u, 1u,
+                    uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))},
+      0u, /*dest_swap=*/true, /*dest_red_only=*/true,
+      /*color_format=*/15u, 1.0f, rg_r_words, xenos::kEdramSizeBytes,
+      &rg_g_words);
+  float rg_actual;
+  std::memcpy(&rg_actual, rg_result.data(), sizeof(rg_actual));
+  CHECK(rg_actual == rg_g);
+}
+
+TEST_CASE("Canonical packed color resolve matches guest formats and Endian128",
+          "[l1][metal][canonical][resolve][packed]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t word_count =
+      uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t));
+  auto read16 = [](const std::array<uint8_t, 16>& bytes) {
+    uint16_t value;
+    std::memcpy(&value, bytes.data(), sizeof(value));
+    return value;
+  };
+  auto read32 = [](const std::array<uint8_t, 16>& bytes, uint32_t word = 0u) {
+    uint32_t value;
+    std::memcpy(&value, bytes.data() + word * sizeof(uint32_t), sizeof(value));
+    return value;
+  };
+  auto swap32 = [](uint32_t value, uint32_t endian) {
+    if (endian == 1u || endian == 2u) {
+      value = ((value & 0x00FF00FFu) << 8u) |
+              ((value & 0xFF00FF00u) >> 8u);
+    }
+    if (endian == 2u || endian == 3u) {
+      value = (value << 16u) | (value >> 16u);
+    }
+    return value;
+  };
+  auto swap64 = [&](std::array<uint32_t, 2> value, uint32_t endian) {
+    if (endian == 4u) {
+      std::swap(value[0], value[1]);
+      endian = 2u;
+    }
+    value[0] = swap32(value[0], endian);
+    value[1] = swap32(value[1], endian);
+    return value;
+  };
+  auto swap128 = [&](std::array<uint32_t, 4> value, uint32_t endian) {
+    if (endian == 5u) {
+      std::reverse(value.begin(), value.end());
+      endian = 2u;
+    }
+    auto lo = swap64({value[0], value[1]}, endian);
+    auto hi = swap64({value[2], value[3]}, endian);
+    return std::array<uint32_t, 4>{lo[0], lo[1], hi[0], hi[1]};
+  };
+
+  SurfaceParams rgba_sp{0u, PitchFor(1u, 2u, 0u), 2u, 0u, 0u,
+                        word_count};
+  std::array<uint32_t, 4> samples{0xFF000010u, 0xFF000020u,
+                                  0xFF000040u, 0xFF000080u};
+  auto r8 = mc.ResolveColorPackedOne(rgba_sp, 4u, false, 0u, 2.0f,
+                                     2u, 0u, 5u, false, samples);
+  CHECK(r8[0] == 48u);
+
+  samples.fill(0xFF0080FFu);
+  auto rgb565 = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 1.0f,
+                                         4u, 1u, 1u, false, samples);
+  CHECK(read16(rgb565) == 0x1F04u);
+
+  samples.fill(0x44332211u);
+  constexpr uint32_t swapped_8888 = 0x44112233u;
+  for (uint32_t endian = 0; endian <= 3u; ++endian) {
+    auto packed = mc.ResolveColorPackedOne(rgba_sp, 0u, true, 0u, 1.0f,
+                                           6u, 2u, endian, false, samples);
+    INFO("32bpp endian " << endian);
+    CHECK(read32(packed) == swap32(swapped_8888, endian));
+
+    // Bitwise-equivalent resolves take the raw-copy fast path live. The raw
+    // word must still honor copy_dest_swap before endian packing; otherwise a
+    // later Z,Y,X,W texture fetch applies the only R/B exchange and composites
+    // the entire image with red and blue reversed.
+    auto raw_packed = mc.ResolveColorPackedOne(
+        rgba_sp, 0u, true, 0u, 1.0f, 6u, 2u, endian, true, samples);
+    INFO("32bpp raw-copy endian " << endian);
+    CHECK(read32(raw_packed) == swap32(swapped_8888, endian));
+  }
+
+  SurfaceParams half_sp{0u, PitchFor(1u, 2u, 1u), 2u, 0u, 1u,
+                        word_count};
+  std::array<uint32_t, 4> half_rg, half_ba;
+  half_rg.fill(0x40003C00u);
+  half_ba.fill(0x44004200u);
+  const std::array<uint32_t, 2> half_expected{0x40003C00u, 0x44004200u};
+  for (uint32_t endian = 0; endian <= 5u; ++endian) {
+    auto packed = mc.ResolveColorPackedOne(
+        half_sp, 0u, false, 7u, 1.0f, 32u, 3u, endian, false, half_rg,
+        &half_ba);
+    auto expected = swap64(half_expected, endian);
+    INFO("64bpp endian " << endian);
+    CHECK(read32(packed, 0u) == expected[0]);
+    CHECK(read32(packed, 1u) == expected[1]);
+  }
+
+  samples.fill(0xFFFFFFFFu);
+  const std::array<uint32_t, 4> float_one{0x3F800000u, 0x3F800000u,
+                                         0x3F800000u, 0x3F800000u};
+  for (uint32_t endian = 0; endian <= 5u; ++endian) {
+    auto packed = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 1.0f,
+                                           38u, 4u, endian, false, samples);
+    auto expected = swap128(float_one, endian);
+    INFO("128bpp endian " << endian);
+    for (uint32_t word = 0; word < 4u; ++word) {
+      CHECK(read32(packed, word) == expected[word]);
+    }
+  }
+
+  SurfaceParams r32_sp{0u, PitchFor(1u, 2u, 0u), 2u, 0u, 0u, word_count};
+  std::array<uint32_t, 4> nan_samples{0x7FC00001u, 0x7FC00002u,
+                                      0x7FC12345u, 0x7FC00004u};
+  auto raw = mc.ResolveColorPackedOne(r32_sp, 2u, false, 14u, 1.0f,
+                                      36u, 2u, 0u, true, nan_samples);
+  CHECK(read32(raw) == 0x7FC12345u);
+
+  // Red-only swap is specific to the 8bpp resolve shader. Wider conversion
+  // paths swap the full float4 before packing, so R/RG -> R32 selects the
+  // absent blue lane (zero), while RG -> R8 selects the second stored dword.
+  float quarter = 0.25f;
+  float half = 0.5f;
+  uint32_t quarter_bits, half_bits;
+  std::memcpy(&quarter_bits, &quarter, sizeof(quarter_bits));
+  std::memcpy(&half_bits, &half, sizeof(half_bits));
+  std::array<uint32_t, 4> r_words, g_words;
+  r_words.fill(quarter_bits);
+  g_words.fill(half_bits);
+  auto converted_r32 = mc.ResolveColorPackedOne(
+      r32_sp, 0u, true, 14u, 1.0f, 36u, 2u, 0u, false, r_words);
+  CHECK(read32(converted_r32) == 0u);
+  SurfaceParams rg_sp{0u, PitchFor(1u, 2u, 1u), 2u, 0u, 1u, word_count};
+  auto converted_r8 = mc.ResolveColorPackedOne(
+      rg_sp, 0u, true, 15u, 1.0f, 2u, 0u, 0u, false, r_words, &g_words);
+  CHECK(converted_r8[0] == 128u);
+}
+
+TEST_CASE("Canonical resolve clear writes only the declared surface samples",
+          "[l1][metal][canonical][resolve][clear]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  NSError* error = nil;
+  id<MTLComputePipelineState> pipeline = [mc.dev
+      newComputePipelineStateWithFunction:
+          [mc.lib newFunctionWithName:@"resolve_canonical_clear"]
+                                    error:&error];
+  REQUIRE(pipeline != nil);
+  constexpr uint32_t sentinel = 0xDEADBEEFu;
+  const uint32_t word_count =
+      uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t));
+  struct Config {
+    SurfaceParams surface;
+    uint32_t source_x, source_y, width, height, clear_lo, clear_hi;
+    const char* name;
+  } configs[] = {
+      {{20u, PitchFor(13u, 0u, 0u), 0u, 0u, 0u, word_count},
+       3u, 5u, 13u, 7u, 0x10203040u, 0u, "1x color"},
+      {{40u, PitchFor(15u, 1u, 0u), 1u, 1u, 0u, word_count},
+       1u, 3u, 15u, 9u, 0xFEDCBA79u, 0u, "2x depth+stencil"},
+      {{xenos::kEdramTileCount - 1u, PitchFor(16u, 2u, 0u), 2u, 0u,
+        0u, word_count},
+       0u, 8u, 16u, 8u, 0xA1B2C3D4u, 0u, "4x color wrap"},
+      {{100u, PitchFor(16u, 2u, 0u), 2u, 1u, 0u, word_count},
+       8u, 0u, 16u, 8u, 0x123456A5u, 0u, "4x depth+stencil"},
+      {{200u, PitchFor(16u, 2u, 1u), 2u, 0u, 1u, word_count},
+       0u, 0u, 16u, 8u, 0x01020304u, 0xA0B0C0D0u, "4x 64bpp color"},
+  };
+  for (const Config& config : configs) {
+    id<MTLBuffer> canonical =
+        [mc.dev newBufferWithLength:xenos::kEdramSizeBytes
+                            options:MTLResourceStorageModeShared];
+    uint32_t* actual = static_cast<uint32_t*>(canonical.contents);
+    std::fill(actual, actual + word_count, sentinel);
+    std::vector<uint32_t> expected(word_count, sentinel);
+    const uint32_t sample_count = 1u << config.surface.msaa;
+    for (uint32_t y = 0; y < config.height; ++y) {
+      for (uint32_t x = 0; x < config.width; ++x) {
+        for (uint32_t sample = 0; sample < sample_count; ++sample) {
+          uint32_t index =
+              (XeEdramSnapshotOffsetBytes(
+                   config.source_x + x, config.source_y + y,
+                   config.surface.base, config.surface.pitch,
+                   config.surface.msaa, config.surface.is_depth != 0u,
+                   config.surface.format_ints_log2, sample) >>
+               2u) %
+              word_count;
+          expected[index] = config.clear_lo;
+          if (config.surface.format_ints_log2 != 0u) {
+            expected[(index + 1u) % word_count] = config.clear_hi;
+          }
+        }
+      }
+    }
+    CanonicalClearParamsHost params{
+        config.surface, config.source_x, config.source_y, config.width,
+        config.height, config.clear_lo, config.clear_hi};
+    id<MTLCommandBuffer> cb = [mc.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:canonical offset:0 atIndex:0];
+    [encoder setBytes:&params length:sizeof(params) atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(config.width, config.height,
+                                         sample_count)
+        threadsPerThreadgroup:MTLSizeMake(8u, 8u, 1u)];
+    [encoder endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+    uint32_t bad = 0u;
+    uint32_t first_bad = 0u;
+    for (uint32_t i = 0; i < word_count; ++i) {
+      if (actual[i] != expected[i]) {
+        if (!bad) first_bad = i;
+        ++bad;
+      }
+    }
+    INFO(config.name << ": first bad word " << first_bad);
+    CHECK(bad == 0u);
   }
 }
 

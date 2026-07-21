@@ -88,6 +88,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // The caller must submit/wait the returned command-buffer work before
   // reading canonical storage.
   bool PrepareCanonicalEdramForReadback();
+  bool PrepareCanonicalEdramForResolve(uint32_t span_base,
+                                       uint32_t row_length_used,
+                                       uint32_t rows, uint32_t span_pitch);
   // Records successful raster writes after a draw has been emitted. Only the
   // exact spans and slots actually used by that draw become authoritative.
   void MarkCurrentRasterTargetsWritten(uint32_t color_write_mask,
@@ -133,6 +136,33 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                               void* dest_snapshot, uint64_t dest_pixel_format,
                               uint32_t width, uint32_t height,
                               uint32_t dest_y_offset, float exp_bias_scale);
+  bool ResolveCanonicalToSnapshot(
+      const void* command_buffer, bool is_depth, uint32_t base_tiles,
+      uint32_t pitch_tiles, uint32_t msaa_samples, uint32_t format,
+      bool is_64bpp, uint32_t source_x, uint32_t source_y,
+      uint32_t sample_select, bool dest_swap, bool raw_copy,
+      void* dest_snapshot,
+      uint64_t dest_pixel_format, uint32_t width, uint32_t height,
+      uint32_t dest_y_offset, float exp_bias_scale);
+  bool ResolveCanonicalDepthToBuffer(
+      const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+      uint32_t msaa_samples, uint32_t format, uint32_t source_x,
+      uint32_t source_y, uint32_t sample_select, void* destination_buffer,
+      uint32_t width, uint32_t height);
+  bool ResolveCanonicalColorToBuffer(
+      const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+      uint32_t msaa_samples, uint32_t format, bool is_64bpp,
+      uint32_t source_x, uint32_t source_y, uint32_t sample_select,
+      bool dest_swap, float exp_bias_scale, uint32_t dest_format,
+      uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
+      void* destination_buffer, uint32_t width, uint32_t height);
+  bool PerformCanonicalResolveClear(
+      const void* command_buffer, uint32_t span_base,
+      uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
+      uint32_t base_tiles, uint32_t surface_pitch_tiles,
+      uint32_t msaa_samples, bool is_depth, bool is_64bpp,
+      uint32_t source_x, uint32_t source_y, uint32_t width, uint32_t height,
+      uint32_t clear_lo, uint32_t clear_hi);
 
   // Resolve CLEAR: writes the guest clear value into every render target
   // owning the span's tiles (fullscreen draw, in-shader tile-range discard).
@@ -385,6 +415,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
   bool sample_edram_enabled_ = false;
   bool sample_edram_raster_enabled_ = false;
+  // Snapshot restore validation is deliberately separate from canonical
+  // authority. It performs a full 10 MiB dump plus scratch materialize/pack
+  // comparison and is therefore opt-in for diagnostics, not normal replay.
+  bool canonical_restore_self_check_enabled_ = false;
   // Diagnostic ordering oracle: when explicitly enabled with the canonical
   // gate, commit and wait after every ownership-transfer batch. This is an
   // intentionally expensive upper bound for finding missing producer/consumer
@@ -434,6 +468,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // pixel format and sample count; the texture2d_ms pack kernel is generic.
   std::unordered_map<uint64_t, void*>
       canonical_color_msaa_materialize_pipelines_;
+  std::unordered_map<uint64_t, void*> canonical_resolve_pipelines_;
+  void* canonical_depth_raw_resolve_pipeline_ = nullptr;
+  void* canonical_color_packed_resolve_pipeline_ = nullptr;
+  void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_msaa_pack_pipeline_ = nullptr;
   void* canonical_color_raw_msaa_pack_pipeline_ = nullptr;
@@ -459,11 +497,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                     RenderTarget* render_target,
                                     uint32_t start_tiles,
                                     uint32_t end_tiles);
-  // Gated, ADDITIVE snapshot operations. RestoreCanonicalEdram copies the
-  // already-physical-order snapshot to the private buffer. The self-check then
-  // reads it back through DumpCanonicalEdram, materializes it into a scratch
-  // texture, and verifies byte-for-byte against the raw snapshot and legacy CPU
-  // reorder. No effect on the restored render target.
+  // Gated snapshot operations. RestoreCanonicalEdram always copies the
+  // already-physical-order snapshot to the private buffer when canonical EDRAM
+  // is active. The separately gated diagnostic self-check then reads it back
+  // through DumpCanonicalEdram, materializes it into a scratch texture, and
+  // verifies byte-for-byte against the raw snapshot and legacy CPU reorder. It
+  // has no effect on the restored render target.
   bool RestoreCanonicalEdram(const void* snapshot);
   void RunCanonicalRestoreSelfCheck(const void* snapshot,
                                     const void* reordered_reference,

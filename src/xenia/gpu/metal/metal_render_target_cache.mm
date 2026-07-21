@@ -188,6 +188,8 @@ bool MetalRenderTargetCache::Initialize() {
         "MetalRenderTargetCache: ignoring XE_METAL_SAMPLE_EDRAM_RASTER=1 "
         "because XE_METAL_SAMPLE_EDRAM=1 is not active");
   }
+  const bool canonical_restore_self_check_requested =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_SELF_CHECK");
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
   const bool canonical_depth_requested =
@@ -243,6 +245,18 @@ bool MetalRenderTargetCache::Initialize() {
           "pipeline initialization failed (2x={}, 4x={})",
           depth_2x_ready, depth_4x_ready);
     }
+  }
+  canonical_restore_self_check_enabled_ =
+      sample_edram_enabled_ && canonical_restore_self_check_requested;
+  if (canonical_restore_self_check_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: canonical restore SELF-CHECK diagnostic "
+        "enabled (full 10 MiB dump/materialize/pack validation)");
+  } else if (canonical_restore_self_check_requested) {
+    XELOGW(
+        "MetalRenderTargetCache: ignoring "
+        "XE_METAL_SAMPLE_EDRAM_SELF_CHECK=1 because canonical EDRAM is not "
+        "active");
   }
   canonical_full_sync_enabled_ =
       sample_edram_enabled_ && canonical_full_sync_requested;
@@ -344,6 +358,15 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
   }
   canonical_color_msaa_materialize_pipelines_.clear();
+  for (auto& pair : canonical_resolve_pipelines_) {
+    id<MTLRenderPipelineState> released =
+        (__bridge_transfer id<MTLRenderPipelineState>)pair.second;
+    (void)released;
+  }
+  canonical_resolve_pipelines_.clear();
+  release_compute_pipeline(canonical_depth_raw_resolve_pipeline_);
+  release_compute_pipeline(canonical_color_packed_resolve_pipeline_);
+  release_compute_pipeline(canonical_resolve_clear_pipeline_);
   if (canonical_color_msaa_pack_pipeline_) {
     id<MTLComputePipelineState> released =
         (__bridge_transfer id<MTLComputePipelineState>)
@@ -714,6 +737,51 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
   return true;
 }
 
+bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
+    uint32_t span_base, uint32_t row_length_used, uint32_t rows,
+    uint32_t span_pitch) {
+  if (!sample_edram_raster_enabled_ || !row_length_used || !rows) {
+    return true;
+  }
+  id<MTLCommandBuffer> command_buffer = nil;
+  auto synchronize = [&](uint32_t start, uint32_t end) {
+    auto operations = canonical_authority_.SynchronizeCanonical(
+        start, end, ++canonical_authority_order_);
+    for (const auto& operation : operations) {
+      if (!command_buffer) {
+        command_buffer = (__bridge id<MTLCommandBuffer>)
+            command_processor_.PrepareTransferCommandBuffer();
+      }
+      if (!command_buffer || !EncodeCanonicalAuthorityOperation(
+                                 (__bridge const void*)command_buffer,
+                                 operation)) {
+        XELOGE(
+            "MetalRenderTargetCache: canonical resolve pack failed for "
+            "attachment {:016X}, tiles [{},{})",
+            operation.attachment, operation.start_tiles,
+            operation.end_tiles);
+        canonical_authority_.ResetUnknown();
+        return false;
+      }
+    }
+    return true;
+  };
+  for (uint32_t row = 0; row < rows; ++row) {
+    uint32_t start =
+        (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
+    uint32_t first_length =
+        std::min(row_length_used, xenos::kEdramTileCount - start);
+    if (!synchronize(start, start + first_length)) {
+      return false;
+    }
+    if (first_length < row_length_used &&
+        !synchronize(0u, row_length_used - first_length)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     uint32_t color_write_mask, bool depth_or_stencil_written) {
   if (!sample_edram_raster_enabled_) {
@@ -806,9 +874,9 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         return IsCanonicalColorFormatSupported(key.GetColorFormat());
       };
-      if (sample_edram_raster_enabled_ &&
-          canonical_format_supported(src_key) &&
-          canonical_format_supported(dest_key)) {
+      if (ShouldUseCanonicalTransferPath(sample_edram_raster_enabled_,
+                                         canonical_format_supported(src_key),
+                                         canonical_format_supported(dest_key))) {
         // Tasks 4.1/4.2: canonical raw words make exact-format copies,
         // cross-MSAA ownership, color-format reinterpretation, and
         // color<->depth/stencil aliasing the same operation. The scheduler
@@ -3171,11 +3239,365 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
   return any;
 }
 
+bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
+    const void* command_buffer, bool is_depth, uint32_t base_tiles,
+    uint32_t pitch_tiles, uint32_t msaa_samples, uint32_t format,
+    bool is_64bpp, uint32_t source_x, uint32_t source_y,
+    uint32_t sample_select, bool dest_swap, bool raw_copy,
+    void* dest_snapshot,
+    uint64_t dest_pixel_format, uint32_t width, uint32_t height,
+    uint32_t dest_y_offset, float exp_bias_scale) {
+  xenos::ColorRenderTargetFormat storage_format =
+      is_depth
+          ? xenos::ColorRenderTargetFormat::k_8_8_8_8
+          : xenos::GetStorageColorFormat(
+                xenos::ColorRenderTargetFormat(format));
+  // Gamma changes render-time transfer behavior, not the raw EDRAM packing.
+  // Canonical resolve reads the stored bytes just like plain 8_8_8_8 (matching
+  // the existing resolve shader's gamma-storage behavior).
+  if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+    storage_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+  }
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
+      !dest_snapshot || !width || !height ||
+      (!is_depth && !IsCanonicalColorFormatSupported(storage_format)) ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  const uint64_t pipeline_key =
+      dest_pixel_format | (uint64_t(is_depth) << 63u);
+  auto found = canonical_resolve_pipelines_.find(pipeline_key);
+  if (found == canonical_resolve_pipelines_.end()) {
+    id<MTLLibrary> library =
+        (__bridge id<MTLLibrary>)canonical_materialize_library_;
+    MTLRenderPipelineDescriptor* descriptor =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = [library newFunctionWithName:@"xe_color_vs"];
+    descriptor.fragmentFunction = [library
+        newFunctionWithName:is_depth ? @"resolve_canonical_depth_fs"
+                                     : @"resolve_canonical_color_fs"];
+    descriptor.colorAttachments[0].pixelFormat =
+        (MTLPixelFormat)dest_pixel_format;
+    NSError* error = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!pipeline) {
+      XELOGE(
+          "MetalRenderTargetCache: canonical {} resolve pipeline {} failed: "
+          "{}",
+          is_depth ? "depth" : "color", dest_pixel_format,
+          error ? error.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    found = canonical_resolve_pipelines_
+                .emplace(pipeline_key, (__bridge_retained void*)pipeline)
+                .first;
+  }
+  id<MTLTexture> destination = (__bridge id<MTLTexture>)dest_snapshot;
+  if (dest_y_offset >= destination.height) {
+    return false;
+  }
+  uint32_t clipped_width =
+      std::min<uint32_t>(width, uint32_t(destination.width));
+  uint32_t clipped_height = std::min<uint32_t>(
+      height, uint32_t(destination.height) - dest_y_offset);
+  if (!clipped_width || !clipped_height) {
+    return false;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, pitch_tiles, msaa_samples,
+      is_depth
+          ? (format == uint32_t(xenos::DepthRenderTargetFormat::kD24FS8) ? 2u
+                                                                        : 1u)
+          : 0u,
+      uint32_t(!is_depth && is_64bpp),
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct ResolveParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, dest_y, sample_select;
+    uint32_t color_format;
+    uint32_t dest_swap;
+    uint32_t dest_red_only;
+    float exp_bias_scale;
+    uint32_t width, height;
+    uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+  } params{surface, source_x, source_y, dest_y_offset, sample_select,
+           uint32_t(storage_format), uint32_t(dest_swap),
+           uint32_t(!is_depth && raw_copy &&
+                    dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
+           exp_bias_scale, clipped_width, clipped_height, 0u, 0u, 0u, 0u};
+  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = destination;
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:pass];
+  encoder.label = is_depth ? @"rtcache:canonical-depth-resolve"
+                           : @"rtcache:canonical-color-resolve";
+  [encoder setRenderPipelineState:
+               (__bridge id<MTLRenderPipelineState>)found->second];
+  [encoder setScissorRect:MTLScissorRect{0, dest_y_offset, clipped_width,
+                                         clipped_height}];
+  [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+                       offset:0
+                     atIndex:0];
+  [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
+    const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+    uint32_t msaa_samples, uint32_t format, uint32_t source_x,
+    uint32_t source_y, uint32_t sample_select, void* destination_buffer,
+    uint32_t width, uint32_t height) {
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
+      !destination_buffer || !width || !height ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!canonical_depth_raw_resolve_pipeline_) {
+    id<MTLLibrary> library =
+        (__bridge id<MTLLibrary>)canonical_materialize_library_;
+    id<MTLFunction> function =
+        [library newFunctionWithName:@"resolve_canonical_depth_raw"];
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline =
+        [device newComputePipelineStateWithFunction:function error:&error];
+    if (!pipeline) {
+      XELOGE(
+          "MetalRenderTargetCache: canonical raw depth resolve pipeline "
+          "failed: {}",
+          error ? error.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    canonical_depth_raw_resolve_pipeline_ =
+        (__bridge_retained void*)pipeline;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, pitch_tiles, msaa_samples,
+      format == uint32_t(xenos::DepthRenderTargetFormat::kD24FS8) ? 2u : 1u,
+      0u, kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct ResolveParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, dest_y, sample_select;
+    uint32_t color_format;
+    uint32_t dest_swap;
+    uint32_t dest_red_only;
+    float exp_bias_scale;
+    uint32_t width, height;
+    uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+  } params{surface, source_x, source_y, 0u, sample_select, 0u, 0u, 0u,
+           1.0f, width, height, 0u, 0u, 0u, 0u};
+  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-depth-raw-resolve";
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)
+          canonical_depth_raw_resolve_pipeline_;
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+              offset:0
+             atIndex:0];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)destination_buffer
+              offset:0
+             atIndex:1];
+  [encoder setBytes:&params length:sizeof(params) atIndex:2];
+  MTLSize threads = MTLSizeMake(8, 8, 1);
+  MTLSize groups = MTLSizeMake((width + 7u) / 8u, (height + 7u) / 8u, 1);
+  [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
+    const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+    uint32_t msaa_samples, uint32_t format, bool is_64bpp,
+    uint32_t source_x, uint32_t source_y, uint32_t sample_select,
+    bool dest_swap, float exp_bias_scale, uint32_t dest_format,
+    uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
+    void* destination_buffer, uint32_t width, uint32_t height) {
+  xenos::ColorRenderTargetFormat storage_format =
+      xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
+  if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+    storage_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+  }
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
+      !destination_buffer || !width || !height || dest_bpp_log2 > 4u ||
+      !IsCanonicalColorFormatSupported(storage_format) ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!canonical_color_packed_resolve_pipeline_) {
+    id<MTLLibrary> library =
+        (__bridge id<MTLLibrary>)canonical_materialize_library_;
+    id<MTLFunction> function =
+        [library newFunctionWithName:@"resolve_canonical_color_packed"];
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline =
+        [device newComputePipelineStateWithFunction:function error:&error];
+    if (!pipeline) {
+      XELOGE(
+          "MetalRenderTargetCache: canonical packed color resolve pipeline "
+          "failed: {}",
+          error ? error.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    canonical_color_packed_resolve_pipeline_ =
+        (__bridge_retained void*)pipeline;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, pitch_tiles, msaa_samples, 0u, uint32_t(is_64bpp),
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct ResolveParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, dest_y, sample_select;
+    uint32_t color_format;
+    uint32_t dest_swap;
+    uint32_t dest_red_only;
+    float exp_bias_scale;
+    uint32_t width, height;
+    uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+  } params{surface,
+           source_x,
+           source_y,
+           0u,
+           sample_select,
+           uint32_t(storage_format),
+           uint32_t(dest_swap),
+           uint32_t(dest_bpp_log2 == 0u),
+           exp_bias_scale,
+           width,
+           height,
+           dest_format,
+           dest_bpp_log2,
+           dest_endian,
+           uint32_t(raw_copy)};
+  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:canonical-color-packed-resolve";
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)
+          canonical_color_packed_resolve_pipeline_;
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+              offset:0
+             atIndex:0];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)destination_buffer
+              offset:0
+             atIndex:1];
+  [encoder setBytes:&params length:sizeof(params) atIndex:2];
+  MTLSize threads = MTLSizeMake(8, 8, 1);
+  MTLSize groups = MTLSizeMake((width + 7u) / 8u, (height + 7u) / 8u, 1);
+  [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+  [encoder endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::PerformCanonicalResolveClear(
+    const void* command_buffer, uint32_t span_base,
+    uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
+    uint32_t base_tiles, uint32_t surface_pitch_tiles,
+    uint32_t msaa_samples, bool is_depth, bool is_64bpp,
+    uint32_t source_x, uint32_t source_y, uint32_t width, uint32_t height,
+    uint32_t clear_lo, uint32_t clear_hi) {
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
+      !width || !height || !row_length_used || !rows ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!canonical_resolve_clear_pipeline_) {
+    id<MTLLibrary> library =
+        (__bridge id<MTLLibrary>)canonical_materialize_library_;
+    id<MTLFunction> function =
+        [library newFunctionWithName:@"resolve_canonical_clear"];
+    NSError* error = nil;
+    id<MTLComputePipelineState> pipeline =
+        [device newComputePipelineStateWithFunction:function error:&error];
+    if (!pipeline) {
+      XELOGE("MetalRenderTargetCache: canonical resolve clear pipeline "
+             "failed: {}",
+             error ? error.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    canonical_resolve_clear_pipeline_ = (__bridge_retained void*)pipeline;
+  }
+  if (!PrepareCanonicalEdramForResolve(span_base, row_length_used, rows,
+                                       span_pitch)) {
+    return false;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, surface_pitch_tiles, msaa_samples, uint32_t(is_depth),
+      uint32_t(!is_depth && is_64bpp),
+      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct ClearParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, width, height, clear_lo, clear_hi;
+  } params{surface, source_x, source_y, width, height, clear_lo, clear_hi};
+  static_assert(sizeof(ClearParams) == 12u * sizeof(uint32_t));
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = is_depth ? @"rtcache:canonical-resolve-clear-depth"
+                           : @"rtcache:canonical-resolve-clear-color";
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)canonical_resolve_clear_pipeline_;
+  [encoder setComputePipelineState:pipeline];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+              offset:0
+             atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  MTLSize threads = MTLSizeMake(8, 8, 1);
+  MTLSize groups = MTLSizeMake((width + 7u) / 8u, (height + 7u) / 8u,
+                               1u << msaa_samples);
+  [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+  [encoder endEncoding];
+  // SynchronizeCanonical intentionally keeps the attachment it packed as a
+  // clean cache. The clear is a new canonical producer, so invalidate every
+  // cached attachment over the exact (possibly wrapped) resolve rows. Without
+  // this, reusing that attachment may skip materialization and expose its
+  // pre-clear contents.
+  for (uint32_t row = 0; row < rows; ++row) {
+    uint32_t start =
+        (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
+    uint32_t first_length =
+        std::min(row_length_used, xenos::kEdramTileCount - start);
+    canonical_authority_.MarkCanonical(start, start + first_length,
+                                       ++canonical_authority_order_);
+    if (first_length < row_length_used) {
+      canonical_authority_.MarkCanonical(0u, row_length_used - first_length,
+                                         ++canonical_authority_order_);
+    }
+  }
+  return true;
+}
+
 void MetalRenderTargetCache::PerformResolveClear(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, bool is_depth, uint32_t clear_value) {
   if (!command_buffer) {
     return;
+  }
+  // In canonical mode this function is only the degraded fallback. The legacy
+  // rectangle clear may touch multiple attachment owners (and represents wrap
+  // in owner-local coordinates), so no single exact authority assignment can
+  // be made here. Forget authority before any early return rather than letting
+  // a stale clean-attachment claim survive a fallback attempt.
+  if (sample_edram_raster_enabled_) {
+    canonical_authority_.ResetUnknown();
   }
   resolve_dump_rectangles_.clear();
   GetResolveCopyRectanglesToDump(span_base, row_length_used, rows, span_pitch,
@@ -4216,10 +4638,12 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   [blit endEncoding];
   XELOGI("MetalRenderTargetCache: EDRAM snapshot restored into {}",
          full_rt->key().GetDebugName());
-  // Gated, additive: exercise + self-check the canonical materialize path on
-  // this real snapshot without touching the restored RT above.
+  // Restoring canonical authority is part of the active path. The expensive
+  // full-buffer proof remains available as an explicit diagnostic, but must not
+  // be paid on every normal replay or live-title launch.
   if (sample_edram_enabled_ && canonical_edram_) {
-    if (RestoreCanonicalEdram(snapshot)) {
+    if (RestoreCanonicalEdram(snapshot) &&
+        canonical_restore_self_check_enabled_) {
       RunCanonicalRestoreSelfCheck(snapshot, reordered.get(), width, height,
                                    row_bytes);
     }

@@ -271,28 +271,28 @@ MTLBlendOperation ToMetalBlendOp(xenos::BlendOp op) {
   }
 }
 
-// Applies RB_BLENDCONTROL0 + RB_COLOR_MASK to an RT0 color-attachment descriptor.
-// Shared by the standard render pipeline and the geometry-emulation mesh pipeline
-// (both use MTLRenderPipelineColorAttachmentDescriptor). Blending is always
-// enabled; the no-op case (One*src + Zero*dst, Add) yields opaque output, so this
-// is safe for non-blended draws too.
-void ApplyRt0BlendState(MTLRenderPipelineColorAttachmentDescriptor* rt0,
-                        uint32_t blend_control, uint32_t color_write_mask) {
+// Applies one RB_BLENDCONTROL + its RB_COLOR_MASK nibble to a color-attachment
+// descriptor. Shared by the standard render pipeline and the geometry-emulation
+// mesh pipeline (both use MTLRenderPipelineColorAttachmentDescriptor). Blending
+// is always enabled; the no-op case (One*src + Zero*dst, Add) yields opaque
+// output, so this is safe for non-blended draws too.
+void ApplyRtBlendState(MTLRenderPipelineColorAttachmentDescriptor* rt,
+                       uint32_t blend_control, uint32_t color_write_mask) {
   reg::RB_BLENDCONTROL bc;
   bc.value = blend_control;
-  rt0.blendingEnabled = YES;
-  rt0.sourceRGBBlendFactor = ToMetalBlendFactor(bc.color_srcblend);
-  rt0.destinationRGBBlendFactor = ToMetalBlendFactor(bc.color_destblend);
-  rt0.rgbBlendOperation = ToMetalBlendOp(bc.color_comb_fcn);
-  rt0.sourceAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_srcblend);
-  rt0.destinationAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_destblend);
-  rt0.alphaBlendOperation = ToMetalBlendOp(bc.alpha_comb_fcn);
+  rt.blendingEnabled = YES;
+  rt.sourceRGBBlendFactor = ToMetalBlendFactor(bc.color_srcblend);
+  rt.destinationRGBBlendFactor = ToMetalBlendFactor(bc.color_destblend);
+  rt.rgbBlendOperation = ToMetalBlendOp(bc.color_comb_fcn);
+  rt.sourceAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_srcblend);
+  rt.destinationAlphaBlendFactor = ToMetalBlendFactor(bc.alpha_destblend);
+  rt.alphaBlendOperation = ToMetalBlendOp(bc.alpha_comb_fcn);
   MTLColorWriteMask write_mask = MTLColorWriteMaskNone;
   if (color_write_mask & 0b0001) write_mask |= MTLColorWriteMaskRed;
   if (color_write_mask & 0b0010) write_mask |= MTLColorWriteMaskGreen;
   if (color_write_mask & 0b0100) write_mask |= MTLColorWriteMaskBlue;
   if (color_write_mask & 0b1000) write_mask |= MTLColorWriteMaskAlpha;
-  rt0.writeMask = write_mask;
+  rt.writeMask = write_mask;
 }
 
 // Maps a geometry-shader type to the MSC input topology the guest primitive
@@ -324,18 +324,22 @@ void* MetalPipelineCache::GetOrCreateMemexportPipelineState(
   // scratch depth attachment (DontCare load/store; the command processor's
   // memexport pass provides it). That makes this exactly the existing
   // depth-only pipeline variant: no fragment function, no color attachment.
+  uint64_t color_pixel_formats[xenos::kMaxColorRenderTargets] = {};
+  uint32_t blend_controls[xenos::kMaxColorRenderTargets] = {};
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    color_pixel_formats[i] = uint64_t(MTLPixelFormatInvalid);
+  }
   return GetOrCreateRenderPipelineState(
-      vertex, /*pixel=*/nullptr, uint64_t(MTLPixelFormatInvalid),
+      vertex, /*pixel=*/nullptr, color_pixel_formats,
       MetalRenderTargetCache::kDepthFormat, /*raster_sample_count=*/1,
-      /*blend_control=*/0,
-      /*color_write_mask=*/0);
+      blend_controls, /*color_write_mask=*/0);
 }
 
 void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     MetalShader::MetalTranslation* vertex,
-    MetalShader::MetalTranslation* pixel, uint64_t color_pixel_format,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
     uint64_t depth_pixel_format, uint32_t raster_sample_count,
-    uint32_t blend_control,
+    const uint32_t* blend_controls,
     uint32_t color_write_mask) {
   if (!vertex || !vertex->has_metal_function()) {
     return nullptr;
@@ -347,16 +351,22 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   struct KeyBytes {
     void* vs;
     void* ps;
-    uint64_t color;
+    uint64_t colors[xenos::kMaxColorRenderTargets];
     uint64_t depth;
     uint32_t sample_count;
-    uint32_t blend;
+    uint32_t blends[xenos::kMaxColorRenderTargets];
     uint32_t write_mask;
     uint32_t pad;
-  } key_bytes{vertex->metal_function(),
-               pixel ? pixel->metal_function() : nullptr, color_pixel_format,
-               depth_pixel_format, raster_sample_count, blend_control,
-              color_write_mask, 0u};
+  } key_bytes = {};
+  key_bytes.vs = vertex->metal_function();
+  key_bytes.ps = pixel ? pixel->metal_function() : nullptr;
+  key_bytes.depth = depth_pixel_format;
+  key_bytes.sample_count = raster_sample_count;
+  key_bytes.write_mask = color_write_mask;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    key_bytes.colors[i] = color_pixel_formats[i];
+    key_bytes.blends[i] = blend_controls[i];
+  }
   uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
   auto it = render_pipeline_states_.find(key);
   if (it != render_pipeline_states_.end()) {
@@ -371,13 +381,16 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   if (pixel && pixel->has_metal_function()) {
     desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
   }
-  if (color_pixel_format != MTLPixelFormatInvalid) {
-    desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
-    // RT0 blending + write mask from RB_BLENDCONTROL0 / RB_COLOR_MASK. Without
-    // this, transparent draws (e.g. alpha-0 fade overlays) wrote opaque and
-    // showed as black boxes.
-    ApplyRt0BlendState(desc.colorAttachments[0], blend_control,
-                       color_write_mask);
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (color_pixel_formats[i] == MTLPixelFormatInvalid) {
+      continue;
+    }
+    desc.colorAttachments[i].pixelFormat =
+        (MTLPixelFormat)color_pixel_formats[i];
+    // Per-target blending and write mask from RB_BLENDCONTROL[0-3] and the
+    // corresponding RB_COLOR_MASK nibble.
+    ApplyRtBlendState(desc.colorAttachments[i], blend_controls[i],
+                      (color_write_mask >> (i * 4u)) & 0xFu);
   }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
@@ -540,8 +553,8 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     PipelineGeometryShader geometry_type,
     DxbcShaderTranslator::Modification vertex_modification,
     DxbcShaderTranslator::Modification pixel_modification,
-    uint64_t color_pixel_format, uint64_t depth_pixel_format,
-    uint32_t raster_sample_count, uint32_t blend_control,
+    const uint64_t* color_pixel_formats, uint64_t depth_pixel_format,
+    uint32_t raster_sample_count, const uint32_t* blend_controls,
     uint32_t color_write_mask,
     uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out) {
   if (gs_vertex_size_out) {
@@ -569,15 +582,23 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     uint32_t gs_key;
     void* vs;  // vertex translation identity (object-stage source).
     void* ps;  // fragment function identity.
-    uint64_t color;
+    uint64_t colors[xenos::kMaxColorRenderTargets];
     uint64_t depth;
     uint32_t sample_count;
-    uint32_t blend;
+    uint32_t blends[xenos::kMaxColorRenderTargets];
     uint32_t write_mask;
     uint32_t pad;
-  } key_bytes{gs_key.key, static_cast<void*>(vertex), pixel->metal_function(),
-              color_pixel_format, depth_pixel_format, raster_sample_count,
-              blend_control, color_write_mask, 0u};
+  } key_bytes = {};
+  key_bytes.gs_key = gs_key.key;
+  key_bytes.vs = static_cast<void*>(vertex);
+  key_bytes.ps = pixel->metal_function();
+  key_bytes.depth = depth_pixel_format;
+  key_bytes.sample_count = raster_sample_count;
+  key_bytes.write_mask = color_write_mask;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    key_bytes.colors[i] = color_pixel_formats[i];
+    key_bytes.blends[i] = blend_controls[i];
+  }
   uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
   auto cache_it = geometry_pipelines_.find(key);
   if (cache_it != geometry_pipelines_.end()) {
@@ -610,10 +631,14 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLMeshRenderPipelineDescriptor* desc =
       [[MTLMeshRenderPipelineDescriptor alloc] init];
-  if (color_pixel_format != MTLPixelFormatInvalid) {
-    desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_pixel_format;
-    ApplyRt0BlendState(desc.colorAttachments[0], blend_control,
-                       color_write_mask);
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (color_pixel_formats[i] == MTLPixelFormatInvalid) {
+      continue;
+    }
+    desc.colorAttachments[i].pixelFormat =
+        (MTLPixelFormat)color_pixel_formats[i];
+    ApplyRtBlendState(desc.colorAttachments[i], blend_controls[i],
+                      (color_write_mask >> (i * 4u)) & 0xFu);
   }
   if (depth_pixel_format != MTLPixelFormatInvalid) {
     desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;

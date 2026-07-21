@@ -591,7 +591,8 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_NO_CENTROID=1     force center interpolation (no centroid at MSAA)
 //   XE_METAL_NO_SMALL_DEPTH=1  depth test off for small-pitch (lighting) draws
 //   XE_METAL_NO_WRITEBACK=1    small-resolve guest-memory writeback off
-//   XE_METAL_NO_WB_HOLD=1      disable exposure hold-last-value guard (A/B)
+//   XE_METAL_WB_HOLD=1         enable diagnostic exposure hold-last-value (A/B;
+//                              default off so canonical zero stays exact)
 //   XE_METAL_SERIALIZE_RESOLVES=1  commit+wait after each resolve (hazard A/B)
 //   XE_METAL_NO_RESOLVE_COMMIT=1   disable the default commit-before-resolve
 //   XE_METAL_STAGE3=0         disable stage 3 (guest-RAM resolve reads/writes,
@@ -607,6 +608,8 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_CHAIN_TRACE=hex,hex  per-swap 4px fingerprint of each base's
 //                             snapshot (MetalChain lines; find what alternates)
 //   XE_METAL_FLUSH_ALL_UPLOADS=1   flush before any mid-frame upload (hazard A/B)
+//   XE_METAL_SAMPLE_EDRAM_SELF_CHECK=1  validate a restored canonical snapshot
+//                             with a full 10 MiB dump/materialize/pack pass
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
 //   XE_METAL_DUMP_PS=hexhash   dump that PS + paired VS ucode disasm to /tmp
@@ -686,13 +689,14 @@ bool MetalCommandProcessor::SetupContext() {
   static const char* kDebugEnvs[] = {
       "XE_METAL_DISABLE_GEO",    "XE_METAL_NO_SIGNS",
       "XE_METAL_NO_CENTROID",    "XE_METAL_NO_SMALL_DEPTH",
-      "XE_METAL_NO_WRITEBACK",   "XE_METAL_NO_WB_HOLD",
+      "XE_METAL_NO_WRITEBACK",   "XE_METAL_WB_HOLD",
       "XE_METAL_SERIALIZE_RESOLVES", "XE_METAL_FLUSH_ALL_UPLOADS",
       "XE_METAL_FAULT_INJECT",  "XE_METAL_EXPO_TRACE",
       "XE_METAL_CHAIN_TRACE",   "XE_METAL_NO_RESOLVE_COMMIT",
       "XE_METAL_COLOR_BRIDGE",  "XE_METAL_STAGE3",
       "XE_METAL_SAMPLE_EDRAM",  "XE_METAL_CROSSMSAA_SHADOW",
       "XE_METAL_SAMPLE_EDRAM_FULL_SYNC",
+      "XE_METAL_SAMPLE_EDRAM_SELF_CHECK",
       "XE_METAL_CANONICAL_DEPTH",
       "XE_METAL_DUMP_RT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
@@ -991,18 +995,26 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (!provider || !provider->command_queue() || !render_target_cache_) {
     return nullptr;
   }
-  uint64_t color_pixel_format = 0;
   uint32_t raster_sample_count =
       memexport_pass_ ? 1u : render_target_cache_->current_raster_sample_count();
-  void* rt_resolve =
-      memexport_pass_
-          ? nullptr
-          : render_target_cache_->current_color_texture(0, nullptr);
-  void* rt =
-      memexport_pass_
-          ? nullptr
-          : render_target_cache_->current_color_raster_texture(
-                0, &color_pixel_format);
+  void* color_resolves[xenos::kMaxColorRenderTargets] = {};
+  void* color_targets[xenos::kMaxColorRenderTargets] = {};
+  void* primary_color_target = nullptr;
+  bool any_color_target = false;
+  if (!memexport_pass_) {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      color_resolves[i] =
+          render_target_cache_->current_color_texture(i, nullptr);
+      color_targets[i] =
+          render_target_cache_->current_color_raster_texture(i, nullptr);
+      if (color_targets[i]) {
+        any_color_target = true;
+        if (!primary_color_target) {
+          primary_color_target = color_targets[i];
+        }
+      }
+    }
+  }
   void* depth_resolve =
       (kDepthEnabled && !memexport_pass_)
           ? render_target_cache_->current_depth_texture()
@@ -1010,7 +1022,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   void* depth = (kDepthEnabled && !memexport_pass_)
                     ? render_target_cache_->current_depth_raster_texture()
                     : nullptr;
-  if (!rt && !depth && !memexport_pass_) {
+  if (!any_color_target && !depth && !memexport_pass_) {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
   }
@@ -1074,18 +1086,22 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
     pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
   }
-  if (rt) {
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (!color_targets[i]) {
+      continue;
+    }
     // Always LOAD: textures are cleared at creation; content comes from
     // ownership transfers / persistence, clears from guest resolve clears.
-    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt;
-    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[i].texture =
+        (__bridge id<MTLTexture>)color_targets[i];
+    pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
     if (raster_sample_count > 1u) {
-      pass.colorAttachments[0].resolveTexture =
-          (__bridge id<MTLTexture>)rt_resolve;
-      pass.colorAttachments[0].storeAction =
+      pass.colorAttachments[i].resolveTexture =
+          (__bridge id<MTLTexture>)color_resolves[i];
+      pass.colorAttachments[i].storeAction =
           MTLStoreActionStoreAndMultisampleResolve;
     } else {
-      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      pass.colorAttachments[i].storeAction = MTLStoreActionStore;
     }
   }
   // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
@@ -1117,11 +1133,12 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     } else {
       pass.stencilAttachment.storeAction = MTLStoreActionStore;
     }
-  } else if (rt && dummy_depth_pass_) {
+  } else if (primary_color_target && dummy_depth_pass_) {
     // The draw's PS exports depth with no depth target bound — attach a
     // throwaway scratch depth so the pipeline is valid (see dummy_depth in
     // IssueDraw). Never loaded, never stored; content is irrelevant.
-    id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt;
+    id<MTLTexture> rt_tex =
+        (__bridge id<MTLTexture>)primary_color_target;
     uint64_t dk = (1ull << 63) | (uint64_t(rt_tex.width) << 32) |
                   (uint64_t(rt_tex.height) << 8) | raster_sample_count;
     id<MTLTexture> dummy_tex = nil;
@@ -1599,11 +1616,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  // --- Guest render-target binding (single color + depth; JC2 proven to never
-  // bind simultaneous MRT — see the RTConfig diagnostic below). The normalized
-  // color mask folds RB_MODECONTROL + RB_COLOR_MASK + the PS's static writes;
-  // RT0's EDRAM tile base + format and RB_DEPTH_INFO's base key the per-target
-  // textures in the RT cache. ---
+  // --- Guest render-target binding. The normalized color mask folds
+  // RB_MODECONTROL + RB_COLOR_MASK + the PS's static writes; each enabled
+  // color slot's EDRAM base/format and RB_DEPTH_INFO key the per-target views
+  // in the RT cache. ---
   uint32_t normalized_color_mask =
       pixel_shader ? draw_util::GetNormalizedColorMask(
                          regs, pixel_shader->writes_color_targets())
@@ -1637,20 +1653,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
-  bool color_bound = (normalized_color_mask & 0b1111u) != 0;
-  auto rt0_info = regs.Get<reg::RB_COLOR_INFO>(
-      reg::RB_COLOR_INFO::rt_register_indices[0]);
-  if (normalized_color_mask & ~0b1111u) {
-    // A draw binding RT1..3 — not seen in JC2 (single-RT proven); render RT0
-    // only and log so a title that does use MRT is visible immediately.
-    static bool s_mrt_logged = false;
-    if (!s_mrt_logged) {
-      s_mrt_logged = true;
-      XELOGW("MetalCommandProcessor: draw binds multiple color RTs (ncm={:04X})"
-             " — only RT0 is rendered",
-             normalized_color_mask);
-    }
+  bool color_bound = HasMetalColorTarget(normalized_color_mask);
+  std::array<reg::RB_COLOR_INFO, xenos::kMaxColorRenderTargets> color_infos;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(
+        reg::RB_COLOR_INFO::rt_register_indices[i]);
   }
+  const reg::RB_COLOR_INFO& rt0_info = color_infos[0];
   {
     // Log each unique RT configuration once (kept from the MRT-proof pass; it
     // is the ground truth for the per-target model).
@@ -1826,10 +1835,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           bool is_snap =
               render_target_cache_->GetResolveSnapshot(fetch_base) != nullptr;
           XELOGI(
-              "MetalRTConsumer:   fc={} base={:08X}{} fmt={} {}x{} signs={:02X}",
+              "MetalRTConsumer:   fc={} base={:08X}{} fmt={} {}x{} "
+              "swz={:03X} signs={:02X}",
               binding.fetch_constant, fetch_base, is_snap ? " [SNAPSHOT]" : "",
               uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
-              texture_util::SwizzleSigns(f));
+              f.swizzle & 0xFFF, texture_util::SwizzleSigns(f));
         }
       }
     }
@@ -1907,19 +1917,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
   // The truth of what's bound now comes from the accumulated RTs.
-  uint64_t color_pixel_format = uint64_t(MTLPixelFormatInvalid);
-  bool have_color =
-      !memexport_draw &&
-      render_target_cache_->current_color_texture(0, &color_pixel_format) !=
-          nullptr;
+  uint64_t color_pixel_formats[xenos::kMaxColorRenderTargets] = {};
+  bool have_color = false;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    color_pixel_formats[i] = uint64_t(MTLPixelFormatInvalid);
+    if (!memexport_draw &&
+        render_target_cache_->current_color_texture(
+            i, &color_pixel_formats[i]) != nullptr) {
+      have_color = true;
+    }
+  }
   depth_bound = !memexport_draw && kDepthEnabled &&
                 render_target_cache_->current_depth_texture() != nullptr;
   if (!have_color && !depth_bound && !memexport_draw) {
     ++draw_skip_count_;
     return true;
-  }
-  if (!have_color) {
-    color_pixel_format = uint64_t(MTLPixelFormatInvalid);
   }
   // Diagnostic: XE_METAL_PRECLEAR_RT=<trace draw index> clears the bound
   // color-0 RT to magenta right before encoding that draw. Combined with
@@ -2076,6 +2088,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // strict raster gate selects the common real 2x/4x attachment count.
   uint32_t raster_sample_count =
       memexport_draw ? 1u : render_target_cache_->current_raster_sample_count();
+  uint32_t blend_controls[xenos::kMaxColorRenderTargets] = {};
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    blend_controls[i] =
+        regs.Get<reg::RB_BLENDCONTROL>(
+                reg::RB_BLENDCONTROL::rt_register_indices[i])
+            .value;
+  }
   if (memexport_draw) {
     // Vertex-only, rasterization disabled, zero attachments.
     pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
@@ -2086,22 +2105,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         vs_translation->metal_function(), debug_solid_fragment_,
         debug_solid_pipelines_);
   } else if (use_geometry_emulation) {
-    uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
-    uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateGeometryPipelineState(
         vs_translation, ps_translation, geometry_type,
         DxbcShaderTranslator::Modification(vs_mod),
-        DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_format,
-        pipeline_depth_format, raster_sample_count, blend_control,
-        color_write_mask,
+        DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_formats,
+        pipeline_depth_format, raster_sample_count, blend_controls,
+        normalized_color_mask,
         &gs_vertex_size, &gs_max_input_primitives);
   } else {
-    uint32_t blend_control = regs[XE_GPU_REG_RB_BLENDCONTROL0];
-    uint32_t color_write_mask = normalized_color_mask & 0b1111;
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
-        vs_translation, ps_translation, color_pixel_format,
-        pipeline_depth_format, raster_sample_count, blend_control,
-        color_write_mask);
+        vs_translation, ps_translation, color_pixel_formats,
+        pipeline_depth_format, raster_sample_count, blend_controls,
+        normalized_color_mask);
   }
   if (!pipeline) {
     if (use_geometry_emulation) {
@@ -2112,7 +2127,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         s_null_pipeline_ps.insert(pixel_shader->ucode_data_hash()).second &&
         s_null_pipeline_ps.size() <= 16) {
       XELOGW("MetalCommandProcessor: NULL PIPELINE skip ps={:016X} fmt={:X}",
-             pixel_shader->ucode_data_hash(), color_pixel_format);
+             pixel_shader->ucode_data_hash(), color_pixel_formats[0]);
     }
     ++draw_skip_count_;
     return true;
@@ -2166,7 +2181,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t vf_end = vf_base + (fetch.size << 2);
         bool overlap = false;
         for (const PendingWriteback& wb : pending_writebacks_) {
-          uint32_t wend = wb.guest_addr + wb.width * wb.height * wb.bpp;
+          uint32_t wend = wb.guest_addr + wb.range_bytes();
           if (vf_base < wend && vf_end > wb.guest_addr) {
             overlap = true;
             break;
@@ -2243,7 +2258,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // whose 1 MB span aliased a neighbouring uncompressed pyramid).
         metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
         for (const PendingWriteback& wb : pending_writebacks_) {
-          uint32_t wend = wb.guest_addr + wb.width * wb.height * wb.bpp;
+          uint32_t wend = wb.guest_addr + wb.range_bytes();
           if (metal::WritebackOverlapsFetch(rng, wb.guest_addr, wend)) {
             return true;
           }
@@ -2472,10 +2487,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // NO_SIGNS flattens the oscillation; this tests the encode leg).
     static const bool s_no_gamma_encode =
         std::getenv("XE_METAL_NO_GAMMA_ENCODE") != nullptr;
-    if (!s_no_gamma_encode && color_bound &&
-        rt0_info.color_format ==
-            xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-      flags |= DxbcShaderTranslator::kSysFlag_ConvertColor0ToGamma;
+    if (!s_no_gamma_encode && color_bound) {
+      flags |= GetMetalGammaRenderTargetMask(color_infos)
+               << DxbcShaderTranslator::kSysFlag_ConvertColor0ToGamma_Shift;
     }
     flags |= uint32_t(alpha_test_function)
              << DxbcShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
@@ -2532,11 +2546,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // the additional /32 remap here. Doing so starves temporal luminance
     // passes and made SF4 compensate into a live white-out. The guest exponent
     // is still required for HDR formats (notably Red Dead's 7e3 chain).
-    for (uint32_t i = 0; i < 4; ++i) {
-      auto color_info = regs.Get<reg::RB_COLOR_INFO>(
-          reg::RB_COLOR_INFO::rt_register_indices[i]);
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
       system_constants.color_exp_bias[i] =
-          std::ldexp(1.0f, int32_t(color_info.color_exp_bias));
+          std::ldexp(1.0f, int32_t(color_infos[i].color_exp_bias));
     }
     // Index/vfetch helpers used by the vertex shader. The endian here must
     // describe the index buffer AS BOUND, not the guest's: our draw paths
@@ -2676,6 +2688,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Both guest faces culled is a successful raster no-op. Memexport bypasses
     // raster state because its vertex-stage shared-memory stores must execute.
     if (!memexport_draw) {
+      MetalDepthClipMode depth_clip_mode = GetMetalDepthClipMode(
+          regs.Get<reg::PA_CL_CLIP_CNTL>());
+      [encoder setDepthClipMode:depth_clip_mode == MetalDepthClipMode::kClamp
+                                    ? MTLDepthClipModeClamp
+                                    : MTLDepthClipModeClip];
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
           regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal);
       if (face_state.culls_all()) {
@@ -2734,8 +2751,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         have_render_extent = true;
       };
       if (have_color) {
-        intersect_render_extent(
-            render_target_cache_->current_color_texture(0, nullptr));
+        for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+          intersect_render_extent(
+              render_target_cache_->current_color_texture(i, nullptr));
+        }
       }
       if (depth_bound) {
         intersect_render_extent(render_target_cache_->current_depth_texture());
@@ -3199,7 +3218,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   auto mark_raster_targets_written = [&] {
     render_target_cache_->MarkCurrentRasterTargetsWritten(
-        normalized_color_mask & 0xFu,
+        normalized_color_mask,
         norm_depth.z_write_enable || norm_depth.stencil_enable);
   };
 
@@ -3850,14 +3869,16 @@ bool MetalCommandProcessor::IssueCopy() {
       void* probe = render_target_cache_->GetResolveSourceTexture(
           span_base, span_row_length, span_rows, span_pitch, /*is_depth=*/false,
           &src_pixel_format);
-      if (probe) {
+      const bool canonical_resolve =
+          render_target_cache_->sample_edram_raster_enabled();
+      if (probe || canonical_resolve) {
         // Diagnostic: XE_METAL_PROBE_RESOLVE=<hex dest base> reads back the
         // OWNER texture's top-left region at resolve time (forces a mid-frame
         // commit) — splits "the producing draw rendered zero" from "the
         // resolve remap reads the wrong place".
         static const char* s_probe_resolve =
             std::getenv("XE_METAL_PROBE_RESOLVE");
-        if (s_probe_resolve &&
+        if (probe && s_probe_resolve &&
             uint32_t(strtoul(s_probe_resolve, nullptr, 16)) ==
                 resolve_info.copy_dest_base) {
           EndFrameEncoderAndWait();
@@ -3938,7 +3959,7 @@ bool MetalCommandProcessor::IssueCopy() {
             s_resolve_log_all) {
           XELOGW(
               "MetalResolve @draw {}: dest base={:08X} extent=[{:08X},+{}] "
-              "rect={}x{} edram_base={} pitch={} msaa={} dest_pitch={} "
+              "rect={}x{} edram_base={} pitch={} msaa={} sample={} dest_pitch={} "
               "off_x={} off_y={} dest_fmt={} swap={} endian={} exp_bias={} "
               "parent={} strip_y={}",
               trace_draw_index_, resolve_info.copy_dest_base,
@@ -3947,6 +3968,8 @@ bool MetalCommandProcessor::IssueCopy() {
               resolve_info.color_edram_info.base_tiles,
               resolve_info.color_edram_info.pitch_tiles,
               uint32_t(resolve_info.color_edram_info.msaa_samples),
+              uint32_t(resolve_info.copy_dest_coordinate_info
+                           .copy_sample_select),
               uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32)
                   * 32,
               uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8)
@@ -4003,16 +4026,56 @@ bool MetalCommandProcessor::IssueCopy() {
           dest_pixel_format =
               uint64_t(((__bridge id<MTLTexture>)snap).pixelFormat);
         }
-        bool resolved =
-            snap && render_target_cache_->ResolveColorToSnapshot(
-                        frame_command_buffer_, span_base, span_row_length,
-                        span_rows, span_pitch,
-                        uint32_t(resolve_info.color_edram_info.msaa_samples),
-                        snap, dest_pixel_format, rw, rh, strip_y_offset,
-                        std::ldexp(
-                            1.0f,
-                            int32_t(resolve_info.copy_dest_info
-                                        .copy_dest_exp_bias)));
+        float exp_bias_scale = std::ldexp(
+            1.0f,
+            int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias));
+        const uint32_t canonical_dest_format =
+            uint32_t(resolve_info.copy_dest_info.copy_dest_format);
+        const bool canonical_raw_copy =
+            !resolve_info.copy_dest_info.copy_dest_exp_bias &&
+            xenos::IsSingleCopySampleSelected(
+                resolve_info.copy_dest_coordinate_info.copy_sample_select) &&
+            xenos::IsColorResolveFormatBitwiseEquivalent(
+                xenos::ColorRenderTargetFormat(
+                    resolve_info.color_edram_info.format),
+                xenos::ColorFormat(canonical_dest_format));
+        bool resolved = false;
+        if (snap && canonical_resolve) {
+          resolved = render_target_cache_->PrepareCanonicalEdramForResolve(
+                         span_base, span_row_length, span_rows, span_pitch) &&
+                     render_target_cache_->ResolveCanonicalToSnapshot(
+                         frame_command_buffer_, /*is_depth=*/false,
+                         resolve_info.color_edram_info.base_tiles,
+                         resolve_info.color_edram_info.pitch_tiles,
+                         uint32_t(resolve_info.color_edram_info.msaa_samples),
+                         resolve_info.color_edram_info.format,
+                         resolve_info.color_edram_info.format_is_64bpp != 0,
+                         uint32_t(resolve_info.coordinate_info
+                                      .edram_offset_x_div_8)
+                             << 3,
+                         uint32_t(resolve_info.coordinate_info
+                                      .edram_offset_y_div_8)
+                             << 3,
+                         uint32_t(resolve_info.copy_dest_coordinate_info
+                                      .copy_sample_select),
+                         resolve_info.copy_dest_info.copy_dest_swap != 0,
+                         canonical_raw_copy,
+                         snap, dest_pixel_format, rw, rh, strip_y_offset,
+                         exp_bias_scale);
+        } else if (snap) {
+          resolved = render_target_cache_->ResolveColorToSnapshot(
+              frame_command_buffer_, span_base, span_row_length, span_rows,
+              span_pitch,
+              uint32_t(resolve_info.color_edram_info.msaa_samples), snap,
+              dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale);
+        }
+        if (resolved) {
+          // Advance provenance for every successful resolve, including a
+          // coalesced parent-strip update. Only an encoded color writeback
+          // below stamps its layout with this generation; skipped or failed
+          // writeback therefore leaves the previous layout provably stale.
+          ++resolve_snapshot_generation_[resolve_info.copy_dest_base];
+        }
         if (resolved && !parent_snap) {
           // Register (or re-register) every own-snapshot resolve: the entry's
           // dims must track the LAST resolve to the base — base reuse (JC2's
@@ -4023,7 +4086,8 @@ bool MetalCommandProcessor::IssueCopy() {
           // without its y-offset.
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh,
-                                                 /*is_depth=*/false);
+                                                 /*is_depth=*/false,
+                                                 canonical_resolve);
           // XE_METAL_TIP_SNAP_VIEW (stabilize 6.6 experiment, default off):
           // maintain a derived 1x1 R32F copy of the snapshot's guest texel
           // (0,0) so 1x1 fetches (the exposure tips) sample the correct
@@ -4096,38 +4160,67 @@ bool MetalCommandProcessor::IssueCopy() {
           const char* v = std::getenv("XE_METAL_STAGE3");
           return !v || v[0] != '0';
         }();
-        const uint32_t wb_cap =
-            s_stage3 ? 4u * 1024 * 1024 : 256u * 1024;
-        // 64bpp fmt32 dests write back too: Sonic's exposure tip resolves
-        // k_16_16_16_16_FLOAT — with no RAM writeback, the game's CPU
-        // exposure controller read never-written RAM (zeros) and latched
-        // the tonemap white even after the RGBA16F fetch fix.
-        const uint32_t wb_bpp =
-            dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float) ? 8u : 4u;
-        if (resolved && !s_no_writeback && rw * rh * wb_bpp <= wb_cap &&
-            (dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
-             dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
-             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float))) {
+        const uint64_t wb_cap =
+            s_stage3 ? UINT32_MAX : 256u * 1024u;
+        const uint32_t dest_format =
+            uint32_t(resolve_info.copy_dest_info.copy_dest_format);
+        const FormatInfo& wb_format_info =
+            *FormatInfo::Get(xenos::TextureFormat(dest_format));
+        const uint32_t wb_bpp = wb_format_info.bits_per_pixel >> 3u;
+        const uint32_t wb_bpp_log2 = xe::log2_floor(wb_bpp);
+        const bool canonical_packed = canonical_resolve;
+        const bool legacy_blit_format =
+            dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
+            dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
+            dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float);
+        if (resolved && !s_no_writeback &&
+            uint64_t(rw) * rh * wb_bpp <= wb_cap &&
+            (canonical_packed || legacy_blit_format)) {
           id<MTLDevice> wb_device =
               ((__bridge id<MTLTexture>)snap).device;
           id<MTLBuffer> staging =
-              [wb_device newBufferWithLength:rw * rh * wb_bpp
+              [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
                                      options:MTLResourceStorageModeShared];
           if (staging) {
-            id<MTLCommandBuffer> wb_cb =
-                (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
-            id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
-            wb_blit.label = @"cp:writeback-blit";
-            [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
-                          sourceSlice:0
-                          sourceLevel:0
-                         sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
-                           sourceSize:MTLSizeMake(rw, rh, 1)
-                             toBuffer:staging
-                    destinationOffset:0
-               destinationBytesPerRow:rw * wb_bpp
-             destinationBytesPerImage:rw * rh * wb_bpp];
-            [wb_blit endEncoding];
+            bool writeback_encoded = false;
+            if (canonical_packed) {
+              writeback_encoded =
+                  render_target_cache_->ResolveCanonicalColorToBuffer(
+                      frame_command_buffer_,
+                      resolve_info.color_edram_info.base_tiles,
+                      resolve_info.color_edram_info.pitch_tiles,
+                      uint32_t(resolve_info.color_edram_info.msaa_samples),
+                      resolve_info.color_edram_info.format,
+                      resolve_info.color_edram_info.format_is_64bpp != 0,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_x_div_8)
+                          << 3,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_y_div_8)
+                          << 3,
+                      uint32_t(resolve_info.copy_dest_coordinate_info
+                                   .copy_sample_select),
+                      resolve_info.copy_dest_info.copy_dest_swap != 0,
+                      exp_bias_scale, dest_format, wb_bpp_log2,
+                      uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                      canonical_raw_copy, (__bridge void*)staging, rw, rh);
+            } else {
+              id<MTLCommandBuffer> wb_cb =
+                  (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+              id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
+              wb_blit.label = @"cp:writeback-blit";
+              [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
+                            sourceSlice:0
+                            sourceLevel:0
+                           sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                             sourceSize:MTLSizeMake(rw, rh, 1)
+                               toBuffer:staging
+                      destinationOffset:0
+                 destinationBytesPerRow:rw * wb_bpp
+               destinationBytesPerImage:rw * rh * wb_bpp];
+              [wb_blit endEncoding];
+              writeback_encoded = true;
+            }
             const auto& dc = resolve_info.copy_dest_coordinate_info;
             uint32_t extent_bytes =
                 resolve_info.copy_dest_extent_start - resolve_info.copy_dest_base +
@@ -4136,35 +4229,56 @@ bool MetalCommandProcessor::IssueCopy() {
             // (resolve.xesli writes .bgra); R32Float has nothing to swap.
             uint32_t wb_swap_rb =
                 dest_pixel_format == MetalRenderTargetCache::kColorFormat &&
+                !canonical_resolve &&
                 resolve_info.copy_dest_info.copy_dest_swap;
-            pending_writebacks_.push_back(PendingWriteback{
-                (__bridge_retained void*)staging, resolve_info.copy_dest_base,
-                rw, rh, wb_bpp,
-                uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                uint32_t(dc.pitch_aligned_div_32) << 5,
-                uint32_t(dc.offset_x_div_8) << 3,
-                uint32_t(dc.offset_y_div_8) << 3, extent_bytes, wb_swap_rb,
-                S7TagsOff() ? 0 : CurrentEncodingSubmission(),
-                uint32_t(resolve_info.copy_dest_info.copy_dest_format),
-                trace_draw_index_, swap_count_, /*depth_encode=*/0u});
-            if (dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
+            if (writeback_encoded) {
+              pending_writebacks_.push_back(PendingWriteback{
+                  (__bridge_retained void*)staging,
+                  resolve_info.copy_dest_base,
+                  rw,
+                  rh,
+                  wb_bpp,
+                  canonical_packed
+                      ? 0u
+                      : uint32_t(
+                            resolve_info.copy_dest_info.copy_dest_endian),
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                  uint32_t(dc.pitch_aligned_div_32) << 5,
+                  uint32_t(dc.offset_x_div_8) << 3,
+                  uint32_t(dc.offset_y_div_8) << 3,
+                  extent_bytes,
+                  uint32_t(dc.height_aligned_div_32) << 5,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_slice),
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_array),
+                  wb_swap_rb,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+                  uint32_t(canonical_packed),
+                  S7TagsOff() ? 0 : CurrentEncodingSubmission(),
+                  dest_format,
+                  trace_draw_index_,
+                  swap_count_,
+                  /*depth_encode=*/0u});
+            }
+            if (writeback_encoded &&
+                dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
               ram_color_layouts_[resolve_info.copy_dest_base] = RamColorLayout{
                   uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                  wb_swap_rb};
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+                  resolve_snapshot_generation_[resolve_info.copy_dest_base]};
             }
             // Stage-3 hybrid: RAM now holds (will hold) this dest — fetches
             // of the base must read RAM, not the bridge snapshot. Full-rect
             // geometry (offset 0,0 and pitch == width) lets the exact-cover
             // reader prove snapshot/RAM value equivalence for equal-extent
             // fetches.
-            if (texture_cache_) {
+            if (writeback_encoded && texture_cache_) {
               texture_cache_->MarkResolvedTargetRamBacked(
                   resolve_info.copy_dest_base, rw, rh,
                   dc.offset_x_div_8 == 0 && dc.offset_y_div_8 == 0 &&
                       (uint32_t(dc.pitch_aligned_div_32) << 5) == rw,
                   uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
             }
-            if (xe_lineage_base() &&
+            if (writeback_encoded && xe_lineage_base() &&
                 resolve_info.copy_dest_base == xe_lineage_base()) {
               XELOGW(
                   "MetalLineage WB-ENQUEUE draw={} base={:08X} {}x{} bpp={} "
@@ -4229,6 +4343,21 @@ bool MetalCommandProcessor::IssueCopy() {
                 : 0,
             strip_y_offset);
       }
+      // Address containment alone doesn't prove that this resolve is a
+      // vertical strip of the earlier snapshot. Tiled column resolves may
+      // have nearby adjusted bases whose byte delta happens to look like a row
+      // offset. Joining those clips the bottom and makes later columns sample
+      // stale/repeated depth. Require the same concrete texture compatibility
+      // and fit used by the color path.
+      if (parent_snap) {
+        id<MTLTexture> parent_tex = (__bridge id<MTLTexture>)parent_snap;
+        if (parent_tex.pixelFormat != MTLPixelFormatR32Float ||
+            rw != uint32_t(parent_tex.width) ||
+            strip_y_offset + rh > uint32_t(parent_tex.height)) {
+          parent_snap = nullptr;
+          strip_y_offset = 0;
+        }
+      }
       void* snap = parent_snap;
       bool is_new_snapshot = false;
       if (!snap) {
@@ -4242,61 +4371,125 @@ bool MetalCommandProcessor::IssueCopy() {
       // snapshot) decode the guest 24-bit depth.
       bool is_float24 = resolve_info.depth_edram_info.format ==
                         uint32_t(xenos::DepthRenderTargetFormat::kD24FS8);
-      bool resolved =
-          snap && render_target_cache_->ResolveDepthToSnapshot(
-                      frame_command_buffer_, span_base, span_row_length,
-                      span_rows, span_pitch,
-                      uint32_t(resolve_info.depth_edram_info.msaa_samples),
-                      is_float24, snap, rw, rh, strip_y_offset);
+      bool resolved = false;
+      if (snap && render_target_cache_->sample_edram_raster_enabled()) {
+        resolved = render_target_cache_->PrepareCanonicalEdramForResolve(
+                       span_base, span_row_length, span_rows, span_pitch) &&
+                   render_target_cache_->ResolveCanonicalToSnapshot(
+                       frame_command_buffer_, /*is_depth=*/true,
+                       resolve_info.depth_edram_info.base_tiles,
+                       resolve_info.depth_edram_info.pitch_tiles,
+                       uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                       resolve_info.depth_edram_info.format,
+                       /*is_64bpp=*/false,
+                       uint32_t(resolve_info.coordinate_info
+                                    .edram_offset_x_div_8)
+                           << 3,
+                       uint32_t(resolve_info.coordinate_info
+                                    .edram_offset_y_div_8)
+                           << 3,
+                       uint32_t(resolve_info.copy_dest_coordinate_info
+                                    .copy_sample_select),
+                       /*dest_swap=*/false,
+                       /*raw_copy=*/false,
+                       snap, MTLPixelFormatR32Float, rw, rh, strip_y_offset,
+                       1.0f);
+      } else if (snap) {
+        resolved = render_target_cache_->ResolveDepthToSnapshot(
+            frame_command_buffer_, span_base, span_row_length, span_rows,
+            span_pitch,
+            uint32_t(resolve_info.depth_edram_info.msaa_samples), is_float24,
+            snap, rw, rh, strip_y_offset);
+      }
+      if (resolved) {
+        // A depth resolve cannot produce color layout metadata. Advance
+        // provenance even when it reuses an existing snapshot so any prior
+        // color layout at this base is rejected.
+        ++resolve_snapshot_generation_[resolve_info.copy_dest_base];
+      }
       if (resolved && is_new_snapshot) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
-                                               snap, rw, rh, /*is_depth=*/true);
+                                               snap, rw, rh, /*is_depth=*/true,
+                                               /*requires_fetch_swizzle=*/true);
       }
       // DEPTH RAM writeback: texture consumers get the snapshot (bridge),
       // but VFETCH consumers read guest RAM — JC2's memexport light-atlas VS
       // vfetches the 1024x1024 depth resolve at 121E1000, which stayed
       // permanently zero without this (the black-ambient root, one level
       // above the skipped exports). Blit the R32F snapshot to staging; the
-      // drain packs floats to guest D24S8 words (stencil 0 in v1) and
-      // scatters tiled+endian like color writebacks.
+      // canonical path stages the selected raw D24S8/D24FS8 word (including
+      // stencil); the legacy fallback still packs its R32F snapshot.
       static const bool s_no_writeback_d =
           std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
-      const uint32_t wb_cap_d = 4u * 1024 * 1024;
-      if (resolved && !s_no_writeback_d && rw * rh * 4 <= wb_cap_d) {
+      if (resolved && !s_no_writeback_d) {
         id<MTLDevice> wb_device = ((__bridge id<MTLTexture>)snap).device;
         id<MTLBuffer> staging =
-            [wb_device newBufferWithLength:rw * rh * 4
+            [wb_device newBufferWithLength:size_t(rw) * rh * 4u
                                    options:MTLResourceStorageModeShared];
         if (staging) {
-          id<MTLCommandBuffer> wb_cb =
-              (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
-          id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
-          wb_blit.label = @"cp:depth-writeback-blit";
-          [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
-                        sourceSlice:0
-                        sourceLevel:0
-                       sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
-                         sourceSize:MTLSizeMake(rw, rh, 1)
-                           toBuffer:staging
-                  destinationOffset:0
-             destinationBytesPerRow:rw * 4
-           destinationBytesPerImage:rw * rh * 4];
-          [wb_blit endEncoding];
+          const bool canonical_depth_writeback =
+              render_target_cache_->sample_edram_raster_enabled();
+          bool writeback_encoded = false;
+          if (canonical_depth_writeback) {
+            writeback_encoded =
+                render_target_cache_->ResolveCanonicalDepthToBuffer(
+                    frame_command_buffer_,
+                    resolve_info.depth_edram_info.base_tiles,
+                    resolve_info.depth_edram_info.pitch_tiles,
+                    uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                    resolve_info.depth_edram_info.format,
+                    uint32_t(resolve_info.coordinate_info
+                                 .edram_offset_x_div_8)
+                        << 3,
+                    uint32_t(resolve_info.coordinate_info
+                                 .edram_offset_y_div_8)
+                        << 3,
+                    uint32_t(resolve_info.copy_dest_coordinate_info
+                                 .copy_sample_select),
+                    (__bridge void*)staging, rw, rh);
+          } else {
+            id<MTLCommandBuffer> wb_cb =
+                (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+            id<MTLBlitCommandEncoder> wb_blit = [wb_cb blitCommandEncoder];
+            wb_blit.label = @"cp:depth-writeback-blit";
+            [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                           sourceSize:MTLSizeMake(rw, rh, 1)
+                             toBuffer:staging
+                    destinationOffset:0
+               destinationBytesPerRow:rw * 4
+             destinationBytesPerImage:rw * rh * 4];
+            [wb_blit endEncoding];
+            writeback_encoded = true;
+          }
           const auto& dc = resolve_info.copy_dest_coordinate_info;
           uint32_t extent_bytes = resolve_info.copy_dest_extent_start -
                                   resolve_info.copy_dest_base +
                                   resolve_info.copy_dest_extent_length;
-          pending_writebacks_.push_back(PendingWriteback{
-              (__bridge_retained void*)staging, resolve_info.copy_dest_base,
-              rw, rh, 4u,
-              uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-              uint32_t(dc.pitch_aligned_div_32) << 5,
-              uint32_t(dc.offset_x_div_8) << 3,
-              uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
-              /*swap_rb=*/0u, S7TagsOff() ? 0 : CurrentEncodingSubmission(),
-              uint32_t(resolve_info.copy_dest_info.copy_dest_format),
-              trace_draw_index_, swap_count_,
-              /*depth_encode=*/is_float24 ? 2u : 1u});
+          if (writeback_encoded) {
+            pending_writebacks_.push_back(PendingWriteback{
+                (__bridge_retained void*)staging,
+                resolve_info.copy_dest_base, rw, rh, 4u,
+                uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                uint32_t(dc.pitch_aligned_div_32) << 5,
+                uint32_t(dc.offset_x_div_8) << 3,
+                uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
+                uint32_t(dc.height_aligned_div_32) << 5,
+                uint32_t(resolve_info.copy_dest_info.copy_dest_slice),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_array),
+                /*swap_rb=*/0u,
+                /*layout_swap_rb=*/0u,
+                /*packed_bytes=*/0u,
+                S7TagsOff() ? 0 : CurrentEncodingSubmission(),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+                trace_draw_index_, swap_count_,
+                /*depth_encode=*/canonical_depth_writeback
+                    ? 0u
+                    : (is_float24 ? 2u : 1u)});
+          }
         }
       }
     }
@@ -4335,27 +4528,67 @@ bool MetalCommandProcessor::IssueCopy() {
     // depth never cleared between the 720p half-passes, and the composite's
     // depth tests ran against the previous half's stale depth (the hard
     // half-screen seam: sky/objects failing GE tests only below y=384).
-    if (resolve_info.IsClearingColor()) {
-      uint32_t cbase, crowlen, crows;
-      draw_util::GetResolveEdramTileSpan(resolve_info.color_edram_info,
-                                         resolve_info.coordinate_info,
-                                         resolve_info.height_div_8, cbase,
-                                         crowlen, crows);
-      render_target_cache_->PerformResolveClear(
-          frame_command_buffer_, cbase, crowlen, crows,
-          resolve_info.color_edram_info.pitch_tiles, /*is_depth=*/false,
-          resolve_info.rb_color_clear);
-    }
+    const bool canonical_clear =
+        render_target_cache_->sample_edram_raster_enabled();
+    const uint32_t clear_source_x =
+        uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3;
+    const uint32_t clear_source_y =
+        uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3;
+    const uint32_t clear_width =
+        uint32_t(resolve_info.coordinate_info.width_div_8) << 3;
+    const uint32_t clear_height = resolve_info.height_div_8 << 3;
+    // Match the reference backends' command order. If the declared depth and
+    // color spans alias, the later color clear is the final physical producer.
     if (resolve_info.IsClearingDepth()) {
       uint32_t dbase, drowlen, drows;
       draw_util::GetResolveEdramTileSpan(resolve_info.depth_edram_info,
                                          resolve_info.coordinate_info,
                                          resolve_info.height_div_8, dbase,
                                          drowlen, drows);
-      render_target_cache_->PerformResolveClear(
-          frame_command_buffer_, dbase, drowlen, drows,
-          resolve_info.depth_edram_info.pitch_tiles, /*is_depth=*/true,
-          resolve_info.rb_depth_clear);
+      bool cleared = canonical_clear &&
+                     render_target_cache_->PerformCanonicalResolveClear(
+                         frame_command_buffer_, dbase, drowlen, drows,
+                         resolve_info.depth_edram_info.pitch_tiles,
+                         resolve_info.depth_edram_info.base_tiles,
+                         resolve_info.depth_edram_info.pitch_tiles,
+                         uint32_t(
+                             resolve_info.depth_edram_info.msaa_samples),
+                         /*is_depth=*/true, /*is_64bpp=*/false,
+                         clear_source_x, clear_source_y, clear_width,
+                         clear_height, resolve_info.rb_depth_clear,
+                         resolve_info.rb_depth_clear);
+      if (!cleared) {
+        render_target_cache_->PerformResolveClear(
+            frame_command_buffer_, dbase, drowlen, drows,
+            resolve_info.depth_edram_info.pitch_tiles, /*is_depth=*/true,
+            resolve_info.rb_depth_clear);
+      }
+    }
+    if (resolve_info.IsClearingColor()) {
+      uint32_t cbase, crowlen, crows;
+      draw_util::GetResolveEdramTileSpan(resolve_info.color_edram_info,
+                                         resolve_info.coordinate_info,
+                                         resolve_info.height_div_8, cbase,
+                                         crowlen, crows);
+      bool cleared = canonical_clear &&
+                     render_target_cache_->PerformCanonicalResolveClear(
+                         frame_command_buffer_, cbase, crowlen, crows,
+                         resolve_info.color_edram_info.pitch_tiles,
+                         resolve_info.color_edram_info.base_tiles,
+                         resolve_info.color_edram_info.pitch_tiles,
+                         uint32_t(
+                             resolve_info.color_edram_info.msaa_samples),
+                         /*is_depth=*/false,
+                         resolve_info.color_edram_info.format_is_64bpp != 0,
+                         clear_source_x, clear_source_y, clear_width,
+                         clear_height, resolve_info.rb_color_clear,
+                         resolve_info.rb_color_clear_lo);
+      if (!cleared) {
+        render_target_cache_->PerformResolveClear(
+            frame_command_buffer_, cbase, crowlen, crows,
+            resolve_info.color_edram_info.pitch_tiles, /*is_depth=*/false,
+            resolve_info.rb_color_clear);
+      }
     }
   }
   // Gamma-parity diagnostic (XE_METAL_GAMMA_PARITY=1): record each color
@@ -4468,7 +4701,24 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
   if (uint64_t(base) + range_bytes > kPhysicalMemorySize) {
     return nullptr;
   }
-  uint64_t hash = XXH3_64bits(guest, size_t(range_bytes));
+  // The decode below depends on the resolve layout (presence, endian,
+  // copy_dest_swap) recorded for this base, not just the raw bytes. Fold that
+  // metadata AND the snapshot generation into the reuse key so identical guest
+  // bytes decoded under changed metadata can't reuse a stale decoded texture.
+  auto layout_it = ram_color_layouts_.find(base);
+  bool has_resolve_layout = layout_it != ram_color_layouts_.end();
+  RamColorLayout resolve_layout =
+      has_resolve_layout ? layout_it->second : RamColorLayout{};
+  struct DecodeKey {
+    uint64_t bytes_hash;
+    uint32_t present;
+    uint32_t endian;
+    uint32_t swap_rb;
+    uint32_t generation;
+  } decode_key{XXH3_64bits(guest, size_t(range_bytes)),
+               has_resolve_layout ? 1u : 0u, resolve_layout.endian,
+               resolve_layout.swap_rb, resolve_layout.generation};
+  uint64_t hash = XXH3_64bits(&decode_key, sizeof(decode_key));
   id<MTLTexture> tex = (__bridge id<MTLTexture>)fb_ram_texture_;
   if (tex && fb_ram_width_ == width && fb_ram_height_ == height &&
       fb_ram_content_hash_ == hash) {
@@ -4509,10 +4759,6 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
   // [A][R][G][B] byte order, retained via the legacy rotate-right-8 path.
   std::vector<uint32_t> linear(size_t(width) * height);
   uint32_t* out = linear.data();
-  auto layout_it = ram_color_layouts_.find(base);
-  bool has_resolve_layout = layout_it != ram_color_layouts_.end();
-  RamColorLayout resolve_layout =
-      has_resolve_layout ? layout_it->second : RamColorLayout{};
   auto untile_row = [&](size_t y) {
     for (uint32_t x = 0; x < width; ++x) {
       uint32_t off = uint32_t(texture_address::Tiled2D(
@@ -4520,8 +4766,11 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
       uint32_t v;
       std::memcpy(&v, guest + off, 4);
       if (has_resolve_layout) {
-        v = xenos::GpuSwapInline(
-            v, xenos::Endian(resolve_layout.endian & 0b11));
+        if (resolve_layout.endian <=
+            uint32_t(xenos::Endian128::k16in32)) {
+          v = xenos::GpuSwapInline(
+              v, xenos::Endian(resolve_layout.endian));
+        }
         if (resolve_layout.swap_rb) {
           v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
               ((v >> 16) & 0xFFu);
@@ -4616,7 +4865,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
   std::vector<PendingWriteback> still_pending;
   for (PendingWriteback& wb : pending_writebacks_) {
     if (wb.submission > completed ||
-        !in_filter(wb.guest_addr, wb.width * wb.height * wb.bpp)) {
+        !in_filter(wb.guest_addr, wb.range_bytes())) {
       still_pending.push_back(wb);
       continue;
     }
@@ -4625,33 +4874,66 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
     if (dest && staging) {
       const uint32_t* src_words =
           static_cast<const uint32_t*>(staging.contents);
+      const uint8_t* src_bytes =
+          static_cast<const uint8_t*>(staging.contents);
       uint32_t count = wb.width * wb.height;
-      const uint32_t words_per_texel = wb.bpp / 4;
-      // Endian128 low bits mirror plain Endian for 8in16/8in32.
-      xenos::Endian endian = xenos::Endian(wb.endian & 0b11);
+      const uint32_t words_per_texel = (wb.bpp + 3u) / 4u;
       uint64_t content_sum = 0;
-      for (uint32_t i = 0; i < count * words_per_texel; ++i) {
-        content_sum += src_words[i] & 0xFFFFFF;  // ignore alpha
+      if (wb.bpp < 4u) {
+        for (uint32_t i = 0; i < count * wb.bpp; ++i) {
+          content_sum += src_bytes[i];
+        }
+      } else {
+        for (uint32_t i = 0; i < count * words_per_texel; ++i) {
+          content_sum += src_words[i] & 0xFFFFFF;  // ignore alpha
+        }
       }
       // Scatter through the TILED addresser: resolve dests are tiled guest
       // textures (32bpp: block == pixel, block_log2 == 2). A linear memcpy
       // makes every tiled fetch of the dest read block-scrambled garbage.
       uint32_t pitch_aligned =
           wb.dest_pitch_aligned ? wb.dest_pitch_aligned : ((wb.width + 31) & ~31u);
-      const uint32_t block_log2 = wb.bpp == 8 ? 3u : 2u;
-      auto scatter_row = [&](const uint32_t* words, size_t y) {
-        for (uint32_t x = 0; x < wb.width; ++x) {
-          uint32_t off = uint32_t(texture_address::Tiled2D(
-              int32_t(wb.dest_offset_x + x),
-              int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned,
+      uint32_t height_aligned = wb.dest_height_aligned
+                                    ? wb.dest_height_aligned
+                                    : ((wb.height + 31u) & ~31u);
+      const uint32_t block_log2 = xe::log2_floor(wb.bpp);
+      auto tiled_offset = [&](uint32_t x, uint32_t y) {
+        if (wb.dest_is_3d) {
+          return uint32_t(texture_address::Tiled3D(
+              int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
+              int32_t(wb.dest_slice), pitch_aligned, height_aligned,
               int32_t(block_log2)));
+        }
+        return uint32_t(texture_address::Tiled2D(
+            int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
+            pitch_aligned, int32_t(block_log2)));
+      };
+      auto scatter_row = [&](const uint8_t* bytes, size_t y) {
+        for (uint32_t x = 0; x < wb.width; ++x) {
+          uint32_t off = tiled_offset(x, uint32_t(y));
           if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
             continue;
           }
+          const uint8_t* texel_bytes =
+              bytes + (y * wb.width + x) * wb.bpp;
+          if (wb.packed_bytes) {
+            std::memcpy(dest + off, texel_bytes, wb.bpp);
+            continue;
+          }
           const uint32_t* texel =
-              &words[(y * wb.width + x) * words_per_texel];
+              reinterpret_cast<const uint32_t*>(texel_bytes);
           for (uint32_t w = 0; w < words_per_texel; ++w) {
-            uint32_t v = texel[w];
+            uint32_t source_word = w;
+            uint32_t endian32 = wb.endian;
+            if (wb.bpp == 8u && wb.endian ==
+                                    uint32_t(xenos::Endian128::k8in64)) {
+              source_word ^= 1u;
+              endian32 = uint32_t(xenos::Endian128::k8in32);
+            } else if (endian32 >
+                       uint32_t(xenos::Endian128::k16in32)) {
+              endian32 = uint32_t(xenos::Endian128::kNone);
+            }
+            uint32_t v = texel[source_word];
             if (wb.depth_encode) {
               // Staging holds R32Float depth from the snapshot conversion;
               // pack to the guest D24S8 word (stencil 0 in v1 — extend from
@@ -4670,7 +4952,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
               v = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) |
                   ((v >> 16) & 0xFFu);
             }
-            v = xenos::GpuSwapInline(v, endian);
+            v = xenos::GpuSwapInline(v, xenos::Endian(endian32));
             std::memcpy(dest + off + w * 4, &v, 4);
           }
         }
@@ -4679,17 +4961,17 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       // the big stage-3 writebacks (SF4 scatters several MB per frame on the
       // GPU thread; the single-threaded loop was a visible slice of the live
       // frame).
-      auto scatter_words = [&](const uint32_t* words) {
+      auto scatter_bytes = [&](const uint8_t* bytes) {
         if (size_t(wb.width) * wb.height >= 128 * 1024) {
           dispatch_apply(wb.height, DISPATCH_APPLY_AUTO,
-                         ^(size_t y) { scatter_row(words, y); });
+                         ^(size_t y) { scatter_row(bytes, y); });
         } else {
           for (uint32_t y = 0; y < wb.height; ++y) {
-            scatter_row(words, y);
+            scatter_row(bytes, y);
           }
         }
       };
-      scatter_words(src_words);
+      scatter_bytes(src_bytes);
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
@@ -4698,7 +4980,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       // STAGE 3: the writeback changed guest RAM — evict cached textures
       // uploaded from that range so the next fetch re-uploads fresh content.
       if (texture_cache_) {
-        texture_cache_->InvalidateRange(wb.guest_addr, count * wb.bpp);
+        texture_cache_->InvalidateRange(wb.guest_addr, wb.range_bytes());
       }
       if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
         // RAM now holds this frame's scattered resolve. This ramHash is what a
@@ -4709,11 +4991,11 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
             "MetalLineage DRAIN base={:08X} {}x{} bytes={} invalidate=[{:08X},+{}] "
             "ramHash={:08x} (scattered -> RAM, cache evicted)",
             wb.guest_addr, wb.width, wb.height, count * wb.bpp, wb.guest_addr,
-            count * wb.bpp, rh);
+            wb.range_bytes(), rh);
       }
       // Exposure telemetry: remember the smallest writeback this frame (the
       // pyramid tip the game's exposure controller actually reads).
-      if (count <= 256 &&
+      if (wb.bpp >= 4u && count <= 256 &&
           (expo_last_wb_words_ == 0 || count <= expo_last_wb_words_)) {
         expo_last_wb_words_ = count;
         float f;
@@ -4727,7 +5009,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       // MetalExpoWB, group by addr). Gated by XE_METAL_EXPO_TRACE.
       static const bool s_expo_addr =
           std::getenv("XE_METAL_EXPO_TRACE") != nullptr;
-      if (s_expo_addr && count <= 256) {
+      if (s_expo_addr && wb.bpp >= 4u && count <= 256) {
         float f0, f1;
         std::memcpy(&f0, &src_words[0], sizeof(f0));
         std::memcpy(&f1, count > 1 ? &src_words[1] : &src_words[0], sizeof(f1));
@@ -4759,27 +5041,23 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
             "hostva={} raw32_scattered={:08X}",
             swap_count_, wb.guest_addr, count, f0, f1, host_va, raw32);
       }
-      // Exposure death-spiral guard: the game's auto-exposure feedback loop
-      // reads these tiny luminance writebacks; an ALL-ZERO one collapses
-      // exposure, the scene renders black, real luminance goes 0, and the loop
-      // latches black forever ("stopped updating" while running). Real hardware
-      // never delivers a pure-zero luminance tile, so an exact zero here is our
-      // resolve failing, not a genuinely-black scene (which still carries tiny
-      // non-zero HDR values). Hold the last non-zero content at this address so
-      // exposure rides the gap and recovers instead of latching.
-      static const bool s_no_wb_hold =
-          std::getenv("XE_METAL_NO_WB_HOLD") != nullptr;
-      const bool small = count <= 256;
-      if (small && content_sum == 0) {
+      // Diagnostic-only exposure hold. This must never be default behavior:
+      // zero, opaque black, alpha-only color, and zero depth are all valid
+      // canonical resolve results and guest RAM must observe them exactly.
+      static const bool s_wb_hold =
+          std::getenv("XE_METAL_WB_HOLD") != nullptr;
+      const bool small = wb.bpp >= 4u && count <= 256;
+      if (s_wb_hold && small && content_sum == 0) {
         static uint32_t s_zero_wb = 0;
         ++s_zero_wb;
         auto held = held_writeback_content_.find(wb.guest_addr);
-        if (!s_no_wb_hold && held != held_writeback_content_.end() &&
+        if (held != held_writeback_content_.end() &&
             held->second.size() == count * words_per_texel) {
           // Re-write the last good luminance instead of the black tile. The
           // held words are PRE-swap staging content; scatter like the normal
           // path.
-          scatter_words(held->second.data());
+          scatter_bytes(reinterpret_cast<const uint8_t*>(
+              held->second.data()));
           if (s_zero_wb <= 24 || (s_zero_wb & 255) == 0) {
             XELOGW("MetalWB HOLD {}x{} @ {:08X} (swap#{}, #{}) — held last value",
                    wb.width, wb.height, wb.guest_addr, swap_count_, s_zero_wb);
@@ -4788,7 +5066,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
           XELOGW("MetalWB ZERO {}x{} @ {:08X} (swap#{}, #{}) — no held value",
                  wb.width, wb.height, wb.guest_addr, swap_count_, s_zero_wb);
         }
-      } else if (small) {
+      } else if (s_wb_hold && small) {
         // Non-zero small writeback: remember it as the fallback for future
         // zero-content resolves at this address (pre-swap staging words; the
         // hold path re-scatters them like a normal drain).
@@ -4805,15 +5083,18 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         auto tip_it = tip_view_textures_.find(wb.guest_addr);
         if (tip_it != tip_view_textures_.end() && tip_it->second &&
             wb.bpp == 4) {
-          uint32_t tip_off = uint32_t(texture_address::Tiled2D(
-              int32_t(wb.dest_offset_x), int32_t(wb.dest_offset_y),
-              pitch_aligned, int32_t(block_log2)));
+          uint32_t tip_off = tiled_offset(0u, 0u);
           if (!wb.dest_extent_bytes || tip_off + 4 <= wb.dest_extent_bytes) {
             uint32_t tip_word;
             std::memcpy(&tip_word, dest + tip_off, sizeof(tip_word));
             // dest holds the post-endian packed word; the texture needs the
             // logical float — undo the scatter's endian pack.
-            tip_word = xenos::GpuSwapInline(tip_word, endian);
+            uint32_t layout_endian = wb.layout_endian;
+            if (layout_endian <=
+                uint32_t(xenos::Endian128::k16in32)) {
+              tip_word = xenos::GpuSwapInline(
+                  tip_word, xenos::Endian(layout_endian));
+            }
             id<MTLTexture> tip_tex = (__bridge id<MTLTexture>)tip_it->second;
             [tip_tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
                        mipmapLevel:0
@@ -4830,9 +5111,7 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
       if (IsResolveWritebackLogEnabled()) {
         uint32_t rec_extent =
             wb.dest_extent_bytes ? wb.dest_extent_bytes : count * wb.bpp;
-        uint32_t first_off = uint32_t(texture_address::Tiled2D(
-            int32_t(wb.dest_offset_x), int32_t(wb.dest_offset_y),
-            pitch_aligned, int32_t(block_log2)));
+        uint32_t first_off = tiled_offset(0u, 0u);
         uint32_t word0 = 0;
         if (first_off + 4 <= rec_extent) {
           std::memcpy(&word0, dest + first_off, sizeof(word0));
@@ -4845,8 +5124,8 @@ void MetalCommandProcessor::DrainPendingWritebacks(uint32_t filter_base,
         record.width = wb.width;
         record.height = wb.height;
         record.format = wb.dest_format;
-        record.endian = wb.endian;
-        record.swap = wb.swap_rb;
+        record.endian = wb.layout_endian;
+        record.swap = wb.layout_swap_rb;
         record.extent_bytes = rec_extent;
         record.raw_word0 = word0;
         record.guest_hash = HashResolveWritebackExtent(dest, rec_extent);
@@ -4885,7 +5164,7 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
   // all other writebacks keep the swap cadence (the reference backends'
   // readback is likewise a frame behind).
   for (const PendingWriteback& wb : pending_writebacks_) {
-    uint32_t length = wb.width * wb.height * wb.bpp;
+    uint32_t length = wb.range_bytes();
     if (guest_address >= wb.guest_addr &&
         guest_address < wb.guest_addr + length) {
       EndFrameEncoderAndWait();
@@ -5099,6 +5378,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   uint32_t requested_present_height =
       frontbuffer_height ? frontbuffer_height : 720;
   bool partial_ram_backed_snapshot = false;
+  bool canonical_ram_backed_snapshot = false;
   if (fb_snapshot && texture_cache_) {
     id<MTLTexture> snapshot_texture = (__bridge id<MTLTexture>)fb_snapshot;
     bool snapshot_covers_frontbuffer =
@@ -5109,7 +5389,29 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         !texture_cache_->BridgeServes(frontbuffer_ptr,
                                       requested_present_width,
                                       requested_present_height);
+    // A canonical color snapshot is the resolve destination representation:
+    // copy_dest_swap is already packed into its channels. That representation
+    // is correct for texture fetches (their guest swizzle decodes it), but it
+    // is not directly displayable. Once its writeback has drained, the RAM
+    // frontbuffer path is the shared decode oracle: it reverses the recorded
+    // endian and copy_dest_swap before presenting. Legacy snapshots do not
+    // bake copy_dest_swap into the texture, so they retain the direct path.
+    // Only trust the canonical RAM layout when it was recorded for the base's
+    // CURRENT snapshot generation. ram_color_layouts_ entries are never erased,
+    // so a base once resolved as canonical color but re-registered this frame
+    // by a different (legacy/depth) path would otherwise select the canonical
+    // RAM decode over the correct snapshot, presenting stale/mis-decoded bytes.
+    auto layout_gen_it = ram_color_layouts_.find(frontbuffer_ptr);
+    if (render_target_cache_->sample_edram_raster_enabled() &&
+        layout_gen_it != ram_color_layouts_.end()) {
+      auto gen_it = resolve_snapshot_generation_.find(frontbuffer_ptr);
+      canonical_ram_backed_snapshot =
+          gen_it != resolve_snapshot_generation_.end() &&
+          layout_gen_it->second.generation == gen_it->second;
+    }
   }
+  bool prefer_ram_frontbuffer =
+      partial_ram_backed_snapshot || canonical_ram_backed_snapshot;
   // Diagnostic: XE_METAL_PRESENT_BASE=<hex guest base> presents that resolved
   // snapshot instead of the frontbuffer, to inspect an intermediate scene RT
   // (G-buffer / pre-tonemap / bloom) via the dumped image.
@@ -5166,20 +5468,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (source_rt) {
     // already selected by the debug override
     present_source_path = "debug-base";
-  } else if (fb_snapshot && !partial_ram_backed_snapshot) {
+  } else if (fb_snapshot && !prefer_ram_frontbuffer) {
     source_rt = (__bridge id<MTLTexture>)fb_snapshot;
     // Use the snapshot's real extent so the present blit can't overrun it.
     present_width = uint32_t(source_rt.width);
     present_height = uint32_t(source_rt.height);
     present_source_path = "fb-snapshot";
-  } else if (partial_ram_backed_snapshot) {
+  } else if (prefer_ram_frontbuffer) {
     void* ram_fb = GetRamFrontbufferTexture(
         frontbuffer_ptr, requested_present_width, requested_present_height);
     if (ram_fb) {
       source_rt = (__bridge id<MTLTexture>)ram_fb;
       present_width = uint32_t(source_rt.width);
       present_height = uint32_t(source_rt.height);
-      present_source_path = "ram-frontbuffer-partial-snapshot";
+      present_source_path = canonical_ram_backed_snapshot
+                                ? "ram-frontbuffer-canonical-snapshot"
+                                : "ram-frontbuffer-partial-snapshot";
     } else {
       // Keep the old partial presentation as a last-resort fallback rather
       // than dropping the frame entirely if the RAM upload can't be made.

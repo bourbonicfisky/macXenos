@@ -35,16 +35,23 @@ enum class TransferKind : uint32_t {
   // Same host pixel format AND same MSAA pixel-block size: a straight
   // tile-by-tile blit, no reformatting.
   kBlit,
-  // Same host pixel format, different MSAA sample density: remap the differently
-  // sized per-tile pixel blocks through a sampling pass.
+  // Same host pixel format, different MSAA sample density. LEGACY behavior:
+  // remap the differently sized per-tile pixel blocks through a sampling pass
+  // that COLLAPSES/synthesizes missing samples when up- or down-sampling.
+  // CANONICAL bypass (ShouldUseCanonicalTransferPath): the physical EDRAM words
+  // are preserved verbatim, so no missing-sample synthesis happens; the
+  // classification is still kCrossMsaa so the manifest records the handoff.
   kCrossMsaa,
   // Raw-word color reinterpreted as depth: unpack the 24-bit guest depth and
   // write host depth via a depth-only pass.
   kColorToDepth,
-  // Depth reinterpreted as raw-word color. NOTE: the live default SKIPS the GPU
-  // work here (key-local persistence) unless XE_METAL_D2C_REAL or a same-frame
-  // ping-pong return; the CLASSIFICATION is still kDepthToColor so the manifest
-  // records the ownership handoff regardless of whether bits were transported.
+  // Depth reinterpreted as raw-word color. LEGACY behavior: the default SKIPS
+  // the GPU work here (d2c skip/zero, key-local persistence) unless
+  // XE_METAL_D2C_REAL or a same-frame ping-pong return, so no bits are
+  // transported. CANONICAL bypass (ShouldUseCanonicalTransferPath): the real
+  // physical EDRAM words are transported through the scheduler, so the d2c
+  // skip/zero policy no longer applies. Either way the CLASSIFICATION is still
+  // kDepthToColor so the manifest records the ownership handoff.
   kDepthToColor,
   // Color<->color 32bpp reinterpret where only the host container differs
   // (raw-word 8888 bytes vs R32F bits): identical EDRAM word, no math.
@@ -122,6 +129,29 @@ inline TransferKind ClassifyTransfer(const TransferClassInput& in) {
     return TransferKind::kColorConvert;
   }
   return TransferKind::kSkip;
+}
+
+// Decide whether an ownership transition takes the canonical sample-accurate
+// EDRAM path instead of any legacy per-branch transfer handler.
+//
+// When this returns true the live cascade materializes/packs the physical EDRAM
+// words through the canonical scheduler and SKIPS every legacy transfer policy,
+// including:
+//   * the kDepthToColor "d2c skip/zero" default (key-local persistence that
+//     transports no bits unless XE_METAL_D2C_REAL / a same-frame ping-pong),
+//   * the kCrossMsaa collapsed missing-sample synthesis (legacy sampling pass
+//     that fabricates absent samples when remapping differently sized blocks).
+// The canonical path preserves the real physical words across the handoff, so
+// those legacy approximations no longer apply.
+//
+// All three preconditions must hold: canonical raster must be enabled, and both
+// the source and destination formats must be representable in canonical EDRAM.
+// Any false input falls back to the legacy branch cascade.
+inline bool ShouldUseCanonicalTransferPath(bool canonical_raster_enabled,
+                                           bool source_format_supported,
+                                           bool destination_format_supported) {
+  return canonical_raster_enabled && source_format_supported &&
+         destination_format_supported;
 }
 
 inline const char* TransferKindName(TransferKind kind) {

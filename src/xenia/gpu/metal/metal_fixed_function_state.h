@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_FIXED_FUNCTION_STATE_H_
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 
 #include "xenia/gpu/draw_util.h"
@@ -39,6 +40,19 @@ enum class MetalCullMode : uint32_t {
   kBack,
   kAll,
 };
+
+// Metal clips depth to its host clip volume by default. Xenos
+// PA_CL_CLIP_CNTL::clip_disable instead requests depth clamping, allowing
+// slightly out-of-range Z (common in screen-space rectangles) to rasterize.
+enum class MetalDepthClipMode : uint32_t {
+  kClip,
+  kClamp,
+};
+
+inline MetalDepthClipMode GetMetalDepthClipMode(reg::PA_CL_CLIP_CNTL mode) {
+  return mode.clip_disable ? MetalDepthClipMode::kClamp
+                           : MetalDepthClipMode::kClip;
+}
 
 struct MetalCullFrontFaceState {
   MetalCullMode cull_mode;
@@ -74,6 +88,31 @@ struct MetalBlendStencilState {
   uint32_t stencil_reference_front;
   uint32_t stencil_reference_back;
 };
+
+// The normalized color mask contains one RGBA nibble per Xenos render target.
+// A draw writing only RT1-RT3 is still a color draw and must not fall into the
+// attachment-less / memexport path.
+inline bool HasMetalColorTarget(uint32_t normalized_color_mask) {
+  constexpr uint32_t kAllColorTargetChannels =
+      (1u << (4u * xenos::kMaxColorRenderTargets)) - 1u;
+  return (normalized_color_mask & kAllColorTargetChannels) != 0;
+}
+
+// Returns one bit per render target whose pixel-shader output must be converted
+// from linear to the Xenos 8:8:8:8 gamma encoding. Keeping this independent of
+// RT0 mirrors the D3D12/Vulkan system-constant contract.
+inline uint32_t GetMetalGammaRenderTargetMask(
+    const std::array<reg::RB_COLOR_INFO, xenos::kMaxColorRenderTargets>&
+        color_infos) {
+  uint32_t gamma_mask = 0;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (color_infos[i].color_format ==
+        xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      gamma_mask |= 1u << i;
+    }
+  }
+  return gamma_mask;
+}
 
 // Xenos culling and faceness apply only to polygonal primitives. Lines,
 // points, and rectangle-list geometry must establish safe no-cull state on
