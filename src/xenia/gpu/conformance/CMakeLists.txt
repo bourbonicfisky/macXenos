@@ -79,6 +79,7 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_util.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_info_formats.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_load_shader_pipelines.mm
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_upload_arena.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm
     # Shared-memory coherence surface (L1): links the REAL Memory +
     # SharedMemory + MetalSharedMemory (no replicas). This pulls a small,

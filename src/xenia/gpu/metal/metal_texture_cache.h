@@ -102,7 +102,12 @@ class MetalTextureCache {
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }
-  void ResetActive() { active_textures_.clear(); }
+  void ResetActive() {
+    active_textures_.clear();
+    binding_allocation_failed_ = false;
+  }
+  bool binding_allocation_failed() const { return binding_allocation_failed_; }
+  void ClearBindingAllocationFailure() { binding_allocation_failed_ = false; }
 
   // Appends EVERY live texture a bindless slot can reach (guest cache entries
   // + resolved targets) for the per-encoder residency sweep: a shader indexing
@@ -204,6 +209,10 @@ class MetalTextureCache {
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
   uint32_t view_heap_slots_;
   uint32_t next_slot_ = 1;  // 0 == null texture.
+  // Distinguishes an intentional null descriptor (unsupported/invalid guest
+  // fetch) from failure to create a required Metal object or bindless slot.
+  // IssueDraw skips only the latter before emission.
+  bool binding_allocation_failed_ = false;
   // Slots freed when a resolved target was repointed to a new texture; the old
   // slot keeps pointing at the old texture until the submissions encoded
   // against it complete, then moves to free_slots_ for reuse. Tagged with the

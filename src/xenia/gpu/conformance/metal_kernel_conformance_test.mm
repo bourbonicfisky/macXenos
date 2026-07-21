@@ -34,6 +34,7 @@
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_edram_msl.h"
+#include "xenia/gpu/metal/metal_upload_arena.h"
 #include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/xenos.h"
 
@@ -1261,7 +1262,8 @@ struct MetalCompute {
                                      width:w
                                     height:h
                                  mipmapped:NO];
-    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.usage =
+        MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     td.storageMode = MTLStorageModePrivate;  // depth/stencil can't be shared.
     id<MTLTexture> depth = [dev newTextureWithDescriptor:td];
     REQUIRE(depth != nil);
@@ -1394,7 +1396,8 @@ struct MetalCompute {
     td.width = w;
     td.height = h;
     td.sampleCount = num_samples;
-    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.usage =
+        MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     td.storageMode = MTLStorageModePrivate;
     id<MTLTexture> depth = [dev newTextureWithDescriptor:td];
     REQUIRE(depth != nil);
@@ -1553,7 +1556,8 @@ struct MetalCompute {
                                    : MTLTextureType2D;
       td.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
       td.width = w; td.height = h; td.sampleCount = samples;
-      td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+      td.usage =
+          MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
       td.storageMode = MTLStorageModePrivate;
       return [dev newTextureWithDescriptor:td];
     };
@@ -1800,6 +1804,35 @@ TEST_CASE("Metal device is available for L1", "[l1][metal]") {
     return;
   }
   SUCCEED("Metal device present");
+}
+
+TEST_CASE("Metal binding upload exhaustion fails without publishing stale output",
+          "[l1][metal][binding-parity][failure]") {
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  if (!device) {
+    SUCCEED("no device");
+    return;
+  }
+
+  constexpr uint32_t kArenaSize = 256;
+  metal::MetalUploadArena arena((__bridge void*)device, kArenaSize);
+  REQUIRE(arena.Initialize());
+
+  metal::MetalUploadAllocation first{};
+  REQUIRE(arena.Allocate(kArenaSize, kArenaSize, &first));
+  REQUIRE(first.buffer != nullptr);
+  REQUIRE(first.cpu_ptr != nullptr);
+
+  // IssueDraw zero-initializes every required upload result and exits before
+  // encoding when Allocate returns false. Pin the allocator half of that
+  // contract on-device: exhaustion is reported synchronously and does not
+  // replace the caller's output with an earlier live allocation.
+  metal::MetalUploadAllocation failed{};
+  CHECK_FALSE(arena.Allocate(sizeof(uint32_t), alignof(uint32_t), &failed));
+  CHECK(failed.buffer == nullptr);
+  CHECK(failed.cpu_ptr == nullptr);
+  CHECK(failed.gpu_address == 0);
+  CHECK(failed.offset == 0);
 }
 
 TEST_CASE("Metal native MSAA sample IDs map to Xenos storage order",

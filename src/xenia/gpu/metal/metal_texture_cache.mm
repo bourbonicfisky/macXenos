@@ -436,6 +436,7 @@ uint32_t MetalTextureCache::GetSwizzledSnapshotSlot(
                                  slices:NSMakeRange(0, src.arrayLength)
                                 swizzle:channels];
   if (!view) {
+    binding_allocation_failed_ = true;
     return 0;
   }
   uint32_t view_slot = AllocateSlot();
@@ -518,6 +519,10 @@ uint32_t MetalTextureCache::GetTextureSlot(
         d.arrayLength = 1;
         d.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> tex = [device newTextureWithDescriptor:d];
+        if (!tex) {
+          binding_allocation_failed_ = true;
+          return 0;
+        }
         std::vector<uint8_t> px(size_t(sw) * sh * 4);
         for (size_t i = 0; i < size_t(sw) * sh; ++i) {
           std::memcpy(&px[i * 4], s_synth.rgba, 4);
@@ -528,8 +533,11 @@ uint32_t MetalTextureCache::GetTextureSlot(
                  withBytes:px.data()
                bytesPerRow:sw * 4
              bytesPerImage:size_t(sw) * sh * 4];
-        s_synth_tex = (__bridge_retained void*)tex;
         s_synth_slot = AllocateSlot();
+        if (!s_synth_slot) {
+          return 0;
+        }
+        s_synth_tex = (__bridge_retained void*)tex;
         auto* entries =
             static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
         IRDescriptorTableSetTexture(&entries[s_synth_slot],
@@ -605,6 +613,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         // than serve the unswizzled raw snapshot (wrong channels) or null.
         // Exact-cover is RAM-backed by definition (RAM holds scatter(snapshot)),
         // so the untile reproduces the content.
+        ClearBindingAllocationFailure();
       }
       if (service == ResolvedFetchService::kBridgeSnapshot) {
         // The raw snapshot / tip slots carry no swizzle, exactly like the
@@ -673,6 +682,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         }
         // RAM-backed color: fall through to the guest RAM path below, which
         // bakes the swizzle into its own view.
+        ClearBindingAllocationFailure();
       }
       // kRamContent: RAM authoritative — fall through to the cache/untile
       // path below.
@@ -747,10 +757,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
-  if (next_slot_ >= view_heap_slots_ && free_slots_.empty()) {
-    return 0;
-  }
-
   const uint8_t* guest =
       static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
   if (!guest) {
@@ -1008,6 +1014,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   desc.storageMode = MTLStorageModeShared;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
+    binding_allocation_failed_ = true;
     return 0;
   }
   // For BC formats bytesPerRow is a row of blocks; MTLRegion is still in texels
@@ -1187,12 +1194,17 @@ uint32_t MetalTextureCache::FinalizeTexture(
                                levels:NSMakeRange(0, host_levels)
                                slices:NSMakeRange(0, is_cube ? 6 : 1)
                               swizzle:channels];
-    if (view) {
-      sampled = view;
+    if (!view) {
+      binding_allocation_failed_ = true;
+      return 0;
     }
+    sampled = view;
   }
 
   uint32_t slot = AllocateSlot();
+  if (!slot) {
+    return 0;
+  }
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   IRDescriptorTableSetTexture(&entries[slot], sampled, 0.0f, 0);
   // Retain the sampled view (or the base texture if identity) for the descriptor
@@ -1418,6 +1430,7 @@ uint32_t MetalTextureCache::AllocateSlot() {
       XELOGE("MetalTextureCache: BINDLESS HEAP EXHAUSTED ({} slots, {} stale)",
              view_heap_slots_, uint32_t(stale_slots_.size()));
     }
+    binding_allocation_failed_ = true;
     return 0;  // exhausted (0 == null texture).
   }
   return next_slot_++;

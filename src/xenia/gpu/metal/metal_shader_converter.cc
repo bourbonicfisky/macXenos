@@ -10,6 +10,7 @@
 #include "xenia/gpu/metal/metal_shader_converter.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/gpu/metal/metal_binding_layout.h"
 
 #include "metal_irconverter.h"
 
@@ -18,11 +19,6 @@ namespace gpu {
 namespace metal {
 
 namespace {
-
-// Metal Shader Converter's reserved function-constant register space, matching
-// the value the D3D12 bindless path uses. Must be declared in the root signature
-// when function constants are enabled.
-constexpr uint32_t kFunctionConstantRegisterSpace = 2147420894u;
 
 IRShaderStage ToIRStage(MetalShaderConverter::Stage stage) {
   switch (stage) {
@@ -84,11 +80,13 @@ MetalShaderConverter::~MetalShaderConverter() {
 
 IRRootSignature* MetalShaderConverter::CreateXbox360RootSignature(
     bool bindless_resources_used, std::string* error_out) {
-  // Descriptor tables hold the heap-backed texture/UAV/sampler resources; shader
-  // constants use root CBVs, mirroring the D3D12 bindless root-signature shape.
-  IRDescriptorRange1 ranges[32] = {};
-  IRRootDescriptorTable1 tables[32] = {};
-  IRRootParameter1 params[32] = {};
+  // Descriptor tables hold the heap-backed texture/UAV/sampler resources;
+  // shader constants use root CBVs, mirroring the D3D12 bindless root-signature
+  // shape. kMetalBindingLayout is also consumed by IssueDraw's top-level
+  // argument buffer, so parameter order has one authority.
+  IRDescriptorRange1 ranges[kMetalBindingSlotCount] = {};
+  IRRootDescriptorTable1 tables[kMetalBindingSlotCount] = {};
+  IRRootParameter1 params[kMetalBindingSlotCount] = {};
   int range_count = 0;
   int table_count = 0;
   int param_count = 0;
@@ -112,62 +110,58 @@ IRRootSignature* MetalShaderConverter::CreateXbox360RootSignature(
     param.DescriptorTable = table;
     param.ShaderVisibility = vis;
   };
-  auto append_cbv = [&](uint32_t shader_register, IRShaderVisibility vis) {
+  auto append_cbv = [&](uint32_t shader_register, uint32_t register_space,
+                        IRShaderVisibility vis) {
     IRRootParameter1& param = params[param_count++];
     param.ParameterType = IRRootParameterTypeCBV;
     param.Descriptor.ShaderRegister = shader_register;
-    param.Descriptor.RegisterSpace = 0;
+    param.Descriptor.RegisterSpace = register_space;
     param.Descriptor.Flags = IRRootDescriptorFlagNone;
     param.ShaderVisibility = vis;
   };
 
-  const uint32_t resource_descriptor_count =
-      bindless_resources_used ? UINT32_MAX : 1025;
-  const uint32_t sampler_descriptor_count =
-      bindless_resources_used ? UINT32_MAX : 257;
-
-  // SRVs in spaces 0-3, plus space 10 (hull), UAVs in spaces 0-3, samplers in
-  // space 0 — the D3D12 bindless heap layout.
-  for (uint32_t space = 0; space < 4; ++space) {
-    append_table(IRDescriptorRangeTypeSRV, resource_descriptor_count, space,
-                 IRShaderVisibilityAll);
+  auto get_visibility = [](MetalBindingVisibility visibility) {
+    switch (visibility) {
+      case MetalBindingVisibility::kVertex:
+        return IRShaderVisibilityVertex;
+      case MetalBindingVisibility::kHull:
+        return IRShaderVisibilityHull;
+      case MetalBindingVisibility::kDomain:
+        return IRShaderVisibilityDomain;
+      case MetalBindingVisibility::kPixel:
+        return IRShaderVisibilityPixel;
+      case MetalBindingVisibility::kAll:
+      default:
+        return IRShaderVisibilityAll;
+    }
+  };
+  auto get_range_type = [](MetalBindingKind kind) {
+    switch (kind) {
+      case MetalBindingKind::kSrvTable:
+        return IRDescriptorRangeTypeSRV;
+      case MetalBindingKind::kUavTable:
+        return IRDescriptorRangeTypeUAV;
+      case MetalBindingKind::kSamplerTable:
+        return IRDescriptorRangeTypeSampler;
+      case MetalBindingKind::kFunctionConstantTable:
+        return IRDescriptorRangeTypeCBV;
+      case MetalBindingKind::kConstantBuffer:
+      default:
+        return IRDescriptorRangeTypeCBV;
+    }
+  };
+  for (const MetalBindingParameter& binding : kMetalBindingLayout) {
+    IRShaderVisibility visibility = get_visibility(binding.visibility);
+    if (binding.kind == MetalBindingKind::kConstantBuffer) {
+      append_cbv(binding.shader_register, binding.register_space, visibility);
+    } else {
+      append_table(
+          get_range_type(binding.kind),
+          GetMetalBindingDescriptorCount(binding, bindless_resources_used),
+          binding.register_space, visibility);
+    }
   }
-  append_table(IRDescriptorRangeTypeSRV, resource_descriptor_count, 10,
-               IRShaderVisibilityAll);
-  for (uint32_t space = 0; space < 4; ++space) {
-    append_table(IRDescriptorRangeTypeUAV, resource_descriptor_count, space,
-                 IRShaderVisibilityAll);
-  }
-  append_table(IRDescriptorRangeTypeSampler, sampler_descriptor_count, 0,
-               IRShaderVisibilityAll);
-
-  // Shader-constant CBVs, matching DxbcShaderTranslator::CbufferRegister:
-  //   b0 = system constants   (all stages)
-  //   b1 = float constants    (per-stage-local)
-  //   b2 = bool/loop constants (all stages)
-  //   b3 = fetch constants    (per-stage-local)
-  //   b4 = descriptor indices (per-stage-local)
-  // b0/b2 are common; the volatile stage-local CBVs are duplicated with disjoint
-  // stage visibility so the runtime builds one graphics root argument block while
-  // the DXIL-visible register numbers stay unchanged.
-  append_cbv(0, IRShaderVisibilityAll);
-  append_cbv(1, IRShaderVisibilityVertex);
-  append_cbv(2, IRShaderVisibilityAll);
-  append_cbv(3, IRShaderVisibilityVertex);
-  append_cbv(4, IRShaderVisibilityVertex);
-  const IRShaderVisibility stage_local[] = {IRShaderVisibilityHull,
-                                            IRShaderVisibilityDomain,
-                                            IRShaderVisibilityPixel};
-  for (IRShaderVisibility vis : stage_local) {
-    append_cbv(1, vis);
-    append_cbv(3, vis);
-    append_cbv(4, vis);
-  }
-
-  // MSC requires the function-constant CBV space to be declared when function
-  // constants are enabled, though it is skipped in the top-level argument buffer.
-  append_table(IRDescriptorRangeTypeCBV, 1, kFunctionConstantRegisterSpace,
-               IRShaderVisibilityAll);
+  assert_true(param_count == int(kMetalBindingSlotCount));
 
   IRRootSignatureDescriptor1 desc = {};
   desc.NumParameters = param_count;
@@ -254,8 +248,8 @@ bool MetalShaderConverter::Convert(Stage stage,
                     IRCompatibilityFlagVertexPositionInfToNan));
   // We supply our own root signature; ignore any embedded in the DXIL.
   IRCompilerIgnoreRootSignature(compiler, true);
-  IRCompilerSetFunctionConstantResourceSpace(compiler,
-                                             kFunctionConstantRegisterSpace);
+  IRCompilerSetFunctionConstantResourceSpace(
+      compiler, kMetalFunctionConstantRegisterSpace);
   IRCompilerSetGlobalRootSignature(compiler, root_signature_);
 
   IRError* error = nullptr;
@@ -341,8 +335,8 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
                     IRCompatibilityFlagBoundsCheck |
                     IRCompatibilityFlagVertexPositionInfToNan));
   IRCompilerIgnoreRootSignature(compiler, true);
-  IRCompilerSetFunctionConstantResourceSpace(compiler,
-                                             kFunctionConstantRegisterSpace);
+  IRCompilerSetFunctionConstantResourceSpace(
+      compiler, kMetalFunctionConstantRegisterSpace);
   IRCompilerSetGlobalRootSignature(compiler, root_signature_);
   // The primitive-expansion path runs the guest VS as an object stage feeding a
   // generated GS as a mesh stage; both must be compiled with emulation enabled and

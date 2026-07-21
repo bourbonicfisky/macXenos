@@ -194,7 +194,7 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Real guest samplers: filters/clamps/aniso packed into a key ->
   // sampler-heap slot, created on first use (states retained until shutdown).
-  uint32_t GetOrCreateSamplerSlot(uint32_t key);
+  bool GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_slot);
   std::unordered_map<uint32_t, uint32_t> sampler_slot_cache_;
   uint32_t next_sampler_slot_ = 1;     // 0 == null sampler.
   std::vector<void*> sampler_states_;  // id<MTLSamplerState>, retained.

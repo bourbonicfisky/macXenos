@@ -42,6 +42,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/metal/metal_binding_layout.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
@@ -139,38 +140,6 @@ metal::FetchGuestRanges ComputeFetchGuestRanges(
   return r;
 }
 
-// Top-level argument buffer: 32 uint64 gpuAddress entries, one per root-signature
-// parameter, in the exact order MetalShaderConverter::CreateXbox360RootSignature
-// appends them.
-constexpr uint32_t kTopLevelABSlots = 32;
-enum AbSlot : uint32_t {
-  kAbSrvSpace0 = 0,   // shared memory SRV (t0, space0)
-  kAbSrvSpace1 = 1,
-  kAbSrvSpace2 = 2,
-  kAbSrvSpace3 = 3,
-  kAbSrvSpace10 = 4,
-  kAbUavSpace0 = 5,
-  kAbUavSpace1 = 6,
-  kAbUavSpace2 = 7,
-  kAbUavSpace3 = 8,
-  kAbSamplerSpace0 = 9,
-  kAbCbvSystem = 10,        // b0
-  kAbCbvFloatVertex = 11,   // b1 (vertex)
-  kAbCbvBoolLoop = 12,      // b2
-  kAbCbvFetchVertex = 13,   // b3 (vertex)
-  kAbCbvDescIdxVertex = 14, // b4 (vertex)
-  kAbCbvFloatHull = 15,
-  kAbCbvFetchHull = 16,
-  kAbCbvDescIdxHull = 17,
-  kAbCbvFloatDomain = 18,
-  kAbCbvFetchDomain = 19,
-  kAbCbvDescIdxDomain = 20,
-  kAbCbvFloatPixel = 21,    // b1 (pixel)
-  kAbCbvFetchPixel = 22,    // b3 (pixel)
-  kAbCbvDescIdxPixel = 23,  // b4 (pixel)
-  kAbCbvFunctionConstants = 24,
-};
-
 // Entries inside the small fixed system view table.
 constexpr uint32_t kSystemViewSharedMemorySRV = 0;
 constexpr uint32_t kSystemViewNullUAV = 1;
@@ -243,14 +212,16 @@ MetalCommandProcessor::MetalCommandProcessor(
     : CommandProcessor(graphics_system, kernel_state) {}
 MetalCommandProcessor::~MetalCommandProcessor() = default;
 
-uint32_t MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key) {
+bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_slot) {
+  *out_slot = 0;
   auto it = sampler_slot_cache_.find(key);
   if (it != sampler_slot_cache_.end()) {
-    return it->second;
+    *out_slot = it->second;
+    return true;
   }
   if (next_sampler_slot_ >= kSamplerBindlessHeapSlots ||
       !sampler_bindless_heap_) {
-    return 0;
+    return false;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
@@ -297,7 +268,7 @@ uint32_t MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key) {
   }
   id<MTLSamplerState> state = [device newSamplerStateWithDescriptor:d];
   if (!state) {
-    return 0;
+    return false;
   }
   uint32_t slot = next_sampler_slot_++;
   auto* entries = static_cast<IRDescriptorTableEntry*>(
@@ -305,7 +276,8 @@ uint32_t MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key) {
   IRDescriptorTableSetSampler(&entries[slot], state, 0.0f);
   sampler_states_.push_back((__bridge_retained void*)state);
   sampler_slot_cache_.emplace(key, slot);
-  return slot;
+  *out_slot = slot;
+  return true;
 }
 
 void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
@@ -1551,6 +1523,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
   RegisterFile& regs = *register_file_;
+
+  if (!AreMetalConstantBankBasesSupported(regs[XE_GPU_REG_SQ_VS_CONST],
+                                          regs[XE_GPU_REG_SQ_PS_CONST])) {
+    static uint32_t invalid_constant_bank_logs = 0;
+    if (invalid_constant_bank_logs++ < 16) {
+      XELOGW("MetalCommandProcessor: skipping draw with unsupported constant "
+             "banks VS={:08X} PS={:08X}",
+             regs[XE_GPU_REG_SQ_VS_CONST], regs[XE_GPU_REG_SQ_PS_CONST]);
+    }
+    ++draw_skip_count_;
+    return true;
+  }
 
   // Analyze microcode (once) so constant maps / bindings are available.
   StringBuffer ucode_disasm;
@@ -2847,25 +2831,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   std::memcpy(system_alloc.cpu_ptr, &system_constants, sizeof(system_constants));
 
   // Float constants, packed per the shader's float_bitmap (b1). Vertex + pixel.
-  auto marshal_floats = [&](const Shader::ConstantRegisterMap& map,
-                            uint32_t reg_base,
+  auto marshal_floats = [&](const Shader::ConstantRegisterMap& map, uint32_t reg_base,
                             MetalUploadAllocation* out) -> bool {
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < 4; ++i) count += xe::bit_count(map.float_bitmap[i]);
+    uint32_t count = GetMetalPackedFloatConstantCount(map);
     uint32_t bytes = sizeof(float) * 4 * std::max(count, 1u);
-    if (!upload_arena_->Allocate(bytes, 256, out)) return false;
-    uint8_t* dst = static_cast<uint8_t*>(out->cpu_ptr);
-    for (uint32_t i = 0; i < 4; ++i) {
-      uint64_t entry = map.float_bitmap[i];
-      uint32_t index;
-      while (xe::bit_scan_forward(entry, &index)) {
-        entry = xe::clear_lowest_bit(entry);
-        std::memcpy(dst, &regs[reg_base + (i << 8) + (index << 2)],
-                    4 * sizeof(float));
-        dst += 4 * sizeof(float);
-      }
+    if (!upload_arena_->Allocate(bytes, 256, out)) {
+      return false;
     }
-    return true;
+    return PackMetalFloatConstants(regs, map, reg_base, out->cpu_ptr, bytes);
   };
   MetalUploadAllocation float_vertex_alloc{};
   if (!marshal_floats(vs_map, XE_GPU_REG_SHADER_CONSTANT_000_X,
@@ -2977,10 +2950,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   };
   MetalUploadAllocation bool_loop_alloc{};
   MetalUploadAllocation fetch_alloc{};
-  if (!marshal_block(XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031,
-                     (8 + 32) * sizeof(uint32_t), &bool_loop_alloc) ||
-      !marshal_block(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0,
-                     32 * 6 * sizeof(uint32_t), &fetch_alloc)) {
+  if (!marshal_block(XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, kMetalBoolLoopConstantsSize,
+                     &bool_loop_alloc) ||
+      !marshal_block(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, kMetalFetchConstantsSize,
+                     &fetch_alloc)) {
     ++draw_skip_count_;
     return true;
   }
@@ -3003,20 +2976,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // wild texture pointer and a GPU page fault (the live JC2
     // lost-command-buffer storm). Unassigned gaps read 0 = the null
     // texture/sampler slot, which is always valid.
-    uint32_t count = 1;
+    MetalDescriptorIndexPlan plan;
     if (shader) {
-      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
-        count = std::max(count, binding.bindless_descriptor_index + 1);
-      }
-      for (const auto& sb : shader->GetSamplerBindingsAfterTranslation()) {
-        count = std::max(count, sb.bindless_descriptor_index + 1);
+      plan = GetMetalDescriptorIndexPlan(shader->GetTextureBindingsAfterTranslation(),
+                                         shader->GetSamplerBindingsAfterTranslation());
+      if (!plan.valid) {
+        XELOGW("MetalCommandProcessor: skipping draw with invalid {} descriptor "
+               "index layout",
+               shader->type() == xenos::ShaderType::kPixel ? "pixel" : "vertex");
+        return false;
       }
     }
+    const uint32_t count = plan.count;
     if (!upload_arena_->Allocate(count * sizeof(uint32_t), 256, out)) {
       return false;
     }
     auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
-    std::memset(indices, 0, count * sizeof(uint32_t));
+    if (!InitializeMetalDescriptorIndices(plan, indices, count * sizeof(uint32_t))) {
+      return false;
+    }
     if (shader) {
       // XE_METAL_TEX_PROBE=<draw>: log every texture binding's fetch fields +
       // resolved bindless slot at that trace draw (slot 0 = null texture ->
@@ -3040,10 +3018,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             routed_slot =
                 shared_texture_cache_->GetServedSlot(binding.fetch_constant);
           }
-          indices[binding.bindless_descriptor_index] =
-              routed_slot ? routed_slot
-                          : texture_cache_->GetTextureSlot(fetch,
-                                                           binding.is_signed);
+          uint32_t texture_slot = routed_slot;
+          if (!texture_slot) {
+            // A failed shared-cache candidate may still have a correct legacy
+            // fallback. Only propagate failure if that fallback also can't
+            // create the required object or heap slot.
+            texture_cache_->ClearBindingAllocationFailure();
+            texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
+            if (texture_cache_->binding_allocation_failed()) {
+              XELOGW("MetalCommandProcessor: skipping draw after texture "
+                     "binding allocation failure");
+              return false;
+            }
+          }
+          indices[binding.bindless_descriptor_index] = texture_slot;
           if (probe) {
             XELOGI(
                 "MetalTexProbe draw={} {} fc={} descidx={} -> slot={} "
@@ -3082,7 +3070,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                         ((uint32_t(f.clamp_x) & 7) << 6) |
                         ((uint32_t(f.clamp_y) & 7) << 9) |
                         ((uint32_t(f.clamp_z) & 7) << 12) | ((an & 7) << 15);
-        indices[sb.bindless_descriptor_index] = GetOrCreateSamplerSlot(skey);
+        uint32_t sampler_slot;
+        if (!GetOrCreateSamplerSlot(skey, &sampler_slot)) {
+          XELOGW("MetalCommandProcessor: skipping draw after sampler binding "
+                 "allocation failure");
+          return false;
+        }
+        indices[sb.bindless_descriptor_index] = sampler_slot;
       }
     }
     return true;
@@ -3095,7 +3089,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
-  // --- Build the top-level argument buffer (32 gpuAddresses). ---
+  // --- Build the top-level argument buffer from the root-layout authority. ---
   id<MTLBuffer> view_heap = (__bridge id<MTLBuffer>)view_bindless_heap_;
   id<MTLBuffer> sampler_heap = (__bridge id<MTLBuffer>)sampler_bindless_heap_;
   id<MTLBuffer> system_view = (__bridge id<MTLBuffer>)system_view_tables_;
@@ -3106,37 +3100,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t null_gpu = [null_buffer gpuAddress];
 
   MetalUploadAllocation ab_alloc{};
-  if (!upload_arena_->Allocate(kTopLevelABSlots * sizeof(uint64_t), 256,
-                               &ab_alloc)) {
+  if (!upload_arena_->Allocate(kMetalBindingSlotCount * sizeof(uint64_t), 256, &ab_alloc)) {
     ++draw_skip_count_;
     return true;
   }
-  uint64_t* ab = static_cast<uint64_t*>(ab_alloc.cpu_ptr);
-  for (uint32_t i = 0; i < kTopLevelABSlots; ++i) ab[i] = null_gpu;
-  ab[kAbSrvSpace0] =
+  MetalBindingAddresses binding_addresses;
+  binding_addresses.null_buffer = null_gpu;
+  binding_addresses.view_heap = view_heap_gpu;
+  binding_addresses.sampler_heap = sampler_heap_gpu;
+  binding_addresses.shared_memory_srv =
       system_view_gpu + kSystemViewSharedMemorySRV * sizeof(IRDescriptorTableEntry);
-  ab[kAbSrvSpace1] = view_heap_gpu;
-  ab[kAbSrvSpace2] = view_heap_gpu;
-  ab[kAbSrvSpace3] = view_heap_gpu;
-  ab[kAbSrvSpace10] = view_heap_gpu;
-  ab[kAbUavSpace0] =
-      system_view_gpu + (memexport_draw ? kSystemViewSharedMemoryUAV
-                                        : kSystemViewNullUAV) *
-                            sizeof(IRDescriptorTableEntry);
-  ab[kAbUavSpace1] = view_heap_gpu;
-  ab[kAbUavSpace2] = view_heap_gpu;
-  ab[kAbUavSpace3] = view_heap_gpu;
-  ab[kAbSamplerSpace0] = sampler_heap_gpu;
-  ab[kAbCbvSystem] = system_alloc.gpu_address;
-  ab[kAbCbvFloatVertex] = float_vertex_alloc.gpu_address;
-  ab[kAbCbvBoolLoop] = bool_loop_alloc.gpu_address;
-  ab[kAbCbvFetchVertex] = fetch_alloc.gpu_address;
-  ab[kAbCbvDescIdxVertex] = desc_idx_vertex_alloc.gpu_address;
-  if (pixel_shader) {
-    ab[kAbCbvFloatPixel] = float_pixel_alloc.gpu_address;
-    ab[kAbCbvFetchPixel] = fetch_alloc.gpu_address;
-    ab[kAbCbvDescIdxPixel] = desc_idx_pixel_alloc.gpu_address;
-  }
+  binding_addresses.null_uav =
+      system_view_gpu + kSystemViewNullUAV * sizeof(IRDescriptorTableEntry);
+  binding_addresses.shared_memory_uav =
+      system_view_gpu + kSystemViewSharedMemoryUAV * sizeof(IRDescriptorTableEntry);
+  binding_addresses.system_constants = system_alloc.gpu_address;
+  binding_addresses.float_vertex = float_vertex_alloc.gpu_address;
+  binding_addresses.bool_loop = bool_loop_alloc.gpu_address;
+  binding_addresses.fetch = fetch_alloc.gpu_address;
+  binding_addresses.descriptor_indices_vertex = desc_idx_vertex_alloc.gpu_address;
+  binding_addresses.float_pixel = float_pixel_alloc.gpu_address;
+  binding_addresses.descriptor_indices_pixel = desc_idx_pixel_alloc.gpu_address;
+  std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
+      BuildMetalTopLevelArgumentBuffer(binding_addresses, pixel_shader != nullptr, memexport_draw);
+  std::memcpy(ab_alloc.cpu_ptr, argument_buffer.data(), sizeof(argument_buffer));
 
   // --- Bind. ---
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
@@ -3224,10 +3211,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   id<MTLBuffer> shared_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
-  MTLRenderStages stages =
-      use_geometry_emulation
-          ? (MTLRenderStageObject | MTLRenderStageMesh | MTLRenderStageFragment)
-          : (MTLRenderStageVertex | MTLRenderStageFragment);
+  uint32_t binding_stage_mask = GetMetalBindingStageMask(use_geometry_emulation);
+  MTLRenderStages stages = 0;
+  if (binding_stage_mask & kMetalBindingStageVertex) {
+    stages |= MTLRenderStageVertex;
+  }
+  if (binding_stage_mask & kMetalBindingStageObject) {
+    stages |= MTLRenderStageObject;
+  }
+  if (binding_stage_mask & kMetalBindingStageMesh) {
+    stages |= MTLRenderStageMesh;
+  }
+  if (binding_stage_mask & kMetalBindingStageFragment) {
+    stages |= MTLRenderStageFragment;
+  }
   [encoder useResource:shared_buffer
                  usage:memexport_draw
                            ? (MTLResourceUsageRead | MTLResourceUsageWrite)
