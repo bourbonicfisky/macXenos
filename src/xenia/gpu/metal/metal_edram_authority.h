@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_EDRAM_AUTHORITY_H_
 #define XENIA_GPU_METAL_METAL_EDRAM_AUTHORITY_H_
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -19,6 +20,24 @@
 namespace xe {
 namespace gpu {
 namespace metal {
+
+// Returns the smallest top-aligned texture height containing every pixel whose
+// physical tile may be below end_tiles. Range shaders retain their exact
+// start/end guards; this only avoids dispatching rows that are guaranteed to be
+// beyond the operation. The result is clamped to the allocated texture.
+inline uint32_t ComputeCanonicalRangeTextureHeight(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_y_shift,
+    uint32_t end_tiles, uint32_t texture_height) {
+  if (!pitch_tiles || end_tiles <= base_tiles || !texture_height) {
+    return 0u;
+  }
+  uint64_t local_end_tiles = uint64_t(end_tiles) - base_tiles;
+  uint64_t tile_rows =
+      (local_end_tiles + pitch_tiles - 1u) / pitch_tiles;
+  uint64_t pixel_rows =
+      (uint64_t(tile_rows) * xenos::kEdramTileHeightSamples) >> msaa_y_shift;
+  return uint32_t(std::min<uint64_t>(pixel_rows, texture_height));
+}
 
 // Submission-ordered authority for the physical EDRAM tile space. This class
 // deliberately contains no Metal objects: it decides which exact overlapping

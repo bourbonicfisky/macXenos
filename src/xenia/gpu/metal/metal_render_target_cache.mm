@@ -85,6 +85,15 @@ void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
   x_shift = shifts.x;
   y_shift = shifts.y;
 }
+NSUInteger GetCanonicalRangeTextureHeight(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
+    uint32_t end_tiles, NSUInteger texture_height) {
+  uint32_t x_shift, y_shift;
+  GetMsaaShifts(msaa_samples, x_shift, y_shift);
+  (void)x_shift;
+  return ComputeCanonicalRangeTextureHeight(
+      base_tiles, pitch_tiles, y_shift, end_tiles, uint32_t(texture_height));
+}
 bool IsCanonicalColorFormatSupported(xenos::ColorRenderTargetFormat format) {
   switch (format) {
     case xenos::ColorRenderTargetFormat::k_8_8_8_8:
@@ -1379,6 +1388,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
   encoder.label = @"rtcache:canonical-depth-materialize-range";
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipelines->mat_depth_range];
   [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
@@ -1450,7 +1467,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
-  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -1501,6 +1525,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
   encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
 
   // The first pass writes every depth sample and replaces stencil with zero.
   // Eight masked REPLACE passes then reconstruct the complete stencil byte per
@@ -1582,8 +1614,15 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
   [encoder dispatchThreads:
-               MTLSizeMake(texture.width, texture.height, texture.sampleCount)
+               MTLSizeMake(texture.width, work_height, texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -4130,7 +4169,14 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
   [encoder setBytes:&range length:sizeof(range) atIndex:3];
   NSUInteger tw = pipeline.threadExecutionWidth;
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
-  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -4190,7 +4236,14 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
   [encoder setBytes:&range length:sizeof(range) atIndex:3];
   NSUInteger tw = pipeline.threadExecutionWidth;
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
-  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height, 1)
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -4251,6 +4304,14 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
           : (is_64bpp
                  ? @"rtcache:canonical-color64-materialize-msaa-range"
                  : @"rtcache:canonical-color-materialize-msaa-range");
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
   [encoder setRenderPipelineState:pipeline];
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
@@ -4319,8 +4380,15 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
   [encoder dispatchThreads:
-               MTLSizeMake(texture.width, texture.height, texture.sampleCount)
+               MTLSizeMake(texture.width, work_height, texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;

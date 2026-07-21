@@ -44,6 +44,7 @@ namespace test {
 namespace {
 
 using metal::MetalEdramAuthorityTracker;
+using metal::ComputeCanonicalRangeTextureHeight;
 
 // CPU reference for the tile-range content hash (mirror of xe_hash_mix /
 // k_tile_hash in the MSL below). The live ownership-transition manifest hashes
@@ -2008,6 +2009,20 @@ static uint32_t PitchFor(uint32_t w, uint32_t msaa, uint32_t fmt_log2) {
   uint32_t tile_w = 80u >> fmt_log2;
   uint32_t width_samples = w << (msaa >= 2u ? 1u : 0u);  // 4x doubles x
   return (width_samples + tile_w - 1u) / tile_w;
+}
+
+TEST_CASE("Metal canonical range work height excludes untouched lower rows",
+          "[l0][metal][authority]") {
+  CHECK(ComputeCanonicalRangeTextureHeight(0u, 16u, 0u, 16u, 2048u) ==
+        16u);
+  CHECK(ComputeCanonicalRangeTextureHeight(0u, 16u, 1u, 17u, 1024u) ==
+        16u);
+  CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 178u, 8192u) ==
+        16u);
+  CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 9999u, 8192u) ==
+        8192u);
+  CHECK(ComputeCanonicalRangeTextureHeight(174u, 0u, 1u, 178u, 8192u) == 0u);
+  CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 174u, 8192u) == 0u);
 }
 
 TEST_CASE("Metal EDRAM authority synchronizes only overlapping dirty tiles",
