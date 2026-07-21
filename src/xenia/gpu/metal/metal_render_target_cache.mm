@@ -35,13 +35,12 @@ const uint64_t MetalRenderTargetCache::kDepthFormat =
     MTLPixelFormatDepth32Float_Stencil8;
 
 namespace {
-// Experimental Metal feature gates use explicit value semantics so a tracked
-// `NAME=0` environment entry is a real disable, not an accidental enable just
-// because the variable exists. Keep this strict: the onboarding contract uses
-// 0 and 1, and any other value should stay safely off.
-bool IsMetalEnvironmentFlagEnabled(const char* name) {
-  const char* value = std::getenv(name);
-  return value && value[0] == '1' && value[1] == '\0';
+// Metal feature gates use strict explicit-value semantics. Diagnostics default
+// off; promoted pipeline features may default on while exact `NAME=0` remains
+// a reliable rollback. Malformed values always fail closed.
+bool IsMetalEnvironmentFlagEnabled(const char* name,
+                                   bool default_enabled = false) {
+  return ParseMetalEnvironmentFlag(std::getenv(name), default_enabled);
 }
 
 // Guest color RESOURCE format (gamma already collapsed by the base class since
@@ -182,20 +181,31 @@ MetalRenderTargetCache::~MetalRenderTargetCache() { Shutdown(); }
 
 bool MetalRenderTargetCache::Initialize() {
   InitializeCommon();
-  // Canonical per-sample EDRAM buffer (source of truth for the sample-accurate
-  // path). Allocated only when gated on, so the default collapsed path stays
-  // byte-for-byte unchanged. See openspec implement-sample-accurate-metal-edram
-  // task 2.1.
+  // Canonical per-sample EDRAM and real-MSAA raster views are the promoted
+  // default. Exact `XE_METAL_SAMPLE_EDRAM=0` retains the collapsed rollback
+  // through the following milestone; the raster flag can also be disabled
+  // independently for sample-storage diagnostics.
   sample_edram_enabled_ =
-      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM");
-  const bool sample_edram_raster_requested =
-      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER");
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM", true);
+  const bool sample_edram_raster_configured =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER", true);
   sample_edram_raster_enabled_ =
-      sample_edram_enabled_ && sample_edram_raster_requested;
-  if (sample_edram_raster_requested && !sample_edram_enabled_) {
+      sample_edram_enabled_ && sample_edram_raster_configured;
+  const bool sample_edram_raster_explicitly_requested =
+      std::getenv("XE_METAL_SAMPLE_EDRAM_RASTER") &&
+      IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER");
+  if (sample_edram_raster_explicitly_requested && !sample_edram_enabled_) {
     XELOGW(
         "MetalRenderTargetCache: ignoring XE_METAL_SAMPLE_EDRAM_RASTER=1 "
-        "because XE_METAL_SAMPLE_EDRAM=1 is not active");
+        "because canonical EDRAM is disabled");
+  } else if (!sample_edram_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: canonical EDRAM disabled; using collapsed "
+        "rollback path");
+  } else if (!sample_edram_raster_enabled_) {
+    XELOGW(
+        "MetalRenderTargetCache: real-MSAA canonical raster disabled; using "
+        "collapsed raster rollback path");
   }
   const bool canonical_restore_self_check_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_SELF_CHECK");
@@ -231,9 +241,9 @@ bool MetalRenderTargetCache::Initialize() {
           kCanonicalEdramSize / (1024 * 1024),
           canonical_depth_enabled_ ? " [depth authority]" : "");
       if (sample_edram_raster_enabled_) {
-        XELOGW(
+        XELOGI(
             "MetalRenderTargetCache: canonical real-MSAA raster authority "
-            "enabled (staged task 4.1 path)");
+            "enabled (default pipeline; XE_METAL_SAMPLE_EDRAM=0 rolls back)");
       }
     }
   }

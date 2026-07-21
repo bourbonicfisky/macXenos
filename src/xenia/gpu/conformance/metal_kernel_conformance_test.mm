@@ -46,6 +46,7 @@ namespace {
 using metal::ComputeCanonicalRangeTextureHeight;
 using metal::ComputeMsaaCompanionAllocationHeight;
 using metal::MetalEdramAuthorityTracker;
+using metal::ParseMetalEnvironmentFlag;
 
 // CPU reference for the tile-range content hash (mirror of xe_hash_mix /
 // k_tile_hash in the MSL below). The live ownership-transition manifest hashes
@@ -2010,6 +2011,19 @@ static uint32_t PitchFor(uint32_t w, uint32_t msaa, uint32_t fmt_log2) {
   uint32_t tile_w = 80u >> fmt_log2;
   uint32_t width_samples = w << (msaa >= 2u ? 1u : 0u);  // 4x doubles x
   return (width_samples + tile_w - 1u) / tile_w;
+}
+
+TEST_CASE("Metal environment flags preserve strict default and rollback",
+          "[l0][metal][authority]") {
+  CHECK_FALSE(ParseMetalEnvironmentFlag(nullptr, false));
+  CHECK(ParseMetalEnvironmentFlag(nullptr, true));
+  CHECK(ParseMetalEnvironmentFlag("1", false));
+  CHECK(ParseMetalEnvironmentFlag("1", true));
+  CHECK_FALSE(ParseMetalEnvironmentFlag("0", false));
+  CHECK_FALSE(ParseMetalEnvironmentFlag("0", true));
+  CHECK_FALSE(ParseMetalEnvironmentFlag("", true));
+  CHECK_FALSE(ParseMetalEnvironmentFlag("true", true));
+  CHECK_FALSE(ParseMetalEnvironmentFlag("10", true));
 }
 
 TEST_CASE("Metal canonical range work height excludes untouched lower rows",

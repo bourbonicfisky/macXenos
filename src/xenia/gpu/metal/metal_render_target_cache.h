@@ -419,10 +419,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // A raw 10 MB private buffer in Xenos physical sample order is the intended
   // source of truth for every color/depth/stencil sample across 1x/2x/4x, so
   // ownership transfers/resolves can reconstruct samples the collapsed host
-  // targets discard. Gated OFF by default behind XE_METAL_SAMPLE_EDRAM=1 until
-  // the materialize/pack + authority-tracking paths are proven; the existing
-  // collapsed path stays the rollback. Phase 1 only allocates/lifecycles it
-  // (task 2.1) — no visible rendering change.
+  // targets discard. This is the promoted default; exact
+  // XE_METAL_SAMPLE_EDRAM=0 retains the collapsed rollback through the next
+  // milestone.
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
   bool sample_edram_enabled_ = false;
   bool sample_edram_raster_enabled_ = false;

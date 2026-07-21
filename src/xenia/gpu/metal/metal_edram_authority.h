@@ -21,6 +21,18 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+// Parses the strict 0/1 environment contract used by Metal pipeline gates.
+// Unset inherits the caller's default; exact 1 enables, while exact 0 and
+// malformed values disable so unsupported configuration never turns on by
+// accident.
+inline bool ParseMetalEnvironmentFlag(const char* value,
+                                      bool default_enabled) {
+  if (!value) {
+    return default_enabled;
+  }
+  return value[0] == '1' && value[1] == '\0';
+}
+
 // Returns the smallest top-aligned texture height containing every pixel whose
 // physical tile may be below end_tiles. Range shaders retain their exact
 // start/end guards; this only avoids dispatching rows that are guaranteed to be
