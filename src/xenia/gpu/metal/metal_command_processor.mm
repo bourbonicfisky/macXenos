@@ -76,6 +76,40 @@ namespace metal {
 
 namespace {
 
+// Concrete task-3.1 RamWritePublicationTarget: forwards the seam's two
+// invalidation primitives to the operations that already exist on this
+// command processor's shared memory / legacy texture cache. Holds no state of
+// its own and adds no new watch -- it is a thin adapter so PublishRamWrite can
+// EXECUTE a writer's publication instead of only predicting it.
+class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
+ public:
+  MetalRamWritePublicationTarget(SharedMemory* shared_memory,
+                                 metal::MetalTextureCache* texture_cache)
+      : shared_memory_(shared_memory), texture_cache_(texture_cache) {}
+
+  bool InvalidateSharedPages(uint32_t base, uint32_t length,
+                             bool exact_range) override {
+    if (!shared_memory_) {
+      return false;
+    }
+    shared_memory_->MemoryInvalidationCallback(base, length, exact_range);
+    return true;
+  }
+
+  bool InvalidateLegacyTextures(uint32_t base, uint32_t length,
+                                uint32_t* invalidated_entries) override {
+    if (!texture_cache_) {
+      return false;
+    }
+    *invalidated_entries = texture_cache_->InvalidateRange(base, length);
+    return true;
+  }
+
+ private:
+  SharedMemory* shared_memory_;
+  metal::MetalTextureCache* texture_cache_;
+};
+
 // Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
 // Same base + strided-hash as the reader (metal_texture_cache.mm) so the
 // resolve/writeback/drain events on the watched base share the fetch clock.
@@ -282,32 +316,39 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_s
 
 void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
                                                      uint32_t length) {
-  // Invalidate the shared-memory pages the trace stream just rewrote so the
-  // next RequestConsumedRange re-uploads them (mirrors the Vulkan backend).
-  if (shared_memory_) {
-    shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
-  }
-  // Also evict cached guest-texture uploads overlapping the restore: the
-  // trace re-restores a buffer right before each packet that read it at
-  // capture (the blur chain ping-pongs draw -> resolve -> RAM -> fetch
-  // through the SAME addresses), so a fetch must re-upload the fresh bytes
-  // or it replays a stale earlier-era upload.
-  uint32_t invalidated_entries = 0;
+  // Trace restore publishes bytes straight to RAM. Route the publication
+  // through the typed task-3.1 seam: it invalidates the shared-memory pages
+  // the trace stream just rewrote (so the next RequestConsumedRange
+  // re-uploads them, mirroring the Vulkan backend) using the SAME
+  // MemoryInvalidationCallback this call site used directly before.
+  //
+  // The direct MetalTextureCache::InvalidateRange call is RETAINED (task 3.1
+  // item 2 / audit blocker 3): trace playback unregisters the legacy global
+  // watch, so the seam's policy for kTraceRestore also requests legacy
+  // invalidation rather than relying on watch fan-out. SetTracePlayback()
+  // must still run first regardless of range count.
   if (texture_cache_) {
     texture_cache_->SetTracePlayback();
-    invalidated_entries = texture_cache_->InvalidateRange(base_ptr, length);
+  }
+  metal::LegacyWriterOutcome outcome;
+  auto publication = metal::DecideRamWritePublication(
+      metal::WriterKind::kTraceRestore, base_ptr, length);
+  if (publication) {
+    MetalRamWritePublicationTarget target(shared_memory_.get(),
+                                          texture_cache_.get());
+    outcome = metal::PublishRamWrite(*publication, target);
   }
   // Observer-only (task 2.4): trace restore publishes restored bytes to RAM via
   // the shared + legacy invalidation above. Record the writer transition; the
   // seam predicts the same invalidate-RAM publication. Never acts.
-  if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kTraceRestore)) {
+  if (publication && authority_observer_.ShouldSampleWriter(
+                         metal::WriterKind::kTraceRestore)) {
     metal::GuestRangeSet ranges;
-    ranges.Add(metal::GuestRange::FromBaseLength(base_ptr, length));
+    ranges.Add(publication->range);
     authority_observer_.RecordWriter(
         metal::WriterKind::kTraceRestore, ranges,
         metal::DecideWriterPublication(metal::WriterKind::kTraceRestore),
-        {/*action=*/metal::AuthorityAction::kInvalidateRamWrite,
-         invalidated_entries, /*committed=*/false, /*waited=*/false});
+        outcome);
   }
 }
 
@@ -5576,6 +5617,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       // agreement summary on the same 128-swap cadence (counters, not a
       // per-frame log). No behavior is executed.
       authority_observer_.ReportSummary();
+      if (shared_memory_) {
+        auto cpu_stats = shared_memory_->guest_cpu_authority_stats();
+        if (cpu_stats.publications) {
+          XELOGI(
+              "MetalAuthority[cpu-watch] writer=guest_cpu callbacks={} "
+              "ranges={} bytes={} action=invalidate_ram source=physical_watch",
+              cpu_stats.publications, cpu_stats.publications,
+              cpu_stats.range_bytes);
+        }
+      }
     }
   }
   // Cycle-transfer instrument (XE_METAL_DUMP_SNAPSHOT=<hexbase>): dump the

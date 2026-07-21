@@ -507,8 +507,15 @@ void SharedMemory::TryGetNextUploadRange(
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
-  return reinterpret_cast<SharedMemory*>(context_ptr)
-      ->MemoryInvalidationCallback(physical_address_start, length, exact_range);
+  SharedMemory* self = reinterpret_cast<SharedMemory*>(context_ptr);
+  std::pair<uint32_t, uint32_t> result = self->MemoryInvalidationCallback(
+      physical_address_start, length, exact_range);
+  // This thunk is the ONLY caller reached through
+  // RegisterPhysicalMemoryInvalidationCallback (InitializeCommon above), so
+  // this is the sole point that observes the guest-CPU physical watch as
+  // distinct from a backend's own direct MemoryInvalidationCallback calls.
+  self->ObservePhysicalWrite(physical_address_start, length);
+  return result;
 }
 
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(

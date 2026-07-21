@@ -104,6 +104,21 @@ class SharedMemory {
  protected:
   SharedMemory(Memory& memory);
 
+  // Observation-only hook fired after MemoryInvalidationCallbackThunk handles
+  // the sole physical-memory watch. Direct backend invalidations (trace restore,
+  // resolve) don't reach this hook. It may run on an arbitrary guest thread, so
+  // implementations must use thread-safe, non-blocking bookkeeping and must not
+  // reenter SharedMemory. No-op for backends that don't observe CPU writers.
+  virtual void ObservePhysicalWrite(uint32_t physical_address_start,
+                                    uint32_t length) {}
+
+  // Registered directly as the one physical-memory invalidation callback.
+  // Protected so conformance subclasses can exercise the exact production
+  // dispatch boundary without installing a second watch.
+  static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
+      void* context_ptr, uint32_t physical_address_start, uint32_t length,
+      bool exact_range);
+
  public:
   Memory& guest_memory() const { return memory_; }
 
@@ -217,10 +232,6 @@ class SharedMemory {
   uint64_t *system_page_flags_valid_ = nullptr,
            *system_page_flags_valid_and_gpu_written_ = nullptr;
   unsigned num_system_page_flags_ = 0;
-  static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
-      void* context_ptr, uint32_t physical_address_start, uint32_t length,
-      bool exact_range);
-
   struct GlobalWatch {
     GlobalWatchCallback callback;
     void* callback_context;

@@ -45,6 +45,38 @@ GuestRangeSet SingleRange(uint32_t base, uint32_t size) {
   return set;
 }
 
+class RecordingRamWriteTarget : public RamWritePublicationTarget {
+ public:
+  bool InvalidateSharedPages(uint32_t base, uint32_t length,
+                             bool exact_range) override {
+    ++shared_calls;
+    shared_base = base;
+    shared_length = length;
+    shared_exact = exact_range;
+    return shared_result;
+  }
+
+  bool InvalidateLegacyTextures(uint32_t base, uint32_t length,
+                                uint32_t* invalidated_entries) override {
+    ++legacy_calls;
+    legacy_base = base;
+    legacy_length = length;
+    *invalidated_entries = legacy_entries;
+    return legacy_result;
+  }
+
+  uint32_t shared_calls = 0;
+  uint32_t shared_base = 0;
+  uint32_t shared_length = 0;
+  bool shared_exact = false;
+  bool shared_result = true;
+  uint32_t legacy_calls = 0;
+  uint32_t legacy_base = 0;
+  uint32_t legacy_length = 0;
+  bool legacy_result = true;
+  uint32_t legacy_entries = 3;
+};
+
 }  // namespace
 
 TEST_CASE("Authority: disjoint consumer selects no dependency", "[l0][authority]") {
@@ -246,6 +278,69 @@ TEST_CASE("Authority: writer publication policy", "[l0][authority]") {
           TransitState::kRamCurrent);
   REQUIRE(WriterTransitState(WriterKind::kTraceRestore) ==
           TransitState::kRamCurrent);
+}
+
+TEST_CASE("Authority: trace restore executes normalized RAM publication",
+          "[l0][authority][publication]") {
+  const uint32_t kEnd = uint32_t(GuestRange::kGuestPhysicalSize);
+  auto publication = DecideRamWritePublication(
+      WriterKind::kTraceRestore, kEnd - 0x100u, 0x400u);
+  REQUIRE(publication);
+  REQUIRE(publication->range.start() == kEnd - 0x100u);
+  REQUIRE(publication->range.length() == 0x100u);
+  REQUIRE(publication->action == AuthorityAction::kInvalidateRamWrite);
+
+  RecordingRamWriteTarget target;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE(target.shared_calls == 1u);
+  REQUIRE(target.shared_base == kEnd - 0x100u);
+  REQUIRE(target.shared_length == 0x100u);
+  REQUIRE(target.shared_exact);
+  REQUIRE(target.legacy_calls == 1u);
+  REQUIRE(target.legacy_base == kEnd - 0x100u);
+  REQUIRE(target.legacy_length == 0x100u);
+  REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+  REQUIRE(outcome.invalidated_entries == target.legacy_entries);
+  REQUIRE(outcome.shared_invalidation_executed);
+  REQUIRE(outcome.legacy_invalidation_executed);
+}
+
+TEST_CASE("Authority: guest CPU observation never duplicates physical "
+          "invalidation",
+          "[l0][authority][publication]") {
+  auto publication =
+      DecideRamWritePublication(WriterKind::kGuestCpu, 0x1234u, 0x80u);
+  REQUIRE(publication);
+  REQUIRE_FALSE(publication->policy.execute_shared_invalidation);
+  REQUIRE_FALSE(publication->policy.execute_legacy_invalidation);
+
+  RecordingRamWriteTarget target;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE(target.shared_calls == 0u);
+  REQUIRE(target.legacy_calls == 0u);
+  REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+}
+
+TEST_CASE("Authority: missing publication operation cannot report agreement",
+          "[l0][authority][publication]") {
+  auto publication = DecideRamWritePublication(
+      WriterKind::kTraceRestore, 0x4000u, 0x1000u);
+  REQUIRE(publication);
+  RecordingRamWriteTarget target;
+  target.shared_result = false;
+  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  REQUIRE_FALSE(outcome.shared_invalidation_executed);
+  REQUIRE(outcome.legacy_invalidation_executed);
+  REQUIRE(outcome.action == AuthorityAction::kNoDependency);
+}
+
+TEST_CASE("Authority: empty and out-of-domain RAM publications are rejected",
+          "[l0][authority][publication]") {
+  const uint32_t kEnd = uint32_t(GuestRange::kGuestPhysicalSize);
+  REQUIRE_FALSE(
+      DecideRamWritePublication(WriterKind::kTraceRestore, 0x1000u, 0u));
+  REQUIRE_FALSE(
+      DecideRamWritePublication(WriterKind::kGuestCpu, kEnd, 0x1000u));
 }
 
 TEST_CASE("Authority: full consumer x producer action matrix", "[l0][authority]") {

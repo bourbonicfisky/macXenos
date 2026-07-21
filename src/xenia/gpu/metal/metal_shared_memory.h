@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 #define XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <utility>
@@ -34,6 +35,11 @@ namespace metal {
 // UploadRanges is a plain memcpy — no staging, no GPU commands.
 class MetalSharedMemory : public SharedMemory {
  public:
+  struct GuestCpuAuthorityStats {
+    uint64_t publications = 0;
+    uint64_t range_bytes = 0;
+  };
+
   MetalSharedMemory(Memory& memory, void* device);
   ~MetalSharedMemory() override;
 
@@ -77,6 +83,11 @@ class MetalSharedMemory : public SharedMemory {
   }
   void ReleaseConsumedRanges(uint64_t completed_submission);
 
+  GuestCpuAuthorityStats guest_cpu_authority_stats() const {
+    return {guest_cpu_publications_.load(std::memory_order_relaxed),
+            guest_cpu_range_bytes_.load(std::memory_order_relaxed)};
+  }
+
   // Forgets the consumed-range set (call after the frame command buffer has
   // been committed and waited on).
   void ResetFrameRanges() { consumed_ranges_.clear(); }  // sync-mode/shutdown
@@ -84,6 +95,8 @@ class MetalSharedMemory : public SharedMemory {
  protected:
   bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,
                     uint32_t num_upload_ranges) override;
+  void ObservePhysicalWrite(uint32_t physical_address_start,
+                            uint32_t length) override;
 
  private:
   TraceWriter* trace_writer_ = nullptr;
@@ -100,6 +113,11 @@ class MetalSharedMemory : public SharedMemory {
   std::vector<ConsumedRange> consumed_ranges_;
   std::function<uint64_t()> submission_provider_;
   std::function<void()> hazard_flush_callback_;
+
+  // The physical-memory callback may run on guest threads. These are
+  // observation counters only; they do not participate in authority decisions.
+  std::atomic<uint64_t> guest_cpu_publications_{0};
+  std::atomic<uint64_t> guest_cpu_range_bytes_{0};
 };
 
 }  // namespace metal

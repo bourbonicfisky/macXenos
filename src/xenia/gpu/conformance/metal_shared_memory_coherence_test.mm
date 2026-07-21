@@ -13,12 +13,14 @@
 // of production decisions. Stimulus follows the resolve-writeback drain's
 // exact production sequence after the writer-audit correction: write guest RAM
 // via TranslatePhysical, then MemoryInvalidationCallback(extent, exact) — the
-// same authority entry the guest-mirror fault path reaches. (A full
+// same authority entry the guest-mirror fault path reaches. The physical
+// callback thunk is exercised directly to prove its Metal observation fires
+// once and direct backend invalidations do not masquerade as CPU writes. (A full
 // command-processor drain in this harness would be artificial; the drain's
 // call path into the same authority is established by the code audit recorded
-// in the gpu-texture-loads design. The guest-mirror FAULT path itself is not
-// exercised here — it requires installed exception handling — and is covered
-// by that audit; this is the documented limitation.)
+// in the gpu-texture-loads design. The host exception transport into the thunk
+// is not exercised here — it requires installed exception handling — and is
+// covered by that audit; this is the documented limitation.)
 //
 // GPU reads use a tiny self-contained compute copy (buffer->buffer) so byte
 // comparison observes exactly what a shader consuming the shared buffer
@@ -45,9 +47,19 @@ namespace {
 
 constexpr uint32_t kPage = 4096;
 
+class TestMetalSharedMemory : public MetalSharedMemory {
+ public:
+  using MetalSharedMemory::MetalSharedMemory;
+
+  std::pair<uint32_t, uint32_t> InvokePhysicalInvalidation(
+      uint32_t address, uint32_t length, bool exact_range) {
+    return MemoryInvalidationCallbackThunk(this, address, length, exact_range);
+  }
+};
+
 struct CoherenceHarness {
   Memory* memory = nullptr;
-  std::unique_ptr<MetalSharedMemory> shared;
+  std::unique_ptr<TestMetalSharedMemory> shared;
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> copy_pipeline = nil;
@@ -62,8 +74,8 @@ struct CoherenceHarness {
     if (!memory) {
       return;
     }
-    shared = std::make_unique<MetalSharedMemory>(*memory,
-                                                 (__bridge void*)device);
+    shared = std::make_unique<TestMetalSharedMemory>(*memory,
+                                                     (__bridge void*)device);
     if (!shared->Initialize()) {
       shared.reset();
       return;
@@ -170,6 +182,30 @@ TEST_CASE("SM coherence: initially-invalid range validates and GPU-reads",
   h.RamWrite(addr, bytes);
   REQUIRE(h.shared->RequestRange(addr, kPage));
   REQUIRE(h.GpuRead(addr, kPage) == bytes);
+}
+
+TEST_CASE("SM coherence: only the physical thunk observes a guest CPU writer",
+          "[l1][metal][sharedmem][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  const uint32_t addr = 0x0A080000;
+  h.EnsureAllocated(addr, kPage);
+
+  auto before = h.shared->guest_cpu_authority_stats();
+  h.shared->MemoryInvalidationCallback(addr, 0x80u, true);
+  auto after_direct = h.shared->guest_cpu_authority_stats();
+  REQUIRE(after_direct.publications == before.publications);
+  REQUIRE(after_direct.range_bytes == before.range_bytes);
+
+  h.shared->InvokePhysicalInvalidation(addr + 0x40u, 0x80u, false);
+  auto after_physical = h.shared->guest_cpu_authority_stats();
+  REQUIRE(after_physical.publications == before.publications + 1u);
+  REQUIRE(after_physical.range_bytes == before.range_bytes + 0x80u);
+
+  h.shared->MemoryInvalidationCallback(addr, 0x80u, true);
+  auto after_second_direct = h.shared->guest_cpu_authority_stats();
+  REQUIRE(after_second_direct.publications == after_physical.publications);
+  REQUIRE(after_second_direct.range_bytes == after_physical.range_bytes);
 }
 
 TEST_CASE("SM coherence: drain-sequence write + extent invalidation "

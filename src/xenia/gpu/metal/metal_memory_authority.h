@@ -44,10 +44,9 @@ namespace metal {
 //     disjoint base/mip extents, an aliased/multi-consumer set); the decision
 //     selects ONLY intersecting producer records. Adjacent/disjoint ranges
 //     choose no dependency (GuestRange treats adjacency as non-overlap).
-//   * Observer-only at this checkpoint. AuthorityObserver captures a prediction
-//     alongside the legacy action that actually ran and reports agreement; it
-//     executes NO behavior and is bounded/throttled. It is telemetry, never a
-//     second authority.
+//   * Incrementally routed. AuthorityObserver remains telemetry only, while the
+//     RAM-writer publication seam below may execute the existing publication
+//     operations for explicitly promoted writers. It owns no authority state.
 
 // Which of the four writers produced (or will produce) the bytes.
 enum class WriterKind {
@@ -312,6 +311,8 @@ struct LegacyWriterOutcome {
   uint32_t invalidated_entries = 0;
   bool committed = false;
   bool waited = false;
+  bool shared_invalidation_executed = false;
+  bool legacy_invalidation_executed = false;
 };
 
 // Factual deltas returned by the existing synchronization and drain operations.
@@ -327,6 +328,106 @@ struct LegacyDrainOutcome {
   uint32_t memexport_records = 0;
   uint32_t invalidated_entries = 0;
 };
+
+// Existing RAM-write publication operations, exposed through a thin device-free
+// port so the typed seam can execute them and tests can substitute a recorder.
+// The port exposes invalidation only -- never watch registration or authority
+// storage -- so routing through it cannot add a second CPU watch.
+struct RamWritePublicationTarget {
+  virtual ~RamWritePublicationTarget() = default;
+
+  // Invalidate the shared-memory pages backing [base, base+length).
+  virtual bool InvalidateSharedPages(uint32_t base, uint32_t length,
+                                     bool exact_range) = 0;
+
+  // Invalidate overlapping legacy texture-cache entries, returning the number
+  // retired. Only writers whose policy requires the independently-needed direct
+  // invalidation (trace restore during the phase-5 equivalence period) call it.
+  virtual bool InvalidateLegacyTextures(uint32_t base, uint32_t length,
+                                        uint32_t* invalidated_entries) = 0;
+};
+
+// Source-appropriate RAM-write publication policy. Guest-CPU publication is
+// observed after the sole physical-memory callback has already performed the
+// invalidation, so executing the seam must not invalidate it a second time.
+struct RamWritePublicationPolicy {
+  bool execute_shared_invalidation = true;
+  bool exact_range = true;
+  bool execute_legacy_invalidation = false;
+};
+
+inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
+  switch (writer) {
+    case WriterKind::kGuestCpu:
+      // The sole physical callback has already invalidated shared pages and
+      // fired watches before this publication is observed.
+      return {/*shared=*/false, /*exact=*/false, /*legacy=*/false};
+    case WriterKind::kTraceRestore:
+      // Exact publication plus the independently-required direct legacy texture
+      // invalidation retained through the phase-5 equivalence period (audit
+      // blocker 3: trace playback unregisters the legacy global watch, so its
+      // direct InvalidateRange is not yet redundant).
+      return {/*shared=*/true, /*exact=*/true, /*legacy=*/true};
+    case WriterKind::kResolve:
+      // Exact publication of the checked scatter extent; legacy fan-out is the
+      // global watch. Routed in task 3.2; the policy lives here so the seam
+      // speaks one vocabulary across writers.
+      return {/*shared=*/true, /*exact=*/true, /*legacy=*/false};
+    case WriterKind::kMemexport:
+    default:
+      // Memexport does not publish RAM by invalidation; it converges RAM from
+      // the buffer under its pending record (task 3.3). The seam performs no RAM
+      // invalidation for it.
+      return {/*shared=*/false, /*exact=*/true, /*legacy=*/false};
+  }
+}
+
+// One normalized RAM-writer publication decision. It is a transient value, not
+// persistent authority. The factory rejects empty/out-of-domain input and
+// clamps the end before any backend operation sees the range.
+struct RamWritePublication {
+  WriterKind writer;
+  GuestRange range;
+  AuthorityAction action;
+  RamWritePublicationPolicy policy;
+};
+
+inline std::optional<RamWritePublication> DecideRamWritePublication(
+    WriterKind writer, uint32_t base, uint32_t length) {
+  std::optional<GuestRange> range = GuestRange::FromBaseLength(base, length);
+  if (!range) {
+    return std::nullopt;
+  }
+  return RamWritePublication{writer, *range, DecideWriterPublication(writer),
+                             RamWritePolicyFor(writer)};
+}
+
+// Execute a normalized decision through existing backend operations. Guest CPU
+// decisions intentionally execute nothing because the physical callback has
+// already published them. This function owns no state and adds no
+// synchronization.
+inline LegacyWriterOutcome PublishRamWrite(
+    const RamWritePublication& publication,
+    RamWritePublicationTarget& target) {
+  LegacyWriterOutcome outcome;
+  bool required_operations_executed = true;
+  if (publication.policy.execute_shared_invalidation) {
+    outcome.shared_invalidation_executed = target.InvalidateSharedPages(
+        publication.range.start(), publication.range.length(),
+        publication.policy.exact_range);
+    required_operations_executed &= outcome.shared_invalidation_executed;
+  }
+  if (publication.policy.execute_legacy_invalidation) {
+    outcome.legacy_invalidation_executed = target.InvalidateLegacyTextures(
+        publication.range.start(), publication.range.length(),
+        &outcome.invalidated_entries);
+    required_operations_executed &= outcome.legacy_invalidation_executed;
+  }
+  outcome.action = required_operations_executed
+                       ? publication.action
+                       : AuthorityAction::kNoDependency;
+  return outcome;
+}
 
 // Observer-only telemetry (task 2.4). Bounded, throttled, non-owning. It holds
 // ONLY counters and a tiny disagreement sample -- never authority state -- and
