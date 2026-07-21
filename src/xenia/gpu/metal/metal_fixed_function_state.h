@@ -89,6 +89,50 @@ struct MetalBlendStencilState {
   uint32_t stencil_reference_back;
 };
 
+// Pipeline-compatible sample state plus the dynamic shader constants used for
+// Xenos alpha-to-mask. The translated pixel shader writes the exact guest
+// coverage mask (including the per-pixel offsets), so Metal hardware
+// alpha-to-coverage must remain disabled and alpha state must not fragment the
+// pipeline cache. Only raster_sample_count is pipeline-bound.
+struct MetalPipelineRasterKey {
+  uint32_t raster_sample_count;
+
+  bool operator==(const MetalPipelineRasterKey& other) const {
+    return raster_sample_count == other.raster_sample_count;
+  }
+  bool operator!=(const MetalPipelineRasterKey& other) const {
+    return !(*this == other);
+  }
+};
+
+struct MetalPipelineRasterState {
+  uint32_t raster_sample_count;
+  uint32_t sample_count_log2_x;
+  uint32_t sample_count_log2_y;
+  uint32_t alpha_to_mask;
+
+  MetalPipelineRasterKey pipeline_key() const { return {raster_sample_count}; }
+};
+
+inline MetalPipelineRasterState GetMetalPipelineRasterState(
+    uint32_t raster_sample_count, reg::RB_COLORCONTROL color_control) {
+  // Render-target selection is expected to provide a Metal-supported count.
+  // Fail closed to single-sample if a malformed value reaches this pure seam.
+  if (raster_sample_count != 2u && raster_sample_count != 4u) {
+    raster_sample_count = 1u;
+  }
+  uint32_t alpha_to_mask =
+      color_control.alpha_to_mask_enable
+          ? (color_control.value >> 24u) | (1u << 8u)
+          : 0u;
+  return {
+      raster_sample_count,
+      raster_sample_count == 4u ? 1u : 0u,
+      raster_sample_count >= 2u ? 1u : 0u,
+      alpha_to_mask,
+  };
+}
+
 // The normalized color mask contains one RGBA nibble per Xenos render target.
 // A draw writing only RT1-RT3 is still a color draw and must not fall into the
 // attachment-less / memexport path.

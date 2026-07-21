@@ -479,9 +479,18 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
                                   height:height
                                mipmapped:NO];
   // Sampled by the depth-convert / snapshot-blit paths and by transfers.
+  // Canonical color materialization also writes single-sample color targets
+  // from compute, so their declared usage must include ShaderWrite.
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-  if (sample_edram_enabled_ && !key.is_depth &&
-      IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+  if (!key.is_depth) {
+    desc.usage |= MTLTextureUsageShaderWrite;
+  }
+  if (key.is_depth ||
+      (sample_edram_enabled_ &&
+       IsCanonicalColorRawViewFormat(key.GetColorFormat()))) {
+    // Canonical and legacy depth/stencil transfer paths create an
+    // X32_Stencil8 view even under the exact collapsed rollback. Raw color
+    // pack paths reinterpret through their canonical uint view.
     desc.usage |= MTLTextureUsagePixelFormatView;
   }
   desc.storageMode = MTLStorageModePrivate;
@@ -599,8 +608,10 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     descriptor.height = allocation_height;
     descriptor.sampleCount = sample_count;
     descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    if (!key.is_depth &&
+    if (key.is_depth ||
         IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+      // Depth MSAA pack reads stencil through an X32_Stencil8 view; raw color
+      // MSAA pack uses the corresponding canonical uint view.
       descriptor.usage |= MTLTextureUsagePixelFormatView;
     }
     descriptor.storageMode = MTLStorageModePrivate;
@@ -1804,7 +1815,8 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
   td.width = src_tex.width;
   td.height = src_tex.height;
   td.sampleCount = sc;
-  td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+             MTLTextureUsagePixelFormatView;
   td.storageMode = MTLStorageModePrivate;
   id<MTLTexture> scratch = [device newTextureWithDescriptor:td];
   id<MTLTexture> scratch_sten =
@@ -3952,6 +3964,20 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
                                                     uint32_t width,
                                                     uint32_t height,
                                                     uint64_t pixel_format) {
+  // Some Xenos resolve destinations (for example 4:4:4:4) have no compatible
+  // Metal render-target container in the snapshot bridge. Canonical writeback
+  // still packs them exactly into guest RAM; fail closed here instead of
+  // passing MTLPixelFormatInvalid to Metal and aborting the process.
+  if (pixel_format == uint64_t(MTLPixelFormatInvalid)) {
+    static uint32_t s_unsupported_snapshot_logs = 0;
+    if (s_unsupported_snapshot_logs++ < 8) {
+      XELOGW(
+          "MetalRenderTargetCache: no snapshot view for resolve {:08X} "
+          "{}x{}; using canonical guest-RAM writeback",
+          dest_base, width, height);
+    }
+    return nullptr;
+  }
   // Scene-scale resolves (depth AND color, e.g. the 720p albedo) arrive as
   // vertical strips of ONE 720-row buffer sampled full-height from the first
   // strip's base; allocate full-height so the later strip lands inside

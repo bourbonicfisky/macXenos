@@ -2087,8 +2087,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // The pipeline sample count must exactly match the selected raster working
   // views. The default and sample-only gates remain single-sample; task 4.1's
   // strict raster gate selects the common real 2x/4x attachment count.
+  MetalPipelineRasterState pipeline_raster_state =
+      GetMetalPipelineRasterState(
+          memexport_draw ? 1u
+                         : render_target_cache_->current_raster_sample_count(),
+          regs.Get<reg::RB_COLORCONTROL>());
   uint32_t raster_sample_count =
-      memexport_draw ? 1u : render_target_cache_->current_raster_sample_count();
+      pipeline_raster_state.pipeline_key().raster_sample_count;
   uint32_t blend_controls[xenos::kMaxColorRenderTargets] = {};
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     blend_controls[i] =
@@ -2110,13 +2115,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         vs_translation, ps_translation, geometry_type,
         DxbcShaderTranslator::Modification(vs_mod),
         DxbcShaderTranslator::Modification(ps_mod_value), color_pixel_formats,
-        pipeline_depth_format, raster_sample_count, blend_controls,
+        pipeline_depth_format, pipeline_raster_state.pipeline_key(),
+        blend_controls,
         normalized_color_mask,
         &gs_vertex_size, &gs_max_input_primitives);
   } else {
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_formats,
-        pipeline_depth_format, raster_sample_count, blend_controls,
+        pipeline_depth_format, pipeline_raster_state.pipeline_key(),
+        blend_controls,
         normalized_color_mask);
   }
   if (!pipeline) {
@@ -2497,6 +2504,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     system_constants.flags = flags;
     system_constants.alpha_test_reference =
         regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
+    // The DXBC translator implements the exact Xenos alpha-to-mask thresholds,
+    // dither offsets, and coverage output in the pixel shader. Populate its
+    // dynamic ABI from the same normalized count used by the pipeline and
+    // attachments; Metal hardware alpha-to-coverage stays off to avoid
+    // filtering the shader-produced mask a second time.
+    system_constants.sample_count_log2[0] =
+        pipeline_raster_state.sample_count_log2_x;
+    system_constants.sample_count_log2[1] =
+        pipeline_raster_state.sample_count_log2_y;
+    system_constants.alpha_to_mask = pipeline_raster_state.alpha_to_mask;
     // Texture signedness / gamma (8 bits per fetch constant): tells the PS/VS
     // to decode gamma-signed fetches (TextureSign::kGamma) to linear on sample
     // and handle signed formats. Left zeroed, every gamma texture (incl. the
@@ -4041,10 +4058,13 @@ bool MetalCommandProcessor::IssueCopy() {
                     resolve_info.color_edram_info.format),
                 xenos::ColorFormat(canonical_dest_format));
         bool resolved = false;
-        if (snap && canonical_resolve) {
-          resolved = render_target_cache_->PrepareCanonicalEdramForResolve(
-                         span_base, span_row_length, span_rows, span_pitch) &&
-                     render_target_cache_->ResolveCanonicalToSnapshot(
+        bool canonical_prepared = false;
+        if (canonical_resolve) {
+          canonical_prepared =
+              render_target_cache_->PrepareCanonicalEdramForResolve(
+                  span_base, span_row_length, span_rows, span_pitch);
+          if (snap && canonical_prepared) {
+            resolved = render_target_cache_->ResolveCanonicalToSnapshot(
                          frame_command_buffer_, /*is_depth=*/false,
                          resolve_info.color_edram_info.base_tiles,
                          resolve_info.color_edram_info.pitch_tiles,
@@ -4063,6 +4083,7 @@ bool MetalCommandProcessor::IssueCopy() {
                          canonical_raw_copy,
                          snap, dest_pixel_format, rw, rh, strip_y_offset,
                          exp_bias_scale);
+          }
         } else if (snap) {
           resolved = render_target_cache_->ResolveColorToSnapshot(
               frame_command_buffer_, span_base, span_row_length, span_rows,
@@ -4169,16 +4190,20 @@ bool MetalCommandProcessor::IssueCopy() {
             *FormatInfo::Get(xenos::TextureFormat(dest_format));
         const uint32_t wb_bpp = wb_format_info.bits_per_pixel >> 3u;
         const uint32_t wb_bpp_log2 = xe::log2_floor(wb_bpp);
-        const bool canonical_packed = canonical_resolve;
+        const bool canonical_packed = canonical_resolve && canonical_prepared;
         const bool legacy_blit_format =
             dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
             dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float);
-        if (resolved && !s_no_writeback &&
+        const bool writeback_source_available =
+            canonical_packed || (resolved && snap && legacy_blit_format);
+        if (writeback_source_available && !s_no_writeback &&
             uint64_t(rw) * rh * wb_bpp <= wb_cap &&
             (canonical_packed || legacy_blit_format)) {
-          id<MTLDevice> wb_device =
-              ((__bridge id<MTLTexture>)snap).device;
+          id<MTLDevice> wb_device = (__bridge id<MTLDevice>)
+              static_cast<xe::ui::metal::MetalProvider*>(
+                  graphics_system_->provider())
+                  ->device();
           id<MTLBuffer> staging =
               [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
                                      options:MTLResourceStorageModeShared];
@@ -5721,8 +5746,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             return o;
           }
           fragment float4 xe_gray_fs(VOut in [[stage_in]],
-                                     texture2d<float> t [[texture(0)]]) {
-            float v = t.read(uint2(in.pos.xy), 0).r;
+                                     texture2d_array<float> t [[texture(0)]]) {
+            // Resolve snapshots are 2D arrays (one slice) so the texture cache
+            // can consume them directly. Present the same slice explicitly.
+            float v = t.read(uint2(in.pos.xy), 0, 0).r;
             return float4(v, v, v, 1.0);
           }
         )METAL";

@@ -297,6 +297,56 @@ TEST_CASE("Metal disabled stencil state has deterministic safe references",
   CHECK(state.stencil_reference_back == 0);
 }
 
+TEST_CASE("Metal raster sample state matches pipeline and shader ABI",
+          "[l0][metal][pipeline-raster]") {
+  reg::RB_COLORCONTROL color = {};
+
+  MetalPipelineRasterState one = GetMetalPipelineRasterState(1u, color);
+  CHECK(one.raster_sample_count == 1u);
+  CHECK(one.pipeline_key().raster_sample_count == 1u);
+  CHECK(one.sample_count_log2_x == 0u);
+  CHECK(one.sample_count_log2_y == 0u);
+
+  MetalPipelineRasterState two = GetMetalPipelineRasterState(2u, color);
+  CHECK(two.pipeline_key().raster_sample_count == 2u);
+  CHECK(two.sample_count_log2_x == 0u);
+  CHECK(two.sample_count_log2_y == 1u);
+
+  MetalPipelineRasterState four = GetMetalPipelineRasterState(4u, color);
+  CHECK(four.pipeline_key().raster_sample_count == 4u);
+  CHECK(four.sample_count_log2_x == 1u);
+  CHECK(four.sample_count_log2_y == 1u);
+
+  MetalPipelineRasterState malformed = GetMetalPipelineRasterState(8u, color);
+  CHECK(malformed.pipeline_key().raster_sample_count == 1u);
+  CHECK(malformed.sample_count_log2_x == 0u);
+  CHECK(malformed.sample_count_log2_y == 0u);
+}
+
+TEST_CASE("Metal alpha-to-mask is dynamic and does not fragment pipelines",
+          "[l0][metal][pipeline-raster]") {
+  reg::RB_COLORCONTROL color = {};
+  color.alpha_to_mask_offset0 = 3u;
+  color.alpha_to_mask_offset1 = 1u;
+  color.alpha_to_mask_offset2 = 0u;
+  color.alpha_to_mask_offset3 = 2u;
+
+  MetalPipelineRasterState disabled = GetMetalPipelineRasterState(4u, color);
+  CHECK(disabled.alpha_to_mask == 0u);
+
+  color.alpha_to_mask_enable = 1u;
+  MetalPipelineRasterState enabled = GetMetalPipelineRasterState(4u, color);
+  CHECK(enabled.alpha_to_mask == 0x187u);
+  CHECK(enabled.pipeline_key() == disabled.pipeline_key());
+  CHECK(enabled.sample_count_log2_x == disabled.sample_count_log2_x);
+  CHECK(enabled.sample_count_log2_y == disabled.sample_count_log2_y);
+
+  // A later disabled draw must clear the packed offsets rather than inherit
+  // the preceding shader constant.
+  color.alpha_to_mask_enable = 0u;
+  CHECK(GetMetalPipelineRasterState(4u, color).alpha_to_mask == 0u);
+}
+
 TEST_CASE("Metal scissor preserves in-bounds coverage", "[l0][metal][scissor]") {
   MetalScissorRect rect =
       ClampScissorToRenderExtent(Scissor(10, 20, 30, 40), 1280, 720);

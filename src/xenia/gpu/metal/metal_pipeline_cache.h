@@ -19,6 +19,7 @@
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
+#include "xenia/gpu/metal/metal_fixed_function_state.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/xenos.h"
@@ -62,7 +63,7 @@ class MetalPipelineCache {
                                        MetalShader::MetalTranslation* pixel,
                                        const uint64_t* color_pixel_formats,
                                        uint64_t depth_pixel_format,
-                                       uint32_t raster_sample_count,
+                                       MetalPipelineRasterKey raster_key,
                                        const uint32_t* blend_controls,
                                        uint32_t color_write_mask);
 
@@ -83,7 +84,7 @@ class MetalPipelineCache {
       DxbcShaderTranslator::Modification vertex_modification,
       DxbcShaderTranslator::Modification pixel_modification,
       const uint64_t* color_pixel_formats, uint64_t depth_pixel_format,
-      uint32_t raster_sample_count, const uint32_t* blend_controls,
+      MetalPipelineRasterKey raster_key, const uint32_t* blend_controls,
       uint32_t color_write_mask,
       uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out);
 

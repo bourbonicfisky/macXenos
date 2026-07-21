@@ -2040,25 +2040,23 @@ TEST_CASE("Metal canonical range work height excludes untouched lower rows",
   CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 174u, 8192u) == 0u);
 }
 
-TEST_CASE("Metal MSAA companion height grows lazily and monotonically",
+TEST_CASE("Metal MSAA companion height matches its resolve texture",
           "[l0][metal][authority]") {
-  // Initial allocation rounds up to one whole 2x/4x EDRAM tile row.
+  // Metal validates multisample and resolve attachments at identical sizes,
+  // so any non-empty requested range allocates the full companion height.
   CHECK(ComputeMsaaCompanionAllocationHeight(0u, 0u, 8192u, 8u) == 0u);
-  CHECK(ComputeMsaaCompanionAllocationHeight(0u, 1u, 8192u, 8u) == 8u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(0u, 1u, 8192u, 8u) == 8192u);
   CHECK(ComputeMsaaCompanionAllocationHeight(0u, 721u, 8192u, 8u) ==
-        728u);
+        8192u);
 
-  // Reuse an allocation that already contains the touched height, otherwise
-  // grow geometrically rather than reallocating for every newly touched row.
+  // Existing height and row-growth quantum cannot relax the invariant.
   CHECK(ComputeMsaaCompanionAllocationHeight(728u, 720u, 8192u, 8u) ==
-        728u);
+        8192u);
   CHECK(ComputeMsaaCompanionAllocationHeight(728u, 729u, 8192u, 8u) ==
-        1456u);
+        8192u);
   CHECK(ComputeMsaaCompanionAllocationHeight(728u, 2000u, 8192u, 8u) ==
-        2000u);
+        8192u);
 
-  // The full texture/device limit wins without integer overflow, while valid
-  // current allocations never shrink. A zero quantum degrades safely to rows.
   CHECK(ComputeMsaaCompanionAllocationHeight(4096u, 4097u, 8192u, 8u) ==
         8192u);
   CHECK(ComputeMsaaCompanionAllocationHeight(8192u, 100u, 8192u, 8u) ==
@@ -2067,7 +2065,7 @@ TEST_CASE("Metal MSAA companion height grows lazily and monotonically",
         8192u);
   CHECK(ComputeMsaaCompanionAllocationHeight(0x80000000u, 0x80000001u,
                                              UINT32_MAX, 8u) == UINT32_MAX);
-  CHECK(ComputeMsaaCompanionAllocationHeight(7u, 9u, 17u, 0u) == 14u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(7u, 9u, 17u, 0u) == 17u);
   CHECK(ComputeMsaaCompanionAllocationHeight(7u, 9u, 0u, 8u) == 0u);
 }
 

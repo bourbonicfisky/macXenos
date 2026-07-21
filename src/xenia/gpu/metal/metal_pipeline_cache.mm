@@ -331,14 +331,15 @@ void* MetalPipelineCache::GetOrCreateMemexportPipelineState(
   }
   return GetOrCreateRenderPipelineState(
       vertex, /*pixel=*/nullptr, color_pixel_formats,
-      MetalRenderTargetCache::kDepthFormat, /*raster_sample_count=*/1,
+      MetalRenderTargetCache::kDepthFormat,
+      MetalPipelineRasterKey{/*raster_sample_count=*/1},
       blend_controls, /*color_write_mask=*/0);
 }
 
 void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     MetalShader::MetalTranslation* vertex,
     MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
-    uint64_t depth_pixel_format, uint32_t raster_sample_count,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
     const uint32_t* blend_controls,
     uint32_t color_write_mask) {
   if (!vertex || !vertex->has_metal_function()) {
@@ -361,7 +362,7 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   key_bytes.vs = vertex->metal_function();
   key_bytes.ps = pixel ? pixel->metal_function() : nullptr;
   key_bytes.depth = depth_pixel_format;
-  key_bytes.sample_count = raster_sample_count;
+  key_bytes.sample_count = raster_key.raster_sample_count;
   key_bytes.write_mask = color_write_mask;
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     key_bytes.colors[i] = color_pixel_formats[i];
@@ -376,7 +377,12 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLRenderPipelineDescriptor* desc =
       [[MTLRenderPipelineDescriptor alloc] init];
-  desc.rasterSampleCount = raster_sample_count;
+  desc.rasterSampleCount = raster_key.raster_sample_count;
+  // Xenos alpha-to-mask is emitted as exact dynamic SV_Coverage by the reused
+  // DXBC translator. Enabling Metal alpha-to-coverage here would apply a
+  // second, host-defined coverage filter and would incorrectly require alpha
+  // state in the pipeline key.
+  desc.alphaToCoverageEnabled = NO;
   desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
   if (pixel && pixel->has_metal_function()) {
     desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
@@ -554,7 +560,7 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     DxbcShaderTranslator::Modification vertex_modification,
     DxbcShaderTranslator::Modification pixel_modification,
     const uint64_t* color_pixel_formats, uint64_t depth_pixel_format,
-    uint32_t raster_sample_count, const uint32_t* blend_controls,
+    MetalPipelineRasterKey raster_key, const uint32_t* blend_controls,
     uint32_t color_write_mask,
     uint32_t* gs_vertex_size_out, uint32_t* gs_max_input_primitives_out) {
   if (gs_vertex_size_out) {
@@ -593,7 +599,7 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   key_bytes.vs = static_cast<void*>(vertex);
   key_bytes.ps = pixel->metal_function();
   key_bytes.depth = depth_pixel_format;
-  key_bytes.sample_count = raster_sample_count;
+  key_bytes.sample_count = raster_key.raster_sample_count;
   key_bytes.write_mask = color_write_mask;
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     key_bytes.colors[i] = color_pixel_formats[i];
@@ -647,7 +653,10 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
       desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
     }
   }
-  desc.rasterSampleCount = raster_sample_count;
+  desc.rasterSampleCount = raster_key.raster_sample_count;
+  // The fragment function writes the complete Xenos coverage mask dynamically.
+  // Keep the host coverage filter disabled for the same reason as the regular
+  // render-pipeline path above.
   desc.alphaToCoverageEnabled = NO;
 
   id<MTLFunction> ps_fn = (__bridge id<MTLFunction>)pixel->metal_function();
