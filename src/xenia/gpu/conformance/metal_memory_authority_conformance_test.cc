@@ -604,6 +604,266 @@ TEST_CASE("Authority observer: sampling throttle bounds recorded events",
   REQUIRE(sampled < AuthorityObserver::kInitialSamples * 4);
 }
 
+// --- Task 3.3: memexport destination preparation / publication / RAM
+// convergence ------------------------------------------------------------
+
+namespace {
+
+class RecordingMemexportPreparationTarget
+    : public MemexportPreparationTarget {
+ public:
+  bool RequestDestinationRange(uint32_t base, uint32_t length) override {
+    ++calls;
+    requested_base = base;
+    requested_length = length;
+    return result;
+  }
+
+  uint32_t calls = 0;
+  uint32_t requested_base = 0;
+  uint32_t requested_length = 0;
+  bool result = true;
+};
+
+class RecordingMemexportPublicationTarget
+    : public MemexportPublicationTarget {
+ public:
+  bool CanMarkRangeWrittenByGpu() const override { return can_mark; }
+
+  void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
+    ++calls;
+    marked_base = base;
+    marked_length = length;
+    event_order.push_back(2u);
+  }
+
+  uint32_t calls = 0;
+  uint32_t marked_base = 0;
+  uint32_t marked_length = 0;
+  bool can_mark = true;
+  std::vector<uint32_t> event_order;
+};
+
+class RecordingMemexportConvergenceTarget
+    : public MemexportConvergenceTarget {
+ public:
+  bool CopyBufferToRam(uint32_t base, uint32_t length,
+                       uint32_t* invalidated_entries) override {
+    ++calls;
+    copied_base = base;
+    copied_length = length;
+    *invalidated_entries = invalidated_entries_to_report;
+    return result;
+  }
+
+  uint32_t calls = 0;
+  uint32_t copied_base = 0;
+  uint32_t copied_length = 0;
+  uint32_t invalidated_entries_to_report = 0;
+  bool result = true;
+};
+
+}  // namespace
+
+TEST_CASE("Authority: memexport destination preparation executes RequestRange"
+          " for the normalized exact range",
+          "[l0][authority][memexport]") {
+  auto preparation = DecideMemexportDestinationPreparation(0x5000u, 0x800u);
+  REQUIRE(preparation.has_value());
+  REQUIRE(preparation->range.start() == 0x5000u);
+  REQUIRE(preparation->range.length() == 0x800u);
+
+  RecordingMemexportPreparationTarget target;
+  bool requested = PrepareMemexportDestination(*preparation, target);
+  REQUIRE(requested);
+  REQUIRE(target.calls == 1u);
+  REQUIRE(target.requested_base == 0x5000u);
+  REQUIRE(target.requested_length == 0x800u);
+}
+
+TEST_CASE("Authority: memexport destination preparation clamps to the guest "
+          "physical boundary",
+          "[l0][authority][memexport]") {
+  uint32_t kEnd = static_cast<uint32_t>(GuestRange::kGuestPhysicalSize);
+  auto preparation =
+      DecideMemexportDestinationPreparation(kEnd - 0x100u, 0x1000u);
+  REQUIRE(preparation.has_value());
+  REQUIRE(preparation->range.start() == kEnd - 0x100u);
+  REQUIRE(preparation->range.end() == kEnd);
+  REQUIRE(preparation->range.length() == 0x100u);  // clamped, no wraparound.
+}
+
+TEST_CASE("Authority: memexport destination preparation rejects zero-length "
+          "and out-of-domain input",
+          "[l0][authority][memexport]") {
+  REQUIRE_FALSE(DecideMemexportDestinationPreparation(0x1000u, 0u));
+  uint32_t kEnd = static_cast<uint32_t>(GuestRange::kGuestPhysicalSize);
+  REQUIRE_FALSE(DecideMemexportDestinationPreparation(kEnd, 0x100u));
+}
+
+TEST_CASE("Authority: memexport destination preparation reports a factual "
+          "failure when RequestRange fails",
+          "[l0][authority][memexport]") {
+  auto preparation = DecideMemexportDestinationPreparation(0x9000u, 0x400u);
+  REQUIRE(preparation.has_value());
+  RecordingMemexportPreparationTarget target;
+  target.result = false;
+  REQUIRE_FALSE(PrepareMemexportDestination(*preparation, target));
+  REQUIRE(target.calls == 1u);
+}
+
+TEST_CASE("Authority: memexport publication marks GPU-written for the exact "
+          "submission-owned range",
+          "[l0][authority][memexport]") {
+  auto publication = DecideMemexportPublication(0x6000u, 0x2000u, 42u);
+  REQUIRE(publication.has_value());
+  REQUIRE(publication->range.start() == 0x6000u);
+  REQUIRE(publication->range.length() == 0x2000u);
+  REQUIRE(publication->submission == 42u);
+
+  RecordingMemexportPublicationTarget target;
+  uint32_t registered_base = 0;
+  uint32_t registered_length = 0;
+  uint64_t registered_submission = 0;
+  MemexportPublicationResult result = PublishMemexportWrite(
+      *publication, target,
+      [&](const MemexportPublication& owned) {
+        target.event_order.push_back(1u);
+        registered_base = owned.range.start();
+        registered_length = owned.range.length();
+        registered_submission = owned.submission;
+        return true;
+      });
+  REQUIRE(result.registered);
+  REQUIRE(result.marked);
+  REQUIRE(result.action == AuthorityAction::kPublishGpuWrite);
+  REQUIRE(target.calls == 1u);
+  REQUIRE(target.marked_base == 0x6000u);
+  REQUIRE(target.marked_length == 0x2000u);
+  REQUIRE(registered_base == 0x6000u);
+  REQUIRE(registered_length == 0x2000u);
+  REQUIRE(registered_submission == 42u);
+  const std::vector<uint32_t> expected_order = {1u, 2u};
+  REQUIRE(target.event_order == expected_order);
+}
+
+TEST_CASE("Authority: memexport publication forms one ordered transition -- "
+          "failed preflight cannot register or mark",
+          "[l0][authority][memexport]") {
+  auto publication = DecideMemexportPublication(0x7000u, 0x400u, 7u);
+  REQUIRE(publication.has_value());
+  RecordingMemexportPublicationTarget target;
+  target.can_mark = false;
+  uint32_t registrations = 0;
+  MemexportPublicationResult result = PublishMemexportWrite(
+      *publication, target,
+      [&](const MemexportPublication&) {
+        ++registrations;
+        return true;
+      });
+  REQUIRE_FALSE(result.registered);
+  REQUIRE_FALSE(result.marked);
+  REQUIRE(result.action == AuthorityAction::kNoDependency);
+  REQUIRE(registrations == 0u);
+  REQUIRE(target.calls == 0u);
+  REQUIRE(target.event_order.empty());
+}
+
+TEST_CASE("Authority: failed memexport registration never marks GPU-written",
+          "[l0][authority][memexport]") {
+  auto publication = DecideMemexportPublication(0x7400u, 0x400u, 8u);
+  REQUIRE(publication.has_value());
+  RecordingMemexportPublicationTarget target;
+  MemexportPublicationResult result = PublishMemexportWrite(
+      *publication, target,
+      [&](const MemexportPublication&) {
+        target.event_order.push_back(1u);
+        return false;
+      });
+  REQUIRE_FALSE(result.registered);
+  REQUIRE_FALSE(result.marked);
+  REQUIRE(result.action == AuthorityAction::kNoDependency);
+  REQUIRE(target.calls == 0u);
+  const std::vector<uint32_t> expected_order = {1u};
+  REQUIRE(target.event_order == expected_order);
+}
+
+TEST_CASE("Authority: memexport RAM convergence copies exact bytes and "
+          "retires on success without touching the shared buffer",
+          "[l0][authority][memexport]") {
+  PendingProducer producer =
+      MakeProducer(0x10000u, 0x1000u, TransitState::kPendingMemexport, 5u, 1u);
+  RecordingMemexportConvergenceTarget target;
+  target.invalidated_entries_to_report = 2u;
+  MemexportConvergenceResult result = ConvergeMemexportRam(producer, target);
+  REQUIRE(result.converged);
+  REQUIRE(result.action == AuthorityAction::kConvergeRamFromBuffer);
+  REQUIRE(result.invalidated_entries == 2u);
+  REQUIRE(target.calls == 1u);
+  REQUIRE(target.copied_base == 0x10000u);
+  REQUIRE(target.copied_length == 0x1000u);
+  // The port contract exposes only a RAM-directed copy -- no shared-buffer
+  // invalidation primitive is reachable from this seam at all, so a
+  // convergence call structurally cannot clobber the buffer it read from.
+}
+
+TEST_CASE("Authority: memexport RAM convergence failure reports a factual "
+          "disagreement so the caller retains the pending record",
+          "[l0][authority][memexport]") {
+  PendingProducer producer =
+      MakeProducer(0x20000u, 0x800u, TransitState::kPendingMemexport, 9u, 2u);
+  RecordingMemexportConvergenceTarget target;
+  target.result = false;  // missing RAM mapping or shared-buffer contents.
+  MemexportConvergenceResult result = ConvergeMemexportRam(producer, target);
+  REQUIRE_FALSE(result.converged);
+  REQUIRE(result.action == AuthorityAction::kNoDependency);
+  REQUIRE(result.invalidated_entries == 0u);
+
+  // The caller's retention policy: a failed convergence must retain the
+  // record for retry rather than drop it or retire it.
+  std::vector<PendingProducer> still_pending;
+  uint32_t drained_records = 0;
+  if (!result.converged) {
+    still_pending.push_back(producer);
+  } else {
+    ++drained_records;
+  }
+  REQUIRE(still_pending.size() == 1u);
+  REQUIRE(drained_records == 0u);
+}
+
+TEST_CASE("Authority: memexport convergence drain counters increment only "
+          "for successful retirement",
+          "[l0][authority][memexport]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x30000u, 0x100u, TransitState::kPendingMemexport, 1u, 1u),
+      MakeProducer(0x31000u, 0x100u, TransitState::kPendingMemexport, 1u, 2u),
+  };
+  RecordingMemexportConvergenceTarget ok_target;
+  RecordingMemexportConvergenceTarget failing_target;
+  failing_target.result = false;
+
+  uint32_t drained = 0;
+  std::vector<PendingProducer> retained;
+  MemexportConvergenceResult first =
+      ConvergeMemexportRam(producers[0], ok_target);
+  if (first.converged) {
+    ++drained;
+  } else {
+    retained.push_back(producers[0]);
+  }
+  MemexportConvergenceResult second =
+      ConvergeMemexportRam(producers[1], failing_target);
+  if (second.converged) {
+    ++drained;
+  } else {
+    retained.push_back(producers[1]);
+  }
+  REQUIRE(drained == 1u);
+  REQUIRE(retained.size() == 1u);
+  REQUIRE(retained.front().range == producers[1].range);
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace metal

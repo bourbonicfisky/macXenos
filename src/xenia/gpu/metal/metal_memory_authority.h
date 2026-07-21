@@ -382,6 +382,136 @@ inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
   }
 }
 
+// --- Memexport destination preparation / publication / convergence (task 3.3)
+//
+// Memexport is the one writer whose bytes exist in the shared buffer before
+// they exist in guest RAM (design.md Decision 2's "pending memexport" transit
+// state). Three distinct typed steps route through this seam:
+//   1. Destination preparation: request the destination pages BEFORE the GPU
+//      write so a stale CPU-RAM upload cannot race ahead of the export.
+//   2. Publication: after preflighting the marker, the seam registers the
+//      submission-scoped pending record first and then calls RangeWrittenByGpu
+//      in the SAME ordered step. No interval is marked GPU-newer before it has
+//      an owner.
+//   3. Convergence: a completed pending record's exact bytes are copied
+//      shared-buffer -> RAM. The port never touches shared-buffer validity;
+//      the buffer remains the authoritative source the copy read from. The
+//      caller retires the pending record only when the copy reports success.
+
+// Requests the destination range's pages before the GPU write.
+struct MemexportPreparationTarget {
+  virtual ~MemexportPreparationTarget() = default;
+  virtual bool RequestDestinationRange(uint32_t base, uint32_t length) = 0;
+};
+
+// One normalized memexport destination-preparation decision.
+struct MemexportDestinationPreparation {
+  GuestRange range;
+};
+
+inline std::optional<MemexportDestinationPreparation>
+DecideMemexportDestinationPreparation(uint32_t base, uint32_t length) {
+  std::optional<GuestRange> range = GuestRange::FromBaseLength(base, length);
+  if (!range) {
+    return std::nullopt;
+  }
+  return MemexportDestinationPreparation{*range};
+}
+
+// Executes the destination-preparation decision through the existing
+// SharedMemory::RequestRange operation. Returns the factual RequestRange
+// result -- false means the exports have nowhere to land and the caller must
+// treat the draw the same as today (skip it), never invent success.
+inline bool PrepareMemexportDestination(
+    const MemexportDestinationPreparation& preparation,
+    MemexportPreparationTarget& target) {
+  return target.RequestDestinationRange(preparation.range.start(),
+                                        preparation.range.length());
+}
+
+// Marks a memexport range GPU-written.
+struct MemexportPublicationTarget {
+  virtual ~MemexportPublicationTarget() = default;
+  virtual bool CanMarkRangeWrittenByGpu() const = 0;
+  virtual void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) = 0;
+};
+
+// One normalized memexport GPU-write publication decision, owned by the
+// exporting submission.
+struct MemexportPublication {
+  GuestRange range;
+  uint64_t submission;
+};
+
+inline std::optional<MemexportPublication> DecideMemexportPublication(
+    uint32_t base, uint32_t length, uint64_t submission) {
+  std::optional<GuestRange> range = GuestRange::FromBaseLength(base, length);
+  if (!range) {
+    return std::nullopt;
+  }
+  return MemexportPublication{*range, submission};
+}
+
+// Factual result of the ordered ownership + GPU-write publication.
+struct MemexportPublicationResult {
+  bool registered = false;
+  bool marked = false;
+  AuthorityAction action = AuthorityAction::kNoDependency;
+};
+
+template <typename RegisterPending>
+inline MemexportPublicationResult PublishMemexportWrite(
+    const MemexportPublication& publication,
+    MemexportPublicationTarget& target, RegisterPending&& register_pending) {
+  MemexportPublicationResult result;
+  if (!target.CanMarkRangeWrittenByGpu()) {
+    return result;
+  }
+  // Ownership is deliberately installed BEFORE the GPU-written notification.
+  // If record allocation/registration fails, the marker is never called.
+  result.registered = register_pending(publication);
+  if (!result.registered) {
+    return result;
+  }
+  target.MarkRangeWrittenByGpu(publication.range.start(),
+                               publication.range.length());
+  result.marked = true;
+  result.action = AuthorityAction::kPublishGpuWrite;
+  return result;
+}
+
+// Copies one completed pending memexport record's exact bytes from the
+// shared buffer to guest RAM. The port MUST NOT invalidate or overwrite the
+// shared buffer -- it is the authoritative source of the converged bytes --
+// and MUST report false (rather than partially converge) when the RAM
+// mapping or shared-buffer contents pointer is unavailable, so the caller
+// retains the pending record for retry instead of losing GPU-newer bytes.
+struct MemexportConvergenceTarget {
+  virtual ~MemexportConvergenceTarget() = default;
+  virtual bool CopyBufferToRam(uint32_t base, uint32_t length,
+                               uint32_t* invalidated_entries) = 0;
+};
+
+// Factual result of one convergence attempt. `converged` gates record
+// retirement: the caller must retain the pending record for retry whenever
+// this is false, and increment drain counters only when it is true.
+struct MemexportConvergenceResult {
+  bool converged = false;
+  AuthorityAction action = AuthorityAction::kNoDependency;
+  uint32_t invalidated_entries = 0;
+};
+
+inline MemexportConvergenceResult ConvergeMemexportRam(
+    const PendingProducer& producer, MemexportConvergenceTarget& target) {
+  MemexportConvergenceResult result;
+  result.converged = target.CopyBufferToRam(
+      producer.range.start(), producer.range.length(),
+      &result.invalidated_entries);
+  result.action = result.converged ? AuthorityAction::kConvergeRamFromBuffer
+                                   : AuthorityAction::kNoDependency;
+  return result;
+}
+
 // One normalized RAM-writer publication decision. It is a transient value, not
 // persistent authority. The factory rejects empty/out-of-domain input and
 // clamps the end before any backend operation sees the range.

@@ -110,6 +110,84 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
   metal::MetalTextureCache* texture_cache_;
 };
 
+// Concrete task-3.3 memexport destination-preparation target: forwards to the
+// existing SharedMemory::RequestRange the direct call site used before.
+class MetalMemexportPreparationTarget
+    : public metal::MemexportPreparationTarget {
+ public:
+  explicit MetalMemexportPreparationTarget(SharedMemory* shared_memory)
+      : shared_memory_(shared_memory) {}
+
+  bool RequestDestinationRange(uint32_t base, uint32_t length) override {
+    return shared_memory_ && shared_memory_->RequestRange(base, length);
+  }
+
+ private:
+  SharedMemory* shared_memory_;
+};
+
+// Concrete task-3.3 memexport GPU-write publication target: forwards to the
+// existing SharedMemory::RangeWrittenByGpu the direct call site used before.
+class MetalMemexportPublicationTarget
+    : public metal::MemexportPublicationTarget {
+ public:
+  explicit MetalMemexportPublicationTarget(SharedMemory* shared_memory)
+      : shared_memory_(shared_memory) {}
+
+  bool CanMarkRangeWrittenByGpu() const override {
+    return shared_memory_ != nullptr;
+  }
+
+  void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
+    shared_memory_->RangeWrittenByGpu(base, length);
+  }
+
+ private:
+  SharedMemory* shared_memory_;
+};
+
+// Concrete task-3.3 memexport RAM-convergence target: copies the completed
+// export's exact bytes from the shared buffer to guest RAM and invalidates
+// overlapping legacy texture-cache entries (the same direct call the drain
+// used before). It never touches shared-memory page validity -- the shared
+// buffer is the authoritative source of the converged bytes and is left
+// exactly as-is.
+class MetalMemexportConvergenceTarget
+    : public metal::MemexportConvergenceTarget {
+ public:
+  MetalMemexportConvergenceTarget(Memory* memory,
+                                  MetalSharedMemory* shared_memory,
+                                  metal::MetalTextureCache* texture_cache)
+      : memory_(memory),
+        shared_memory_(shared_memory),
+        texture_cache_(texture_cache) {}
+
+  bool CopyBufferToRam(uint32_t base, uint32_t length,
+                       uint32_t* invalidated_entries) override {
+    if (!memory_ || !shared_memory_) {
+      return false;
+    }
+    uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(base);
+    id<MTLBuffer> shared_buffer =
+        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+    const uint8_t* contents =
+        static_cast<const uint8_t*>(shared_buffer.contents);
+    if (!dest || !contents) {
+      return false;
+    }
+    std::memcpy(dest, contents + base, length);
+    if (texture_cache_) {
+      *invalidated_entries = texture_cache_->InvalidateRange(base, length);
+    }
+    return true;
+  }
+
+ private:
+  Memory* memory_;
+  MetalSharedMemory* shared_memory_;
+  metal::MetalTextureCache* texture_cache_;
+};
+
 // Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
 // Same base + strided-hash as the reader (metal_texture_cache.mm) so the
 // resolve/writeback/drain events on the watched base share the fetch clock.
@@ -1753,13 +1831,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       return true;
     }
     // Commit the destination pages; failure means the exports have nowhere
-    // to land — skip like the reference backends fail the draw.
+    // to land — skip like the reference backends fail the draw. Routed
+    // through the typed task-3.3 destination-preparation seam (normalized
+    // range + the same RequestRange call the direct call site used before).
     bool ranges_ok = true;
+    MetalMemexportPreparationTarget preparation_target(
+        shared_memory_.get());
     for (const auto& range : memexport_ranges) {
-      if (!shared_memory_->RequestRange(range.base_address_dwords << 2,
-                                        range.size_bytes)) {
+      uint32_t range_base = range.base_address_dwords << 2;
+      auto preparation = metal::DecideMemexportDestinationPreparation(
+          range_base, range.size_bytes);
+      bool requested =
+          preparation && metal::PrepareMemexportDestination(
+                              *preparation, preparation_target);
+      if (!requested) {
         XELOGE("MetalMemexport: failed to request range {:08X}(+{})",
-               range.base_address_dwords << 2, range.size_bytes);
+               range_base, range.size_bytes);
         ranges_ok = false;
       }
     }
@@ -3634,14 +3721,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // The exports now exist (GPU-ordered) in the shared-memory buffer. Mark
     // the ranges GPU-written (watches + stale-texture invalidation, and so
     // later RequestRange calls don't upload stale CPU RAM over them) and
-    // queue the RAM drain for when this submission completes.
+    // queue the RAM drain for when this submission completes. Routed through
+    // the typed task-3.3 publication seam: RangeWrittenByGpu and the pending-
+    // record registration form ONE ordered transition. The seam preflights the
+    // marker, registers ownership FIRST, then marks the same normalized range
+    // GPU-written, so no interval is GPU-newer before it has an owner.
     uint64_t export_submission = S7TagsOff() ? 0 : CurrentEncodingSubmission();
+    MetalMemexportPublicationTarget publication_target(
+        shared_memory_.get());
     for (const auto& range : memexport_ranges) {
       uint32_t range_base = range.base_address_dwords << 2;
-      shared_memory_->RangeWrittenByGpu(range_base, range.size_bytes);
-      pending_memexports_.push_back(
-          PendingMemexport{range_base, range.size_bytes, export_submission,
-                           ++memory_authority_sequence_});
+      auto publication = metal::DecideMemexportPublication(
+          range_base, range.size_bytes, export_submission);
+      metal::MemexportPublicationResult publish_result;
+      if (publication) {
+        publish_result = metal::PublishMemexportWrite(
+            *publication, publication_target,
+            [this](const metal::MemexportPublication& owned) {
+              pending_memexports_.push_back(PendingMemexport{
+                  owned.range.start(), owned.range.length(), owned.submission,
+                  ++memory_authority_sequence_});
+              return true;
+            });
+      }
+      if (!publish_result.marked) {
+        XELOGE(
+            "MetalMemexport: failed to publish GPU write {:08X}(+{}); "
+            "no GPU-written notification was issued",
+            range_base, range.size_bytes);
+      }
       // Observer-only (task 2.4): this is the one ordered publish-GPU-write
       // transition (RangeWrittenByGpu + pending record). Record, never act.
       if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kMemexport)) {
@@ -3651,7 +3759,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         authority_observer_.RecordWriter(
             metal::WriterKind::kMemexport, ranges,
             metal::DecideWriterPublication(metal::WriterKind::kMemexport),
-            {/*action=*/metal::AuthorityAction::kPublishGpuWrite,
+            {/*action=*/publish_result.action,
              /*invalidated_entries=*/0, /*committed=*/false,
              /*waited=*/false});
       }
@@ -5045,72 +5153,121 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   // cached texture uploads overlapping the range so the next fetch re-reads.
   if (!pending_memexports_.empty()) {
     std::vector<PendingMemexport> still_pending_exports;
-    id<MTLBuffer> me_shared_buffer =
-        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+    id<MTLBuffer> me_shared_buffer = shared_memory_
+                                         ? (__bridge id<MTLBuffer>)
+                                               shared_memory_->GetBuffer()
+                                         : nil;
     const uint8_t* me_contents =
         static_cast<const uint8_t*>(me_shared_buffer.contents);
+    MetalMemexportConvergenceTarget convergence_target(
+        memory_, shared_memory_.get(), texture_cache_.get());
     for (const PendingMemexport& me : pending_memexports_) {
       if (me.submission > completed ||
           !in_filter(me.base_address, me.size_bytes)) {
         still_pending_exports.push_back(me);
         continue;
       }
+      std::optional<metal::GuestRange> range =
+          metal::GuestRange::FromBaseLength(me.base_address, me.size_bytes);
+      if (!range) {
+        // Invalid decision (no in-bounds byte): unreachable in practice,
+        // since both the destination-preparation and publication seams
+        // already reject out-of-domain ranges before a record is
+        // registered, but retain rather than drop so a record is never
+        // silently discarded outside the explicit success path.
+        still_pending_exports.push_back(me);
+        if (authority_observer_.ShouldSampleWriter(
+                metal::WriterKind::kMemexport)) {
+          metal::GuestRangeSet ranges;
+          authority_observer_.RecordWriter(
+              metal::WriterKind::kMemexport, ranges,
+              metal::AuthorityAction::kConvergeRamFromBuffer,
+              {/*action=*/metal::AuthorityAction::kNoDependency,
+               /*invalidated_entries=*/0, /*committed=*/false,
+               /*waited=*/false});
+        }
+        continue;
+      }
+      static uint32_t s_me_drains = 0;
+      // First 8, then a 3-drain sample every 512 (~once per 170 frames at 3
+      // exports/frame) — steady-state gameplay content stays observable.
+      bool me_log = s_me_drains < 8 || (s_me_drains & 511) < 3;
+      ++s_me_drains;
+      uint32_t old_hash = 0, new_hash = 0;
+      if (me_log && me_contents) {
+        // Store-landing oracle: if the buffer content equals the RAM it was
+        // primed from, the shader's UAV stores never landed (silent
+        // RAM->buffer->RAM round-trip) — a binding problem, not a content
+        // problem. Read before the seam's copy so this never races the
+        // convergence write into the same guest bytes.
+        uint8_t* me_dest_peek =
+            memory_->TranslatePhysical<uint8_t*>(me.base_address);
+        if (me_dest_peek) {
+          old_hash = xe_lineage_stridehash(me_dest_peek, me.size_bytes);
+        }
+        new_hash = xe_lineage_stridehash(me_contents + me.base_address,
+                                         me.size_bytes);
+      }
+      // Routed through the typed task-3.3 convergence seam: exact
+      // shared-buffer bytes -> RAM, no shared-buffer invalidation, and the
+      // record is retired only when the copy itself reports success.
+      metal::PendingProducer producer{*range,
+                                      metal::TransitState::kPendingMemexport,
+                                      me.submission, me.authority_sequence};
+      metal::MemexportConvergenceResult result =
+          metal::ConvergeMemexportRam(producer, convergence_target);
+      if (!result.converged) {
+        // Missing RAM mapping or shared-buffer contents: a factual
+        // disagreement, not a silent drop -- retain the record for retry.
+        still_pending_exports.push_back(me);
+        static uint32_t s_failed_convergences = 0;
+        if (s_failed_convergences++ < 8) {
+          XELOGE(
+              "MetalMemexport: convergence failed for {:08X}(+{}); "
+              "retaining pending record for retry",
+              me.base_address, me.size_bytes);
+        }
+        if (authority_observer_.ShouldSampleWriter(
+                metal::WriterKind::kMemexport)) {
+          metal::GuestRangeSet ranges;
+          ranges.Add(*range);
+          authority_observer_.RecordWriter(
+              metal::WriterKind::kMemexport, ranges,
+              metal::AuthorityAction::kConvergeRamFromBuffer,
+              {/*action=*/metal::AuthorityAction::kNoDependency,
+               /*invalidated_entries=*/0, /*committed=*/false,
+               /*waited=*/false});
+        }
+        continue;
+      }
       ++outcome.drained_records;
       ++outcome.memexport_records;
-      uint8_t* me_dest = memory_->TranslatePhysical<uint8_t*>(me.base_address);
-      bool copied_to_ram = false;
-      uint32_t invalidated_entries = 0;
-      if (me_dest && me_contents) {
-        static uint32_t s_me_drains = 0;
-        // First 8, then a 3-drain sample every 512 (~once per 170 frames at 3
-        // exports/frame) — steady-state gameplay content stays observable.
-        bool me_log = s_me_drains < 8 || (s_me_drains & 511) < 3;
-        ++s_me_drains;
-        uint32_t old_hash = 0, new_hash = 0;
-        if (me_log) {
-          // Store-landing oracle: if the buffer content equals the RAM it was
-          // primed from, the shader's UAV stores never landed (silent
-          // RAM->buffer->RAM round-trip) — a binding problem, not a content
-          // problem.
-          old_hash = xe_lineage_stridehash(me_dest, me.size_bytes);
-          new_hash =
-              xe_lineage_stridehash(me_contents + me.base_address, me.size_bytes);
+      outcome.invalidated_entries += result.invalidated_entries;
+      if (me_log && me_contents) {
+        const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
+            me_contents + me.base_address);
+        uint32_t nonzero = 0;
+        uint32_t word_count = me.size_bytes / 4;
+        for (uint32_t w = 0; w < word_count; ++w) {
+          nonzero += buf_words[w] != 0;
         }
-        std::memcpy(me_dest, me_contents + me.base_address, me.size_bytes);
-        copied_to_ram = true;
-        if (texture_cache_) {
-          invalidated_entries =
-              texture_cache_->InvalidateRange(me.base_address, me.size_bytes);
-          outcome.invalidated_entries += invalidated_entries;
-        }
-        if (me_log) {
-          const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
-              me_contents + me.base_address);
-          uint32_t nonzero = 0;
-          uint32_t word_count = me.size_bytes / 4;
-          for (uint32_t w = 0; w < word_count; ++w) {
-            nonzero += buf_words[w] != 0;
-          }
-          XELOGI("MetalMemexport: drained {:08X}(+{}) ramHash {:08x} -> "
-                 "bufHash {:08x} nonzero {}/{} w0={:08X} w1={:08X}{}",
-                 me.base_address, me.size_bytes, old_hash, new_hash, nonzero,
-                 word_count, buf_words[0], buf_words[1],
-                 old_hash == new_hash ? " (UNCHANGED — stores did not land?)"
-                                      : " (exported content differs)");
-        }
+        XELOGI("MetalMemexport: drained {:08X}(+{}) ramHash {:08x} -> "
+               "bufHash {:08x} nonzero {}/{} w0={:08X} w1={:08X}{}",
+               me.base_address, me.size_bytes, old_hash, new_hash, nonzero,
+               word_count, buf_words[0], buf_words[1],
+               old_hash == new_hash ? " (UNCHANGED — stores did not land?)"
+                                    : " (exported content differs)");
       }
       if (authority_observer_.ShouldSampleWriter(
               metal::WriterKind::kMemexport)) {
         metal::GuestRangeSet ranges;
-        ranges.Add(metal::GuestRange::FromBaseLength(me.base_address,
-                                                     me.size_bytes));
+        ranges.Add(*range);
         authority_observer_.RecordWriter(
             metal::WriterKind::kMemexport, ranges,
             metal::AuthorityAction::kConvergeRamFromBuffer,
-            {/*action=*/copied_to_ram
-                 ? metal::AuthorityAction::kConvergeRamFromBuffer
-                 : metal::AuthorityAction::kNoDependency,
-             invalidated_entries, /*committed=*/false, /*waited=*/false});
+            {/*action=*/metal::AuthorityAction::kConvergeRamFromBuffer,
+             result.invalidated_entries, /*committed=*/false,
+             /*waited=*/false});
       }
     }
     pending_memexports_ = std::move(still_pending_exports);
