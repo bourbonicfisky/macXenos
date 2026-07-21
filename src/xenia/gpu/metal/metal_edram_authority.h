@@ -39,6 +39,36 @@ inline uint32_t ComputeCanonicalRangeTextureHeight(
   return uint32_t(std::min<uint64_t>(pixel_rows, texture_height));
 }
 
+// Chooses the height for a lazily allocated real-MSAA working view. Initial
+// allocation is only the touched height rounded to an EDRAM tile-row quantum;
+// later allocations grow geometrically so gradually increasing draw extents do
+// not recreate the texture every frame. Both the current and requested heights
+// are treated as bounded by max_height, which is the full render-target/device
+// limit supplied by the caller.
+inline uint32_t ComputeMsaaCompanionAllocationHeight(
+    uint32_t current_height, uint32_t requested_touched_height,
+    uint32_t max_height, uint32_t tile_row_height) {
+  if (!max_height) {
+    return 0u;
+  }
+  const uint64_t bounded_current =
+      std::min<uint64_t>(current_height, max_height);
+  const uint64_t bounded_requested =
+      std::min<uint64_t>(requested_touched_height, max_height);
+  if (bounded_requested <= bounded_current) {
+    return uint32_t(bounded_current);
+  }
+
+  const uint64_t geometric_height =
+      bounded_current ? bounded_current * 2u : bounded_requested;
+  const uint64_t required_height =
+      std::max<uint64_t>(bounded_requested, geometric_height);
+  const uint64_t quantum = tile_row_height ? tile_row_height : 1u;
+  const uint64_t rounded_height =
+      ((required_height + quantum - 1u) / quantum) * quantum;
+  return uint32_t(std::min<uint64_t>(rounded_height, max_height));
+}
+
 // Submission-ordered authority for the physical EDRAM tile space. This class
 // deliberately contains no Metal objects: it decides which exact overlapping
 // intervals need attachment->canonical packing or canonical->attachment
@@ -78,6 +108,26 @@ class MetalEdramAuthorityTracker {
   };
 
   void ResetUnknown() { tiles_.fill(TileState{}); }
+
+  // Drops every cached reference to a replaced or retired working view. The
+  // caller should synchronize canonical first; if an attachment is still the
+  // authority, conservatively make those tiles unknown rather than retain a
+  // pointer to content that no longer exists.
+  void InvalidateAttachment(AttachmentId attachment) {
+    if (!attachment) {
+      return;
+    }
+    for (TileState& state : tiles_) {
+      if (state.location == Location::kAttachment &&
+          state.authority_attachment == attachment) {
+        state.location = Location::kUnknown;
+        state.authority_attachment = 0;
+        state.clean_attachment = 0;
+      } else if (state.clean_attachment == attachment) {
+        state.clean_attachment = 0;
+      }
+    }
+  }
 
   void MarkCanonical(uint32_t start_tiles, uint32_t end_tiles,
                      uint64_t submission_order) {

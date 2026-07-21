@@ -43,8 +43,9 @@ namespace test {
 
 namespace {
 
-using metal::MetalEdramAuthorityTracker;
 using metal::ComputeCanonicalRangeTextureHeight;
+using metal::ComputeMsaaCompanionAllocationHeight;
+using metal::MetalEdramAuthorityTracker;
 
 // CPU reference for the tile-range content hash (mirror of xe_hash_mix /
 // k_tile_hash in the MSL below). The live ownership-transition manifest hashes
@@ -2025,6 +2026,37 @@ TEST_CASE("Metal canonical range work height excludes untouched lower rows",
   CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 174u, 8192u) == 0u);
 }
 
+TEST_CASE("Metal MSAA companion height grows lazily and monotonically",
+          "[l0][metal][authority]") {
+  // Initial allocation rounds up to one whole 2x/4x EDRAM tile row.
+  CHECK(ComputeMsaaCompanionAllocationHeight(0u, 0u, 8192u, 8u) == 0u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(0u, 1u, 8192u, 8u) == 8u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(0u, 721u, 8192u, 8u) ==
+        728u);
+
+  // Reuse an allocation that already contains the touched height, otherwise
+  // grow geometrically rather than reallocating for every newly touched row.
+  CHECK(ComputeMsaaCompanionAllocationHeight(728u, 720u, 8192u, 8u) ==
+        728u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(728u, 729u, 8192u, 8u) ==
+        1456u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(728u, 2000u, 8192u, 8u) ==
+        2000u);
+
+  // The full texture/device limit wins without integer overflow, while valid
+  // current allocations never shrink. A zero quantum degrades safely to rows.
+  CHECK(ComputeMsaaCompanionAllocationHeight(4096u, 4097u, 8192u, 8u) ==
+        8192u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(8192u, 100u, 8192u, 8u) ==
+        8192u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(0u, UINT32_MAX, 8192u, 8u) ==
+        8192u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(0x80000000u, 0x80000001u,
+                                             UINT32_MAX, 8u) == UINT32_MAX);
+  CHECK(ComputeMsaaCompanionAllocationHeight(7u, 9u, 17u, 0u) == 14u);
+  CHECK(ComputeMsaaCompanionAllocationHeight(7u, 9u, 0u, 8u) == 0u);
+}
+
 TEST_CASE("Metal EDRAM authority synchronizes only overlapping dirty tiles",
           "[l1][metal][authority]") {
   using Location = MetalEdramAuthorityTracker::Location;
@@ -2058,24 +2090,43 @@ TEST_CASE("Metal EDRAM authority synchronizes only overlapping dirty tiles",
 
   // Reusing B is compatible and emits no redundant synchronization.
   CHECK(tracker.SynchronizeAttachment(kAttachmentB, 15u, 25u, 4u).empty());
+  // Replacing B's Metal texture invalidates its clean-view cache, so the same
+  // canonical words must be materialized into the new allocation.
+  tracker.InvalidateAttachment(kAttachmentB);
+  CHECK(tracker.tile(17u).clean_attachment == 0u);
+  operations = tracker.SynchronizeAttachment(kAttachmentB, 15u, 25u, 5u);
+  REQUIRE(operations.size() == 1u);
+  CHECK(operations[0].kind == SyncKind::kMaterializeFromCanonical);
+  CHECK(operations[0].attachment == kAttachmentB);
+  CHECK(operations[0].start_tiles == 15u);
+  CHECK(operations[0].end_tiles == 25u);
   // A resolve clear is a new canonical producer. Even if A was retained as a
   // clean cache by the preceding pack, MarkCanonical must invalidate it so the
   // next A consumer rematerializes the cleared words rather than reusing the
   // pre-clear attachment contents.
-  tracker.MarkCanonical(15u, 20u, 5u);
-  operations = tracker.SynchronizeAttachment(kAttachmentA, 15u, 20u, 6u);
+  tracker.MarkCanonical(15u, 20u, 6u);
+  operations = tracker.SynchronizeAttachment(kAttachmentA, 15u, 20u, 7u);
   REQUIRE(operations.size() == 1u);
   CHECK(operations[0].kind == SyncKind::kMaterializeFromCanonical);
   CHECK(operations[0].attachment == kAttachmentA);
   CHECK(operations[0].start_tiles == 15u);
   CHECK(operations[0].end_tiles == 20u);
   // A canonical consumer of a smaller overlap packs only that subrange.
-  operations = tracker.SynchronizeCanonical(10u, 12u, 7u);
+  operations = tracker.SynchronizeCanonical(10u, 12u, 8u);
   REQUIRE(operations.size() == 1u);
   CHECK(operations[0].kind == SyncKind::kPackToCanonical);
   CHECK(operations[0].start_tiles == 10u);
   CHECK(operations[0].end_tiles == 12u);
   CHECK(tracker.tile(12u).location == Location::kAttachment);
+
+  // If a caller retires a dirty view without synchronizing first, never leave
+  // authority pointing at deallocated content. The defensive branch degrades
+  // those tiles to unknown rather than allowing a stale pack later.
+  tracker.MarkAttachment(kAttachmentA, 40u, 42u, 9u);
+  tracker.InvalidateAttachment(kAttachmentA);
+  CHECK(tracker.tile(40u).location == Location::kUnknown);
+  CHECK(tracker.tile(40u).authority_attachment == 0u);
+  CHECK(tracker.tile(40u).clean_attachment == 0u);
 }
 
 TEST_CASE("Metal EDRAM authority preserves submission order and batches sources",

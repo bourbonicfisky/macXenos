@@ -268,9 +268,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // the canonical EDRAM. nullptr / sample_count 1 on the default path.
     void* msaa_texture() const { return msaa_texture_; }
     uint32_t sample_count() const { return sample_count_; }
-    void set_msaa_texture(void* texture, uint32_t sample_count) {
+    uint32_t msaa_texture_height() const { return msaa_texture_height_; }
+    void* ReplaceMsaaTexture(void* texture, uint32_t sample_count,
+                             uint32_t height) {
+      void* old_texture = msaa_texture_;
       msaa_texture_ = texture;
       sample_count_ = sample_count;
+      msaa_texture_height_ = height;
+      return old_texture;
     }
 
    private:
@@ -279,6 +284,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint64_t pixel_format_;
     void* msaa_texture_ = nullptr;  // id<MTLTexture>, retained when set.
     uint32_t sample_count_ = 1;
+    uint32_t msaa_texture_height_ = 0;
   };
 
   // Clears a freshly created texture to zero (color) / the far value (depth)
@@ -286,6 +292,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // transfer, resolve, or the present. Deterministic-black beats garbage for
   // debugging.
   void ClearTextureAtCreation(void* texture, bool is_depth);
+
+  // Allocates real-MSAA working views only to the height touched by the
+  // current draw, growing them geometrically as needed. Growth first makes
+  // canonical EDRAM authoritative, then retires the old views by submission.
+  bool EnsureCurrentMsaaCompanions();
 
   // Executes the base class's requested ownership transfers for the current
   // accumulated render targets: same-host-format spans as per-tile blits,

@@ -486,41 +486,157 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
   auto* rt = new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
                                    uint64_t(pixel_format));
-  // Sample-accurate path (gated): an MSAA color/depth key gets a REAL MSAA
-  // companion so draws can render per-sample and feed the canonical EDRAM. The
-  // 1x texture above stays as the resolve target / collapsed-consumer view, so
-  // this allocation alone changes nothing until BeginFrameEncoder renders into
-  // it. Depth MSAA must match color MSAA within a pass, so both are allocated.
-  if (sample_edram_enabled_ &&
-      key.msaa_samples != xenos::MsaaSamples::k1X) {
-    uint32_t sample_count =
-        uint32_t(1) << uint32_t(key.msaa_samples);  // k2X->2, k4X->4
-    MTLTextureDescriptor* mdesc = [[MTLTextureDescriptor alloc] init];
-    mdesc.textureType = MTLTextureType2DMultisample;
-    mdesc.pixelFormat = pixel_format;
-    mdesc.width = width;
-    mdesc.height = height;
-    mdesc.sampleCount = sample_count;
-    mdesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    if (!key.is_depth &&
-        IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
-      mdesc.usage |= MTLTextureUsagePixelFormatView;
+  return rt;
+}
+
+bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
+  if (!sample_edram_raster_enabled_) {
+    return true;
+  }
+
+  RenderTarget* const* used = last_update_used_render_targets();
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  uint32_t requested_height = 0;
+  uint32_t current_height = 0;
+  uint32_t full_height = 0;
+  uint32_t sample_count = 0;
+  uint32_t tile_row_height = 1;
+
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    auto* target = static_cast<MetalRenderTarget*>(used[slot]);
+    if (!target || !lengths[slot] ||
+        target->key().msaa_samples == xenos::MsaaSamples::k1X) {
+      continue;
     }
-    mdesc.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> msaa_texture = [device newTextureWithDescriptor:mdesc];
-    if (msaa_texture) {
-      msaa_texture.label =
-          [NSString stringWithFormat:@"xe_rt_msaa_%ux", sample_count];
-      rt->set_msaa_texture((__bridge_retained void*)msaa_texture, sample_count);
-      XELOGI(
-          "MetalRenderTargetCache: RT {} gets a {}x MSAA companion ({}x{})",
-          key.GetDebugName(), sample_count, width, height);
-    } else {
-      XELOGW("MetalRenderTargetCache: {}x MSAA companion alloc failed for {}",
-             sample_count, key.GetDebugName());
+    const RenderTargetKey& key = target->key();
+    uint32_t target_sample_count = uint32_t(1) << uint32_t(key.msaa_samples);
+    if (sample_count && sample_count != target_sample_count) {
+      XELOGE("MetalRenderTargetCache: mixed MSAA sample counts in one pass");
+      return false;
+    }
+    sample_count = target_sample_count;
+    full_height = GetRenderTargetHeight(key.pitch_tiles_at_32bpp,
+                                        key.msaa_samples);
+    uint32_t x_shift, y_shift;
+    GetMsaaShifts(uint32_t(key.msaa_samples), x_shift, y_shift);
+    (void)x_shift;
+    tile_row_height = xenos::kEdramTileHeightSamples >> y_shift;
+    requested_height = std::max(
+        requested_height,
+        ComputeCanonicalRangeTextureHeight(
+            key.base_tiles, key.GetPitchTiles(), y_shift,
+            key.base_tiles + lengths[slot], full_height));
+  }
+  if (!sample_count || !requested_height || !full_height) {
+    return true;
+  }
+
+  std::vector<MetalRenderTarget*> targets;
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    auto* target = static_cast<MetalRenderTarget*>(accumulated[slot]);
+    if (!target) {
+      continue;
+    }
+    uint32_t target_sample_count =
+        uint32_t(1) << uint32_t(target->key().msaa_samples);
+    if (target_sample_count != sample_count) {
+      XELOGE("MetalRenderTargetCache: incompatible accumulated MSAA target");
+      return false;
+    }
+    current_height = std::max(current_height, target->msaa_texture_height());
+    targets.push_back(target);
+  }
+  uint32_t allocation_height = ComputeMsaaCompanionAllocationHeight(
+      current_height, requested_height, full_height, tile_row_height);
+  bool allocation_needed = false;
+  for (MetalRenderTarget* target : targets) {
+    if (!target->msaa_texture() ||
+        target->msaa_texture_height() < allocation_height) {
+      allocation_needed = true;
+      break;
     }
   }
-  return rt;
+  if (!allocation_needed) {
+    return true;
+  }
+
+  // Any attachment content that will be replaced must first be made canonical.
+  // PrepareTransferCommandBuffer also closes a render encoder that may still
+  // reference an old view; deferred release then keeps it alive through the
+  // current submission.
+  if (!PrepareCanonicalEdramForReadback() ||
+      !command_processor_.PrepareTransferCommandBuffer()) {
+    return false;
+  }
+
+  struct PendingCompanion {
+    MetalRenderTarget* target;
+    void* texture;
+  };
+  std::vector<PendingCompanion> pending;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  for (MetalRenderTarget* target : targets) {
+    if (target->msaa_texture() &&
+        target->msaa_texture_height() >= allocation_height) {
+      continue;
+    }
+    const RenderTargetKey& key = target->key();
+    MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+    descriptor.textureType = MTLTextureType2DMultisample;
+    descriptor.pixelFormat = (MTLPixelFormat)target->pixel_format();
+    descriptor.width = key.GetWidth();
+    descriptor.height = allocation_height;
+    descriptor.sampleCount = sample_count;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    if (!key.is_depth &&
+        IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+      descriptor.usage |= MTLTextureUsagePixelFormatView;
+    }
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+    if (!texture) {
+      XELOGW(
+          "MetalRenderTargetCache: {}x MSAA companion alloc failed for {} "
+          "({}x{})",
+          sample_count, key.GetDebugName(), key.GetWidth(), allocation_height);
+      uint64_t submission =
+          MetalCommandProcessor::S7TagsOff()
+              ? 0
+              : command_processor_.CurrentEncodingSubmission();
+      for (const PendingCompanion& entry : pending) {
+        deferred_texture_releases_.emplace_back(submission, entry.texture);
+      }
+      return false;
+    }
+    texture.label =
+        [NSString stringWithFormat:@"xe_rt_msaa_%ux_%u", sample_count,
+                                   allocation_height];
+    ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
+    pending.push_back({target, (__bridge_retained void*)texture});
+  }
+
+  uint64_t submission =
+      MetalCommandProcessor::S7TagsOff()
+          ? 0
+          : command_processor_.CurrentEncodingSubmission();
+  for (const PendingCompanion& entry : pending) {
+    MetalRenderTarget* target = entry.target;
+    uint32_t old_height = target->msaa_texture_height();
+    void* old_texture = target->ReplaceMsaaTexture(
+        entry.texture, sample_count, allocation_height);
+    if (old_texture) {
+      deferred_texture_releases_.emplace_back(submission, old_texture);
+    }
+    canonical_authority_.InvalidateAttachment(
+        GetCanonicalAttachmentId(target));
+    XELOGI(
+        "MetalRenderTargetCache: RT {} {}x MSAA companion height {} -> {} "
+        "(full {})",
+        target->key().GetDebugName(), sample_count, old_height,
+        allocation_height, full_height);
+  }
+  return true;
 }
 
 bool MetalRenderTargetCache::Update(bool is_rasterization_done,
@@ -530,6 +646,9 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
                                  normalized_color_mask, vertex_shader)) {
+    return false;
+  }
+  if (!EnsureCurrentMsaaCompanions()) {
     return false;
   }
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
