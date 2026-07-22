@@ -1479,6 +1479,49 @@ TEST_CASE(
   RequireRangeBytes(obs.ram, 0x8000u, 0x800u, kStaleRam);
 }
 
+TEST_CASE(
+    "Authority bytes: exactly-adjacent producers are not a dependency and keep "
+    "their stale bytes while only the overlapping producer converges",
+    "[l0][authority][same-frame][bytes]") {
+  // Half-open adjacency (one record ends at the exact base of another) is not
+  // overlap. A producer ends exactly at the consumer base and another begins
+  // exactly at the consumer end; neither may be selected or converged, while the
+  // single record the consumer truly overlaps is drained. This proves the
+  // adjacent range dimension at the byte level -- distinct from the disjoint
+  // cases above, which leave a gap between the consumer and the untouched
+  // record -- for every consumer kind, both shared-buffer (texture/vertex) and
+  // guest-RAM (wait/host CPU read).
+  std::vector<ProducerBytes> world = {
+      // Left-adjacent: [0x2000, 0x3000) ends at the exact consumer base 0x3000.
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/7, /*sequence=*/1, /*fill=*/0x71u),
+      // Overlapping: [0x3000, 0x4000) is the consumer's real dependency.
+      MakeProducerBytes(0x3000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/7, /*sequence=*/2, /*fill=*/0x72u),
+      // Right-adjacent: [0x4000, 0x5000) begins at the exact consumer end 0x4000.
+      MakeProducerBytes(0x4000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/7, /*sequence=*/3, /*fill=*/0x73u),
+  };
+  const ConsumerKind kinds[] = {ConsumerKind::kTexture, ConsumerKind::kVertex,
+                                ConsumerKind::kWait, ConsumerKind::kHostCpuRead};
+  for (ConsumerKind kind : kinds) {
+    auto obs = ObserveConsumerBytes(kind, UniformRequest(0x3000u, 0x1000u),
+                                    world, /*completed=*/7);
+    REQUIRE(obs.available);
+    REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+    // Only the overlapping record is selected; neither adjacency is a dependency.
+    REQUIRE(obs.decision.selected.size() == 1u);
+    REQUIRE(obs.decision.selected[0].sequence == 2u);
+    REQUIRE(obs.decision.revalidate_gpu_bytes == ConsumerReadsSharedBuffer(kind));
+    // The consumer observes the overlapping producer's exact newest bytes.
+    RequireRangeBytes(obs.ram, 0x3000u, 0x1000u, 0x72u);
+    // Both exactly-adjacent records are left un-drained: their RAM stays stale,
+    // proving half-open adjacency added no convergence on either boundary.
+    RequireRangeBytes(obs.ram, 0x2000u, 0x1000u, kStaleRam);
+    RequireRangeBytes(obs.ram, 0x4000u, 0x1000u, kStaleRam);
+  }
+}
+
 // --- Task 4.6: disjoint consumers add zero resolver effects ----------------
 //
 // The tests above assert the seam's decision (action / selected set / bytes).

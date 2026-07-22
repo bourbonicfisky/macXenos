@@ -31,6 +31,7 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -48,6 +49,17 @@ namespace metal {
 namespace {
 
 constexpr uint32_t kPage = 4096;
+
+// Deterministic byte pattern independent of any device. Used by the device-free
+// boundary-clamp surface (which must run even with no Metal device) and mirrored
+// by CoherenceHarness::Pattern for the on-device cells.
+std::vector<uint8_t> SeededPattern(uint32_t bytes, uint8_t seed) {
+  std::vector<uint8_t> v(bytes);
+  for (uint32_t i = 0; i < bytes; ++i) {
+    v[i] = uint8_t(seed + i * 7 + (i >> 8));
+  }
+  return v;
+}
 
 class TestMetalSharedMemory : public MetalSharedMemory {
  public:
@@ -193,11 +205,7 @@ struct CoherenceHarness {
   }
 
   std::vector<uint8_t> Pattern(uint32_t bytes, uint8_t seed) {
-    std::vector<uint8_t> v(bytes);
-    for (uint32_t i = 0; i < bytes; ++i) {
-      v[i] = uint8_t(seed + i * 7 + (i >> 8));
-    }
-    return v;
+    return SeededPattern(bytes, seed);
   }
 };
 
@@ -300,6 +308,154 @@ class RealMemexportConvergenceTarget final : public MemexportConvergenceTarget {
  private:
   CoherenceHarness* harness_;
 };
+
+// --- Task 6.1 factual four-writer / four-consumer matrix helpers -----------
+//
+// These route BOTH sides of every writer x consumer cell through the real
+// production seams (DecideRamWritePublication/PublishRamWrite, the memexport
+// preparation/publication/ConvergeMemexportRam ports, DecideConsumer, and the
+// shared DrainSelectedProducers executor) against the real Memory +
+// MetalSharedMemory + GpuRead/RamRead corridors. No production decision is
+// reimplemented here: the helpers only supply stimulus and read back exact
+// bytes, so each cell asserts the writer's own byte pattern for that consumer
+// rather than inferring a cell from a shared mechanism.
+
+// Executes writer W's real production publication of `bytes` over [addr, len).
+// Guest CPU flows only through the physical-callback thunk; resolve and trace
+// restore flow through the typed PublishRamWrite seam (with the writer's exact
+// legacy-invalidation policy asserted); memexport prepares the destination,
+// encodes submission N, registers its pending record BEFORE RangeWrittenByGpu,
+// then commits and awaits N so the record is complete. A memexport leaves its
+// pending record in `pending` and returns N; the RAM writers leave none and
+// return 0 (no completed submission to await).
+uint64_t ApplyWriter(CoherenceHarness& h, WriterKind writer, uint32_t addr,
+                     uint32_t len, const std::vector<uint8_t>& bytes,
+                     std::vector<PendingProducer>* pending) {
+  switch (writer) {
+    case WriterKind::kGuestCpu:
+      h.RamWrite(addr, bytes);
+      h.shared->InvokePhysicalInvalidation(addr, len, true);
+      return 0u;
+    case WriterKind::kResolve:
+    case WriterKind::kTraceRestore: {
+      h.RamWrite(addr, bytes);
+      auto publication = DecideRamWritePublication(writer, addr, len);
+      REQUIRE(publication.has_value());
+      RealRamWritePublicationTarget target(h.shared.get());
+      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+      REQUIRE(outcome.shared_invalidation_executed);
+      REQUIRE(target.shared_calls == 1u);
+      REQUIRE(target.legacy_calls ==
+              (writer == WriterKind::kTraceRestore ? 1u : 0u));
+      return 0u;
+    }
+    case WriterKind::kMemexport:
+    default: {
+      auto preparation = DecideMemexportDestinationPreparation(addr, len);
+      REQUIRE(preparation.has_value());
+      RealMemexportPreparationTarget preparation_target(h.shared.get());
+      REQUIRE(PrepareMemexportDestination(*preparation, preparation_target));
+      auto gpu_write = h.EncodeGpuWrite(addr, bytes);
+      uint64_t submission_n = gpu_write.submission;
+      std::vector<uint32_t> event_order;
+      OwnedMemexportPublicationTarget publication_target(h.shared.get(), pending,
+                                                         &event_order);
+      auto publication = DecideMemexportPublication(addr, len, submission_n);
+      REQUIRE(publication.has_value());
+      MemexportPublicationResult result = PublishMemexportWrite(
+          *publication, publication_target,
+          [&](const MemexportPublication& owned) {
+            event_order.push_back(1u);
+            pending->push_back({owned.range, TransitState::kPendingMemexport,
+                                owned.submission, 1u});
+            return true;
+          });
+      REQUIRE(result.marked);
+      REQUIRE(publication_target.mark_saw_owner);
+      const std::vector<uint32_t> expected_event_order = {1u, 2u};
+      REQUIRE(event_order == expected_event_order);
+      h.CommitGpuWrite(&gpu_write);
+      [gpu_write.command_buffer waitUntilCompleted];
+      REQUIRE(gpu_write.command_buffer.status ==
+              MTLCommandBufferStatusCompleted);
+      return submission_n;
+    }
+  }
+}
+
+struct CellResult {
+  AuthorityAction action = AuthorityAction::kNoDependency;
+  size_t selected = 0;
+  std::vector<uint8_t> observed;
+};
+
+// Applies writer W, then observes [c_addr, c_len) through consumer C's real
+// corridor, routed through the real DecideConsumer + DrainSelectedProducers
+// seam. `request_addr` is the address the consumer presents (optionally the
+// bit-29 physical alias); it must normalize to `c_addr`. Any pending memexport
+// record is converged through the real ConvergeMemexportRam port and retired by
+// its unique authority sequence; the RAM writers leave nothing to drain. Shared-
+// buffer consumers observe via a GPU compute read of the shared buffer, RAM
+// consumers via a direct guest-RAM read.
+CellResult WriteAndConsume(CoherenceHarness& h, WriterKind writer,
+                           ConsumerKind consumer, uint32_t w_addr,
+                           uint32_t w_len, const std::vector<uint8_t>& bytes,
+                           uint32_t c_addr, uint32_t c_len,
+                           uint32_t request_addr) {
+  std::vector<PendingProducer> pending;
+  uint64_t completed = ApplyWriter(h, writer, w_addr, w_len, bytes, &pending);
+
+  const uint32_t physical = xenos::CpuToGpu(request_addr);
+  REQUIRE(physical == c_addr);
+  GuestRangeSet requested;
+  requested.Add(GuestRange::FromExactBaseLength(physical, c_len));
+  ConsumerDecision decision =
+      DecideConsumer(consumer, requested, pending, completed);
+  REQUIRE(decision.revalidate_gpu_bytes == ConsumerReadsSharedBuffer(consumer));
+
+  RealMemexportConvergenceTarget convergence_target(&h);
+  auto retire_by_sequence = [&](uint64_t sequence) {
+    for (auto it = pending.begin(); it != pending.end(); ++it) {
+      if (it->sequence == sequence) {
+        pending.erase(it);
+        return true;
+      }
+    }
+    return false;
+  };
+  LegacyDrainOutcome drain = DrainSelectedProducers(
+      decision, [&](const PendingProducer& selected) {
+        LegacyDrainOutcome one;
+        MemexportConvergenceResult converged =
+            ConvergeMemexportRam(selected, convergence_target);
+        REQUIRE(converged.converged);
+        REQUIRE(converged.action == AuthorityAction::kConvergeRamFromBuffer);
+        one.memexport_records = 1;
+        one.drained_records = 1;
+        REQUIRE(retire_by_sequence(selected.sequence));
+        return one;
+      });
+  REQUIRE(drain.drained_records == decision.selected.size());
+
+  CellResult result;
+  result.action = decision.action;
+  result.selected = decision.selected.size();
+  if (ConsumerReadsSharedBuffer(consumer)) {
+    REQUIRE(h.shared->RequestRange(c_addr, c_len));
+    result.observed = h.GpuRead(c_addr, c_len);
+  } else {
+    result.observed = h.RamRead(c_addr, c_len);
+  }
+  return result;
+}
+
+constexpr WriterKind kAllWriters[] = {
+    WriterKind::kGuestCpu, WriterKind::kResolve, WriterKind::kMemexport,
+    WriterKind::kTraceRestore};
+constexpr ConsumerKind kAllConsumers[] = {
+    ConsumerKind::kTexture, ConsumerKind::kVertex, ConsumerKind::kWait,
+    ConsumerKind::kHostCpuRead};
 
 #define REQUIRE_DEVICE()        \
   if (!H().ok) {                \
@@ -887,6 +1043,569 @@ TEST_CASE("SM coherence: repeated mixed writers leave each later consumer on "
     REQUIRE(h.RamRead(addr, kPage) == trace_bytes);
     REQUIRE(h.SharedRead(addr, kPage) == trace_bytes);
     REQUIRE(h.GpuRead(addr, kPage) == trace_bytes);
+  }
+}
+
+// --- Task 6.1: the complete four-writer x four-consumer factual matrix ------
+//
+// The tests above prove individual mechanisms; task 6.1 asks the whole grid
+// directly. The prior evidence was insufficient on its own: the aliased same-
+// frame case masks resolve under a newer memexport (resolve's bytes are never
+// asserted for any consumer), and the guest-CPU / trace-restore proofs read
+// through generic GpuRead/RamRead rather than each of the four consumer
+// corridors. The following cases assert, for EVERY writer x consumer cell, that
+// the consumer observes the writer's own exact byte pattern through that
+// consumer's real corridor. No cell is credited from a shared mechanism.
+
+TEST_CASE("SM coherence: four-writer x four-consumer exact byte matrix "
+          "(bit-29 aliased request)",
+          "[l1][metal][sharedmem][authority][matrix][bytes]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  uint32_t addr = 0x14000000u;
+  for (uint8_t wi = 0; wi < std::size(kAllWriters); ++wi) {
+    for (uint8_t ci = 0; ci < std::size(kAllConsumers); ++ci) {
+      const WriterKind writer = kAllWriters[wi];
+      const ConsumerKind consumer = kAllConsumers[ci];
+      const uint32_t cell = addr;
+      addr += 0x00100000u;  // 1 MiB per cell keeps every cell on its own pages.
+      INFO(WriterKindName(writer) << " -> " << ConsumerKindName(consumer));
+
+      // Baseline: distinct stale bytes, validated. A cell that failed to publish
+      // (or that masked this writer under another) would read back this stale
+      // pattern and fail the exact comparison below.
+      auto stale = h.Pattern(kPage, uint8_t(0x10u + wi * 16u + ci));
+      auto written = h.Pattern(kPage, uint8_t(0x80u + wi * 16u + ci));
+      h.RamWrite(cell, stale);
+      REQUIRE(h.shared->RequestRange(cell, kPage));
+      REQUIRE(h.GpuRead(cell, kPage) == stale);
+
+      // Consumer presents the range through the bit-29 physical alias; the
+      // authority receives the normalized physical range (aliased coverage).
+      const uint32_t aliased = cell | 0x20000000u;
+      auto writer_range = GuestRange::FromBaseLength(cell, kPage);
+      auto consumer_range =
+          GuestRange::FromBaseLength(xenos::CpuToGpu(aliased), kPage);
+      REQUIRE(writer_range.has_value());
+      REQUIRE(consumer_range.has_value());
+      REQUIRE(writer_range->Classify(*consumer_range) ==
+              GuestRange::Relation::kExact);
+      CellResult r = WriteAndConsume(h, writer, consumer, cell, kPage, written,
+                                     cell, kPage, aliased);
+      REQUIRE(r.observed == written);
+      REQUIRE(h.RamRead(cell, kPage) == written);
+      if (writer == WriterKind::kMemexport) {
+        REQUIRE(r.action == AuthorityAction::kDrainMatchingRecords);
+        REQUIRE(r.selected == 1u);
+      } else {
+        REQUIRE(r.action == AuthorityAction::kNoDependency);
+        REQUIRE(r.selected == 0u);
+      }
+    }
+  }
+}
+
+TEST_CASE("SM coherence: four-writer x four-consumer partial and repeated "
+          "overlap byte matrix",
+          "[l1][metal][sharedmem][authority][matrix][bytes]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  uint32_t addr = 0x15000000u;
+  const uint32_t w_len = kPage * 4u;     // writer covers [base, base+4p).
+  const uint32_t union_len = kPage * 5u; // includes the consumer-only tail.
+  for (uint8_t wi = 0; wi < std::size(kAllWriters); ++wi) {
+    for (uint8_t ci = 0; ci < std::size(kAllConsumers); ++ci) {
+      const WriterKind writer = kAllWriters[wi];
+      const ConsumerKind consumer = kAllConsumers[ci];
+      const uint32_t base = addr;
+      addr += 0x00100000u;
+      const uint32_t sub = base + 3u * kPage;
+      const uint32_t consumer_len = 2u * kPage;
+      INFO(WriterKindName(writer) << " -> " << ConsumerKindName(consumer));
+
+      // ---- partial: writer=[base,base+4p), consumer=[base+3p,base+5p).
+      // They share one page, while the consumer's final page is a stale canary.
+      // Neither range contains the other, so this is true kPartial overlap.
+      auto writer_range = GuestRange::FromBaseLength(base, w_len);
+      auto consumer_range = GuestRange::FromBaseLength(sub, consumer_len);
+      REQUIRE(writer_range.has_value());
+      REQUIRE(consumer_range.has_value());
+      REQUIRE(writer_range->Classify(*consumer_range) ==
+              GuestRange::Relation::kPartial);
+      auto stale = h.Pattern(union_len, uint8_t(0x20u + wi * 16u + ci));
+      h.RamWrite(base, stale);
+      REQUIRE(h.shared->RequestRange(base, union_len));
+      auto written = h.Pattern(w_len, uint8_t(0xA0u + wi * 16u + ci));
+      CellResult r = WriteAndConsume(h, writer, consumer, base, w_len, written,
+                                     sub, consumer_len, sub);
+      std::vector<uint8_t> expected(written.begin() + 3u * kPage,
+                                    written.end());
+      expected.insert(expected.end(), stale.begin() + 4u * kPage, stale.end());
+      REQUIRE(r.observed == expected);
+      REQUIRE(h.RamRead(base, w_len) == written);
+      REQUIRE(h.RamRead(base + w_len, kPage) ==
+              std::vector<uint8_t>(stale.begin() + w_len, stale.end()));
+      if (writer == WriterKind::kMemexport) {
+        REQUIRE(r.action == AuthorityAction::kDrainMatchingRecords);
+        REQUIRE(r.selected == 1u);
+      } else {
+        REQUIRE(r.action == AuthorityAction::kNoDependency);
+      }
+
+      // ---- repeated: the same writer publishes again over the same range;
+      // the overlap must land on the NEWEST bytes while the consumer-only tail
+      // remains the original stale canary.
+      auto rewritten = h.Pattern(w_len, uint8_t(0xC0u + wi * 16u + ci));
+      CellResult r2 = WriteAndConsume(h, writer, consumer, base, w_len,
+                                      rewritten, sub, consumer_len, sub);
+      std::vector<uint8_t> expected2(rewritten.begin() + 3u * kPage,
+                                     rewritten.end());
+      expected2.insert(expected2.end(), stale.begin() + 4u * kPage,
+                       stale.end());
+      REQUIRE(r2.observed == expected2);
+      REQUIRE(h.RamRead(base, w_len) == rewritten);
+      REQUIRE(h.RamRead(base + w_len, kPage) ==
+              std::vector<uint8_t>(stale.begin() + w_len, stale.end()));
+    }
+  }
+}
+
+TEST_CASE("SM coherence: four-writer x four-consumer adjacent and disjoint "
+          "non-dependency byte matrix",
+          "[l1][metal][sharedmem][authority][matrix][bytes]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  uint32_t addr = 0x16000000u;
+  for (uint8_t wi = 0; wi < std::size(kAllWriters); ++wi) {
+    for (uint8_t ci = 0; ci < std::size(kAllConsumers); ++ci) {
+      for (uint8_t variant = 0; variant < 2; ++variant) {
+        const WriterKind writer = kAllWriters[wi];
+        const ConsumerKind consumer = kAllConsumers[ci];
+        const bool disjoint = variant != 0;
+        const uint32_t consumer_addr = addr;
+        addr += 0x00080000u;  // 512 KiB per (cell, variant).
+        // Adjacent: writer's range begins exactly where the consumer's ends
+        // (half-open touch, zero shared bytes). Disjoint: a page gap between
+        // them. Neither is a dependency; the writer's bytes must not bleed into
+        // the consumer range.
+        const uint32_t writer_addr =
+            disjoint ? consumer_addr + kPage * 4u : consumer_addr + kPage;
+        auto writer_range = GuestRange::FromBaseLength(writer_addr, kPage);
+        auto consumer_range =
+            GuestRange::FromBaseLength(consumer_addr, kPage);
+        REQUIRE(writer_range.has_value());
+        REQUIRE(consumer_range.has_value());
+        REQUIRE(consumer_range->Classify(*writer_range) ==
+                (disjoint ? GuestRange::Relation::kDisjoint
+                          : GuestRange::Relation::kAdjacent));
+        INFO(WriterKindName(writer)
+             << " -> " << ConsumerKindName(consumer)
+             << (disjoint ? " (disjoint)" : " (adjacent)"));
+
+        auto baseline = h.Pattern(kPage, uint8_t(0x30u + wi * 16u + ci));
+        auto neighbor = h.Pattern(kPage, uint8_t(0xB0u + wi * 16u + ci));
+        auto neighbor_ram =
+            h.Pattern(kPage, uint8_t(0x50u + wi * 16u + ci));
+        h.RamWrite(consumer_addr, baseline);
+        REQUIRE(h.shared->RequestRange(consumer_addr, kPage));
+        REQUIRE(h.GpuRead(consumer_addr, kPage) == baseline);
+        // Memexport preparation requests the destination from guest RAM before
+        // the GPU write. Allocate and seed it just as a real guest allocation
+        // would; RAM-current writers overwrite this seed in ApplyWriter.
+        h.RamWrite(writer_addr, neighbor_ram);
+
+        std::vector<PendingProducer> pending;
+        ApplyWriter(h, writer, writer_addr, kPage, neighbor, &pending);
+
+        // The consumer's own range is decided against whatever pending record
+        // the writer left. Completed high-water is maxed so that if a record
+        // were wrongly selected it would drain (not merely await) -- yet a non-
+        // overlapping request must select nothing regardless.
+        GuestRangeSet requested;
+        requested.Add(GuestRange::FromExactBaseLength(consumer_addr, kPage));
+        ConsumerDecision decision = DecideConsumer(
+            consumer, requested, pending, /*completed_submission=*/~0ull);
+        REQUIRE(decision.action == AuthorityAction::kNoDependency);
+        REQUIRE(decision.selected.empty());
+        REQUIRE(pending.size() ==
+                (writer == WriterKind::kMemexport ? 1u : 0u));
+
+        // The consumer still observes exactly its own baseline: the adjacent /
+        // disjoint writer did not bleed into the consumer range.
+        REQUIRE(h.RamRead(consumer_addr, kPage) == baseline);
+        if (ConsumerReadsSharedBuffer(consumer)) {
+          REQUIRE(h.shared->RequestRange(consumer_addr, kPage));
+          REQUIRE(h.GpuRead(consumer_addr, kPage) == baseline);
+        } else {
+          REQUIRE(h.RamRead(consumer_addr, kPage) == baseline);
+        }
+        // And the writer genuinely wrote its neighbor (so the non-bleed above is
+        // a real separation, not a writer that silently did nothing). Memexport
+        // lands in the shared buffer; the RAM writers land in guest RAM.
+        if (writer == WriterKind::kMemexport) {
+          REQUIRE(h.SharedRead(writer_addr, kPage) == neighbor);
+          REQUIRE(h.RamRead(writer_addr, kPage) == neighbor_ram);
+        } else {
+          REQUIRE(h.RamRead(writer_addr, kPage) == neighbor);
+        }
+      }
+    }
+  }
+}
+
+// --- Task 6.1 boundary cell: device-free RAM + shared-buffer world ----------
+//
+// The literal 512 MiB top cannot be allocated on the real device (the topmost
+// guest pages are heap-reserved and RequestRange refuses them), so the boundary
+// cell cannot ride the on-device CoherenceHarness. This sparse in-memory world
+// models only the byte transport and validity for a small window abutting the
+// domain top. It owns NO authority policy: range normalization, selection,
+// action, and ordering come from the production decisions and ports below. The
+// existing high-address Metal test separately proves the real shared-memory and
+// GPU-compute transport. Out-of-domain model access is refused, never wrapped.
+class BoundaryByteWorld {
+ public:
+  BoundaryByteWorld(uint32_t base, uint32_t size)
+      : base_(base), ram_(size), shared_(size), valid_(size, false) {}
+
+  bool Contains(uint32_t addr, uint32_t length) const {
+    return addr >= base_ && uint64_t(addr - base_) + length <= ram_.size();
+  }
+
+  // Host-view guest-RAM deposit: the RAM-current writer stimulus (resolve/trace
+  // scatter, guest CPU store) and the memexport destination seed.
+  void RamWrite(uint32_t addr, const std::vector<uint8_t>& bytes) {
+    REQUIRE(Contains(addr, uint32_t(bytes.size())));
+    std::copy(bytes.begin(), bytes.end(), ram_.begin() + (addr - base_));
+  }
+  std::vector<uint8_t> RamRead(uint32_t addr, uint32_t length) const {
+    REQUIRE(Contains(addr, length));
+    const auto first = ram_.begin() + (addr - base_);
+    return std::vector<uint8_t>(first, first + length);
+  }
+
+  // A completed GPU deposit into the shared buffer (the memexport write): lands
+  // in the buffer and leaves the range valid, as a finished blit would.
+  void SharedWrite(uint32_t addr, const std::vector<uint8_t>& bytes) {
+    REQUIRE(Contains(addr, uint32_t(bytes.size())));
+    std::copy(bytes.begin(), bytes.end(), shared_.begin() + (addr - base_));
+    SetValid(addr, uint32_t(bytes.size()), true);
+  }
+  std::vector<uint8_t> SharedRead(uint32_t addr, uint32_t length) const {
+    REQUIRE(Contains(addr, length));
+    const auto first = shared_.begin() + (addr - base_);
+    return std::vector<uint8_t>(first, first + length);
+  }
+
+  // Mirrors SharedMemory::MemoryInvalidationCallback: marks the range invalid so
+  // the next RequestRange re-uploads. An out-of-domain length is ignored (the
+  // real callback clamps), never wrapped into low pages.
+  void InvalidateShared(uint32_t addr, uint32_t length) {
+    if (!Contains(addr, length)) {
+      return;
+    }
+    SetValid(addr, length, false);
+  }
+
+  // Mirrors SharedMemory::RequestRange: re-uploads any invalid bytes from RAM,
+  // marks them valid, and refuses an out-of-domain request rather than clamp it.
+  bool RequestRange(uint32_t addr, uint32_t length) {
+    if (!Contains(addr, length)) {
+      return false;
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+      uint32_t off = addr - base_ + i;
+      if (!valid_[off]) {
+        shared_[off] = ram_[off];
+        valid_[off] = true;
+      }
+    }
+    return true;
+  }
+
+  // The memexport convergence copy: shared buffer -> guest RAM, never touching
+  // the buffer it read from.
+  bool CopyBufferToRam(uint32_t addr, uint32_t length) {
+    if (!Contains(addr, length)) {
+      return false;
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+      ram_[addr - base_ + i] = shared_[addr - base_ + i];
+    }
+    return true;
+  }
+
+ private:
+  void SetValid(uint32_t addr, uint32_t length, bool v) {
+    for (uint32_t i = 0; i < length; ++i) {
+      valid_[addr - base_ + i] = v;
+    }
+  }
+
+  uint32_t base_;
+  std::vector<uint8_t> ram_;
+  std::vector<uint8_t> shared_;
+  std::vector<bool> valid_;
+};
+
+// Device-free seam targets for the boundary cell. Each routes a typed port to
+// the world's modeled RAM/shared storage and owns no authority state.
+class BoundaryRamWriteTarget final : public RamWritePublicationTarget {
+ public:
+  explicit BoundaryRamWriteTarget(BoundaryByteWorld* world) : world_(world) {}
+  bool InvalidateSharedPages(uint32_t base, uint32_t length, bool) override {
+    ++shared_calls;
+    world_->InvalidateShared(base, length);
+    return true;
+  }
+  bool InvalidateLegacyTextures(uint32_t, uint32_t,
+                                uint32_t* invalidated_entries) override {
+    ++legacy_calls;
+    *invalidated_entries = 0;
+    return true;
+  }
+  uint32_t shared_calls = 0;
+  uint32_t legacy_calls = 0;
+
+ private:
+  BoundaryByteWorld* world_;
+};
+
+class BoundaryPreparationTarget final : public MemexportPreparationTarget {
+ public:
+  explicit BoundaryPreparationTarget(BoundaryByteWorld* world) : world_(world) {}
+  bool RequestDestinationRange(uint32_t base, uint32_t length) override {
+    return world_->RequestRange(base, length);
+  }
+
+ private:
+  BoundaryByteWorld* world_;
+};
+
+class BoundaryPublicationTarget final : public MemexportPublicationTarget {
+ public:
+  bool CanMarkRangeWrittenByGpu() const override { return true; }
+  void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
+    ++marks;
+    marked_base = base;
+    marked_length = length;
+  }
+  uint32_t marks = 0;
+  uint32_t marked_base = 0;
+  uint32_t marked_length = 0;
+};
+
+class BoundaryConvergenceTarget final : public MemexportConvergenceTarget {
+ public:
+  explicit BoundaryConvergenceTarget(BoundaryByteWorld* world) : world_(world) {}
+  bool CopyBufferToRam(uint32_t base, uint32_t length,
+                       uint32_t* invalidated_entries) override {
+    *invalidated_entries = 0;
+    return world_->CopyBufferToRam(base, length);
+  }
+
+ private:
+  BoundaryByteWorld* world_;
+};
+
+// Publishes writer W's clamped `payload` over [start, start+requested_len) through
+// W's real production seam against the boundary world. Guest CPU is published by
+// the physical-memory callback (modeled as a direct shared invalidation), then
+// PublishRamWrite is exercised to confirm its no-op policy adds nothing; resolve
+// and trace restore flow through the typed PublishRamWrite seam with each writer's
+// exact legacy-invalidation policy asserted; memexport prepares the destination,
+// deposits its submission-owned bytes into the shared buffer, then registers its
+// pending record BEFORE marking the range GPU-written. Memexport leaves its
+// pending record in `pending` and returns submission 1; the RAM writers leave
+// none and return 0. Every seam's range is asserted to clamp to `clamped_len`.
+uint64_t ApplyBoundaryWriter(BoundaryByteWorld& world, WriterKind writer,
+                             uint32_t start, uint32_t requested_len,
+                             uint32_t clamped_len,
+                             const std::vector<uint8_t>& payload,
+                             std::vector<PendingProducer>* pending) {
+  switch (writer) {
+    case WriterKind::kGuestCpu: {
+      world.RamWrite(start, payload);
+      world.InvalidateShared(start, clamped_len);  // the physical callback.
+      auto publication = DecideRamWritePublication(writer, start, requested_len);
+      REQUIRE(publication.has_value());
+      REQUIRE(publication->range.start() == start);
+      REQUIRE(publication->range.length() == clamped_len);  // clamped, no wrap.
+      BoundaryRamWriteTarget target(&world);
+      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+      // Guest CPU policy: the seam re-publishes nothing (the callback already did).
+      REQUIRE(target.shared_calls == 0u);
+      REQUIRE(target.legacy_calls == 0u);
+      REQUIRE_FALSE(outcome.shared_invalidation_executed);
+      return 0u;
+    }
+    case WriterKind::kResolve:
+    case WriterKind::kTraceRestore: {
+      world.RamWrite(start, payload);
+      auto publication = DecideRamWritePublication(writer, start, requested_len);
+      REQUIRE(publication.has_value());
+      REQUIRE(publication->range.start() == start);
+      REQUIRE(publication->range.length() == clamped_len);  // clamped, no wrap.
+      BoundaryRamWriteTarget target(&world);
+      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
+      REQUIRE(outcome.shared_invalidation_executed);
+      REQUIRE(target.shared_calls == 1u);
+      REQUIRE(target.legacy_calls ==
+              (writer == WriterKind::kTraceRestore ? 1u : 0u));
+      return 0u;
+    }
+    case WriterKind::kMemexport:
+    default: {
+      auto preparation =
+          DecideMemexportDestinationPreparation(start, requested_len);
+      REQUIRE(preparation.has_value());
+      REQUIRE(preparation->range.length() == clamped_len);  // clamped, no wrap.
+      BoundaryPreparationTarget preparation_target(&world);
+      REQUIRE(PrepareMemexportDestination(*preparation, preparation_target));
+      world.SharedWrite(start, payload);  // the submission-owned GPU write.
+      auto publication = DecideMemexportPublication(start, requested_len, 1u);
+      REQUIRE(publication.has_value());
+      REQUIRE(publication->range.start() == start);
+      REQUIRE(publication->range.length() == clamped_len);
+      BoundaryPublicationTarget publication_target;
+      MemexportPublicationResult result = PublishMemexportWrite(
+          *publication, publication_target,
+          [&](const MemexportPublication& owned) {
+            pending->push_back({owned.range, TransitState::kPendingMemexport,
+                                owned.submission, 1u});
+            return true;
+          });
+      REQUIRE(result.marked);
+      REQUIRE(result.action == AuthorityAction::kPublishGpuWrite);
+      REQUIRE(publication_target.marks == 1u);
+      REQUIRE(publication_target.marked_length == clamped_len);
+      return 1u;
+    }
+  }
+}
+
+TEST_CASE("Authority matrix: four-writer x four-consumer 512 MiB "
+          "boundary-clamped "
+          "byte surface (device-free, paired with the real high-boundary test)",
+          "[l0][authority][matrix][boundary][bytes]") {
+  // The literal 512 MiB top cannot be allocated on the real device: the topmost
+  // guest pages are heap-reserved and RequestRange refuses them (see "SM
+  // coherence: physical-memory boundary is checked", which pairs a real GPU read
+  // at a high allocatable address with an overshooting invalidation length).
+  // This device-free surface completes the boundary cell for EVERY writer x
+  // consumer by driving normalization, publication, selection, and convergence
+  // through the production typed decisions and ports used by the other matrix
+  // tests (DecideRamWritePublication/PublishRamWrite, the memexport ports,
+  // DecideConsumer, and DrainSelectedProducers). The sparse world supplies only
+  // the otherwise-unbackable literal-tail byte transport. GuestRange clamps the
+  // overshoot to kGuestPhysicalSize, and the modeled shared/RAM storage class
+  // observes exactly the in-domain clamped extent, never a wrapped or out-of-
+  // domain byte. Actual Metal transport is the paired high-boundary test above;
+  // no device is required for this literal-tail seam proof.
+  const uint32_t kDomain = uint32_t(GuestRange::kGuestPhysicalSize);
+  const uint32_t window = kPage * 8u;
+  const uint32_t base_lo = kDomain - window;  // world spans [base_lo, kDomain).
+  const uint32_t start = kDomain - kPage;     // last in-domain page.
+  const uint32_t requested_len = kPage * 4u;  // three-page overshoot past top.
+  for (uint8_t wi = 0; wi < std::size(kAllWriters); ++wi) {
+    for (uint8_t ci = 0; ci < std::size(kAllConsumers); ++ci) {
+      const WriterKind writer = kAllWriters[wi];
+      const ConsumerKind consumer = kAllConsumers[ci];
+      INFO(WriterKindName(writer) << " -> " << ConsumerKindName(consumer));
+
+      // The seam's factory clamps the overshoot to the single in-domain page.
+      auto w_range = GuestRange::FromBaseLength(start, requested_len);
+      REQUIRE(w_range.has_value());
+      REQUIRE(w_range->start() == start);
+      REQUIRE(w_range->end() == kDomain);   // clamped end, no 32-bit wrap.
+      REQUIRE(w_range->length() == kPage);  // only the in-domain page survives.
+      // A host dereference that demands the full overshoot must be REJECTED, not
+      // silently clamped, so a consumer never dereferences past the domain.
+      REQUIRE_FALSE(
+          GuestRange::FromExactBaseLength(start, requested_len).has_value());
+      const uint32_t clamped_len = w_range->length();
+
+      // Seed the whole window stale and validated so a cell that failed to
+      // publish (or clamped to the wrong extent/offset) reads back this stale
+      // pattern. Writer/consumer identity is in the payload seed.
+      BoundaryByteWorld world(base_lo, window);
+      auto stale = SeededPattern(window, uint8_t(0x10u + wi * 16u + ci));
+      world.RamWrite(base_lo, stale);
+      REQUIRE(world.RequestRange(base_lo, window));
+      REQUIRE(world.SharedRead(base_lo, window) == stale);
+      auto payload = SeededPattern(clamped_len, uint8_t(0x40u + wi * 16u + ci));
+
+      std::vector<PendingProducer> pending;
+      uint64_t completed = ApplyBoundaryWriter(
+          world, writer, start, requested_len, clamped_len, payload, &pending);
+      REQUIRE(pending.size() == (writer == WriterKind::kMemexport ? 1u : 0u));
+
+      // The consumer presents exactly the in-domain clamped page as an exact
+      // range (accepted precisely because it no longer overshoots the domain).
+      GuestRangeSet requested;
+      REQUIRE(requested.Add(GuestRange::FromExactBaseLength(start, clamped_len)));
+      ConsumerDecision decision =
+          DecideConsumer(consumer, requested, pending, completed);
+      REQUIRE(decision.revalidate_gpu_bytes ==
+              ConsumerReadsSharedBuffer(consumer));
+
+      // Any pending memexport record converges through the real seam and is
+      // retired by its unique authority sequence; the RAM writers leave nothing.
+      BoundaryConvergenceTarget convergence_target(&world);
+      LegacyDrainOutcome drain = DrainSelectedProducers(
+          decision, [&](const PendingProducer& selected) {
+            LegacyDrainOutcome one;
+            MemexportConvergenceResult converged =
+                ConvergeMemexportRam(selected, convergence_target);
+            REQUIRE(converged.converged);
+            REQUIRE(converged.action == AuthorityAction::kConvergeRamFromBuffer);
+            one.memexport_records = 1;
+            one.drained_records = 1;
+            for (auto it = pending.begin(); it != pending.end(); ++it) {
+              if (it->sequence == selected.sequence) {
+                pending.erase(it);
+                break;
+              }
+            }
+            return one;
+          });
+      REQUIRE(drain.drained_records == decision.selected.size());
+
+      if (writer == WriterKind::kMemexport) {
+        REQUIRE(decision.action == AuthorityAction::kDrainMatchingRecords);
+        REQUIRE(decision.selected.size() == 1u);
+      } else {
+        REQUIRE(decision.action == AuthorityAction::kNoDependency);
+        REQUIRE(decision.selected.empty());
+      }
+      REQUIRE(pending.empty());  // every selected record retired.
+
+      // Observe through the matching sparse storage class: shared-buffer
+      // consumers (texture/vertex) revalidate their exact bytes from RAM before
+      // reading the buffer; guest-RAM consumers (wait/host CPU read) read RAM
+      // directly. The paired high-boundary case supplies the actual Metal GPU
+      // transport half of this composed boundary proof.
+      std::vector<uint8_t> observed;
+      if (ConsumerReadsSharedBuffer(consumer)) {
+        REQUIRE(world.RequestRange(start, clamped_len));
+        observed = world.SharedRead(start, clamped_len);
+      } else {
+        observed = world.RamRead(start, clamped_len);
+      }
+      REQUIRE(observed == payload);
+      // Guest RAM holds the converged clamped bytes for every writer.
+      REQUIRE(world.RamRead(start, clamped_len) == payload);
+
+      // No out-of-domain / wrapped access: every byte below the clamped page is
+      // still the stale seed in BOTH RAM and the shared buffer.
+      const uint32_t prefix_len = start - base_lo;
+      std::vector<uint8_t> stale_prefix(stale.begin(),
+                                        stale.begin() + prefix_len);
+      REQUIRE(world.RamRead(base_lo, prefix_len) == stale_prefix);
+      REQUIRE(world.SharedRead(base_lo, prefix_len) == stale_prefix);
+    }
   }
 }
 
