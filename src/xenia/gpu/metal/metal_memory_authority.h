@@ -454,9 +454,11 @@ inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
       // direct InvalidateRange is not yet redundant).
       return {/*shared=*/true, /*exact=*/true, /*legacy=*/true};
     case WriterKind::kResolve:
-      // Exact publication of the checked scatter extent; legacy fan-out is the
-      // global watch. Routed in task 3.2; the policy lives here so the seam
-      // speaks one vocabulary across writers.
+      // Exact publication of the checked scatter extent. The resolve drain
+      // performs the scoped direct legacy RAM-upload invalidation separately;
+      // this publication suppresses duplicate global fan-out while still
+      // firing shared-cache per-range watches. Routed in task 3.2; the policy
+      // lives here so the seam speaks one vocabulary across writers.
       return {/*shared=*/true, /*exact=*/true, /*legacy=*/false};
     case WriterKind::kMemexport:
     default:
