@@ -93,9 +93,31 @@ if(APPLE)
     # cvar definitions + trace writer (referenced by MetalSharedMemory) —
     # kept minimal so the target stays a fast isolated contract check.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_memory_coherence_test.mm
-    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_memory.mm)
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_memory.mm
+    # Cross-writer memory-authority task 5.2: alias / cache-invalidation tests.
+    # Executes the REAL legacy MetalTextureCache (multi-key alias, base+mip
+    # InvalidateRange scan, retirement/reclaim) and the REAL generic TextureCache
+    # base-class watch machinery (MakeUpToDateAndWatch/WatchCallback) that the
+    # shared cache inherits. texture_cache.cc is kept in this APPLE block (not
+    # common) so no non-Apple link hazard exists -- these are Metal-only tests.
+    # metal_texture_cache.mm's non-header deps (texture_util.cc,
+    # texture_info_formats.cc, metal_load_shader_pipelines.mm,
+    # metal_upload_arena.mm, trace_writer.cc) are already in this target; its
+    # other includes are header-only (metal_exact_cover_predicate.h,
+    # metal_resolved_fetch_service.h, metal_texture_load_eligibility.h,
+    # texture_address.h). The local Metal Shader Converter runtime implementation
+    # is compiled below, avoiding an external libmetalirconverter dylib link.
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_cache.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_texture_cache.mm
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/ir_runtime_impl.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_invalidation_alias_test.mm)
+  # Metal Shader Converter declarations used by ir_runtime_impl.mm and
+  # metal_texture_cache.mm's bindless view-heap writes.
+  target_include_directories(xenia-gpu-conformance PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/metal-shader-converter/include
+    ${PROJECT_SOURCE_DIR}/third_party/metal-shader-converter/include/metal_irconverter_runtime)
   target_link_libraries(xenia-gpu-conformance PRIVATE
-    "-framework Metal" "-framework Foundation")
+    "-framework Metal" "-framework Foundation" xxhash)
 endif()
 
 xe_target_defaults(xenia-gpu-conformance)
