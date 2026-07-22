@@ -11,7 +11,6 @@
 
 #include <algorithm>
 
-#include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/trace_writer.h"
 
 #import <Metal/Metal.h>
@@ -82,22 +81,6 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   }
   consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   return result;
-}
-
-void MetalSharedMemory::ObservePhysicalWrite(uint32_t physical_address_start,
-                                             uint32_t length) {
-  // The base-class thunk has already performed the sole physical-watch
-  // invalidation. Classify the logical write through the typed seam, but do not
-  // execute its target operations (kGuestCpu policy forbids a duplicate
-  // invalidation). Keep this callback allocation-free and thread-safe.
-  auto publication = DecideRamWritePublication(
-      WriterKind::kGuestCpu, physical_address_start, length);
-  if (!publication) {
-    return;
-  }
-  guest_cpu_publications_.fetch_add(1, std::memory_order_relaxed);
-  guest_cpu_range_bytes_.fetch_add(publication->range.length(),
-                                   std::memory_order_relaxed);
 }
 
 void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {

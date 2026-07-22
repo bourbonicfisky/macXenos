@@ -12,25 +12,23 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
-#include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_guest_range.h"
 
 namespace xe {
 namespace gpu {
 namespace metal {
 
-// Typed, non-owning cross-writer memory-authority decision seam (OpenSpec
-// implement-metal-cross-writer-memory-authority, tasks 2.3 and 2.4).
+// Typed, non-owning cross-writer memory-authority decision and execution seam
+// (OpenSpec implement-metal-cross-writer-memory-authority).
 //
 // This is the coordination contract the audit calls for: the same pending
-// producer state (pending_writebacks_ / pending_memexports_) is today
-// interpreted differently by the vertex, texture, and WAIT_REG_MEM call sites
-// (raw 32-bit end arithmetic, unfiltered vs range-scoped drains). This header
-// gives all of them ONE typed vocabulary and ONE pure decision function so the
-// difference between the intended selective contract and today's legacy action
-// becomes measurable rather than implicit.
+// producer state (pending_writebacks_ / pending_memexports_) was previously
+// interpreted independently by the vertex, texture, and WAIT_REG_MEM call
+// sites. This header gives every promoted writer and consumer one typed
+// vocabulary and one pure decision function for selective convergence.
 //
 // Design constraints this file honors (docs/metal_cross_writer_memory_authority
 // _audit.md):
@@ -44,9 +42,9 @@ namespace metal {
 //     disjoint base/mip extents, an aliased/multi-consumer set); the decision
 //     selects ONLY intersecting producer records. Adjacent/disjoint ranges
 //     choose no dependency (GuestRange treats adjacency as non-overlap).
-//   * Incrementally routed. AuthorityObserver remains telemetry only, while the
-//     RAM-writer publication seam below may execute the existing publication
-//     operations for explicitly promoted writers. It owns no authority state.
+//   * Non-authoritative execution. The RAM-writer publication and consumer
+//     dependency seams below execute the existing publication/drain operations
+//     for the promoted writers and consumers. They own no authority state.
 
 // Which of the four writers produced (or will produce) the bytes.
 enum class WriterKind {
@@ -108,7 +106,8 @@ struct PendingProducer {
 inline bool ProducerComplete(const PendingProducer& producer,
                              uint64_t completed_submission) {
   // Submission 0 is the S7-tags-off / not-yet-owned sentinel. The producer is
-  // still pending and must cross the legacy commit+wait boundary before RAM
+  // still pending and must cross the synchronous commit+wait boundary before
+  // RAM
   // convergence; treating 0 <= 0 as completion would under-predict that wait.
   return producer.submission != 0 &&
          producer.submission <= completed_submission;
@@ -134,23 +133,6 @@ struct ConsumerDecision {
   bool drain = false;                  // at least one producer to converge.
   bool revalidate_gpu_bytes = false;   // consumer reads the shared buffer.
   uint64_t max_wait_submission = 0;    // highest submission to await (0 if none).
-
-  // Number of pending producer records DecideConsumer considered (the snapshot
-  // size). Transient telemetry metadata ONLY: it lets the exact dependency
-  // recorder distinguish a real disjoint query (considered > 0, selected empty)
-  // from a query with no pending producers at all (considered == 0). It is
-  // never authority state and drives no decision.
-  uint64_t considered_producers = 0;
-
-  // Bytes actually depended on (covered by the selected producers), for
-  // telemetry. Zero when there is no dependency.
-  uint64_t selected_bytes() const {
-    GuestRangeSet set;
-    for (const PendingProducer& p : selected) {
-      set.Add(p.range);
-    }
-    return set.CoveredBytes();
-  }
 };
 
 // Producer-state-specific request ranges. Most consumers read the same ranges
@@ -193,7 +175,6 @@ inline ConsumerDecision DecideConsumer(
   decision.consumer = consumer;
   decision.requested = request.Combined();
   decision.revalidate_gpu_bytes = ConsumerReadsSharedBuffer(consumer);
-  decision.considered_producers = producers.size();
   std::vector<bool> selected(producers.size(), false);
   for (size_t i = 0; i < producers.size(); ++i) {
     const PendingProducer& producer = producers[i];
@@ -319,61 +300,20 @@ inline const char* ConsumerKindName(ConsumerKind c) {
     default: return "?";
   }
 }
-inline const char* AuthorityActionName(AuthorityAction a) {
-  switch (a) {
-    case AuthorityAction::kNoDependency: return "no_dependency";
-    case AuthorityAction::kAwaitProducer: return "await_producer";
-    case AuthorityAction::kDrainMatchingRecords: return "drain_matching";
-    case AuthorityAction::kInvalidateRamWrite: return "invalidate_ram";
-    case AuthorityAction::kRequestValidatedGpuBytes: return "request_gpu_bytes";
-    case AuthorityAction::kPublishGpuWrite: return "publish_gpu_write";
-    case AuthorityAction::kConvergeRamFromBuffer: return "converge_ram";
-    default: return "?";
-  }
-}
-
-// What the current legacy call site ACTUALLY did for a consumer, captured so the
-// observer can compare it against the seam's prediction. This is an observation
-// of existing behavior -- it never drives behavior.
-struct LegacyConsumerOutcome {
-  bool overlap = false;             // legacy detected an overlapping producer.
-  bool committed = false;           // a command buffer was actually committed.
-  bool waited = false;              // that submission was actually awaited.
-  bool drained = false;             // legacy ran DrainPendingWritebacks.
-  bool drain_range_scoped = false;  // filtered drain (vs unfiltered all-records).
-  uint32_t drained_records = 0;     // records legacy retired, when known.
-};
-
-// Map a legacy consumer outcome to the action vocabulary so agreement can be
-// judged on the same axis as the prediction.
-inline AuthorityAction LegacyConsumerAction(const LegacyConsumerOutcome& o) {
-  if (!o.overlap) {
-    return AuthorityAction::kNoDependency;
-  }
-  return (o.committed || o.waited) ? AuthorityAction::kAwaitProducer
-                                   : AuthorityAction::kDrainMatchingRecords;
-}
-
-// Independently observed writer-side legacy action. The observer compares this
-// with the seam prediction; callers must not derive it from the same decision
-// function or agreement would be tautological.
-struct LegacyWriterOutcome {
+// Factual writer-side publication result returned by PublishRamWrite. `action`
+// is the promoted outcome the caller checks (kInvalidateRamWrite on success);
+// the remaining fields report which existing invalidation operations actually
+// ran so callers report facts rather than infer them.
+struct RamWritePublicationOutcome {
   AuthorityAction action = AuthorityAction::kNoDependency;
   uint32_t invalidated_entries = 0;
-  bool committed = false;
-  bool waited = false;
   bool shared_invalidation_executed = false;
   bool legacy_invalidation_executed = false;
 };
 
-// Factual deltas returned by the existing synchronization and drain operations.
-// Returning these changes no behavior; it only lets observer call sites report
-// what happened rather than infer it from an overlap branch.
-struct LegacySyncOutcome {
-  bool committed = false;
-  bool waited = false;
-};
-struct LegacyDrainOutcome {
+// Factual result of producer convergence used by the promoted selective-drain
+// executor and its behavioral tests.
+struct ProducerDrainOutcome {
   uint32_t drained_records = 0;
   uint32_t resolve_records = 0;
   uint32_t memexport_records = 0;
@@ -384,7 +324,7 @@ struct LegacyDrainOutcome {
 // (MetalCommandProcessor::DrainSelectedPendingProducers) and the task-4.5
 // conformance executors. It walks the seam's sequence-ordered selected records,
 // drains each through the caller-supplied one-record callback, merges the
-// factual LegacyDrainOutcome counts, and stops the moment a record fails to
+// factual ProducerDrainOutcome counts, and stops the moment a record fails to
 // retire exactly one pending record.
 //
 // Stopping on the first non-unit retirement preserves authority chronology: a
@@ -398,11 +338,11 @@ struct LegacyDrainOutcome {
 // closes over, matching each selected record back by its unique authority
 // sequence; the selection itself remains a transient value.
 template <typename DrainOneProducer>
-inline LegacyDrainOutcome DrainSelectedProducers(
+inline ProducerDrainOutcome DrainSelectedProducers(
     const ConsumerDecision& decision, DrainOneProducer&& drain_one) {
-  LegacyDrainOutcome combined;
+  ProducerDrainOutcome combined;
   for (const PendingProducer& producer : decision.selected) {
-    LegacyDrainOutcome one = drain_one(producer);
+    ProducerDrainOutcome one = drain_one(producer);
     combined.drained_records += one.drained_records;
     combined.resolve_records += one.resolve_records;
     combined.memexport_records += one.memexport_records;
@@ -414,7 +354,7 @@ inline LegacyDrainOutcome DrainSelectedProducers(
   return combined;
 }
 
-// Existing RAM-write publication operations, exposed through a thin device-free
+// RAM-write publication operations, exposed through a thin device-free
 // port so the typed seam can execute them and tests can substitute a recorder.
 // The port exposes invalidation only -- never watch registration or authority
 // storage -- so routing through it cannot add a second CPU watch.
@@ -436,9 +376,9 @@ struct RamWritePublicationTarget {
                                         uint32_t* invalidated_entries) = 0;
 };
 
-// Source-appropriate RAM-write publication policy. Guest-CPU publication is
-// observed after the sole physical-memory callback has already performed the
-// invalidation, so executing the seam must not invalidate it a second time.
+// Source-appropriate RAM-write publication policy. The sole physical-memory
+// callback already performs guest-CPU publication, so a typed model decision
+// must not invalidate the same write a second time.
 struct RamWritePublicationPolicy {
   bool execute_shared_invalidation = true;
   bool exact_range = true;
@@ -449,7 +389,7 @@ inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
   switch (writer) {
     case WriterKind::kGuestCpu:
       // The sole physical callback has already invalidated shared pages and
-      // fired watches before this publication is observed.
+      // fired watches; the typed policy executes no duplicate operation.
       return {/*shared=*/false, /*exact=*/false, /*legacy=*/false};
     case WriterKind::kTraceRestore:
       // Exact publication plus the independently-required direct legacy texture
@@ -630,10 +570,10 @@ inline std::optional<RamWritePublication> DecideRamWritePublication(
 // decisions intentionally execute nothing because the physical callback has
 // already published them. This function owns no state and adds no
 // synchronization.
-inline LegacyWriterOutcome PublishRamWrite(
+inline RamWritePublicationOutcome PublishRamWrite(
     const RamWritePublication& publication,
     RamWritePublicationTarget& target) {
-  LegacyWriterOutcome outcome;
+  RamWritePublicationOutcome outcome;
   bool required_operations_executed = true;
   if (publication.policy.execute_shared_invalidation) {
     outcome.shared_invalidation_executed = target.InvalidateSharedPages(
@@ -652,348 +592,6 @@ inline LegacyWriterOutcome PublishRamWrite(
                        : AuthorityAction::kNoDependency;
   return outcome;
 }
-
-// Observer-only telemetry (task 2.4). Bounded, throttled, non-owning. It holds
-// ONLY counters and a tiny disagreement sample -- never authority state -- and
-// it executes nothing. Callers feed it a prediction and the legacy outcome; it
-// tallies agreement and emits a throttled diagnostic on divergence.
-class AuthorityObserver {
- public:
-  // Per-consumer and per-writer sampling budget. The first `kInitialSamples`
-  // events of each kind are always recorded; after that only 1 in
-  // `kSampleStride` is, so steady-state cost stays flat and logs stay quiet.
-  static constexpr uint32_t kInitialSamples = 64;
-  static constexpr uint32_t kSampleStride = 1024;
-  // How many divergences to log verbatim before switching to counters only.
-  static constexpr uint32_t kMaxDivergenceLogs = 32;
-
-  // True when the next consumer/writer event of this kind should build a full
-  // snapshot and record. Cheap: one counter increment + modulo. Call sites gate
-  // the (allocating) snapshot build behind this so unsampled events are ~free.
-  bool ShouldSampleConsumer(ConsumerKind consumer) {
-    uint32_t n = consumer_seen_[static_cast<size_t>(consumer)]++;
-    return n < kInitialSamples || (n % kSampleStride) == 0;
-  }
-  bool ShouldSampleWriter(WriterKind writer) {
-    uint32_t n = writer_seen_[static_cast<size_t>(writer)]++;
-    return n < kInitialSamples || (n % kSampleStride) == 0;
-  }
-
-  // Record one consumer decision alongside the legacy outcome that actually ran.
-  void RecordConsumer(const ConsumerDecision& predicted,
-                      const LegacyConsumerOutcome& legacy) {
-    size_t ci = static_cast<size_t>(predicted.consumer);
-    ++consumer_records_[ci];
-    action_count_[static_cast<size_t>(predicted.action)]++;
-    if (predicted.await) {
-      ++consumer_await_[ci];
-    }
-    if (predicted.drain) {
-      ++consumer_drain_[ci];
-      predicted_drained_records_[ci] += predicted.selected.size();
-    }
-    if (legacy.committed) {
-      ++legacy_commit_[ci];
-    }
-    if (legacy.waited) {
-      ++legacy_wait_[ci];
-    }
-    if (legacy.drained) {
-      ++legacy_drain_[ci];
-      legacy_drained_records_[ci] += legacy.drained_records;
-    }
-    AuthorityAction legacy_action = LegacyConsumerAction(legacy);
-    bool agree = legacy_action == predicted.action;
-    // Every attempted drain must retire exactly the selected records. This
-    // catches over-broad unfiltered drains, under-retirement after a failed
-    // wait/copy, and mismatches in nominally range-scoped paths.
-    bool drain_count_divergence =
-        predicted.drain && legacy.drained &&
-        legacy.drained_records != predicted.selected.size();
-    if (agree && !drain_count_divergence) {
-      ++consumer_agree_[ci];
-    } else {
-      ++consumer_disagree_[ci];
-      if (divergence_logs_++ < kMaxDivergenceLogs) {
-        XELOGI(
-            "MetalAuthority[observer] consumer={} predicted={} legacy={} "
-            "selected={} selected_bytes={} requested_ranges={} "
-            "requested_bytes={} legacy_records={} legacy_scoped={} "
-            "(divergence)",
-            ConsumerKindName(predicted.consumer),
-            AuthorityActionName(predicted.action),
-            AuthorityActionName(legacy_action), predicted.selected.size(),
-            predicted.selected_bytes(), predicted.requested.size(),
-            predicted.requested.CoveredBytes(), legacy.drained_records,
-            legacy.drain_range_scoped);
-      }
-    }
-  }
-
-  // Record one dependency-resolver execution EXACTLY (unsampled,
-  // allocation-free). Where RecordConsumer above measures sampled agreement,
-  // this measures the factual synchronization/drain EFFECTS one resolver
-  // execution produced, so a disjoint consumer can be proven to add zero
-  // commits, zero waits, zero drains, zero drained records, and to never
-  // resolve inside an active consuming encoder. Callers pass the factual
-  // LegacySyncOutcome, whether a drain was attempted, the factual
-  // LegacyDrainOutcome, and whether the CURRENT consuming-encoder scope was
-  // active at resolver entry. These are temporary telemetry counters ONLY --
-  // never authority state -- and this method executes no behavior.
-  void RecordDependencyExecution(const ConsumerDecision& decision,
-                                 const LegacySyncOutcome& sync,
-                                 bool drain_attempted,
-                                 const LegacyDrainOutcome& drain,
-                                 bool inside_current_consuming_encoder) {
-    size_t ci = static_cast<size_t>(decision.consumer);
-    ++exec_total_[ci];
-    if (inside_current_consuming_encoder) {
-      // A resolution attempted while THIS draw's consuming encoder scope is
-      // active. Production keeps this at zero (every resolver runs before
-      // BeginFrameEncoder marks the scope); a nonzero value would flag a real
-      // in-encoder dependency resolution.
-      ++exec_inside_encoder_[ci];
-    }
-    // A REAL disjoint query: a nonempty consumer request faced pending
-    // producers but none intersected it. selected-empty with zero considered
-    // producers is a no-pending query, and an empty requested range set never
-    // depends on anything -- neither is a disjoint query, so both must stay out
-    // of the disjoint tallies.
-    bool disjoint = decision.selected.empty() &&
-                    decision.considered_producers > 0 &&
-                    !decision.requested.empty();
-    if (disjoint) {
-      ++exec_disjoint_[ci];
-      if (sync.committed) {
-        ++disjoint_commit_[ci];
-      }
-      if (sync.waited) {
-        ++disjoint_wait_[ci];
-      }
-      if (drain_attempted) {
-        ++disjoint_drain_attempt_[ci];
-      }
-      disjoint_drained_records_[ci] += drain.drained_records;
-    }
-  }
-
-  // Record one writer publication alongside the independently observed legacy
-  // outcome. Invalidation counts are factual Entry retirements returned by the
-  // direct legacy cache call. Tasks 5.2-5.3 measured deferred watch fan-out
-  // separately and proved the retained-hook set; this observer still records
-  // only the factual direct result rather than fabricating a deferred count.
-  void RecordWriter(WriterKind writer, const GuestRangeSet& ranges,
-                    AuthorityAction predicted_action,
-                    const LegacyWriterOutcome& legacy) {
-    size_t wi = static_cast<size_t>(writer);
-    ++writer_records_[wi];
-    action_count_[static_cast<size_t>(predicted_action)]++;
-    writer_range_count_[wi] += ranges.size();
-    writer_range_bytes_[wi] += ranges.CoveredBytes();
-    writer_invalidated_entries_[wi] += legacy.invalidated_entries;
-    if (legacy.committed) {
-      ++writer_commits_[wi];
-    }
-    if (legacy.waited) {
-      ++writer_waits_[wi];
-    }
-    if (predicted_action != legacy.action) {
-      ++writer_disagree_[wi];
-      if (divergence_logs_++ < kMaxDivergenceLogs) {
-        XELOGW(
-            "MetalAuthority[observer] writer={} predicted={} legacy={} "
-            "ranges={} bytes={} (policy divergence)",
-            WriterKindName(writer), AuthorityActionName(predicted_action),
-            AuthorityActionName(legacy.action), ranges.size(),
-            ranges.CoveredBytes());
-      }
-    } else {
-      ++writer_agree_[wi];
-    }
-  }
-
-  // Emit a one-line summary per consumer/writer kind. Throttled by the caller
-  // (e.g. once per swap interval); safe to call at any point.
-  void ReportSummary() const {
-    for (size_t c = 0; c < kConsumerCount; ++c) {
-      if (!consumer_records_[c]) {
-        continue;
-      }
-      XELOGI(
-          "MetalAuthority[observer] consumer={} records={} agree={} "
-          "disagree={} await={} drain={} legacy_commits={} legacy_waits={} "
-          "legacy_drain={} "
-          "pred_drained_recs={} legacy_drained_recs={}",
-          ConsumerKindName(static_cast<ConsumerKind>(c)), consumer_records_[c],
-          consumer_agree_[c], consumer_disagree_[c], consumer_await_[c],
-          consumer_drain_[c], legacy_commit_[c], legacy_wait_[c],
-          legacy_drain_[c], predicted_drained_records_[c],
-          legacy_drained_records_[c]);
-    }
-    for (size_t w = 0; w < kWriterCount; ++w) {
-      if (!writer_records_[w]) {
-        continue;
-      }
-      XELOGI(
-          "MetalAuthority[observer] writer={} records={} agree={} disagree={} "
-          "ranges={} bytes={} invalidated_entries={} commits={} waits={}",
-          WriterKindName(static_cast<WriterKind>(w)), writer_records_[w],
-          writer_agree_[w], writer_disagree_[w], writer_range_count_[w],
-          writer_range_bytes_[w],
-          writer_invalidated_entries_[w], writer_commits_[w],
-          writer_waits_[w]);
-    }
-    // Exact (unsampled) dependency-resolver effect totals. These prove disjoint
-    // consumers add no commit/wait/drain and never resolve inside a consuming
-    // encoder; a nonzero disjoint effect or inside-encoder count is a defect.
-    if (exec_total()) {
-      XELOGI(
-          "MetalAuthority[exact] exec_total={} exec_disjoint={} "
-          "disjoint_commits={} disjoint_waits={} disjoint_drain_attempts={} "
-          "disjoint_drained_records={} inside_consuming_encoder={}",
-          exec_total(), exec_disjoint(), disjoint_commits(), disjoint_waits(),
-          disjoint_drain_attempts(), disjoint_drained_records(),
-          exec_inside_encoder());
-    }
-  }
-
-  // Accessors for the conformance tests (no device, no log noise).
-  uint64_t consumer_records(ConsumerKind c) const {
-    return consumer_records_[static_cast<size_t>(c)];
-  }
-  uint64_t consumer_agree(ConsumerKind c) const {
-    return consumer_agree_[static_cast<size_t>(c)];
-  }
-  uint64_t consumer_disagree(ConsumerKind c) const {
-    return consumer_disagree_[static_cast<size_t>(c)];
-  }
-  uint64_t writer_records(WriterKind w) const {
-    return writer_records_[static_cast<size_t>(w)];
-  }
-  uint64_t writer_agree(WriterKind w) const {
-    return writer_agree_[static_cast<size_t>(w)];
-  }
-  uint64_t writer_range_count(WriterKind w) const {
-    return writer_range_count_[static_cast<size_t>(w)];
-  }
-  uint64_t writer_range_bytes(WriterKind w) const {
-    return writer_range_bytes_[static_cast<size_t>(w)];
-  }
-  uint64_t action_count(AuthorityAction a) const {
-    return action_count_[static_cast<size_t>(a)];
-  }
-  uint64_t predicted_drained_records(ConsumerKind c) const {
-    return predicted_drained_records_[static_cast<size_t>(c)];
-  }
-  uint64_t predicted_drained_records() const {
-    uint64_t total = 0;
-    for (uint64_t count : predicted_drained_records_) {
-      total += count;
-    }
-    return total;
-  }
-  uint64_t legacy_drained_records(ConsumerKind c) const {
-    return legacy_drained_records_[static_cast<size_t>(c)];
-  }
-  uint64_t legacy_drained_records() const {
-    uint64_t total = 0;
-    for (uint64_t count : legacy_drained_records_) {
-      total += count;
-    }
-    return total;
-  }
-
-  // Exact dependency-resolver effect accessors (per ConsumerKind and totals).
-  uint64_t exec_total(ConsumerKind c) const {
-    return exec_total_[static_cast<size_t>(c)];
-  }
-  uint64_t exec_total() const { return SumConsumers(exec_total_); }
-  uint64_t exec_disjoint(ConsumerKind c) const {
-    return exec_disjoint_[static_cast<size_t>(c)];
-  }
-  uint64_t exec_disjoint() const { return SumConsumers(exec_disjoint_); }
-  uint64_t disjoint_commits(ConsumerKind c) const {
-    return disjoint_commit_[static_cast<size_t>(c)];
-  }
-  uint64_t disjoint_commits() const { return SumConsumers(disjoint_commit_); }
-  uint64_t disjoint_waits(ConsumerKind c) const {
-    return disjoint_wait_[static_cast<size_t>(c)];
-  }
-  uint64_t disjoint_waits() const { return SumConsumers(disjoint_wait_); }
-  uint64_t disjoint_drain_attempts(ConsumerKind c) const {
-    return disjoint_drain_attempt_[static_cast<size_t>(c)];
-  }
-  uint64_t disjoint_drain_attempts() const {
-    return SumConsumers(disjoint_drain_attempt_);
-  }
-  uint64_t disjoint_drained_records(ConsumerKind c) const {
-    return disjoint_drained_records_[static_cast<size_t>(c)];
-  }
-  uint64_t disjoint_drained_records() const {
-    return SumConsumers(disjoint_drained_records_);
-  }
-  uint64_t exec_inside_encoder(ConsumerKind c) const {
-    return exec_inside_encoder_[static_cast<size_t>(c)];
-  }
-  uint64_t exec_inside_encoder() const {
-    return SumConsumers(exec_inside_encoder_);
-  }
-
- private:
-  static constexpr size_t kConsumerCount = 4;
-  static constexpr size_t kWriterCount = 4;
-  static constexpr size_t kActionCount = 7;
-
-  // Sampling counters (mutable across the throttle checks).
-  uint32_t consumer_seen_[kConsumerCount] = {};
-  uint32_t writer_seen_[kWriterCount] = {};
-
-  // Consumer tallies.
-  uint64_t consumer_records_[kConsumerCount] = {};
-  uint64_t consumer_agree_[kConsumerCount] = {};
-  uint64_t consumer_disagree_[kConsumerCount] = {};
-  uint64_t consumer_await_[kConsumerCount] = {};
-  uint64_t consumer_drain_[kConsumerCount] = {};
-  uint64_t legacy_commit_[kConsumerCount] = {};
-  uint64_t legacy_wait_[kConsumerCount] = {};
-  uint64_t legacy_drain_[kConsumerCount] = {};
-
-  // Writer tallies.
-  uint64_t writer_records_[kWriterCount] = {};
-  uint64_t writer_agree_[kWriterCount] = {};
-  uint64_t writer_disagree_[kWriterCount] = {};
-  uint64_t writer_range_count_[kWriterCount] = {};
-  uint64_t writer_range_bytes_[kWriterCount] = {};
-  uint64_t writer_invalidated_entries_[kWriterCount] = {};
-  uint64_t writer_commits_[kWriterCount] = {};
-  uint64_t writer_waits_[kWriterCount] = {};
-
-  // Action histogram + drain-breadth accounting.
-  uint64_t action_count_[kActionCount] = {};
-  uint64_t predicted_drained_records_[kConsumerCount] = {};
-  uint64_t legacy_drained_records_[kConsumerCount] = {};
-
-  // Exact (unsampled) dependency-resolver effect tallies. Temporary telemetry
-  // only: they count the factual commits/waits/drains a resolver produced, so a
-  // disjoint consumer's zero-effect contract is measurable rather than assumed.
-  uint64_t exec_total_[kConsumerCount] = {};
-  uint64_t exec_disjoint_[kConsumerCount] = {};
-  uint64_t disjoint_commit_[kConsumerCount] = {};
-  uint64_t disjoint_wait_[kConsumerCount] = {};
-  uint64_t disjoint_drain_attempt_[kConsumerCount] = {};
-  uint64_t disjoint_drained_records_[kConsumerCount] = {};
-  uint64_t exec_inside_encoder_[kConsumerCount] = {};
-
-  static uint64_t SumConsumers(const uint64_t (&counts)[kConsumerCount]) {
-    uint64_t total = 0;
-    for (uint64_t count : counts) {
-      total += count;
-    }
-    return total;
-  }
-
-  uint32_t divergence_logs_ = 0;
-};
 
 }  // namespace metal
 }  // namespace gpu

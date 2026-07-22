@@ -579,7 +579,7 @@ TEST_CASE(
                                                 kBase + 0x100, 0x20);
   REQUIRE(publication.has_value());
   RealCacheRamWriteTarget target(*shared, legacy);
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(outcome.shared_invalidation_executed);
   REQUIRE(outcome.legacy_invalidation_executed);
   REQUIRE(outcome.invalidated_entries == 2u);

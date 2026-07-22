@@ -14,9 +14,10 @@
 // exact production sequence after the writer-audit correction: write guest RAM
 // via TranslatePhysical, then MemoryInvalidationCallback(extent, exact) — the
 // same authority entry the guest-mirror fault path reaches. The physical
-// callback thunk is exercised directly to prove its Metal observation fires
-// once and direct backend invalidations do not masquerade as CPU writes. (A full
-// command-processor drain in this harness would be artificial; the drain's
+// callback thunk is exercised directly to prove the functional shared-memory
+// invalidation used by guest CPU writes. Direct backend publications are
+// covered at their explicit typed call sites. (A full command-processor drain
+// in this harness would be artificial; the drain's
 // call path into the same authority is established by the code audit recorded
 // in the gpu-texture-loads design. The host exception transport into the thunk
 // is not exercised here — it requires installed exception handling — and is
@@ -342,7 +343,7 @@ uint64_t ApplyWriter(CoherenceHarness& h, WriterKind writer, uint32_t addr,
       auto publication = DecideRamWritePublication(writer, addr, len);
       REQUIRE(publication.has_value());
       RealRamWritePublicationTarget target(h.shared.get());
-      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
       REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
       REQUIRE(outcome.shared_invalidation_executed);
       REQUIRE(target.shared_calls == 1u);
@@ -424,9 +425,9 @@ CellResult WriteAndConsume(CoherenceHarness& h, WriterKind writer,
     }
     return false;
   };
-  LegacyDrainOutcome drain = DrainSelectedProducers(
+  ProducerDrainOutcome drain = DrainSelectedProducers(
       decision, [&](const PendingProducer& selected) {
-        LegacyDrainOutcome one;
+        ProducerDrainOutcome one;
         MemexportConvergenceResult converged =
             ConvergeMemexportRam(selected, convergence_target);
         REQUIRE(converged.converged);
@@ -477,30 +478,6 @@ TEST_CASE("SM coherence: initially-invalid range validates and GPU-reads",
   h.RamWrite(addr, bytes);
   REQUIRE(h.shared->RequestRange(addr, kPage));
   REQUIRE(h.GpuRead(addr, kPage) == bytes);
-}
-
-TEST_CASE("SM coherence: only the physical thunk observes a guest CPU writer",
-          "[l1][metal][sharedmem][authority]") {
-  REQUIRE_DEVICE();
-  auto& h = H();
-  const uint32_t addr = 0x0A080000;
-  h.EnsureAllocated(addr, kPage);
-
-  auto before = h.shared->guest_cpu_authority_stats();
-  h.shared->MemoryInvalidationCallback(addr, 0x80u, true);
-  auto after_direct = h.shared->guest_cpu_authority_stats();
-  REQUIRE(after_direct.publications == before.publications);
-  REQUIRE(after_direct.range_bytes == before.range_bytes);
-
-  h.shared->InvokePhysicalInvalidation(addr + 0x40u, 0x80u, false);
-  auto after_physical = h.shared->guest_cpu_authority_stats();
-  REQUIRE(after_physical.publications == before.publications + 1u);
-  REQUIRE(after_physical.range_bytes == before.range_bytes + 0x80u);
-
-  h.shared->MemoryInvalidationCallback(addr, 0x80u, true);
-  auto after_second_direct = h.shared->guest_cpu_authority_stats();
-  REQUIRE(after_second_direct.publications == after_physical.publications);
-  REQUIRE(after_second_direct.range_bytes == after_physical.range_bytes);
 }
 
 TEST_CASE("SM coherence: drain-sequence write + extent invalidation "
@@ -679,7 +656,7 @@ TEST_CASE("SM coherence: typed resolve and trace publication reaches exact "
     auto publication = DecideRamWritePublication(writer_case.writer, writer_case.address, kPage);
     REQUIRE(publication.has_value());
     RealRamWritePublicationTarget target(h.shared.get());
-    LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+    RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
 
     REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
     REQUIRE(outcome.shared_invalidation_executed);
@@ -890,9 +867,9 @@ TEST_CASE("SM coherence: aliased same-frame consumers observe the newest "
       }
       return false;
     };
-    LegacyDrainOutcome drain = DrainSelectedProducers(
+    ProducerDrainOutcome drain = DrainSelectedProducers(
         decision, [&](const PendingProducer& selected) {
-          LegacyDrainOutcome one;
+          ProducerDrainOutcome one;
           if (selected.state == TransitState::kPendingResolve) {
             // The resolve's checked scatter deposits its bytes to RAM, then the
             // typed seam publishes the exact extent.
@@ -902,7 +879,7 @@ TEST_CASE("SM coherence: aliased same-frame consumers observe the newest "
                 selected.range.length());
             REQUIRE(resolve_publication.has_value());
             RealRamWritePublicationTarget resolve_target(h.shared.get());
-            LegacyWriterOutcome resolve_outcome =
+            RamWritePublicationOutcome resolve_outcome =
                 PublishRamWrite(*resolve_publication, resolve_target);
             REQUIRE(resolve_outcome.action ==
                     AuthorityAction::kInvalidateRamWrite);
@@ -951,14 +928,10 @@ TEST_CASE("SM coherence: repeated mixed writers leave each later consumer on "
     INFO("mixed-writer cycle " << uint32_t(cycle));
     uint8_t seed = uint8_t(0x40u + cycle * 8u);
 
-    // Guest CPU: only the real physical callback thunk may observe the writer.
+    // Guest CPU: the real physical callback thunk publishes the writer.
     auto cpu_bytes = h.Pattern(kPage, seed);
-    auto cpu_stats_before = h.shared->guest_cpu_authority_stats();
     h.RamWrite(addr, cpu_bytes);
     h.shared->InvokePhysicalInvalidation(addr, kPage, true);
-    auto cpu_stats_after = h.shared->guest_cpu_authority_stats();
-    REQUIRE(cpu_stats_after.publications == cpu_stats_before.publications + 1u);
-    REQUIRE(cpu_stats_after.range_bytes == cpu_stats_before.range_bytes + kPage);
     REQUIRE(h.shared->RequestRange(addr, kPage));
     REQUIRE(h.RamRead(addr, kPage) == cpu_bytes);
     REQUIRE(h.SharedRead(addr, kPage) == cpu_bytes);
@@ -971,7 +944,7 @@ TEST_CASE("SM coherence: repeated mixed writers leave each later consumer on "
     auto resolve_publication = DecideRamWritePublication(WriterKind::kResolve, addr, kPage);
     REQUIRE(resolve_publication.has_value());
     RealRamWritePublicationTarget resolve_target(h.shared.get());
-    LegacyWriterOutcome resolve_outcome = PublishRamWrite(*resolve_publication, resolve_target);
+    RamWritePublicationOutcome resolve_outcome = PublishRamWrite(*resolve_publication, resolve_target);
     REQUIRE(resolve_outcome.action == AuthorityAction::kInvalidateRamWrite);
     REQUIRE(resolve_target.shared_calls == 1u);
     REQUIRE(resolve_target.legacy_calls == 0u);
@@ -1035,7 +1008,7 @@ TEST_CASE("SM coherence: repeated mixed writers leave each later consumer on "
     auto trace_publication = DecideRamWritePublication(WriterKind::kTraceRestore, addr, kPage);
     REQUIRE(trace_publication.has_value());
     RealRamWritePublicationTarget trace_target(h.shared.get());
-    LegacyWriterOutcome trace_outcome = PublishRamWrite(*trace_publication, trace_target);
+    RamWritePublicationOutcome trace_outcome = PublishRamWrite(*trace_publication, trace_target);
     REQUIRE(trace_outcome.action == AuthorityAction::kInvalidateRamWrite);
     REQUIRE(trace_target.shared_calls == 1u);
     REQUIRE(trace_target.legacy_calls == 1u);
@@ -1432,7 +1405,7 @@ uint64_t ApplyBoundaryWriter(BoundaryByteWorld& world, WriterKind writer,
       REQUIRE(publication->range.start() == start);
       REQUIRE(publication->range.length() == clamped_len);  // clamped, no wrap.
       BoundaryRamWriteTarget target(&world);
-      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
       REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
       // Guest CPU policy: the seam re-publishes nothing (the callback already did).
       REQUIRE(target.shared_calls == 0u);
@@ -1448,7 +1421,7 @@ uint64_t ApplyBoundaryWriter(BoundaryByteWorld& world, WriterKind writer,
       REQUIRE(publication->range.start() == start);
       REQUIRE(publication->range.length() == clamped_len);  // clamped, no wrap.
       BoundaryRamWriteTarget target(&world);
-      LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+      RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
       REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
       REQUIRE(outcome.shared_invalidation_executed);
       REQUIRE(target.shared_calls == 1u);
@@ -1554,9 +1527,9 @@ TEST_CASE("Authority matrix: four-writer x four-consumer 512 MiB "
       // Any pending memexport record converges through the real seam and is
       // retired by its unique authority sequence; the RAM writers leave nothing.
       BoundaryConvergenceTarget convergence_target(&world);
-      LegacyDrainOutcome drain = DrainSelectedProducers(
+      ProducerDrainOutcome drain = DrainSelectedProducers(
           decision, [&](const PendingProducer& selected) {
-            LegacyDrainOutcome one;
+            ProducerDrainOutcome one;
             MemexportConvergenceResult converged =
                 ConvergeMemexportRam(selected, convergence_target);
             REQUIRE(converged.converged);

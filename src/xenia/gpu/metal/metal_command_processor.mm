@@ -433,25 +433,12 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   if (texture_cache_) {
     texture_cache_->SetTracePlayback();
   }
-  metal::LegacyWriterOutcome outcome;
   auto publication = metal::DecideRamWritePublication(
       metal::WriterKind::kTraceRestore, base_ptr, length);
   if (publication) {
     MetalRamWritePublicationTarget target(shared_memory_.get(),
                                           texture_cache_.get());
-    outcome = metal::PublishRamWrite(*publication, target);
-  }
-  // Observer-only (task 2.4): trace restore publishes restored bytes to RAM via
-  // the shared + legacy invalidation above. Record the writer transition; the
-  // seam predicts the same invalidate-RAM publication. Never acts.
-  if (publication && authority_observer_.ShouldSampleWriter(
-                         metal::WriterKind::kTraceRestore)) {
-    metal::GuestRangeSet ranges;
-    ranges.Add(publication->range);
-    authority_observer_.RecordWriter(
-        metal::WriterKind::kTraceRestore, ranges,
-        metal::DecideWriterPublication(metal::WriterKind::kTraceRestore),
-        outcome);
+    metal::PublishRamWrite(*publication, target);
   }
 }
 
@@ -1569,20 +1556,15 @@ void MetalCommandProcessor::EndFrameEncoder() {
   PumpCompletedActions();
 }
 
-metal::LegacySyncOutcome MetalCommandProcessor::EndFrameEncoderAndWait() {
+void MetalCommandProcessor::EndFrameEncoderAndWait() {
   // For sites that read GPU results on the CPU right after the commit
   // (writeback drains, guest fence waits, EDRAM/RT readbacks, shutdown):
   // full synchronous semantics.
   bool had_buffer = frame_command_buffer_ != nullptr;
   EndFrameEncoder();
-  bool wait_completed = false;
-  if (had_buffer) {
-    wait_completed = WaitForSubmission(submission_counter_);
-    if (wait_completed) {
-      PumpCompletedActions();
-    }
+  if (had_buffer && WaitForSubmission(submission_counter_)) {
+    PumpCompletedActions();
   }
-  return {/*committed=*/had_buffer, /*waited=*/wait_completed};
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -1642,17 +1624,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
-  // Task 4.6: the current-consuming-encoder phase marker is scoped to this one
-  // IssueDraw. It is set true only after BeginFrameEncoder succeeds below; this
-  // RAII guard clears it on EVERY exit path so the next draw starts with no
-  // consuming encoder of its own and every dependency resolver (which run
-  // strictly before BeginFrameEncoder) observes the scope as inactive. The
-  // marker observes phase only and controls no behavior.
-  struct ConsumingEncoderScopeGuard {
-    bool* flag;
-    ~ConsumingEncoderScopeGuard() { *flag = false; }
-  } consuming_encoder_scope_guard{&current_consuming_encoder_active_};
-
   // An EDRAM "copy mode" draw is not geometry — it's a resolve (EDRAM ->
   // guest). The D3D12/Vulkan backends dispatch this from IssueDraw; without the
   // check our backend treated resolves as normal draws and IssueCopy never fired
@@ -2057,21 +2028,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         QueryPendingProducerDependencies(
             metal::ConsumerKind::kVertex,
             metal::ConsumerRequest::Uniform(vertex_dependency_ranges));
-    bool overlap = !authority_decision.selected.empty();
-    bool authority_sample = authority_observer_.ShouldSampleConsumer(
-        metal::ConsumerKind::kVertex);
     ProducerDependencyOutcome dependency_outcome =
         ResolvePendingProducerDependencies(authority_decision);
-    if (authority_sample) {
-      metal::LegacyConsumerOutcome legacy;
-      legacy.overlap = overlap;
-      legacy.committed = dependency_outcome.sync.committed;
-      legacy.waited = dependency_outcome.sync.waited;
-      legacy.drained = dependency_outcome.drain_attempted;
-      legacy.drain_range_scoped = true;
-      legacy.drained_records = dependency_outcome.drain.drained_records;
-      authority_observer_.RecordConsumer(authority_decision, legacy);
-    }
     if (!dependency_outcome.complete) {
       XELOGE(
           "MetalCommandProcessor: vertex dependency convergence retired {} "
@@ -2465,25 +2423,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
-    bool tex_overlap = !authority_decision.selected.empty();
-    bool authority_sample = authority_observer_.ShouldSampleConsumer(
-        metal::ConsumerKind::kTexture);
+    // Task 4.3 routes both texture-cache implementations through the common
+    // selected-record executor: one boundary, selective drain, before either
+    // cache consumes the RAM-derived bytes below.
     ProducerDependencyOutcome dependency_outcome =
         ResolvePendingProducerDependencies(authority_decision);
-    // Task 4.3 routes both texture-cache implementations through the common
-    // selected-record executor above. Telemetry remains throttled and records
-    // the factual one-boundary, selective action before either cache consumes
-    // the RAM-derived bytes below.
-    if (authority_sample) {
-      metal::LegacyConsumerOutcome legacy;
-      legacy.overlap = tex_overlap;
-      legacy.committed = dependency_outcome.sync.committed;
-      legacy.waited = dependency_outcome.sync.waited;
-      legacy.drained = dependency_outcome.drain_attempted;
-      legacy.drain_range_scoped = true;
-      legacy.drained_records = dependency_outcome.drain.drained_records;
-      authority_observer_.RecordConsumer(authority_decision, legacy);
-    }
     if (!dependency_outcome.complete) {
       XELOGE(
           "MetalCommandProcessor: texture dependency convergence retired {} "
@@ -2642,11 +2586,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ++draw_skip_count_;
     return true;
   }
-  // The CURRENT draw has now acquired its consuming encoder (task 4.6). Mark
-  // the logical scope; every dependency resolver above already ran, so this
-  // proves resolution never happens inside an active consuming encoder. Phase
-  // marker only -- the RAII guard clears it on exit and it drives no behavior.
-  current_consuming_encoder_active_ = true;
 
   // --- Marshal the constant buffers (b0-b4), matching the D3D12 backend. ---
   MetalUploadAllocation system_alloc{};
@@ -3757,19 +3696,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             "MetalMemexport: failed to publish GPU write {:08X}(+{}); "
             "no GPU-written notification was issued",
             range_base, range.size_bytes);
-      }
-      // Observer-only (task 2.4): this is the one ordered publish-GPU-write
-      // transition (RangeWrittenByGpu + pending record). Record, never act.
-      if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kMemexport)) {
-        metal::GuestRangeSet ranges;
-        ranges.Add(
-            metal::GuestRange::FromBaseLength(range_base, range.size_bytes));
-        authority_observer_.RecordWriter(
-            metal::WriterKind::kMemexport, ranges,
-            metal::DecideWriterPublication(metal::WriterKind::kMemexport),
-            {/*action=*/publish_result.action,
-             /*invalidated_entries=*/0, /*committed=*/false,
-             /*waited=*/false});
       }
     }
   }
@@ -5152,7 +5078,7 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
   // GuestRange; a record whose extent has no in-bounds byte is skipped (it can
   // never be a real dependency). The existing records carry one cross-kind
   // registration sequence so the seam sees chronological producer order even
-  // though the two legacy queues are stored and drained separately.
+  // though the two backing queues are stored and drained separately.
   std::vector<metal::PendingProducer> producers;
   producers.reserve(pending_writebacks_.size() + pending_memexports_.size());
   for (const PendingWriteback& wb : pending_writebacks_) {
@@ -5185,17 +5111,17 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
     const metal::ConsumerRequest& request) const {
   // Task 4.1's one multi-range query. It selects only intersecting records
   // from the two existing producer queues and owns no authority state. The
-  // caller still executes its established commit/wait/drain policy; routing
-  // those consumer-specific actions belongs to tasks 4.2 through 4.4.
+  // The caller executes the promoted one-boundary commit/wait and selective
+  // drain policy for the returned decision.
   return metal::DecideConsumer(
       consumer, request, SnapshotPendingProducers(),
       completed_submission_.load(std::memory_order_acquire));
 }
 
-metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
+metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     uint32_t filter_base, uint32_t filter_size,
     uint64_t filter_authority_sequence) {
-  metal::LegacyDrainOutcome outcome;
+  metal::ProducerDrainOutcome outcome;
   auto filter_range =
       metal::GuestRange::FromBaseLength(filter_base, filter_size);
   auto in_filter = [&](uint32_t base, uint32_t size,
@@ -5244,16 +5170,6 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         // registered, but retain rather than drop so a record is never
         // silently discarded outside the explicit success path.
         still_pending_exports.push_back(me);
-        if (authority_observer_.ShouldSampleWriter(
-                metal::WriterKind::kMemexport)) {
-          metal::GuestRangeSet ranges;
-          authority_observer_.RecordWriter(
-              metal::WriterKind::kMemexport, ranges,
-              metal::AuthorityAction::kConvergeRamFromBuffer,
-              {/*action=*/metal::AuthorityAction::kNoDependency,
-               /*invalidated_entries=*/0, /*committed=*/false,
-               /*waited=*/false});
-        }
         continue;
       }
       static uint32_t s_me_drains = 0;
@@ -5295,17 +5211,6 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
               "retaining pending record for retry",
               me.base_address, me.size_bytes);
         }
-        if (authority_observer_.ShouldSampleWriter(
-                metal::WriterKind::kMemexport)) {
-          metal::GuestRangeSet ranges;
-          ranges.Add(*range);
-          authority_observer_.RecordWriter(
-              metal::WriterKind::kMemexport, ranges,
-              metal::AuthorityAction::kConvergeRamFromBuffer,
-              {/*action=*/metal::AuthorityAction::kNoDependency,
-               /*invalidated_entries=*/0, /*committed=*/false,
-               /*waited=*/false});
-        }
         continue;
       }
       ++outcome.drained_records;
@@ -5326,17 +5231,6 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
                old_hash == new_hash ? " (UNCHANGED — stores did not land?)"
                                     : " (exported content differs)");
       }
-      if (authority_observer_.ShouldSampleWriter(
-              metal::WriterKind::kMemexport)) {
-        metal::GuestRangeSet ranges;
-        ranges.Add(*range);
-        authority_observer_.RecordWriter(
-            metal::WriterKind::kMemexport, ranges,
-            metal::AuthorityAction::kConvergeRamFromBuffer,
-            {/*action=*/metal::AuthorityAction::kConvergeRamFromBuffer,
-             result.invalidated_entries, /*committed=*/false,
-             /*waited=*/false});
-      }
     }
     pending_memexports_ = std::move(still_pending_exports);
   }
@@ -5349,7 +5243,7 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       continue;
     }
     uint32_t invalidated_entries = 0;
-    metal::LegacyWriterOutcome publish_outcome;
+    metal::RamWritePublicationOutcome publish_outcome;
     // Borrow the retained staging buffer until RAM publication succeeds. A
     // failed mapping/invalidation must keep both the record and its staging
     // ownership so a later drain can retry rather than silently retiring
@@ -5645,21 +5539,6 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         publish_outcome = metal::PublishRamWrite(*publication, target);
       }
     }
-    // Observer-only (task 2.4): record after every corrective RAM write and
-    // publication operation has run. The legacy outcome is the seam's own
-    // factual result (whether InvalidateSharedPages actually ran), merged with
-    // the STAGE-3 texture-cache invalidation count from above -- never
-    // rederived from the same decision the observer compares against.
-    if (authority_observer_.ShouldSampleWriter(metal::WriterKind::kResolve)) {
-      metal::GuestRangeSet ranges;
-      ranges.Add(metal::GuestRange::FromBaseLength(wb.guest_addr,
-                                                   wb.dest_extent_bytes));
-      publish_outcome.invalidated_entries = invalidated_entries;
-      authority_observer_.RecordWriter(
-          metal::WriterKind::kResolve, ranges,
-          metal::DecideWriterPublication(metal::WriterKind::kResolve),
-          publish_outcome);
-    }
     if (publish_outcome.action !=
         metal::AuthorityAction::kInvalidateRamWrite) {
       static uint32_t s_failed_resolve_publications = 0;
@@ -5684,7 +5563,7 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   return outcome;
 }
 
-metal::LegacyDrainOutcome
+metal::ProducerDrainOutcome
 MetalCommandProcessor::DrainSelectedPendingProducers(
     const metal::ConsumerDecision& decision) {
   // DecideConsumer returns selected records in their cross-kind registration
@@ -5706,21 +5585,10 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
 MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision) {
-  // Snapshot the logical consuming-encoder phase at resolver entry (task 4.6).
-  // IssueDraw marks current_consuming_encoder_active_ only AFTER
-  // BeginFrameEncoder, which is strictly after every resolver call, so a
-  // physical encoder retained from a prior draw is never mistaken for this
-  // draw's consumer. The exact recorder uses this to prove no dependency
-  // resolution runs inside an active consuming encoder. It reads phase only.
-  const bool inside_consuming_encoder = current_consuming_encoder_active_;
   ProducerDependencyOutcome outcome;
   if (decision.selected.empty()) {
-    // Early no-op preserved EXACTLY: a disjoint (or no-pending) consumer adds
-    // no commit, wait, or drain. Record the factual zero effects before the
-    // unchanged return so counters can prove it.
-    authority_observer_.RecordDependencyExecution(
-        decision, outcome.sync, outcome.drain_attempted, outcome.drain,
-        inside_consuming_encoder);
+    // Early no-op: a disjoint (or no-pending) consumer adds no commit, wait, or
+    // drain.
     return outcome;
   }
 
@@ -5730,33 +5598,23 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   // commit and prove it completed independently of the record tag.
   uint64_t boundary_submission =
       frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
-  outcome.sync = EndFrameEncoderAndWait();
+  EndFrameEncoderAndWait();
   uint64_t required_submission =
       std::max(boundary_submission, decision.max_wait_submission);
   if (required_submission >
       completed_submission_.load(std::memory_order_acquire)) {
     bool waited = WaitForSubmission(required_submission);
-    outcome.sync.waited = outcome.sync.waited || waited;
     if (!waited) {
-      outcome.complete = false;
       // Failed-wait path: the commit already happened but the drain did not.
-      // Record the factual sync effect (no drain attempted) before the
-      // unchanged return.
-      authority_observer_.RecordDependencyExecution(
-          decision, outcome.sync, outcome.drain_attempted, outcome.drain,
-          inside_consuming_encoder);
+      outcome.complete = false;
       return outcome;
     }
     PumpCompletedActions();
   }
 
-  outcome.drain_attempted = true;
   outcome.drain = DrainSelectedPendingProducers(decision);
   outcome.complete =
       outcome.drain.drained_records == decision.selected.size();
-  authority_observer_.RecordDependencyExecution(
-      decision, outcome.sync, outcome.drain_attempted, outcome.drain,
-      inside_consuming_encoder);
   return outcome;
 }
 
@@ -5769,21 +5627,8 @@ bool MetalCommandProcessor::ResolveRamConsumerDependencies(
 
   metal::ConsumerDecision decision = QueryPendingProducerDependencies(
       consumer, metal::ConsumerRequest::Uniform(requested_ranges));
-  bool overlap = !decision.selected.empty();
-  bool authority_sample = authority_observer_.ShouldSampleConsumer(consumer);
   ProducerDependencyOutcome outcome =
       ResolvePendingProducerDependencies(decision);
-
-  if (authority_sample) {
-    metal::LegacyConsumerOutcome actual;
-    actual.overlap = overlap;
-    actual.committed = outcome.sync.committed;
-    actual.waited = outcome.sync.waited;
-    actual.drained = outcome.drain_attempted;
-    actual.drain_range_scoped = true;
-    actual.drained_records = outcome.drain.drained_records;
-    authority_observer_.RecordConsumer(decision, actual);
-  }
 
   if (!outcome.complete) {
     XELOGE(
@@ -5985,20 +5830,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
-      // Observer-only (task 2.4): emit the bounded cross-writer authority
-      // agreement summary on the same 128-swap cadence (counters, not a
-      // per-frame log). No behavior is executed.
-      authority_observer_.ReportSummary();
-      if (shared_memory_) {
-        auto cpu_stats = shared_memory_->guest_cpu_authority_stats();
-        if (cpu_stats.publications) {
-          XELOGI(
-              "MetalAuthority[cpu-watch] writer=guest_cpu callbacks={} "
-              "ranges={} bytes={} action=invalidate_ram source=physical_watch",
-              cpu_stats.publications, cpu_stats.publications,
-              cpu_stats.range_bytes);
-        }
-      }
     }
   }
   // Cycle-transfer instrument (XE_METAL_DUMP_SNAPSHOT=<hexbase>): dump the

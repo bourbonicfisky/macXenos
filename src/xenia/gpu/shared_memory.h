@@ -107,14 +107,6 @@ class SharedMemory {
  protected:
   SharedMemory(Memory& memory);
 
-  // Observation-only hook fired after MemoryInvalidationCallbackThunk handles
-  // the sole physical-memory watch. Direct backend invalidations (trace restore,
-  // resolve) don't reach this hook. It may run on an arbitrary guest thread, so
-  // implementations must use thread-safe, non-blocking bookkeeping and must not
-  // reenter SharedMemory. No-op for backends that don't observe CPU writers.
-  virtual void ObservePhysicalWrite(uint32_t physical_address_start,
-                                    uint32_t length) {}
-
   // Registered directly as the one physical-memory invalidation callback.
   // Protected so conformance subclasses can exercise the exact production
   // dispatch boundary without installing a second watch.

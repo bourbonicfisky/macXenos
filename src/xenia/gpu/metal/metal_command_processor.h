@@ -123,15 +123,13 @@ class MetalCommandProcessor : public CommandProcessor {
   // only entries overlapping [filter_base, filter_base+filter_size) drain —
   // the same-frame vfetch barrier must NOT drain unrelated writebacks (the
   // exposure ping-pong reads mid-frame luminance otherwise: black flicker).
-  metal::LegacyDrainOutcome DrainPendingWritebacks(
+  metal::ProducerDrainOutcome DrainPendingWritebacks(
       uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu,
       uint64_t filter_authority_sequence = 0);
-  metal::LegacyDrainOutcome DrainSelectedPendingProducers(
+  metal::ProducerDrainOutcome DrainSelectedPendingProducers(
       const metal::ConsumerDecision& decision);
   struct ProducerDependencyOutcome {
-    metal::LegacySyncOutcome sync;
-    metal::LegacyDrainOutcome drain;
-    bool drain_attempted = false;
+    metal::ProducerDrainOutcome drain;
     bool complete = true;
   };
   ProducerDependencyOutcome ResolvePendingProducerDependencies(
@@ -250,15 +248,6 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
 
-  // Task 4.6 logical current-consuming-encoder phase marker. Set true ONLY
-  // after BeginFrameEncoder successfully returns for the CURRENT draw (so a
-  // physical encoder retained from a prior draw is not mistaken for this draw's
-  // consumer), and reset to false on every IssueDraw exit via a small RAII
-  // guard. The exact dependency recorder reads it at resolver entry to prove no
-  // dependency resolution runs inside an active consuming encoder. It observes
-  // phase only and MUST NOT control any behavior.
-  bool current_consuming_encoder_active_ = false;
-
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)
   // the open encoder was created with; a draw whose accumulated render targets
   // differ closes the encoder and opens a new pass.
@@ -346,7 +335,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // EndFrameEncoderAndWait. Faults are recorded by the completion handler
   // and drained (logged + auto-recovered) on the GPU thread from
   // PumpCompletedActions.
-  metal::LegacySyncOutcome EndFrameEncoderAndWait();
+  void EndFrameEncoderAndWait();
   // Blocks until `submission` completes (condition variable signaled by the
   // completion handler). Returns false on timeout — a wedged GPU.
   bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000);
@@ -425,7 +414,7 @@ class MetalCommandProcessor : public CommandProcessor {
     // (depth24 << 8, stencil 0 in v1) before the endian scatter.
     // 0 = color (no conversion), 1 = unorm24 (k_24_8), 2 = float24 (20e4).
     uint32_t depth_encode;
-    // Monotonic cross-kind registration order for observer/seam chronology.
+    // Monotonic cross-kind registration order for authority-seam chronology.
     // This lives on the existing pending record; it is not a second queue.
     uint64_t authority_sequence;
 
@@ -455,13 +444,6 @@ class MetalCommandProcessor : public CommandProcessor {
   // Same-frame consumer visibility (v1) is handled by the stage-3 lazy flush
   // in IssueDraw: a draw whose texture fetches overlap a pending memexport
   // commits + waits + drains before its uploads read guest RAM.
-
-  // Observer-only cross-writer authority telemetry (task 2.4). Records the
-  // seam's predicted selective action alongside the legacy vertex/texture/WAIT
-  // action and writer publication, bounded/throttled. It executes NO behavior
-  // and holds only counters -- it is telemetry, never a second authority. A
-  // periodic summary is emitted from IssueSwap.
-  metal::AuthorityObserver authority_observer_;
 
   // XE_METAL_TIP_SNAP_VIEW: per-base derived 1x1 R32F copies of snapshot
   // texel (0,0) (retained id<MTLTexture>; experiment-scoped, freed with the

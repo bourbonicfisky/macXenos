@@ -8,16 +8,16 @@
  */
 
 // Level 0 (device-free) conformance for the cross-writer memory-authority
-// decision seam (OpenSpec implement-metal-cross-writer-memory-authority, tasks
-// 2.3 and 2.4). Exercises the pure decision functions and the observer-only
-// telemetry against the full writer/consumer/action matrix:
+// decision seam (OpenSpec implement-metal-cross-writer-memory-authority).
+// Exercises the promoted pure decision and execution functions against the
+// full writer/consumer/action matrix:
 //   * every ConsumerKind x pending-producer arrangement -> AuthorityAction;
 //   * multiple pending records with selective (intersecting-only) selection;
 //   * aliased / disjoint base+mip range sets;
 //   * submission ordering (await vs drain by completed-submission high-water);
 //   * disjoint no-op (no commit, wait, or drain);
 //   * writer publication policy;
-//   * typed observer agreement/disagreement accounting.
+//   * disjoint no-dependency behavior across every consumer kind.
 // Pure C++ + Catch2; links no Metal device and no command processor.
 
 #include <algorithm>
@@ -94,7 +94,6 @@ TEST_CASE("Authority: disjoint consumer selects no dependency", "[l0][authority]
   REQUIRE(decision.selected.empty());
   REQUIRE_FALSE(decision.await);
   REQUIRE_FALSE(decision.drain);
-  REQUIRE(decision.selected_bytes() == 0u);
 }
 
 TEST_CASE("Authority: adjacency is not a dependency", "[l0][authority]") {
@@ -169,7 +168,6 @@ TEST_CASE("Authority: selective drain across multiple pending records",
   REQUIRE(decision.selected[1].range.start() == 0x3000u);
   REQUIRE_FALSE(decision.revalidate_gpu_bytes);  // wait reads guest RAM.
   // The third record is disjoint and must never be drained by this consumer.
-  REQUIRE(decision.selected_bytes() == 0x1000u + 0x1000u);
 }
 
 TEST_CASE("Authority: wait word leaves adjacent and disjoint producers pending",
@@ -420,7 +418,7 @@ TEST_CASE("Authority: trace restore executes normalized RAM publication",
   REQUIRE(publication->action == AuthorityAction::kInvalidateRamWrite);
 
   RecordingRamWriteTarget target;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(target.shared_calls == 1u);
   REQUIRE(target.shared_base == kEnd - 0x100u);
   REQUIRE(target.shared_length == 0x100u);
@@ -434,7 +432,7 @@ TEST_CASE("Authority: trace restore executes normalized RAM publication",
   REQUIRE(outcome.legacy_invalidation_executed);
 }
 
-TEST_CASE("Authority: guest CPU observation never duplicates physical "
+TEST_CASE("Authority: guest CPU publication policy never duplicates physical "
           "invalidation",
           "[l0][authority][publication]") {
   auto publication =
@@ -444,7 +442,7 @@ TEST_CASE("Authority: guest CPU observation never duplicates physical "
   REQUIRE_FALSE(publication->policy.execute_legacy_invalidation);
 
   RecordingRamWriteTarget target;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(target.shared_calls == 0u);
   REQUIRE(target.legacy_calls == 0u);
   REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
@@ -457,7 +455,7 @@ TEST_CASE("Authority: missing publication operation cannot report agreement",
   REQUIRE(publication);
   RecordingRamWriteTarget target;
   target.shared_result = false;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE_FALSE(outcome.shared_invalidation_executed);
   REQUIRE(outcome.legacy_invalidation_executed);
   REQUIRE(outcome.action == AuthorityAction::kNoDependency);
@@ -492,7 +490,7 @@ TEST_CASE("Authority: resolve executes normalized RAM publication",
   REQUIRE_FALSE(publication->policy.execute_legacy_invalidation);
 
   RecordingRamWriteTarget target;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(target.shared_calls == 1u);
   REQUIRE(target.shared_base == 0x20000u);
   REQUIRE(target.shared_length == 0x800u);
@@ -522,7 +520,7 @@ TEST_CASE(
   REQUIRE(publication->range.length() == 0x40u);
 
   RecordingRamWriteTarget target;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(target.shared_base == kEnd - 0x40u);
   REQUIRE(target.shared_length == 0x40u);
   REQUIRE(outcome.action == AuthorityAction::kInvalidateRamWrite);
@@ -550,7 +548,7 @@ TEST_CASE(
   REQUIRE(publication);
   RecordingRamWriteTarget target;
   target.shared_result = false;
-  LegacyWriterOutcome outcome = PublishRamWrite(*publication, target);
+  RamWritePublicationOutcome outcome = PublishRamWrite(*publication, target);
   REQUIRE(target.shared_calls == 1u);
   REQUIRE_FALSE(outcome.shared_invalidation_executed);
   REQUIRE(outcome.action == AuthorityAction::kNoDependency);
@@ -584,175 +582,6 @@ TEST_CASE("Authority: full consumer x producer action matrix", "[l0][authority]"
       REQUIRE(d.action == AuthorityAction::kAwaitProducer);
     }
   }
-}
-
-TEST_CASE("Authority observer: agreement when legacy matches prediction",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  // Prediction: overlap + incomplete -> await. The factual vertex path commits,
-  // waits, then performs its range-scoped drain, so the actions agree.
-  std::vector<PendingProducer> p = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 2)};
-  auto decision = DecideConsumer(ConsumerKind::kVertex,
-                                 SingleRange(0x1000u, 0x1000u), p, 1);
-  LegacyConsumerOutcome legacy;
-  legacy.overlap = true;
-  legacy.committed = true;
-  legacy.waited = true;
-  legacy.drained = true;
-  legacy.drain_range_scoped = true;
-  legacy.drained_records = 1;
-  obs.RecordConsumer(decision, legacy);
-  REQUIRE(obs.consumer_records(ConsumerKind::kVertex) == 1u);
-  REQUIRE(obs.consumer_agree(ConsumerKind::kVertex) == 1u);
-  REQUIRE(obs.consumer_disagree(ConsumerKind::kVertex) == 0u);
-  REQUIRE(obs.predicted_drained_records() == 1u);
-  REQUIRE(obs.legacy_drained_records() == 1u);
-}
-
-TEST_CASE("Authority observer: scope divergence recorded for unfiltered drain",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  // The texture and WAIT paths drain ALL records on any overlap (blocker 6).
-  // The seam predicts a selective drain of only the intersecting record, so the
-  // top-level action agrees but drain breadth diverges -- record it.
-  std::vector<PendingProducer> p = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 2),
-      MakeProducer(0x9000u, 0x1000u, TransitState::kPendingResolve, 2),
-  };
-  auto decision = DecideConsumer(ConsumerKind::kWait,
-                                 SingleRange(0x1000u, 0x1000u), p, 1);
-  REQUIRE(decision.selected.size() == 1u);  // only the intersecting record.
-  LegacyConsumerOutcome legacy;
-  legacy.overlap = true;
-  legacy.committed = true;
-  legacy.waited = true;
-  legacy.drained = true;
-  legacy.drain_range_scoped = false;  // legacy drained ALL records.
-  legacy.drained_records = 2;
-  obs.RecordConsumer(decision, legacy);
-  REQUIRE(obs.consumer_disagree(ConsumerKind::kWait) == 1u);
-  REQUIRE(obs.consumer_agree(ConsumerKind::kWait) == 0u);
-  // The seam would drain one record; legacy drained two.
-  REQUIRE(obs.predicted_drained_records() == 1u);
-  REQUIRE(obs.legacy_drained_records() == 2u);
-}
-
-TEST_CASE("Authority observer: unfiltered identical breadth is agreement",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  std::vector<PendingProducer> p = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 2),
-  };
-  auto decision = DecideConsumer(ConsumerKind::kWait,
-                                 SingleRange(0x1000u, 4u), p, 1);
-  LegacyConsumerOutcome legacy;
-  legacy.overlap = true;
-  legacy.committed = true;
-  legacy.waited = true;
-  legacy.drained = true;
-  legacy.drain_range_scoped = false;
-  legacy.drained_records = 1;
-  obs.RecordConsumer(decision, legacy);
-  REQUIRE(obs.consumer_agree(ConsumerKind::kWait) == 1u);
-  REQUIRE(obs.consumer_disagree(ConsumerKind::kWait) == 0u);
-}
-
-TEST_CASE("Authority observer: range-scoped under-retirement diverges",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  std::vector<PendingProducer> p = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 2),
-      MakeProducer(0x1800u, 0x1000u, TransitState::kPendingMemexport, 2),
-  };
-  auto decision = DecideConsumer(ConsumerKind::kVertex,
-                                 SingleRange(0x1800u, 0x100u), p, 1);
-  REQUIRE(decision.selected.size() == 2u);
-  LegacyConsumerOutcome legacy;
-  legacy.overlap = true;
-  legacy.committed = true;
-  legacy.waited = true;
-  legacy.drained = true;
-  legacy.drain_range_scoped = true;
-  legacy.drained_records = 1;
-  obs.RecordConsumer(decision, legacy);
-  REQUIRE(obs.consumer_disagree(ConsumerKind::kVertex) == 1u);
-}
-
-TEST_CASE("Authority observer: routed host read reports selective convergence",
-          "[l0][authority][cpu-read][telemetry]") {
-  AuthorityObserver obs;
-  std::vector<PendingProducer> producers = {
-      MakeProducer(0x1000u, 0x100u, TransitState::kPendingResolve, 4, 1),
-      MakeProducer(0x9000u, 0x100u, TransitState::kPendingMemexport, 4, 2),
-  };
-  auto decision = DecideConsumer(ConsumerKind::kHostCpuRead,
-                                 SingleRange(0x1000u, 4u), producers, 4);
-  REQUIRE(decision.selected.size() == 1u);
-  LegacyConsumerOutcome actual;
-  actual.overlap = true;
-  actual.drained = true;
-  actual.drain_range_scoped = true;
-  actual.drained_records = 1;
-  obs.RecordConsumer(decision, actual);
-  REQUIRE(obs.consumer_agree(ConsumerKind::kHostCpuRead) == 1u);
-  REQUIRE(obs.consumer_disagree(ConsumerKind::kHostCpuRead) == 0u);
-  REQUIRE(obs.predicted_drained_records() == 1u);
-  REQUIRE(obs.legacy_drained_records() == 1u);
-}
-
-TEST_CASE("Authority observer: no-dependency agreement adds no drain",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  std::vector<PendingProducer> p = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 1)};
-  auto decision = DecideConsumer(ConsumerKind::kTexture,
-                                 SingleRange(0x9000u, 0x1000u), p, 1);
-  LegacyConsumerOutcome legacy;  // legacy also found no overlap: all false.
-  obs.RecordConsumer(decision, legacy);
-  REQUIRE(obs.consumer_agree(ConsumerKind::kTexture) == 1u);
-  REQUIRE(obs.action_count(AuthorityAction::kNoDependency) == 1u);
-  REQUIRE(obs.predicted_drained_records() == 0u);
-}
-
-TEST_CASE("Authority observer: writer publication agreement", "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  GuestRangeSet memexport_ranges = SingleRange(0x4000u, 0x1000u);
-  GuestRangeSet resolve_ranges = SingleRange(0x8000u, 0x2000u);
-  obs.RecordWriter(WriterKind::kMemexport,
-                   memexport_ranges,
-                   DecideWriterPublication(WriterKind::kMemexport),
-                   {/*action=*/AuthorityAction::kPublishGpuWrite,
-                    /*invalidated_entries=*/3, /*committed=*/false,
-                    /*waited=*/false});
-  obs.RecordWriter(WriterKind::kResolve,
-                   resolve_ranges,
-                   DecideWriterPublication(WriterKind::kResolve),
-                   {/*action=*/AuthorityAction::kInvalidateRamWrite,
-                    /*invalidated_entries=*/1, /*committed=*/true,
-                    /*waited=*/true});
-  REQUIRE(obs.writer_records(WriterKind::kMemexport) == 1u);
-  REQUIRE(obs.writer_agree(WriterKind::kMemexport) == 1u);
-  REQUIRE(obs.writer_agree(WriterKind::kResolve) == 1u);
-  REQUIRE(obs.writer_range_count(WriterKind::kMemexport) == 1u);
-  REQUIRE(obs.writer_range_bytes(WriterKind::kMemexport) == 0x1000u);
-  REQUIRE(obs.writer_range_bytes(WriterKind::kResolve) == 0x2000u);
-  REQUIRE(obs.action_count(AuthorityAction::kPublishGpuWrite) == 1u);
-  REQUIRE(obs.action_count(AuthorityAction::kInvalidateRamWrite) == 1u);
-}
-
-TEST_CASE("Authority observer: sampling throttle bounds recorded events",
-          "[l0][authority][telemetry]") {
-  AuthorityObserver obs;
-  uint32_t sampled = 0;
-  for (uint32_t i = 0; i < AuthorityObserver::kInitialSamples * 4; ++i) {
-    if (obs.ShouldSampleConsumer(ConsumerKind::kVertex)) {
-      ++sampled;
-    }
-  }
-  // The first kInitialSamples always sample; after that only 1/kSampleStride.
-  REQUIRE(sampled >= AuthorityObserver::kInitialSamples);
-  REQUIRE(sampled < AuthorityObserver::kInitialSamples * 4);
 }
 
 // --- Task 3.3: memexport destination preparation / publication / RAM
@@ -1106,15 +935,15 @@ class ByteStoreConvergenceTarget : public MemexportConvergenceTarget {
 };
 
 // Drain one selected producer's owed bytes into the RAM image and report the
-// factual LegacyDrainOutcome the shared executor merges. Memexport routes
+// factual ProducerDrainOutcome the shared executor merges. Memexport routes
 // through the real convergence seam; resolve deposits its checked scatter extent
 // the way the writeback drain copies a completed resolve (no device-free resolve
 // byte seam exists, so the store performs the copy the seam's selection
 // ordered). A non-converging producer returns a zero outcome so the shared
 // stop-on-failure policy retains it and the untouched suffix.
-LegacyDrainOutcome ApplyProducerBytes(const ProducerBytes& pb,
+ProducerDrainOutcome ApplyProducerBytes(const ProducerBytes& pb,
                                       std::vector<uint8_t>& ram) {
-  LegacyDrainOutcome outcome;
+  ProducerDrainOutcome outcome;
   if (pb.producer.state == TransitState::kPendingMemexport) {
     ByteStoreConvergenceTarget target(ram, kFrameRamBase, pb);
     MemexportConvergenceResult result = ConvergeMemexportRam(pb.producer, target);
@@ -1157,7 +986,7 @@ enum class WaitModel {
 // selected record. When false, `ram` must not be treated as an observation.
 struct ConsumerObservation {
   ConsumerDecision decision;
-  LegacyDrainOutcome drain;
+  ProducerDrainOutcome drain;
   bool available = false;
   std::vector<uint8_t> ram;
 };
@@ -1240,7 +1069,7 @@ TEST_CASE("Authority bytes: same-frame resolve is seen whole by a vertex fetch",
   REQUIRE(obs.available);
   REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
   REQUIRE(obs.decision.revalidate_gpu_bytes);  // vertex reads the shared buffer.
-  REQUIRE(obs.decision.selected_bytes() == 0x1000u);
+  REQUIRE(obs.decision.selected.size() == 1u);
   // The consumer observes the resolved bytes, not stale RAM.
   RequireRangeBytes(obs.ram, 0x2000u, 0x1000u, 0xA0u);
   RequireRangeBytes(obs.ram, 0x1000u, 0x1000u, kStaleRam);  // outside: untouched.
@@ -1522,205 +1351,48 @@ TEST_CASE(
   }
 }
 
-// --- Task 4.6: disjoint consumers add zero resolver effects ----------------
+// --- Task 4.6: disjoint consumers select no dependency ---------------------
 //
-// The tests above assert the seam's decision (action / selected set / bytes).
-// Task 4.6 asks the resolver-effect question with exact, unsampled counters:
-// when a consumer is disjoint from every pending producer, does the resolver
-// add zero command-buffer commits, zero waits, zero drains, zero drained
-// records, and never resolve inside an active consuming encoder? The exact
-// recorder counts the FACTUAL effects; these tests drive it with real
-// DecideConsumer output. A disjoint query is a nonempty producer set with an
-// empty selection -- distinguished from a no-pending query by the retained
-// considered-producer count.
-
-namespace {
-
-// Build a real disjoint decision: two pending producers, a consumer in the gap
-// between them. Selection is empty, but considered_producers is nonzero.
-ConsumerDecision DisjointDecision(ConsumerKind consumer) {
-  std::vector<PendingProducer> producers = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
-      MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
-  };
-  return DecideConsumer(consumer, SingleRange(0x4000u, 0x400u), producers,
-                        /*completed=*/5);
-}
-
-}  // namespace
-
-TEST_CASE("Authority 4.6: DecideConsumer retains the considered-producer count",
-          "[l0][authority]") {
-  std::vector<PendingProducer> producers = {
-      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
-      MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
-      MakeProducer(0x9000u, 0x1000u, TransitState::kPendingResolve, 5),
-  };
-  // Disjoint request in the gap: selection empty, but the seam considered all
-  // three records, so the disjoint query is distinguishable from a no-pending
-  // one.
-  auto disjoint = DecideConsumer(ConsumerKind::kVertex,
-                                 SingleRange(0x4000u, 0x400u), producers, 5);
-  REQUIRE(disjoint.selected.empty());
-  REQUIRE(disjoint.considered_producers == 3u);
-
-  // No pending producers at all: considered count is zero.
-  auto no_pending = DecideConsumer(ConsumerKind::kVertex,
-                                   SingleRange(0x4000u, 0x400u), {}, 5);
-  REQUIRE(no_pending.selected.empty());
-  REQUIRE(no_pending.considered_producers == 0u);
-
-  // An overlapping request considers every record and selects one.
-  auto overlap = DecideConsumer(ConsumerKind::kVertex,
-                                SingleRange(0x1000u, 0x1000u), producers, 5);
-  REQUIRE(overlap.considered_producers == 3u);
-  REQUIRE(overlap.selected.size() == 1u);
-}
-
+// The promoted resolver adds zero command-buffer commits, waits, and drains
+// for a consumer that is disjoint from every pending producer, because the
+// decision itself carries no dependency: DecideConsumer selects nothing and
+// reports kNoDependency, so ResolvePendingProducerDependencies takes its early
+// no-op return. This device-free test proves that decision property (the
+// behavioral root of the disjoint zero-sync guarantee) across every consumer
+// kind, for a real disjoint query, a no-pending query, and an empty request.
 TEST_CASE(
-    "Authority 4.6: disjoint consumer resolver adds zero commits/waits/drains "
-    "and never resolves inside the consuming encoder",
+    "Authority 4.6: disjoint, no-pending, and empty-request consumers select "
+    "no dependency across every consumer kind",
     "[l0][authority]") {
   const ConsumerKind kinds[] = {ConsumerKind::kTexture, ConsumerKind::kVertex,
                                 ConsumerKind::kWait, ConsumerKind::kHostCpuRead};
-  for (ConsumerKind kind : kinds) {
-    AuthorityObserver obs;
-    ConsumerDecision decision = DisjointDecision(kind);
-    REQUIRE(decision.selected.empty());
-    REQUIRE(decision.considered_producers == 2u);
-
-    // The factual effects the resolver's early no-op path returns for a
-    // disjoint consumer: no commit, no wait, no drain, no drained records, and
-    // (resolvers run strictly before BeginFrameEncoder) not inside the current
-    // consuming encoder.
-    LegacySyncOutcome sync;             // committed=false, waited=false.
-    LegacyDrainOutcome drain;           // drained_records=0.
-    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                  drain, /*inside=*/false);
-
-    // Exact deltas: one execution, one disjoint execution, all effects zero.
-    REQUIRE(obs.exec_total(kind) == 1u);
-    REQUIRE(obs.exec_disjoint(kind) == 1u);
-    REQUIRE(obs.disjoint_commits(kind) == 0u);
-    REQUIRE(obs.disjoint_waits(kind) == 0u);
-    REQUIRE(obs.disjoint_drain_attempts(kind) == 0u);
-    REQUIRE(obs.disjoint_drained_records(kind) == 0u);
-    REQUIRE(obs.exec_inside_encoder(kind) == 0u);
-    // Totals mirror the single per-kind execution.
-    REQUIRE(obs.exec_total() == 1u);
-    REQUIRE(obs.exec_disjoint() == 1u);
-    REQUIRE(obs.disjoint_commits() == 0u);
-    REQUIRE(obs.disjoint_waits() == 0u);
-    REQUIRE(obs.disjoint_drain_attempts() == 0u);
-    REQUIRE(obs.disjoint_drained_records() == 0u);
-    REQUIRE(obs.exec_inside_encoder() == 0u);
-  }
-}
-
-TEST_CASE(
-    "Authority 4.6: a no-pending query is not counted as a disjoint execution",
-    "[l0][authority]") {
-  AuthorityObserver obs;
-  // Selection empty AND zero considered producers: a no-pending query, not a
-  // disjoint one. It is still an execution but must not inflate the disjoint
-  // tally, otherwise the disjoint zero-effect proof loses its denominator.
-  auto decision =
-      DecideConsumer(ConsumerKind::kTexture, SingleRange(0x4000u, 0x400u), {},
-                     /*completed=*/0);
-  REQUIRE(decision.selected.empty());
-  REQUIRE(decision.considered_producers == 0u);
-  LegacySyncOutcome sync;
-  LegacyDrainOutcome drain;
-  obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                drain, /*inside=*/false);
-  REQUIRE(obs.exec_total(ConsumerKind::kTexture) == 1u);
-  REQUIRE(obs.exec_disjoint(ConsumerKind::kTexture) == 0u);
-}
-
-TEST_CASE(
-    "Authority 4.6: an empty requested range set is not counted as a disjoint "
-    "execution even with pending producers",
-    "[l0][authority]") {
-  AuthorityObserver obs;
-  // Pending producers exist and are all considered, but the consumer requests
-  // no bytes at all. An empty request depends on nothing, so it is neither a
-  // real disjoint query nor allowed to inflate the disjoint tally -- otherwise
-  // a consumer that requested nothing would masquerade as a producer-avoiding
-  // disjoint read.
   std::vector<PendingProducer> producers = {
       MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
       MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
   };
-  auto decision = DecideConsumer(ConsumerKind::kVertex, GuestRangeSet{},
-                                 producers, /*completed=*/5);
-  REQUIRE(decision.selected.empty());
-  REQUIRE(decision.considered_producers == 2u);
-  REQUIRE(decision.requested.empty());
-  LegacySyncOutcome sync;
-  LegacyDrainOutcome drain;
-  obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                drain, /*inside=*/false);
-  // Still one execution, but the empty request must not register as disjoint.
-  REQUIRE(obs.exec_total(ConsumerKind::kVertex) == 1u);
-  REQUIRE(obs.exec_disjoint(ConsumerKind::kVertex) == 0u);
-}
+  for (ConsumerKind kind : kinds) {
+    // A request in the gap between the two producers depends on neither, so no
+    // await or drain (and therefore downstream no commit, wait, or drain).
+    ConsumerDecision disjoint =
+        DecideConsumer(kind, SingleRange(0x4000u, 0x400u), producers, 5);
+    REQUIRE(disjoint.selected.empty());
+    REQUIRE(disjoint.action == AuthorityAction::kNoDependency);
+    REQUIRE_FALSE(disjoint.await);
+    REQUIRE_FALSE(disjoint.drain);
 
-TEST_CASE(
-    "Authority 4.6: injected commit/wait/drain/inside facts increment their "
-    "counters so a broken counter cannot pass by staying zero",
-    "[l0][authority]") {
-  // A counter hardwired to zero would pass the zero-delta proof above. Drive
-  // the recorder with a disjoint decision but nonzero injected facts and assert
-  // each counter moves, so only a faithful recorder passes both tests.
-  SECTION("injected commit increments disjoint_commits only") {
-    AuthorityObserver obs;
-    ConsumerDecision decision = DisjointDecision(ConsumerKind::kVertex);
-    LegacySyncOutcome sync;
-    sync.committed = true;
-    LegacyDrainOutcome drain;
-    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                  drain, /*inside=*/false);
-    REQUIRE(obs.disjoint_commits(ConsumerKind::kVertex) == 1u);
-    REQUIRE(obs.disjoint_waits(ConsumerKind::kVertex) == 0u);
-    REQUIRE(obs.disjoint_drain_attempts(ConsumerKind::kVertex) == 0u);
-    REQUIRE(obs.exec_inside_encoder(ConsumerKind::kVertex) == 0u);
-  }
-  SECTION("injected wait increments disjoint_waits only") {
-    AuthorityObserver obs;
-    ConsumerDecision decision = DisjointDecision(ConsumerKind::kTexture);
-    LegacySyncOutcome sync;
-    sync.waited = true;
-    LegacyDrainOutcome drain;
-    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                  drain, /*inside=*/false);
-    REQUIRE(obs.disjoint_waits(ConsumerKind::kTexture) == 1u);
-    REQUIRE(obs.disjoint_commits(ConsumerKind::kTexture) == 0u);
-  }
-  SECTION("injected drain increments attempts and drained records") {
-    AuthorityObserver obs;
-    ConsumerDecision decision = DisjointDecision(ConsumerKind::kWait);
-    LegacySyncOutcome sync;
-    LegacyDrainOutcome drain;
-    drain.drained_records = 2u;
-    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/true,
-                                  drain, /*inside=*/false);
-    REQUIRE(obs.disjoint_drain_attempts(ConsumerKind::kWait) == 1u);
-    REQUIRE(obs.disjoint_drained_records(ConsumerKind::kWait) == 2u);
-    REQUIRE(obs.disjoint_commits(ConsumerKind::kWait) == 0u);
-  }
-  SECTION("injected inside-encoder fact increments inside_encoder only") {
-    AuthorityObserver obs;
-    ConsumerDecision decision = DisjointDecision(ConsumerKind::kHostCpuRead);
-    LegacySyncOutcome sync;
-    LegacyDrainOutcome drain;
-    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
-                                  drain, /*inside=*/true);
-    REQUIRE(obs.exec_inside_encoder(ConsumerKind::kHostCpuRead) == 1u);
-    REQUIRE(obs.exec_inside_encoder() == 1u);
-    // An inside-encoder resolution is still an execution, but adds no disjoint
-    // effect facts here.
-    REQUIRE(obs.exec_total(ConsumerKind::kHostCpuRead) == 1u);
-    REQUIRE(obs.disjoint_commits(ConsumerKind::kHostCpuRead) == 0u);
+    // No pending producers at all is likewise a no-dependency query.
+    ConsumerDecision no_pending =
+        DecideConsumer(kind, SingleRange(0x4000u, 0x400u), {}, 5);
+    REQUIRE(no_pending.selected.empty());
+    REQUIRE(no_pending.action == AuthorityAction::kNoDependency);
+
+    // An empty requested range set depends on nothing even when producers
+    // exist, so it can never masquerade as a producer-avoiding disjoint read.
+    ConsumerDecision empty_request =
+        DecideConsumer(kind, GuestRangeSet{}, producers, 5);
+    REQUIRE(empty_request.selected.empty());
+    REQUIRE(empty_request.action == AuthorityAction::kNoDependency);
+    REQUIRE(empty_request.requested.empty());
   }
 }
 
