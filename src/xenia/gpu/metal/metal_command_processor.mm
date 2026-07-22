@@ -1550,11 +1550,14 @@ metal::LegacySyncOutcome MetalCommandProcessor::EndFrameEncoderAndWait() {
   // full synchronous semantics.
   bool had_buffer = frame_command_buffer_ != nullptr;
   EndFrameEncoder();
+  bool wait_completed = false;
   if (had_buffer) {
-    WaitForSubmission(submission_counter_);
-    PumpCompletedActions();
+    wait_completed = WaitForSubmission(submission_counter_);
+    if (wait_completed) {
+      PumpCompletedActions();
+    }
   }
-  return {/*committed=*/had_buffer, /*waited=*/had_buffer};
+  return {/*committed=*/had_buffer, /*waited=*/wait_completed};
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -1963,6 +1966,114 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
+  // Task 4.2: collect every draw-input vertex range before any CPU-side draw
+  // estimation, trace capture, primitive processing, or Metal encoding reads
+  // it. The exact DMA index interval participates in the same kVertex request
+  // because this backend materializes indices directly from guest RAM. Only
+  // vfetch ranges are revalidated in the shared buffer below; indices remain a
+  // RAM consumer.
+  const Shader::ConstantRegisterMap& vs_map =
+      vertex_shader->constant_register_map();
+  struct VertexFetchDependency {
+    uint32_t fetch_constant;
+    xenos::xe_gpu_vertex_fetch_t fetch;
+    metal::GuestRange range;
+  };
+  std::vector<VertexFetchDependency> vertex_fetch_dependencies;
+  metal::GuestRangeSet vertex_dependency_ranges;
+  for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
+    uint32_t bits = vs_map.vertex_fetch_bitmap[i];
+    uint32_t j;
+    while (xe::bit_scan_forward(bits, &j)) {
+      bits = xe::clear_lowest_bit(bits);
+      uint32_t fetch_constant = i * 32 + j;
+      xenos::xe_gpu_vertex_fetch_t fetch =
+          regs.GetVertexFetch(fetch_constant);
+      if (fetch.type != xenos::FetchConstantType::kVertex &&
+          fetch.type != xenos::FetchConstantType::kInvalidVertex) {
+        continue;
+      }
+      uint32_t fetch_base = fetch.address << 2;
+      auto range = metal::GuestRange::FromBounds(
+          fetch_base,
+          uint64_t(fetch_base) + uint64_t(fetch.size) * sizeof(uint32_t));
+      if (!range) {
+        continue;
+      }
+      vertex_fetch_dependencies.push_back(
+          {fetch_constant, fetch, *range});
+      vertex_dependency_ranges.Add(*range);
+    }
+  }
+  if (index_buffer_info && index_buffer_info->guest_base && index_count) {
+    uint32_t index_size_bytes =
+        index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
+    vertex_dependency_ranges.Add(metal::GuestRange::FromBounds(
+        index_buffer_info->guest_base,
+        uint64_t(index_buffer_info->guest_base) +
+            uint64_t(index_count) * index_size_bytes));
+  }
+  vertex_dependency_ranges.Normalize();
+
+  if (!vertex_dependency_ranges.empty() &&
+      (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
+    metal::ConsumerDecision authority_decision =
+        QueryPendingProducerDependencies(
+            metal::ConsumerKind::kVertex,
+            metal::ConsumerRequest::Uniform(vertex_dependency_ranges));
+    bool overlap = !authority_decision.selected.empty();
+    bool authority_sample = authority_observer_.ShouldSampleConsumer(
+        metal::ConsumerKind::kVertex);
+    metal::LegacySyncOutcome sync_outcome;
+    metal::LegacyDrainOutcome drain_outcome;
+    bool drain_attempted = false;
+    if (overlap) {
+      // One boundary for the whole draw. EndFrameEncoderAndWait commits an
+      // unsubmitted selected producer and also preserves the existing shared-
+      // buffer rewrite hazard ordering for earlier draws.
+      uint64_t boundary_submission =
+          frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
+      sync_outcome = EndFrameEncoderAndWait();
+      uint64_t required_submission = std::max(
+          boundary_submission, authority_decision.max_wait_submission);
+      bool dependency_completed = true;
+      if (required_submission >
+          completed_submission_.load(std::memory_order_acquire)) {
+        bool waited = WaitForSubmission(required_submission);
+        sync_outcome.waited = sync_outcome.waited || waited;
+        if (waited) {
+          PumpCompletedActions();
+        } else {
+          dependency_completed = false;
+        }
+      }
+      if (dependency_completed) {
+        drain_attempted = true;
+        drain_outcome =
+            DrainSelectedPendingProducers(authority_decision);
+      }
+    }
+    if (authority_sample) {
+      metal::LegacyConsumerOutcome legacy;
+      legacy.overlap = overlap;
+      legacy.committed = sync_outcome.committed;
+      legacy.waited = sync_outcome.waited;
+      legacy.drained = drain_attempted;
+      legacy.drain_range_scoped = true;
+      legacy.drained_records = drain_outcome.drained_records;
+      authority_observer_.RecordConsumer(authority_decision, legacy);
+    }
+    if (overlap &&
+        drain_outcome.drained_records != authority_decision.selected.size()) {
+      XELOGE(
+          "MetalCommandProcessor: vertex dependency convergence retired {} "
+          "of {} selected producers; skipping draw",
+          drain_outcome.drained_records, authority_decision.selected.size());
+      ++draw_skip_count_;
+      return true;
+    }
+  }
+
   // VB sentinel probe (XE_METAL_VB_SENTINEL=<draw>): overwrite the draw's
   // vertex floats with per-dword sentinels z = (w+1)*8 + 0.5 so a consumer
   // like frc(z*c254) encodes WHICH dword the translated vfetch actually
@@ -1999,6 +2110,45 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       XELOGW("MetalVBSentinel: draw {} fc={} addr={:08X} patched {} verts",
              s_vb_sentinel, vb.fetch_constant, vaddr, vcount);
+    }
+  }
+
+  // Revalidate each exact vfetch interval only after all selected producer
+  // records have converged to RAM and after the diagnostic writer above. This
+  // is still before RenderTargetCache::Update and BeginFrameEncoder, so both
+  // CPU shader interpretation and the consuming Metal draw see the same bytes.
+  static const char* s_log_vf = std::getenv("XE_METAL_LOG_VF");
+  bool log_vf =
+      s_log_vf &&
+      vertex_shader->ucode_data_hash() == strtoull(s_log_vf, nullptr, 16);
+  static uint32_t s_log_vf_count = 0;
+  for (const VertexFetchDependency& dependency :
+       vertex_fetch_dependencies) {
+    if (log_vf && s_log_vf_count < 24) {
+      ++s_log_vf_count;
+      const uint32_t* words = reinterpret_cast<const uint32_t*>(
+          memory_->TranslatePhysical(dependency.range.start()));
+      uint32_t sampled_words[4] = {};
+      if (words) {
+        std::memcpy(sampled_words, words,
+                    std::min<size_t>(dependency.range.length(),
+                                     sizeof(sampled_words)));
+      }
+      XELOGW("MetalVF draw={} slot={} type={} addr={:08X} size_dw={} "
+             "endian={} words={:08X} {:08X} {:08X} {:08X}",
+             trace_draw_index_, dependency.fetch_constant,
+             uint32_t(dependency.fetch.type), dependency.range.start(),
+             uint32_t(dependency.fetch.size),
+             uint32_t(dependency.fetch.endian), sampled_words[0],
+             sampled_words[1], sampled_words[2], sampled_words[3]);
+    }
+    if (!shared_memory_->RequestConsumedRange(dependency.range.start(),
+                                               dependency.range.length())) {
+      XELOGE("MetalCommandProcessor: failed to validate vertex range "
+             "{:08X}(+{})",
+             dependency.range.start(), dependency.range.length());
+      ++draw_skip_count_;
+      return true;
     }
   }
   // Frame-trace recording: this backend reads guest indices directly from
@@ -2257,93 +2407,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     ++draw_skip_count_;
     return true;
-  }
-
-  // Upload the vertex data ranges referenced by the vertex shader's vfetches.
-  // This runs BEFORE the frame encoder opens: the hazard path ends the frame
-  // (EndFrameEncoder) when changed content overlaps an already-consumed
-  // range, and an encoder obtained earlier would be dead by the time the
-  // draw encodes into it (setViewport on an ended encoder = driver crash on
-  // first in-game interaction, when dynamic UI/particle rewrites start).
-  const Shader::ConstantRegisterMap& vs_map =
-      vertex_shader->constant_register_map();
-  // Diagnostic: XE_METAL_LOG_VF=<hex VS ucode hash> logs each vfetch slot the
-  // VS's bitmap consumes for that shader — slot, guest range, and the first
-  // dwords as uploaded — to split fetch-addressing bugs from data bugs.
-  static const char* s_log_vf = std::getenv("XE_METAL_LOG_VF");
-  bool log_vf =
-      s_log_vf &&
-      vertex_shader->ucode_data_hash() == strtoull(s_log_vf, nullptr, 16);
-  static uint32_t s_log_vf_count = 0;
-  for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
-    uint32_t bits = vs_map.vertex_fetch_bitmap[i];
-    uint32_t j;
-    while (xe::bit_scan_forward(bits, &j)) {
-      bits = xe::clear_lowest_bit(bits);
-      xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(i * 32 + j);
-      if (log_vf && s_log_vf_count < 24) {
-        ++s_log_vf_count;
-        const uint32_t* words = reinterpret_cast<const uint32_t*>(
-            memory_->TranslatePhysical(fetch.address << 2));
-        XELOGW("MetalVF draw={} slot={} type={} addr={:08X} size_dw={} "
-               "endian={} words={:08X} {:08X} {:08X} {:08X}",
-               trace_draw_index_, i * 32 + j, uint32_t(fetch.type),
-               fetch.address << 2, uint32_t(fetch.size),
-               uint32_t(fetch.endian), words ? words[0] : 0,
-               words ? words[1] : 0, words ? words[2] : 0,
-               words ? words[3] : 0);
-      }
-      if (fetch.type != xenos::FetchConstantType::kVertex &&
-          fetch.type != xenos::FetchConstantType::kInvalidVertex) {
-        continue;
-      }
-      // Same-frame producer -> VFETCH consumer: if a pending resolve
-      // writeback (or memexport) covers this vfetch range, the data exists
-      // only GPU-side — commit + wait + drain BEFORE the upload below, or
-      // the shader reads stale RAM. JC2's light-atlas chain is exactly this:
-      // depth resolve at draw N, memexport VFETCHES it at draw N+2.
-      if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
-        uint32_t vf_base = fetch.address << 2;
-        uint32_t vf_end = vf_base + (fetch.size << 2);
-        metal::GuestRangeSet requested;
-        requested.Add(
-            metal::GuestRange::FromBaseLength(vf_base, fetch.size << 2));
-        metal::ConsumerDecision authority_decision =
-            QueryPendingProducerDependencies(
-                metal::ConsumerKind::kVertex,
-                metal::ConsumerRequest::Uniform(requested));
-        bool overlap = !authority_decision.selected.empty();
-        bool authority_sample = authority_observer_.ShouldSampleConsumer(
-            metal::ConsumerKind::kVertex);
-        metal::LegacySyncOutcome sync_outcome;
-        metal::LegacyDrainOutcome drain_outcome;
-        if (overlap) {
-          sync_outcome = EndFrameEncoderAndWait();
-          // Range-scoped: draining unrelated writebacks here would hand the
-          // exposure loop mid-frame luminance (the black-flicker class).
-          drain_outcome =
-              DrainPendingWritebacks(vf_base, vf_end - vf_base);
-        }
-        // Observer-only telemetry is still throttled, but task 4.1 now owns
-        // the overlap gate above. Record the executed commit, wait, and
-        // range-scoped drain so later routing work can compare its breadth and
-        // retirement count with the selected producer set.
-        if (authority_sample) {
-          metal::LegacyConsumerOutcome legacy;
-          legacy.overlap = overlap;
-          legacy.committed = sync_outcome.committed;
-          legacy.waited = sync_outcome.waited;
-          legacy.drained = overlap;
-          legacy.drain_range_scoped = true;  // the vfetch drain is range-scoped.
-          legacy.drained_records = drain_outcome.drained_records;
-          authority_observer_.RecordConsumer(authority_decision, legacy);
-        }
-      }
-      // Page-tracked: uploads only pages invalidated since their last use;
-      // the intra-frame rewrite hazard flush runs inside when needed.
-      shared_memory_->RequestConsumedRange(fetch.address << 2,
-                                           fetch.size << 2);
-    }
   }
 
   // STAGE 3 lazy writeback flush: if this draw SAMPLES a range a pending
@@ -5075,10 +5138,20 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
 }
 
 metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
-    uint32_t filter_base, uint32_t filter_size) {
+    uint32_t filter_base, uint32_t filter_size,
+    uint64_t filter_authority_sequence) {
   metal::LegacyDrainOutcome outcome;
-  auto in_filter = [&](uint32_t base, uint32_t size) {
-    return base < filter_base + filter_size && base + size > filter_base;
+  auto filter_range =
+      metal::GuestRange::FromBaseLength(filter_base, filter_size);
+  auto in_filter = [&](uint32_t base, uint32_t size,
+                       uint64_t authority_sequence) {
+    if (filter_authority_sequence &&
+        authority_sequence != filter_authority_sequence) {
+      return false;
+    }
+    auto producer_range = metal::GuestRange::FromBaseLength(base, size);
+    return filter_range && producer_range &&
+           filter_range->Overlaps(*producer_range);
   };
   // Resolve guest-memory writebacks (the CPU-side exposure loop and any
   // fence-after-copy data). S7: a staging buffer is final only once its
@@ -5102,7 +5175,8 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         memory_, shared_memory_.get(), texture_cache_.get());
     for (const PendingMemexport& me : pending_memexports_) {
       if (me.submission > completed ||
-          !in_filter(me.base_address, me.size_bytes)) {
+          !in_filter(me.base_address, me.size_bytes,
+                     me.authority_sequence)) {
         still_pending_exports.push_back(me);
         continue;
       }
@@ -5214,7 +5288,8 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   std::vector<PendingWriteback> still_pending;
   for (PendingWriteback& wb : pending_writebacks_) {
     if (wb.submission > completed ||
-        !in_filter(wb.guest_addr, wb.range_bytes())) {
+        !in_filter(wb.guest_addr, wb.range_bytes(),
+                   wb.authority_sequence)) {
       still_pending.push_back(wb);
       continue;
     }
@@ -5546,6 +5621,33 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   }
   pending_writebacks_ = std::move(still_pending);
   return outcome;
+}
+
+metal::LegacyDrainOutcome
+MetalCommandProcessor::DrainSelectedPendingProducers(
+    const metal::ConsumerDecision& decision) {
+  // DecideConsumer returns selected records in their cross-kind registration
+  // order. Match each record back to the existing queues by its unique
+  // authority sequence and reuse the established convergence implementation.
+  // This adds no queue or ownership state: the selection is a transient value,
+  // and successful convergence still retires the original pending record.
+  metal::LegacyDrainOutcome combined;
+  for (const metal::PendingProducer& producer : decision.selected) {
+    metal::LegacyDrainOutcome one = DrainPendingWritebacks(
+        producer.range.start(), producer.range.length(), producer.sequence);
+    combined.drained_records += one.drained_records;
+    combined.resolve_records += one.resolve_records;
+    combined.memexport_records += one.memexport_records;
+    combined.invalidated_entries += one.invalidated_entries;
+    if (one.drained_records != 1) {
+      // A failed convergence retains this record. Do not apply any newer
+      // selected writer: doing so would let a later retry of this older record
+      // overwrite newer bytes and invert authority order. The caller fails the
+      // draw closed, while this record and the untouched suffix stay pending.
+      break;
+    }
+  }
+  return combined;
 }
 
 void MetalCommandProcessor::FlushPendingWritebacksForWait(

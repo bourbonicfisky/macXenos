@@ -124,7 +124,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // the same-frame vfetch barrier must NOT drain unrelated writebacks (the
   // exposure ping-pong reads mid-frame luminance otherwise: black flicker).
   metal::LegacyDrainOutcome DrainPendingWritebacks(
-      uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu);
+      uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu,
+      uint64_t filter_authority_sequence = 0);
+  metal::LegacyDrainOutcome DrainSelectedPendingProducers(
+      const metal::ConsumerDecision& decision);
   void FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   // Cross-writer memory-authority dependency seam (OpenSpec
