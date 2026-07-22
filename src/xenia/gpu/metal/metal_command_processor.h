@@ -128,6 +128,14 @@ class MetalCommandProcessor : public CommandProcessor {
       uint64_t filter_authority_sequence = 0);
   metal::LegacyDrainOutcome DrainSelectedPendingProducers(
       const metal::ConsumerDecision& decision);
+  struct ProducerDependencyOutcome {
+    metal::LegacySyncOutcome sync;
+    metal::LegacyDrainOutcome drain;
+    bool drain_attempted = false;
+    bool complete = true;
+  };
+  ProducerDependencyOutcome ResolvePendingProducerDependencies(
+      const metal::ConsumerDecision& decision);
   void FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   // Cross-writer memory-authority dependency seam (OpenSpec

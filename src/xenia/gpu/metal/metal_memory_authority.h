@@ -173,9 +173,11 @@ struct ConsumerRequest {
   }
 };
 
-// The pure consumer decision. Selects only producers intersecting `requested`,
-// classifies the resulting action, and reports whether an await/drain/revalidate
-// is required. No side effects, no ownership, no device.
+// The pure consumer decision. Seeds selection only from producers intersecting
+// `requested`, then closes over older overlapping predecessors so whole-record
+// convergence cannot invert writer chronology. Classifies the resulting action
+// and reports whether await/drain/revalidate is required. No side effects, no
+// ownership, no device.
 inline ConsumerDecision DecideConsumer(
     ConsumerKind consumer, const ConsumerRequest& request,
     const std::vector<PendingProducer>& producers,
@@ -184,10 +186,51 @@ inline ConsumerDecision DecideConsumer(
   decision.consumer = consumer;
   decision.requested = request.Combined();
   decision.revalidate_gpu_bytes = ConsumerReadsSharedBuffer(consumer);
-  for (const PendingProducer& producer : producers) {
+  std::vector<bool> selected(producers.size(), false);
+  for (size_t i = 0; i < producers.size(); ++i) {
+    const PendingProducer& producer = producers[i];
     if (!request.ForProducer(producer.state).OverlapsAny(producer.range)) {
       continue;  // disjoint or merely adjacent: not a dependency.
     }
+    selected[i] = true;
+  }
+
+  // Convergence applies whole producer records, not only their intersection
+  // with the consumer request. Close the selected set transitively over every
+  // older overlapping producer: otherwise an unselected predecessor could be
+  // drained later and overwrite a newer record already converged here. This is
+  // especially important for bridge service, where the initial request may
+  // omit resolves, but it is writer-kind-independent (M1 -> R2 -> M3 chains
+  // need all three). A frontier makes the closure O(selected * producers), and
+  // resolve-only bridge traffic keeps its fast path because it seeds nothing.
+  std::vector<size_t> closure_frontier;
+  closure_frontier.reserve(producers.size());
+  for (size_t i = 0; i < producers.size(); ++i) {
+    if (selected[i]) {
+      closure_frontier.push_back(i);
+    }
+  }
+  for (size_t frontier_index = 0; frontier_index < closure_frontier.size();
+       ++frontier_index) {
+    const PendingProducer& newer =
+        producers[closure_frontier[frontier_index]];
+    for (size_t older_index = 0; older_index < producers.size();
+         ++older_index) {
+      const PendingProducer& older = producers[older_index];
+      if (selected[older_index] || older.sequence >= newer.sequence ||
+          !older.range.Overlaps(newer.range)) {
+        continue;
+      }
+      selected[older_index] = true;
+      closure_frontier.push_back(older_index);
+    }
+  }
+
+  for (size_t i = 0; i < producers.size(); ++i) {
+    if (!selected[i]) {
+      continue;
+    }
+    const PendingProducer& producer = producers[i];
     decision.selected.push_back(producer);
     if (!ProducerComplete(producer, completed_submission)) {
       decision.await = true;

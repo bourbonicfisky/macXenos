@@ -236,7 +236,8 @@ void SharedMemory::UnwatchMemoryRange(WatchHandle handle) {
 }
 
 void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
-                               bool invalidated_by_gpu) {
+                               bool invalidated_by_gpu,
+                               bool fire_global_watches) {
   uint32_t address_first = page_first << page_size_log2_;
   uint32_t address_last =
       (page_last << page_size_log2_) + ((1 << page_size_log2_) - 1);
@@ -246,9 +247,11 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
   auto global_lock = global_critical_region_.Acquire();
 
   // Fire global watches.
-  for (const auto global_watch : global_watches_) {
-    global_watch->callback(global_lock, global_watch->callback_context,
-                           address_first, address_last, invalidated_by_gpu);
+  if (fire_global_watches) {
+    for (const auto global_watch : global_watches_) {
+      global_watch->callback(global_lock, global_watch->callback_context,
+                             address_first, address_last, invalidated_by_gpu);
+    }
   }
 
   // Fire per-range watches.
@@ -519,7 +522,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
 }
 
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
-    uint32_t physical_address_start, uint32_t length, bool exact_range) {
+    uint32_t physical_address_start, uint32_t length, bool exact_range,
+    bool fire_global_watches) {
   if (length == 0 || physical_address_start >= kBufferSize) {
     return std::make_pair(uint32_t(0), UINT32_MAX);
   }
@@ -570,7 +574,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
   }
 
-  FireWatches(page_first, page_last, false);
+  FireWatches(page_first, page_last, false, fire_global_watches);
 
   return std::make_pair(page_first << page_size_log2_,
                         (page_last - page_first + 1) << page_size_log2_);

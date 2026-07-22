@@ -209,7 +209,7 @@ TEST_CASE("Authority: aliased base/mip range set selects the right producers",
   REQUIRE(decision.requested.CoveredBytes() == 0xA000u);
 }
 
-TEST_CASE("Authority: texture bridge excludes resolve but not memexport",
+TEST_CASE("Authority: texture bridge excludes newer resolve but not memexport",
           "[l0][authority][bridge]") {
   ConsumerRequest request;
   // A bridge-served texture contributes no resolve-read range, but its exact
@@ -217,13 +217,67 @@ TEST_CASE("Authority: texture bridge excludes resolve but not memexport",
   request.memexport_ranges.Add(
       GuestRange::FromBaseLength(0x4000u, 0x1000u));
   std::vector<PendingProducer> producers = {
-      MakeProducer(0x4000u, 0x1000u, TransitState::kPendingResolve, 3),
-      MakeProducer(0x4000u, 0x1000u, TransitState::kPendingMemexport, 3),
+      MakeProducer(0x4000u, 0x1000u, TransitState::kPendingMemexport, 3, 10),
+      MakeProducer(0x4000u, 0x1000u, TransitState::kPendingResolve, 3, 11),
   };
   auto decision = DecideConsumer(ConsumerKind::kTexture, request, producers, 3);
   REQUIRE(decision.selected.size() == 1u);
   REQUIRE(decision.selected[0].state == TransitState::kPendingMemexport);
   REQUIRE(decision.requested.CoveredBytes() == 0x1000u);
+}
+
+TEST_CASE(
+    "Authority: bridge selects older resolve before newer overlapping "
+    "memexport",
+    "[l0][authority][bridge][mixed-writer]") {
+  ConsumerRequest request;
+  request.memexport_ranges.Add(
+      GuestRange::FromBaseLength(0x4000u, 0x1000u));
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x4000u, 0x1000u, TransitState::kPendingResolve, 4, 20),
+      MakeProducer(0x4800u, 0x800u, TransitState::kPendingMemexport, 5, 21),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kTexture, request, producers, 5);
+  REQUIRE(decision.selected.size() == 2u);
+  REQUIRE(decision.selected[0].state == TransitState::kPendingResolve);
+  REQUIRE(decision.selected[0].sequence == 20u);
+  REQUIRE(decision.selected[1].state == TransitState::kPendingMemexport);
+  REQUIRE(decision.selected[1].sequence == 21u);
+}
+
+TEST_CASE("Authority: mixed-writer closure covers whole memexport record",
+          "[l0][authority][bridge][mixed-writer]") {
+  ConsumerRequest request;
+  // The consumer reads only the memexport tail. Convergence nevertheless
+  // copies the full memexport record, so the older resolve at its head must be
+  // retired first or it could overwrite the newer head bytes on a later drain.
+  request.memexport_ranges.Add(
+      GuestRange::FromBaseLength(0x5000u, 0x100u));
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x4000u, 0x100u, TransitState::kPendingResolve, 6, 30),
+      MakeProducer(0x4000u, 0x1100u, TransitState::kPendingMemexport, 7, 31),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kTexture, request, producers, 7);
+  REQUIRE(decision.selected.size() == 2u);
+  REQUIRE(decision.selected[0].sequence == 30u);
+  REQUIRE(decision.selected[1].sequence == 31u);
+}
+
+TEST_CASE("Authority: producer ordering closure is transitive across kinds",
+          "[l0][authority][mixed-writer]") {
+  ConsumerRequest request;
+  request.memexport_ranges.Add(
+      GuestRange::FromBaseLength(0x5000u, 0x100u));
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x4000u, 0x100u, TransitState::kPendingMemexport, 1, 40),
+      MakeProducer(0x4000u, 0x2000u, TransitState::kPendingResolve, 2, 41),
+      MakeProducer(0x5000u, 0x100u, TransitState::kPendingMemexport, 3, 42),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kTexture, request, producers, 3);
+  REQUIRE(decision.selected.size() == 3u);
+  REQUIRE(decision.selected[0].sequence == 40u);
+  REQUIRE(decision.selected[1].sequence == 41u);
+  REQUIRE(decision.selected[2].sequence == 42u);
 }
 
 TEST_CASE("Authority: submission ordering N produces, M consumes",

@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_guest_range.h"
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
@@ -79,7 +80,9 @@ class MetalTextureCache {
   // in place, so re-registering the same base/texture is a cheap no-op.
   void RegisterResolvedTarget(uint32_t base, void* texture, uint32_t width,
                               uint32_t height, bool is_depth,
-                              bool requires_fetch_swizzle);
+                              bool requires_fetch_swizzle,
+                              uint32_t guest_extent_start,
+                              uint32_t guest_extent_length);
 
   // Stage 3 hybrid: a resolve at `base` enqueued a guest-RAM writeback, so
   // RAM is authoritative for fetches of this base (the bridge snapshot is a
@@ -133,7 +136,17 @@ class MetalTextureCache {
   // textures overlapping it so the next fetch re-uploads fresh content.
   // Evicted textures/slots are retired (freed via ReclaimStaleSlots after the
   // frame's GPU work completes). Returns entries evicted.
-  uint32_t InvalidateRange(uint32_t base, uint32_t length);
+  enum class InvalidationScope {
+    // An independent RAM writer supersedes every cached representation of the
+    // bytes, including an older resolve-backed snapshot bridge.
+    kAllRepresentations,
+    // The resolve publishing these bytes owns the matching snapshot, so only
+    // RAM-derived uploads are stale; preserve the GPU-ordered bridge.
+    kRamUploadsOnly,
+  };
+  uint32_t InvalidateRange(
+      uint32_t base, uint32_t length,
+      InvalidationScope scope = InvalidationScope::kAllRepresentations);
 
   // Trace playback restores guest ranges explicitly and calls InvalidateRange
   // for each restore. It doesn't need live CPU page watching, which would add
@@ -261,6 +274,11 @@ class MetalTextureCache {
     uint32_t width;
     uint32_t height;
     uint32_t slot;
+    // Exact normalized guest destination extent of the resolve represented by
+    // this snapshot. Used to retire the bridge when a later independent RAM
+    // writer overlaps any byte, including a partial/aliased write.
+    uint32_t guest_extent_start;
+    uint32_t guest_extent_length;
     // Stage 3: DEPTH bridges and non-RAM-backed color bridges are served to
     // fetches; RAM-backed color reads guest RAM (exact-address placement).
     bool is_depth;
@@ -314,6 +332,10 @@ class MetalTextureCache {
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+
+  // Retires descriptors and cache-owned views without releasing the snapshot
+  // or tip texture objects, whose ownership remains outside this cache.
+  void RetireResolvedTarget(ResolvedTarget& target);
 
   // Returns the bindless slot for a channel-swizzled sampled view of `source`
   // (a resolved snapshot or its 1x1 tip), creating and caching it in `views`

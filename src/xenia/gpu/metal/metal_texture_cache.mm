@@ -1241,62 +1241,68 @@ void MetalTextureCache::WriteAllCachedTexturesToTrace(
 void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
                                                uint32_t width, uint32_t height,
                                                bool is_depth,
-                                               bool requires_fetch_swizzle) {
+                                               bool requires_fetch_swizzle,
+                                               uint32_t guest_extent_start,
+                                               uint32_t guest_extent_length) {
   if (!texture) {
     return;
   }
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   auto it = resolved_targets_.find(base);
   if (it != resolved_targets_.end()) {
+    auto guest_extent = metal::GuestRange::FromBaseLength(
+        guest_extent_start, guest_extent_length);
+    uint32_t normalized_extent_start = guest_extent ? guest_extent->start() : 0;
+    uint32_t normalized_extent_length = guest_extent ? guest_extent->length() : 0;
+    bool texture_changed = it->second.texture != texture;
+    bool extent_changed =
+        it->second.width != width || it->second.height != height ||
+        it->second.guest_extent_start != normalized_extent_start ||
+        it->second.guest_extent_length != normalized_extent_length;
+
+    if (texture_changed) {
+      // Allocate the replacement before mutating metadata or retiring any
+      // descriptor/view. On exhaustion, the old entry remains one internally
+      // consistent generation and the caller can fail closed.
+      static const bool s_fault_inject =
+          std::getenv("XE_METAL_FAULT_INJECT") != nullptr;
+      uint32_t new_slot = it->second.slot;
+      if (!s_fault_inject) {
+        new_slot = AllocateSlot();
+        if (!new_slot) {
+          return;
+        }
+      }
+
+      // Every per-swizzle exact-cover view aliases the old snapshot texture.
+      // Retire it through the same in-flight-safe pools as the base slot.
+      for (auto& sv : it->second.swizzle_views) {
+        stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+        retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
+      }
+      it->second.swizzle_views.clear();
+      if (!s_fault_inject) {
+        // Never repoint a descriptor used by an in-flight draw. The new
+        // generation gets a fresh slot while the old slot drains.
+        stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
+      }
+      IRDescriptorTableSetTexture(&entries[new_slot],
+                                  (__bridge id<MTLTexture>)texture, 0.0f, 0);
+      it->second.texture = texture;
+      it->second.slot = new_slot;
+    }
+
     // A new snapshot generation or extent invalidates the exact-cover
     // state: RAM equivalence must be re-established by the next writeback.
-    if (it->second.texture != texture || it->second.width != width ||
-        it->second.height != height) {
+    if (texture_changed || extent_changed) {
       it->second.full_rect = false;
     }
     it->second.width = width;
     it->second.height = height;
     it->second.is_depth = is_depth;
     it->second.requires_fetch_swizzle = requires_fetch_swizzle;
-    if (it->second.texture != texture) {
-      // The snapshot generation is changing: every per-swizzle exact-cover
-      // view aliases the OLD texture, so retire them all (slot + retained
-      // view) through the same in-flight-safe pool as the base slot. In-flight
-      // draws keep sampling the old views/slots until their submissions drain.
-      for (auto& sv : it->second.swizzle_views) {
-        stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
-        retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
-      }
-      it->second.swizzle_views.clear();
-      // FAULT INJECTOR (XE_METAL_FAULT_INJECT=1): restore the old in-place
-      // repoint, which reproduces the GPU page fault deliberately — used to
-      // verify fault attribution (S2) and auto-recovery (S6) end-to-end.
-      static const bool s_fault_inject =
-          std::getenv("XE_METAL_FAULT_INJECT") != nullptr;
-      if (s_fault_inject) {
-        it->second.texture = texture;
-        IRDescriptorTableSetTexture(&entries[it->second.slot],
-                                    (__bridge id<MTLTexture>)texture, 0.0f, 0);
-        return;
-      }
-      // The snapshot texture was recreated (grew/reformatted). DON'T repoint the
-      // existing slot in place: draws already encoded this frame reference it by
-      // gpuAddress and made the OLD texture resident on their (now closed)
-      // encoders. Repointing makes them sample the new texture, which is NOT
-      // resident there -> GPU page fault (the "GPU froze" hang), and even when
-      // resident, the wrong generation (the tile stipple). Instead give the new
-      // generation a FRESH slot; the old slot keeps pointing at the old texture
-      // for the in-flight draws and is reclaimed after the frame drains.
-      uint32_t new_slot = AllocateSlot();
-      if (!new_slot) {
-        return;  // heap exhausted; keep the old slot rather than corrupt.
-      }
-      stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
-      IRDescriptorTableSetTexture(&entries[new_slot],
-                                  (__bridge id<MTLTexture>)texture, 0.0f, 0);
-      it->second.texture = texture;
-      it->second.slot = new_slot;
-    }
+    it->second.guest_extent_start = normalized_extent_start;
+    it->second.guest_extent_length = normalized_extent_length;
     return;
   }
   uint32_t slot = AllocateSlot();
@@ -1305,8 +1311,17 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
   }
   id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
   IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
-  resolved_targets_[base] = ResolvedTarget{texture, width, height, slot,
-                                           is_depth, requires_fetch_swizzle};
+  auto guest_extent = metal::GuestRange::FromBaseLength(
+      guest_extent_start, guest_extent_length);
+  resolved_targets_[base] = ResolvedTarget{
+      texture,
+      width,
+      height,
+      slot,
+      guest_extent ? guest_extent->start() : 0,
+      guest_extent ? guest_extent->length() : 0,
+      is_depth,
+      requires_fetch_swizzle};
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
 }
@@ -1464,12 +1479,43 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
   retired_textures_.erase(tex_it, retired_textures_.end());
 }
 
-uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
+void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
+  uint64_t retire_submission = RetireSubmission();
+  if (target.slot) {
+    stale_slots_.emplace_back(retire_submission, target.slot);
+  }
+  if (target.tip_slot) {
+    stale_slots_.emplace_back(retire_submission, target.tip_slot);
+  }
+  for (auto& swizzle_view : target.swizzle_views) {
+    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    retired_textures_.emplace_back(retire_submission,
+                                   swizzle_view.second.view);
+  }
+  target.swizzle_views.clear();
+  for (auto& swizzle_view : target.tip_swizzle_views) {
+    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    retired_textures_.emplace_back(retire_submission,
+                                   swizzle_view.second.view);
+  }
+  target.tip_swizzle_views.clear();
+}
+
+uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
+                                            InvalidationScope scope) {
+  auto invalidation = metal::GuestRange::FromBaseLength(base, length);
+  if (!invalidation) {
+    return 0;
+  }
   uint32_t evicted = 0;
-  uint32_t end = base + length;
   for (auto it = cache_.begin(); it != cache_.end();) {
     const Entry& e = it->second;
-    if (e.guest_base < end && e.guest_base + e.guest_bytes > base) {
+    auto guest_range =
+        metal::GuestRange::FromBaseLength(e.guest_base, e.guest_bytes);
+    auto mip_range =
+        metal::GuestRange::FromBaseLength(e.mip_base, e.mip_bytes);
+    if ((guest_range && invalidation->Overlaps(*guest_range)) ||
+        (mip_range && invalidation->Overlaps(*mip_range))) {
       // Retire, don't free: in-flight draws may still reference the texture
       // (bindless) and the slot; both drain once the submissions encoded
       // against them complete.
@@ -1479,6 +1525,20 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length) {
       ++evicted;
     } else {
       ++it;
+    }
+  }
+  if (scope == InvalidationScope::kAllRepresentations) {
+    for (auto it = resolved_targets_.begin();
+         it != resolved_targets_.end();) {
+      auto guest_extent = metal::GuestRange::FromBaseLength(
+          it->second.guest_extent_start, it->second.guest_extent_length);
+      if (guest_extent && invalidation->Overlaps(*guest_extent)) {
+        RetireResolvedTarget(it->second);
+        it = resolved_targets_.erase(it);
+        ++evicted;
+      } else {
+        ++it;
+      }
     }
   }
   return evicted;

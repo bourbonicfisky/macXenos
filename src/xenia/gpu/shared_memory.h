@@ -88,9 +88,12 @@ class SharedMemory {
   // Marks the range and, if not exact_range, potentially its surroundings
   // (to up to the first GPU-written page, as an access violation exception
   // count optimization) as modified by the CPU, also invalidating GPU-written
-  // pages directly in the range.
+  // pages directly in the range. Backend publications that already notify a
+  // global cache directly may set fire_global_watches=false to avoid duplicate
+  // global invalidation while still firing every per-range watch.
   std::pair<uint32_t, uint32_t> MemoryInvalidationCallback(
-      uint32_t physical_address_start, uint32_t length, bool exact_range);
+      uint32_t physical_address_start, uint32_t length, bool exact_range,
+      bool fire_global_watches = true);
 
   // Marks the range as containing GPU-generated data (such as resolves),
   // triggering modification callbacks, making it valid (so pages are not
@@ -292,7 +295,7 @@ class SharedMemory {
   // Triggers the watches (global and per-range), removing triggered range
   // watches.
   void FireWatches(uint32_t page_first, uint32_t page_last,
-                   bool invalidated_by_gpu);
+                   bool invalidated_by_gpu, bool fire_global_watches = true);
   // Unlinks and frees the range and its nodes. Call this in the global critical
   // region.
   void UnlinkWatchRange(WatchRange* range);

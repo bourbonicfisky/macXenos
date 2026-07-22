@@ -206,6 +206,36 @@ TEST_CASE("SM logic: repeated invalidation/revalidation cycles converge",
   }
 }
 
+TEST_CASE("SM logic: backend invalidation can suppress only global watches",
+          "[l0][sharedmem][authority]") {
+  REQUIRE(L().ok);
+  auto& h = L();
+  const uint32_t addr = 0x01380000;
+  struct WatchCounts {
+    uint32_t global = 0;
+    uint32_t range = 0;
+  } counts;
+  auto global_callback = [](const global_unique_lock_type&, void* context,
+                            uint32_t, uint32_t, bool) {
+    ++static_cast<WatchCounts*>(context)->global;
+  };
+  auto range_callback = [](const global_unique_lock_type&, void* context,
+                           void*, uint64_t, bool) {
+    ++static_cast<WatchCounts*>(context)->range;
+  };
+  auto global_watch =
+      h.sm->RegisterGlobalWatch(global_callback, static_cast<void*>(&counts));
+  REQUIRE(h.sm->WatchMemoryRange(addr, 0x100u, range_callback,
+                                 static_cast<void*>(&counts), nullptr, 0) !=
+          nullptr);
+
+  h.sm->MemoryInvalidationCallback(addr, 0x100u, true,
+                                   /*fire_global_watches=*/false);
+  REQUIRE(counts.global == 0u);
+  REQUIRE(counts.range == 1u);
+  h.sm->UnregisterGlobalWatch(global_watch);
+}
+
 TEST_CASE("SM logic: physical boundary requests and invalidation clamp",
           "[l0][sharedmem]") {
   REQUIRE(L().ok);

@@ -84,15 +84,32 @@ namespace {
 class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
  public:
   MetalRamWritePublicationTarget(SharedMemory* shared_memory,
-                                 metal::MetalTextureCache* texture_cache)
-      : shared_memory_(shared_memory), texture_cache_(texture_cache) {}
+                                 metal::MetalTextureCache* texture_cache,
+                                 metal::MetalTextureCache::InvalidationScope
+                                     texture_invalidation_scope =
+                                         metal::MetalTextureCache::
+                                             InvalidationScope::
+                                                 kAllRepresentations)
+      : shared_memory_(shared_memory),
+        texture_cache_(texture_cache),
+        texture_invalidation_scope_(texture_invalidation_scope) {}
 
   bool InvalidateSharedPages(uint32_t base, uint32_t length,
                              bool exact_range) override {
     if (!shared_memory_) {
       return false;
     }
-    shared_memory_->MemoryInvalidationCallback(base, length, exact_range);
+    // Resolve convergence invalidates the shared pages and fires per-range
+    // watches so the shared texture cache reloads, but the matching legacy
+    // snapshot bridge must survive. Its legacy RAM uploads are invalidated
+    // directly below with the explicit scope, so suppress only the duplicate
+    // global-watch fan-out for this self-publication.
+    bool fire_global_watches =
+        texture_invalidation_scope_ == metal::MetalTextureCache::
+                                           InvalidationScope::
+                                               kAllRepresentations;
+    shared_memory_->MemoryInvalidationCallback(base, length, exact_range,
+                                               fire_global_watches);
     return true;
   }
 
@@ -101,13 +118,15 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
     if (!texture_cache_) {
       return false;
     }
-    *invalidated_entries = texture_cache_->InvalidateRange(base, length);
+    *invalidated_entries = texture_cache_->InvalidateRange(
+        base, length, texture_invalidation_scope_);
     return true;
   }
 
  private:
   SharedMemory* shared_memory_;
   metal::MetalTextureCache* texture_cache_;
+  metal::MetalTextureCache::InvalidationScope texture_invalidation_scope_;
 };
 
 // Concrete task-3.3 memexport destination-preparation target: forwards to the
@@ -2024,51 +2043,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     bool overlap = !authority_decision.selected.empty();
     bool authority_sample = authority_observer_.ShouldSampleConsumer(
         metal::ConsumerKind::kVertex);
-    metal::LegacySyncOutcome sync_outcome;
-    metal::LegacyDrainOutcome drain_outcome;
-    bool drain_attempted = false;
-    if (overlap) {
-      // One boundary for the whole draw. EndFrameEncoderAndWait commits an
-      // unsubmitted selected producer and also preserves the existing shared-
-      // buffer rewrite hazard ordering for earlier draws.
-      uint64_t boundary_submission =
-          frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
-      sync_outcome = EndFrameEncoderAndWait();
-      uint64_t required_submission = std::max(
-          boundary_submission, authority_decision.max_wait_submission);
-      bool dependency_completed = true;
-      if (required_submission >
-          completed_submission_.load(std::memory_order_acquire)) {
-        bool waited = WaitForSubmission(required_submission);
-        sync_outcome.waited = sync_outcome.waited || waited;
-        if (waited) {
-          PumpCompletedActions();
-        } else {
-          dependency_completed = false;
-        }
-      }
-      if (dependency_completed) {
-        drain_attempted = true;
-        drain_outcome =
-            DrainSelectedPendingProducers(authority_decision);
-      }
-    }
+    ProducerDependencyOutcome dependency_outcome =
+        ResolvePendingProducerDependencies(authority_decision);
     if (authority_sample) {
       metal::LegacyConsumerOutcome legacy;
       legacy.overlap = overlap;
-      legacy.committed = sync_outcome.committed;
-      legacy.waited = sync_outcome.waited;
-      legacy.drained = drain_attempted;
+      legacy.committed = dependency_outcome.sync.committed;
+      legacy.waited = dependency_outcome.sync.waited;
+      legacy.drained = dependency_outcome.drain_attempted;
       legacy.drain_range_scoped = true;
-      legacy.drained_records = drain_outcome.drained_records;
+      legacy.drained_records = dependency_outcome.drain.drained_records;
       authority_observer_.RecordConsumer(authority_decision, legacy);
     }
-    if (overlap &&
-        drain_outcome.drained_records != authority_decision.selected.size()) {
+    if (!dependency_outcome.complete) {
       XELOGE(
           "MetalCommandProcessor: vertex dependency convergence retired {} "
           "of {} selected producers; skipping draw",
-          drain_outcome.drained_records, authority_decision.selected.size());
+          dependency_outcome.drain.drained_records,
+          authority_decision.selected.size());
       ++draw_skip_count_;
       return true;
     }
@@ -2459,25 +2451,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     bool tex_overlap = !authority_decision.selected.empty();
     bool authority_sample = authority_observer_.ShouldSampleConsumer(
         metal::ConsumerKind::kTexture);
-    metal::LegacySyncOutcome sync_outcome;
-    metal::LegacyDrainOutcome drain_outcome;
-    if (tex_overlap) {
-      sync_outcome = EndFrameEncoderAndWait();
-      drain_outcome = DrainPendingWritebacks();
-    }
-    // Observer-only telemetry is still throttled, but task 4.1 now owns the
-    // overlap gate above. The execution path still drains ALL records on one
-    // selected dependency, so record its breadth and retirement count until
-    // task 4.3 routes only the selected records.
+    ProducerDependencyOutcome dependency_outcome =
+        ResolvePendingProducerDependencies(authority_decision);
+    // Task 4.3 routes both texture-cache implementations through the common
+    // selected-record executor above. Telemetry remains throttled and records
+    // the factual one-boundary, selective action before either cache consumes
+    // the RAM-derived bytes below.
     if (authority_sample) {
       metal::LegacyConsumerOutcome legacy;
       legacy.overlap = tex_overlap;
-      legacy.committed = sync_outcome.committed;
-      legacy.waited = sync_outcome.waited;
-      legacy.drained = tex_overlap;
-      legacy.drain_range_scoped = false;  // unfiltered: drains every record.
-      legacy.drained_records = drain_outcome.drained_records;
+      legacy.committed = dependency_outcome.sync.committed;
+      legacy.waited = dependency_outcome.sync.waited;
+      legacy.drained = dependency_outcome.drain_attempted;
+      legacy.drain_range_scoped = true;
+      legacy.drained_records = dependency_outcome.drain.drained_records;
       authority_observer_.RecordConsumer(authority_decision, legacy);
+    }
+    if (!dependency_outcome.complete) {
+      XELOGE(
+          "MetalCommandProcessor: texture dependency convergence retired {} "
+          "of {} selected producers; skipping draw",
+          dependency_outcome.drain.drained_records,
+          authority_decision.selected.size());
+      ++draw_skip_count_;
+      return true;
     }
   }
 
@@ -4376,7 +4373,9 @@ bool MetalCommandProcessor::IssueCopy() {
           texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                  snap, rw, rh,
                                                  /*is_depth=*/false,
-                                                 canonical_resolve);
+                                                 canonical_resolve,
+                                                 resolve_info.copy_dest_extent_start,
+                                                 resolve_info.copy_dest_extent_length);
           // XE_METAL_TIP_SNAP_VIEW (stabilize 6.6 experiment, default off):
           // maintain a derived 1x1 R32F copy of the snapshot's guest texel
           // (0,0) so 1x1 fetches (the exposure tips) sample the correct
@@ -4704,7 +4703,9 @@ bool MetalCommandProcessor::IssueCopy() {
       if (resolved && is_new_snapshot) {
         texture_cache_->RegisterResolvedTarget(resolve_info.copy_dest_base,
                                                snap, rw, rh, /*is_depth=*/true,
-                                               /*requires_fetch_swizzle=*/true);
+                                               /*requires_fetch_swizzle=*/true,
+                                               resolve_info.copy_dest_extent_start,
+                                               resolve_info.copy_dest_extent_length);
       }
       // DEPTH RAM writeback: texture consumers get the snapshot (bridge),
       // but VFETCH consumers read guest RAM — JC2's memexport light-atlas VS
@@ -5411,7 +5412,9 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // uploaded from that range so the next fetch re-uploads fresh content.
       if (texture_cache_) {
         invalidated_entries =
-            texture_cache_->InvalidateRange(wb.guest_addr, wb.range_bytes());
+            texture_cache_->InvalidateRange(
+                wb.guest_addr, wb.range_bytes(),
+                metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
         outcome.invalidated_entries += invalidated_entries;
       }
       if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
@@ -5579,8 +5582,9 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       auto publication = metal::DecideRamWritePublication(
           metal::WriterKind::kResolve, wb.guest_addr, wb.dest_extent_bytes);
       if (publication) {
-        MetalRamWritePublicationTarget target(shared_memory_.get(),
-                                              texture_cache_.get());
+        MetalRamWritePublicationTarget target(
+            shared_memory_.get(), texture_cache_.get(),
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
         publish_outcome = metal::PublishRamWrite(*publication, target);
       }
     }
@@ -5648,6 +5652,41 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
     }
   }
   return combined;
+}
+
+MetalCommandProcessor::ProducerDependencyOutcome
+MetalCommandProcessor::ResolvePendingProducerDependencies(
+    const metal::ConsumerDecision& decision) {
+  ProducerDependencyOutcome outcome;
+  if (decision.selected.empty()) {
+    return outcome;
+  }
+
+  // One completion boundary for the whole consumer request. A producer in the
+  // current command buffer is tagged with CurrentEncodingSubmission (or zero
+  // in the diagnostic tags-off mode), so capture the real boundary before the
+  // commit and prove it completed independently of the record tag.
+  uint64_t boundary_submission =
+      frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
+  outcome.sync = EndFrameEncoderAndWait();
+  uint64_t required_submission =
+      std::max(boundary_submission, decision.max_wait_submission);
+  if (required_submission >
+      completed_submission_.load(std::memory_order_acquire)) {
+    bool waited = WaitForSubmission(required_submission);
+    outcome.sync.waited = outcome.sync.waited || waited;
+    if (!waited) {
+      outcome.complete = false;
+      return outcome;
+    }
+    PumpCompletedActions();
+  }
+
+  outcome.drain_attempted = true;
+  outcome.drain = DrainSelectedPendingProducers(decision);
+  outcome.complete =
+      outcome.drain.drained_records == decision.selected.size();
+  return outcome;
 }
 
 void MetalCommandProcessor::FlushPendingWritebacksForWait(
