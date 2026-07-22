@@ -1034,13 +1034,42 @@ ConsumerObservation ObserveConsumerBytes(
         return ApplyProducerBytes(*pb, ram);
       });
   observation.available =
-      observation.drain.drained_records == observation.decision.selected.size();
+      ConsumerPublicationComplete(observation.decision, observation.drain);
   observation.ram = std::move(ram);
   return observation;
 }
 
 ConsumerRequest UniformRequest(uint32_t base, uint32_t size) {
   return ConsumerRequest::Uniform(SingleRange(base, size));
+}
+
+// The full 512 MiB guest physical domain the swap publishes before present
+// (MetalCommandProcessor::IssueSwap routes it through
+// ResolveRamConsumerDependencies(kHostCpuRead, ...)). Modeling the swap request
+// as one full-domain range means selection is driven purely by which records
+// are pending and their registration order -- exactly the property the promoted
+// selective drain must preserve where the old cross-kind grouped drain did not.
+ConsumerRequest FullDomainRequest() {
+  GuestRangeSet domain;
+  bool added = domain.Add(GuestRange::FromBaseLength(
+      0u, static_cast<uint32_t>(GuestRange::kGuestPhysicalSize)));
+  REQUIRE(added);  // the full-domain range must be representable and in-bounds.
+  REQUIRE(domain.CoveredBytes() == GuestRange::kGuestPhysicalSize);
+  return ConsumerRequest::Uniform(domain);
+}
+
+// The exact present/suppress gate MetalCommandProcessor::IssueSwap applies
+// after its full-domain publication. IssueSwap presents iff
+// ResolveRamConsumerDependencies returned true, which is
+// ProducerDependencyOutcome::complete, which production computes as
+// ConsumerPublicationComplete(decision, drain). Deriving the gate here from the
+// SAME shared authority predicate -- over the decision and drain the shared
+// executor actually produced -- means a passing test cannot diverge from what
+// production would present on; it is not an independently recomputed
+// availability flag. (ObserveConsumerBytes also sets `available` through this
+// predicate, so the two agree by construction rather than by coincidence.)
+bool SwapPresentationGatePermitsPresent(const ConsumerObservation& obs) {
+  return ConsumerPublicationComplete(obs.decision, obs.drain);
 }
 
 // Assert every byte of [base, base+size) equals `value`. Bounds are validated
@@ -1394,6 +1423,167 @@ TEST_CASE(
     REQUIRE(empty_request.action == AuthorityAction::kNoDependency);
     REQUIRE(empty_request.requested.empty());
   }
+}
+
+// --- Swap full-domain publication ordering (task 7.4) ----------------------
+//
+// MetalCommandProcessor::IssueSwap publishes every deferred producer to guest
+// RAM before present. It used to call the cross-kind grouped unfiltered
+// DrainPendingWritebacks(), which converged ALL pending memexports before ALL
+// pending resolves regardless of registration order. For overlapping records
+// that inverted writer chronology: a newer memexport could be published and
+// then overwritten by an older resolve (or a newer suffix retired while an
+// older predecessor was retained). The swap now routes its full-domain request
+// through the same DecideConsumer + DrainSelectedProducers path every other
+// consumer uses, so records converge in authority-sequence order and the
+// newest overlapping writer always lands last -- independent of writer kind.
+//
+// These tests drive the SAME shared executor production uses
+// (ObserveConsumerBytes -> DrainSelectedProducers) against a full-domain
+// kHostCpuRead request, for both cross-kind orderings and a failed predecessor.
+
+TEST_CASE(
+    "Swap full-domain: older resolve then newer memexport -- newest memexport "
+    "wins the overlap under registration order",
+    "[l0][authority][swap][bytes]") {
+  // Registration order A: resolve (seq 10) then memexport (seq 20). The old
+  // grouped drain converged the memexport FIRST and the resolve LAST, so the
+  // older resolve overwrote the newer memexport on the overlap -- the exact
+  // failure the audit describes. The selective drain applies them in sequence
+  // order, so the newest (memexport) bytes win.
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0xE1u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0xE2u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kHostCpuRead,
+                                  FullDomainRequest(), world, /*completed=*/4);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(obs.decision.selected.size() == 2u);  // full domain selects both.
+  REQUIRE(obs.decision.selected[0].sequence == 10u);  // older applied first.
+  REQUIRE(obs.decision.selected[1].sequence == 20u);  // newer applied last.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0xE1u);   // resolve-only head.
+  RequireRangeBytes(obs.ram, 0x2800u, 0x1000u, 0xE2u);  // overlap+tail: newest.
+}
+
+TEST_CASE(
+    "Swap full-domain: older memexport then newer resolve -- newest resolve "
+    "wins the overlap under registration order",
+    "[l0][authority][swap][bytes]") {
+  // Registration order B: memexport (seq 10) then resolve (seq 20). This is the
+  // opposite cross-kind ordering; the newest writer is the resolve. The
+  // selective drain still applies them in sequence order, so the resolve lands
+  // last and wins the overlap. (Proving both orderings guarantees the outcome
+  // depends on registration order, not writer kind.)
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0x51u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0x52u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kHostCpuRead,
+                                  FullDomainRequest(), world, /*completed=*/4);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.selected.size() == 2u);
+  REQUIRE(obs.decision.selected[0].sequence == 10u);  // older memexport first.
+  REQUIRE(obs.decision.selected[1].sequence == 20u);  // newer resolve last.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0x51u);   // memexport-only head.
+  RequireRangeBytes(obs.ram, 0x2800u, 0x1000u, 0x52u);  // overlap+tail: newest.
+}
+
+TEST_CASE(
+    "Swap full-domain: a failed older predecessor stops retirement of the "
+    "newer overlapping suffix",
+    "[l0][authority][swap][bytes]") {
+  // The swap publishes the whole domain, but the oldest overlapping record
+  // (seq 10, a memexport) fails to converge (missing RAM/buffer mapping). The
+  // shared stop-on-first-failed-retirement policy must NOT retire the newer
+  // overlapping resolve suffix (seq 20): retiring a newer record while its
+  // older overlapping predecessor stays pending would let a later retry of the
+  // older record overwrite the newer bytes and invert writer order. The failed
+  // record and its newer suffix both stay stale, and the consumer is
+  // unavailable (not every selected record retired), so the whole overlap is
+  // republished together on the next attempt. (The failing record is the
+  // memexport because the byte harness models convergence failure through the
+  // real ConvergeMemexportRam seam.)
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0x61u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0x62u),
+      // A record disjoint from the first pair: the full-domain request selects
+      // it, but stop-on-failure must leave it untouched.
+      MakeProducerBytes(0x9000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/30, /*fill=*/0x63u),
+  };
+  world[0].converges = false;  // the OLDER predecessor fails to converge.
+
+  auto obs = ObserveConsumerBytes(ConsumerKind::kHostCpuRead,
+                                  FullDomainRequest(), world, /*completed=*/4);
+  REQUIRE(obs.decision.selected.size() == 3u);  // full domain selects all.
+  REQUIRE(obs.decision.selected[0].sequence == 10u);  // failing predecessor.
+  REQUIRE(obs.drain.drained_records == 0u);  // stopped at the first record.
+  REQUIRE_FALSE(obs.available);  // not every selected record retired.
+  // Neither the failed older record nor its newer overlapping suffix landed:
+  // the newer resolve is NOT retired ahead of its still-pending predecessor.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x1000u, kStaleRam);
+  RequireRangeBytes(obs.ram, 0x2800u, 0x1000u, kStaleRam);
+  // The untouched later record is likewise left stale for the next attempt.
+  RequireRangeBytes(obs.ram, 0x9000u, 0x1000u, kStaleRam);
+}
+
+TEST_CASE(
+    "Swap presentation gate: suppresses present on incomplete full-domain "
+    "convergence and permits it only when complete",
+    "[l0][authority][swap]") {
+  // This is the fail-closed gate itself, not just the byte outcome. IssueSwap
+  // presents iff its full-domain kHostCpuRead publication returned complete;
+  // production derives that bool from ConsumerPublicationComplete(decision,
+  // drain), and SwapPresentationGatePermitsPresent evaluates the SAME predicate
+  // over the shared executor's real decision/drain. Present is permitted only
+  // when every selected producer retired -- so a stale RAM image can never be
+  // presented.
+
+  // Incomplete: the oldest overlapping producer (seq 10) fails to converge, so
+  // the shared stop-on-failure executor retires nothing and the gate must
+  // SUPPRESS the present. A later disjoint record is also left pending.
+  std::vector<ProducerBytes> incomplete = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0x71u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0x72u),
+      MakeProducerBytes(0x9000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/30, /*fill=*/0x73u),
+  };
+  incomplete[0].converges = false;  // the OLDER predecessor fails to converge.
+  auto blocked = ObserveConsumerBytes(
+      ConsumerKind::kHostCpuRead, FullDomainRequest(), incomplete,
+      /*completed=*/4);
+  REQUIRE(blocked.decision.selected.size() == 3u);  // full domain selects all.
+  REQUIRE(blocked.drain.drained_records < blocked.decision.selected.size());
+  REQUIRE_FALSE(SwapPresentationGatePermitsPresent(blocked));  // fail closed.
+
+  // Complete: the identical world with every producer converging. The gate
+  // retires all three selected records and PERMITS the present. Same records,
+  // same registration order, same request -- only convergence differs, so the
+  // gate's decision tracks convergence completeness and nothing else.
+  std::vector<ProducerBytes> complete = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0x71u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0x72u),
+      MakeProducerBytes(0x9000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/30, /*fill=*/0x73u),
+  };
+  auto permitted = ObserveConsumerBytes(
+      ConsumerKind::kHostCpuRead, FullDomainRequest(), complete,
+      /*completed=*/4);
+  REQUIRE(permitted.decision.selected.size() == 3u);
+  REQUIRE(permitted.drain.drained_records ==
+          permitted.decision.selected.size());
+  REQUIRE(SwapPresentationGatePermitsPresent(permitted));  // present permitted.
 }
 
 }  // namespace test

@@ -320,6 +320,24 @@ struct ProducerDrainOutcome {
   uint32_t invalidated_entries = 0;
 };
 
+// The one publication-convergence predicate shared by production and the
+// conformance harness: a RAM consumer's publication is complete only when the
+// selective drain retired exactly one pending record for every selected
+// producer. A short retirement (the stop-on-first-failure policy above halting,
+// or a failed wait yielding an empty drain) leaves the failing record and its
+// untouched selected suffix pending, so the consumer must fail closed.
+//
+// MetalCommandProcessor::ResolvePendingProducerDependencies uses this to set
+// ProducerDependencyOutcome::complete, so the bool the swap's full-domain
+// publication consumes as its present/suppress gate is exactly this function of
+// the decision and drain. Owning no state, it lets the device-free tests assert
+// the SAME gate production presents on, rather than an independently recomputed
+// availability flag.
+inline bool ConsumerPublicationComplete(const ConsumerDecision& decision,
+                                        const ProducerDrainOutcome& drain) {
+  return drain.drained_records == decision.selected.size();
+}
+
 // The selective-drain executor shared by production
 // (MetalCommandProcessor::DrainSelectedPendingProducers) and the task-4.5
 // conformance executors. It walks the seam's sequence-ordered selected records,

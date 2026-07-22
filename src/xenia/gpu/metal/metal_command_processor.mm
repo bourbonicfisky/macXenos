@@ -5111,7 +5111,7 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
     const metal::ConsumerRequest& request) const {
   // Task 4.1's one multi-range query. It selects only intersecting records
   // from the two existing producer queues and owns no authority state. The
-  // The caller executes the promoted one-boundary commit/wait and selective
+  // caller executes the promoted one-boundary commit/wait and selective
   // drain policy for the returned decision.
   return metal::DecideConsumer(
       consumer, request, SnapshotPendingProducers(),
@@ -5146,6 +5146,25 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   // cached texture uploads overlapping the range so the next fetch re-reads.
   if (!pending_memexports_.empty()) {
     std::vector<PendingMemexport> still_pending_exports;
+    const bool exact_sequence = filter_authority_sequence != 0;
+    auto export_begin = pending_memexports_.begin();
+    auto export_end = pending_memexports_.end();
+    if (exact_sequence) {
+      export_begin = std::lower_bound(
+          pending_memexports_.begin(), pending_memexports_.end(),
+          filter_authority_sequence,
+          [](const PendingMemexport& pending, uint64_t sequence) {
+            return pending.authority_sequence < sequence;
+          });
+      export_end =
+          export_begin != pending_memexports_.end() &&
+                  export_begin->authority_sequence == filter_authority_sequence
+              ? export_begin + 1
+              : export_begin;
+    } else {
+      still_pending_exports.reserve(pending_memexports_.size());
+    }
+    bool retire_exact_export = false;
     id<MTLBuffer> me_shared_buffer = shared_memory_
                                          ? (__bridge id<MTLBuffer>)
                                                shared_memory_->GetBuffer()
@@ -5154,11 +5173,14 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         static_cast<const uint8_t*>(me_shared_buffer.contents);
     MetalMemexportConvergenceTarget convergence_target(
         memory_, shared_memory_.get(), texture_cache_.get());
-    for (const PendingMemexport& me : pending_memexports_) {
+    for (auto export_it = export_begin; export_it != export_end; ++export_it) {
+      const PendingMemexport& me = *export_it;
       if (me.submission > completed ||
           !in_filter(me.base_address, me.size_bytes,
                      me.authority_sequence)) {
-        still_pending_exports.push_back(me);
+        if (!exact_sequence) {
+          still_pending_exports.push_back(me);
+        }
         continue;
       }
       std::optional<metal::GuestRange> range =
@@ -5169,7 +5191,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         // already reject out-of-domain ranges before a record is
         // registered, but retain rather than drop so a record is never
         // silently discarded outside the explicit success path.
-        still_pending_exports.push_back(me);
+        if (!exact_sequence) {
+          still_pending_exports.push_back(me);
+        }
         continue;
       }
       static uint32_t s_me_drains = 0;
@@ -5203,7 +5227,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       if (!result.converged) {
         // Missing RAM mapping or shared-buffer contents: a factual
         // disagreement, not a silent drop -- retain the record for retry.
-        still_pending_exports.push_back(me);
+        if (!exact_sequence) {
+          still_pending_exports.push_back(me);
+        }
         static uint32_t s_failed_convergences = 0;
         if (s_failed_convergences++ < 8) {
           XELOGE(
@@ -5216,6 +5242,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
+      retire_exact_export = exact_sequence;
       if (me_log && me_contents) {
         const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
             me_contents + me.base_address);
@@ -5232,14 +5259,41 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
                                     : " (exported content differs)");
       }
     }
-    pending_memexports_ = std::move(still_pending_exports);
+    if (retire_exact_export) {
+      pending_memexports_.erase(export_begin);
+    } else if (!exact_sequence) {
+      pending_memexports_ = std::move(still_pending_exports);
+    }
   }
   std::vector<PendingWriteback> still_pending;
-  for (PendingWriteback& wb : pending_writebacks_) {
+  const bool exact_sequence = filter_authority_sequence != 0;
+  auto writeback_begin = pending_writebacks_.begin();
+  auto writeback_end = pending_writebacks_.end();
+  if (exact_sequence) {
+    writeback_begin = std::lower_bound(
+        pending_writebacks_.begin(), pending_writebacks_.end(),
+        filter_authority_sequence,
+        [](const PendingWriteback& pending, uint64_t sequence) {
+          return pending.authority_sequence < sequence;
+        });
+    writeback_end =
+        writeback_begin != pending_writebacks_.end() &&
+                writeback_begin->authority_sequence == filter_authority_sequence
+            ? writeback_begin + 1
+            : writeback_begin;
+  } else {
+    still_pending.reserve(pending_writebacks_.size());
+  }
+  bool retire_exact_writeback = false;
+  for (auto writeback_it = writeback_begin; writeback_it != writeback_end;
+       ++writeback_it) {
+    PendingWriteback& wb = *writeback_it;
     if (wb.submission > completed ||
         !in_filter(wb.guest_addr, wb.range_bytes(),
                    wb.authority_sequence)) {
-      still_pending.push_back(wb);
+      if (!exact_sequence) {
+        still_pending.push_back(wb);
+      }
       continue;
     }
     uint32_t invalidated_entries = 0;
@@ -5549,7 +5603,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             wb.guest_addr, wb.dest_extent_bytes, dest != nullptr,
             staging != nil, shared_memory_ != nullptr);
       }
-      still_pending.push_back(wb);
+      if (!exact_sequence) {
+        still_pending.push_back(wb);
+      }
       continue;
     }
     ++outcome.drained_records;
@@ -5558,8 +5614,13 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         (__bridge_transfer id<MTLBuffer>)wb.staging;
     (void)released_staging;
     wb.staging = nullptr;
+    retire_exact_writeback = exact_sequence;
   }
-  pending_writebacks_ = std::move(still_pending);
+  if (retire_exact_writeback) {
+    pending_writebacks_.erase(writeback_begin);
+  } else if (!exact_sequence) {
+    pending_writebacks_ = std::move(still_pending);
+  }
   return outcome;
 }
 
@@ -5614,7 +5675,7 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
 
   outcome.drain = DrainSelectedPendingProducers(decision);
   outcome.complete =
-      outcome.drain.drained_records == decision.selected.size();
+      metal::ConsumerPublicationComplete(decision, outcome.drain);
   return outcome;
 }
 
@@ -5775,7 +5836,44 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }
   }
 
-  DrainPendingWritebacks();
+  // Publish every deferred producer to guest RAM before present. Route the
+  // swap's full-domain publication through the same chronological authority
+  // decision/selected-record executor every other consumer uses, rather than
+  // the cross-kind grouped unfiltered DrainPendingWritebacks() (which converged
+  // ALL memexports before ALL resolves regardless of registration order). For
+  // overlapping records that inversion could publish a newer memexport and then
+  // let an older resolve overwrite it; the selective drain walks the records in
+  // authority-sequence order so the newest overlapping writer always lands
+  // last. Its stop-on-first-failed-retirement policy retains a failed record
+  // and the untouched later suffix instead of retiring a newer record over an
+  // older still-pending predecessor. The request spans the whole 512 MiB guest
+  // physical domain (buffer offset == guest physical address), so full
+  // publication intent is preserved: every pending record intersects and is
+  // selected. The frame's single synchronous EndFrameEncoderAndWait above
+  // already completed every submission, so this adds no wait for a disjoint or
+  // empty pending set. kHostCpuRead expresses a RAM-publication boundary, so it
+  // adds no shared-buffer revalidation and no second queue.
+  metal::GuestRangeSet swap_publication_domain;
+  swap_publication_domain.Add(metal::GuestRange::FromBaseLength(
+      0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
+  XE_UNLIKELY_IF(!ResolveRamConsumerDependencies(
+      metal::ConsumerKind::kHostCpuRead, swap_publication_domain)) {
+    // Fail closed: full-domain publication did not converge every selected
+    // producer (the shared executor's stop-on-first-failed-retirement policy
+    // halted, or a wait failed). Presenting now would expose stale RAM for the
+    // failed record and its untouched suffix while both stay pending. Suppress
+    // this frame's present and leave the pending set intact so the next swap
+    // republishes the whole overlap together -- the same retry the shared
+    // fail-closed contract gives every other RAM consumer. Reset per-frame
+    // render state exactly like the no-presenter/no-queue early exits below so
+    // the empty-swap forensics and next frame stay consistent.
+    XELOGE(
+        "MetalCommandProcessor: swap #{} suppressed present -- full-domain RAM "
+        "publication did not fully converge; retrying next frame",
+        swap_count_);
+    frame_has_render_ = false;
+    return;
+  }
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {

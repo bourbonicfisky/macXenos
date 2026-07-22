@@ -114,15 +114,11 @@ class MetalCommandProcessor : public CommandProcessor {
   void InitializeTrace() override;
   std::string GetCaptureDeviceInfoJson() const override;
 
-  // Flush + CPU-copy pending resolve writebacks into guest RAM. Runs at
-  // IssueSwap, and early via FlushPendingWritebacksForWait when the guest
-  // WAIT_REG_MEMs on an address a pending writeback covers (deferring to
-  // swap alone deadlocks such waits; draining everything at every wait fed
-  // the auto-exposure loop mid-frame values — black flicker).
-  // Drains completed writebacks/memexports to guest RAM. With a filter range,
-  // only entries overlapping [filter_base, filter_base+filter_size) drain —
-  // the same-frame vfetch barrier must NOT drain unrelated writebacks (the
-  // exposure ping-pong reads mid-frame luminance otherwise: black flicker).
+  // Converges completed resolve writebacks and memexports to guest RAM. The
+  // promoted selected executor supplies a unique authority sequence, allowing
+  // ordered lookup and exact retirement without rebuilding either full pending
+  // vector for every selected record. The broad range form remains available
+  // for behavior-preserving internal use and never drains a disjoint record.
   metal::ProducerDrainOutcome DrainPendingWritebacks(
       uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu,
       uint64_t filter_authority_sequence = 0);
