@@ -427,7 +427,11 @@ struct RamWritePublicationTarget {
 
   // Invalidate overlapping legacy texture-cache entries, returning the number
   // retired. Only writers whose policy requires the independently-needed direct
-  // invalidation (trace restore during the phase-5 equivalence period) call it.
+  // invalidation (trace restore, whose legacy global watch is unregistered by
+  // SetTracePlayback) call it. Task 5.3's writer-matrix comparison proved this
+  // leg is durably required, not a temporary phase-5 measure: with the global
+  // watch gone the watch fan-out is empty, so nothing else retires these
+  // entries.
   virtual bool InvalidateLegacyTextures(uint32_t base, uint32_t length,
                                         uint32_t* invalidated_entries) = 0;
 };
@@ -449,9 +453,12 @@ inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
       return {/*shared=*/false, /*exact=*/false, /*legacy=*/false};
     case WriterKind::kTraceRestore:
       // Exact publication plus the independently-required direct legacy texture
-      // invalidation retained through the phase-5 equivalence period (audit
-      // blocker 3: trace playback unregisters the legacy global watch, so its
-      // direct InvalidateRange is not yet redundant).
+      // invalidation. Trace playback unregisters the legacy global watch, so
+      // watch fan-out cannot retire these entries and the direct InvalidateRange
+      // is durably required. Task 5.3's writer-matrix comparison proved this
+      // leg is not removable (the global-watch set is empty after
+      // SetTracePlayback), so it is retained by design rather than pending a
+      // later equivalence proof.
       return {/*shared=*/true, /*exact=*/true, /*legacy=*/true};
     case WriterKind::kResolve:
       // Exact publication of the checked scatter extent. The resolve drain
@@ -772,8 +779,9 @@ class AuthorityObserver {
 
   // Record one writer publication alongside the independently observed legacy
   // outcome. Invalidation counts are factual Entry retirements returned by the
-  // direct legacy cache call; deferred watch fan-out remains a separately
-  // measured phase-5 surface and is not fabricated here.
+  // direct legacy cache call. Tasks 5.2-5.3 measured deferred watch fan-out
+  // separately and proved the retained-hook set; this observer still records
+  // only the factual direct result rather than fabricating a deferred count.
   void RecordWriter(WriterKind writer, const GuestRangeSet& ranges,
                     AuthorityAction predicted_action,
                     const LegacyWriterOutcome& legacy) {

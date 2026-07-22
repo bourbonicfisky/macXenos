@@ -101,9 +101,9 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
     }
     // Resolve convergence invalidates the shared pages and fires per-range
     // watches so the shared texture cache reloads, but the matching legacy
-    // snapshot bridge must survive. Its legacy RAM uploads are invalidated
-    // directly below with the explicit scope, so suppress only the duplicate
-    // global-watch fan-out for this self-publication.
+    // snapshot bridge must survive. The preceding resolve-drain call site
+    // invalidates legacy RAM uploads with kRamUploadsOnly, so suppress only
+    // duplicate global-watch fan-out for this self-publication.
     bool fire_global_watches =
         texture_invalidation_scope_ == metal::MetalTextureCache::
                                            InvalidationScope::
@@ -196,6 +196,10 @@ class MetalMemexportConvergenceTarget
     }
     std::memcpy(dest, contents + base, length);
     if (texture_cache_) {
+      // Task 5.3 proved the earlier RangeWrittenByGpu watch is equivalent in
+      // normal mode, but trace playback unregisters that global watch and
+      // skips queue draining. Keep this direct retirement globally so replayed
+      // memexports cannot leave aliases or resolved bridges stale.
       *invalidated_entries = texture_cache_->InvalidateRange(base, length);
     }
     return true;
@@ -419,11 +423,13 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   // re-uploads them, mirroring the Vulkan backend) using the SAME
   // MemoryInvalidationCallback this call site used directly before.
   //
-  // The direct MetalTextureCache::InvalidateRange call is RETAINED (task 3.1
-  // item 2 / audit blocker 3): trace playback unregisters the legacy global
-  // watch, so the seam's policy for kTraceRestore also requests legacy
-  // invalidation rather than relying on watch fan-out. SetTracePlayback()
-  // must still run first regardless of range count.
+  // The direct MetalTextureCache::InvalidateRange call is durably RETAINED:
+  // trace playback unregisters the legacy global watch, so the seam's policy
+  // for kTraceRestore also requests legacy invalidation rather than relying on
+  // watch fan-out. Task 5.3's writer-matrix comparison proved this leg is not
+  // redundant (the legacy global-watch set is empty after SetTracePlayback), so
+  // it stays by design. SetTracePlayback() must still run first regardless of
+  // range count.
   if (texture_cache_) {
     texture_cache_->SetTracePlayback();
   }
@@ -5458,6 +5464,9 @@ metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       }
       // STAGE 3: the writeback changed guest RAM — evict cached textures
       // uploaded from that range so the next fetch re-uploads fresh content.
+      // Task 5.3 proved this scoped direct leg is required: the following
+      // shared publication suppresses global fan-out to preserve the
+      // overlapping resolved bridge, so no legacy watch can replace it.
       if (texture_cache_) {
         invalidated_entries =
             texture_cache_->InvalidateRange(
