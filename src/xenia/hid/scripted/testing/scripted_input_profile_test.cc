@@ -27,16 +27,23 @@ using namespace std::chrono_literals;
 struct ExpectedProfile {
   std::string_view filename;
   std::string_view title_id;
+  std::string_view final_marker;
   uint32_t source_steps;
   uint32_t transitions;
   std::chrono::milliseconds duration;
 };
 
-constexpr std::array<ExpectedProfile, 4> kExpectedProfiles = {{
-    {"53450848-sonic-generations.toml", "53450848", 5, 7, 21100ms},
-    {"434307FC-ultra-street-fighter-iv.toml", "434307FC", 17, 29, 48000ms},
-    {"534307E7-just-cause-2.toml", "534307E7", 5, 11, 70000ms},
-    {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", 3, 4, 12800ms},
+constexpr std::array<ExpectedProfile, 5> kExpectedProfiles = {{
+    {"53450848-sonic-generations.toml", "53450848", "gameplay_expected", 5,
+     7, 21100ms},
+    {"434307FC-ultra-street-fighter-iv.toml", "434307FC",
+     "gameplay_expected", 17, 29, 48000ms},
+    {"534307E7-just-cause-2.toml", "534307E7", "gameplay_expected", 5, 11,
+     70000ms},
+    {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", "gameplay_expected", 3,
+     4, 12800ms},
+    {"5454082B-red-dead-redemption.toml", "5454082B", "intro_expected", 5,
+     7, 35000ms},
 }};
 
 }  // namespace
@@ -69,7 +76,7 @@ TEST_CASE("every committed scripted-input profile parses and ends neutral",
       const auto* final_marker =
           std::get_if<MarkerStep>(&result.script->steps().back());
       REQUIRE(final_marker != nullptr);
-      REQUIRE(final_marker->name == "gameplay_expected");
+      REQUIRE(final_marker->name == expected.final_marker);
 
       ScriptedInputTimeline::Clock::time_point now = {};
       std::vector<TimelineEvent> events;
@@ -91,7 +98,7 @@ TEST_CASE("every committed scripted-input profile parses and ends neutral",
       REQUIRE(timeline.Poll() == GamepadState{});
       REQUIRE(events.size() == 2);
       REQUIRE(events[0].type == TimelineEventType::kMarker);
-      REQUIRE(events[0].marker == "gameplay_expected");
+      REQUIRE(events[0].marker == expected.final_marker);
       REQUIRE(events[1].type == TimelineEventType::kCompletion);
     }
   }
