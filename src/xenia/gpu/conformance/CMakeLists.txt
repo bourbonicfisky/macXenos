@@ -37,6 +37,13 @@ add_executable(xenia-gpu-conformance
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/xenos.cc
   # Shared viewport normalization used by the Stage 19 system-constant tests.
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/draw_util.cc
+  # draw_util.cc's non-header closure (platform-neutral, pure math): the
+  # RB_COLOR_INFO/RB_BLENDCONTROL::rt_register_indices tables (registers.cc,
+  # only includes registers.h) and ui::FloatToD3D11Fixed16p8 (graphics_util.cc,
+  # only includes graphics_util.h + <cmath>). Release stripped these dead, but
+  # Checked/Debug reference them -- keep the L0 closure complete on all configs.
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/registers.cc
+  ${PROJECT_SOURCE_DIR}/src/xenia/ui/graphics_util.cc
   # PP1 (device-free): the REAL shared PrimitiveProcessor normalization logic +
   # the REAL production MetalPrimitiveProcessor subclass (pure C++, no device)
   # + the register file it reads. metal_primitive_processor_pp1_test.cc
