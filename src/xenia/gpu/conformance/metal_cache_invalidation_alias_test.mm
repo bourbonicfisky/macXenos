@@ -7,10 +7,10 @@
  ******************************************************************************
  */
 
-// Task 5.2: factual legacy-cache alias and lifetime coverage. Every entry is
-// created through MetalTextureCache::GetTextureSlot, and the production
-// InvalidateRange scan is the only overlap oracle. A real Metal device is
-// required because entries own real textures and bindless descriptor slots.
+// Tasks 5.2-5.3: factual cache alias, lifetime, and writer-matrix coverage.
+// Every legacy entry is created through MetalTextureCache::GetTextureSlot, and
+// the production InvalidateRange scan or SharedMemory watch fan-out is the only
+// overlap oracle. Real Metal textures and bindless descriptor slots are used.
 
 #import <Metal/Metal.h>
 
@@ -595,6 +595,486 @@ TEST_CASE(
   legacy.ReclaimStaleSlots(UINT64_MAX);
 }
 
+// Task 5.3 compares actual affected entry sets. Direct-only reference caches
+// and watch-driven caches start with the same real Metal entries; survivor
+// membership and retirement counts are compared after each production event.
+// SharedMemory notifications are page-granular, so a watch set may be a safe
+// conservative superset of the exact direct set on a 16 KiB host. Resolve and
+// trace are different: their legacy-global watch set is empty by design, so
+// their scoped direct hooks remain independently required.
+
+id<MTLTexture> MakeBridgeTexture(id<MTLDevice> device) {
+  MTLTextureDescriptor* descriptor =
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                         width:16
+                                                        height:16
+                                                     mipmapped:NO];
+  descriptor.storageMode = MTLStorageModeShared;
+  descriptor.usage = MTLTextureUsageShaderRead;
+  return [device newTextureWithDescriptor:descriptor];
+}
+
+std::vector<void*> LiveTextures(const MetalTextureCache& cache) {
+  std::vector<void*> live;
+  cache.AppendAllTextures(live);
+  return live;
+}
+
+bool ContainsTexture(const std::vector<void*>& live, void* texture) {
+  return std::find(live.begin(), live.end(), texture) != live.end();
+}
+
+class MatrixMemexportConvergenceTarget final : public MemexportConvergenceTarget {
+ public:
+  MatrixMemexportConvergenceTarget(Memory& memory, MetalTextureCache* legacy)
+      : memory_(memory), legacy_(legacy) {}
+
+  bool CopyBufferToRam(uint32_t base, uint32_t length, uint32_t* invalidated_entries) override {
+    uint8_t* dest = memory_.TranslatePhysical<uint8_t*>(base);
+    if (!dest) {
+      return false;
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+      dest[i] = uint8_t(0xC0u + i);
+    }
+    *invalidated_entries = legacy_ ? legacy_->InvalidateRange(base, length) : 0;
+    return true;
+  }
+
+ private:
+  Memory& memory_;
+  MetalTextureCache* legacy_;
+};
+
+TEST_CASE("Cache alias 5.3: guest CPU and memexport publication watch sets contain "
+          "the exact direct set and expose only page-granular conservative extras",
+          "[l1][metal][cache][alias][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  constexpr uint32_t kBase = 0x13000000;
+  constexpr uint32_t kAdjacent = kBase + kLegacyTextureExtent;
+  constexpr uint32_t kDisjoint = kBase + 0x10000;
+
+  auto shared = std::make_unique<AliasSharedMemory>(*h.memory);
+  REQUIRE(shared->Initialize());
+  uint32_t page = shared->PageSize();
+  FillMemory(*h.memory, kBase, 0x12000, 0xB1);
+
+  RegisterFile register_file;
+  WatchTextureCache shared_cache(register_file, *shared);
+  auto* shared_a = shared_cache.Load(MakeSharedRouteFetch(kBase, 16));
+  auto* shared_b = shared_cache.Load(MakeSharedRouteFetch(kBase, 32));
+  REQUIRE(shared_a != nullptr);
+  REQUIRE(shared_b != nullptr);
+
+  id<MTLBuffer> watch_heap = [h.device newBufferWithLength:16 * 1024
+                                                   options:MTLResourceStorageModeShared];
+  id<MTLBuffer> direct_heap = [h.device newBufferWithLength:16 * 1024
+                                                    options:MTLResourceStorageModeShared];
+  REQUIRE(watch_heap != nil);
+  REQUIRE(direct_heap != nil);
+  MetalTextureCache watch_cache((__bridge void*)h.device, h.memory, shared.get(),
+                                (__bridge void*)watch_heap, 64);
+  MetalTextureCache direct_cache((__bridge void*)h.device, h.memory, nullptr,
+                                 (__bridge void*)direct_heap, 64);
+  watch_cache.SetSubmissionProvider([]() { return uint64_t(51); });
+  direct_cache.SetSubmissionProvider([]() { return uint64_t(51); });
+
+  auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
+  auto adjacent = MakeLinearFetch(kAdjacent, xenos::TextureFormat::k_8_8_8_8);
+  auto disjoint = MakeLinearFetch(kDisjoint, xenos::TextureFormat::k_8_8_8_8);
+  auto seed = [&](MetalTextureCache& cache) {
+    std::vector<uint32_t> slots = {
+        cache.GetTextureSlot(alias, false), cache.GetTextureSlot(alias, true),
+        cache.GetTextureSlot(adjacent, false), cache.GetTextureSlot(disjoint, false)};
+    for (uint32_t slot : slots) {
+      REQUIRE(slot != 0u);
+    }
+    REQUIRE(cache.ConsumeUploadCount() == 4u);
+    return slots;
+  };
+  auto watch_slots = seed(watch_cache);
+  auto direct_slots = seed(direct_cache);
+
+  id<MTLTexture> bridge = MakeBridgeTexture(h.device);
+  REQUIRE(bridge != nil);
+  watch_cache.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                     kLegacyTextureExtent);
+  direct_cache.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                      kLegacyTextureExtent);
+  REQUIRE(LiveTextures(watch_cache).size() == 5u);
+  REQUIRE(LiveTextures(direct_cache).size() == 5u);
+
+  SECTION("guest CPU physical callback") {
+    auto policy = RamWritePolicyFor(WriterKind::kGuestCpu);
+    REQUIRE_FALSE(policy.execute_shared_invalidation);
+    REQUIRE_FALSE(policy.execute_legacy_invalidation);
+    shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, true);
+  }
+  SECTION("memexport GPU publication") { shared->RangeWrittenByGpu(kBase + 0x100, 0x20); }
+
+  REQUIRE(shared_a->base_outdated_lockless());
+  REQUIRE(shared_b->base_outdated_lockless());
+
+  // The exact reference removes the two keys and overlapping bridge, but not
+  // the exactly adjacent or disjoint entries.
+  REQUIRE(direct_cache.InvalidateRange(kBase + 0x100, 0x20,
+                                       MetalTextureCache::InvalidationScope::kAllRepresentations) ==
+          3u);
+  REQUIRE(direct_cache.GetTextureSlot(adjacent, false) == direct_slots[2]);
+  REQUIRE(direct_cache.GetTextureSlot(disjoint, false) == direct_slots[3]);
+  auto direct_live = LiveTextures(direct_cache);
+  REQUIRE(direct_live.size() == 2u);
+  REQUIRE_FALSE(ContainsTexture(direct_live, (__bridge void*)bridge));
+
+  // A disjoint lookup drains the real legacy global queue without recreating
+  // a target alias. On 16 KiB hosts the page also covers the exact-adjacent
+  // 8 KiB entry; on 4 KiB hosts it does not. This conservative superset is
+  // page validity, not a missed cache subscriber.
+  REQUIRE(watch_cache.GetTextureSlot(disjoint, false) == watch_slots[3]);
+  auto watch_live = LiveTextures(watch_cache);
+  uint32_t expected_watch_live = page > kLegacyTextureExtent ? 1u : 2u;
+  REQUIRE(watch_live.size() == expected_watch_live);
+  REQUIRE_FALSE(ContainsTexture(watch_live, (__bridge void*)bridge));
+  if (page <= kLegacyTextureExtent) {
+    REQUIRE(watch_cache.GetTextureSlot(adjacent, false) == watch_slots[2]);
+  }
+  REQUIRE(watch_cache.InvalidateRange(kBase + 0x100, 0x20,
+                                      MetalTextureCache::InvalidationScope::kAllRepresentations) ==
+          0u);
+  REQUIRE(watch_cache.slots_stale() == (page > kLegacyTextureExtent ? 4u : 3u));
+  REQUIRE(direct_cache.slots_stale() == 3u);
+
+  watch_cache.InvalidateRange(kBase, 0x20000);
+  direct_cache.InvalidateRange(kBase, 0x20000);
+  watch_cache.ReclaimStaleSlots(UINT64_MAX);
+  direct_cache.ReclaimStaleSlots(UINT64_MAX);
+}
+
+TEST_CASE("Cache alias 5.3: resolve direct RAM-only retirement precedes suppressed "
+          "global publication and preserves an overlapping bridge",
+          "[l1][metal][cache][alias][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  constexpr uint32_t kBase = 0x14000000;
+  constexpr uint32_t kSurvivor = kBase + 0x10000;
+
+  auto shared = std::make_unique<AliasSharedMemory>(*h.memory);
+  REQUIRE(shared->Initialize());
+  FillMemory(*h.memory, kBase, 0x12000, 0xC1);
+
+  RegisterFile register_file;
+  WatchTextureCache shared_cache(register_file, *shared);
+  auto* shared_a = shared_cache.Load(MakeSharedRouteFetch(kBase, 16));
+  auto* shared_b = shared_cache.Load(MakeSharedRouteFetch(kBase, 32));
+  REQUIRE(shared_a != nullptr);
+  REQUIRE(shared_b != nullptr);
+
+  id<MTLBuffer> heap = [h.device newBufferWithLength:16 * 1024
+                                             options:MTLResourceStorageModeShared];
+  REQUIRE(heap != nil);
+  MetalTextureCache legacy((__bridge void*)h.device, h.memory, shared.get(), (__bridge void*)heap,
+                           64);
+  legacy.SetSubmissionProvider([]() { return uint64_t(61); });
+  auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
+  auto survivor = MakeLinearFetch(kSurvivor, xenos::TextureFormat::k_8_8_8_8);
+  REQUIRE(legacy.GetTextureSlot(alias, false) != 0u);
+  REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
+  uint32_t survivor_slot = legacy.GetTextureSlot(survivor, false);
+  REQUIRE(survivor_slot != 0u);
+  REQUIRE(legacy.ConsumeUploadCount() == 3u);
+
+  id<MTLTexture> bridge = MakeBridgeTexture(h.device);
+  REQUIRE(bridge != nil);
+  legacy.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                kLegacyTextureExtent);
+  REQUIRE(LiveTextures(legacy).size() == 4u);
+
+  // Production order: the writeback drain retires RAM uploads directly, then
+  // typed publication invalidates shared pages with global fan-out suppressed.
+  REQUIRE(legacy.InvalidateRange(kBase + 0x100, 0x20,
+                                 MetalTextureCache::InvalidationScope::kRamUploadsOnly) == 2u);
+  auto live = LiveTextures(legacy);
+  REQUIRE(live.size() == 2u);
+  REQUIRE(ContainsTexture(live, (__bridge void*)bridge));
+  REQUIRE(legacy.GetTextureSlot(survivor, false) == survivor_slot);
+
+  shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, true,
+                                     /*fire_global_watches=*/false);
+  REQUIRE(shared_a->base_outdated_lockless());
+  REQUIRE(shared_b->base_outdated_lockless());
+  REQUIRE(legacy.GetTextureSlot(survivor, false) == survivor_slot);
+  live = LiveTextures(legacy);
+  REQUIRE(live.size() == 2u);
+  REQUIRE(ContainsTexture(live, (__bridge void*)bridge));
+
+  // kAll over the same overlapping range retires the bridge nontrivially; the
+  // survivor is cleaned separately. Neither slot may be reclaimed early.
+  REQUIRE(legacy.InvalidateRange(kBase + 0x100, 0x20) == 1u);
+  REQUIRE(legacy.InvalidateRange(kSurvivor, kLegacyTextureExtent) == 1u);
+  REQUIRE(legacy.slots_stale() == 4u);
+  legacy.ReclaimStaleSlots(60);
+  REQUIRE(legacy.slots_stale() == 4u);
+  legacy.ReclaimStaleSlots(61);
+  REQUIRE(legacy.slots_stale() == 0u);
+  REQUIRE(legacy.slots_free() == 4u);
+}
+
+TEST_CASE("Cache alias 5.3: memexport full lifecycle direct convergence and "
+          "publication-watch candidate retire identical entries before reuse",
+          "[l1][metal][cache][alias][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  constexpr uint32_t kBase = 0x15000000;
+  constexpr uint32_t kDisjoint = kBase + 0x10000;
+
+  auto shared = std::make_unique<AliasSharedMemory>(*h.memory);
+  REQUIRE(shared->Initialize());
+  uint32_t page = shared->PageSize();
+  uint32_t adjacent_base = kBase + std::max(page, kLegacyTextureExtent);
+  FillMemory(*h.memory, kBase, 0x12000, 0xD1);
+
+  RegisterFile register_file;
+  WatchTextureCache shared_cache(register_file, *shared);
+  auto* shared_a = shared_cache.Load(MakeSharedRouteFetch(kBase, 16));
+  auto* shared_b = shared_cache.Load(MakeSharedRouteFetch(kBase, 32));
+  REQUIRE(shared_a != nullptr);
+  REQUIRE(shared_b != nullptr);
+
+  id<MTLBuffer> current_heap = [h.device newBufferWithLength:16 * 1024
+                                                     options:MTLResourceStorageModeShared];
+  id<MTLBuffer> candidate_heap = [h.device newBufferWithLength:16 * 1024
+                                                       options:MTLResourceStorageModeShared];
+  REQUIRE(current_heap != nil);
+  REQUIRE(candidate_heap != nil);
+  MetalTextureCache current((__bridge void*)h.device, h.memory, shared.get(),
+                            (__bridge void*)current_heap, 64);
+  MetalTextureCache candidate((__bridge void*)h.device, h.memory, shared.get(),
+                              (__bridge void*)candidate_heap, 64);
+  current.SetSubmissionProvider([]() { return uint64_t(71); });
+  candidate.SetSubmissionProvider([]() { return uint64_t(71); });
+
+  auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
+  auto adjacent = MakeLinearFetch(adjacent_base, xenos::TextureFormat::k_8_8_8_8);
+  auto disjoint = MakeLinearFetch(kDisjoint, xenos::TextureFormat::k_8_8_8_8);
+  auto seed = [&](MetalTextureCache& cache) {
+    std::vector<uint32_t> slots = {
+        cache.GetTextureSlot(alias, false), cache.GetTextureSlot(alias, true),
+        cache.GetTextureSlot(adjacent, false), cache.GetTextureSlot(disjoint, false)};
+    for (uint32_t slot : slots) {
+      REQUIRE(slot != 0u);
+    }
+    REQUIRE(cache.ConsumeUploadCount() == 4u);
+    return slots;
+  };
+  auto current_slots = seed(current);
+  auto candidate_slots = seed(candidate);
+  id<MTLTexture> bridge = MakeBridgeTexture(h.device);
+  REQUIRE(bridge != nil);
+  current.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                 kLegacyTextureExtent);
+  candidate.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                   kLegacyTextureExtent);
+
+  // Production publication happens before convergence and queues both legacy
+  // global watches while firing the shared per-range subscribers.
+  shared->RangeWrittenByGpu(kBase + 0x100, 0x20);
+  REQUIRE(shared_a->base_outdated_lockless());
+  REQUIRE(shared_b->base_outdated_lockless());
+
+  auto range = GuestRange::FromBaseLength(kBase + 0x100, 0x20);
+  REQUIRE(range.has_value());
+  PendingProducer producer{*range, TransitState::kPendingMemexport,
+                           /*submission=*/71};
+  MatrixMemexportConvergenceTarget current_target(*h.memory, &current);
+  auto current_result = ConvergeMemexportRam(producer, current_target);
+  REQUIRE(current_result.converged);
+  REQUIRE(current_result.invalidated_entries == 3u);
+  REQUIRE(LiveTextures(current).size() == 2u);
+
+  // Candidate 5.4 shape: bytes converge but the earlier publication watch is
+  // the only cache invalidation. The next cache lookup drains that queue before
+  // it can serve any target texture.
+  MatrixMemexportConvergenceTarget candidate_target(*h.memory, nullptr);
+  auto candidate_result = ConvergeMemexportRam(producer, candidate_target);
+  REQUIRE(candidate_result.converged);
+  REQUIRE(candidate_result.invalidated_entries == 0u);
+  REQUIRE(LiveTextures(candidate).size() == 5u);
+  for (uint32_t i = 0; i < 0x20; ++i) {
+    REQUIRE(h.memory->TranslatePhysical<uint8_t*>(kBase + 0x100)[i] == uint8_t(0xC0u + i));
+  }
+
+  REQUIRE(current.GetTextureSlot(disjoint, false) == current_slots[3]);
+  REQUIRE(candidate.GetTextureSlot(disjoint, false) == candidate_slots[3]);
+  REQUIRE(current.GetTextureSlot(adjacent, false) == current_slots[2]);
+  REQUIRE(candidate.GetTextureSlot(adjacent, false) == candidate_slots[2]);
+  auto current_live = LiveTextures(current);
+  auto candidate_live = LiveTextures(candidate);
+  REQUIRE(current_live.size() == 2u);
+  REQUIRE(candidate_live.size() == 2u);
+  REQUIRE_FALSE(ContainsTexture(current_live, (__bridge void*)bridge));
+  REQUIRE_FALSE(ContainsTexture(candidate_live, (__bridge void*)bridge));
+  REQUIRE(current.slots_stale() == 3u);
+  REQUIRE(candidate.slots_stale() == 3u);
+  REQUIRE(current.InvalidateRange(kBase + 0x100, 0x20) == 0u);
+  REQUIRE(candidate.InvalidateRange(kBase + 0x100, 0x20) == 0u);
+
+  current.ReclaimStaleSlots(70);
+  candidate.ReclaimStaleSlots(70);
+  REQUIRE(current.slots_stale() == 3u);
+  REQUIRE(candidate.slots_stale() == 3u);
+  current.ReclaimStaleSlots(71);
+  candidate.ReclaimStaleSlots(71);
+  REQUIRE(current.slots_stale() == 0u);
+  REQUIRE(candidate.slots_stale() == 0u);
+
+  current.InvalidateRange(adjacent_base, 0x20000);
+  candidate.InvalidateRange(adjacent_base, 0x20000);
+  current.ReclaimStaleSlots(UINT64_MAX);
+  candidate.ReclaimStaleSlots(UINT64_MAX);
+}
+
+TEST_CASE("Cache alias 5.3: memexport trace playback fires shared range fan-out but "
+          "leaves an empty legacy-global set, so direct convergence stays required",
+          "[l1][metal][cache][alias][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  constexpr uint32_t kBase = 0x17000000;
+  constexpr uint32_t kSurvivor = kBase + 0x10000;
+
+  auto shared = std::make_unique<AliasSharedMemory>(*h.memory);
+  REQUIRE(shared->Initialize());
+  FillMemory(*h.memory, kBase, 0x12000, 0xF1);
+
+  RegisterFile register_file;
+  WatchTextureCache shared_cache(register_file, *shared);
+  auto* shared_a = shared_cache.Load(MakeSharedRouteFetch(kBase, 16));
+  auto* shared_b = shared_cache.Load(MakeSharedRouteFetch(kBase, 32));
+  REQUIRE(shared_a != nullptr);
+  REQUIRE(shared_b != nullptr);
+
+  id<MTLBuffer> heap = [h.device newBufferWithLength:16 * 1024
+                                             options:MTLResourceStorageModeShared];
+  REQUIRE(heap != nil);
+  MetalTextureCache legacy((__bridge void*)h.device, h.memory, shared.get(), (__bridge void*)heap,
+                           64);
+  legacy.SetSubmissionProvider([]() { return uint64_t(91); });
+  auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
+  auto survivor = MakeLinearFetch(kSurvivor, xenos::TextureFormat::k_8_8_8_8);
+  // Two overlapping RAM aliases differing only by fetch sign, plus a disjoint
+  // survivor whose extent never intersects the memexport write range.
+  REQUIRE(legacy.GetTextureSlot(alias, false) != 0u);
+  REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
+  uint32_t survivor_slot = legacy.GetTextureSlot(survivor, false);
+  REQUIRE(survivor_slot != 0u);
+  REQUIRE(legacy.ConsumeUploadCount() == 3u);
+
+  id<MTLTexture> bridge = MakeBridgeTexture(h.device);
+  REQUIRE(bridge != nil);
+  legacy.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                kLegacyTextureExtent);
+  REQUIRE(LiveTextures(legacy).size() == 4u);
+
+  // Trace playback permanently unregisters the legacy global watch and makes
+  // GetTextureSlot skip DrainPendingInvalidations. A replayed memexport GPU
+  // publication therefore fires only the shared per-range subscribers; the
+  // legacy target set is left entirely intact, and even a drain-attempting
+  // lookup cannot retire it.
+  legacy.SetTracePlayback();
+  shared->RangeWrittenByGpu(kBase + 0x100, 0x20);
+  REQUIRE(shared_a->base_outdated_lockless());
+  REQUIRE(shared_b->base_outdated_lockless());
+  REQUIRE(legacy.GetTextureSlot(survivor, false) == survivor_slot);
+  REQUIRE(LiveTextures(legacy).size() == 4u);
+
+  // With the watch set empty under trace playback, direct convergence is the
+  // only path that retires the target aliases and the overlapping bridge. Task
+  // 5.4 must therefore retain this memexport convergence direct leg globally
+  // unless production conditionally restores the legacy watch (or otherwise
+  // proves a watch equivalent) that survives SetTracePlayback's teardown.
+  auto range = GuestRange::FromBaseLength(kBase + 0x100, 0x20);
+  REQUIRE(range.has_value());
+  PendingProducer producer{*range, TransitState::kPendingMemexport,
+                           /*submission=*/91};
+  MatrixMemexportConvergenceTarget target(*h.memory, &legacy);
+  auto result = ConvergeMemexportRam(producer, target);
+  REQUIRE(result.converged);
+  REQUIRE(result.invalidated_entries == 3u);
+  for (uint32_t i = 0; i < 0x20; ++i) {
+    REQUIRE(h.memory->TranslatePhysical<uint8_t*>(kBase + 0x100)[i] == uint8_t(0xC0u + i));
+  }
+  REQUIRE(legacy.GetTextureSlot(survivor, false) == survivor_slot);
+  auto live = LiveTextures(legacy);
+  REQUIRE(live.size() == 1u);
+  REQUIRE_FALSE(ContainsTexture(live, (__bridge void*)bridge));
+  REQUIRE(legacy.slots_stale() == 3u);
+
+  // The retired target keys carry submission 91; reclaim must wait for it to
+  // complete before any target slot can be reused, exactly as the normal-mode
+  // convergence path above.
+  legacy.ReclaimStaleSlots(90);
+  REQUIRE(legacy.slots_stale() == 3u);
+  legacy.ReclaimStaleSlots(91);
+  REQUIRE(legacy.slots_stale() == 0u);
+  REQUIRE(legacy.slots_free() == 3u);
+
+  legacy.InvalidateRange(kSurvivor, kLegacyTextureExtent);
+  legacy.ReclaimStaleSlots(UINT64_MAX);
+}
+
+TEST_CASE("Cache alias 5.3: trace restore has shared range fan-out but an empty "
+          "legacy-global set, so its direct all-representations leg is required",
+          "[l1][metal][cache][alias][authority]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  constexpr uint32_t kBase = 0x16000000;
+
+  auto shared = std::make_unique<AliasSharedMemory>(*h.memory);
+  REQUIRE(shared->Initialize());
+  FillMemory(*h.memory, kBase, shared->PageSize() * 2, 0xE1);
+
+  RegisterFile register_file;
+  WatchTextureCache shared_cache(register_file, *shared);
+  auto* shared_entry = shared_cache.Load(MakeSharedRouteFetch(kBase, 16));
+  REQUIRE(shared_entry != nullptr);
+  id<MTLBuffer> heap = [h.device newBufferWithLength:16 * 1024
+                                             options:MTLResourceStorageModeShared];
+  REQUIRE(heap != nil);
+  MetalTextureCache legacy((__bridge void*)h.device, h.memory, shared.get(), (__bridge void*)heap,
+                           64);
+  legacy.SetSubmissionProvider([]() { return uint64_t(81); });
+  auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
+  REQUIRE(legacy.GetTextureSlot(alias, false) != 0u);
+  REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
+  REQUIRE(legacy.ConsumeUploadCount() == 2u);
+  id<MTLTexture> bridge = MakeBridgeTexture(h.device);
+  REQUIRE(bridge != nil);
+  legacy.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,
+                                kLegacyTextureExtent);
+  REQUIRE(LiveTextures(legacy).size() == 3u);
+
+  legacy.SetTracePlayback();
+  auto publication = DecideRamWritePublication(WriterKind::kTraceRestore, kBase + 0x100, 0x20);
+  REQUIRE(publication.has_value());
+  shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, publication->policy.exact_range);
+  REQUIRE(shared_entry->base_outdated_lockless());
+  REQUIRE(LiveTextures(legacy).size() == 3u);
+
+  // SetTracePlayback removed the legacy global subscriber, so only the shared
+  // range set fired. The direct all-representations leg must retire both RAM
+  // aliases and the overlapping bridge. Task 5.2 separately executes the full
+  // PublishRamWrite ordering; this case isolates and enumerates the two sets.
+  RealCacheRamWriteTarget target(*shared, legacy);
+  uint32_t direct_invalidated = 0;
+  REQUIRE(target.InvalidateLegacyTextures(kBase + 0x100, 0x20, &direct_invalidated));
+  REQUIRE(direct_invalidated == 3u);
+  REQUIRE(LiveTextures(legacy).empty());
+  REQUIRE(legacy.slots_stale() == 3u);
+  legacy.ReclaimStaleSlots(80);
+  REQUIRE(legacy.slots_stale() == 3u);
+  legacy.ReclaimStaleSlots(81);
+  REQUIRE(legacy.slots_stale() == 0u);
+}
 }  // namespace
 }  // namespace metal
 }  // namespace gpu
