@@ -39,6 +39,7 @@
 #include "xenia/gpu/conformance/test_shared_physical_memory.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -623,6 +624,164 @@ TEST_CASE("SM coherence: submission-owned memexport preserves GPU-newer bytes "
   h.RamWrite(addr, exported);
   REQUIRE(h.RamRead(addr, kPage) == exported);
   REQUIRE(h.SharedRead(addr, kPage) == exported);
+}
+
+TEST_CASE("SM coherence: aliased same-frame consumers observe the newest "
+          "selected producer bytes",
+          "[l1][metal][sharedmem][authority][same-frame][bytes][alias]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  struct ConsumerCase {
+    const char* name;
+    ConsumerKind kind;
+    uint32_t address;
+  } cases[] = {
+      {"texture shared-byte corridor", ConsumerKind::kTexture, 0x12400000u},
+      {"vertex shared-byte corridor", ConsumerKind::kVertex, 0x12500000u},
+      {"wait RAM corridor", ConsumerKind::kWait, 0x12600000u},
+      {"host CPU-read RAM corridor", ConsumerKind::kHostCpuRead, 0x12700000u},
+  };
+
+  for (uint8_t case_index = 0; case_index < std::size(cases);
+       ++case_index) {
+    const ConsumerCase& consumer_case = cases[case_index];
+    INFO(consumer_case.name);
+    const uint32_t address = consumer_case.address;
+    const uint32_t disjoint_address = address + 0x8000u;
+    auto stale = h.Pattern(kPage, uint8_t(0x90u + case_index * 3u));
+    auto resolved = h.Pattern(kPage, uint8_t(0x91u + case_index * 3u));
+    auto exported = h.Pattern(kPage, uint8_t(0x92u + case_index * 3u));
+    h.RamWrite(address, stale);
+    REQUIRE(h.shared->RequestRange(address, kPage));
+    REQUIRE(h.GpuRead(address, kPage) == stale);
+
+    // The newer memexport is encoded and owns its pending range before the
+    // command buffer is committed. The older resolve and one disjoint record
+    // model the real cross-kind pending snapshot seen by DecideConsumer.
+    auto preparation =
+        DecideMemexportDestinationPreparation(address, kPage);
+    REQUIRE(preparation.has_value());
+    RealMemexportPreparationTarget preparation_target(h.shared.get());
+    REQUIRE(PrepareMemexportDestination(*preparation, preparation_target));
+    auto gpu_write = h.EncodeGpuWrite(address, exported);
+    std::vector<PendingProducer> pending = {
+        {*GuestRange::FromBaseLength(address, kPage),
+         TransitState::kPendingResolve, gpu_write.submission, 1u},
+    };
+    std::vector<uint32_t> event_order;
+    OwnedMemexportPublicationTarget export_target(h.shared.get(), &pending,
+                                                   &event_order);
+    auto export_publication =
+        DecideMemexportPublication(address, kPage, gpu_write.submission);
+    REQUIRE(export_publication.has_value());
+    MemexportPublicationResult export_result = PublishMemexportWrite(
+        *export_publication, export_target,
+        [&](const MemexportPublication& owned) {
+          event_order.push_back(1u);
+          pending.push_back({owned.range, TransitState::kPendingMemexport,
+                             owned.submission, 2u});
+          return true;
+        });
+    REQUIRE(export_result.registered);
+    REQUIRE(export_result.marked);
+    REQUIRE(export_target.mark_saw_owner);
+    pending.push_back({*GuestRange::FromBaseLength(disjoint_address, kPage),
+                       TransitState::kPendingResolve, gpu_write.submission,
+                       3u});
+
+    // PM4 and fetch descriptors may carry the bit-29 physical alias. The
+    // authority receives the normalized physical range, just as the routed
+    // production call sites do.
+    const uint32_t aliased_address = address | 0x20000000u;
+    const uint32_t physical_address = xenos::CpuToGpu(aliased_address);
+    REQUIRE(physical_address == address);
+    GuestRangeSet requested;
+    requested.Add(
+        GuestRange::FromExactBaseLength(physical_address, kPage));
+    ConsumerDecision decision = DecideConsumer(
+        consumer_case.kind, requested, pending,
+        /*completed_submission=*/0u);
+    REQUIRE(decision.action == AuthorityAction::kAwaitProducer);
+    REQUIRE(decision.await);
+    REQUIRE(decision.drain);
+    REQUIRE(decision.selected.size() == 2u);
+    REQUIRE(decision.selected[0].state == TransitState::kPendingResolve);
+    REQUIRE(decision.selected[1].state == TransitState::kPendingMemexport);
+    REQUIRE(decision.selected[0].sequence < decision.selected[1].sequence);
+    REQUIRE(decision.revalidate_gpu_bytes ==
+            ConsumerReadsSharedBuffer(consumer_case.kind));
+
+    h.CommitGpuWrite(&gpu_write);
+    [gpu_write.command_buffer waitUntilCompleted];
+    REQUIRE(gpu_write.command_buffer.status ==
+            MTLCommandBufferStatusCompleted);
+    REQUIRE(ProducerComplete(decision.selected[0], gpu_write.submission));
+    REQUIRE(ProducerComplete(decision.selected[1], gpu_write.submission));
+
+    // Drain the selected records through the SAME shared production executor
+    // (DrainSelectedProducers) used by MetalCommandProcessor, rather than
+    // replaying the selection order by hand. The callback drives the real
+    // publication / convergence seams for one record and, on success, retires
+    // the matching LOCAL pending record by its unique authority sequence. The
+    // disjoint record is never selected, so it remains without any manual erase.
+    RealMemexportConvergenceTarget convergence_target(&h);
+    auto retire_by_sequence = [&](uint64_t sequence) {
+      for (auto it = pending.begin(); it != pending.end(); ++it) {
+        if (it->sequence == sequence) {
+          pending.erase(it);
+          return true;
+        }
+      }
+      return false;
+    };
+    LegacyDrainOutcome drain = DrainSelectedProducers(
+        decision, [&](const PendingProducer& selected) {
+          LegacyDrainOutcome one;
+          if (selected.state == TransitState::kPendingResolve) {
+            // The resolve's checked scatter deposits its bytes to RAM, then the
+            // typed seam publishes the exact extent.
+            h.RamWrite(selected.range.start(), resolved);
+            auto resolve_publication = DecideRamWritePublication(
+                WriterKind::kResolve, selected.range.start(),
+                selected.range.length());
+            REQUIRE(resolve_publication.has_value());
+            RealRamWritePublicationTarget resolve_target(h.shared.get());
+            LegacyWriterOutcome resolve_outcome =
+                PublishRamWrite(*resolve_publication, resolve_target);
+            REQUIRE(resolve_outcome.action ==
+                    AuthorityAction::kInvalidateRamWrite);
+            one.resolve_records = 1;
+          } else {
+            MemexportConvergenceResult convergence_result =
+                ConvergeMemexportRam(selected, convergence_target);
+            REQUIRE(convergence_result.converged);
+            REQUIRE(convergence_result.action ==
+                    AuthorityAction::kConvergeRamFromBuffer);
+            one.memexport_records = 1;
+            one.invalidated_entries = convergence_result.invalidated_entries;
+          }
+          one.drained_records = 1;
+          REQUIRE(retire_by_sequence(selected.sequence));
+          return one;
+        });
+    REQUIRE(drain.drained_records == decision.selected.size());
+    REQUIRE(drain.resolve_records == 1u);
+    REQUIRE(drain.memexport_records == 1u);
+    REQUIRE(h.RamRead(address, kPage) == exported);
+    REQUIRE(h.SharedRead(address, kPage) == exported);
+
+    if (ConsumerReadsSharedBuffer(consumer_case.kind)) {
+      REQUIRE(h.shared->RequestRange(address, kPage));
+      REQUIRE(h.GpuRead(address, kPage) == exported);
+    } else {
+      REQUIRE(h.RamRead(address, kPage) == exported);
+    }
+
+    // Only the selected records retired via the shared executor; the disjoint
+    // record was never selected and remains pending without any manual erase.
+    REQUIRE(pending.size() == 1u);
+    REQUIRE(pending.front().range.start() == disjoint_address);
+  }
 }
 
 TEST_CASE("SM coherence: repeated mixed writers leave each later consumer on "

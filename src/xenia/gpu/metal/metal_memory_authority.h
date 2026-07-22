@@ -372,6 +372,40 @@ struct LegacyDrainOutcome {
   uint32_t invalidated_entries = 0;
 };
 
+// The selective-drain executor shared by production
+// (MetalCommandProcessor::DrainSelectedPendingProducers) and the task-4.5
+// conformance executors. It walks the seam's sequence-ordered selected records,
+// drains each through the caller-supplied one-record callback, merges the
+// factual LegacyDrainOutcome counts, and stops the moment a record fails to
+// retire exactly one pending record.
+//
+// Stopping on the first non-unit retirement preserves authority chronology: a
+// retained older record must never be followed by a newer selected writer, or a
+// later retry of the older record could overwrite the newer bytes and invert
+// writer order. The caller fails the consumer closed while the failing record
+// and the untouched selected suffix stay pending.
+//
+// This helper owns NO state and adds no queue, flag, ownership, or title rule.
+// The callback performs the actual convergence against whatever pending queue it
+// closes over, matching each selected record back by its unique authority
+// sequence; the selection itself remains a transient value.
+template <typename DrainOneProducer>
+inline LegacyDrainOutcome DrainSelectedProducers(
+    const ConsumerDecision& decision, DrainOneProducer&& drain_one) {
+  LegacyDrainOutcome combined;
+  for (const PendingProducer& producer : decision.selected) {
+    LegacyDrainOutcome one = drain_one(producer);
+    combined.drained_records += one.drained_records;
+    combined.resolve_records += one.resolve_records;
+    combined.memexport_records += one.memexport_records;
+    combined.invalidated_entries += one.invalidated_entries;
+    if (one.drained_records != 1) {
+      break;
+    }
+  }
+  return combined;
+}
+
 // Existing RAM-write publication operations, exposed through a thin device-free
 // port so the typed seam can execute them and tests can substitute a recorder.
 // The port exposes invalidation only -- never watch registration or authority

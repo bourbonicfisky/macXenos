@@ -5663,27 +5663,19 @@ metal::LegacyDrainOutcome
 MetalCommandProcessor::DrainSelectedPendingProducers(
     const metal::ConsumerDecision& decision) {
   // DecideConsumer returns selected records in their cross-kind registration
-  // order. Match each record back to the existing queues by its unique
-  // authority sequence and reuse the established convergence implementation.
-  // This adds no queue or ownership state: the selection is a transient value,
-  // and successful convergence still retires the original pending record.
-  metal::LegacyDrainOutcome combined;
-  for (const metal::PendingProducer& producer : decision.selected) {
-    metal::LegacyDrainOutcome one = DrainPendingWritebacks(
-        producer.range.start(), producer.range.length(), producer.sequence);
-    combined.drained_records += one.drained_records;
-    combined.resolve_records += one.resolve_records;
-    combined.memexport_records += one.memexport_records;
-    combined.invalidated_entries += one.invalidated_entries;
-    if (one.drained_records != 1) {
-      // A failed convergence retains this record. Do not apply any newer
-      // selected writer: doing so would let a later retry of this older record
-      // overwrite newer bytes and invert authority order. The caller fails the
-      // draw closed, while this record and the untouched suffix stay pending.
-      break;
-    }
-  }
-  return combined;
+  // order. Delegate the loop/merge/stop-on-failure policy to the shared
+  // selective-drain executor and, per selected record, match it back to the
+  // existing queues by its unique authority sequence and reuse the established
+  // convergence implementation. This adds no queue or ownership state: the selection is a
+  // transient value, successful convergence still retires the original pending
+  // record, and a failed convergence keeps this record and the untouched suffix
+  // pending so a later retry cannot invert authority order.
+  return metal::DrainSelectedProducers(
+      decision, [&](const metal::PendingProducer& producer) {
+        return DrainPendingWritebacks(producer.range.start(),
+                                      producer.range.length(),
+                                      producer.sequence);
+      });
 }
 
 MetalCommandProcessor::ProducerDependencyOutcome

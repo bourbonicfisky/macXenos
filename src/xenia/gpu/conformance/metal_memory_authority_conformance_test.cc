@@ -20,6 +20,7 @@
 //   * typed observer agreement/disagreement accounting.
 // Pure C++ + Catch2; links no Metal device and no command processor.
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -1012,6 +1013,470 @@ TEST_CASE("Authority: memexport convergence drain counters increment only "
   REQUIRE(drained == 1u);
   REQUIRE(retained.size() == 1u);
   REQUIRE(retained.front().range == producers[1].range);
+}
+
+// --- Task 4.5: same-frame byte-level consumption matrix -------------------
+//
+// The tests above assert the seam's ACTION and the SET of selected producers.
+// Task 4.5 asks the stronger question: after the seam's selected producers
+// converge, does the consumer read the exact newest bytes? To answer factually
+// this section adds a minimal device-free byte store. The store owns NO policy:
+// WHICH producers converge and in WHAT order comes entirely from the real
+// DecideConsumer output (its sequence-sorted `selected`); memexport producers
+// converge through the real ConvergeMemexportRam seam. The store only moves the
+// bytes those decisions name, then the test asserts the resulting RAM image.
+// Newest-writer-wins therefore falls out of the seam's ordering, not out of any
+// logic reimplemented here.
+
+namespace {
+
+// A single guest-RAM window shared by every task 4.5 case. All producer and
+// consumer ranges below live inside [kFrameRamBase, kFrameRamBase + kFrameSize).
+constexpr uint32_t kFrameRamBase = 0x1000u;
+constexpr uint32_t kFrameSize = 0x10000u;
+constexpr uint8_t kStaleRam = 0x11u;  // baseline "RAM has the old bytes" fill.
+
+// A pending producer paired with the exact bytes it owes RAM over its range.
+// For a resolve these are the scattered destination bytes; for a memexport they
+// are the shared-buffer contents the convergence copy reads.
+struct ProducerBytes {
+  PendingProducer producer;
+  std::vector<uint8_t> payload;  // payload[i] belongs to range.start() + i.
+  // When false the convergence copy reports failure without moving bytes,
+  // modelling a missing RAM mapping / shared-buffer pointer so the shared
+  // drain executor's stop-on-failure policy can be exercised at the byte level.
+  bool converges = true;
+};
+
+ProducerBytes MakeProducerBytes(uint32_t base, uint32_t size,
+                                TransitState state, uint64_t submission,
+                                uint64_t sequence, uint8_t fill) {
+  return ProducerBytes{MakeProducer(base, size, state, submission, sequence),
+                       std::vector<uint8_t>(size, fill)};
+}
+
+const ProducerBytes* FindBySequence(const std::vector<ProducerBytes>& world,
+                                    uint64_t sequence) {
+  for (const ProducerBytes& pb : world) {
+    if (pb.producer.sequence == sequence) {
+      return &pb;
+    }
+  }
+  return nullptr;
+}
+
+// The byte-moving body of the real MemexportConvergenceTarget port: copies a
+// producer's staged shared-buffer bytes into the RAM image. The seam still
+// decides the base/length; this only performs the copy it is handed and never
+// touches the source buffer, honoring the convergence contract.
+class ByteStoreConvergenceTarget : public MemexportConvergenceTarget {
+ public:
+  ByteStoreConvergenceTarget(std::vector<uint8_t>& ram, uint32_t ram_base,
+                             const ProducerBytes& producer)
+      : ram_(ram), ram_base_(ram_base), producer_(producer) {}
+
+  bool CopyBufferToRam(uint32_t base, uint32_t length,
+                       uint32_t* invalidated_entries) override {
+    *invalidated_entries = 0;
+    // Model a missing RAM mapping / shared-buffer contents pointer: report the
+    // failure the convergence contract expects instead of moving bytes, so the
+    // caller retains the pending record.
+    if (!producer_.converges) {
+      return false;
+    }
+    // Explicit bounds validation: a malformed future range must fail
+    // diagnostically rather than index the RAM image or payload out of bounds
+    // with unchecked vector arithmetic. All widths are promoted to 64-bit so the
+    // end computation itself cannot wrap.
+    uint32_t payload_base = producer_.producer.range.start();
+    REQUIRE(base >= ram_base_);
+    REQUIRE(base >= payload_base);
+    REQUIRE(uint64_t(base - ram_base_) + length <= ram_.size());
+    REQUIRE(uint64_t(base - payload_base) + length <= producer_.payload.size());
+    for (uint32_t i = 0; i < length; ++i) {
+      ram_[base - ram_base_ + i] = producer_.payload[base - payload_base + i];
+    }
+    return true;
+  }
+
+ private:
+  std::vector<uint8_t>& ram_;
+  uint32_t ram_base_;
+  const ProducerBytes& producer_;
+};
+
+// Drain one selected producer's owed bytes into the RAM image and report the
+// factual LegacyDrainOutcome the shared executor merges. Memexport routes
+// through the real convergence seam; resolve deposits its checked scatter extent
+// the way the writeback drain copies a completed resolve (no device-free resolve
+// byte seam exists, so the store performs the copy the seam's selection
+// ordered). A non-converging producer returns a zero outcome so the shared
+// stop-on-failure policy retains it and the untouched suffix.
+LegacyDrainOutcome ApplyProducerBytes(const ProducerBytes& pb,
+                                      std::vector<uint8_t>& ram) {
+  LegacyDrainOutcome outcome;
+  if (pb.producer.state == TransitState::kPendingMemexport) {
+    ByteStoreConvergenceTarget target(ram, kFrameRamBase, pb);
+    MemexportConvergenceResult result = ConvergeMemexportRam(pb.producer, target);
+    if (!result.converged) {
+      return outcome;  // drained_records stays 0 -> executor stops.
+    }
+    REQUIRE(result.action == AuthorityAction::kConvergeRamFromBuffer);
+    outcome.memexport_records = 1;
+    outcome.invalidated_entries = result.invalidated_entries;
+  } else {
+    // Explicit bounds validation on the resolve copy: reject a malformed future
+    // range diagnostically instead of using unchecked vector arithmetic.
+    uint32_t base = pb.producer.range.start();
+    uint32_t length = pb.producer.range.length();
+    REQUIRE(base >= kFrameRamBase);
+    REQUIRE(uint64_t(base - kFrameRamBase) + length <= ram.size());
+    REQUIRE(length <= pb.payload.size());
+    for (uint32_t i = 0; i < length; ++i) {
+      ram[base - kFrameRamBase + i] = pb.payload[i];
+    }
+    outcome.resolve_records = 1;
+  }
+  outcome.drained_records = 1;
+  return outcome;
+}
+
+// How a modeled await resolves. Production (ResolvePendingProducerDependencies)
+// waits for the required submission and only then drains; a failed wait returns
+// incomplete and fails the draw closed. There is no in-frame state in which an
+// awaiting consumer reads stale bytes -- it either waits+drains, or observes
+// nothing at all.
+enum class WaitModel {
+  kSucceeds,  // the awaited submissions complete; the consumer drains.
+  kFails,     // the wait fails; the consumer produces no byte observation.
+};
+
+// The factual result of one consumer operation. `available` is the byte-level
+// analogue of ResolveRamConsumerDependencies returning true: the consumer got a
+// converged byte image only when the (possibly awaited) drain retired every
+// selected record. When false, `ram` must not be treated as an observation.
+struct ConsumerObservation {
+  ConsumerDecision decision;
+  LegacyDrainOutcome drain;
+  bool available = false;
+  std::vector<uint8_t> ram;
+};
+
+// Materialize the guest-RAM bytes a consumer observes: run the real
+// DecideConsumer over the world's pending records, then converge the selected
+// producers through the SAME shared production executor (DrainSelectedProducers)
+// used by MetalCommandProcessor. Await semantics mirror production exactly:
+//   * no await -> drain immediately;
+//   * await + successful wait -> the awaited submissions complete and the SAME
+//     consumer operation drains and returns the newest bytes;
+//   * await + failed wait -> no bytes are observed and the consumer is
+//     unavailable (available == false), never a stale byte image.
+// `available` additionally requires the executor to retire every selected
+// record, so a mid-drain stop-on-failure also yields an unavailable consumer
+// with the untouched suffix left stale.
+ConsumerObservation ObserveConsumerBytes(
+    ConsumerKind consumer, const ConsumerRequest& request,
+    const std::vector<ProducerBytes>& world, uint64_t completed_submission,
+    WaitModel wait_model = WaitModel::kSucceeds) {
+  std::vector<PendingProducer> snapshot;
+  snapshot.reserve(world.size());
+  for (const ProducerBytes& pb : world) {
+    snapshot.push_back(pb.producer);
+  }
+  ConsumerObservation observation;
+  observation.decision =
+      DecideConsumer(consumer, request, snapshot, completed_submission);
+  std::vector<uint8_t> ram(kFrameSize, kStaleRam);
+
+  if (observation.decision.await && wait_model == WaitModel::kFails) {
+    // Failed wait: production returns incomplete and fails the draw closed. No
+    // convergence runs and no bytes are observed.
+    observation.available = false;
+    return observation;
+  }
+
+  // Either no await, or a successful wait completed the awaited submissions.
+  // Drive producer application through the shared executor and check the actual
+  // merged drain outcome rather than replaying the selection order by hand.
+  observation.drain = DrainSelectedProducers(
+      observation.decision, [&](const PendingProducer& selected) {
+        const ProducerBytes* pb = FindBySequence(world, selected.sequence);
+        REQUIRE(pb != nullptr);
+        return ApplyProducerBytes(*pb, ram);
+      });
+  observation.available =
+      observation.drain.drained_records == observation.decision.selected.size();
+  observation.ram = std::move(ram);
+  return observation;
+}
+
+ConsumerRequest UniformRequest(uint32_t base, uint32_t size) {
+  return ConsumerRequest::Uniform(SingleRange(base, size));
+}
+
+// Assert every byte of [base, base+size) equals `value`. Bounds are validated
+// (64-bit end, no wrap) so a malformed future range fails diagnostically instead
+// of iterating past the RAM image with unchecked vector arithmetic.
+void RequireRangeBytes(const std::vector<uint8_t>& ram, uint32_t base,
+                       uint32_t size, uint8_t value) {
+  REQUIRE(base >= kFrameRamBase);
+  REQUIRE(uint64_t(base - kFrameRamBase) + size <= ram.size());
+  const auto first = ram.begin() + (base - kFrameRamBase);
+  REQUIRE(std::all_of(first, first + size,
+                      [value](uint8_t byte) { return byte == value; }));
+}
+
+}  // namespace
+
+TEST_CASE("Authority bytes: same-frame resolve is seen whole by a vertex fetch",
+          "[l0][authority][same-frame][bytes]") {
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/5, /*sequence=*/1, /*fill=*/0xA0u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kVertex,
+                                  UniformRequest(0x2000u, 0x1000u), world,
+                                  /*completed=*/5);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(obs.decision.revalidate_gpu_bytes);  // vertex reads the shared buffer.
+  REQUIRE(obs.decision.selected_bytes() == 0x1000u);
+  // The consumer observes the resolved bytes, not stale RAM.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x1000u, 0xA0u);
+  RequireRangeBytes(obs.ram, 0x1000u, 0x1000u, kStaleRam);  // outside: untouched.
+}
+
+TEST_CASE(
+    "Authority bytes: same-frame memexport is seen whole by a texture fetch",
+    "[l0][authority][same-frame][bytes]") {
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x4000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/3, /*sequence=*/1, /*fill=*/0xB0u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kTexture,
+                                  UniformRequest(0x4000u, 0x1000u), world,
+                                  /*completed=*/3);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+  // Bytes arrive through the real ConvergeMemexportRam seam (buffer -> RAM).
+  RequireRangeBytes(obs.ram, 0x4000u, 0x1000u, 0xB0u);
+}
+
+TEST_CASE(
+    "Authority bytes: every consumer kind converges identical same-frame bytes",
+    "[l0][authority][same-frame][bytes]") {
+  // A resolve and a memexport in the same frame, with a stale gap between them.
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/1, /*fill=*/0xC1u),
+      MakeProducerBytes(0x5000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/2, /*fill=*/0xC2u),
+  };
+  const ConsumerKind kinds[] = {ConsumerKind::kTexture, ConsumerKind::kVertex,
+                                ConsumerKind::kWait, ConsumerKind::kHostCpuRead};
+  for (ConsumerKind kind : kinds) {
+    auto obs = ObserveConsumerBytes(kind, UniformRequest(0x2000u, 0x4000u),
+                                    world, /*completed=*/4);
+    REQUIRE(obs.available);
+    REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+    REQUIRE(obs.decision.selected.size() == 2u);
+    RequireRangeBytes(obs.ram, 0x2000u, 0x1000u, 0xC1u);  // resolve bytes.
+    RequireRangeBytes(obs.ram, 0x3000u, 0x2000u, kStaleRam);  // gap: no producer.
+    RequireRangeBytes(obs.ram, 0x5000u, 0x1000u, 0xC2u);  // memexport bytes.
+  }
+}
+
+TEST_CASE(
+    "Authority bytes: multiple pending records select intersecting bytes and "
+    "leave a disjoint record untouched",
+    "[l0][authority][same-frame][bytes]") {
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x800u, TransitState::kPendingResolve,
+                        /*submission=*/2, /*sequence=*/1, /*fill=*/0xD1u),
+      MakeProducerBytes(0x2800u, 0x800u, TransitState::kPendingMemexport,
+                        /*submission=*/2, /*sequence=*/2, /*fill=*/0xD2u),
+      // Disjoint third record: never touched by this consumer.
+      MakeProducerBytes(0x8000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/2, /*sequence=*/3, /*fill=*/0xD3u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kWait,
+                                  UniformRequest(0x2000u, 0x1000u), world,
+                                  /*completed=*/2);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(obs.decision.selected.size() == 2u);  // the two intersecting records.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0xD1u);
+  RequireRangeBytes(obs.ram, 0x2800u, 0x800u, 0xD2u);
+  // The disjoint record's RAM is never converged: it still reads stale bytes,
+  // proving the selective (not global) drain at the byte level.
+  RequireRangeBytes(obs.ram, 0x8000u, 0x1000u, kStaleRam);
+}
+
+TEST_CASE(
+    "Authority bytes: chronological newest-writer-wins where records overlap",
+    "[l0][authority][same-frame][bytes]") {
+  // An older resolve and a newer memexport overlap on [0x2800, 0x3000). Applied
+  // in the seam's sequence order the memexport lands last and wins that span.
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/4, /*sequence=*/10, /*fill=*/0xE1u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/4, /*sequence=*/20, /*fill=*/0xE2u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kHostCpuRead,
+                                  UniformRequest(0x2000u, 0x1800u), world,
+                                  /*completed=*/4);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.selected.size() == 2u);
+  REQUIRE(obs.decision.selected[0].sequence == 10u);  // older applied first.
+  REQUIRE(obs.decision.selected[1].sequence == 20u);  // newer applied last.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0xE1u);   // resolve-only head.
+  RequireRangeBytes(obs.ram, 0x2800u, 0x1000u, 0xE2u);  // overlap + tail: newest.
+}
+
+TEST_CASE(
+    "Authority bytes: closure pulls the older resolve so newest bytes still win "
+    "when only the memexport tail is requested",
+    "[l0][authority][same-frame][bytes]") {
+  // Bridge-style request: the texture contributes only its memexport range, but
+  // whole-record convergence must retire the older overlapping resolve first or
+  // it could later clobber the newer overlap bytes. Assert the byte outcome.
+  ConsumerRequest request;
+  request.memexport_ranges.Add(GuestRange::FromBaseLength(0x2800u, 0x1000u));
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x1000u, TransitState::kPendingResolve,
+                        /*submission=*/6, /*sequence=*/10, /*fill=*/0xF1u),
+      MakeProducerBytes(0x2800u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/6, /*sequence=*/20, /*fill=*/0xF2u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kTexture, request, world,
+                                  /*completed=*/6);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.selected.size() == 2u);  // closure pulled the resolve.
+  REQUIRE(obs.decision.selected[0].sequence == 10u);
+  REQUIRE(obs.decision.selected[1].sequence == 20u);
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0xF1u);   // resolve head survives.
+  RequireRangeBytes(obs.ram, 0x2800u, 0x1000u, 0xF2u);  // newest memexport wins.
+}
+
+TEST_CASE(
+    "Authority bytes: bit-29 aliased WAIT_REG_MEM word converges its whole "
+    "record and retains the disjoint record",
+    "[l0][authority][same-frame][bytes][alias]") {
+  // WAIT_REG_MEM polls exactly one 32-bit word. Its packet address carries the
+  // bit-29 (0x2000'0000) physical alias; the routed call site aligns it to 4 and
+  // normalizes it before the authority sees it. The request is therefore exactly
+  // 4 bytes -- matching production -- yet whole-record convergence still applies
+  // the entire selected memexport record, and the disjoint physical record must
+  // neither be selected nor converged.
+  constexpr uint32_t kAliasedWaitAddress = 0x20001003u;
+  uint32_t physical_address =
+      xenos::CpuToGpu(kAliasedWaitAddress & ~uint32_t(0x3));
+  REQUIRE(physical_address == 0x1000u);
+
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x1000u, 0x40u, TransitState::kPendingMemexport,
+                        /*submission=*/3, /*sequence=*/1, /*fill=*/0xA1u),
+      MakeProducerBytes(0x2000u, 0x40u, TransitState::kPendingResolve,
+                        /*submission=*/3, /*sequence=*/2, /*fill=*/0xA2u),
+  };
+  auto obs = ObserveConsumerBytes(ConsumerKind::kWait,
+                                  UniformRequest(physical_address, 4u), world,
+                                  /*completed=*/3);
+  REQUIRE(obs.available);
+  REQUIRE(obs.decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(obs.decision.selected.size() == 1u);
+  REQUIRE(obs.decision.selected[0].sequence == 1u);  // the physical record.
+  REQUIRE(obs.decision.selected[0].range.length() == 0x40u);  // whole record.
+  REQUIRE(obs.decision.requested.CoveredBytes() == 4u);  // exact WAIT word.
+  REQUIRE_FALSE(obs.decision.revalidate_gpu_bytes);  // wait reads guest RAM.
+  // The exact 4-byte WAIT word reads the newest physical byte.
+  RequireRangeBytes(obs.ram, physical_address, 4u, 0xA1u);
+  // Whole selected record converges, not just the 4-byte intersection.
+  RequireRangeBytes(obs.ram, 0x1000u, 0x40u, 0xA1u);
+  // The disjoint physical record is neither selected nor converged: retained.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x40u, kStaleRam);
+}
+
+TEST_CASE(
+    "Authority bytes: an awaiting consumer waits and drains in one operation, "
+    "or observes nothing -- never stale bytes",
+    "[l0][authority][same-frame][bytes]") {
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x3000u, 0x1000u, TransitState::kPendingMemexport,
+                        /*submission=*/10, /*sequence=*/1, /*fill=*/0xB5u),
+  };
+
+  // Submission 10 has not completed (high-water 9), so the consumer must await.
+  // A FAILED wait converges nothing and produces no byte observation at all --
+  // production fails the draw closed rather than reading stale RAM. There is no
+  // in-frame state in which an awaiting consumer observes the old bytes.
+  auto failed = ObserveConsumerBytes(ConsumerKind::kTexture,
+                                     UniformRequest(0x3000u, 0x1000u), world,
+                                     /*completed=*/9, WaitModel::kFails);
+  REQUIRE(failed.decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(failed.decision.max_wait_submission == 10u);
+  REQUIRE_FALSE(failed.available);       // no consumer availability.
+  REQUIRE(failed.ram.empty());           // no byte observation.
+  REQUIRE(failed.drain.drained_records == 0u);
+
+  // A SUCCESSFUL wait completes submission 10 and, in the SAME consumer
+  // operation, drains the selected record and returns the newest bytes.
+  auto awaited = ObserveConsumerBytes(ConsumerKind::kTexture,
+                                      UniformRequest(0x3000u, 0x1000u), world,
+                                      /*completed=*/9, WaitModel::kSucceeds);
+  REQUIRE(awaited.decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(awaited.decision.max_wait_submission == 10u);
+  REQUIRE(awaited.available);
+  REQUIRE(awaited.drain.drained_records == 1u);
+  RequireRangeBytes(awaited.ram, 0x3000u, 0x1000u, 0xB5u);
+
+  // The non-awaited path (high-water already 10) drains identically.
+  auto ready = ObserveConsumerBytes(ConsumerKind::kTexture,
+                                    UniformRequest(0x3000u, 0x1000u), world,
+                                    /*completed=*/10);
+  REQUIRE(ready.available);
+  REQUIRE(ready.decision.action == AuthorityAction::kDrainMatchingRecords);
+  RequireRangeBytes(ready.ram, 0x3000u, 0x1000u, 0xB5u);
+}
+
+TEST_CASE(
+    "Authority bytes: the shared drain executor stops on the first failed "
+    "convergence and leaves the selected suffix and disjoint record untouched",
+    "[l0][authority][same-frame][bytes]") {
+  // Three intersecting records plus a disjoint one. The middle memexport record
+  // cannot converge (missing RAM/buffer mapping). The shared executor
+  // (DrainSelectedProducers) must apply the first record, stop at the failing
+  // second, and never touch the selected suffix or the disjoint record -- so a
+  // later retry of an older record cannot invert authority order.
+  std::vector<ProducerBytes> world = {
+      MakeProducerBytes(0x2000u, 0x800u, TransitState::kPendingResolve,
+                        /*submission=*/2, /*sequence=*/1, /*fill=*/0xC1u),
+      MakeProducerBytes(0x2800u, 0x800u, TransitState::kPendingMemexport,
+                        /*submission=*/2, /*sequence=*/2, /*fill=*/0xC2u),
+      MakeProducerBytes(0x3000u, 0x800u, TransitState::kPendingResolve,
+                        /*submission=*/2, /*sequence=*/3, /*fill=*/0xC3u),
+      // Disjoint record: never selected.
+      MakeProducerBytes(0x8000u, 0x800u, TransitState::kPendingResolve,
+                        /*submission=*/2, /*sequence=*/4, /*fill=*/0xC4u),
+  };
+  world[1].converges = false;  // the middle record fails to converge.
+
+  auto obs = ObserveConsumerBytes(ConsumerKind::kWait,
+                                  UniformRequest(0x2000u, 0x1800u), world,
+                                  /*completed=*/2);
+  REQUIRE(obs.decision.selected.size() == 3u);  // the three intersecting.
+  // The executor retired exactly one record before stopping.
+  REQUIRE(obs.drain.drained_records == 1u);
+  REQUIRE(obs.drain.resolve_records == 1u);
+  REQUIRE_FALSE(obs.available);  // not every selected record retired.
+  // Only the first record's bytes landed.
+  RequireRangeBytes(obs.ram, 0x2000u, 0x800u, 0xC1u);
+  // The failing record and the untouched selected suffix stay stale.
+  RequireRangeBytes(obs.ram, 0x2800u, 0x800u, kStaleRam);
+  RequireRangeBytes(obs.ram, 0x3000u, 0x800u, kStaleRam);
+  // The disjoint record is never touched.
+  RequireRangeBytes(obs.ram, 0x8000u, 0x800u, kStaleRam);
 }
 
 }  // namespace test
