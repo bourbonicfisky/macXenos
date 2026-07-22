@@ -1636,6 +1636,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  // Task 4.6: the current-consuming-encoder phase marker is scoped to this one
+  // IssueDraw. It is set true only after BeginFrameEncoder succeeds below; this
+  // RAII guard clears it on EVERY exit path so the next draw starts with no
+  // consuming encoder of its own and every dependency resolver (which run
+  // strictly before BeginFrameEncoder) observes the scope as inactive. The
+  // marker observes phase only and controls no behavior.
+  struct ConsumingEncoderScopeGuard {
+    bool* flag;
+    ~ConsumingEncoderScopeGuard() { *flag = false; }
+  } consuming_encoder_scope_guard{&current_consuming_encoder_active_};
+
   // An EDRAM "copy mode" draw is not geometry — it's a resolve (EDRAM ->
   // guest). The D3D12/Vulkan backends dispatch this from IssueDraw; without the
   // check our backend treated resolves as normal draws and IssueCopy never fired
@@ -2625,6 +2636,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ++draw_skip_count_;
     return true;
   }
+  // The CURRENT draw has now acquired its consuming encoder (task 4.6). Mark
+  // the logical scope; every dependency resolver above already ran, so this
+  // proves resolution never happens inside an active consuming encoder. Phase
+  // marker only -- the RAII guard clears it on exit and it drives no behavior.
+  current_consuming_encoder_active_ = true;
 
   // --- Marshal the constant buffers (b0-b4), matching the D3D12 backend. ---
   MetalUploadAllocation system_alloc{};
@@ -5681,8 +5697,21 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
 MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision) {
+  // Snapshot the logical consuming-encoder phase at resolver entry (task 4.6).
+  // IssueDraw marks current_consuming_encoder_active_ only AFTER
+  // BeginFrameEncoder, which is strictly after every resolver call, so a
+  // physical encoder retained from a prior draw is never mistaken for this
+  // draw's consumer. The exact recorder uses this to prove no dependency
+  // resolution runs inside an active consuming encoder. It reads phase only.
+  const bool inside_consuming_encoder = current_consuming_encoder_active_;
   ProducerDependencyOutcome outcome;
   if (decision.selected.empty()) {
+    // Early no-op preserved EXACTLY: a disjoint (or no-pending) consumer adds
+    // no commit, wait, or drain. Record the factual zero effects before the
+    // unchanged return so counters can prove it.
+    authority_observer_.RecordDependencyExecution(
+        decision, outcome.sync, outcome.drain_attempted, outcome.drain,
+        inside_consuming_encoder);
     return outcome;
   }
 
@@ -5701,6 +5730,12 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
     outcome.sync.waited = outcome.sync.waited || waited;
     if (!waited) {
       outcome.complete = false;
+      // Failed-wait path: the commit already happened but the drain did not.
+      // Record the factual sync effect (no drain attempted) before the
+      // unchanged return.
+      authority_observer_.RecordDependencyExecution(
+          decision, outcome.sync, outcome.drain_attempted, outcome.drain,
+          inside_consuming_encoder);
       return outcome;
     }
     PumpCompletedActions();
@@ -5710,6 +5745,9 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   outcome.drain = DrainSelectedPendingProducers(decision);
   outcome.complete =
       outcome.drain.drained_records == decision.selected.size();
+  authority_observer_.RecordDependencyExecution(
+      decision, outcome.sync, outcome.drain_attempted, outcome.drain,
+      inside_consuming_encoder);
   return outcome;
 }
 

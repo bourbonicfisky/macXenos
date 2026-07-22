@@ -135,6 +135,13 @@ struct ConsumerDecision {
   bool revalidate_gpu_bytes = false;   // consumer reads the shared buffer.
   uint64_t max_wait_submission = 0;    // highest submission to await (0 if none).
 
+  // Number of pending producer records DecideConsumer considered (the snapshot
+  // size). Transient telemetry metadata ONLY: it lets the exact dependency
+  // recorder distinguish a real disjoint query (considered > 0, selected empty)
+  // from a query with no pending producers at all (considered == 0). It is
+  // never authority state and drives no decision.
+  uint64_t considered_producers = 0;
+
   // Bytes actually depended on (covered by the selected producers), for
   // telemetry. Zero when there is no dependency.
   uint64_t selected_bytes() const {
@@ -186,6 +193,7 @@ inline ConsumerDecision DecideConsumer(
   decision.consumer = consumer;
   decision.requested = request.Combined();
   decision.revalidate_gpu_bytes = ConsumerReadsSharedBuffer(consumer);
+  decision.considered_producers = producers.size();
   std::vector<bool> selected(producers.size(), false);
   for (size_t i = 0; i < producers.size(); ++i) {
     const PendingProducer& producer = producers[i];
@@ -713,6 +721,53 @@ class AuthorityObserver {
     }
   }
 
+  // Record one dependency-resolver execution EXACTLY (unsampled,
+  // allocation-free). Where RecordConsumer above measures sampled agreement,
+  // this measures the factual synchronization/drain EFFECTS one resolver
+  // execution produced, so a disjoint consumer can be proven to add zero
+  // commits, zero waits, zero drains, zero drained records, and to never
+  // resolve inside an active consuming encoder. Callers pass the factual
+  // LegacySyncOutcome, whether a drain was attempted, the factual
+  // LegacyDrainOutcome, and whether the CURRENT consuming-encoder scope was
+  // active at resolver entry. These are temporary telemetry counters ONLY --
+  // never authority state -- and this method executes no behavior.
+  void RecordDependencyExecution(const ConsumerDecision& decision,
+                                 const LegacySyncOutcome& sync,
+                                 bool drain_attempted,
+                                 const LegacyDrainOutcome& drain,
+                                 bool inside_current_consuming_encoder) {
+    size_t ci = static_cast<size_t>(decision.consumer);
+    ++exec_total_[ci];
+    if (inside_current_consuming_encoder) {
+      // A resolution attempted while THIS draw's consuming encoder scope is
+      // active. Production keeps this at zero (every resolver runs before
+      // BeginFrameEncoder marks the scope); a nonzero value would flag a real
+      // in-encoder dependency resolution.
+      ++exec_inside_encoder_[ci];
+    }
+    // A REAL disjoint query: a nonempty consumer request faced pending
+    // producers but none intersected it. selected-empty with zero considered
+    // producers is a no-pending query, and an empty requested range set never
+    // depends on anything -- neither is a disjoint query, so both must stay out
+    // of the disjoint tallies.
+    bool disjoint = decision.selected.empty() &&
+                    decision.considered_producers > 0 &&
+                    !decision.requested.empty();
+    if (disjoint) {
+      ++exec_disjoint_[ci];
+      if (sync.committed) {
+        ++disjoint_commit_[ci];
+      }
+      if (sync.waited) {
+        ++disjoint_wait_[ci];
+      }
+      if (drain_attempted) {
+        ++disjoint_drain_attempt_[ci];
+      }
+      disjoint_drained_records_[ci] += drain.drained_records;
+    }
+  }
+
   // Record one writer publication alongside the independently observed legacy
   // outcome. Invalidation counts are factual Entry retirements returned by the
   // direct legacy cache call; deferred watch fan-out remains a separately
@@ -778,6 +833,18 @@ class AuthorityObserver {
           writer_invalidated_entries_[w], writer_commits_[w],
           writer_waits_[w]);
     }
+    // Exact (unsampled) dependency-resolver effect totals. These prove disjoint
+    // consumers add no commit/wait/drain and never resolve inside a consuming
+    // encoder; a nonzero disjoint effect or inside-encoder count is a defect.
+    if (exec_total()) {
+      XELOGI(
+          "MetalAuthority[exact] exec_total={} exec_disjoint={} "
+          "disjoint_commits={} disjoint_waits={} disjoint_drain_attempts={} "
+          "disjoint_drained_records={} inside_consuming_encoder={}",
+          exec_total(), exec_disjoint(), disjoint_commits(), disjoint_waits(),
+          disjoint_drain_attempts(), disjoint_drained_records(),
+          exec_inside_encoder());
+    }
   }
 
   // Accessors for the conformance tests (no device, no log noise).
@@ -826,6 +893,42 @@ class AuthorityObserver {
     return total;
   }
 
+  // Exact dependency-resolver effect accessors (per ConsumerKind and totals).
+  uint64_t exec_total(ConsumerKind c) const {
+    return exec_total_[static_cast<size_t>(c)];
+  }
+  uint64_t exec_total() const { return SumConsumers(exec_total_); }
+  uint64_t exec_disjoint(ConsumerKind c) const {
+    return exec_disjoint_[static_cast<size_t>(c)];
+  }
+  uint64_t exec_disjoint() const { return SumConsumers(exec_disjoint_); }
+  uint64_t disjoint_commits(ConsumerKind c) const {
+    return disjoint_commit_[static_cast<size_t>(c)];
+  }
+  uint64_t disjoint_commits() const { return SumConsumers(disjoint_commit_); }
+  uint64_t disjoint_waits(ConsumerKind c) const {
+    return disjoint_wait_[static_cast<size_t>(c)];
+  }
+  uint64_t disjoint_waits() const { return SumConsumers(disjoint_wait_); }
+  uint64_t disjoint_drain_attempts(ConsumerKind c) const {
+    return disjoint_drain_attempt_[static_cast<size_t>(c)];
+  }
+  uint64_t disjoint_drain_attempts() const {
+    return SumConsumers(disjoint_drain_attempt_);
+  }
+  uint64_t disjoint_drained_records(ConsumerKind c) const {
+    return disjoint_drained_records_[static_cast<size_t>(c)];
+  }
+  uint64_t disjoint_drained_records() const {
+    return SumConsumers(disjoint_drained_records_);
+  }
+  uint64_t exec_inside_encoder(ConsumerKind c) const {
+    return exec_inside_encoder_[static_cast<size_t>(c)];
+  }
+  uint64_t exec_inside_encoder() const {
+    return SumConsumers(exec_inside_encoder_);
+  }
+
  private:
   static constexpr size_t kConsumerCount = 4;
   static constexpr size_t kWriterCount = 4;
@@ -859,6 +962,25 @@ class AuthorityObserver {
   uint64_t action_count_[kActionCount] = {};
   uint64_t predicted_drained_records_[kConsumerCount] = {};
   uint64_t legacy_drained_records_[kConsumerCount] = {};
+
+  // Exact (unsampled) dependency-resolver effect tallies. Temporary telemetry
+  // only: they count the factual commits/waits/drains a resolver produced, so a
+  // disjoint consumer's zero-effect contract is measurable rather than assumed.
+  uint64_t exec_total_[kConsumerCount] = {};
+  uint64_t exec_disjoint_[kConsumerCount] = {};
+  uint64_t disjoint_commit_[kConsumerCount] = {};
+  uint64_t disjoint_wait_[kConsumerCount] = {};
+  uint64_t disjoint_drain_attempt_[kConsumerCount] = {};
+  uint64_t disjoint_drained_records_[kConsumerCount] = {};
+  uint64_t exec_inside_encoder_[kConsumerCount] = {};
+
+  static uint64_t SumConsumers(const uint64_t (&counts)[kConsumerCount]) {
+    uint64_t total = 0;
+    for (uint64_t count : counts) {
+      total += count;
+    }
+    return total;
+  }
 
   uint32_t divergence_logs_ = 0;
 };

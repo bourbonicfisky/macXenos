@@ -250,6 +250,15 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
 
+  // Task 4.6 logical current-consuming-encoder phase marker. Set true ONLY
+  // after BeginFrameEncoder successfully returns for the CURRENT draw (so a
+  // physical encoder retained from a prior draw is not mistaken for this draw's
+  // consumer), and reset to false on every IssueDraw exit via a small RAII
+  // guard. The exact dependency recorder reads it at resolver entry to prove no
+  // dependency resolution runs inside an active consuming encoder. It observes
+  // phase only and MUST NOT control any behavior.
+  bool current_consuming_encoder_active_ = false;
+
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)
   // the open encoder was created with; a draw whose accumulated render targets
   // differ closes the encoder and opens a new pass.

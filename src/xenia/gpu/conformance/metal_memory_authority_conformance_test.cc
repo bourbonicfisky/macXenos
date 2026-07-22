@@ -1479,6 +1479,208 @@ TEST_CASE(
   RequireRangeBytes(obs.ram, 0x8000u, 0x800u, kStaleRam);
 }
 
+// --- Task 4.6: disjoint consumers add zero resolver effects ----------------
+//
+// The tests above assert the seam's decision (action / selected set / bytes).
+// Task 4.6 asks the resolver-effect question with exact, unsampled counters:
+// when a consumer is disjoint from every pending producer, does the resolver
+// add zero command-buffer commits, zero waits, zero drains, zero drained
+// records, and never resolve inside an active consuming encoder? The exact
+// recorder counts the FACTUAL effects; these tests drive it with real
+// DecideConsumer output. A disjoint query is a nonempty producer set with an
+// empty selection -- distinguished from a no-pending query by the retained
+// considered-producer count.
+
+namespace {
+
+// Build a real disjoint decision: two pending producers, a consumer in the gap
+// between them. Selection is empty, but considered_producers is nonzero.
+ConsumerDecision DisjointDecision(ConsumerKind consumer) {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
+      MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
+  };
+  return DecideConsumer(consumer, SingleRange(0x4000u, 0x400u), producers,
+                        /*completed=*/5);
+}
+
+}  // namespace
+
+TEST_CASE("Authority 4.6: DecideConsumer retains the considered-producer count",
+          "[l0][authority]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
+      MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
+      MakeProducer(0x9000u, 0x1000u, TransitState::kPendingResolve, 5),
+  };
+  // Disjoint request in the gap: selection empty, but the seam considered all
+  // three records, so the disjoint query is distinguishable from a no-pending
+  // one.
+  auto disjoint = DecideConsumer(ConsumerKind::kVertex,
+                                 SingleRange(0x4000u, 0x400u), producers, 5);
+  REQUIRE(disjoint.selected.empty());
+  REQUIRE(disjoint.considered_producers == 3u);
+
+  // No pending producers at all: considered count is zero.
+  auto no_pending = DecideConsumer(ConsumerKind::kVertex,
+                                   SingleRange(0x4000u, 0x400u), {}, 5);
+  REQUIRE(no_pending.selected.empty());
+  REQUIRE(no_pending.considered_producers == 0u);
+
+  // An overlapping request considers every record and selects one.
+  auto overlap = DecideConsumer(ConsumerKind::kVertex,
+                                SingleRange(0x1000u, 0x1000u), producers, 5);
+  REQUIRE(overlap.considered_producers == 3u);
+  REQUIRE(overlap.selected.size() == 1u);
+}
+
+TEST_CASE(
+    "Authority 4.6: disjoint consumer resolver adds zero commits/waits/drains "
+    "and never resolves inside the consuming encoder",
+    "[l0][authority]") {
+  const ConsumerKind kinds[] = {ConsumerKind::kTexture, ConsumerKind::kVertex,
+                                ConsumerKind::kWait, ConsumerKind::kHostCpuRead};
+  for (ConsumerKind kind : kinds) {
+    AuthorityObserver obs;
+    ConsumerDecision decision = DisjointDecision(kind);
+    REQUIRE(decision.selected.empty());
+    REQUIRE(decision.considered_producers == 2u);
+
+    // The factual effects the resolver's early no-op path returns for a
+    // disjoint consumer: no commit, no wait, no drain, no drained records, and
+    // (resolvers run strictly before BeginFrameEncoder) not inside the current
+    // consuming encoder.
+    LegacySyncOutcome sync;             // committed=false, waited=false.
+    LegacyDrainOutcome drain;           // drained_records=0.
+    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                  drain, /*inside=*/false);
+
+    // Exact deltas: one execution, one disjoint execution, all effects zero.
+    REQUIRE(obs.exec_total(kind) == 1u);
+    REQUIRE(obs.exec_disjoint(kind) == 1u);
+    REQUIRE(obs.disjoint_commits(kind) == 0u);
+    REQUIRE(obs.disjoint_waits(kind) == 0u);
+    REQUIRE(obs.disjoint_drain_attempts(kind) == 0u);
+    REQUIRE(obs.disjoint_drained_records(kind) == 0u);
+    REQUIRE(obs.exec_inside_encoder(kind) == 0u);
+    // Totals mirror the single per-kind execution.
+    REQUIRE(obs.exec_total() == 1u);
+    REQUIRE(obs.exec_disjoint() == 1u);
+    REQUIRE(obs.disjoint_commits() == 0u);
+    REQUIRE(obs.disjoint_waits() == 0u);
+    REQUIRE(obs.disjoint_drain_attempts() == 0u);
+    REQUIRE(obs.disjoint_drained_records() == 0u);
+    REQUIRE(obs.exec_inside_encoder() == 0u);
+  }
+}
+
+TEST_CASE(
+    "Authority 4.6: a no-pending query is not counted as a disjoint execution",
+    "[l0][authority]") {
+  AuthorityObserver obs;
+  // Selection empty AND zero considered producers: a no-pending query, not a
+  // disjoint one. It is still an execution but must not inflate the disjoint
+  // tally, otherwise the disjoint zero-effect proof loses its denominator.
+  auto decision =
+      DecideConsumer(ConsumerKind::kTexture, SingleRange(0x4000u, 0x400u), {},
+                     /*completed=*/0);
+  REQUIRE(decision.selected.empty());
+  REQUIRE(decision.considered_producers == 0u);
+  LegacySyncOutcome sync;
+  LegacyDrainOutcome drain;
+  obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                drain, /*inside=*/false);
+  REQUIRE(obs.exec_total(ConsumerKind::kTexture) == 1u);
+  REQUIRE(obs.exec_disjoint(ConsumerKind::kTexture) == 0u);
+}
+
+TEST_CASE(
+    "Authority 4.6: an empty requested range set is not counted as a disjoint "
+    "execution even with pending producers",
+    "[l0][authority]") {
+  AuthorityObserver obs;
+  // Pending producers exist and are all considered, but the consumer requests
+  // no bytes at all. An empty request depends on nothing, so it is neither a
+  // real disjoint query nor allowed to inflate the disjoint tally -- otherwise
+  // a consumer that requested nothing would masquerade as a producer-avoiding
+  // disjoint read.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 5),
+      MakeProducer(0x8000u, 0x1000u, TransitState::kPendingMemexport, 5),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kVertex, GuestRangeSet{},
+                                 producers, /*completed=*/5);
+  REQUIRE(decision.selected.empty());
+  REQUIRE(decision.considered_producers == 2u);
+  REQUIRE(decision.requested.empty());
+  LegacySyncOutcome sync;
+  LegacyDrainOutcome drain;
+  obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                drain, /*inside=*/false);
+  // Still one execution, but the empty request must not register as disjoint.
+  REQUIRE(obs.exec_total(ConsumerKind::kVertex) == 1u);
+  REQUIRE(obs.exec_disjoint(ConsumerKind::kVertex) == 0u);
+}
+
+TEST_CASE(
+    "Authority 4.6: injected commit/wait/drain/inside facts increment their "
+    "counters so a broken counter cannot pass by staying zero",
+    "[l0][authority]") {
+  // A counter hardwired to zero would pass the zero-delta proof above. Drive
+  // the recorder with a disjoint decision but nonzero injected facts and assert
+  // each counter moves, so only a faithful recorder passes both tests.
+  SECTION("injected commit increments disjoint_commits only") {
+    AuthorityObserver obs;
+    ConsumerDecision decision = DisjointDecision(ConsumerKind::kVertex);
+    LegacySyncOutcome sync;
+    sync.committed = true;
+    LegacyDrainOutcome drain;
+    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                  drain, /*inside=*/false);
+    REQUIRE(obs.disjoint_commits(ConsumerKind::kVertex) == 1u);
+    REQUIRE(obs.disjoint_waits(ConsumerKind::kVertex) == 0u);
+    REQUIRE(obs.disjoint_drain_attempts(ConsumerKind::kVertex) == 0u);
+    REQUIRE(obs.exec_inside_encoder(ConsumerKind::kVertex) == 0u);
+  }
+  SECTION("injected wait increments disjoint_waits only") {
+    AuthorityObserver obs;
+    ConsumerDecision decision = DisjointDecision(ConsumerKind::kTexture);
+    LegacySyncOutcome sync;
+    sync.waited = true;
+    LegacyDrainOutcome drain;
+    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                  drain, /*inside=*/false);
+    REQUIRE(obs.disjoint_waits(ConsumerKind::kTexture) == 1u);
+    REQUIRE(obs.disjoint_commits(ConsumerKind::kTexture) == 0u);
+  }
+  SECTION("injected drain increments attempts and drained records") {
+    AuthorityObserver obs;
+    ConsumerDecision decision = DisjointDecision(ConsumerKind::kWait);
+    LegacySyncOutcome sync;
+    LegacyDrainOutcome drain;
+    drain.drained_records = 2u;
+    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/true,
+                                  drain, /*inside=*/false);
+    REQUIRE(obs.disjoint_drain_attempts(ConsumerKind::kWait) == 1u);
+    REQUIRE(obs.disjoint_drained_records(ConsumerKind::kWait) == 2u);
+    REQUIRE(obs.disjoint_commits(ConsumerKind::kWait) == 0u);
+  }
+  SECTION("injected inside-encoder fact increments inside_encoder only") {
+    AuthorityObserver obs;
+    ConsumerDecision decision = DisjointDecision(ConsumerKind::kHostCpuRead);
+    LegacySyncOutcome sync;
+    LegacyDrainOutcome drain;
+    obs.RecordDependencyExecution(decision, sync, /*drain_attempted=*/false,
+                                  drain, /*inside=*/true);
+    REQUIRE(obs.exec_inside_encoder(ConsumerKind::kHostCpuRead) == 1u);
+    REQUIRE(obs.exec_inside_encoder() == 1u);
+    // An inside-encoder resolution is still an execution, but adds no disjoint
+    // effect facts here.
+    REQUIRE(obs.exec_total(ConsumerKind::kHostCpuRead) == 1u);
+    REQUIRE(obs.disjoint_commits(ConsumerKind::kHostCpuRead) == 0u);
+  }
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace metal
