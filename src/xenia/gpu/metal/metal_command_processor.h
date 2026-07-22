@@ -127,13 +127,16 @@ class MetalCommandProcessor : public CommandProcessor {
       uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu);
   void FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
-  // Cross-writer memory-authority observer seam (OpenSpec
-  // implement-metal-cross-writer-memory-authority, task 2.4). Snapshots the
-  // current pending resolve/memexport records into the device-free authority
-  // vocabulary so the observer can compare the seam's selective prediction with
-  // the legacy call-site action. Non-owning and side-effect free: it reads the
-  // existing queues, never mutates them.
+  // Cross-writer memory-authority dependency seam (OpenSpec
+  // implement-metal-cross-writer-memory-authority, tasks 2.4 and 4.1).
+  // Snapshots the current pending resolve/memexport records into the
+  // device-free authority vocabulary for the common dependency query.
+  // Non-owning and side-effect free: it reads the existing queues, never
+  // mutates them.
   std::vector<metal::PendingProducer> SnapshotPendingProducers() const;
+  metal::ConsumerDecision QueryPendingProducerDependencies(
+      metal::ConsumerKind consumer,
+      const metal::ConsumerRequest& request) const;
 
   // --- Draw path helpers (metal_command_processor.mm) ---
 

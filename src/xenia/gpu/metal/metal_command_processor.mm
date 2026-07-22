@@ -2305,35 +2305,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
         uint32_t vf_base = fetch.address << 2;
         uint32_t vf_end = vf_base + (fetch.size << 2);
-        bool overlap = false;
-        for (const PendingWriteback& wb : pending_writebacks_) {
-          uint32_t wend = wb.guest_addr + wb.range_bytes();
-          if (vf_base < wend && vf_end > wb.guest_addr) {
-            overlap = true;
-            break;
-          }
-        }
-        if (!overlap) {
-          for (const PendingMemexport& me : pending_memexports_) {
-            if (vf_base < me.base_address + me.size_bytes &&
-                vf_end > me.base_address) {
-              overlap = true;
-              break;
-            }
-          }
-        }
+        metal::GuestRangeSet requested;
+        requested.Add(
+            metal::GuestRange::FromBaseLength(vf_base, fetch.size << 2));
+        metal::ConsumerDecision authority_decision =
+            QueryPendingProducerDependencies(
+                metal::ConsumerKind::kVertex,
+                metal::ConsumerRequest::Uniform(requested));
+        bool overlap = !authority_decision.selected.empty();
         bool authority_sample = authority_observer_.ShouldSampleConsumer(
             metal::ConsumerKind::kVertex);
-        metal::ConsumerDecision authority_decision;
-        if (authority_sample) {
-          metal::GuestRangeSet requested;
-          requested.Add(
-              metal::GuestRange::FromBaseLength(vf_base, fetch.size << 2));
-          authority_decision = metal::DecideConsumer(
-              metal::ConsumerKind::kVertex, requested,
-              SnapshotPendingProducers(),
-              completed_submission_.load(std::memory_order_acquire));
-        }
         metal::LegacySyncOutcome sync_outcome;
         metal::LegacyDrainOutcome drain_outcome;
         if (overlap) {
@@ -2343,8 +2324,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           drain_outcome =
               DrainPendingWritebacks(vf_base, vf_end - vf_base);
         }
-        // Observer-only (task 2.4): compare the seam's selective prediction with
-        // this legacy range-scoped decision. Records, never acts; throttled.
+        // Observer-only telemetry is still throttled, but task 4.1 now owns
+        // the overlap gate above. Record the executed commit, wait, and
+        // range-scoped drain so later routing work can compare its breadth and
+        // retirement count with the selected producer set.
         if (authority_sample) {
           metal::LegacyConsumerOutcome legacy;
           legacy.overlap = overlap;
@@ -2371,115 +2354,58 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
   if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
-    auto fetch_overlaps_writeback = [&](MetalShader* shader) {
-      if (!shader) return false;
+    auto collect_texture_ranges = [&](MetalShader* shader,
+                                      metal::ConsumerRequest& request) {
+      if (!shader) return;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         auto f = regs.GetTextureFetch(binding.fetch_constant);
         uint32_t fbase = f.base_address << 12;
         if (!fbase) continue;
-        // Memexport pending on this base: the exported bytes exist only in
-        // the shared-memory buffer until drained — neither RAM nor any
-        // bridge snapshot has them, so flush regardless of BridgeServes.
-        {
-          uint32_t fpitch_me = f.pitch ? (f.pitch << 5) : (f.size_2d.width + 32);
-          uint32_t fbytes_me = fpitch_me * (f.size_2d.height + 1) * 4;
-          uint32_t fend_me =
-              fbase + std::min<uint32_t>(fbytes_me, 8 * 1024 * 1024);
-          for (const PendingMemexport& me : pending_memexports_) {
-            if (fbase < me.base_address + me.size_bytes &&
-                fend_me > me.base_address) {
-              return true;
-            }
-          }
-        }
-        // Bridge-served fetches never read guest RAM — the snapshot is
-        // GPU-ordered, so no flush is needed. This is the JC2 fast path:
-        // the luminance pyramid's resolve->read ping-pong forced a full
-        // commit+wait PER LEVEL through this check (39 commits/frame,
-        // 21.5 -> 12.7 fps when stage 3 went default-ON).
-        if (texture_cache_ &&
-            texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
-                                         f.size_2d.height + 1)) {
-          continue;
-        }
-        // Precise guest footprint: base level(s) and mip chain as two disjoint
-        // ranges (see ComputeFetchGuestRanges / metal_fetch_overlap.h). Only a
-        // writeback that lands inside one of those ranges is a real dependency;
-        // the previous conservative pitch*height*4 span from the base also
-        // covered the gap up to the mip pointer, spuriously flushing for
-        // unrelated resolves in adjacent memory (e.g. a 512x512 DXT texture
-        // whose 1 MB span aliased a neighbouring uncompressed pyramid).
+
         metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
-        for (const PendingWriteback& wb : pending_writebacks_) {
-          uint32_t wend = wb.guest_addr + wb.range_bytes();
-          if (metal::WritebackOverlapsFetch(rng, wb.guest_addr, wend)) {
-            return true;
+        auto base_range =
+            metal::GuestRange::FromBounds(rng.base_begin, rng.base_end);
+        auto mip_range =
+            metal::GuestRange::FromBounds(rng.mip_begin, rng.mip_end);
+
+        // Every RAM-backed fetch can depend on memexport. A bridge-served
+        // resolve is already GPU-ordered, while memexport at the same address
+        // still needs convergence because the bridge does not contain it.
+        request.memexport_ranges.Add(base_range);
+        if (rng.mip_end > rng.mip_begin) {
+          request.memexport_ranges.Add(mip_range);
+        }
+        bool bridge_served =
+            texture_cache_ &&
+            texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
+                                          f.size_2d.height + 1);
+        if (!bridge_served) {
+          request.resolve_ranges.Add(base_range);
+          if (rng.mip_end > rng.mip_begin) {
+            request.resolve_ranges.Add(mip_range);
           }
         }
       }
-      return false;
     };
-    // Capture the legacy overlap decision in a bool so the observer below can
-    // read it without re-evaluating (fetch_overlaps_writeback is a pure query;
-    // the || short-circuit and drain behavior are unchanged).
-    bool tex_overlap = fetch_overlaps_writeback(pixel_shader) ||
-                       fetch_overlaps_writeback(vertex_shader);
+    metal::ConsumerRequest texture_request;
+    collect_texture_ranges(pixel_shader, texture_request);
+    collect_texture_ranges(vertex_shader, texture_request);
+    metal::ConsumerDecision authority_decision =
+        QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
+                                         texture_request);
+    bool tex_overlap = !authority_decision.selected.empty();
     bool authority_sample = authority_observer_.ShouldSampleConsumer(
         metal::ConsumerKind::kTexture);
-    metal::ConsumerDecision authority_decision;
-    if (authority_sample) {
-      auto collect_texture_ranges = [&](MetalShader* shader,
-                                        metal::ConsumerRequest& request) {
-        if (!shader) return;
-        for (const auto& binding :
-             shader->GetTextureBindingsAfterTranslation()) {
-          auto f = regs.GetTextureFetch(binding.fetch_constant);
-          uint32_t fbase = f.base_address << 12;
-          if (!fbase) continue;
-
-          metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
-          auto base_range =
-              metal::GuestRange::FromBounds(rng.base_begin, rng.base_end);
-          auto mip_range =
-              metal::GuestRange::FromBounds(rng.mip_begin, rng.mip_end);
-
-          // Every RAM-backed fetch can depend on memexport. A bridge-served
-          // resolve is the producer-state-specific exception: its snapshot is
-          // already GPU-ordered and legacy deliberately doesn't converge it.
-          request.memexport_ranges.Add(base_range);
-          if (rng.mip_end > rng.mip_begin) {
-            request.memexport_ranges.Add(mip_range);
-          }
-          bool bridge_served =
-              texture_cache_ &&
-              texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
-                                            f.size_2d.height + 1);
-          if (!bridge_served) {
-            request.resolve_ranges.Add(base_range);
-            if (rng.mip_end > rng.mip_begin) {
-              request.resolve_ranges.Add(mip_range);
-            }
-          }
-        }
-      };
-      metal::ConsumerRequest request;
-      collect_texture_ranges(pixel_shader, request);
-      collect_texture_ranges(vertex_shader, request);
-      auto producers = SnapshotPendingProducers();
-      authority_decision = metal::DecideConsumer(
-          metal::ConsumerKind::kTexture, request, producers,
-          completed_submission_.load(std::memory_order_acquire));
-    }
     metal::LegacySyncOutcome sync_outcome;
     metal::LegacyDrainOutcome drain_outcome;
     if (tex_overlap) {
       sync_outcome = EndFrameEncoderAndWait();
       drain_outcome = DrainPendingWritebacks();
     }
-    // Observer-only (task 2.4): the legacy texture path drains ALL records on
-    // any overlap (audit blocker 6). Feed the seam the precise base/mip range
-    // set and record the selective prediction against the unfiltered legacy
-    // drain -- expected as a scope divergence until the seam is routed.
+    // Observer-only telemetry is still throttled, but task 4.1 now owns the
+    // overlap gate above. The execution path still drains ALL records on one
+    // selected dependency, so record its breadth and retirement count until
+    // task 4.3 routes only the selected records.
     if (authority_sample) {
       metal::LegacyConsumerOutcome legacy;
       legacy.overlap = tex_overlap;
@@ -5135,6 +5061,19 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
   return producers;
 }
 
+metal::ConsumerDecision
+MetalCommandProcessor::QueryPendingProducerDependencies(
+    metal::ConsumerKind consumer,
+    const metal::ConsumerRequest& request) const {
+  // Task 4.1's one multi-range query. It selects only intersecting records
+  // from the two existing producer queues and owns no authority state. The
+  // caller still executes its established commit/wait/drain policy; routing
+  // those consumer-specific actions belongs to tasks 4.2 through 4.4.
+  return metal::DecideConsumer(
+      consumer, request, SnapshotPendingProducers(),
+      completed_submission_.load(std::memory_order_acquire));
+}
+
 metal::LegacyDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     uint32_t filter_base, uint32_t filter_size) {
   metal::LegacyDrainOutcome outcome;
@@ -5619,20 +5558,19 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
   // only when the polled address actually lies inside a pending writeback;
   // all other writebacks keep the swap cadence (the reference backends'
   // readback is likewise a frame behind).
-  // Observer-only (task 2.4): the seam models the WAIT as a 4-byte RAM read and
-  // selects only intersecting producers; the legacy loops below drain ALL
-  // records on any single-address hit (audit blocker 6). Record the comparison
-  // without changing the legacy control flow.
+  // Task 4.1: the common multi-range query models WAIT as a 4-byte RAM read
+  // and selects only intersecting producers. This slice uses that selection
+  // for the overlap gate while retaining the established unfiltered drain;
+  // routing only the selected records belongs to task 4.4.
+  metal::GuestRangeSet requested;
+  requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
+  metal::ConsumerDecision authority_decision =
+      QueryPendingProducerDependencies(
+          metal::ConsumerKind::kWait,
+          metal::ConsumerRequest::Uniform(requested));
+  bool overlap = !authority_decision.selected.empty();
   bool authority_sample = authority_observer_.ShouldSampleConsumer(
       metal::ConsumerKind::kWait);
-  metal::ConsumerDecision authority_decision;
-  if (authority_sample) {
-    metal::GuestRangeSet requested;
-    requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
-    authority_decision = metal::DecideConsumer(
-        metal::ConsumerKind::kWait, requested, SnapshotPendingProducers(),
-        completed_submission_.load(std::memory_order_acquire));
-  }
   auto record_legacy = [&](bool overlap,
                            const metal::LegacySyncOutcome& sync_outcome,
                            const metal::LegacyDrainOutcome& drain_outcome) {
@@ -5648,25 +5586,11 @@ void MetalCommandProcessor::FlushPendingWritebacksForWait(
     legacy.drained_records = drain_outcome.drained_records;
     authority_observer_.RecordConsumer(authority_decision, legacy);
   };
-  for (const PendingWriteback& wb : pending_writebacks_) {
-    uint32_t length = wb.range_bytes();
-    if (guest_address >= wb.guest_addr &&
-        guest_address < wb.guest_addr + length) {
-      metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
-      metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
-      record_legacy(true, sync_outcome, drain_outcome);
-      return;
-    }
-  }
-  // The guest may also poll memory a memexport writes.
-  for (const PendingMemexport& me : pending_memexports_) {
-    if (guest_address >= me.base_address &&
-        guest_address < me.base_address + me.size_bytes) {
-      metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
-      metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
-      record_legacy(true, sync_outcome, drain_outcome);
-      return;
-    }
+  if (overlap) {
+    metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
+    metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
+    record_legacy(true, sync_outcome, drain_outcome);
+    return;
   }
   record_legacy(false, {}, {});
 }
