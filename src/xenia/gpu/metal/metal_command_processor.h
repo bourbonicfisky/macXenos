@@ -136,7 +136,14 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   ProducerDependencyOutcome ResolvePendingProducerDependencies(
       const metal::ConsumerDecision& decision);
-  void FlushPendingWritebacksForWait(uint32_t guest_address) override;
+  bool PrepareGuestMemoryForHostRead(uint32_t guest_address,
+                                     uint32_t length) override;
+  bool PrepareGuestMemoryForCompletionExposure() override;
+  bool FlushPendingWritebacksForWait(uint32_t guest_address) override;
+
+  bool ResolveRamConsumerDependencies(
+      metal::ConsumerKind consumer,
+      const metal::GuestRangeSet& requested_ranges);
 
   // Cross-writer memory-authority dependency seam (OpenSpec
   // implement-metal-cross-writer-memory-authority, tasks 2.4 and 4.1).

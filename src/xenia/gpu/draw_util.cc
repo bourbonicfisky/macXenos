@@ -956,10 +956,12 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     assert_always();
     return false;
   }
-  trace_writer.WriteMemoryRead(fetch.address * sizeof(uint32_t),
+  uint32_t vertices_address =
+      xenos::CpuToGpu(fetch.address * sizeof(uint32_t));
+  trace_writer.WriteMemoryRead(vertices_address,
                                fetch.size * sizeof(uint32_t));
   const float* vertices_guest = reinterpret_cast<const float*>(
-      memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
+      memory.TranslatePhysical(vertices_address));
   // Most vertices have a negative half-pixel offset applied, which we reverse.
   float half_pixel_offset =
       regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero

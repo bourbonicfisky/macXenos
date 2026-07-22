@@ -76,6 +76,18 @@ class GuestRange {
                       static_cast<uint64_t>(base) + static_cast<uint64_t>(length));
   }
 
+  // Build only if the complete requested interval is in the guest-physical
+  // domain. This is for host dereferences that will read the exact byte count;
+  // unlike authority invalidations, they must reject rather than clamp.
+  static std::optional<GuestRange> FromExactBaseLength(uint32_t base,
+                                                       uint32_t length) {
+    std::optional<GuestRange> range = FromBaseLength(base, length);
+    if (!range || range->start() != base || range->length() != length) {
+      return std::nullopt;
+    }
+    return range;
+  }
+
   // Build from an explicit half-open [begin, end) computed in 64-bit. The end
   // is clamped to kGuestPhysicalSize. Returns nullopt when the clamped interval
   // is empty (end <= begin after clamping, or begin >= kGuestPhysicalSize).

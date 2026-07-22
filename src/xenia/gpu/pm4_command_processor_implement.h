@@ -637,6 +637,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INTERRUPT(
 
   // generate interrupt from the command stream
   uint32_t cpu_mask = reader_.ReadAndSwap<uint32_t>();
+  if ((cpu_mask & 0x3Fu) &&
+      !COMMAND_PROCESSOR::PrepareGuestMemoryForCompletionExposure()) {
+    XELOGE("INTERRUPT: failed to publish deferred guest-memory producers");
+    return false;
+  }
   for (int n = 0; n < 6; n++) {
     if (cpu_mask & (1 << n)) {
       graphics_system_->DispatchInterruptCallback(1, n);
@@ -681,7 +686,14 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INDIRECT_BUFFER(
   uint32_t list_length = reader_.ReadAndSwap<uint32_t>();
   assert_zero(list_length & ~0xFFFFF);
   list_length &= 0xFFFFF;
-  COMMAND_PROCESSOR::ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
+  uint32_t list_physical = GpuToCpu(list_ptr);
+  if (!COMMAND_PROCESSOR::PrepareGuestMemoryForHostRead(
+          list_physical, list_length * sizeof(uint32_t))) {
+    XELOGE("INDIRECT_BUFFER: failed to prepare guest range {:08X}(+{})",
+           list_physical, list_length * sizeof(uint32_t));
+    return false;
+  }
+  COMMAND_PROCESSOR::ExecuteIndirectBuffer(list_physical, list_length);
   return true;
 }
 
@@ -716,14 +728,20 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
 
   bool is_memory = (wait_info & 0x10) != 0;
   assert_true(is_memory || poll_reg_addr < RegisterFile::kRegisterCount);
+  // Strip the packet's low endian bits, then resolve the single 512 MiB
+  // physical alias (matching Memory::TranslatePhysical) used for the authority
+  // boundary, the trace read, and the actual RAM read.
+  uint32_t poll_physical = xenos::CpuToGpu(poll_reg_addr & ~uint32_t(0x3));
   const volatile uint32_t& value_ref =
-      is_memory ? *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(
-                      poll_reg_addr & ~uint32_t(0x3)))
+      is_memory ? *reinterpret_cast<uint32_t*>(
+                      memory_->TranslatePhysical(poll_physical))
                 : register_file_->values[poll_reg_addr];
 
   if (is_memory) {
-    COMMAND_PROCESSOR::FlushPendingWritebacksForWait(poll_reg_addr &
-                                                     ~uint32_t(0x3));
+    if (!COMMAND_PROCESSOR::FlushPendingWritebacksForWait(poll_physical)) {
+      XELOGE("WAIT_REG_MEM: failed to prepare guest word {:08X}", poll_physical);
+      return false;
+    }
   }
 
   bool matched = false;
@@ -732,8 +750,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   do {
     uint32_t value = value_ref;
     if (is_memory) {
-      trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)),
-                                    sizeof(uint32_t));
+      trace_writer_.WriteMemoryRead(poll_physical, sizeof(uint32_t));
       value = xenos::GpuSwap(value,
                              static_cast<xenos::Endian>(poll_reg_addr & 0x3));
     } else {
@@ -857,8 +874,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
     // Memory.
     auto endianness = static_cast<xenos::Endian>(poll_reg_addr & 0x3);
     poll_reg_addr &= ~0x3;
-    trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr), 4);
-    value = xe::load<uint32_t>(memory_->TranslatePhysical(poll_reg_addr));
+    // Strip the packet's low endian bits, then resolve the single 512 MiB
+    // physical alias used for the authority boundary, the trace read, and the
+    // actual RAM read.
+    uint32_t poll_physical = xenos::CpuToGpu(poll_reg_addr);
+    if (!COMMAND_PROCESSOR::PrepareGuestMemoryForHostRead(poll_physical,
+                                                          sizeof(uint32_t))) {
+      XELOGE("COND_WRITE: failed to prepare guest predicate {:08X}",
+             poll_physical);
+      return false;
+    }
+    trace_writer_.WriteMemoryRead(poll_physical, 4);
+    value = xe::load<uint32_t>(memory_->TranslatePhysical(poll_physical));
     value = GpuSwap(value, endianness);
   } else {
     // Register.
@@ -920,6 +947,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
     // Write value.
     data_value = value;
   }
+  if (!COMMAND_PROCESSOR::PrepareGuestMemoryForCompletionExposure()) {
+    XELOGE(
+        "EVENT_WRITE_SHD: failed to publish deferred guest-memory producers");
+    return false;
+  }
   auto endianness = static_cast<xenos::Endian>(address & 0x3);
   address &= ~0x3;
   data_value = GpuSwap(data_value, endianness);
@@ -950,6 +982,12 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_EXT(
   COMMAND_PROCESSOR::WriteEventInitiator(initiator & 0x3F);
   auto endianness = static_cast<xenos::Endian>(address & 0x3);
   address &= ~0x3;
+
+  if (!COMMAND_PROCESSOR::PrepareGuestMemoryForCompletionExposure()) {
+    XELOGE(
+        "EVENT_WRITE_EXT: failed to publish deferred guest-memory producers");
+    return false;
+  }
 
   // Let us hope we can fake this.
   // This callback tells the driver the xy coordinates affected by a previous
@@ -988,14 +1026,29 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
   uint32_t report_address =
       register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
   uint32_t report_record_base = XenosZPDReport::GetRecordBase(report_address);
+  // report_record_base already carries the record-aligned guest address (low
+  // record/type bits stripped by GetRecordBase); keep it for the logical ZPD
+  // begin/end sequencing below. Resolve the single 512 MiB physical alias
+  // (matching Memory::TranslatePhysical) for the authority boundary and the
+  // actual RAM pointer so both agree on the same word.
+  uint32_t report_physical =
+      report_record_base ? xenos::CpuToGpu(report_record_base) : 0;
   bool is_begin_record = XenosZPDReport::IsBeginRecord(report_address);
   bool is_end_record = XenosZPDReport::IsEndRecord(report_address);
 
   xe_gpu_depth_sample_counts* report =
       report_record_base
           ? memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(
-                report_record_base)
+                report_physical)
           : nullptr;
+
+  if (report_record_base &&
+      !COMMAND_PROCESSOR::PrepareGuestMemoryForHostRead(
+          report_physical, sizeof(xe_gpu_depth_sample_counts))) {
+    XELOGE("EVENT_WRITE_ZPD: failed to prepare guest report {:08X}",
+           report_physical);
+    return false;
+  }
 
   // True if the record has the pending D3D sentinel.
   // Useful as a hint, but not authoritative for report boundaries.
@@ -1671,27 +1724,39 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_LOAD_ALU_CONSTANT(
   size_dwords &= 0xFFF;
   uint32_t type = (offset_type >> 16) & 0xFF;
 
-  auto xlat_address = (uint32_t*)memory_->TranslatePhysical(address);
+  // The packet's 0x3FFFFFFF mask above leaves the type/flag bits already
+  // stripped; resolve the single 512 MiB physical alias (matching
+  // Memory::TranslatePhysical) used for the authority boundary, the trace
+  // reads, and the actual RAM read.
+  uint32_t constant_physical = xenos::CpuToGpu(address);
+  if (!COMMAND_PROCESSOR::PrepareGuestMemoryForHostRead(
+          constant_physical, size_dwords * sizeof(uint32_t))) {
+    XELOGE("LOAD_ALU_CONSTANT: failed to prepare guest range {:08X}(+{})",
+           constant_physical, size_dwords * sizeof(uint32_t));
+    return false;
+  }
+
+  auto xlat_address = (uint32_t*)memory_->TranslatePhysical(constant_physical);
 
   switch (type) {
     case 0:  // ALU
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
+      trace_writer_.WriteMemoryRead(constant_physical, size_dwords * 4);
       COMMAND_PROCESSOR::WriteALURangeFromMem(index, xlat_address, size_dwords);
 
       break;
     case 1:  // FETCH
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
+      trace_writer_.WriteMemoryRead(constant_physical, size_dwords * 4);
       COMMAND_PROCESSOR::WriteFetchRangeFromMem(index, xlat_address,
                                                 size_dwords);
       break;
     case 2:  // BOOL
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
+      trace_writer_.WriteMemoryRead(constant_physical, size_dwords * 4);
 
       COMMAND_PROCESSOR::WriteBoolRangeFromMem(index, xlat_address,
                                                size_dwords);
       break;
     case 3:  // LOOP
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
+      trace_writer_.WriteMemoryRead(constant_physical, size_dwords * 4);
 
       COMMAND_PROCESSOR::WriteLoopRangeFromMem(index, xlat_address,
                                                size_dwords);
@@ -1700,7 +1765,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_LOAD_ALU_CONSTANT(
     case 4:  // REGISTERS
       // chrispy: todo, REGISTERS cannot write any special regs, so optimize for
       // that
-      trace_writer_.WriteMemoryRead(CpuToGpu(address), size_dwords * 4);
+      trace_writer_.WriteMemoryRead(constant_physical, size_dwords * 4);
 
       COMMAND_PROCESSOR::WriteREGISTERSRangeFromMem(index, xlat_address,
                                                     size_dwords);
@@ -1735,10 +1800,20 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_IM_LOAD(uint32_t packet,
   uint32_t start = start_size >> 16;
   uint32_t size_dwords = start_size & 0xFFFF;  // dwords
   assert_true(start == 0);
-  trace_writer_.WriteMemoryRead(CpuToGpu(addr), size_dwords * 4);
+  // addr already has the packet's low shader-type bits stripped. Resolve the
+  // single 512 MiB physical alias (matching Memory::TranslatePhysical) used for
+  // the authority boundary, trace read, shader identity, and actual RAM read.
+  uint32_t shader_physical = xenos::CpuToGpu(addr);
+  if (!COMMAND_PROCESSOR::PrepareGuestMemoryForHostRead(
+          shader_physical, size_dwords * sizeof(uint32_t))) {
+    XELOGE("IM_LOAD: failed to prepare guest shader {:08X}(+{})", shader_physical,
+           size_dwords * sizeof(uint32_t));
+    return false;
+  }
+  trace_writer_.WriteMemoryRead(shader_physical, size_dwords * 4);
   auto shader = COMMAND_PROCESSOR::LoadShader(
-      shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr),
-      size_dwords);
+      shader_type, shader_physical,
+      memory_->TranslatePhysical<uint32_t*>(shader_physical), size_dwords);
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;

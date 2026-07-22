@@ -1147,15 +1147,13 @@ bool Emulator::SaveToFile(const std::filesystem::path& path) {
 
   // It's important we don't hold the global lock here! XThreads need to step
   // forward (possibly through guarded regions) without worry!
-  processor_->Save(&stream);
-  graphics_system_->Save(&stream);
-  audio_system_->Save(&stream);
-  kernel_state_->Save(&stream);
-  memory_->Save(&stream);
+  bool saved = processor_->Save(&stream) && graphics_system_->Save(&stream) &&
+               audio_system_->Save(&stream) && kernel_state_->Save(&stream) &&
+               memory_->Save(&stream);
   map->Close(stream.offset());
 
   Resume();
-  return true;
+  return saved;
 }
 
 bool Emulator::RestoreFromFile(const std::filesystem::path& path) {

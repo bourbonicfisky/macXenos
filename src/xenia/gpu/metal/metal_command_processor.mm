@@ -4079,6 +4079,27 @@ bool MetalCommandProcessor::IssueCopy() {
   // destination base so the texture cache can bridge it to our color RT. No data
   // is copied yet -- this pass logs what JC2 resolves so the RT-as-texture bridge
   // can be built against real addresses/formats.
+  // GetResolveInfo decodes the resolve rectangle from vf0 on the host. The
+  // D3D9 convention says the CPU normally writes these vertices, but the
+  // authority contract must cover the factual address rather than assume its
+  // writer. Resolve an aliased pending producer before the host dereference.
+  xenos::xe_gpu_vertex_fetch_t resolve_fetch =
+      register_file_->GetVertexFetch(0);
+  if (resolve_fetch.type == xenos::FetchConstantType::kVertex &&
+      resolve_fetch.size == 3 * 2) {
+    uint32_t resolve_vertices_address =
+        xenos::CpuToGpu(resolve_fetch.address * sizeof(uint32_t));
+    if (!PrepareGuestMemoryForHostRead(
+            resolve_vertices_address,
+            resolve_fetch.size * sizeof(uint32_t))) {
+      XELOGE(
+          "MetalCommandProcessor: failed to converge resolve vf0 {:08X}+{}",
+          resolve_vertices_address,
+          resolve_fetch.size * uint32_t(sizeof(uint32_t)));
+      return false;
+    }
+  }
+
   draw_util::ResolveInfo resolve_info;
   if (!draw_util::GetResolveInfo(*register_file_, *memory_, trace_writer_,
                                  /*draw_resolution_scale_x=*/1,
@@ -4924,6 +4945,17 @@ bool MetalCommandProcessor::IssueCopy() {
 }
 
 void MetalCommandProcessor::InitializeTrace() {
+  // Warm-entry and shared-memory trace initialization read arbitrary guest RAM
+  // ranges. Converge every pending producer once before either sweep so the
+  // trace never captures an older RAM version. Do this before writing any
+  // initial trace command so a convergence failure leaves no partial capture.
+  // With no pending producers this query performs no commit, wait, or drain.
+  if (!PrepareGuestMemoryForHostRead(
+          0, static_cast<uint32_t>(SharedMemory::kBufferSize))) {
+    XELOGE("MetalCommandProcessor: failed to converge RAM for trace start");
+    AbortTrace("failed to converge Metal guest RAM at trace start");
+    return;
+  }
   // Base: all register values + gamma ramps.
   CommandProcessor::InitializeTrace();
   // Guest RAM is CPU-authoritative for this backend (uploads read it
@@ -5689,51 +5721,81 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   return outcome;
 }
 
-void MetalCommandProcessor::FlushPendingWritebacksForWait(
+bool MetalCommandProcessor::ResolveRamConsumerDependencies(
+    metal::ConsumerKind consumer,
+    const metal::GuestRangeSet& requested_ranges) {
+  if (requested_ranges.empty()) {
+    return true;
+  }
+
+  metal::ConsumerDecision decision = QueryPendingProducerDependencies(
+      consumer, metal::ConsumerRequest::Uniform(requested_ranges));
+  bool overlap = !decision.selected.empty();
+  bool authority_sample = authority_observer_.ShouldSampleConsumer(consumer);
+  ProducerDependencyOutcome outcome =
+      ResolvePendingProducerDependencies(decision);
+
+  if (authority_sample) {
+    metal::LegacyConsumerOutcome actual;
+    actual.overlap = overlap;
+    actual.committed = outcome.sync.committed;
+    actual.waited = outcome.sync.waited;
+    actual.drained = outcome.drain_attempted;
+    actual.drain_range_scoped = true;
+    actual.drained_records = outcome.drain.drained_records;
+    authority_observer_.RecordConsumer(decision, actual);
+  }
+
+  if (!outcome.complete) {
+    XELOGE(
+        "MetalCommandProcessor: {} RAM dependency convergence retired {} of "
+        "{} selected producers",
+        metal::ConsumerKindName(consumer), outcome.drain.drained_records,
+        decision.selected.size());
+    return false;
+  }
+  return true;
+}
+
+bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
+    uint32_t guest_address, uint32_t length) {
+  if (!length) {
+    return true;
+  }
+  std::optional<metal::GuestRange> exact_range =
+      metal::GuestRange::FromExactBaseLength(guest_address, length);
+  if (!exact_range) {
+    XELOGE(
+        "MetalCommandProcessor: rejected out-of-domain host read {:08X}+{}",
+        guest_address, length);
+    return false;
+  }
+  metal::GuestRangeSet requested;
+  requested.Add(exact_range);
+  return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
+                                        requested);
+}
+
+bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
+  // Completion notifications do not identify the range the guest CPU will
+  // inspect next. Publish every existing deferred producer before exposing the
+  // signal; the query is still a strict no-op when the pending set is empty.
+  metal::GuestRangeSet requested;
+  requested.Add(metal::GuestRange::FromBaseLength(
+      0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
+  return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
+                                        requested);
+}
+
+bool MetalCommandProcessor::FlushPendingWritebacksForWait(
     uint32_t guest_address) {
-  // The guest may WAIT_REG_MEM on memory the GPU writes (fence-after-copy /
-  // resolved data): a writeback deferred to IssueSwap would never drain
-  // because the wait blocks the command stream BEFORE the swap — a deadlock
-  // (the combat freeze). But draining EVERYTHING at every wait made the
-  // auto-exposure loop read mid-frame luminance (black flicker) — so flush
-  // only when the polled address actually lies inside a pending writeback;
-  // all other writebacks keep the swap cadence (the reference backends'
-  // readback is likewise a frame behind).
-  // Task 4.1: the common multi-range query models WAIT as a 4-byte RAM read
-  // and selects only intersecting producers. This slice uses that selection
-  // for the overlap gate while retaining the established unfiltered drain;
-  // routing only the selected records belongs to task 4.4.
+  // A wait blocks the command stream before swap, so an intersecting deferred
+  // producer must converge now. The common executor retires only the selected
+  // records; disjoint resolve/memexport traffic keeps its normal swap cadence.
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
-  metal::ConsumerDecision authority_decision =
-      QueryPendingProducerDependencies(
-          metal::ConsumerKind::kWait,
-          metal::ConsumerRequest::Uniform(requested));
-  bool overlap = !authority_decision.selected.empty();
-  bool authority_sample = authority_observer_.ShouldSampleConsumer(
-      metal::ConsumerKind::kWait);
-  auto record_legacy = [&](bool overlap,
-                           const metal::LegacySyncOutcome& sync_outcome,
-                           const metal::LegacyDrainOutcome& drain_outcome) {
-    if (!authority_sample) {
-      return;
-    }
-    metal::LegacyConsumerOutcome legacy;
-    legacy.overlap = overlap;
-    legacy.committed = sync_outcome.committed;
-    legacy.waited = sync_outcome.waited;
-    legacy.drained = overlap;
-    legacy.drain_range_scoped = false;  // unfiltered: drains every record.
-    legacy.drained_records = drain_outcome.drained_records;
-    authority_observer_.RecordConsumer(authority_decision, legacy);
-  };
-  if (overlap) {
-    metal::LegacySyncOutcome sync_outcome = EndFrameEncoderAndWait();
-    metal::LegacyDrainOutcome drain_outcome = DrainPendingWritebacks();
-    record_legacy(true, sync_outcome, drain_outcome);
-    return;
-  }
-  record_legacy(false, {}, {});
+  return ResolveRamConsumerDependencies(metal::ConsumerKind::kWait,
+                                        requested);
 }
 
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
@@ -5763,21 +5825,47 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_peeked = true;
       char* dup = strdup(peek);
       for (char* tok = strtok(dup, ","); tok; tok = strtok(nullptr, ",")) {
-        uint32_t addr = uint32_t(strtoul(tok, nullptr, 16));
+        uint32_t raw_address = uint32_t(strtoul(tok, nullptr, 16));
+        uint32_t physical_address = xenos::CpuToGpu(raw_address);
+        bool base_in_range =
+            metal::GuestRange::FromExactBaseLength(physical_address, 16)
+                .has_value();
+        bool base_ready =
+            base_in_range &&
+            PrepareGuestMemoryForHostRead(physical_address, 16);
+        uint64_t middle_address_64 =
+            uint64_t(physical_address) + 0x60000u;
+        bool middle_in_range =
+            middle_address_64 <= UINT32_MAX &&
+            metal::GuestRange::FromExactBaseLength(
+                static_cast<uint32_t>(middle_address_64), 16)
+                .has_value();
+        uint32_t middle_address = static_cast<uint32_t>(middle_address_64);
+        bool middle_ready =
+            !middle_in_range ||
+            PrepareGuestMemoryForHostRead(middle_address, 16);
+        if (!base_ready || !middle_ready) {
+          XELOGE("MetalPeek {:08X}: failed to converge diagnostic range",
+                 physical_address);
+          continue;
+        }
         const uint32_t* p = reinterpret_cast<const uint32_t*>(
-            memory_->TranslatePhysical(addr));
+            memory_->TranslatePhysical(physical_address));
         if (p) {
           // Middle of the buffer too (offset +0x60000 = row ~300 of a 1280-wide
           // 32bpp image) to skip letterbox/border rows.
-          const uint32_t* q = reinterpret_cast<const uint32_t*>(
-              memory_->TranslatePhysical(addr + 0x60000));
+          const uint32_t* q =
+              middle_in_range
+                  ? reinterpret_cast<const uint32_t*>(
+                        memory_->TranslatePhysical(middle_address))
+                  : nullptr;
           XELOGI(
               "MetalPeek {:08X}: {:08X} {:08X} {:08X} {:08X} | +60000: {:08X} "
               "{:08X} {:08X} {:08X}",
-              addr, p[0], p[1], p[2], p[3], q ? q[0] : 0, q ? q[1] : 0,
-              q ? q[2] : 0, q ? q[3] : 0);
+              physical_address, p[0], p[1], p[2], p[3], q ? q[0] : 0,
+              q ? q[1] : 0, q ? q[2] : 0, q ? q[3] : 0);
         } else {
-          XELOGI("MetalPeek {:08X}: unmapped", addr);
+          XELOGI("MetalPeek {:08X}: unmapped", physical_address);
         }
       }
       free(dup);

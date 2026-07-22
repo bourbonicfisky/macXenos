@@ -25,6 +25,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
@@ -168,6 +169,79 @@ TEST_CASE("Authority: selective drain across multiple pending records",
   REQUIRE_FALSE(decision.revalidate_gpu_bytes);  // wait reads guest RAM.
   // The third record is disjoint and must never be drained by this consumer.
   REQUIRE(decision.selected_bytes() == 0x1000u + 0x1000u);
+}
+
+TEST_CASE("Authority: wait word leaves adjacent and disjoint producers pending",
+          "[l0][authority][cpu-read]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 4u, TransitState::kPendingResolve, 3, 1),
+      MakeProducer(0x1004u, 4u, TransitState::kPendingMemexport, 3, 2),
+      MakeProducer(0x8000u, 4u, TransitState::kPendingResolve, 3, 3),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kWait,
+                                 SingleRange(0x1000u, 4u), producers, 3);
+  REQUIRE(decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(decision.selected.size() == 1u);
+  REQUIRE(decision.selected[0].sequence == 1u);
+  REQUIRE_FALSE(decision.revalidate_gpu_bytes);
+}
+
+TEST_CASE("Authority: PM4 RAM consumer normalizes the bit-29 physical alias",
+          "[l0][authority][cpu-read][alias]") {
+  constexpr uint32_t kAliasedPacketAddress = 0x20001003u;
+  uint32_t physical_address =
+      xenos::CpuToGpu(kAliasedPacketAddress & ~uint32_t(0x3));
+  REQUIRE(physical_address == 0x1000u);
+
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 4u, TransitState::kPendingMemexport, 3, 1),
+      MakeProducer(0x2000u, 4u, TransitState::kPendingResolve, 3, 2),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kWait,
+                                 SingleRange(physical_address, 4u), producers,
+                                 /*completed_submission=*/3);
+  REQUIRE(decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(decision.selected.size() == 1u);
+  REQUIRE(decision.selected[0].sequence == 1u);
+}
+
+TEST_CASE("Authority: exact host spans reject clamped end-boundary reads",
+          "[l0][authority][cpu-read][boundary]") {
+  constexpr uint32_t kGuestEnd =
+      static_cast<uint32_t>(GuestRange::kGuestPhysicalSize);
+  auto exact_end = GuestRange::FromExactBaseLength(kGuestEnd - 16u, 16u);
+  REQUIRE(exact_end);
+  REQUIRE(exact_end->end() == kGuestEnd);
+
+  REQUIRE_FALSE(
+      GuestRange::FromExactBaseLength(kGuestEnd - 4u, 16u).has_value());
+  REQUIRE_FALSE(GuestRange::FromExactBaseLength(kGuestEnd, 4u).has_value());
+  REQUIRE_FALSE(GuestRange::FromExactBaseLength(0x1000u, 0u).has_value());
+
+  uint32_t alias_physical = xenos::CpuToGpu(0x20001000u);
+  auto alias_exact = GuestRange::FromExactBaseLength(alias_physical, 16u);
+  REQUIRE(alias_exact);
+  REQUIRE(alias_exact->start() == 0x1000u);
+  REQUIRE(alias_exact->length() == 16u);
+}
+
+TEST_CASE("Authority: completion and bulk host boundary select every producer",
+          "[l0][authority][cpu-read][completion]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x100u, TransitState::kPendingResolve, 7, 3),
+      MakeProducer(0x9000u, 0x200u, TransitState::kPendingMemexport, 6, 1),
+      MakeProducer(0x1FFFF000u, 0x1000u, TransitState::kPendingResolve, 7, 2),
+  };
+  auto decision = DecideConsumer(
+      ConsumerKind::kHostCpuRead,
+      SingleRange(0, static_cast<uint32_t>(GuestRange::kGuestPhysicalSize)),
+      producers, 6);
+  REQUIRE(decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(decision.selected.size() == 3u);
+  REQUIRE(decision.selected[0].sequence == 1u);
+  REQUIRE(decision.selected[1].sequence == 2u);
+  REQUIRE(decision.selected[2].sequence == 3u);
+  REQUIRE(decision.max_wait_submission == 7u);
 }
 
 TEST_CASE("Authority: mixed producers retain chronological order",
@@ -602,6 +676,28 @@ TEST_CASE("Authority observer: range-scoped under-retirement diverges",
   legacy.drained_records = 1;
   obs.RecordConsumer(decision, legacy);
   REQUIRE(obs.consumer_disagree(ConsumerKind::kVertex) == 1u);
+}
+
+TEST_CASE("Authority observer: routed host read reports selective convergence",
+          "[l0][authority][cpu-read][telemetry]") {
+  AuthorityObserver obs;
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x100u, TransitState::kPendingResolve, 4, 1),
+      MakeProducer(0x9000u, 0x100u, TransitState::kPendingMemexport, 4, 2),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kHostCpuRead,
+                                 SingleRange(0x1000u, 4u), producers, 4);
+  REQUIRE(decision.selected.size() == 1u);
+  LegacyConsumerOutcome actual;
+  actual.overlap = true;
+  actual.drained = true;
+  actual.drain_range_scoped = true;
+  actual.drained_records = 1;
+  obs.RecordConsumer(decision, actual);
+  REQUIRE(obs.consumer_agree(ConsumerKind::kHostCpuRead) == 1u);
+  REQUIRE(obs.consumer_disagree(ConsumerKind::kHostCpuRead) == 0u);
+  REQUIRE(obs.predicted_drained_records() == 1u);
+  REQUIRE(obs.legacy_drained_records() == 1u);
 }
 
 TEST_CASE("Authority observer: no-dependency agreement adds no drain",

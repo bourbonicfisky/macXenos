@@ -197,6 +197,24 @@ class CommandProcessor {
 
   virtual void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) = 0;
 
+  // Makes deferred backend writes to an exact guest-physical RAM range
+  // observable before a host-side consumer reads it. Backends without
+  // GPU-newer-than-RAM producer records have nothing to do. This is public so
+  // audited consumers outside PM4 dispatch (save-state and trace export) can
+  // use the same demand boundary. Call on the command-processor thread, or
+  // while the command processor is paused and its state is exclusively owned.
+  virtual bool PrepareGuestMemoryForHostRead(uint32_t guest_address,
+                                             uint32_t length) {
+    return true;
+  }
+
+  // Makes every deferred guest-memory producer visible before the command
+  // processor exposes a completion signal to the guest CPU. Unlike a demand
+  // read, a completion interrupt or event write has no range identifying what
+  // the CPU may read next, so backends with deferred producers must publish
+  // their complete pending domain. Backends without such producers are no-op.
+  virtual bool PrepareGuestMemoryForCompletionExposure() { return true; }
+
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,
                         uint32_t register_count, bool execute_callbacks);
@@ -334,7 +352,9 @@ class CommandProcessor {
   // backends with deferred GPU->guest-memory writebacks must make any
   // pending write covering the polled address observable, or a guest
   // waiting on GPU-written data (fence-after-copy) deadlocks.
-  virtual void FlushPendingWritebacksForWait(uint32_t guest_address) {}
+  virtual bool FlushPendingWritebacksForWait(uint32_t guest_address) {
+    return true;
+  }
 
   virtual void PollCompletedSubmission() {}
 
@@ -570,6 +590,7 @@ class CommandProcessor {
   bool OpenTrace(const std::filesystem::path& path, uint32_t title_id,
                  uint32_t frame_index, bool streaming);
   void CloseTrace();
+  void AbortTrace(std::string_view reason);
   std::string BuildTraceMetadataJson(uintmax_t trace_size,
                                      bool trace_hash_valid,
                                      uint64_t trace_hash) const;
@@ -656,6 +677,9 @@ class CommandProcessor {
   Shader* active_pixel_shader_ = nullptr;
 
   bool paused_ = false;
+  // Written on the command-processor thread immediately before Pause suspends
+  // it, then read by Save after the pause fence has completed.
+  bool pause_guest_memory_ready_ = false;
 
   // By default (such as for tools), post-processing is disabled.
   // "Desired" is for the external thread managing the post-processing effect.

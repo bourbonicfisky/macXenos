@@ -244,10 +244,20 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
               return v ? strtoull(v, nullptr, 16) : 0ull;
             }();
             if (swap_watch_addr) {
+              uint32_t swap_watch_physical =
+                  xenos::CpuToGpu(uint32_t(swap_watch_addr));
+              if (!command_processor->PrepareGuestMemoryForHostRead(
+                      swap_watch_physical, 4 * sizeof(uint32_t))) {
+                XELOGE("TraceWatch: failed to converge swap sample {:08X}",
+                       swap_watch_physical);
+                playing_trace_ = false;
+                playback_event_->Set();
+                return;
+              }
               const uint32_t* w = reinterpret_cast<const uint32_t*>(
-                  memory->TranslatePhysical(uint32_t(swap_watch_addr)));
+                  memory->TranslatePhysical(swap_watch_physical));
               XELOGW("TraceWatch: at swap {:08X}: {:08X} {:08X} {:08X} {:08X}",
-                     uint32_t(swap_watch_addr), w[0], w[1], w[2], w[3]);
+                     swap_watch_physical, w[0], w[1], w[2], w[3]);
             }
             if (playback_mode == TracePlaybackMode::kBreakOnSwap) {
               pending_break = true;
@@ -297,10 +307,20 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
     if (end_watch_addr) {
+      uint32_t end_watch_physical =
+          xenos::CpuToGpu(uint32_t(end_watch_addr));
+      if (!command_processor->PrepareGuestMemoryForHostRead(
+              end_watch_physical, 4 * sizeof(uint32_t))) {
+        XELOGE("TraceWatch: failed to converge end sample {:08X}",
+               end_watch_physical);
+        playing_trace_ = false;
+        playback_event_->Set();
+        return;
+      }
       const uint32_t* w = reinterpret_cast<const uint32_t*>(
-          memory->TranslatePhysical(uint32_t(end_watch_addr)));
+          memory->TranslatePhysical(end_watch_physical));
       XELOGW("TraceWatch: at end {:08X}: {:08X} {:08X} {:08X} {:08X}",
-             uint32_t(end_watch_addr), w[0], w[1], w[2], w[3]);
+             end_watch_physical, w[0], w[1], w[2], w[3]);
     }
   }
 

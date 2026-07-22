@@ -31,6 +31,7 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/sampler_info.h"
+#include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/kernel_state.h"
@@ -746,6 +747,24 @@ void CommandProcessor::CloseTrace() {
   active_trace_started_utc_.clear();
 }
 
+void CommandProcessor::AbortTrace(std::string_view reason) {
+  if (!trace_writer_.is_open()) {
+    return;
+  }
+  std::filesystem::path aborted_path = active_trace_path_;
+  trace_writer_.Close();
+  trace_state_ = TraceState::kDisabled;
+  active_trace_path_.clear();
+  active_trace_title_id_ = 0;
+  active_trace_frame_index_ = 0;
+  active_trace_width_ = 0;
+  active_trace_height_ = 0;
+  active_trace_streaming_ = false;
+  active_trace_started_utc_.clear();
+  XELOGE("GPU trace aborted: path={} reason={}",
+         xe::path_to_utf8(aborted_path), reason);
+}
+
 std::string CommandProcessor::BuildTraceMetadataJson(
     uintmax_t trace_size, bool trace_hash_valid, uint64_t trace_hash) const {
   if (active_trace_path_.empty()) {
@@ -1050,9 +1069,16 @@ void CommandProcessor::Pause() {
     return;
   }
   paused_ = true;
+  pause_guest_memory_ready_ = false;
 
   threading::Fence fence;
-  CallInThread([&fence]() {
+  CallInThread([this, &fence]() {
+    // Transfer guest-RAM authority while the backend still owns its command
+    // encoder on the command-processor thread. Save-state runs after this
+    // thread is suspended; mutating an open Metal encoder from that caller
+    // thread would violate the backend's thread ownership.
+    pause_guest_memory_ready_ = PrepareGuestMemoryForHostRead(
+        0, static_cast<uint32_t>(SharedMemory::kBufferSize));
     fence.Signal();
     threading::Thread::GetCurrentThread()->Suspend();
   });
@@ -1065,12 +1091,21 @@ void CommandProcessor::Resume() {
     return;
   }
   paused_ = false;
+  pause_guest_memory_ready_ = false;
 
   worker_thread_->thread()->Resume();
 }
 
 bool CommandProcessor::Save(ByteStream* stream) {
   assert_true(paused_);
+
+  // Pause performs the bulk RAM-consumer boundary on the command-processor
+  // thread before suspending it. Save only verifies that transfer succeeded;
+  // it must not touch a backend command encoder from this caller thread.
+  if (!pause_guest_memory_ready_) {
+    XELOGE("CommandProcessor::Save has no converged guest-RAM pause boundary");
+    return false;
+  }
 
   stream->Write<uint32_t>(primary_buffer_ptr_);
   stream->Write<uint32_t>(primary_buffer_size_);

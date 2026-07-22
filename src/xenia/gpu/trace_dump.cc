@@ -21,9 +21,11 @@
 #include "xenia/base/string.h"
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
-#include "xenia/gpu/gpu_flags.h"
-#include "xenia/gpu/trace_analysis_decode.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/shared_memory.h"
+#include "xenia/gpu/trace_analysis_decode.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/presenter.h"
@@ -325,6 +327,10 @@ int TraceDump::Run() {
   }
   EndHostCapture();
 
+  // A determinism failure must make the process exit nonzero (exit code 2) so
+  // a CI/shell gate actually fails; other capture failures use exit code 1.
+  int result = determinism_failed ? 2 : 0;
+
   if (cvars::dump_edram) {
     auto edram_path = base_output_path_;
     edram_path.replace_extension(".edram.bin");
@@ -338,26 +344,59 @@ int TraceDump::Run() {
   if (!cvars::dump_guest_memory.empty()) {
     uint32_t dump_address = 0, dump_length = 0;
     if (std::sscanf(cvars::dump_guest_memory.c_str(), "%x,%x", &dump_address,
-                    &dump_length) == 2 &&
-        dump_length) {
-      const uint8_t* dump_source =
-          emulator_->memory()->TranslatePhysical(dump_address);
-      auto mem_path = base_output_path_;
-      mem_path.replace_extension(".mem.bin");
-      auto mem_file = filesystem::OpenFile(mem_path, "wb");
-      fwrite(dump_source, 1, dump_length, mem_file);
-      fclose(mem_file);
-      XELOGI("Dumped guest memory {:08X}+{:X} to {}", dump_address,
-             dump_length, xe::path_to_utf8(mem_path));
-    } else {
+                    &dump_length) != 2) {
       XELOGE("dump_guest_memory: expected hexaddr,hexlength");
+    } else {
+      // Normalize to the same 512 MiB physical alias the backend and
+      // Memory::TranslatePhysical use, then require the exact range to fit
+      // inside the shared-memory buffer -- reject a zero-length request or any
+      // range whose end runs past kBufferSize (computed in 64-bit to avoid
+      // wraparound). Everything downstream operates on this validated range.
+      uint32_t dump_physical = xenos::CpuToGpu(dump_address);
+      uint64_t dump_end = static_cast<uint64_t>(dump_physical) +
+                          static_cast<uint64_t>(dump_length);
+      if (!dump_length || dump_end > SharedMemory::kBufferSize) {
+        XELOGE(
+            "dump_guest_memory: range {:08X}+{:X} is empty or extends beyond "
+            "the {:X}-byte guest buffer",
+            dump_physical, dump_length,
+            static_cast<uint32_t>(SharedMemory::kBufferSize));
+        if (!result) {
+          result = 1;
+        }
+      } else {
+        CommandProcessor* command_processor =
+            graphics_system_->command_processor();
+        bool prepared = false;
+        threading::Fence prepare_fence;
+        command_processor->CallInThread([&]() {
+          prepared = command_processor->PrepareGuestMemoryForHostRead(
+              dump_physical, dump_length);
+          prepare_fence.Signal();
+        });
+        prepare_fence.Wait();
+        if (!prepared) {
+          XELOGE("Failed to converge guest memory {:08X}+{:X} for dump",
+                 dump_physical, dump_length);
+          if (!result) {
+            result = 1;
+          }
+        } else {
+          const uint8_t* dump_source =
+              emulator_->memory()->TranslatePhysical(dump_physical);
+          auto mem_path = base_output_path_;
+          mem_path.replace_extension(".mem.bin");
+          auto mem_file = filesystem::OpenFile(mem_path, "wb");
+          fwrite(dump_source, 1, dump_length, mem_file);
+          fclose(mem_file);
+          XELOGI("Dumped guest memory {:08X}+{:X} to {}", dump_physical,
+                 dump_length, xe::path_to_utf8(mem_path));
+        }
+      }
     }
   }
 
-  // Capture. A determinism failure must make the process exit nonzero (exit
-  // code 2) so a CI/shell gate actually fails; otherwise the check is
-  // advisory-only and a broken backend passes silently.
-  int result = determinism_failed ? 2 : 0;
+  // Capture.
   ui::Presenter* presenter = graphics_system_->presenter();
   ui::RawImage raw_image;
   if (presenter && presenter->CaptureGuestOutput(raw_image)) {
