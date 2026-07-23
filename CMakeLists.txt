@@ -92,6 +92,79 @@ file(MAKE_DIRECTORY "${PROJECT_SOURCE_DIR}/scratch")
 # Python for shader compilation scripts
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Keep the embedded branch and commit synchronized even when building directly
+# with `cmake --build` rather than through xenia-build.py. CMake watches the
+# active worktree state below and reruns configuration after commits, checkouts,
+# rebases, and resets. The generator preserves version.h's timestamp when its
+# contents are unchanged, so ordinary incremental builds remain no-ops.
+set(XE_VERSION_HEADER "${CMAKE_BINARY_DIR}/version.h")
+set(XE_VERSION_GENERATOR
+    "${PROJECT_SOURCE_DIR}/tools/build/generate_version_header.py")
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}"
+          "${XE_VERSION_GENERATOR}"
+          --source-root "${PROJECT_SOURCE_DIR}"
+          --output "${XE_VERSION_HEADER}"
+  RESULT_VARIABLE XE_VERSION_RESULT
+)
+if(NOT XE_VERSION_RESULT EQUAL 0)
+  message(FATAL_ERROR "Failed to generate ${XE_VERSION_HEADER}")
+endif()
+
+find_package(Git QUIET)
+if(Git_FOUND)
+  set(XE_GIT_CONFIGURE_DEPENDS "${XE_VERSION_GENERATOR}")
+  foreach(XE_GIT_PATH HEAD logs/HEAD packed-refs)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
+              rev-parse --git-path "${XE_GIT_PATH}"
+      OUTPUT_VARIABLE XE_GIT_DEPENDENCY
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE XE_GIT_PATH_RESULT
+    )
+    if(XE_GIT_PATH_RESULT EQUAL 0)
+      get_filename_component(
+        XE_GIT_DEPENDENCY "${XE_GIT_DEPENDENCY}" ABSOLUTE
+        BASE_DIR "${PROJECT_SOURCE_DIR}"
+      )
+      if(EXISTS "${XE_GIT_DEPENDENCY}")
+        list(APPEND XE_GIT_CONFIGURE_DEPENDS "${XE_GIT_DEPENDENCY}")
+      endif()
+    endif()
+  endforeach()
+
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
+            symbolic-ref -q HEAD
+    OUTPUT_VARIABLE XE_GIT_HEAD_REF
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE XE_GIT_HEAD_REF_RESULT
+  )
+  if(XE_GIT_HEAD_REF_RESULT EQUAL 0 AND XE_GIT_HEAD_REF)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
+              rev-parse --git-path "${XE_GIT_HEAD_REF}"
+      OUTPUT_VARIABLE XE_GIT_HEAD_REF_PATH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    get_filename_component(
+      XE_GIT_HEAD_REF_PATH "${XE_GIT_HEAD_REF_PATH}" ABSOLUTE
+      BASE_DIR "${PROJECT_SOURCE_DIR}"
+    )
+    if(EXISTS "${XE_GIT_HEAD_REF_PATH}")
+      list(APPEND XE_GIT_CONFIGURE_DEPENDS "${XE_GIT_HEAD_REF_PATH}")
+    endif()
+  endif()
+
+  if(XE_GIT_CONFIGURE_DEPENDS)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                 ${XE_GIT_CONFIGURE_DEPENDS})
+  endif()
+endif()
+
 # Include helpers
 include(cmake/XeniaHelpers.cmake)
 
