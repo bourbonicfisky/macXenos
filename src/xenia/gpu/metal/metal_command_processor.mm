@@ -43,6 +43,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_binding_layout.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
@@ -808,6 +809,7 @@ bool MetalCommandProcessor::SetupContext() {
       "XE_METAL_SAMPLE_EDRAM_FULL_SYNC",
       "XE_METAL_SAMPLE_EDRAM_SELF_CHECK",
       "XE_METAL_CANONICAL_DEPTH",
+      "XE_METAL_MEMEXPORT",
       "XE_METAL_DUMP_RT",
       "XE_METAL_PRESENT_BASE",   "XE_METAL_PEEK",
       "XE_METAL_DUMP_PS",
@@ -1814,14 +1816,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // XE_METAL_MEMEXPORT_LOG=1 logs executions and remaining skips.
   static const bool s_memexport_log =
       std::getenv("XE_METAL_MEMEXPORT_LOG") != nullptr;
-  // XE_METAL_MEMEXPORT=1 enables execution (default OFF until the export
-  // data path is right): stores currently land with correct per-point eA
-  // addressing but constant eM data — live, that means zero-clobbering the
-  // resolve-written content consumers would otherwise read.
-  static const bool s_memexport_exec = [] {
-    const char* v = std::getenv("XE_METAL_MEMEXPORT");
-    return v && v[0] == '1';
-  }();
+  // The validated VS-only route is part of the default pipeline. Exact
+  // XE_METAL_MEMEXPORT=0 retains the pre-promotion skip path as a rollback;
+  // explicit 1 enables and malformed values fail closed through the same
+  // strict environment contract as canonical EDRAM.
+  static const bool s_memexport_exec = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_MEMEXPORT"), /*default_enabled=*/true);
   bool memexport_draw = false;
   std::vector<draw_util::MemExportRange> memexport_ranges;
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
