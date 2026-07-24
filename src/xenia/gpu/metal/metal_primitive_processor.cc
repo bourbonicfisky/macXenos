@@ -25,17 +25,15 @@ bool MetalPrimitiveProcessor::Initialize() {
   //     kGuestDMA with host_shader_index_endian == the guest endian (no
   //     indirection / pre-masking), matching the command processor's existing
   //     CPU byte-swap-into-arena mechanism exactly.
-  //   triangle_fans/line_loops/quad_lists supported = true,
+  //   line_loops_supported = false
+  //     PP3-auto activates the shared auto line-loop -> line-strip result. Only
+  //     auto-indexed reset-disabled loops are routed by the command processor,
+  //     so the DMA kHostConverted path remains unreachable.
+  //   quad_lists supported = true,
   //   point_sprites/rectangle_lists native (no VS expansion) = true
-  //     None of the routed classes (line/triangle list/strip) depend on these
-  //     flags, and none of the non-routed classes reach this processor (the
-  //     command processor's routing predicate keeps them wholly inline / on the
-  //     MSC mesh-shader path). Declaring them all "supported" provisions NO
-  //     conversion, built-in, or two-triangle-strip index machinery
-  //     (builtin_index_buffer_size == 0), so InitializeBuiltinIndexBuffer and
-  //     RequestHostConvertedIndexBufferForCurrentFrame are never invoked and no
-  //     allocator is created. Later slices flip the relevant flag and add the
-  //     backing buffer under their own gate.
+  //     None of the routed classes depend on these flags, and the routing
+  //     predicates keep expanded classes on the MSC path. PP2-auto's fan table
+  //     is the only built-in allocation; line-loop conversion adds none.
   //   host_primitive_reset_always_enabled = false
   //     The 16->32 restart-index widening and the moltenvk_draw_diagnostics
   //     classifier are gated on this being true; keeping it false makes both
@@ -50,7 +48,7 @@ bool MetalPrimitiveProcessor::Initialize() {
   return InitializeCommon(
       /*full_32bit_vertex_indices_supported=*/true,
       /*triangle_fans_supported=*/false,
-      /*line_loops_supported=*/true,
+      /*line_loops_supported=*/false,
       /*quad_lists_supported=*/true,
       /*point_sprites_supported_without_vs_expansion=*/true,
       /*rectangle_lists_supported_without_vs_expansion=*/true,
@@ -90,14 +88,15 @@ void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
   (void)coalign_for_simd;
   (void)coalignment_original_address;
   (void)backend_handle_out;
-  // Invariant guard: PP1 routes only reset-disabled line/triangle list/strip,
-  // for which Process returns kNone or kGuestDMA and never requests a
-  // host-converted buffer. Reaching here means an out-of-scope draw was routed
-  // (a routing-predicate bug) or a later capability slice landed without adding
-  // its converted-buffer owner. Fail loudly rather than silently mis-render.
+  // Invariant guard: PP1 routes only pass-through classes, PP2 routes only auto
+  // fans, and PP3 routes only auto line loops. None requests a host-converted
+  // buffer. Reaching here means an out-of-scope draw was routed (a predicate
+  // bug) or a later capability slice landed without adding its converted-buffer
+  // owner. Fail loudly rather than silently mis-render.
   XELOGE(
       "MetalPrimitiveProcessor: RequestHostConvertedIndexBufferForCurrentFrame "
-      "called, but PP1 routes no converting class. Routing predicate bug.");
+      "called, but the active Metal routes own no host-converted class. "
+      "Routing predicate bug.");
   assert_always();
   return nullptr;
 }

@@ -195,16 +195,46 @@ inline bool IsAutoFanRoutable(const RegisterFile& regs,
   return true;
 }
 
-// PP1 + PP2-auto slice: a real shared-`PrimitiveProcessor` subclass that is the
-// single guest-semantic NORMALIZATION authority for the routed native,
-// non-expanded, non-tessellated, restart-disabled topologies (line list/strip,
-// triangle list/strip) AND for auto-indexed triangle fans.
+// PP3-auto routing predicate. Returns true for exactly auto-indexed,
+// restart-disabled, non-tessellated line loops. The shared PrimitiveProcessor
+// converts these to a non-indexed host line strip and reports the synthetic
+// closing vertex through line_loop_closing_index. Guest-DMA loops stay out of
+// this slice because they require host-converted-buffer lifetime, cache, and
+// trace ownership that Metal does not enable here.
+inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
+                                   xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kLineLoop) {
+    return false;
+  }
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (prim_type != vgt_draw_initiator.prim_type ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
+    return false;
+  }
+  // Primitive reset is owned by PP4 even though auto-indexed draws have no
+  // guest reset markers to scan. Keep the routing partition explicit.
+  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  return true;
+}
+
+// PP1 + PP2-auto + PP3-auto slice: a real shared-`PrimitiveProcessor` subclass
+// that is the single guest-semantic NORMALIZATION authority for the routed
+// native, non-expanded, non-tessellated, restart-disabled topologies (line
+// list/strip, triangle list/strip) AND for auto-indexed triangle fans.
 //
 // The Metal backend keeps its existing index MECHANISM: the command processor
 // CPU-swaps the guest indices into MetalUploadArena and binds that transient as
 // the index source; it never binds the shared-memory buffer as an index source.
 // Which draws reach this processor is decided externally by IsPp1Routable /
-// IsAutoFanRoutable, not by the configuration. This subclass therefore:
+// IsAutoFanRoutable / IsAutoLineLoopRoutable, not by the configuration. This
+// subclass therefore:
 //   - configures InitializeCommon with triangle_fans_supported = false (so the
 //     shared code provisions the auto-index fan built-in table) and
 //     convert_triangle_fans_first_provoking = true (so both the built-in table
@@ -216,23 +246,24 @@ inline bool IsAutoFanRoutable(const RegisterFile& regs,
 //   - implements InitializeBuiltinIndexBuffer to own the immutable fan table on
 //     the CPU (no persistent MTL resource); the command processor materializes
 //     each auto-fan draw's slice into the same transient upload arena via
-//     CopyBuiltinIndexData. RequestHostConvertedIndexBufferForCurrentFrame stays
-//     an unreachable invariant guard (no DMA fan is routed).
+//     CopyBuiltinIndexData. RequestHostConvertedIndexBufferForCurrentFrame
+//     stays an unreachable invariant guard (no DMA fan is routed).
 //   - overrides RequestGuestIndexSharedMemoryRange as a true no-op so Process
 //     performs no shared-memory RequestRange for the routed set. That avoids
 //     the unwanted shared-memory-buffer upload and its intra-frame hazard flush
-//     (EndFrameEncoderAndWait / commit+wait). Separately: a routed Process emits
-//     no trace record of its own for the routed set (auto fans read no guest
-//     index memory), and the command processor's existing explicit
+//     (EndFrameEncoderAndWait / commit+wait). Separately: a routed Process
+//     emits no trace record of its own for the routed set (auto fans read no
+//     guest index memory), and the command processor's existing explicit
 //     WriteMemoryRead of any DMA index range preserves capture. Distinct facts.
-// Point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle fans,
-// line loops, primitive reset, and tessellation are NOT routed here and stay
-// wholly on the existing inline path.
+// PP3-auto declares line loops unsupported to activate the shared loop-to-strip
+// result, but routes only auto-indexed reset-disabled loops. DMA/reset loops,
+// point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle fans,
+// primitive reset, and tessellation stay wholly on their existing paths.
 //
-// Pure C++ (no Metal types): the built-in fan table is a CPU byte vector and the
-// routed draws allocate only from the command processor's arena, so this class
-// holds no device or MTLBuffer, which also lets the device-free conformance test
-// instantiate the real production class.
+// Pure C++ (no Metal types): the built-in fan table is a CPU byte vector and
+// the routed draws allocate only from the command processor's arena, so this
+// class holds no device or MTLBuffer, which also lets the device-free
+// conformance test instantiate the real production class.
 class MetalPrimitiveProcessor final : public PrimitiveProcessor {
  public:
   MetalPrimitiveProcessor(const RegisterFile& register_file, Memory& memory,

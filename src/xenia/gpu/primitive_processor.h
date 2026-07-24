@@ -610,7 +610,8 @@ class PrimitiveProcessor {
     }
   }
 
- private:
+  // Public so backend fail-closed shape guards and device-free conformance use
+  // the shared line-loop count oracle rather than replicating it.
   static constexpr uint32_t GetLineLoopStripIndexCount(
       uint32_t loop_index_count) {
     // Even if 2 vertices are supplied, two lines are still drawn between them.
@@ -619,6 +620,8 @@ class PrimitiveProcessor {
     // "If the user only specifies 1 vertex, the drawing command is ignored"
     return loop_index_count > 1 ? loop_index_count + 1 : 0;
   }
+
+ private:
   template <typename Index, typename IndexTransform>
   static void LineLoopToStrip(Index* dest, const Index* source,
                               uint32_t source_index_count,
