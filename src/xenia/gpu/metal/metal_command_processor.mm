@@ -1664,6 +1664,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // mapping: they must first normalize through the shared PrimitiveProcessor
   // to the already-mapped host kLineStrip topology.
   bool auto_line_loop_route = IsAutoLineLoopRoutable(regs, prim_type);
+  // PP4: enabled 16-bit DMA strips whose reset value already equals Metal's
+  // fixed 0xFFFF sentinel need normalization fields only, never conversion.
+  bool fixed_reset_strip_route = IsFixedResetStripRoutable(regs, prim_type);
   // A skipped draw is not an error (the base loop treats false as failure); we
   // return true and just render nothing so the game keeps advancing.
   MTLPrimitiveType mtl_prim = MTLPrimitiveTypeTriangle;
@@ -2497,13 +2500,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  // PP1 + PP2-auto + PP3-auto: normalize the routed draws through the shared
+  // PP1 + PP2-auto + PP3-auto + PP4-fixed: normalize the routed draws through
+  // the shared
   // PrimitiveProcessor — the single normalization authority for the routed set.
   // PP1 routes native restart-disabled line/triangle list/strip draws;
   // PP2-auto additionally routes auto-indexed triangle fans (to the built-in
-  // fan table), and PP3-auto routes auto-indexed line loops to a host line
-  // strip plus a closing-index remap. This runs at the proven pre-encoder seam (before
-  // BeginFrameEncoder below); the Metal override of
+  // fan table), PP3-auto routes auto-indexed line loops to a host line strip
+  // plus a closing-index remap, and PP4-fixed routes only matching 16-bit DMA
+  // strip reset without conversion. This runs at the proven pre-encoder seam
+  // (before BeginFrameEncoder below); the Metal override of
   // RequestGuestIndexSharedMemoryRange is a no-op, so Process performs no
   // shared-memory RequestRange — avoiding the unwanted shared-buffer upload and
   // its intra-frame hazard flush (commit/wait). The routed set reads no guest
@@ -2520,7 +2525,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   bool auto_fan_route = IsAutoFanRoutable(regs, prim_type);
   PrimitiveProcessor::ProcessingResult pp_result{};
   if (primitive_processor_ && !use_geometry_emulation &&
-      (IsPp1Routable(regs, prim_type) || auto_fan_route || auto_line_loop_route) &&
+      (IsPp1Routable(regs, prim_type) || auto_fan_route ||
+       auto_line_loop_route || fixed_reset_strip_route) &&
       IsPp1DrawViewConsistent(
           regs, index_count, index_buffer_info != nullptr,
           index_buffer_info ? index_buffer_info->guest_base : 0,
@@ -2528,7 +2534,36 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone,
           index_buffer_info ? index_buffer_info->count : 0)) {
     if (primitive_processor_->Process(pp_result)) {
-      if (auto_line_loop_route) {
+      if (fixed_reset_strip_route) {
+        // Accept only the non-converting fixed-sentinel result proven by the
+        // PP4 L0 matrix and live census. Any future shared result-shape change
+        // fails closed; converted buffers are not owned by this slice.
+        bool fixed_reset_shape =
+            pp_result.host_primitive_type == prim_type &&
+            pp_result.host_vertex_shader_type ==
+                Shader::HostVertexShaderType::kVertex &&
+            pp_result.host_draw_vertex_count == index_count &&
+            pp_result.host_primitive_reset_enabled &&
+            pp_result.index_buffer_type ==
+                PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+            pp_result.host_index_format == xenos::IndexFormat::kInt16;
+        if (fixed_reset_shape) {
+          pp_routed = true;
+        } else {
+          XELOGE(
+              "MetalPrimitiveProcessor: routed fixed-reset strip did not "
+              "produce the kGuestDMA/fixed-16 shape (guest_prim {} host_prim "
+              "{} vs_type {} count {}/{} reset {} ibt {} format {}); "
+              "skipping.",
+              uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
+              uint32_t(pp_result.host_vertex_shader_type),
+              pp_result.host_draw_vertex_count, index_count,
+              pp_result.host_primitive_reset_enabled,
+              uint32_t(pp_result.index_buffer_type),
+              uint32_t(pp_result.host_index_format));
+          assert_always();
+        }
+      } else if (auto_line_loop_route) {
         // Accept exactly the auto-loop shared shape. count <= 1 deliberately
         // produces a zero-count no-draw result with closing index 0.
         uint32_t expected_count = PrimitiveProcessor::GetLineLoopStripIndexCount(index_count);
@@ -3613,10 +3648,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (pp_routed) {
     // Routed draw: the shared PrimitiveProcessor is the normalization authority.
     // Bind/draw from pp_result. host_primitive_type is either one of the four
-    // PP1 native classes (host == guest, non-tessellated), kTriangleList for a
-    // PP2-auto fan, or kLineStrip for a PP3-auto loop, so MapPrimitiveType
-    // always succeeds. The index MECHANISM is
-    // unchanged: PP1 kGuestDMA CPU byte-swaps the guest indices into the arena
+    // PP1/PP4 native classes (host == guest, non-tessellated), kTriangleList
+    // for a PP2-auto fan, or kLineStrip for a PP3-auto loop, so
+    // MapPrimitiveType always succeeds. The index MECHANISM is unchanged:
+    // PP1 and PP4 kGuestDMA CPU-byte-swap the guest indices into the arena
     // using the NORMALIZED host_index_format / host_shader_index_endian
     // (byte-identical to the inline SwapIndicesInto); PP2-auto copies the
     // built-in fan-table slice into the arena (below).
@@ -3678,7 +3713,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                      /*baseVertex=*/0, /*baseInstance=*/0);
     } else {
       // Unreachable: the pre-encoder shape guards only set pp_routed for
-      // kGuestDMA / kNone (PP1) or kHostBuiltinForAuto (PP2-auto). Never
+      // kGuestDMA / kNone (PP1/PP3/PP4) or kHostBuiltinForAuto (PP2-auto).
+      // Never
       // silently fall into an auto draw for an unexpected index-buffer type.
       XELOGE("MetalPrimitiveProcessor: routed draw reached emission with "
              "unexpected index_buffer_type {}; skipping.",

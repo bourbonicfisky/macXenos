@@ -103,6 +103,40 @@ inline bool IsPp1Routable(const RegisterFile& regs,
   return true;
 }
 
+// PP4 fixed-sentinel routing predicate. This is intentionally disjoint from
+// PP1: only guest-DMA line/triangle strips whose enabled 16-bit reset value
+// normalizes to Metal's fixed 0xFFFF sentinel are admitted. No index scan or
+// conversion is needed; Process returns the original DMA range and merely
+// exposes the already-matching reset semantics in its result.
+inline bool IsFixedResetStripRoutable(const RegisterFile& regs,
+                                      xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kLineStrip &&
+      prim_type != xenos::PrimitiveType::kTriangleStrip) {
+    return false;
+  }
+  const reg::VGT_DRAW_INITIATOR draw = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (draw.prim_type != prim_type ||
+      draw.source_select != xenos::SourceSelect::kDMA ||
+      draw.index_size != xenos::IndexFormat::kInt16 ||
+      !regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(draw.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+
+  xenos::Endian endian = regs.Get<reg::VGT_DMA_SIZE>().swap_mode;
+  if (endian != xenos::Endian::kNone && endian != xenos::Endian::k8in16) {
+    endian = endian == xenos::Endian::k8in32 ? xenos::Endian::k8in16
+                                             : xenos::Endian::kNone;
+  }
+  return xenos::GpuSwap(
+             regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx,
+             endian) == UINT16_MAX;
+}
+
 // PP1 view-consistency guard. PrimitiveProcessor::Process reads the guest draw
 // from the VGT registers, but IssueDraw's local inputs (index_count and the
 // IndexBufferInfo) can legitimately diverge from those registers:
@@ -186,7 +220,8 @@ inline bool IsAutoFanRoutable(const RegisterFile& regs,
     return false;
   }
   // Tessellated fans make Process emit a domain host vertex-shader type; the
-  // inline path draws them as plain primitives. Exclude to stay behavior-neutral.
+  // inline path draws them as plain primitives. Exclude to stay
+  // behavior-neutral.
   if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
       regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
           xenos::VGTOutputPath::kTessellationEnable) {
@@ -224,7 +259,8 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
   return true;
 }
 
-// PP1 + PP2-auto + PP3-auto slice: a real shared-`PrimitiveProcessor` subclass
+// PP1 + PP2-auto + PP3-auto + PP4-fixed slice: a real shared
+// `PrimitiveProcessor` subclass
 // that is the single guest-semantic NORMALIZATION authority for the routed
 // native, non-expanded, non-tessellated, restart-disabled topologies (line
 // list/strip, triangle list/strip) AND for auto-indexed triangle fans.
@@ -232,17 +268,18 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
 // The Metal backend keeps its existing index MECHANISM: the command processor
 // CPU-swaps the guest indices into MetalUploadArena and binds that transient as
 // the index source; it never binds the shared-memory buffer as an index source.
-// Which draws reach this processor is decided externally by IsPp1Routable /
-// IsAutoFanRoutable / IsAutoLineLoopRoutable, not by the configuration. This
-// subclass therefore:
+// Which draws reach this processor is decided externally by IsPp1Routable,
+// IsAutoFanRoutable, IsAutoLineLoopRoutable, and
+// IsFixedResetStripRoutable—not by the configuration. This subclass therefore:
 //   - configures InitializeCommon with triangle_fans_supported = false (so the
 //     shared code provisions the auto-index fan built-in table) and
 //     convert_triangle_fans_first_provoking = true (so both the built-in table
 //     and TriangleFanToList emit Metal's historical center-first fan order).
 //     host_primitive_reset_always_enabled = false keeps the 16->32
 //     primitive-reset widening path statically unreachable (a later capability
-//     slice). No host-CONVERTED buffer is ever provisioned for the routed set,
-//     because only AUTO fans are routed (DMA/reset fans stay inline).
+//     slice). No host-CONVERTED buffer is ever provisioned for the routed set:
+//     PP4 admits only the fixed 16-bit reset shape that stays kGuestDMA, while
+//     custom/32-bit reset and reset-disabled maximum protection stay parked.
 //   - implements InitializeBuiltinIndexBuffer to own the immutable fan table on
 //     the CPU (no persistent MTL resource); the command processor materializes
 //     each auto-fan draw's slice into the same transient upload arena via
@@ -256,9 +293,11 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
 //     guest index memory), and the command processor's existing explicit
 //     WriteMemoryRead of any DMA index range preserves capture. Distinct facts.
 // PP3-auto declares line loops unsupported to activate the shared loop-to-strip
-// result, but routes only auto-indexed reset-disabled loops. DMA/reset loops,
-// point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle fans,
-// primitive reset, and tessellation stay wholly on their existing paths.
+// result, but routes only auto-indexed reset-disabled loops. PP4 additionally
+// routes fixed-sentinel DMA line/triangle strips without conversion. DMA/reset
+// loops, point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle
+// fans, custom/32-bit reset, reset-disabled maximum protection, and
+// tessellation stay wholly on their existing paths.
 //
 // Pure C++ (no Metal types): the built-in fan table is a CPU byte vector and
 // the routed draws allocate only from the command processor's arena, so this
@@ -291,10 +330,9 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
   bool InitializeBuiltinIndexBuffer(
       size_t size_bytes, std::function<void(void*)> fill_callback) override;
 
-  // Unreachable in PP1/PP2-auto: the routed set (reset-disabled line/triangle
-  // list/strip, and AUTO triangle fans) returns kNone / kGuestDMA /
-  // kHostBuiltinForAuto and never requests a host-converted buffer. Host
-  // conversion only happens for DMA/reset fans, which stay inline. Fail loudly
+  // Unreachable in PP1/PP2-auto/PP3-auto/PP4-fixed: the routed set returns only
+  // kNone / kGuestDMA / kHostBuiltinForAuto. PP4 accepts only the matching
+  // fixed-16 reset case; every converted reset class stays inline. Fail loudly
   // as an invariant guard.
   void* RequestHostConvertedIndexBufferForCurrentFrame(
       xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
