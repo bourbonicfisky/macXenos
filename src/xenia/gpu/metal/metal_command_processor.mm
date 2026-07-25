@@ -1099,8 +1099,29 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // encoder with attachment passes.
     want_key = 0x4D454D4558504F52ull;  // 'MEMEXPOR'
   }
+  bool reuse_encoder = frame_open_ && encoder_attachment_key_ == want_key;
+  if (reuse_encoder && ZPDSegmentPending()) {
+    // A report can open, and a closed segment can become pending again, while
+    // this encoder is already current -- a path that would otherwise never
+    // reach the segment resume below, because a reused encoder returns early.
+    // Mafia II's "dead" frame is exactly this shape: its whole report lifetime
+    // falls inside one unchanged attachment key.
+    if (!zpd_visibility_pool_.is_initialized()) {
+      EnsureZPDQueryResources();
+    }
+    if (encoder_has_zpd_visibility_) {
+      OpenQuerySegment(false);
+    } else if (zpd_visibility_pool_.is_initialized()) {
+      // The encoder predates the pool. Metal only accepts a visibility buffer
+      // on the descriptor, so the encoder has to be rebuilt to carry one.
+      // Bounded: every encoder created afterwards carries it, so this happens
+      // once per pool lifetime rather than per draw.
+      reuse_encoder = false;
+    }
+    // Pool unavailable: keep the encoder rather than rebuilding it forever.
+  }
   if (frame_open_) {
-    if (encoder_attachment_key_ == want_key) {
+    if (reuse_encoder) {
       return frame_render_encoder_;
     }
     EndRenderEncoder();
@@ -1290,9 +1311,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // here. The pool is created lazily on the first encoder built while a guest
   // report is open -- a title that never issues a query allocates nothing and
   // every encoder below is byte-for-byte what it was before this change.
-  if (GetZPDMode() != ZPDMode::kFake && !zpd_force_fake_fallback_ &&
-      zpd_active_segment_.logical_active &&
-      !zpd_visibility_pool_.is_initialized()) {
+  if (ZPDSegmentPending() && !zpd_visibility_pool_.is_initialized()) {
     EnsureZPDQueryResources();
   }
   id<MTLBuffer> zpd_visibility_buffer =
@@ -1345,8 +1364,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // boundary. This is the Metal analogue of Vulkan reopening at render-pass
   // begin. can_close_submission is false: nothing here may commit the command
   // buffer this encoder was just created on.
-  if (encoder_has_zpd_visibility_ && zpd_active_segment_.logical_active &&
-      zpd_active_segment_.segment_pending_begin) {
+  if (encoder_has_zpd_visibility_ && ZPDSegmentPending()) {
     OpenQuerySegment(false);
   }
   return frame_render_encoder_;
@@ -1534,10 +1552,20 @@ bool MetalCommandProcessor::IsZPDQueryPoolReady() const {
   return zpd_visibility_pool_.is_initialized();
 }
 
+bool MetalCommandProcessor::ZPDSegmentPending() const {
+  return GetZPDMode() != ZPDMode::kFake && !zpd_force_fake_fallback_ &&
+         zpd_active_segment_.logical_active &&
+         zpd_active_segment_.segment_pending_begin;
+}
+
 bool MetalCommandProcessor::CanOpenZPDQuery() const {
-  // Counting can only be switched on for an encoder whose descriptor already
-  // carried the visibility buffer; there is no way to attach one later.
-  return frame_open_ && frame_render_encoder_ && encoder_has_zpd_visibility_;
+  // Only "a render encoder exists". Deliberately NOT "and it carries the
+  // visibility buffer": the shared OpenQuerySegment tests this BEFORE calling
+  // EnsureZPDQueryResources, so requiring the buffer here would stop the pool
+  // from ever being created, and would also skip the fake-fallback latch that
+  // a failed pool creation is supposed to trigger. Whether this particular
+  // encoder can carry a query is decided in OpenZPDQuery, which defers.
+  return frame_open_ && frame_render_encoder_ != nullptr;
 }
 
 CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
@@ -1550,8 +1578,10 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
     // strand the current slot's offset for the rest of the pass.
     return QueryOpenResult::kFailed;
   }
-  if (!CanOpenZPDQuery()) {
-    // Retried when the next visibility-carrying encoder opens.
+  if (!CanOpenZPDQuery() || !encoder_has_zpd_visibility_) {
+    // Either no encoder, or one built before the pool existed. Retried when a
+    // visibility-carrying encoder opens; BeginFrameEncoder rebuilds a reused
+    // encoder for exactly this case.
     return QueryOpenResult::kDeferred;
   }
 

@@ -383,6 +383,11 @@ class MetalCommandProcessor : public CommandProcessor {
   bool RetireActiveZPDQuery(ReportHandle report_handle,
                             uint64_t* out_submission);
 
+  // True when a logical report is open and waiting for a host segment --
+  // either its first, or a resume after CloseQuerySegment marked it pending
+  // at the previous encoder boundary.
+  bool ZPDSegmentPending() const;
+
   struct MetalZPDResolve {
     uint64_t submission = 0;
     uint32_t index = 0;
