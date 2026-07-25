@@ -45,6 +45,7 @@ add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_texture_cache.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_texture_cache.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_upload_arena.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_zpd_visibility_pool.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/ir_runtime_impl.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_pipelines.mm
