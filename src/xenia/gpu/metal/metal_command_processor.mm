@@ -1055,6 +1055,9 @@ void MetalCommandProcessor::ShutdownContext() {
     EndFrameEncoderAndWait();
   }
   PumpCompletedActions();
+  // Drops any resolve still queued and releases the visibility buffer; the
+  // reports they belonged to are abandoned by the shared reset path.
+  ShutdownZPDQueryResources();
   ShutdownDrawResources();
   // PrimitiveProcessor: destroy before shared_memory_ (it holds a reference).
   primitive_processor_.reset();
@@ -1282,6 +1285,22 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
     }
   }
+  // ZPD occlusion queries: Metal takes the visibility buffer on the DESCRIPTOR
+  // and offers no way to attach one to a live encoder, so it must be decided
+  // here. The pool is created lazily on the first encoder built while a guest
+  // report is open -- a title that never issues a query allocates nothing and
+  // every encoder below is byte-for-byte what it was before this change.
+  if (GetZPDMode() != ZPDMode::kFake && !zpd_force_fake_fallback_ &&
+      zpd_active_segment_.logical_active &&
+      !zpd_visibility_pool_.is_initialized()) {
+    EnsureZPDQueryResources();
+  }
+  id<MTLBuffer> zpd_visibility_buffer =
+      (__bridge id<MTLBuffer>)zpd_visibility_pool_.visibility_buffer();
+  if (zpd_visibility_buffer) {
+    pass.visibilityResultBuffer = zpd_visibility_buffer;
+  }
+
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   // Fault attribution: names this encoder in per-encoder execution status.
@@ -1319,6 +1338,17 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
   encoder_attachment_key_ = want_key;
+  encoder_has_zpd_visibility_ = zpd_visibility_buffer != nil;
+  // A new encoder is the next valid opportunity for a report whose segment is
+  // waiting to open -- either because the guest issued BEGIN with no eligible
+  // encoder, or because the previous segment was closed at the last encoder
+  // boundary. This is the Metal analogue of Vulkan reopening at render-pass
+  // begin. can_close_submission is false: nothing here may commit the command
+  // buffer this encoder was just created on.
+  if (encoder_has_zpd_visibility_ && zpd_active_segment_.logical_active &&
+      zpd_active_segment_.segment_pending_begin) {
+    OpenQuerySegment(false);
+  }
   return frame_render_encoder_;
 }
 
@@ -1475,16 +1505,225 @@ void MetalCommandProcessor::PumpCompletedActions() {
     completion_actions_.pop_front();
     action();
   }
+  // Query slots are submission-gated the same way: a visibility counter is
+  // only readable once the command buffer that wrote it has completed.
+  PumpQueryResolves();
+}
+
+void MetalCommandProcessor::EnsureZPDQueryResources() {
+  if (GetZPDMode() == ZPDMode::kFake) {
+    return;
+  }
+  auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+      graphics_system_->provider());
+  if (!provider || !provider->device()) {
+    return;
+  }
+  zpd_visibility_pool_.EnsureInitialized(provider->device(),
+                                         kZPDQueryPoolCapacity);
+}
+
+void MetalCommandProcessor::ShutdownZPDQueryResources() {
+  zpd_resolves_in_flight_.clear();
+  zpd_query_open_ = false;
+  encoder_has_zpd_visibility_ = false;
+  zpd_visibility_pool_.Shutdown();
+}
+
+bool MetalCommandProcessor::IsZPDQueryPoolReady() const {
+  return zpd_visibility_pool_.is_initialized();
+}
+
+bool MetalCommandProcessor::CanOpenZPDQuery() const {
+  // Counting can only be switched on for an encoder whose descriptor already
+  // carried the visibility buffer; there is no way to attach one later.
+  return frame_open_ && frame_render_encoder_ && encoder_has_zpd_visibility_;
+}
+
+CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
+    ReportHandle report_handle, bool can_close_submission) {
+  if (!zpd_visibility_pool_.is_initialized()) {
+    return QueryOpenResult::kFailed;
+  }
+  if (zpd_query_open_) {
+    // The shared code closes or discards before reopening; a second open would
+    // strand the current slot's offset for the rest of the pass.
+    return QueryOpenResult::kFailed;
+  }
+  if (!CanOpenZPDQuery()) {
+    // Retried when the next visibility-carrying encoder opens.
+    return QueryOpenResult::kDeferred;
+  }
+
+  if (!zpd_visibility_pool_.has_free_indices()) {
+    PumpQueryResolves();
+  }
+  if (!zpd_visibility_pool_.has_free_indices()) {
+    ZPDMode mode = GetZPDMode();
+    if (mode == ZPDMode::kFast || mode == ZPDMode::kFastAlt) {
+      // Fast modes favor forward progress; the shared code substitutes a
+      // minimal accumulated value rather than stalling the guest.
+      return QueryOpenResult::kPoolExhausted;
+    }
+    if (zpd_resolves_in_flight_.empty()) {
+      return QueryOpenResult::kPoolExhausted;
+    }
+    uint64_t wait_for = zpd_resolves_in_flight_.front().submission;
+    if (wait_for >= CurrentEncodingSubmission()) {
+      // The freeing work is in the command buffer still being encoded, so it
+      // has to be committed before it can complete.
+      if (can_close_submission) {
+        EndFrameEncoder();
+      }
+      return QueryOpenResult::kDeferred;
+    }
+    if (!WaitForSubmission(wait_for)) {
+      return QueryOpenResult::kFailed;
+    }
+    PumpQueryResolves();
+    if (!zpd_visibility_pool_.has_free_indices()) {
+      return QueryOpenResult::kPoolExhausted;
+    }
+  }
+
+  uint32_t index = 0;
+  uint32_t generation = 0;
+  size_t offset = 0;
+  if (!zpd_visibility_pool_.Acquire(index, generation, offset)) {
+    return QueryOpenResult::kFailed;
+  }
+  id<MTLRenderCommandEncoder> encoder =
+      (__bridge id<MTLRenderCommandEncoder>)frame_render_encoder_;
+  [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting
+                            offset:offset];
+  zpd_active_index_ = index;
+  zpd_active_generation_ = generation;
+  zpd_query_open_ = true;
+  return QueryOpenResult::kOpened;
+}
+
+bool MetalCommandProcessor::RetireActiveZPDQuery(ReportHandle report_handle,
+                                                 uint64_t* out_submission) {
+  if (!zpd_query_open_) {
+    return false;
+  }
+  // If the encoder already ended, counting stopped with it and there is
+  // nothing to disable -- but the slot still has a pending GPU write, so it
+  // must be queued either way.
+  if (frame_open_ && frame_render_encoder_ && encoder_has_zpd_visibility_) {
+    id<MTLRenderCommandEncoder> encoder =
+        (__bridge id<MTLRenderCommandEncoder>)frame_render_encoder_;
+    [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+  }
+
+  MetalZPDResolve resolve;
+  // The command buffer being encoded now is the one that will write this slot.
+  resolve.submission = CurrentEncodingSubmission();
+  resolve.index = zpd_active_index_;
+  resolve.generation = zpd_active_generation_;
+  resolve.report_handle = report_handle;
+  zpd_resolves_in_flight_.push_back(resolve);
+  if (out_submission) {
+    *out_submission = resolve.submission;
+  }
+  zpd_query_open_ = false;
+  return true;
+}
+
+bool MetalCommandProcessor::CloseZPDQuery(ReportHandle report_handle,
+                                          uint64_t& out_submission) {
+  return RetireActiveZPDQuery(report_handle, &out_submission);
+}
+
+bool MetalCommandProcessor::DiscardZPDQuery() {
+  // kInvalidReportHandle: the slot is reclaimed on completion but its count is
+  // attributed to nothing.
+  return RetireActiveZPDQuery(kInvalidReportHandle, nullptr);
+}
+
+void MetalCommandProcessor::PumpQueryResolves() {
+  if (!zpd_visibility_pool_.is_initialized()) {
+    return;
+  }
+  uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  while (!zpd_resolves_in_flight_.empty() &&
+         zpd_resolves_in_flight_.front().submission <= completed) {
+    MetalZPDResolve resolve = zpd_resolves_in_flight_.front();
+    zpd_resolves_in_flight_.pop_front();
+    if (!zpd_visibility_pool_.IsGenerationCurrent(resolve.index,
+                                                  resolve.generation)) {
+      // The slot was recycled out from under this resolve; attributing it now
+      // would corrupt whichever report owns the slot.
+      continue;
+    }
+    // A faulted submission still publishes as completed while its GPU work
+    // never ran. The slot was zeroed at acquire, so such a report reads 0
+    // rather than stale content.
+    uint64_t raw_samples = zpd_visibility_pool_.Read(resolve.index);
+    zpd_visibility_pool_.Release(resolve.index, resolve.generation);
+    if (resolve.report_handle != kInvalidReportHandle) {
+      XELOGD("MetalZPD: resolved handle={} slot={} submission={} samples={}",
+             resolve.report_handle, resolve.index, resolve.submission,
+             raw_samples);
+      OnZPDQueryResolved(resolve.report_handle, raw_samples);
+    }
+  }
+}
+
+bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
+                                              uint64_t wait_for_submission) {
+  if (GetZPDMode() == ZPDMode::kFake) {
+    return false;
+  }
+  PumpQueryResolves();
+
+  auto report = logical_zpd_reports_.find(report_handle);
+  if (report == logical_zpd_reports_.end()) {
+    return true;
+  }
+  if (report->second.pending_segments == 0 && report->second.ended) {
+    return true;
+  }
+  if (!wait_for_submission) {
+    return false;
+  }
+
+  if (wait_for_submission >= CurrentEncodingSubmission()) {
+    if (!frame_command_buffer_) {
+      return false;
+    }
+    // The segment is in the command buffer still open; commit it so it can
+    // complete. Strict mode's stall backstops bound how often this happens.
+    EndFrameEncoder();
+  }
+  if (wait_for_submission >
+          completed_submission_.load(std::memory_order_acquire) &&
+      !WaitForSubmission(wait_for_submission)) {
+    return false;
+  }
+  PumpQueryResolves();
+
+  report = logical_zpd_reports_.find(report_handle);
+  return report == logical_zpd_reports_.end() ||
+         (report->second.pending_segments == 0 && report->second.ended);
 }
 
 void MetalCommandProcessor::EndRenderEncoder() {
   if (!frame_open_) {
     return;
   }
+  // The encoder is a query-segment boundary (Metal's analogue of a Vulkan
+  // render pass): close the active segment while setVisibilityResultMode can
+  // still be issued. The logical report survives and reopens on the next
+  // visibility-carrying encoder.
+  if (zpd_query_open_) {
+    CloseQuerySegment();
+  }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
   frame_render_encoder_ = nullptr;
   frame_open_ = false;
+  encoder_has_zpd_visibility_ = false;
   [encoder endEncoding];
 }
 

@@ -23,6 +23,7 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
 
@@ -345,6 +346,59 @@ class MetalCommandProcessor : public CommandProcessor {
   std::mutex fault_mutex_;
   std::vector<void*> faulted_command_buffers_;  // id<MTLCommandBuffer>, retained.
   std::vector<uint64_t> faulted_submission_ids_;  // Same lock as above.
+
+  // ZPD occlusion queries. The shared CommandProcessor owns the whole logical
+  // report state machine (slots, segment splitting, normalization, guest
+  // writes); everything here is the Metal resource and encoder half of that
+  // contract. Ordering follows Canary D3D12/Vulkan: resume the active segment
+  // when an encoder opens, close it when the encoder ends, resolve only after
+  // the owning submission completes.
+  //
+  // Metal requires visibilityResultBuffer on the render pass DESCRIPTOR, so a
+  // segment can only run on an encoder that was built with the buffer already
+  // attached -- hence encoder_has_zpd_visibility_ rather than a global "pool
+  // exists" test.
+  void EnsureZPDQueryResources() override;
+  void ShutdownZPDQueryResources() override;
+  bool IsZPDQueryPoolReady() const override;
+  bool CanOpenZPDQuery() const override;
+  QueryOpenResult OpenZPDQuery(ReportHandle report_handle,
+                               bool can_close_submission) override;
+  bool CloseZPDQuery(ReportHandle report_handle,
+                     uint64_t& out_submission) override;
+  bool DiscardZPDQuery() override;
+  void PumpQueryResolves() override;
+  bool AwaitQueryResolve(ReportHandle report_handle,
+                         uint64_t wait_for_submission) override;
+  uint64_t GetCompletedSubmission() const override {
+    return completed_submission_.load(std::memory_order_acquire);
+  }
+  void PollCompletedSubmission() override { PumpQueryResolves(); }
+
+  // Ends the active query on the current encoder and records where its result
+  // will land. `report_handle` is kInvalidReportHandle for a discard, whose
+  // slot must still ride the resolve queue: Metal allows a given visibility
+  // offset to be selected only once per pass, so the slot cannot return to the
+  // free list until its submission has completed.
+  bool RetireActiveZPDQuery(ReportHandle report_handle,
+                            uint64_t* out_submission);
+
+  struct MetalZPDResolve {
+    uint64_t submission = 0;
+    uint32_t index = 0;
+    uint32_t generation = 0;
+    ReportHandle report_handle = kInvalidReportHandle;
+  };
+  metal::MetalZPDVisibilityPool zpd_visibility_pool_;
+  std::deque<MetalZPDResolve> zpd_resolves_in_flight_;
+  uint32_t zpd_active_index_ = 0;
+  uint32_t zpd_active_generation_ = 0;
+  bool zpd_query_open_ = false;
+  // Whether the currently open render encoder was built with the visibility
+  // buffer attached. False for every encoder created before a guest first
+  // opened a report, which is what makes a no-query title pay nothing.
+  bool encoder_has_zpd_visibility_ = false;
+
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;
