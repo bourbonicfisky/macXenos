@@ -81,6 +81,18 @@ DEFINE_bool(edram_determinism, false,
             "collapsed backends can't expose lost samples -- stable zeros pass). "
             "Needs --replay_loops>=2. Exits nonzero on failure.",
             "GPU");
+DEFINE_bool(clear_caches_between_replays, false,
+            "Request a backend cache clear before every replay loop, through "
+            "the same path a trace-viewer rewind uses. The ClearCaches "
+            "contract is otherwise reachable only by an interactive F5 press, "
+            "so this is what makes it scriptable. Clearing is observationally "
+            "neutral by design, so the run ALSO asserts positive engagement: "
+            "the backend's executed-clear count must reach the number of "
+            "requests, because byte-identical output is exactly what a "
+            "silently discarded request produces. Combine with "
+            "--edram_determinism to make identity the second half of the "
+            "gate. Needs --replay_loops>=2. Exits nonzero on failure.",
+            "GPU");
 DEFINE_string(decode, "",
               "Offline decode mode (no replay): decode every draw_*.edram.bin "
               "in the given capture directory into color_drawNNNNNN.png using "
@@ -288,8 +300,20 @@ int TraceDump::Run() {
     XELOGI("TraceDump: recapture pass complete -> {}",
            xe::path_to_utf8(cvars::recapture_trace_path));
   }
+  // Cache-clear trigger (--clear_caches_between_replays): each loop requests a
+  // clear through TracePlayer's existing rewind path, so the request crosses a
+  // real submission/frame boundary inside the replay rather than a test-only
+  // entry point. Requests are counted here and checked against what the
+  // backend reports executing, below.
+  bool clear_caches = cvars::clear_caches_between_replays && replay_loops >= 2;
+  uint32_t clears_requested = 0;
+  uint32_t clears_executed_before =
+      graphics_system_->command_processor()->cache_clears_executed();
   for (int32_t loop = 1; loop < replay_loops; ++loop) {
-    player_->ReplayCurrentFrame();
+    if (clear_caches) {
+      ++clears_requested;
+    }
+    player_->ReplayCurrentFrame(clear_caches);
     player_->WaitOnPlayback();
     if (determinism) {
       std::vector<uint8_t> cur;
@@ -325,11 +349,46 @@ int TraceDump::Run() {
       XELOGI("EDRAM DETERMINISM: PASS -- {} loops byte-identical", replay_loops);
     }
   }
+  // Engagement check. A backend that does not implement ClearCaches inherits
+  // the empty base method and reports zero executed clears while producing
+  // byte-identical output -- which is why identity alone is not the gate.
+  bool clear_engagement_failed = false;
+  if (cvars::clear_caches_between_replays) {
+    uint32_t clears_executed =
+        graphics_system_->command_processor()->cache_clears_executed() -
+        clears_executed_before;
+    if (!clear_caches) {
+      XELOGE(
+          "--clear_caches_between_replays needs --replay_loops>=2 (got {}); no "
+          "clear was requested",
+          replay_loops);
+      clear_engagement_failed = true;
+    } else if (clears_executed != clears_requested) {
+      // Both directions are failures. Fewer means requests were discarded
+      // (unimplemented ClearCaches, or a deferred clear that never reached its
+      // boundary); more means clears ran that this gate did not ask for, so
+      // the count no longer attributes to the trigger and cannot certify it.
+      XELOGE(
+          "CACHE CLEAR ENGAGEMENT FAIL: {} requested, {} executed ({})",
+          clears_requested, clears_executed,
+          clears_executed < clears_requested
+              ? "requests were discarded -- unimplemented ClearCaches, or the "
+                "deferred clear never reached its boundary"
+              : "more clears ran than were requested -- the count is not "
+                "attributable to this trigger");
+      clear_engagement_failed = true;
+    } else {
+      XELOGI("CACHE CLEAR ENGAGEMENT: PASS -- {} requested, {} executed",
+             clears_requested, clears_executed);
+    }
+  }
   EndHostCapture();
 
   // A determinism failure must make the process exit nonzero (exit code 2) so
-  // a CI/shell gate actually fails; other capture failures use exit code 1.
-  int result = determinism_failed ? 2 : 0;
+  // a CI/shell gate actually fails; a cache-clear engagement failure uses 3 so
+  // "the clear never ran" is distinguishable from "the output diverged"; other
+  // capture failures use exit code 1.
+  int result = determinism_failed ? 2 : (clear_engagement_failed ? 3 : 0);
 
   if (cvars::dump_edram) {
     auto edram_path = base_output_path_;

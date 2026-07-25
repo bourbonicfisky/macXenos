@@ -47,7 +47,12 @@ class TracePlayer : public TraceReader {
   // SeekCommand no-op when already positioned — a repeat caller would wedge
   // in WaitOnPlayback). Multi-pass replay builds cross-frame state (RT/key
   // persistence, temporal history) that single-pass replay cannot.
-  void ReplayCurrentFrame();
+  //
+  // clear_caches requests a backend cache clear before the replay, through the
+  // same path a trace-viewer rewind uses (playback to an earlier point
+  // invalidates previously cached content). It is the only scriptable way to
+  // reach the ClearCaches contract, which otherwise needs an interactive F5.
+  void ReplayCurrentFrame(bool clear_caches = false);
 
   void WaitOnPlayback();
 

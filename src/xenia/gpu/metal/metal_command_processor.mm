@@ -43,6 +43,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_binding_layout.h"
+#include "xenia/gpu/metal/metal_cache_clear_admission.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
@@ -1526,6 +1527,98 @@ void MetalCommandProcessor::PumpCompletedActions() {
   // Query slots are submission-gated the same way: a visibility counter is
   // only readable once the command buffer that wrote it has completed.
   PumpQueryResolves();
+}
+
+void MetalCommandProcessor::ClearCaches() {
+  CommandProcessor::ClearCaches();
+  // Latch only. The request arrives through GraphicsSystem::ClearCaches ->
+  // CallInThread (F5 / GPU menu) or from a trace player rewinding to an
+  // earlier command, so it can land mid-encoder with submissions in flight.
+  // Releasing here would free resources the GPU is still reading. D3D12 makes
+  // the same choice for the same reason.
+  cache_clear_requested_ = true;
+}
+
+void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
+  // No-request hot path: a single predictable branch. No commit, no wait, no
+  // allocation for a title that never requests a clear.
+  if (!cache_clear_requested_) {
+    return;
+  }
+  // At most three passes -- quiesce, publish, execute. Each pass satisfies at
+  // most one outstanding precondition; anything still unsatisfied leaves the
+  // request LATCHED for the next boundary rather than dropping it or
+  // releasing early.
+  for (int pass = 0; pass < 3; ++pass) {
+    metal::CacheClearAdmissionInputs in{};
+    in.request_latched = cache_clear_requested_;
+    in.encoder_open = frame_open_;
+    in.has_unsubmitted_work = frame_command_buffer_ != nullptr;
+    in.last_submitted_submission = submission_counter_;
+    in.completed_submission =
+        completed_submission_.load(std::memory_order_acquire);
+    in.has_pending_producers =
+        !pending_writebacks_.empty() || !pending_memexports_.empty();
+    in.publication_failed = publication_failed;
+    in.can_end_submission = true;
+    in.can_publish_pending = true;
+    switch (metal::DecideCacheClearAdmission(in)) {
+      case metal::CacheClearAdmission::kEndSubmissionFirst:
+        // Steps 1-3: end the encoder, commit, await every submission, and pump
+        // completion actions so submission-gated retirement finishes before
+        // anything is released. At the swap boundary the frame's own
+        // EndFrameEncoderAndWait has already done this, so this is a no-op
+        // there; it is what makes the routine safe from any other boundary.
+        EndFrameEncoderAndWait();
+        continue;
+      case metal::CacheClearAdmission::kPublishPendingFirst: {
+        // Step 4: completing a submission makes a drain POSSIBLE without
+        // performing it. A queued memexport or render-target writeback is
+        // guest-visible data that has not yet reached RAM -- authoritative
+        // state under the cross-writer authority contract, not derived cache
+        // content -- so it must land before anything is released. Same
+        // full-domain publication the swap performs, through the same
+        // chronological authority executor.
+        metal::GuestRangeSet publication_domain;
+        publication_domain.Add(metal::GuestRange::FromBaseLength(
+            0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
+        if (!ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
+                                            publication_domain)) {
+          // Fail closed: keep the pending set intact and the request latched.
+          publication_failed = true;
+        }
+        continue;
+      }
+      case metal::CacheClearAdmission::kExecute: {
+        // Step 5 -- releasing derived cache state -- is section 3 of the
+        // owning change (implement-metal-cache-clearing) and is NOT
+        // implemented yet.
+        //
+        // So this deliberately does neither of the two things that would look
+        // like progress. It does not advance cache_clears_executed_: that
+        // counter certifies a COMPLETED clear to a scripted gate, and counting
+        // admission alone would make the gate pass while nothing was ever
+        // released -- the exact false positive the counter exists to prevent.
+        // And it does not consume the latch: the request is genuinely
+        // unsatisfied, so dropping it here would be the silent discard this
+        // change is fixing. The request stays pending and re-decides at each
+        // boundary (a bool test plus a pure predicate) until the release step
+        // lands and takes over both actions.
+        static uint32_t s_pending_logs = 0;
+        if (++s_pending_logs <= 4) {
+          XELOGW(
+              "MetalCommandProcessor: cache-clear request reached its "
+              "boundary and quiesced, but resource release is not implemented "
+              "yet -- request remains pending (swap #{})",
+              swap_count_);
+        }
+        return;
+      }
+      case metal::CacheClearAdmission::kDefer:
+      case metal::CacheClearAdmission::kNoRequest:
+        return;
+    }
+  }
 }
 
 void MetalCommandProcessor::EnsureZPDQueryResources() {
@@ -6227,18 +6320,26 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         "publication did not fully converge; retrying next frame",
         swap_count_);
     frame_has_render_ = false;
+    // A latched cache clear must NOT run on a frame whose guest data failed to
+    // land: releasing now would discard the records the retry depends on. The
+    // request stays latched for the next swap.
+    ExecuteDeferredCacheClear(/*publication_failed=*/true);
     return;
   }
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
     frame_has_render_ = false;
+    // Publication converged and the device is quiesced, so a latched clear is
+    // eligible even though this frame never presents (headless boundaries).
+    ExecuteDeferredCacheClear(/*publication_failed=*/false);
     return;
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   if (!provider || !provider->command_queue()) {
     frame_has_render_ = false;
+    ExecuteDeferredCacheClear(/*publication_failed=*/false);
     return;
   }
   id<MTLCommandQueue> queue =
@@ -6769,6 +6870,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   presenter->RefreshGuestOutput(present_width, present_height, /*aspect_x=*/16,
                                 /*aspect_y=*/9, refresher);
   frame_has_render_ = false;
+
+  // The frame boundary, and the Metal analogue of D3D12 executing its deferred
+  // clear inside EndSubmission when the frame closes. Everything the ordering
+  // contract requires has already happened for this frame: the encoder ended,
+  // every submission completed and its completion actions ran
+  // (EndFrameEncoderAndWait above), all pending memexports and render-target
+  // writebacks were published to guest RAM, and the presenter's own command
+  // buffer committed and was waited on inside the refresher. A frame that
+  // never requests a clear reaches only the leading branch of this call.
+  ExecuteDeferredCacheClear(/*publication_failed=*/false);
 }
 
 // Compile this backend's own copy of the PM4 execute loop, statically bound to

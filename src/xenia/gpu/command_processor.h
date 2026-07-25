@@ -171,6 +171,21 @@ class CommandProcessor {
 
   virtual void ClearCaches();
 
+  // Number of cache-clear requests this command processor has actually
+  // executed. The base returns 0, which is the honest answer for a backend
+  // that discards the request (the base ClearCaches is an empty method).
+  //
+  // Exists so a scripted gate can assert POSITIVE ENGAGEMENT: clearing a cache
+  // is observationally neutral by design, so byte-identical output is exactly
+  // what a silently dropped request produces. Without this counter, an
+  // identity gate passes on a no-op.
+  //
+  // Read from a thread other than the command-processor worker that advances
+  // it (a gate reads it after playback completes), so an implementation must
+  // publish the value with its own synchronization rather than relying on an
+  // unspecified edge from whatever the caller waited on.
+  virtual uint32_t cache_clears_executed() const { return 0; }
+
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const {
     return swap_post_effect_desired_;

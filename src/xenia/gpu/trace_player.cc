@@ -80,14 +80,14 @@ void TracePlayer::SeekCommand(int target_command) {
   }
 }
 
-void TracePlayer::ReplayCurrentFrame() {
+void TracePlayer::ReplayCurrentFrame(bool clear_caches) {
   auto frame = current_frame();
   if (!frame) {
     return;
   }
   current_command_index_ = int(frame->commands.size()) - 1;
   PlayTrace(frame->start_ptr, frame->end_ptr - frame->start_ptr,
-            TracePlaybackMode::kBreakOnSwap, false);
+            TracePlaybackMode::kBreakOnSwap, clear_caches);
 }
 
 void TracePlayer::WaitOnPlayback() {

@@ -61,6 +61,20 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
 
+  // Cache-clear request (F5 / GPU menu, or a trace player rewinding to an
+  // earlier command). Latches ONLY -- the request arrives on another thread's
+  // call-in, potentially mid-encoder with submissions in flight, and releasing
+  // there would free memory the GPU is still reading. Execution happens at the
+  // frame boundary in ExecuteDeferredCacheClear. This is the D3D12 contract,
+  // whose ClearCaches likewise only sets cache_clear_requested_.
+  void ClearCaches() override;
+  uint32_t cache_clears_executed() const override {
+    // Advanced on the GPU worker thread, read from the thread driving a gate.
+    // Acquire pairs with the release in ExecuteDeferredCacheClear: waiting on
+    // a playback event is not a synchronization edge this code may assume.
+    return cache_clears_executed_.load(std::memory_order_acquire);
+  }
+
   void RestoreEdramSnapshot(const void* snapshot) override;
 
   // Frame-dissection tooling (--capture_dir per-draw captures + --decode):
@@ -316,6 +330,41 @@ class MetalCommandProcessor : public CommandProcessor {
   // reclaimed while a submission that references them is in flight.
   uint64_t submission_counter_ = 0;
   std::atomic<uint64_t> completed_submission_{0};
+
+  // Deferred cache clearing. The request is latched by ClearCaches() and
+  // executed at the frame boundary (end of IssueSwap), where the ordering
+  // contract's preconditions already hold: the frame's single synchronous
+  // EndFrameEncoderAndWait has finished the encoder, awaited every submission,
+  // and pumped completion actions, and the full-domain
+  // ResolveRamConsumerDependencies has published every pending memexport and
+  // render-target writeback to guest RAM. Eligibility is decided by the shared
+  // device-free predicate so the rules are testable as values.
+  //
+  // `publication_failed` (passed in by the caller) keeps the request latched
+  // when a swap suppressed its present because publication did not converge:
+  // clearing over unpublished guest data would be silent data loss, not a
+  // cache eviction.
+  void ExecuteDeferredCacheClear(bool publication_failed);
+  bool cache_clear_requested_ = false;
+  // Clears that COMPLETED -- ordering satisfied and resources released.
+  // Consumed by CommandProcessor::cache_clears_executed() so a scripted gate
+  // can prove the request was honored: a cleared cache is observationally
+  // neutral, so identical output is also exactly what a discarded request
+  // produces.
+  //
+  // Atomic because the reader is not this thread: the GPU worker will advance
+  // it inside IssueSwap, while a gate reads it after
+  // TracePlayer::WaitOnPlayback. That wait is a threading-event wait whose C++
+  // happens-before relationship with the write is not specified by anything
+  // this code controls, so the value is published explicitly (release/acquire)
+  // instead of assumed.
+  //
+  // Advanced by the resource-release step (section 3 of the owning change),
+  // NOT by admission -- it certifies a completed clear, and a gate that reads
+  // it must not be told a clear happened when nothing was released. It is
+  // therefore 0 for as long as release is unimplemented, which correctly fails
+  // the engagement gate.
+  std::atomic<uint32_t> cache_clears_executed_{0};
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
   // Submissions whose command buffer FAULTED (GPU error status): their GPU
   // work never executed, yet the submission still publishes as completed
