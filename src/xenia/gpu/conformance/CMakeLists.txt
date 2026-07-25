@@ -95,6 +95,12 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_upload_arena.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_primitive_restart_test.mm
+    # ZPD visibility mechanism (L1): drives the REAL MetalZPDVisibilityPool
+    # through a real render pass, so the backend's counting semantics, its
+    # depth-pass meaning, and Metal's once-per-pass offset rule are pinned on
+    # the device. The pool's only non-header dependency is Metal itself.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_zpd_visibility_test.mm
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_zpd_visibility_pool.mm
     # Shared-memory coherence surface (L1): links the REAL Memory +
     # SharedMemory + MetalSharedMemory (no replicas). This pulls a small,
     # deliberate closure — memory + mmio + shared-memory validity + the gpu
