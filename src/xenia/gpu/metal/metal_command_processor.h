@@ -23,6 +23,7 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/metal/metal_zpd_query_admission.h"
 #include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"

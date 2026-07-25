@@ -1570,50 +1570,48 @@ bool MetalCommandProcessor::CanOpenZPDQuery() const {
 
 CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
     ReportHandle report_handle, bool can_close_submission) {
-  if (!zpd_visibility_pool_.is_initialized()) {
-    return QueryOpenResult::kFailed;
-  }
-  if (zpd_query_open_) {
-    // The shared code closes or discards before reopening; a second open would
-    // strand the current slot's offset for the rest of the pass.
-    return QueryOpenResult::kFailed;
-  }
-  if (!CanOpenZPDQuery() || !encoder_has_zpd_visibility_) {
-    // Either no encoder, or one built before the pool existed. Retried when a
-    // visibility-carrying encoder opens; BeginFrameEncoder rebuilds a reused
-    // encoder for exactly this case.
-    return QueryOpenResult::kDeferred;
+  // Drain first, so the admission decision sees slots freed by already
+  // completed submissions rather than declaring a false exhaustion.
+  if (!zpd_visibility_pool_.has_free_indices()) {
+    PumpQueryResolves();
   }
 
-  if (!zpd_visibility_pool_.has_free_indices()) {
-    PumpQueryResolves();
-  }
-  if (!zpd_visibility_pool_.has_free_indices()) {
-    ZPDMode mode = GetZPDMode();
-    if (mode == ZPDMode::kFast || mode == ZPDMode::kFastAlt) {
-      // Fast modes favor forward progress; the shared code substitutes a
-      // minimal accumulated value rather than stalling the guest.
-      return QueryOpenResult::kPoolExhausted;
-    }
-    if (zpd_resolves_in_flight_.empty()) {
-      return QueryOpenResult::kPoolExhausted;
-    }
-    uint64_t wait_for = zpd_resolves_in_flight_.front().submission;
-    if (wait_for >= CurrentEncodingSubmission()) {
-      // The freeing work is in the command buffer still being encoded, so it
-      // has to be committed before it can complete.
-      if (can_close_submission) {
-        EndFrameEncoder();
-      }
+  ZPDMode mode = GetZPDMode();
+  ZPDQueryAdmissionInputs admission;
+  admission.pool_ready = zpd_visibility_pool_.is_initialized();
+  admission.query_already_open = zpd_query_open_;
+  admission.encoder_can_carry_query =
+      CanOpenZPDQuery() && encoder_has_zpd_visibility_;
+  admission.has_free_slot = zpd_visibility_pool_.has_free_indices();
+  admission.fast_mode = mode == ZPDMode::kFast || mode == ZPDMode::kFastAlt;
+  admission.has_pending_resolve = !zpd_resolves_in_flight_.empty();
+  admission.oldest_pending_submission =
+      admission.has_pending_resolve ? zpd_resolves_in_flight_.front().submission
+                                    : 0;
+  admission.current_encoding_submission = CurrentEncodingSubmission();
+  admission.can_close_submission = can_close_submission;
+
+  switch (DecideZPDQueryAdmission(admission)) {
+    case ZPDQueryAdmission::kAcquire:
+      break;
+    case ZPDQueryAdmission::kDefer:
       return QueryOpenResult::kDeferred;
-    }
-    if (!WaitForSubmission(wait_for)) {
-      return QueryOpenResult::kFailed;
-    }
-    PumpQueryResolves();
-    if (!zpd_visibility_pool_.has_free_indices()) {
+    case ZPDQueryAdmission::kDeferAfterClosingSubmission:
+      EndFrameEncoder();
+      return QueryOpenResult::kDeferred;
+    case ZPDQueryAdmission::kPoolExhausted:
       return QueryOpenResult::kPoolExhausted;
-    }
+    case ZPDQueryAdmission::kFailed:
+      return QueryOpenResult::kFailed;
+    case ZPDQueryAdmission::kWaitForOldestResolve:
+      if (!WaitForSubmission(admission.oldest_pending_submission)) {
+        return QueryOpenResult::kFailed;
+      }
+      PumpQueryResolves();
+      if (!zpd_visibility_pool_.has_free_indices()) {
+        return QueryOpenResult::kPoolExhausted;
+      }
+      break;
   }
 
   uint32_t index = 0;
