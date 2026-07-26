@@ -830,17 +830,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint64_t key = MakeTextureKey(fetch, is_signed, base, width, height,
                                 pitch_texels);
   auto it = cache_.find(key);
-  // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
-  // Report-only: nothing below reads these fields back.
-  MetalSignCensusProbeResult* census = sign_census_probe_;
-  if (census) {
-    MetalSignCensusOverheadScope census_overhead;
-    census->keyed_lookup = true;
-    census->cache_hit = it != cache_.end();
-    census->resolve_backed = resolved_targets_.find(base) !=
-                             resolved_targets_.end();
-    census->recurring = sign_census_uploaded_keys_.count(key) != 0;
-  }
   // Lineage probe: this fetch of the watched base is the composite's temporal
   // read. A cache HIT means the untile is SKIPPED and the STALE cached upload is
   // served -- the freshly-resolved guest RAM never reaches the composite (the
@@ -873,21 +862,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
-  // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
-  // Times the miss / untile / upload / finalize path on EVERY exit from it,
-  // including the early null returns below. Report-only.
-  struct CensusMissTimer {
-    MetalSignCensusProbeResult* out;
-    std::chrono::steady_clock::time_point t0;
-    ~CensusMissTimer() {
-      if (out) {
-        out->miss_usec =
-            std::chrono::duration<double, std::micro>(
-                std::chrono::steady_clock::now() - t0).count();
-      }
-    }
-  } census_miss_timer{census, census ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{}};
   const uint8_t* guest =
       static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
   if (!guest) {
@@ -1156,10 +1130,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                withBytes:upload_data
              bytesPerRow:upload_bytes_per_row
            bytesPerImage:0];
-  // TEMPORARY (signedness census probe, task 4.1): host bytes submitted.
-  if (census) {
-    census->host_bytes += decoded.empty() ? linear.size() : decoded.size();
-  }
   // Cube faces 1..5: guest layout is face-major — each face is a full tiled
   // (or linear) slice whose block grid is padded to 32x32 blocks
   // (texture_extent.cc guest rules); re-untile each face at its offset.
@@ -1191,10 +1161,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                    withBytes:linear.data()
                  bytesPerRow:upload_bytes_per_row
                bytesPerImage:0];
-      // TEMPORARY (signedness census probe, task 4.1): host bytes submitted.
-      if (census) {
-        census->host_bytes += linear.size();
-      }
     }
   }
   uint32_t entry_mip_bytes = 0;
@@ -1291,10 +1257,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                    withBytes:mip_linear.data()
                  bytesPerRow:lbw * bpb
                bytesPerImage:0];
-      // TEMPORARY (signedness census probe, task 4.1): host bytes submitted.
-      if (census) {
-        census->host_bytes += mip_linear.size();
-      }
     }
   }
 
@@ -1365,14 +1327,6 @@ uint32_t MetalTextureCache::FinalizeTexture(
   cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes,
                             mip_base, mip_bytes});
   active_textures_.push_back(texture_ptr);
-  // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
-  // The miss reached a completed untile/upload; remember the key so a later
-  // upload of it is reported as recurring (invalidation-driven re-upload).
-  if (sign_census_probe_) {
-    MetalSignCensusOverheadScope census_overhead;
-    sign_census_probe_->upload_completed = true;
-    sign_census_uploaded_keys_.insert(key);
-  }
   return slot;
 }
 
