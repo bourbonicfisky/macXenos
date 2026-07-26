@@ -461,6 +461,14 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   metal::MetalZPDVisibilityPool zpd_visibility_pool_;
   std::deque<MetalZPDResolve> zpd_resolves_in_flight_;
+  // Handles of GUEST logical reports observed still open at a successful
+  // cache-clear execution -- the one ZPD state a clear could strand, since the
+  // pool and its in-flight resolves are retained but a live report must still
+  // retire afterwards. Never holds a merely in-flight resolve. Populated only
+  // when that state actually occurs (no natural fixture does), and drained by
+  // PumpQueryResolves when the shared retirement path completes, so ordinary
+  // resolves cost one empty-set branch. Cleared at teardown.
+  std::unordered_set<uint64_t> zpd_handles_spanning_clear_;
   uint32_t zpd_active_index_ = 0;
   uint32_t zpd_active_generation_ = 0;
   bool zpd_query_open_ = false;

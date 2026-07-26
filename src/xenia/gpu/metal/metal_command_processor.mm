@@ -1601,6 +1601,19 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
           // NOT satisfied: leave it latched and do not count it.
           return;
         }
+        // A GUEST logical report open across this clear (BEGIN seen, END not
+        // yet) is the one ZPD state a clear could strand: the pool and its
+        // in-flight resolves are retained, but the report must still retire
+        // afterwards. Record only handles actually observed in that state --
+        // never a merely in-flight resolve, which the boundary has already
+        // drained -- so PumpQueryResolves can report the matching retirement.
+        // Ordinary titles never populate this set.
+        if (zpd_active_segment_.logical_active &&
+            zpd_active_segment_.report_handle != kInvalidReportHandle) {
+          zpd_handles_spanning_clear_.insert(zpd_active_segment_.report_handle);
+          XELOGI("MetalZPD: report handle={} spans cache clear (swap #{})",
+                 zpd_active_segment_.report_handle, swap_count_);
+        }
         // Step 6: the request is satisfied. Consume the latch and publish the
         // completed clear (release, so the release work above is visible to
         // whichever thread reads the count).
@@ -1794,6 +1807,7 @@ void MetalCommandProcessor::EnsureZPDQueryResources() {
 
 void MetalCommandProcessor::ShutdownZPDQueryResources() {
   zpd_resolves_in_flight_.clear();
+  zpd_handles_spanning_clear_.clear();
   zpd_query_open_ = false;
   encoder_has_zpd_visibility_ = false;
   zpd_visibility_pool_.Shutdown();
@@ -1945,6 +1959,21 @@ void MetalCommandProcessor::PumpQueryResolves() {
              resolve.report_handle, resolve.index, resolve.submission,
              raw_samples);
       OnZPDQueryResolved(resolve.report_handle, raw_samples);
+      // Cache-clear span observability. The set is empty for every title that
+      // never spans a clear, so an ordinary resolve pays one branch.
+      if (!zpd_handles_spanning_clear_.empty()) {
+        auto spanning = zpd_handles_spanning_clear_.find(resolve.report_handle);
+        if (spanning != zpd_handles_spanning_clear_.end() &&
+            logical_zpd_reports_.find(resolve.report_handle) ==
+                logical_zpd_reports_.end()) {
+          // The report that was live across a clear has now completed the
+          // shared retirement path (accumulated, committed, and erased) rather
+          // than being stranded by the release.
+          XELOGI("MetalZPD: clear-spanning report handle={} retired",
+                 resolve.report_handle);
+          zpd_handles_spanning_clear_.erase(spanning);
+        }
+      }
     }
   }
 }
