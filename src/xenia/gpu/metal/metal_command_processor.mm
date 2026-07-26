@@ -78,6 +78,21 @@ namespace metal {
 
 namespace {
 
+// Process physical footprint in MiB, or 0.0 if the query fails. One sampler
+// for every consumer (frame telemetry and cache-clear resource evidence) so
+// they cannot drift into measuring subtly different things. Internal linkage:
+// there is no header or API consumer outside this translation unit.
+double ProcessFootprintMiB() {
+  task_vm_info_data_t vm_info;
+  mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO,
+                reinterpret_cast<task_info_t>(&vm_info),
+                &vm_count) != KERN_SUCCESS) {
+    return 0.0;
+  }
+  return double(vm_info.phys_footprint) / (1024.0 * 1024.0);
+}
+
 // Concrete task-3.1 RamWritePublicationTarget: forwards the seam's two
 // invalidation primitives to the operations that already exist on this
 // command processor's shared memory / legacy texture cache. Holds no state of
@@ -1652,6 +1667,36 @@ bool MetalCommandProcessor::ReleaseCachesForClear() {
     return false;  // nothing released; the request stays latched.
   }
 
+  // Resource-return evidence (task 4.5). Sampled only on the clear path, so a
+  // title that never requests one pays nothing. Footprint is read through the
+  // shared sampler both here and after the release, so the pair is measured
+  // the same way -- see the log below for what it can and cannot show.
+  struct ClearResourceSample {
+    uint32_t textures = 0;
+    uint32_t bridges = 0;
+    uint32_t snapshots = 0;
+    uint32_t slots_used = 0;
+    uint32_t slots_free = 0;
+    uint32_t slots_stale = 0;
+    double footprint_mib = 0.0;
+  };
+  auto sample_resources = [this]() {
+    ClearResourceSample s;
+    if (texture_cache_) {
+      s.textures = texture_cache_->cached_texture_count();
+      s.bridges = texture_cache_->resolved_bridge_count();
+      s.slots_used = texture_cache_->slots_used();
+      s.slots_free = texture_cache_->slots_free();
+      s.slots_stale = texture_cache_->slots_stale();
+    }
+    if (render_target_cache_) {
+      s.snapshots = render_target_cache_->resolve_snapshot_count();
+    }
+    s.footprint_mib = ProcessFootprintMiB();
+    return s;
+  };
+  const ClearResourceSample before = sample_resources();
+
   // The order is load-bearing, not cosmetic: every step that RETIRES into the
   // legacy cache's pools must run before the step that DRAINS them.
 
@@ -1777,18 +1822,30 @@ bool MetalCommandProcessor::ReleaseCachesForClear() {
         "state was classified as authoritative");
     assert_always();
   }
+  // One machine-parsable before->after line per executed clear. The ENUMERABLE
+  // cache counters are the evidence that derived state was actually returned:
+  // they are exact, owned by this backend, and bounded by construction.
+  //
+  // footprint_mib is reported for completeness and is deliberately NOT an
+  // acceptance criterion. Releasing a Metal object returns it to the driver's
+  // and the allocator's pools, which need not shrink the process's physical
+  // footprint at that instant or ever; a flat or rising number here is not
+  // evidence that a cache retained anything, and a falling one would not prove
+  // it released everything. What the counters prove is cache-level return to
+  // baseline; what footprint cannot prove is either direction of that claim.
+  const ClearResourceSample after = sample_resources();
   XELOGI(
-      "MetalCommandProcessor: caches cleared (swap #{}) -- textures {}, "
-      "resolve bridges released {} / retained {}, snapshots released {} "
-      "(remaining {}), slots used {} (free {}, stale {})",
-      swap_count_, texture_cache_ ? texture_cache_->cached_texture_count() : 0,
-      uint32_t(released_bridges.size()),
-      texture_cache_ ? texture_cache_->resolved_bridge_count() : 0,
-      released_snapshots,
-      render_target_cache_ ? render_target_cache_->resolve_snapshot_count() : 0,
-      texture_cache_ ? texture_cache_->slots_used() : 0,
-      texture_cache_ ? texture_cache_->slots_free() : 0,
-      texture_cache_ ? texture_cache_->slots_stale() : 0);
+      "MetalCacheClearStats swap={} textures={}->{} "
+      "bridges={}->{}(released={},retained={}) "
+      "snapshots={}->{}(released={}) slots_used={}->{} slots_free={}->{} "
+      "slots_stale={}->{} slots_capacity={} footprint_mib={:.2f}->{:.2f}",
+      swap_count_, before.textures, after.textures, before.bridges,
+      after.bridges, uint32_t(released_bridges.size()), after.bridges,
+      before.snapshots, after.snapshots, released_snapshots, before.slots_used,
+      after.slots_used, before.slots_free, after.slots_free,
+      before.slots_stale, after.slots_stale,
+      texture_cache_ ? texture_cache_->slots_capacity() : 0,
+      before.footprint_mib, after.footprint_mib);
   return true;
 }
 
@@ -6547,14 +6604,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           std::chrono::duration<float>(now - s_last_time).count();
       // Memory-leak telemetry: physical footprint every stats tick — a
       // steadily climbing number is a leak long before the system pauses.
-      double footprint_mb = 0.0;
-      task_vm_info_data_t vm_info;
-      mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
-      if (task_info(mach_task_self(), TASK_VM_INFO,
-                    reinterpret_cast<task_info_t>(&vm_info),
-                    &vm_count) == KERN_SUCCESS) {
-        footprint_mb = double(vm_info.phys_footprint) / (1024.0 * 1024.0);
-      }
+      double footprint_mb = ProcessFootprintMiB();
       XELOGI(
           "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
           "{:.0f} draws/frame, {:.0f} MB footprint, {:.1f} tex-uploads/frame, "
