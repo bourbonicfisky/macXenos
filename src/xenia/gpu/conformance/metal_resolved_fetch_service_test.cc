@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-// Level 0 (CPU, device-free): the CURRENT resolved-fetch service classification,
-// frozen as an executable contract.
+// Level 0 (CPU, device-free): the CURRENT resolved-fetch service
+// classification, frozen as an executable contract.
 //
 // OpenSpec correct-metal-resolve-bridge-authority task 3.1. Group 2 selected
 // outcome A (closed negative): no production authority edit was made. This
@@ -271,8 +271,9 @@ std::string DescribeRow(int row) {
   return text;
 }
 
-TEST_CASE("Resolved-fetch service: 128-row cross-product matches the golden table",
-          "[l0][metal][reader][service]") {
+TEST_CASE(
+    "Resolved-fetch service: 128-row cross-product matches the golden table",
+    "[l0][metal][reader][service]") {
   int rows_checked = 0;
   int counts[4] = {0, 0, 0, 0};
 
@@ -295,7 +296,8 @@ TEST_CASE("Resolved-fetch service: 128-row cross-product matches the golden tabl
               << " ram=" << counts[3]);
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kNotResolveBacked)] ==
           64);
-  REQUIRE(counts[static_cast<int>(ResolvedFetchService::kBridgeSnapshot)] == 59);
+  REQUIRE(counts[static_cast<int>(ResolvedFetchService::kBridgeSnapshot)] ==
+          59);
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kExactCoverSnapshot)] ==
           2);
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kRamContent)] == 3);
@@ -351,7 +353,8 @@ TEST_CASE("Resolved-fetch service: every enumerated factor is load-bearing",
     // Name the concrete paired rows that prove this factor independently
     // changes the classification.
     REQUIRE(first_differing_row >= 0);
-    const ResolvedFetchService low = ClassifyResolvedFetch(Row(first_differing_row));
+    const ResolvedFetchService low =
+        ClassifyResolvedFetch(Row(first_differing_row));
     const ResolvedFetchService high =
         ClassifyResolvedFetch(Row(first_differing_row | bit));
     INFO("witness: " << DescribeRow(first_differing_row) << " -> "
