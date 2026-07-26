@@ -26,6 +26,8 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <cstring>
 #include <chrono>
 #include <exception>
+// TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -52,6 +54,8 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
+// TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
+#include "xenia/gpu/metal/metal_sign_census_probe.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
@@ -1070,6 +1074,11 @@ void MetalCommandProcessor::ShutdownDrawResources() {
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
+  // Final cumulative snapshot before the caches are torn down.
+  if (MetalSignCensus::Enabled()) {
+    MetalSignCensus::Get().DumpFinal();
+  }
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -3883,9 +3892,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }();
       bool probe = s_tex_probe >= 0 &&
                    int64_t(trace_draw_index_) - 1 == s_tex_probe;
+      // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
+      // Engagement is parsed once inside MetalSignCensus::Enabled(), not here.
+      const bool sign_census = MetalSignCensus::Enabled();
+      MetalSignCensus* census_agg =
+          sign_census ? &MetalSignCensus::Get() : nullptr;
+      // Per-draw memo of the packed swizzled signs: the two interpretations of
+      // one fetch constant are separate bindings, so without this the same
+      // byte is derived twice per constant. Deliberately UNINITIALISED — an
+      // entry is read only where its validity bit is set, so the disengaged
+      // path pays no zeroing.
+      uint8_t census_signs[32];
+      uint32_t census_signs_valid = 0;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         if (binding.bindless_descriptor_index < count) {
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+          // TEMPORARY (signedness census probe, task 4.1): classify this
+          // binding exactly as the production gate would, then act on NOTHING.
+          // Every call below is still made and every result still used.
+          // The whole payload lives in an optional that is ENGAGED ONLY on the
+          // temporary env path, so a disengaged build constructs no probe
+          // state per binding.
+          std::optional<MetalSignCensusCall> census_call;
+          if (census_agg) {
+            // Opens the call and decides whether it is an overhead sample.
+            census_agg->BeginCall();
+            MetalSignCensusOverheadScope census_overhead(*census_agg);
+            census_call.emplace();
+            uint32_t census_fc = binding.fetch_constant & 31;
+            if (!(census_signs_valid & (1u << census_fc))) {
+              census_signs[census_fc] = texture_util::SwizzleSigns(fetch);
+              census_signs_valid |= 1u << census_fc;
+            }
+            census_call->reachable = IsMetalTextureSignInterpretationReachable(
+                census_signs[census_fc], binding.is_signed);
+            census_call->admitted =
+                binding.dimension == xenos::FetchOpDimension::k2D;
+            texture_cache_->SetSignCensusProbe(&census_call->result);
+          }
           // C1T-R serve: indices the prepass prepared come from the shared
           // subclass; anything unserved (prep failure, invalidated between
           // prep and serve, faulted load) falls to the legacy path
@@ -3897,18 +3941,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 shared_texture_cache_->GetServedSlot(binding.fetch_constant);
           }
           uint32_t texture_slot = routed_slot;
+          // TEMPORARY (signedness census probe, task 4.1): observer only.
+          // Detaches the cache hook and counts the call on EVERY exit from
+          // this binding iteration; a no-op when the probe is disengaged.
+          auto census_record = [&](uint32_t slot, bool alloc_failed) {
+            if (!census_call) {
+              return;
+            }
+            {
+              MetalSignCensusOverheadScope census_overhead(*census_agg);
+              texture_cache_->SetSignCensusProbe(nullptr);
+              census_agg->RecordBinding(
+                  binding.is_signed, census_call->reachable,
+                  census_call->admitted, binding.dimension,
+                  uint32_t(fetch.format), routed_slot != 0,
+                  census_call->legacy_called, alloc_failed, slot,
+                  census_call->result);
+            }
+            census_agg->EndCall();
+          };
           if (!texture_slot) {
             // A failed shared-cache candidate may still have a correct legacy
             // fallback. Only propagate failure if that fallback also can't
             // create the required object or heap slot.
             texture_cache_->ClearBindingAllocationFailure();
+            if (census_call) {
+              census_call->legacy_called = true;
+            }
             texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
             if (texture_cache_->binding_allocation_failed()) {
+              // TEMPORARY probe: detach the hook and count the call before the
+              // unchanged draw skip below.
+              census_record(texture_slot, true);
               XELOGW("MetalCommandProcessor: skipping draw after texture "
                      "binding allocation failure");
               return false;
             }
           }
+          census_record(texture_slot, false);
           indices[binding.bindless_descriptor_index] = texture_slot;
           if (probe) {
             XELOGI(
@@ -6444,6 +6514,12 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // TEMPORARY (signedness census probe, task 4.1) — reverted at task 4.3.
+  // Cumulative machine-parseable snapshot on the frame boundary, before any
+  // early return below, so headless replays emit it too.
+  if (MetalSignCensus::Enabled()) {
+    MetalSignCensus::Get().OnSwap(swap_count_);
+  }
   // Cycle the GPU-thread autorelease pool once per frame: drain everything
   // autoreleased while encoding the frame just ended (command buffers,
   // encoders, pass descriptors, label strings — the thread has no run-loop
