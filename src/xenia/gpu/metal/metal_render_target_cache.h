@@ -205,9 +205,6 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // MetalTextureCache::ClearCache for why a non-RAM-backed snapshot is the
   // only copy of its content).
   void ClearCache() override;
-  uint32_t deferred_release_count() const {
-    return uint32_t(deferred_texture_releases_.size());
-  }
 
   // Cache-clear step: release the COLOR resolve snapshots that the bridges
   // MetalTextureCache::ReleaseDerivedResolveBridges just classified as derived

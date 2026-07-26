@@ -121,9 +121,6 @@ class MetalSharedTextureCache : public TextureCache {
   // drains those pools. Reversing the two would strand the retirements in a
   // pool that was already emptied.
   void ClearCache() override;
-  // Post-clear evidence: how many fetch-constant slots still express a
-  // binding (a texture, a view, or a legacy slot).
-  uint32_t bound_slot_count() const;
 
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override {

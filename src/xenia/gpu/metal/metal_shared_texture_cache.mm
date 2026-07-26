@@ -304,16 +304,6 @@ void MetalSharedTextureCache::ClearCache() {
   TextureCache::ClearCache();
 }
 
-uint32_t MetalSharedTextureCache::bound_slot_count() const {
-  uint32_t count = 0;
-  for (const BindingSlot& binding_slot : binding_slots_) {
-    if (binding_slot.texture || binding_slot.sampled_view || binding_slot.slot) {
-      ++count;
-    }
-  }
-  return count;
-}
-
 void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
   if (!binding_slot.slot && !binding_slot.sampled_view) {
     binding_slot = BindingSlot{};
