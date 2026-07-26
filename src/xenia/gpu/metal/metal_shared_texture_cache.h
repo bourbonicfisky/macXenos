@@ -12,10 +12,11 @@
 
 #include <cstdint>
 #include <functional>
-#include <unordered_map>
+#include <memory>
 #include <vector>
 
 #include "xenia/gpu/register_file.h"
+#include "xenia/gpu/metal/metal_mip_level_plan.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/xenos.h"
 
@@ -28,10 +29,12 @@ class MetalSharedMemory;
 class MetalTextureCache;
 
 // C1T-R (OpenSpec implement-metal-gpu-texture-loads): the real
-// xe::gpu::TextureCache subclass serving ONLY strict tiled single-mip 2D
-// k_8_8_8_8 kRamContent cache misses through the proven direct-to-tiled
-// compute load (texture_load_32bpb_direct) — the canonical route for that
-// class. The legacy MetalTextureCache remains the
+// xe::gpu::TextureCache subclass serving ONLY strict tiled 2D k_8_8_8_8
+// kRamContent cache misses -- the single-mip class and its mipped sibling
+// (OpenSpec 6.1: a chain at its own guest pointer, loaded through level-scoped
+// views) -- via the proven direct-to-tiled compute load
+// (texture_load_32bpb_direct). Those two classes are mutually exclusive and
+// each is canonical for its own shape. The legacy MetalTextureCache remains the
 // universal fallback and the single bindless-slot authority (this class
 // allocates/retires slots and registers residency through its narrow
 // external-slot adapter). Seam contract: docs/
@@ -168,24 +171,18 @@ class MetalSharedTextureCache : public TextureCache {
 
   BindingSlot binding_slots_[xenos::kTextureFetchConstantCount];
 
-  // Exact consumed source range per shape (Tiled2D min/max scan is ~1 call
-  // per 4 texels; cache it like the proven slice-3 route did).
-  struct ShapeKey {
-    uint32_t w, h, pitch;
-    bool operator==(const ShapeKey& o) const {
-      return w == o.w && h == o.h && pitch == o.pitch;
-    }
-  };
-  struct ShapeKeyHasher {
-    size_t operator()(const ShapeKey& k) const {
-      return (size_t(k.w) * 0x9E3779B1u) ^ (size_t(k.h) << 16) ^ k.pitch;
-    }
-  };
-  struct ShapeRange {
-    uint32_t begin_off, end_off;
-    bool valid;
-  };
-  std::unordered_map<ShapeKey, ShapeRange, ShapeKeyHasher> shape_ranges_;
+  // One planned level of a mipped load. Derived entirely from
+  // GetGuestTextureLayout + GetPackedMipOffset -- no re-implemented tiled,
+  // packing or endian math.
+  // Thin adapter over the single planning authority in
+  // metal_mip_level_plan.h (BuildMipLevelPlan), which conformance tests
+  // directly. Returns false -> atomic legacy fallback, before any encoding.
+  bool PlanLevels(const Texture& texture, bool load_base, bool load_mips,
+                  std::vector<MipLevelPlan>* out);
+  // Per-shape memo of the planner's exact-range scan. Without it EVERY load --
+  // including the single-mip class -- re-runs an O(w/4 * h) Tiled2D scan
+  // (~0.53 ms at 1280x720), so this preserves the cost of both classes.
+  MipLevelRangeMemo range_memo_;
 };
 
 }  // namespace metal

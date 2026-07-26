@@ -15,8 +15,10 @@
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_mip_level_plan.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/trace_writer.h"
+#include "xenia/memory.h"
 
 namespace xe {
 namespace gpu {
@@ -50,7 +52,15 @@ class MetalSharedTextureCache::MetalTexture final
   MetalTexture(MetalSharedTextureCache& cache, const TextureKey& key,
                void* mtl_texture)
       : Texture(cache, key), mtl_texture_(mtl_texture) {
-    SetHostMemoryUsage(uint64_t(key.GetWidth()) * key.GetHeight() * 4);
+    // Full chain, not just the base level: LRU eviction and the memory limits
+    // are driven by this number, so a mipped texture must not under-report.
+    uint64_t bytes = 0;
+    uint32_t levels = key.mip_max_level + 1;
+    for (uint32_t level = 0; level < levels; ++level) {
+      bytes += uint64_t(std::max(key.GetWidth() >> level, 1u)) *
+               std::max(key.GetHeight() >> level, 1u) * 4u;
+    }
+    SetHostMemoryUsage(bytes);
   }
   ~MetalTexture() override {
     auto& cache = static_cast<MetalSharedTextureCache&>(texture_cache());
@@ -67,7 +77,10 @@ class MetalSharedTextureCache::MetalTexture final
   }
   void* mtl_texture() const { return mtl_texture_; }
 
-  uint64_t last_load_submission = 0;
+  // Base and mip load provenance are tracked SEPARATELY so a later partial
+  // reload of one region cannot hide an earlier faulted load of the other.
+  uint64_t last_load_submission = 0;      // base region
+  uint64_t last_mip_load_submission = 0;  // mip chain
 
  private:
   void* mtl_texture_;  // id<MTLTexture>, 2D base, retained.
@@ -103,18 +116,48 @@ bool MetalSharedTextureCache::Initialize() {
   return direct_pipeline_ != nullptr;
 }
 
+bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
+                                         bool load_mips,
+                                         std::vector<MipLevelPlan>* out) {
+  TextureKey key = texture.key();
+  MipLevelPlanInputs in;
+  in.base_address = uint32_t(key.base_page) << 12;
+  in.mip_address = uint32_t(key.mip_page) << 12;
+  in.width = key.GetWidth();
+  in.height = key.GetHeight();
+  in.mip_max_level = key.mip_max_level;
+  in.guest_buffer_size = SharedMemory::kBufferSize;
+  in.load_base = load_base;
+  in.load_mips = load_mips;
+  // The single planning authority (metal_mip_level_plan.h), shared with
+  // conformance so production and tests can never diverge. The memo caches
+  // only the per-shape range scan, so it changes cost, never the plan.
+  return BuildMipLevelPlan(in, texture.guest_layout(), out, &range_memo_);
+}
+
 std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
     TextureKey key) {
   // Strict routed-class guard (C1T-R): anything else is unsupported here and
   // falls back to the legacy cache. Mirrors IsStrictRgba8Eligible at key
   // granularity, plus pitch != 0 (the key carries the raw fetch pitch; the
-  // legacy align32(width) default is not representable) and mip_page == 0
-  // (single-mip base-only).
+  // legacy align32(width) default is not representable) and the mip_page
+  // agreement checked below.
   if (key.dimension != xenos::DataDimension::k2DOrStacked ||
       key.format != xenos::TextureFormat::k_8_8_8_8 || !key.tiled ||
-      key.signed_separate || key.scaled_resolve || key.mip_max_level != 0 ||
-      key.mip_page != 0 || key.depth_or_array_size_minus_1 != 0 ||
-      key.base_page == 0 || key.pitch == 0) {
+      key.signed_separate || key.scaled_resolve ||
+      key.depth_or_array_size_minus_1 != 0 || key.base_page == 0 ||
+      key.pitch == 0) {
+    return nullptr;
+  }
+  // The strict MIPPED sibling is served whenever the chain has its own guest
+  // pointer; the single-mip class stays exactly base-only. Each class refuses
+  // the other's mip_page shape, so they remain mutually exclusive.
+  bool mipped = key.mip_max_level != 0;
+  if (mipped) {
+    if (key.mip_page == 0) {
+      return nullptr;
+    }
+  } else if (key.mip_page != 0) {
     return nullptr;
   }
   uint32_t width = key.GetWidth();
@@ -124,9 +167,22 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
       texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                    width:width
                                   height:height
-                               mipmapped:NO];
+                               mipmapped:mipped ? YES : NO];
   desc.storageMode = MTLStorageModePrivate;
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+  if (mipped) {
+    // Level count from the shared layout's CLAMPED max_level, and the key must
+    // agree with it -- the planner cross-checks the same pair, so a descriptor
+    // and a plan can never disagree about how many levels exist.
+    texture_util::TextureGuestLayout layout = key.GetGuestLayout();
+    if (layout.max_level != key.mip_max_level) {
+      return nullptr;
+    }
+    desc.mipmapLevelCount = layout.max_level + 1;
+    // The load writes through level-scoped views; the G0 foundation fixture
+    // establishes that this usage bit is part of that contract.
+    desc.usage |= MTLTextureUsagePixelFormatView;
+  }
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
     return nullptr;
@@ -137,47 +193,132 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
 
 bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     Texture& texture, bool load_base, bool load_mips) {
-  // The routed class is single-mip base-only by CreateTexture's guard.
-  if (!load_base || load_mips) {
-    return false;
-  }
   MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
   TextureKey key = texture.key();
-  uint32_t base = key.base_page << 12;
-  uint32_t blocks_w = key.GetWidth();
-  uint32_t blocks_h = key.GetHeight();
-  // fetch pitch is texels/32, so pitch_texels is already 32-aligned; block ==
-  // texel for 32bpp.
-  uint32_t pitch_blocks_aligned = uint32_t(key.pitch) << 5;
-
-  // Exact consumed source range (the proven contract's Tiled2D min/max over
-  // the padded read grid), cached per shape.
-  ShapeKey shape{blocks_w, blocks_h, pitch_blocks_aligned};
-  auto shape_it = shape_ranges_.find(shape);
-  if (shape_it == shape_ranges_.end()) {
-    TextureLoadSourceRange r = ComputeStrictRgba8SourceRange(
-        0, blocks_w, blocks_h, pitch_blocks_aligned, UINT32_MAX);
-    shape_it = shape_ranges_
-                   .emplace(shape, ShapeRange{r.begin, r.end, r.valid})
-                   .first;
+  bool mipped = key.mip_max_level != 0;
+  if (!mipped) {
+    // The promoted single-mip class: base-only by CreateTexture's guard.
+    if (!load_base || load_mips) {
+      return false;
+    }
   }
-  const ShapeRange& range = shape_it->second;
-  if (!range.valid ||
-      uint64_t(base) + range.end_off > SharedMemory::kBufferSize) {
+  if (!load_base && !load_mips) {
     return false;
   }
 
-  // The base-class LoadTextureData already ran RequestRange over the shared
-  // guest layout extent (page revalidation from post-scatter RAM); this
-  // registers the exact read range as CONSUMED by the open frame so a later
-  // same-frame rewrite triggers the existing hazard flush — pre-encoder, the
-  // same seam class the vfetch path uses.
+  // ---- Content guard, the equivalent of the legacy path's: captures never
+  // record mip memory, so a trace replay restores all-zero mip pages, and
+  // loading those blacks out every minified surface. The legacy cache probes
+  // the first 4 KiB at mip_address and serves base-only when it is entirely
+  // zero; the routed path must apply the SAME rule or the two diverge on
+  // replays and on any live all-zero mip region. Direct replay non-engagement
+  // telemetry is evidence, not a substitute -- older or future traces could
+  // engage. New-capture mip recording is unaffected (that is the warm sweep,
+  // which only records regions already up to date).
+  if (mipped && load_mips) {
+    uint32_t mip_addr = uint32_t(key.mip_page) << 12;
+    // Bound FIRST: the subtraction below underflows for an out-of-range
+    // address, which would produce an enormous probe length.
+    if (mip_addr >= SharedMemory::kBufferSize) {
+      return false;
+    }
+    const uint32_t* probe = reinterpret_cast<const uint32_t*>(
+        shared_memory().guest_memory().TranslatePhysical(mip_addr));
+    if (!probe) {
+      return false;
+    }
+    uint32_t probe_words = std::min<uint32_t>(
+        1024, (SharedMemory::kBufferSize - mip_addr) / 4);
+    bool any_nonzero = false;
+    for (uint32_t i = 0; i < probe_words; ++i) {
+      if (probe[i]) {
+        any_nonzero = true;
+        break;
+      }
+    }
+    if (!any_nonzero) {
+      // Zero mip region: decline the whole load so the legacy path applies its
+      // own guard and serves the base level only. Atomic fallback.
+      return false;
+    }
+  }
+
+  // ---- Plan EVERY requested level and validate EVERY consumed range BEFORE
+  // any encoding, so an unsatisfiable plan falls back to the legacy cache
+  // atomically instead of half-loading a texture. ----
+  std::vector<MipLevelPlan> plan;
+  if (!PlanLevels(texture, load_base, load_mips, &plan)) {
+    return false;
+  }
   auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
-  if (!metal_shared_memory.RequestConsumedRange(
-          base + range.begin_off, range.end_off - range.begin_off)) {
-    return false;
+  for (const MipLevelPlan& p : plan) {
+    // Register each exact read range as CONSUMED by the open frame so a later
+    // same-frame rewrite triggers the existing hazard flush.
+    //
+    // ATOMICITY, precisely: if a later request fails, earlier ones stay
+    // registered and we return before ANY encoding, so no texture content is
+    // half-written and the legacy path serves the whole texture. A surplus
+    // consumed range is conservative by construction -- it can only cause an
+    // extra hazard flush, never a missed one -- so the guarantee is "no partial
+    // GPU work", not "no partial bookkeeping".
+    if (!metal_shared_memory.RequestConsumedRange(
+            p.consumed_begin, p.consumed_end - p.consumed_begin)) {
+      return false;
+    }
   }
 
+  // ---- Pre-create and validate EVERY level view BEFORE opening the encoder.
+  // A late newTextureView failure must not leave earlier dispatches encoded, so
+  // view creation cannot be interleaved with dispatching. ----
+  id<MTLTexture> base_texture =
+      (__bridge id<MTLTexture>)metal_texture.mtl_texture();
+  if (!base_texture) {
+    return false;
+  }
+  // RAII: every early exit after pre-creation releases the retained views
+  // exactly once. `release_on_scope_exit` is cleared only after the views have
+  // been handed to the submission-gated retirement pool, so a view is never
+  // both retired and released.
+  std::vector<void*> level_views;  // retained id<MTLTexture>, parallel to plan
+  bool release_on_scope_exit = true;
+  struct ViewGuard {
+    std::vector<void*>* views;
+    bool* armed;
+    ~ViewGuard() {
+      if (!*armed) {
+        return;
+      }
+      for (void* v : *views) {
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)v;
+        (void)released;
+      }
+      views->clear();
+    }
+  } view_guard{&level_views, &release_on_scope_exit};
+  bool views_ok = true;
+  if (mipped) {
+    level_views.reserve(plan.size());
+    for (const MipLevelPlan& p : plan) {
+      id<MTLTexture> view = [base_texture
+          newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                            textureType:MTLTextureType2D
+                                 levels:NSMakeRange(p.host_level, 1)
+                                 slices:NSMakeRange(0, 1)];
+      if (!view) {
+        views_ok = false;
+        break;
+      }
+      level_views.push_back((__bridge_retained void*)view);
+    }
+    if (!views_ok) {
+      // The guard releases what we made; nothing was encoded, so the legacy
+      // path serves the whole texture.
+      return false;
+    }
+  }
+
+  // ---- ONE PrepareTransferCommandBuffer per texture load; ALL levels batched
+  // as dispatches on that existing frame command buffer. ----
   void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_() : nullptr;
   if (!command_buffer_ptr || !direct_pipeline_) {
     return false;
@@ -188,45 +329,77 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   if (!encoder) {
     return false;
   }
-  encoder.label = @"shared-texcache direct load";
-  MetalLoadShaderPipelines::LoadConstants constants = {};
-  constants.is_tiled_3d_endian_scale = 1u | (uint32_t(key.endianness) << 2);
-  constants.guest_offset = base;
-  constants.guest_pitch_aligned = pitch_blocks_aligned;
-  constants.size_blocks[0] = blocks_w;
-  constants.size_blocks[1] = blocks_h;
-  constants.size_blocks[2] = 1;
-  // Host fields are unused by the direct (image-store) variant; keep the
-  // buffer-shape values for ABI-shape consistency with the proven G0 case.
-  constants.host_offset = 0;
-  constants.host_pitch = ((blocks_w * 4u) + 255u) & ~255u;
-  constants.height_texels = blocks_h;
+  encoder.label = mipped ? @"shared-texcache direct load (mip chain)"
+                         : @"shared-texcache direct load";
   [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
                                        direct_pipeline_];
-  [encoder setBytes:&constants
-             length:sizeof(constants)
-            atIndex:MetalLoadShaderPipelines::kBufferIndexPushConstants];
-  [encoder setTexture:(__bridge id<MTLTexture>)metal_texture.mtl_texture()
-              atIndex:1];
   [encoder setBuffer:(__bridge id<MTLBuffer>)metal_shared_memory.GetBuffer()
               offset:0
              atIndex:MetalLoadShaderPipelines::kBufferIndexSource];
   MTLSize group = MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
                               MetalLoadShaderPipelines::kThreadgroupSizeY, 1);
-  uint32_t threads_x = (blocks_w + 7u) / 8u;  // 1 thread = 8 texels along X.
-  [encoder dispatchThreadgroups:MTLSizeMake(
-                                    (threads_x + group.width - 1) / group.width,
-                                    (blocks_h + group.height - 1) /
-                                        group.height,
-                                    1)
-          threadsPerThreadgroup:group];
+  for (size_t i = 0; i < plan.size(); ++i) {
+    const MipLevelPlan& p = plan[i];
+    // Ephemeral level-scoped write view, pre-created above: level N of the base
+    // aliased as a single-level image so the unchanged image_store primitive
+    // can target it. Deliberately NOT cached -- a per-level view cache would be
+    // new lifetime state and a fresh instance of the stale-reference class.
+    // A non-mipped texture needs no view at all.
+    id<MTLTexture> dest =
+        mipped ? (__bridge id<MTLTexture>)level_views[i] : base_texture;
+    MetalLoadShaderPipelines::LoadConstants constants = {};
+    constants.is_tiled_3d_endian_scale = 1u | (uint32_t(key.endianness) << 2);
+    constants.guest_offset = p.guest_offset;
+    constants.guest_pitch_aligned = p.pitch_blocks;
+    constants.size_blocks[0] = p.width;
+    constants.size_blocks[1] = p.height;
+    constants.size_blocks[2] = 1;
+    // The packed sub-tile origin rides host_offset (px low 16 / py high 16) --
+    // the production-zero field the 6.1-G0 foundation proved. Zero for base and
+    // non-packed levels, keeping those byte-identical to the promoted route.
+    constants.host_offset = (p.px & 0xFFFFu) | ((p.py & 0xFFFFu) << 16);
+    constants.host_pitch = ((p.width * 4u) + 255u) & ~255u;
+    constants.height_texels = p.height;
+    [encoder setBytes:&constants
+               length:sizeof(constants)
+              atIndex:MetalLoadShaderPipelines::kBufferIndexPushConstants];
+    [encoder setTexture:dest atIndex:1];
+    uint32_t threads_x = (p.width + 7u) / 8u;  // 1 thread = 8 texels along X.
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      (threads_x + group.width - 1) /
+                                          group.width,
+                                      (p.height + group.height - 1) /
+                                          group.height,
+                                      1)
+            threadsPerThreadgroup:group];
+  }
   [encoder endEncoding];
 
-  metal_texture.last_load_submission =
-      submission_provider_ ? submission_provider_() : 0;
+  // The GPU reads each view for the life of this submission; retire them all
+  // through the single submission-gated legacy pool, then DISARM the guard so
+  // ownership transfers exactly once.
+  release_on_scope_exit = false;
+  for (void* v : level_views) {
+    if (legacy_) {
+      legacy_->RetireExternalTexture(v);
+    } else {
+      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)v;
+      (void)released;
+    }
+  }
+  level_views.clear();
+
+  uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  if (load_base) {
+    metal_texture.last_load_submission = submission;
+  }
+  if (load_mips) {
+    metal_texture.last_mip_load_submission = submission;
+  }
   // Keep the texture out of LRU destruction while its load is in flight
   // (completion actions can pump mid-frame on upload-ring pressure).
   texture.MarkAsUsed();
+
   // No trace recording here (M5 revised by gate-C evidence): the route
   // disengages while a capture is open, so a load never encodes during a
   // captured frame and the legacy path records the CPU-oracle read-set.
@@ -268,10 +441,13 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
         HostSwizzleComponentToMetal((swizzle >> 3) & 0b111),
         HostSwizzleComponentToMetal((swizzle >> 6) & 0b111),
         HostSwizzleComponentToMetal((swizzle >> 9) & 0b111));
+    // FULL mip range: a mipped texture served through a single-level view
+    // samples only mip 0, which would silently break guest LOD selection.
+    NSUInteger level_count = base_texture.mipmapLevelCount;
     id<MTLTexture> view = [base_texture
         newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
                           textureType:MTLTextureType2DArray
-                               levels:NSMakeRange(0, 1)
+                               levels:NSMakeRange(0, level_count)
                               slices:NSMakeRange(0, 1)
                              swizzle:channels];
     if (!view || !legacy_) {
@@ -298,9 +474,10 @@ void MetalSharedTextureCache::ClearCache() {
   for (BindingSlot& binding_slot : binding_slots_) {
     ReleaseBindingSlot(binding_slot);
   }
-  // Derived scan results keyed by texture shape; cheap to recompute and
-  // meaningless once the textures are gone.
-  shape_ranges_.clear();
+  // Derived scan results keyed by texture shape; meaningless once the textures
+  // are gone, and a clear must not leave state behind that a growth check
+  // would see.
+  range_memo_.Clear();
   TextureCache::ClearCache();
 }
 
@@ -363,12 +540,22 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index) {
     return 0;
   }
   MetalTexture* metal_texture = static_cast<MetalTexture*>(texture);
-  if (submission_fault_query_ && metal_texture->last_load_submission &&
-      submission_fault_query_(metal_texture->last_load_submission)) {
-    // M4: content rode a lost command buffer — never serve it; the next
-    // invalidation (recurring resolve dests re-invalidate every frame)
+  if (submission_fault_query_) {
+    // M4: content that rode a lost command buffer must never be served. BOTH
+    // regions are consulted, because base and mip loads carry independent
+    // submissions -- checking only the base would make the claimed independent
+    // provenance false and could serve a texture whose mip chain is garbage.
+    // The next invalidation (recurring resolve dests re-invalidate every frame)
     // reloads, and the CPU path covers until then.
-    return 0;
+    bool base_faulted =
+        metal_texture->last_load_submission &&
+        submission_fault_query_(metal_texture->last_load_submission);
+    bool mip_faulted =
+        metal_texture->last_mip_load_submission &&
+        submission_fault_query_(metal_texture->last_mip_load_submission);
+    if (base_faulted || mip_faulted) {
+      return 0;
+    }
   }
   texture->MarkAsUsed();
   if (legacy_) {
@@ -384,23 +571,39 @@ void MetalSharedTextureCache::OnSubmissionsFaulted(
   }
   ForEachTexture([&](Texture& texture) {
     MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
-    if (!metal_texture.last_load_submission) {
+    // BOTH regions are checked independently: base and mip loads carry their
+    // own submission, so a later partial reload of one cannot hide an earlier
+    // faulted load of the other.
+    bool base_faulted = false;
+    bool mip_faulted = false;
+    for (uint64_t submission : submissions) {
+      if (metal_texture.last_load_submission &&
+          metal_texture.last_load_submission == submission) {
+        base_faulted = true;
+      }
+      if (metal_texture.last_mip_load_submission &&
+          metal_texture.last_mip_load_submission == submission) {
+        mip_faulted = true;
+      }
+    }
+    if (!base_faulted && !mip_faulted) {
       return;
     }
-    for (uint64_t submission : submissions) {
-      if (metal_texture.last_load_submission != submission) {
-        continue;
-      }
-      // The load rode a lost command buffer: its content is garbage while
-      // base state says up-to-date. Invalidate through the ONE authority —
-      // the watch fires, the texture goes outdated, and the next use
-      // revalidates + reloads from intact RAM (also evicts any overlapping
-      // legacy entry via its own global watch).
-      TextureKey key = texture.key();
+    // The load rode a lost command buffer: its content is garbage while
+    // base state says up-to-date. Invalidate through the ONE authority —
+    // the watch fires, the texture goes outdated, and the next use
+    // revalidates + reloads from intact RAM (also evicts any overlapping
+    // legacy entry via its own global watch).
+    TextureKey key = texture.key();
+    if (base_faulted) {
       shared_memory().MemoryInvalidationCallback(
           key.base_page << 12, texture.GetGuestBaseSize(), true);
       metal_texture.last_load_submission = 0;
-      return;
+    }
+    if (mip_faulted) {
+      shared_memory().MemoryInvalidationCallback(
+          key.mip_page << 12, texture.GetGuestMipsSize(), true);
+      metal_texture.last_mip_load_submission = 0;
     }
   });
 }
@@ -414,15 +617,22 @@ void MetalSharedTextureCache::WriteAllCachedTexturesToTrace(
   // immediate drain-time InvalidateRange evicted the entry) and reload
   // during the captured frame through the legacy path instead.
   ForEachTexture([&](Texture& texture) {
-    if (texture.base_outdated_lockless()) {
-      return;
-    }
     TextureKey key = texture.key();
-    uint32_t base = key.base_page << 12;
-    trace_writer.WriteMemoryRead(
-        base, ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
-                                      key.GetHeight(), 4, base,
-                                      SharedMemory::kBufferSize));
+    if (!texture.base_outdated_lockless()) {
+      uint32_t base = key.base_page << 12;
+      trace_writer.WriteMemoryRead(
+          base, ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
+                                        key.GetHeight(), 4, base,
+                                        SharedMemory::kBufferSize));
+    }
+    // 6.1: the mip chain is a SEPARATE up-to-date region at its own guest
+    // pointer, so a warm mipped texture must record those bytes too or a
+    // replay would restore a texture whose levels were never captured.
+    if (key.mip_max_level && key.mip_page &&
+        !texture.mips_outdated_lockless()) {
+      trace_writer.WriteMemoryRead(uint32_t(key.mip_page) << 12,
+                                   texture.GetGuestMipsSize());
+    }
   });
 }
 

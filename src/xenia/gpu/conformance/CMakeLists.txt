@@ -127,7 +127,16 @@ if(APPLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_invalidation_alias_test.mm
     # Cache-clear release (implement-metal-cache-clearing section 3): reuses
     # the same real MetalTextureCache + view-heap closure as the alias test.
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_clear_release_test.mm)
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_clear_release_test.mm
+    # OpenSpec 6.1 lifecycle: constructs the REAL MetalSharedTextureCache
+    # (shared TextureCache subclass) over the real MetalSharedMemory + the real
+    # legacy cache as slot authority, and drives it through its production
+    # entry points. Its whole include closure -- texture_cache.cc,
+    # metal_texture_cache.mm, metal_shared_memory.mm, metal_load_shader_pipelines.mm,
+    # texture_util.cc, trace_writer.cc, memory.cc, register_file.cc -- is
+    # already in this target, so the subclass source is the only addition.
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_texture_cache.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_texture_cache_lifecycle_test.mm)
   # Metal Shader Converter declarations used by ir_runtime_impl.mm and
   # metal_texture_cache.mm's bindless view-heap writes.
   target_include_directories(xenia-gpu-conformance PRIVATE

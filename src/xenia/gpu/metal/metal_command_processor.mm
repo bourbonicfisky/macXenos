@@ -3085,9 +3085,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t fetch_pitch_texels = fetch.pitch
                                           ? (uint32_t(fetch.pitch) << 5)
                                           : ((fetch_width + 31u) & ~31u);
+        // Two mutually exclusive strict classes: the single-mip predicate keeps
+        // deciding its own class unchanged, and the mipped sibling decides the
+        // chain-bearing one.
         if (!metal::IsStrictRgba8RouteEligible(fetch, false, fetch_width,
                                                fetch_height,
-                                               fetch_pitch_texels)) {
+                                               fetch_pitch_texels) &&
+            !metal::IsStrictRgba8MipRouteEligible(fetch, false, fetch_width,
+                                                  fetch_height,
+                                                  fetch_pitch_texels)) {
           continue;
         }
         if (texture_cache_->ClassifyFetchService(fetch, false) !=

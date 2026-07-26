@@ -94,6 +94,37 @@ inline bool IsStrictRgba8RouteEligible(
          fetch.pitch != 0;
 }
 
+// ---- Mipped sibling class (OpenSpec 6.1) ----
+
+// The MIPPED sibling of the strict class. Deliberately a separate predicate:
+// IsStrictRgba8Eligible's single-mip rejection above is pinned by conformance
+// and is NOT weakened, because the canonical single-mip route keeps depending
+// on it exactly as promoted.
+//
+// Every non-mip condition is identical to the strict predicate (evaluated by
+// masking the mip levels off and delegating, so the two can never drift), plus:
+//   - mip_min_level == 0 EXPLICITLY. A nonzero min level means the guest
+//     samples a shifted level set, which this slice does not express.
+//   - mip_max_level > 0, i.e. there is actually a chain to load.
+//   - a nonzero mip_address: the chain lives at its own guest pointer, and the
+//     per-level plan reads levels 1..max from there.
+//   - a nonzero fetch pitch, for the same reason the single-mip route requires
+//     it (the shared TextureKey carries the raw pitch).
+inline bool IsStrictRgba8MipRouteEligible(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed, uint32_t width,
+    uint32_t height, uint32_t pitch_texels) {
+  if (fetch.mip_min_level != 0 || fetch.mip_max_level == 0) {
+    return false;
+  }
+  if (!fetch.mip_address || !fetch.pitch) {
+    return false;
+  }
+  xenos::xe_gpu_texture_fetch_t as_base = fetch;
+  as_base.mip_min_level = 0;
+  as_base.mip_max_level = 0;
+  return IsStrictRgba8Eligible(as_base, is_signed, width, height, pitch_texels);
+}
+
 // ---- Trace-record extent ----
 
 // The guest byte extent the legacy cache records for a non-cube texture
@@ -128,37 +159,68 @@ struct TextureLoadSourceRange {
   bool valid = false;
 };
 
-inline TextureLoadSourceRange ComputeStrictRgba8SourceRange(
-    uint32_t base, uint32_t blocks_w, uint32_t blocks_h,
-    uint32_t pitch_blocks_aligned, uint32_t physical_size) {
+// ONE exact-range authority, origin-aware. The 32bpb direct shader dispatches
+// ceil(w/8) threads along x, each covering 8 blocks as two 4-block groups, and
+// reads Tiled2D(px + 4k, py + y) -- so for a packed sub-mip the read set starts
+// AT the sub-tile origin, not at (0,0). Scanning from the origin is what makes
+// this exact: an origin-to-end rectangle would also claim the bytes of every
+// larger level sharing the tail.
+//
+// All intermediates are 64-bit and every value that reaches Tiled2D is proven
+// to fit in int32, so a hostile or corrupt fetch cannot wrap into a bogus
+// in-range span.
+inline TextureLoadSourceRange ComputeStrictRgba8SourceRangeAtOrigin(
+    uint32_t base, uint32_t px, uint32_t py, uint32_t blocks_w,
+    uint32_t blocks_h, uint32_t pitch_blocks_aligned, uint32_t physical_size) {
   TextureLoadSourceRange r;
   if (!blocks_w || !blocks_h || !pitch_blocks_aligned) {
     return r;
   }
-  uint32_t padded_w = (blocks_w + 7u) & ~7u;
-  int32_t min_off = INT32_MAX;
-  int32_t max_off = INT32_MIN;
-  for (uint32_t y = 0; y < blocks_h; ++y) {
-    for (uint32_t x = 0; x < padded_w; x += 4) {
+  uint64_t padded_w = (uint64_t(blocks_w) + 7u) & ~uint64_t(7u);
+  uint64_t x_end = uint64_t(px) + padded_w;
+  uint64_t y_end = uint64_t(py) + uint64_t(blocks_h);
+  // Everything handed to Tiled2D must be a non-negative int32.
+  if (x_end > uint64_t(INT32_MAX) || y_end > uint64_t(INT32_MAX) ||
+      pitch_blocks_aligned > uint32_t(INT32_MAX)) {
+    return r;
+  }
+  int64_t min_off = INT64_MAX;
+  int64_t max_off = INT64_MIN;
+  for (uint64_t y = py; y < y_end; ++y) {
+    for (uint64_t x = px; x < x_end; x += 4) {
       int32_t off = texture_address::Tiled2D(int32_t(x), int32_t(y),
                                              pitch_blocks_aligned,
                                              /*bytes_per_block_log2=*/2);
       if (off < 0) {
         return r;
       }
-      min_off = std::min(min_off, off);
-      max_off = std::max(max_off, off);
+      min_off = std::min<int64_t>(min_off, off);
+      max_off = std::max<int64_t>(max_off, off);
     }
   }
+  if (min_off > max_off) {
+    return r;
+  }
   uint64_t begin = uint64_t(base) + uint64_t(min_off);
-  uint64_t end = uint64_t(base) + uint64_t(max_off) + 16;
-  if (end > physical_size || begin >= end) {
+  uint64_t end = uint64_t(base) + uint64_t(max_off) + 16u;
+  if (end > uint64_t(physical_size) || begin >= end) {
     return r;
   }
   r.begin = uint32_t(begin);
   r.end = uint32_t(end);
   r.valid = true;
   return r;
+}
+
+// The single-mip form: exactly the origin-aware authority at origin (0,0). Kept
+// as a named entry point because the promoted route and its pinned conformance
+// test call it, but it is NOT a second implementation.
+inline TextureLoadSourceRange ComputeStrictRgba8SourceRange(
+    uint32_t base, uint32_t blocks_w, uint32_t blocks_h,
+    uint32_t pitch_blocks_aligned, uint32_t physical_size) {
+  return ComputeStrictRgba8SourceRangeAtOrigin(base, 0, 0, blocks_w, blocks_h,
+                                               pitch_blocks_aligned,
+                                               physical_size);
 }
 
 // ---- Destination layout ----
