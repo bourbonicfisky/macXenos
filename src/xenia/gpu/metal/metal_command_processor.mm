@@ -986,6 +986,9 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       device_ptr, memory_, shared_memory_.get(), view_bindless_heap_,
       kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
+  // The same null texture every heap slot is initialized to, so a slot freed
+  // by a cache clear returns to a valid resource rather than an empty entry.
+  texture_cache_->SetNullTexture(null_texture_);
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
@@ -1589,36 +1592,191 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         }
         continue;
       }
-      case metal::CacheClearAdmission::kExecute: {
-        // Step 5 -- releasing derived cache state -- is section 3 of the
-        // owning change (implement-metal-cache-clearing) and is NOT
-        // implemented yet.
-        //
-        // So this deliberately does neither of the two things that would look
-        // like progress. It does not advance cache_clears_executed_: that
-        // counter certifies a COMPLETED clear to a scripted gate, and counting
-        // admission alone would make the gate pass while nothing was ever
-        // released -- the exact false positive the counter exists to prevent.
-        // And it does not consume the latch: the request is genuinely
-        // unsatisfied, so dropping it here would be the silent discard this
-        // change is fixing. The request stays pending and re-decides at each
-        // boundary (a bool test plus a pure predicate) until the release step
-        // lands and takes over both actions.
-        static uint32_t s_pending_logs = 0;
-        if (++s_pending_logs <= 4) {
-          XELOGW(
-              "MetalCommandProcessor: cache-clear request reached its "
-              "boundary and quiesced, but resource release is not implemented "
-              "yet -- request remains pending (swap #{})",
-              swap_count_);
+      case metal::CacheClearAdmission::kExecute:
+        // Step 5: every precondition holds -- encoder closed, every submission
+        // complete, completion actions pumped, and all GPU-produced guest data
+        // published to RAM. Only now may anything be released.
+        if (!ReleaseCachesForClear()) {
+          // A precondition failed and nothing was released, so the request is
+          // NOT satisfied: leave it latched and do not count it.
+          return;
         }
+        // Step 6: the request is satisfied. Consume the latch and publish the
+        // completed clear (release, so the release work above is visible to
+        // whichever thread reads the count).
+        cache_clear_requested_ = false;
+        cache_clears_executed_.fetch_add(1, std::memory_order_release);
         return;
-      }
       case metal::CacheClearAdmission::kDefer:
       case metal::CacheClearAdmission::kNoRequest:
         return;
     }
   }
+}
+
+bool MetalCommandProcessor::ReleaseCachesForClear() {
+  // Step 5 of the deferred cache-clear ordering. Reached only through
+  // ExecuteDeferredCacheClear's kExecute decision, which is what guarantees
+  // the device is idle and every GPU-produced guest write has already reached
+  // RAM. Every release below is therefore immediate rather than retired.
+  //
+  // ALL preconditions are checked FIRST, before a single object is released,
+  // so a failure is reported with everything still intact rather than half way
+  // through a partial release. Both of these describe submission-gated state
+  // that step 3's completion pumping must already have drained at a boundary
+  // where every submission has completed; a survivor of either would name
+  // resources this function is about to free.
+  uint32_t queued_actions = uint32_t(completion_actions_.size());
+  uint32_t consumed_ranges =
+      shared_memory_ ? shared_memory_->consumed_range_count() : 0;
+  if (queued_actions || consumed_ranges) {
+    XELOGE(
+        "MetalCommandProcessor: cache clear aborted -- {} completion action(s) "
+        "and {} consumed range(s) still held at a quiesced boundary; "
+        "submission-gated retirement did not drain",
+        queued_actions, consumed_ranges);
+    assert_always();
+    return false;  // nothing released; the request stays latched.
+  }
+
+  // The order is load-bearing, not cosmetic: every step that RETIRES into the
+  // legacy cache's pools must run before the step that DRAINS them.
+
+  // 1. The shared TextureCache subclass FIRST: it retires its binding slots
+  //    and views into the LEGACY cache's pools.
+  if (shared_texture_cache_) {
+    shared_texture_cache_->ClearCache();
+  }
+  // 2. Classify the resolve-snapshot bridges and release the derived ones
+  //    (current-generation RAM-backed color: the clear published their
+  //    writebacks in step 4, so guest RAM holds THIS generation's content and
+  //    their serve path already reads it).
+  //    This also retires into the legacy pools, so it precedes the drain.
+  //    Bridges that are !generation_ram_backed (this content generation was
+  //    never written to guest RAM, so the snapshot is the only copy) or
+  //    is_depth (served from the snapshot regardless of RAM) are retained.
+  std::vector<std::pair<uint32_t, void*>> released_bridges;
+  if (texture_cache_) {
+    texture_cache_->ReleaseDerivedResolveBridges(&released_bridges);
+  }
+  // 3. Release exactly the snapshot textures those bridges named, plus the
+  //    command-processor-owned tip textures and per-base resolve metadata for
+  //    the same bases. Nothing else's snapshot is touched.
+  uint32_t released_snapshots = 0;
+  std::vector<uint32_t> released_snapshot_bases;
+  if (render_target_cache_ && !released_bridges.empty()) {
+    released_snapshots = render_target_cache_->ReleaseResolveSnapshotsForBases(
+        released_bridges, &released_snapshot_bases);
+  }
+  // Per-base state is keyed off what was ACTUALLY released, never off what was
+  // requested. A skipped identity mismatch means a newer snapshot generation
+  // lives at that base, and its tip texture, RAM colour layout, snapshot
+  // generation, and held writeback content belong to that generation -- they
+  // must survive whole, exactly like the snapshot itself.
+  for (uint32_t base : released_snapshot_bases) {
+    auto tip_it = tip_view_textures_.find(base);
+    if (tip_it != tip_view_textures_.end()) {
+      if (tip_it->second) {
+        id<MTLTexture> released =
+            (__bridge_transfer id<MTLTexture>)tip_it->second;
+        (void)released;
+      }
+      tip_view_textures_.erase(tip_it);
+    }
+    ram_color_layouts_.erase(base);
+    resolve_snapshot_generation_.erase(base);
+    held_writeback_content_.erase(base);
+  }
+  // 4. The legacy cache DRAIN: cached textures, their descriptors, the slot
+  //    pools, and both retire lists -- including everything steps 1 and 2 just
+  //    retired into them.
+  if (texture_cache_) {
+    texture_cache_->ClearCache();
+  }
+  // 5. Render targets: drops derived state keyed by render-target identity and
+  //    drains deferred releases, then the shared clear keeps every target still
+  //    owning EDRAM data. Canonical EDRAM is untouched.
+  if (render_target_cache_) {
+    render_target_cache_->ClearCache();
+  }
+  // 6. Shared memory. The consumed-range precondition was verified at the top,
+  //    before anything was released; re-check here only to catch a release
+  //    path above that somehow recorded a new hazard range.
+  if (shared_memory_) {
+    uint32_t consumed_now = shared_memory_->consumed_range_count();
+    if (consumed_now) {
+      XELOGE(
+          "MetalCommandProcessor: {} consumed range(s) appeared DURING the "
+          "cache-clear release -- a release path is recording hazard state",
+          consumed_now);
+      assert_always();
+    }
+    shared_memory_->ClearCache();
+  }
+  // 7. Metal-owned transient pools with no shared equivalent. The arena reset
+  //    is a hard ring reset -- documented as safe only when nothing is in
+  //    flight, which is exactly what this boundary proves. It is unconditional:
+  //    the S7 arena-reset bisect switch governs per-frame reclamation policy,
+  //    not whether a cache clear releases the pool.
+  if (upload_arena_) {
+    upload_arena_->Reset();
+  }
+  for (auto& pair : dummy_depth_textures_) {
+    if (pair.second) {
+      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second;
+      (void)released;
+    }
+  }
+  dummy_depth_textures_.clear();
+  frame_cleared_targets_.clear();  // per-frame clear bookkeeping.
+
+  // NOT released, and each for a stated reason:
+  //   - pipeline_cache_ (pipeline states + MSC-translated shaders): the D3D12
+  //     contract retains what live pipelines reference; destroying them would
+  //     make this a translation-layer reset and risk post-clear draw skips.
+  //   - sampler_states_/sampler_slot_cache_ and depth_stencil_states_:
+  //     immutable state objects of the same class as pipelines.
+  //   - the ZPD visibility pool, zpd_resolves_in_flight_, and the active
+  //     segment: D3D12's clear does not touch its query pool either, and a
+  //     logical report can span the request.
+  //   - canonical EDRAM and EDRAM-owning render targets: authoritative guest
+  //     state, retained by the shared clear's own rule.
+
+  // Retire-list consistency: nothing may remain queued against a submission
+  // whose resources were just released. Completion actions are pumped by step
+  // 3 at a boundary where every submission has completed, so this must already
+  // be empty -- verify rather than assume, since a survivor would run against
+  // caches that no longer hold what it expects.
+  // Re-check: nothing above may have enqueued new submission-gated work.
+  if (!completion_actions_.empty()) {
+    XELOGE(
+        "MetalCommandProcessor: cache clear ENQUEUED {} completion action(s) "
+        "while releasing -- a release path is retiring against a submission "
+        "that will never be revisited",
+        uint32_t(completion_actions_.size()));
+    assert_always();
+  }
+  // Every retained bridge must satisfy the documented retention invariant.
+  if (texture_cache_ && !texture_cache_->retained_bridges_are_authoritative()) {
+    XELOGE(
+        "MetalCommandProcessor: cache clear retained a current-generation "
+        "RAM-backed color resolve bridge (generation_ram_backed) -- derived "
+        "state was classified as authoritative");
+    assert_always();
+  }
+  XELOGI(
+      "MetalCommandProcessor: caches cleared (swap #{}) -- textures {}, "
+      "resolve bridges released {} / retained {}, snapshots released {} "
+      "(remaining {}), slots used {} (free {}, stale {})",
+      swap_count_, texture_cache_ ? texture_cache_->cached_texture_count() : 0,
+      uint32_t(released_bridges.size()),
+      texture_cache_ ? texture_cache_->resolved_bridge_count() : 0,
+      released_snapshots,
+      render_target_cache_ ? render_target_cache_->resolve_snapshot_count() : 0,
+      texture_cache_ ? texture_cache_->slots_used() : 0,
+      texture_cache_ ? texture_cache_->slots_free() : 0,
+      texture_cache_ ? texture_cache_->slots_stale() : 0);
+  return true;
 }
 
 void MetalCommandProcessor::EnsureZPDQueryResources() {

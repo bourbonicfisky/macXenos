@@ -230,6 +230,111 @@ MetalTextureCache::~MetalTextureCache() {
   resolved_targets_.clear();
 }
 
+void MetalTextureCache::ReleaseDerivedResolveBridges(
+    std::vector<std::pair<uint32_t, void*>>* released_out) {
+  for (auto it = resolved_targets_.begin(); it != resolved_targets_.end();) {
+    const ResolvedTarget& target = it->second;
+    // See the header for the classification. Only a RAM-backed color bridge is
+    // derived: its content is in guest RAM (the clear publishes every pending
+    // writeback before this point) and its serve path already reads RAM.
+    //
+    // generation_ram_backed, NOT ram_backed: the latter is sticky for the life
+    // of the base, so a later snapshot generation that skipped its writeback
+    // would still look RAM-backed and be released with content RAM never
+    // received.
+    if (!target.generation_ram_backed || target.is_depth) {
+      ++it;
+      continue;
+    }
+    // Retires the bridge's slots and cache-owned swizzle views into the retire
+    // lists; ClearCache drains them. The snapshot and tip textures themselves
+    // are owned elsewhere and are released by their owners, for exactly the
+    // bases reported here.
+    // Report the texture this bridge actually named, so the owner releases
+    // that object rather than whatever now sits at the same base.
+    void* bridge_texture = it->second.texture;
+    RetireResolvedTarget(it->second);
+    if (released_out) {
+      released_out->emplace_back(it->first, bridge_texture);
+    }
+    it = resolved_targets_.erase(it);
+  }
+}
+
+void MetalTextureCache::ClearCache() {
+  // Ordinary cached textures are pure derived content: every one of them is
+  // reconstructible from guest RAM on the next fetch, which is what makes a
+  // clear observationally neutral. Release the texture, return its descriptor
+  // to the null texture, and return the slot for reuse.
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
+  auto free_slot = [&](uint32_t slot) {
+    if (!slot || slot >= view_heap_slots_) {
+      return;
+    }
+    // A freed slot must not keep describing a texture that no longer exists.
+    // AllocateSlot's contract is that a recycled slot is rewritten before use,
+    // but "before use" is not "now", and a clear is exactly when a stale
+    // descriptor would otherwise outlive its texture. Rebind to the null
+    // texture initialization gave every slot -- writing an empty descriptor
+    // instead would leave an INVALID resource reference, which is worse than
+    // the stale one.
+    if (entries && null_texture) {
+      IRDescriptorTableSetTexture(&entries[slot], null_texture, 0.0f, 0);
+    }
+    free_slots_.push_back(slot);
+  };
+  for (auto& pair : cache_) {
+    free_slot(pair.second.slot);
+    if (pair.second.texture) {
+      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
+      (void)released;
+    }
+  }
+  cache_.clear();
+  active_textures_.clear();
+  // The retire lists exist to hold objects until the submissions that may read
+  // them complete. At the clear boundary every submission HAS completed, so
+  // draining them unconditionally is both safe and the point: leaving entries
+  // queued against retired submissions is the inconsistency the clear must not
+  // create.
+  for (const auto& entry : stale_slots_) {
+    free_slot(entry.second);
+  }
+  stale_slots_.clear();
+  for (const auto& entry : retired_textures_) {
+    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
+    (void)released;
+  }
+  retired_textures_.clear();
+  binding_allocation_failed_ = false;
+  {
+    // Queued guest-write invalidations describe entries that no longer exist.
+    std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
+    pending_invalidations_.clear();
+  }
+
+  // Bridges surviving ReleaseDerivedResolveBridges are RETAINED because each
+  // one is either !generation_ram_backed (its snapshot is the only copy of
+  // this generation's content, which no writeback put in guest RAM -- nothing
+  // re-runs a past resolve) or is_depth (served to fetches from the snapshot
+  // regardless of RAM). Releasing either would destroy or change guest-visible
+  // content instead of evicting a cache, the same reason the shared
+  // RenderTargetCache clear keeps render targets that still own EDRAM data.
+  //
+  // The retained set is CHARACTERIZED, not bounded: every member satisfies
+  // (!generation_ram_backed || is_depth), which
+  // retained_bridges_are_authoritative()
+  // asserts, and resolved_bridge_count() reports its size after each clear.
+  // Nothing here caps how many such bridges can accumulate across repeated
+  // clears -- that is a growth property, and the repeat-clear stress gate
+  // (task 4.6) is what would establish it. Their slots stay allocated, so the
+  // slots freed above can never alias them.
+  //
+  // Slot accounting after a clear therefore returns toward baseline through
+  // free_slots_ rather than by resetting next_slot_.
+}
+
 void MetalTextureCache::SetTracePlayback() {
   if (trace_playback_) {
     return;
@@ -1297,6 +1402,21 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     if (texture_changed || extent_changed) {
       it->second.full_rect = false;
     }
+    // Cache-clear classification, on a DIFFERENT condition from full_rect
+    // above: EVERY successful registration is a new content generation, not
+    // just one that changed object identity or extent. A resolve reuses the
+    // existing snapshot object whenever it is large enough
+    // (EnsureResolveSnapshot returns it), so ResolveColorToSnapshot overwrites
+    // the content in place with the pointer and dimensions unchanged, and this
+    // call happens before that resolve's writeback decision. Treating "same
+    // texture, same extent" as the same generation would let a skipped or
+    // failed writeback inherit the previous generation's RAM-backed status,
+    // and a clear would then release a snapshot holding content guest RAM
+    // never received. Reset unconditionally here -- after the allocation
+    // failure return above, so a registration that bailed out leaves the entry
+    // as one consistent generation. ram_backed itself stays sticky, so no
+    // serving decision changes.
+    it->second.generation_ram_backed = false;
     it->second.width = width;
     it->second.height = height;
     it->second.is_depth = is_depth;
@@ -1387,6 +1507,9 @@ void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
     XELOGI("MetalTex: resolved RT base={:08X} now RAM-backed (bridge retired)",
            base);
   }
+  // This writeback belongs to the CURRENT generation, so its content is now in
+  // guest RAM (cache-clear classification; see the field comment).
+  it->second.generation_ram_backed = true;
   // The newest writeback governs: a full-extent write makes RAM equal to the
   // snapshot regardless of history; anything partial/offset means RAM is a
   // composition the snapshot cannot represent.

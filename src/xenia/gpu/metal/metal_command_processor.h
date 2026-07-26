@@ -345,6 +345,21 @@ class MetalCommandProcessor : public CommandProcessor {
   // clearing over unpublished guest data would be silent data loss, not a
   // cache eviction.
   void ExecuteDeferredCacheClear(bool publication_failed);
+  // Step 5 of that ordering: release derived cache state in the one order that
+  // keeps cross-cache retirements valid --
+  //   shared texture subclass (retires binding slots into the legacy pools)
+  //   -> derived resolve-bridge classification (retires bridge slots/views
+  //      into the same pools, and names the snapshot each bridge held)
+  //   -> exact-identity snapshot release plus the command-processor-owned
+  //      per-base metadata for the bases that actually matched
+  //   -> legacy texture-cache DRAIN (frees everything retired above)
+  //   -> render targets -> shared memory -> Metal-owned pools.
+  // Every step that retires into the legacy pools precedes the drain.
+  // Callable ONLY from the kExecute path, which is what proves the device is
+  // idle and every GPU-produced guest write has already reached RAM. Returns
+  // false without releasing anything if a precondition fails, in which case
+  // the request must stay latched and must NOT be counted as executed.
+  bool ReleaseCachesForClear();
   bool cache_clear_requested_ = false;
   // Clears that COMPLETED -- ordering satisfied and resources released.
   // Consumed by CommandProcessor::cache_clears_executed() so a scripted gate

@@ -124,7 +124,10 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_cache.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_texture_cache.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/ir_runtime_impl.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_invalidation_alias_test.mm)
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_invalidation_alias_test.mm
+    # Cache-clear release (implement-metal-cache-clearing section 3): reuses
+    # the same real MetalTextureCache + view-heap closure as the alias test.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_clear_release_test.mm)
   # Metal Shader Converter declarations used by ir_runtime_impl.mm and
   # metal_texture_cache.mm's bindless view-heap writes.
   target_include_directories(xenia-gpu-conformance PRIVATE

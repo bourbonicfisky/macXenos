@@ -106,6 +106,25 @@ class MetalSharedTextureCache : public TextureCache {
   // every texture a live subclass-bound slot can reach.
   void AppendAllTextures(std::vector<void*>& out) const;
 
+  // Cache-clear release (implement-metal-cache-clearing step 5).
+  //
+  // The inherited TextureCache::ClearCache is NOT sufficient here, which is
+  // why this override exists. The base clear resets the bindings and calls
+  // UpdateTextureBindingsImpl, whose implementation PARKS rather than releases
+  // a binding whose texture is gone -- correct for the per-swap BeginFrame
+  // reset it was written for -- and then destroys the textures. That would
+  // leave every slot holding a dangling Texture*, a retained view over a
+  // destroyed base texture, and a legacy bindless slot still bound to it.
+  //
+  // ORDERING: this releases slots and views back into the legacy cache's
+  // submission-gated pools, so it MUST run before MetalTextureCache::ClearCache
+  // drains those pools. Reversing the two would strand the retirements in a
+  // pool that was already emptied.
+  void ClearCache() override;
+  // Post-clear evidence: how many fetch-constant slots still express a
+  // binding (a texture, a view, or a legacy slot).
+  uint32_t bound_slot_count() const;
+
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override {
     // k_8_8_8_8 signed is a view over the same bytes; signed bindings are

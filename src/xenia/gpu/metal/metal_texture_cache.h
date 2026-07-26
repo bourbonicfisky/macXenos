@@ -165,6 +165,75 @@ class MetalTextureCache {
   // Telemetry: bindless-slot pressure (frame stats). Exhaustion is silent
   // at the allocation sites — surfacing it here caught the slot leak that
   // zeroed the exposure pyramid ~1 minute into every session.
+  // The view-heap null texture (id<MTLTexture>, not owned). Initialization
+  // binds EVERY slot to it so any index the shader can form is a valid
+  // resource; a freed slot must be returned to that state rather than left
+  // describing a released texture.
+  void SetNullTexture(void* null_texture) { null_texture_ = null_texture; }
+
+  // Cache-clear release (implement-metal-cache-clearing step 5). Frees every
+  // cached texture, returns its bindless slot to the free list, rebinds the
+  // freed view-heap descriptors to the null texture, and drains the
+  // submission-gated retire lists outright.
+  //
+  // Direct release rather than retirement is correct ONLY because the deferred
+  // clear runs at a fully quiesced boundary -- encoder closed, every
+  // submission complete, completion actions pumped -- which the admission
+  // predicate is what guarantees. Never call this from anywhere else.
+  //
+  // Call ReleaseDerivedResolveBridges BEFORE this: it retires bridge slots and
+  // views into the same pools this drains.
+  void ClearCache();
+
+  // Cache-clear step: release the resolve-snapshot bridges that are DERIVED,
+  // and report (destination base, snapshot texture) for each so the
+  // render-target cache can release exactly the texture THIS bridge named.
+  //
+  // The texture identity is reported, not just the base, because
+  // EnsureResolveSnapshot replaces the texture at a key when a later resolve
+  // needs a larger one (retiring the old to the deferred list). A bridge can
+  // therefore hold an older pointer than the snapshot currently at its base,
+  // and releasing by base alone would destroy the NEWER snapshot that the
+  // present path or another consumer may still be using.
+  //
+  // Classification:
+  //   RELEASED  generation_ram_backed && !is_depth -- a guest-RAM writeback
+  //             for THIS snapshot generation has been enqueued, and the clear
+  //             publishes every pending writeback before this runs, so guest
+  //             RAM holds the content. These are exactly the bridges whose
+  //             serve path already reads RAM rather than the snapshot.
+  //   RETAINED  !generation_ram_backed -- this generation's content was never
+  //             written to guest RAM (either no writeback was ever enqueued
+  //             for the destination -- the 64bpp/HDR dests the writer skips --
+  //             or a newer snapshot replaced the one that was written back).
+  //             The snapshot is then the ONLY copy of that content, and
+  //             releasing it would destroy guest-visible data.
+  //   RETAINED  is_depth -- depth bridges are served to fetches from the
+  //             snapshot even when a writeback exists, so releasing one would
+  //             change which content a fetch observes.
+  // After a clear, every remaining bridge satisfies
+  // (!generation_ram_backed || is_depth).
+  void ReleaseDerivedResolveBridges(
+      std::vector<std::pair<uint32_t, void*>>* released_out);
+  // Post-clear consistency evidence (a clear must return these toward their
+  // post-initialization baseline, and leave nothing queued).
+  uint32_t cached_texture_count() const { return uint32_t(cache_.size()); }
+  uint32_t retired_texture_count() const {
+    return uint32_t(retired_textures_.size());
+  }
+  uint32_t resolved_bridge_count() const {
+    return uint32_t(resolved_targets_.size());
+  }
+  // True when every retained bridge satisfies the retention invariant above.
+  bool retained_bridges_are_authoritative() const {
+    for (const auto& pair : resolved_targets_) {
+      if (pair.second.generation_ram_backed && !pair.second.is_depth) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   uint32_t slots_used() const { return next_slot_; }
   uint32_t slots_free() const { return uint32_t(free_slots_.size()); }
   uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
@@ -220,6 +289,7 @@ class MetalTextureCache {
   bool trace_playback_ = false;
   void* view_heap_;  // id<MTLBuffer>, not owned.
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
+  void* null_texture_ = nullptr;  // id<MTLTexture>, not owned; may be null.
   uint32_t view_heap_slots_;
   uint32_t next_slot_ = 1;  // 0 == null texture.
   // Distinguishes an intentional null descriptor (unsupported/invalid guest
@@ -293,6 +363,24 @@ class MetalTextureCache {
     // which keep the bridge (Sonic's tonemap chain went flat gray without
     // this fallback under default-ON stage 3).
     bool ram_backed = false;
+    // Cache-clear classification ONLY (implement-metal-cache-clearing): does
+    // the CURRENT content generation's data exist in guest RAM?
+    //
+    // Distinct from ram_backed, which is sticky for the life of the base and
+    // drives the serve path, and reset on a BROADER condition than full_rect:
+    // every successful RegisterResolvedTarget clears this, whereas full_rect
+    // resets only when the texture or extent changes. The conditions differ on
+    // purpose. A resolve reuses the existing snapshot object whenever it is
+    // large enough, so ResolveColorToSnapshot can overwrite the content in
+    // place with the pointer and dimensions unchanged -- still a new
+    // generation, and registration happens before that resolve's writeback
+    // decision.
+    //
+    // Without this, a base whose earlier resolve wrote back and whose later
+    // resolve skipped or failed its writeback would still read
+    // ram_backed == true, and a clear would release a snapshot holding content
+    // guest RAM never received.
+    bool generation_ram_backed = false;
     // XE_METAL_TIP_SNAP_VIEW: derived 1x1 copy of the snapshot's texel (0,0),
     // blitted at resolve time by the command processor (which owns the
     // texture). A 1x1 guest fetch must read guest texel (0,0), but binding

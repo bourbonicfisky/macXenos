@@ -92,6 +92,17 @@ void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
       consumed_ranges_.end());
 }
 
+void MetalSharedMemory::ClearCache() {
+  // Hazard records name byte ranges consumed by draws in a submission, so
+  // their only purpose is protecting encoded-but-unfinished readers. At the
+  // clear boundary there are none, and ReleaseConsumedRanges (driven by the
+  // pumped completion actions) should already have emptied the set -- which
+  // the caller VERIFIES before calling this, so clearing here cannot erase
+  // the evidence for that check.
+  ResetFrameRanges();
+  SharedMemory::ClearCache();
+}
+
 void MetalSharedMemory::WriteTraceInitialState(TraceWriter& trace_writer) {
   PrepareForTraceDownload();
   for (const auto& range : trace_download_ranges()) {

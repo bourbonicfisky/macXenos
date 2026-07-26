@@ -290,6 +290,30 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
   }
 }
 
+void MetalSharedTextureCache::ClearCache() {
+  // Release the descriptor state FIRST, while the textures it names are still
+  // alive. The base clear below resets the bindings, and this cache's
+  // UpdateTextureBindingsImpl deliberately parks a texture-less binding
+  // instead of releasing it, so nothing else would ever retire these.
+  for (BindingSlot& binding_slot : binding_slots_) {
+    ReleaseBindingSlot(binding_slot);
+  }
+  // Derived scan results keyed by texture shape; cheap to recompute and
+  // meaningless once the textures are gone.
+  shape_ranges_.clear();
+  TextureCache::ClearCache();
+}
+
+uint32_t MetalSharedTextureCache::bound_slot_count() const {
+  uint32_t count = 0;
+  for (const BindingSlot& binding_slot : binding_slots_) {
+    if (binding_slot.texture || binding_slot.sampled_view || binding_slot.slot) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
   if (!binding_slot.slot && !binding_slot.sampled_view) {
     binding_slot = BindingSlot{};

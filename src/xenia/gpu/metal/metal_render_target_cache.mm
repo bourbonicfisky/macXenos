@@ -4052,6 +4052,67 @@ void MetalRenderTargetCache::DrainDeferredReleases(
   deferred_texture_releases_.erase(it, deferred_texture_releases_.end());
 }
 
+uint32_t MetalRenderTargetCache::ReleaseResolveSnapshotsForBases(
+    const std::vector<std::pair<uint32_t, void*>>& bases,
+    std::vector<uint32_t>* released_bases_out) {
+  uint32_t released = 0;
+  for (const auto& entry : bases) {
+    uint32_t base = entry.first;
+    void* expected_texture = entry.second;
+    // Color snapshots only: key is (base << 1) | is_r32f, and the depth/R32F
+    // companion at the same base belongs to a bridge that was retained.
+    auto it = resolve_snapshots_.find(uint64_t(base) << 1);
+    if (it == resolve_snapshots_.end()) {
+      continue;
+    }
+    // Identity check: the snapshot at this base may have been REPLACED since
+    // the bridge was registered (EnsureResolveSnapshot creates a new texture
+    // when a resolve needs a bigger one). Releasing then would destroy a newer
+    // object the bridge never named and other consumers may still hold.
+    if (!expected_texture || it->second.texture != expected_texture) {
+      static uint32_t s_mismatch_logs = 0;
+      if (s_mismatch_logs++ < 8) {
+        XELOGW("MetalRenderTargetCache: cache clear skipped resolve snapshot "
+               "{:08X} -- the bridge named a different texture than the one now "
+               "at that base (snapshot replaced since registration); the whole "
+               "current generation at this base is retained",
+               base);
+      }
+      continue;  // NOT reported as released: the newer generation stays whole.
+    }
+    if (it->second.texture) {
+      // Immediate release: the caller runs only at the quiesced clear
+      // boundary, where no submission can still be reading this texture.
+      id<MTLTexture> snapshot = (__bridge_transfer id<MTLTexture>)it->second.texture;
+      (void)snapshot;
+    }
+    resolve_snapshots_.erase(it);
+    if (released_bases_out) {
+      released_bases_out->push_back(base);
+    }
+    ++released;
+  }
+  return released;
+}
+
+void MetalRenderTargetCache::ClearCache() {
+  // Derived state keyed by render-target identity, dropped BEFORE the shared
+  // clear can destroy the targets it names. Both are same-frame/per-present
+  // records, so dropping them costs nothing but a recomputation.
+  c2d_pingpong_.clear();
+  presentable_color_target_ = nullptr;  // borrowed from a render target.
+  // Deferred releases are held until the submissions encoded against them
+  // complete. The clear runs only at a fully quiesced boundary, so every one
+  // of them is now releasable, and leaving them queued against submissions
+  // that will never be revisited is exactly the retire-list inconsistency the
+  // clear must not leave behind.
+  DrainDeferredReleases(UINT64_MAX);
+  // Keeps every render target that currently owns EDRAM data; destroys the
+  // rest. Canonical EDRAM, its pipelines, and the resolve snapshots are not
+  // touched by it and are retained by design.
+  RenderTargetCache::ClearCache();
+}
+
 void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
   // Composite key: base<<1 | is_r32f. Callers (present, RT-as-texture
   // bridge) want the COLOR snapshot; fall back to depth only if that's all

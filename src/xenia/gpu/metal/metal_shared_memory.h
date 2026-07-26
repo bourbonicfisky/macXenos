@@ -81,6 +81,19 @@ class MetalSharedMemory : public SharedMemory {
   // Forgets the consumed-range set (call after the frame command buffer has
   // been committed and waited on).
   void ResetFrameRanges() { consumed_ranges_.clear(); }  // sync-mode/shutdown
+  // Post-clear evidence: submission-tagged hazard records still held. At a
+  // quiesced boundary every submission has completed, so ReleaseConsumedRanges
+  // (run by the pumped completion actions) should already have emptied this --
+  // a claim the clear verifies rather than assumes.
+  uint32_t consumed_range_count() const {
+    return uint32_t(consumed_ranges_.size());
+  }
+
+  // Cache-clear release (implement-metal-cache-clearing step 5): the inherited
+  // clear (which fires every watch and revalidates page state, keeping
+  // GPU-written data) plus the Metal-only hazard records the base cannot know
+  // about.
+  void ClearCache() override;
 
  protected:
   bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,

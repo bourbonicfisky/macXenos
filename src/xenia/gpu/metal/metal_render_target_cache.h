@@ -189,6 +189,56 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // this only after the frame command buffer has completed (commit + wait).
   void DrainDeferredReleases(uint64_t completed_submission);
 
+  // Cache-clear release (implement-metal-cache-clearing step 5).
+  //
+  // Overridden because this cache keeps derived state keyed by render-target
+  // IDENTITY, and the shared clear destroys every render target that does not
+  // currently own EDRAM data. A recycled address would then false-hit that
+  // state -- for the c2d/d2c ping-pong record that means silently changing the
+  // bit-transport decision, i.e. a rendering change caused by a cache clear.
+  // Vulkan's subclass destroys framebuffers and render passes before
+  // delegating for exactly this reason.
+  //
+  // RETAINED, deliberately: canonical EDRAM and its pipelines (the promoted
+  // EDRAM authority, not derived content), every render target still owning
+  // EDRAM data (the shared clear's own rule), and the resolve snapshots (see
+  // MetalTextureCache::ClearCache for why a non-RAM-backed snapshot is the
+  // only copy of its content).
+  void ClearCache() override;
+  uint32_t deferred_release_count() const {
+    return uint32_t(deferred_texture_releases_.size());
+  }
+
+  // Cache-clear step: release the COLOR resolve snapshots that the bridges
+  // MetalTextureCache::ReleaseDerivedResolveBridges just classified as derived
+  // (RAM-backed, non-depth) actually named, and only those.
+  //
+  // Each entry is (destination base, the texture that bridge pointed at). The
+  // texture is VERIFIED against the snapshot currently at that base before
+  // anything is released: EnsureResolveSnapshot replaces the texture at a key
+  // when a later resolve needs a larger one, so a bridge can name an older
+  // object than the snapshot now living there. Releasing on base alone would
+  // then destroy a newer snapshot that the present path or another consumer
+  // still uses. A mismatch is skipped, not released.
+  //
+  // Reports the bases whose texture MATCHED and was released through
+  // `released_bases_out`. A caller owning per-base state must key it off that
+  // list, never off the requested list: a mismatch means a NEWER generation
+  // currently lives at that base, and its tip texture, RAM layout, snapshot
+  // generation, and held writeback content all belong to that newer generation
+  // and must survive intact.
+  //
+  // The classification lives with the bridge because the writeback state does;
+  // this side only releases what that decision names. Snapshots at other bases
+  // -- including every depth/R32F snapshot and any snapshot no bridge refers
+  // to -- are retained.
+  uint32_t ReleaseResolveSnapshotsForBases(
+      const std::vector<std::pair<uint32_t, void*>>& bases,
+      std::vector<uint32_t>* released_bases_out);
+  uint32_t resolve_snapshot_count() const {
+    return uint32_t(resolve_snapshots_.size());
+  }
+
   // Frame-dissection tooling: enumerates the render targets owning each EDRAM
   // tile range (full-EDRAM span through the base class's dump-rectangle
   // machinery) so the command processor can reconstruct the 10MB tile-major
