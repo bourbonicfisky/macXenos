@@ -14,10 +14,13 @@
 #include <functional>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/gpu/metal/metal_guest_range.h"
+// TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
+#include "xenia/gpu/metal/metal_sign_recensus_probe.h"
 #include "xenia/gpu/shared_memory.h"
 #include "xenia/gpu/xenos.h"
 
@@ -111,6 +114,17 @@ class MetalTextureCache {
   }
   bool binding_allocation_failed() const { return binding_allocation_failed_; }
   void ClearBindingAllocationFailure() { binding_allocation_failed_ = false; }
+
+  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
+  // Optional result hook: while `out` is set, the NEXT GetTextureSlot call
+  // reports the facts the command-processor call site cannot observe (cache
+  // hit/miss, whether the miss reached a successful untile/upload, host bytes
+  // submitted, miss-path CPU time, recurring key, resolve-backed destination).
+  // It owns no sign semantics and changes no routing, allocation, ordering,
+  // return value, or failure behaviour — the cache only writes to it.
+  void SetSignRecensusProbe(MetalSignRecensusProbeResult* out) {
+    sign_recensus_probe_ = out;
+  }
 
   // Appends EVERY live texture a bindless slot can reach (guest cache entries
   // + resolved targets) for the per-encoder residency sweep: a shader indexing
@@ -296,6 +310,12 @@ class MetalTextureCache {
   // fetch) from failure to create a required Metal object or bindless slot.
   // IssueDraw skips only the latter before emission.
   bool binding_allocation_failed_ = false;
+  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
+  // Report-only observer state; never read by any decision in this cache.
+  MetalSignRecensusProbeResult* sign_recensus_probe_ = nullptr;
+  // key -> publication sequence at that key's previous completed upload. The
+  // watermark that makes writer attribution causal for re-uploads.
+  std::unordered_map<uint64_t, uint64_t> sign_recensus_uploaded_keys_;
   // Slots freed when a resolved target was repointed to a new texture; the old
   // slot keeps pointing at the old texture until the submissions encoded
   // against it complete, then moves to free_slots_ for reuse. Tagged with the
