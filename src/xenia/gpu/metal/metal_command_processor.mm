@@ -52,8 +52,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
-// TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at 2.8).
-#include "xenia/gpu/metal/metal_rba_probe.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
@@ -1072,10 +1070,6 @@ void MetalCommandProcessor::ShutdownDrawResources() {
 }
 
 void MetalCommandProcessor::ShutdownContext() {
-  // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-  // task 2.8): final census snapshot, so a run shorter than one emission
-  // period still reports. Emitted before teardown so logging is still live.
-  metal::MetalRbaCensus::Emit("shutdown");
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -5920,18 +5914,6 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         new_hash = xe_lineage_stridehash(me_contents + me.base_address,
                                          me.size_bytes);
       }
-      // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-      // task 2.8): exact-range pre-image, captured immediately before this
-      // writer's RAM write, so the post-publication difference is an exact
-      // byte count over the published range rather than a hash inequality.
-      if (metal::MetalRbaCensus::Engaged()) {
-        metal::MetalRbaCensus::NoteTu(
-            metal::MetalRbaCensus::Tu::kCommandProcessor);
-        metal::MetalRbaCensus::PublishBegin(
-            metal::MetalRbaCensus::Writer::kMemexportDrain, me.base_address,
-            me.size_bytes,
-            memory_->TranslatePhysical<const uint8_t*>(me.base_address));
-      }
       // Routed through the typed task-3.3 convergence seam: exact
       // shared-buffer bytes -> RAM, no shared-buffer invalidation, and the
       // record is retired only when the copy itself reports success.
@@ -5958,15 +5940,6 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
-      // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-      // task 2.8): exact-range post-image of what this writer actually put in
-      // guest RAM, retained so a later upload can be proven byte-identical to
-      // it. Unsampled -- the durable log above samples, which cannot produce a
-      // per-frame published-byte total.
-      metal::MetalRbaCensus::PublishEnd(
-          metal::MetalRbaCensus::Writer::kMemexportDrain, me.base_address,
-          me.size_bytes,
-          memory_->TranslatePhysical<const uint8_t*>(me.base_address));
       retire_exact_export = exact_sequence;
       if (me_log && me_contents) {
         const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
@@ -6129,21 +6102,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
           }
         }
       };
-      // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-      // task 2.8): exact-range pre/post images for the other publishing seam,
-      // so a destination written by both writers is attributable and each
-      // writer's own contribution is an exact byte count.
-      if (metal::MetalRbaCensus::Engaged()) {
-        metal::MetalRbaCensus::NoteTu(
-            metal::MetalRbaCensus::Tu::kCommandProcessor);
-        metal::MetalRbaCensus::PublishBegin(
-            metal::MetalRbaCensus::Writer::kResolveWriteback, wb.guest_addr,
-            wb.range_bytes(), dest);
-      }
       scatter_bytes(src_bytes);
-      metal::MetalRbaCensus::PublishEnd(
-          metal::MetalRbaCensus::Writer::kResolveWriteback, wb.guest_addr,
-          wb.range_bytes(), dest);
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
@@ -6637,9 +6596,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
-  // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-  // task 2.8): periodic snapshot of the corrected attribution census.
-  metal::MetalRbaCensus::OnSwap(count);
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.

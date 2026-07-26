@@ -9,8 +9,6 @@
 
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
-// TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at 2.8).
-#include "xenia/gpu/metal/metal_rba_probe.h"
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 
@@ -904,37 +902,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                     size_t(kPhysicalSize - base)))
               : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h, bpb,
                                         base, kPhysicalSize);
-  // TEMPORARY (correct-metal-resolve-bridge-authority group 2; reverted at
-  // task 2.8): corrected per-base attribution. Records the base, format,
-  // extent, the class the ONE production classifier returned for this fetch,
-  // and -- as a separate fact, never as a provenance proxy -- whether a
-  // snapshot was registered at this moment. Disengaged unless XE_METAL_RBA is
-  // set; nothing below is constructed on the shipped path.
-  if (metal::MetalRbaCensus::Engaged()) {
-    metal::MetalRbaCensus::NoteTu(metal::MetalRbaCensus::Tu::kTextureCache);
-    ResolvedFetchService svc = ClassifyFetchService(fetch, is_signed);
-    metal::MetalRbaCensus::Service probe_svc;
-    switch (svc) {
-      case ResolvedFetchService::kBridgeSnapshot:
-        probe_svc = metal::MetalRbaCensus::Service::kBridgeSnapshot;
-        break;
-      case ResolvedFetchService::kExactCoverSnapshot:
-        probe_svc = metal::MetalRbaCensus::Service::kExactCoverSnapshot;
-        break;
-      case ResolvedFetchService::kRamContent:
-        probe_svc = metal::MetalRbaCensus::Service::kRamContent;
-        break;
-      default:
-        probe_svc = metal::MetalRbaCensus::Service::kNotResolveBacked;
-        break;
-    }
-    metal::MetalRbaCensus::RecordUpload(
-        base, uint32_t(fetch.format), uint32_t(fetch.dimension), width, height,
-        is_signed, watched_base_bytes,
-        resolved_targets_.find(base) != resolved_targets_.end(), probe_svc,
-        guest);
-  }
-
   // NOTE: this cache deliberately does NOT call SharedMemory::RequestRange to
   // register these pages for CPU write-watching. RequestRange does host-GPU
   // buffer residency + guest-page write protection (EnsureHostGpuMemoryAllocated
