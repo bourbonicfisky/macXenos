@@ -830,26 +830,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint64_t key = MakeTextureKey(fetch, is_signed, base, width, height,
                                 pitch_texels);
   auto it = cache_.find(key);
-  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-  // Report-only: nothing below reads these fields back.
-  MetalSignRecensusProbeResult* census = sign_recensus_probe_;
-  if (census) {
-    MetalSignRecensusOverheadScope recensus_overhead;
-    census->keyed_lookup = true;
-    census->cache_hit = it != cache_.end();
-    census->recurring = sign_recensus_uploaded_keys_.count(key) != 0;
-    // CORRECTED ATTRIBUTION (design D2): name the base and the shape directly.
-    census->base = base;
-    census->guest_format = uint32_t(fetch.format);
-    census->width = width;
-    census->height = height;
-    // Separate contemporaneous facts, never a provenance proxy: the class the
-    // ONE production classifier returns, and whether a snapshot registration
-    // existed at this moment. Writer provenance is attributed below, from the
-    // ranges the publication seams actually wrote.
-    census->service = uint32_t(ClassifyFetchService(fetch, is_signed));
-    census->registered_at_fetch = resolved_targets_.find(base) != resolved_targets_.end();
-  }
   // Lineage probe: this fetch of the watched base is the composite's temporal
   // read. A cache HIT means the untile is SKIPPED and the STALE cached upload is
   // served -- the freshly-resolved guest RAM never reaches the composite (the
@@ -882,21 +862,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
-  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-  // Times the miss / untile / upload / finalize path on EVERY exit from it,
-  // including the early null returns below. Report-only.
-  struct RecensusMissTimer {
-    MetalSignRecensusProbeResult* out;
-    std::chrono::steady_clock::time_point t0;
-    ~RecensusMissTimer() {
-      if (out) {
-        out->miss_usec =
-            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0)
-                .count();
-      }
-    }
-  } recensus_miss_timer{
-      census, census ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}};
   const uint8_t* guest =
       static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
   if (!guest) {
@@ -1165,10 +1130,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                withBytes:upload_data
              bytesPerRow:upload_bytes_per_row
            bytesPerImage:0];
-  // TEMPORARY (signedness re-census probe, task 7.1): host bytes submitted.
-  if (census) {
-    census->host_bytes += decoded.empty() ? linear.size() : decoded.size();
-  }
   // Cube faces 1..5: guest layout is face-major — each face is a full tiled
   // (or linear) slice whose block grid is padded to 32x32 blocks
   // (texture_extent.cc guest rules); re-untile each face at its offset.
@@ -1200,10 +1161,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                    withBytes:linear.data()
                  bytesPerRow:upload_bytes_per_row
                bytesPerImage:0];
-      // TEMPORARY (signedness re-census probe, task 7.1): host bytes submitted.
-      if (census) {
-        census->host_bytes += linear.size();
-      }
     }
   }
   uint32_t entry_mip_bytes = 0;
@@ -1300,10 +1257,6 @@ uint32_t MetalTextureCache::GetTextureSlot(
                    withBytes:mip_linear.data()
                  bytesPerRow:lbw * bpb
                bytesPerImage:0];
-      // TEMPORARY (signedness re-census probe, task 7.1): host bytes submitted.
-      if (census) {
-        census->host_bytes += mip_linear.size();
-      }
     }
   }
 
@@ -1374,47 +1327,6 @@ uint32_t MetalTextureCache::FinalizeTexture(
   cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes,
                             mip_base, mip_bytes});
   active_textures_.push_back(texture_ptr);
-  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-  // The miss reached a completed untile/upload; remember the key so a later
-  // upload of it is reported as recurring (invalidation-driven re-upload).
-  // This is also where the CORRECTED writer attribution is resolved: the
-  // extent this upload actually read is now known, so the mask of writers
-  // that ACTUALLY published an overlapping guest range can be asked of the
-  // publication record. `resolved_targets_` is never consulted for this.
-  if (sign_recensus_probe_) {
-    MetalSignRecensusOverheadScope recensus_overhead;
-    sign_recensus_probe_->upload_completed = true;
-    sign_recensus_probe_->extent_bytes = guest_bytes + mip_bytes;
-    // Causal attribution: only a publication newer than this exact cache
-    // key's PREVIOUS completed upload can explain this upload. The watermark
-    // is that key's recorded publication sequence (0 on first touch); there is
-    // no age threshold.
-    auto wm_it = sign_recensus_uploaded_keys_.find(key);
-    const uint64_t watermark = wm_it == sign_recensus_uploaded_keys_.end() ? 0ull : wm_it->second;
-    auto overlap = MetalSignRecensus::Get().WriterOverlapFor(base, guest_bytes, watermark);
-    if (mip_bytes) {
-      auto mip_overlap = MetalSignRecensus::Get().WriterOverlapFor(mip_base, mip_bytes, watermark);
-      overlap.resolve_since_bytes += mip_overlap.resolve_since_bytes;
-      overlap.memexport_since_bytes += mip_overlap.memexport_since_bytes;
-      overlap.stale_written_bytes += mip_overlap.stale_written_bytes;
-      overlap.unwritten_bytes += mip_overlap.unwritten_bytes;
-      overlap.resolve_ever_bytes += mip_overlap.resolve_ever_bytes;
-      overlap.memexport_ever_bytes += mip_overlap.memexport_ever_bytes;
-      if (mip_overlap.any_pub_seen &&
-          (!overlap.any_pub_seen || mip_overlap.newest_pub_seq_gap < overlap.newest_pub_seq_gap)) {
-        overlap.newest_pub_seq_gap = mip_overlap.newest_pub_seq_gap;
-        overlap.any_pub_seen = true;
-      }
-    }
-    sign_recensus_probe_->resolve_since_bytes = overlap.resolve_since_bytes;
-    sign_recensus_probe_->memexport_since_bytes = overlap.memexport_since_bytes;
-    sign_recensus_probe_->stale_written_bytes = overlap.stale_written_bytes;
-    sign_recensus_probe_->unwritten_bytes = overlap.unwritten_bytes;
-    sign_recensus_probe_->resolve_ever_bytes = overlap.resolve_ever_bytes;
-    sign_recensus_probe_->memexport_ever_bytes = overlap.memexport_ever_bytes;
-    sign_recensus_probe_->newest_pub_seq_gap = overlap.newest_pub_seq_gap;
-    sign_recensus_uploaded_keys_[key] = MetalSignRecensus::Get().publication_sequence();
-  }
   return slot;
 }
 

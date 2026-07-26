@@ -26,8 +26,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <cstring>
 #include <chrono>
 #include <exception>
-// TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -54,8 +52,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
-// TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-#include "xenia/gpu/metal/metal_sign_recensus_probe.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
@@ -1074,11 +1070,6 @@ void MetalCommandProcessor::ShutdownDrawResources() {
 }
 
 void MetalCommandProcessor::ShutdownContext() {
-  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-  // Final cumulative snapshot before the caches are torn down.
-  if (MetalSignRecensus::Enabled()) {
-    MetalSignRecensus::Get().DumpFinal();
-  }
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -3892,42 +3883,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }();
       bool probe = s_tex_probe >= 0 &&
                    int64_t(trace_draw_index_) - 1 == s_tex_probe;
-      // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-      // Engagement is parsed once inside MetalSignRecensus::Enabled(), not here.
-      const bool sign_recensus = MetalSignRecensus::Enabled();
-      MetalSignRecensus* recensus_agg = sign_recensus ? &MetalSignRecensus::Get() : nullptr;
-      // Per-draw memo of the packed swizzled signs: the two interpretations of
-      // one fetch constant are separate bindings, so without this the same
-      // byte is derived twice per constant. Deliberately UNINITIALISED — an
-      // entry is read only where its validity bit is set, so the disengaged
-      // path pays no zeroing.
-      uint8_t recensus_signs[32];
-      uint32_t recensus_signs_valid = 0;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         if (binding.bindless_descriptor_index < count) {
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-          // TEMPORARY (signedness re-census probe, task 7.1): classify this
-          // binding exactly as the production gate would, then act on NOTHING.
-          // Every call below is still made and every result still used.
-          // The whole payload lives in an optional that is ENGAGED ONLY on the
-          // temporary env path, so a disengaged build constructs no probe
-          // state per binding.
-          std::optional<MetalSignRecensusCall> recensus_call;
-          if (recensus_agg) {
-            // Opens the call and decides whether it is an overhead sample.
-            recensus_agg->BeginCall();
-            MetalSignRecensusOverheadScope recensus_overhead(*recensus_agg);
-            recensus_call.emplace();
-            uint32_t census_fc = binding.fetch_constant & 31;
-            if (!(recensus_signs_valid & (1u << census_fc))) {
-              recensus_signs[census_fc] = texture_util::SwizzleSigns(fetch);
-              recensus_signs_valid |= 1u << census_fc;
-            }
-            recensus_call->reachable = IsMetalTextureSignInterpretationReachable(
-                recensus_signs[census_fc], binding.is_signed);
-            recensus_call->admitted = binding.dimension == xenos::FetchOpDimension::k2D;
-            texture_cache_->SetSignRecensusProbe(&recensus_call->result);
-          }
           // C1T-R serve: indices the prepass prepared come from the shared
           // subclass; anything unserved (prep failure, invalidated between
           // prep and serve, faulted load) falls to the legacy path
@@ -3939,42 +3897,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 shared_texture_cache_->GetServedSlot(binding.fetch_constant);
           }
           uint32_t texture_slot = routed_slot;
-          // TEMPORARY (signedness re-census probe, task 7.1): observer only.
-          // Detaches the cache hook and counts the call on EVERY exit from
-          // this binding iteration; a no-op when the probe is disengaged.
-          auto recensus_record = [&](uint32_t slot, bool alloc_failed) {
-            if (!recensus_call) {
-              return;
-            }
-            {
-              MetalSignRecensusOverheadScope recensus_overhead(*recensus_agg);
-              texture_cache_->SetSignRecensusProbe(nullptr);
-              recensus_agg->RecordBinding(
-                  binding.is_signed, recensus_call->reachable, recensus_call->admitted,
-                  binding.dimension, uint32_t(fetch.format), routed_slot != 0,
-                  recensus_call->legacy_called, alloc_failed, slot, recensus_call->result);
-            }
-            recensus_agg->EndCall();
-          };
           if (!texture_slot) {
             // A failed shared-cache candidate may still have a correct legacy
             // fallback. Only propagate failure if that fallback also can't
             // create the required object or heap slot.
             texture_cache_->ClearBindingAllocationFailure();
-            if (recensus_call) {
-              recensus_call->legacy_called = true;
-            }
             texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
             if (texture_cache_->binding_allocation_failed()) {
-              // TEMPORARY probe: detach the hook and count the call before the
-              // unchanged draw skip below.
-              recensus_record(texture_slot, true);
               XELOGW("MetalCommandProcessor: skipping draw after texture "
                      "binding allocation failure");
               return false;
             }
           }
-          recensus_record(texture_slot, false);
           indices[binding.bindless_descriptor_index] = texture_slot;
           if (probe) {
             XELOGI(
@@ -6006,14 +5940,6 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
-      // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task
-      // 7.3. CORRECTED ATTRIBUTION: record the exact range this writer just
-      // published, unsampled, so a later upload's provenance is decided by a
-      // writer that actually wrote it rather than by registration lifetime.
-      if (MetalSignRecensus::Enabled()) {
-        MetalSignRecensus::Get().RecordPublication(MetalSignRecensus::Writer::kMemexportDrain,
-                                                   me.base_address, me.size_bytes);
-      }
       retire_exact_export = exact_sequence;
       if (me_log && me_contents) {
         const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(
@@ -6177,14 +6103,6 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         }
       };
       scatter_bytes(src_bytes);
-      // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task
-      // 7.3. The other publishing seam, recorded the same way, so a
-      // destination written by either writer is attributable to the writer
-      // that actually wrote it.
-      if (MetalSignRecensus::Enabled()) {
-        MetalSignRecensus::Get().RecordPublication(MetalSignRecensus::Writer::kResolveWriteback,
-                                                   wb.guest_addr, wb.range_bytes());
-      }
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",
@@ -6526,25 +6444,6 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
-  // TEMPORARY (signedness re-census probe, task 7.1) — reverted at task 7.3.
-  // Cumulative machine-parseable snapshot on the frame boundary, before any
-  // early return below, so headless replays emit it too.
-  if (MetalSignRecensus::Enabled()) {
-    // TEMPORARY (task 7.1): one-shot smoke test of the attribution classifier
-    // (exact interval ownership + causal watermark), so its exactness claims
-    // are executed rather than asserted. Runs on a private instance and
-    // touches nothing the census records.
-    static const bool s_recensus_selftest = [] {
-      const char* v = std::getenv("XE_METAL_SIGN_RECENSUS_SELFTEST");
-      return v && *v && *v != '0';
-    }();
-    static bool s_recensus_selftest_done = false;
-    if (s_recensus_selftest && !s_recensus_selftest_done) {
-      s_recensus_selftest_done = true;
-      MetalSignRecensus::SelfTest();
-    }
-    MetalSignRecensus::Get().OnSwap(swap_count_);
-  }
   // Cycle the GPU-thread autorelease pool once per frame: drain everything
   // autoreleased while encoding the frame just ended (command buffers,
   // encoders, pass descriptors, label strings — the thread has no run-loop
