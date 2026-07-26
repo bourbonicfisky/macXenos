@@ -95,6 +95,12 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_upload_arena.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_primitive_restart_test.mm
+    # Typed null-slot mechanism (L1, align-metal-texture-binding-signedness
+    # task 3.2): declares the three MSC exposure shapes
+    # (texture2d_array/texture3d/texturecube_array) as typed argument-buffer
+    # fields and drives the null-resource handle through them on the device.
+    # Device + MSL only -- no backend closure, so it adds no link dependency.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_typed_null_slot_test.mm
     # ZPD visibility mechanism (L1): drives the REAL MetalZPDVisibilityPool
     # through a real render pass, so the backend's counting semantics, its
     # depth-pass meaning, and Metal's once-per-pass offset rule are pinned on
