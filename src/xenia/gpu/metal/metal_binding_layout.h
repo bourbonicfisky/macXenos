@@ -19,6 +19,7 @@
 #include "xenia/base/math.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/texture_util.h"
 
 namespace xe {
 namespace gpu {
@@ -331,6 +332,17 @@ inline bool InitializeMetalDescriptorIndices(
   }
   std::memset(destination, 0, required_size);
   return true;
+}
+
+// Whether the translated shader can select this sign interpretation. The
+// shared predicates match the D3D12 and Vulkan binding gates. They inspect all
+// four packed signs, so the result is deliberately a conservative superset of
+// the translator's used-component reduction: it may retain an unused
+// interpretation, but it never rejects one the shader can select.
+constexpr bool IsMetalTextureSignInterpretationReachable(uint8_t swizzled_signs,
+                                                         bool is_signed) {
+  return is_signed ? texture_util::IsAnySignSigned(swizzled_signs)
+                   : texture_util::IsAnySignNotSigned(swizzled_signs);
 }
 
 enum MetalBindingStageMask : uint32_t {
