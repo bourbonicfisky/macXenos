@@ -8,6 +8,10 @@
  */
 
 #include "xenia/kernel/xam/xam_ui.h"
+
+#include <algorithm>
+#include <cfloat>
+
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
@@ -238,10 +242,29 @@ void MessageBoxDialog::OnDraw(ImGuiIO& io) {
     has_opened_ = true;
     first_draw = true;
   }
+  // Bound the popup to the display before it auto-sizes. Without this,
+  // AlwaysAutoResize widens the popup to fit the description on ONE line, so a
+  // long message (DOA5's save notice) makes the popup wider than the window and
+  // the text is clipped at the edge. Constrain the width, then wrap into it.
+  const float max_popup_width =
+      std::max(320.0f, std::min(io.DisplaySize.x - 64.0f,
+                                io.DisplaySize.x * 0.8f));
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+                                      ImVec2(max_popup_width, FLT_MAX));
+  // Center on first appearance; a popup pinned to a corner reads as a layout
+  // bug once it is no longer full-width.
+  ImGui::SetNextWindowPos(
+      ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+      ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
   if (ImGui::BeginPopupModal(title_.c_str(), nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     if (description_.size()) {
-      ImGui::Text("%s", description_.c_str());
+      // Wrap at the constrained width rather than the current window width:
+      // under AlwaysAutoResize the window width is still being derived from
+      // content, so wrapping against it would feed back into itself.
+      ImGui::PushTextWrapPos(max_popup_width - ImGui::GetStyle().WindowPadding.x * 2.0f);
+      ImGui::TextUnformatted(description_.c_str());
+      ImGui::PopTextWrapPos();
     }
     if (first_draw) {
       ImGui::SetKeyboardFocusHere();
