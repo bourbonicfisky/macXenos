@@ -246,6 +246,13 @@ void MessageBoxDialog::OnDraw(ImGuiIO& io) {
   // AlwaysAutoResize widens the popup to fit the description on ONE line, so a
   // long message (DOA5's save notice) makes the popup wider than the window and
   // the text is clipped at the edge. Constrain the width, then wrap into it.
+  //
+  // MVP sizing, deliberately simple: a fraction of the display. Known limit --
+  // on a very wide display 80% is far past a comfortable reading measure, so a
+  // long message renders as one very long line. It is readable and not clipped,
+  // which is the bar this pass set. A refinement would cap the width at a
+  // typographic measure (roughly 80-100 characters of the current font) and only
+  // then fall back to the display fraction.
   const float max_popup_width =
       std::max(320.0f, std::min(io.DisplaySize.x - 64.0f,
                                 io.DisplaySize.x * 0.8f));
