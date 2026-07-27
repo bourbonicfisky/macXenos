@@ -54,6 +54,14 @@ class MetalImmediateDrawer : public ImmediateDrawer {
                                                   bool is_repeated,
                                                   const uint8_t* data) override;
 
+  // OnLeavePresenter is deliberately NOT overridden, unlike D3D12/Vulkan. They
+  // use it to await GPU completion when leaving the presenter's submission
+  // timeline, because they hand-track a per-texture last-usage submission index
+  // and must not free a resource the GPU still reads. This drawer has no such
+  // window: Metal itself retains every resource an encoder references until the
+  // owning command buffer completes, and textures are held under ARC for their
+  // own lifetime. Recorded in tools/metal_silent_gap_audit.sh so the absence
+  // stays a decision rather than becoming a surprise.
   void Begin(UIDrawContext& ui_draw_context, float coordinate_space_width,
              float coordinate_space_height) override;
   void BeginDrawBatch(const ImmediateDrawBatch& batch) override;

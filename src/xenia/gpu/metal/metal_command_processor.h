@@ -41,9 +41,16 @@ class MetalTextureCache;
 class MetalUploadArena;
 struct MetalUploadAllocation;
 
-// Phase 2b skeleton command processor. Overrides the same pure-virtual surface
-// as the other backends; the draw/copy/shader paths are stubs for now (behaves
-// like the null backend) and are implemented in later phases.
+// Metal command processor. Overrides the same pure-virtual surface as the other
+// backends. The draw, copy, and shader paths are implemented -- the "Phase 2b
+// skeleton / stubs for now / behaves like the null backend" description this
+// comment used to carry has been false for a long time and is retired here.
+//
+// Known deliberate divergences from D3D12/Vulkan, kept honest by
+// tools/metal_silent_gap_audit.sh: gamma-ramp write hooks
+// (OnGammaRamp*ValueWritten) are NOT overridden, so guest gamma changes are
+// tracked by the base and silently ignored. That is a real, recorded gap
+// (roadmap P1 presentation row), not an oversight.
 class MetalCommandProcessor : public CommandProcessor {
  protected:
   // Give this backend its own statically-bound PM4 packet chain so the execute
