@@ -368,6 +368,37 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
                   vertexStart:0
                   vertexCount:4];
     }
+
+    // UI overlays (ImGui: emulator dialogs AND guest system dialogs) draw into
+    // this same pass, on top of the guest image, before the encoder ends. They
+    // composite into the drawable only -- no guest state is reachable from
+    // here, which is what makes overlay drawing incapable of perturbing guest
+    // output.
+    //
+    // Not drawing these is not cosmetic: xeXamDispatchDialog blocks its guest
+    // thread on fence.Wait() until an ImGui-drawn modal is dismissed, so a
+    // title that raises a system dialog hangs forever if nothing renders it.
+    if (execute_ui_drawers) {
+      MetalUIDrawContext ui_draw_context(
+          *this, uint32_t(drawable.texture.width),
+          uint32_t(drawable.texture.height), (__bridge void*)command_buffer,
+          (__bridge void*)encoder);
+      // TEMPORARY task-2.3 liveness assertion (REMOVE AT CLOSEOUT, task 6.1).
+      // Proves the call path is live before the drawer can draw anything, so a
+      // later "still nothing renders" is attributable to the drawer rather than
+      // to a presenter that never invoked it.
+      static bool s_ui_drawers_invoked_logged = false;
+      if (!s_ui_drawers_invoked_logged) {
+        s_ui_drawers_invoked_logged = true;
+        XELOGI(
+            "MetalPresenter: ExecuteUIDrawersFromUIThread reached (drawable "
+            "{}x{})",
+            uint32_t(drawable.texture.width),
+            uint32_t(drawable.texture.height));
+      }
+      ExecuteUIDrawersFromUIThread(ui_draw_context);
+    }
+
     [encoder endEncoding];
 
     // A silent GPU fault in the present blit leaves the window on the last good

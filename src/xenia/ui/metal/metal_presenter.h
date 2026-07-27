@@ -39,6 +39,35 @@ class MetalGuestOutputRefreshContext : public Presenter::GuestOutputRefreshConte
   void* target_texture_;
 };
 
+// Draw context handed to the UI immediate drawers during a paint. Carries the
+// in-flight command buffer and the render encoder already open on the
+// CAMetalLayer drawable, so overlay draws land in the SAME pass as the
+// guest-output blit, after it and before endEncoding. That is what keeps
+// overlay drawing off guest state entirely: it composites into the drawable and
+// never touches EDRAM, guest render targets, or guest memory.
+//
+// Metal objects stay opaque (void*) so this header remains plain C++, matching
+// MetalGuestOutputRefreshContext above. Neither pointer is owned: both are
+// valid only for the duration of the ExecuteUIDrawersFromUIThread call.
+class MetalUIDrawContext final : public UIDrawContext {
+ public:
+  MetalUIDrawContext(Presenter& presenter, uint32_t render_target_width,
+                     uint32_t render_target_height, void* command_buffer,
+                     void* render_encoder)
+      : UIDrawContext(presenter, render_target_width, render_target_height),
+        command_buffer_(command_buffer),
+        render_encoder_(render_encoder) {}
+
+  // id<MTLCommandBuffer>. Not owned.
+  void* command_buffer() const { return command_buffer_; }
+  // id<MTLRenderCommandEncoder>, already open on the drawable. Not owned.
+  void* render_encoder() const { return render_encoder_; }
+
+ private:
+  void* command_buffer_;
+  void* render_encoder_;
+};
+
 // Phase 2b.3 Metal presenter. Owns a CAMetalLayer connection and presents a
 // cleared drawable each frame. Guest-output blitting (showing the actual game
 // framebuffer, with the FSR/CAS paint effects) is deferred to the render path;

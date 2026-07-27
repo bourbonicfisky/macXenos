@@ -93,7 +93,18 @@ std::unique_ptr<Presenter> MetalProvider::CreatePresenter(
 }
 
 std::unique_ptr<ImmediateDrawer> MetalProvider::CreateImmediateDrawer() {
-  return std::make_unique<MetalImmediateDrawer>();
+  auto drawer = std::make_unique<MetalImmediateDrawer>();
+  if (!drawer->Initialize(device_)) {
+    // Returning null leaves the UI without a drawer, which is the same
+    // no-overlay state as before this drawer existed -- but it also means guest
+    // system dialogs stay invisible and block their guest thread, so this is
+    // loud rather than silent.
+    XELOGE(
+        "MetalProvider: immediate drawer initialization failed; UI overlays "
+        "and guest system dialogs will not render");
+    return nullptr;
+  }
+  return drawer;
 }
 
 }  // namespace metal

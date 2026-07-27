@@ -196,30 +196,48 @@ function(xe_shader_rules_spirv target shader_dir)
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
-# xe_shader_rules_metal(target shader_dir)
+# xe_shader_rules_metal(target shader_dir [source_glob...])
 #
-# Ensures Metal texture-load compute shaders are compiled before the target
-# builds (Apple hosts only; no-op elsewhere). Compiles the MSL branch of the
-# shared polyglot texture_load_*.cs.xesl sources via
-# tools/build/compile_shader_metal.py into
+# Ensures Metal shaders are compiled before the target builds (Apple hosts
+# only; no-op elsewhere). Compiles the MSL branch of the shared polyglot XeSL
+# sources via tools/build/compile_shader_metal.py into
 # ${shader_dir}/bytecode/metal/<id>.h (`const uint8_t <id>_metallib[]`),
 # mirroring the SPIR-V rule's generated-not-committed convention.
+#
+# Optional trailing arguments are glob patterns, relative to shader_dir,
+# selecting which sources to compile. They default to the texture-load compute
+# family this rule originally served, so existing callers are unaffected. The
+# compiler itself is stage-agnostic -- it invokes `xcrun metal` on the source
+# and derives the identifier from the filename -- so vertex/fragment sources
+# (e.g. the ui/shaders immediate.vs/.ps pair the UI overlay drawer consumes)
+# compile through the same path with no tool change.
 #
 # Unlike the SPIR-V/DXBC rules, the compile work is owned by ONE global
 # custom target per shader directory, and consumers only add a dependency on
 # it -- two consumers must never race writing the same generated headers.
-# The stamp depends on the load sources AND every .xesli in both the shader
+# Ownership is therefore per-directory: the first registration for a given
+# directory defines that directory's source set, so callers must not register
+# the same directory with differing globs.
+# The stamp depends on the selected sources AND every .xesli in both the shader
 # dir and ui/shaders (cross-directory includes like xesl.xesli).
 function(xe_shader_rules_metal target shader_dir)
   if(NOT APPLE)
     return()
   endif()
   get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
+  set(_globs ${ARGN})
+  if(NOT _globs)
+    set(_globs "texture_load_*.cs.xesl")
+  endif()
   string(SHA1 _dir_hash "${shader_dir}")
   string(SUBSTRING "${_dir_hash}" 0 8 _dir_hash)
   set(_owner_target xe-metal-shaders-${_dir_hash})
   if(NOT TARGET ${_owner_target})
-    file(GLOB _sources "${shader_dir}/texture_load_*.cs.xesl")
+    set(_source_patterns)
+    foreach(_glob ${_globs})
+      list(APPEND _source_patterns "${shader_dir}/${_glob}")
+    endforeach()
+    file(GLOB _sources ${_source_patterns})
     file(GLOB _includes
       "${shader_dir}/*.xesli"
       "${PROJECT_SOURCE_DIR}/src/xenia/ui/shaders/*.xesli")
@@ -242,7 +260,7 @@ function(xe_shader_rules_metal target shader_dir)
       ${_commands}
       COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
       DEPENDS ${_sources} ${_includes} "${_script}"
-      COMMENT "Compiling Metal texture-load shaders (${shader_dir})..."
+      COMMENT "Compiling Metal shaders (${shader_dir})..."
       VERBATIM
     )
     add_custom_target(${_owner_target} DEPENDS "${_stamp}")

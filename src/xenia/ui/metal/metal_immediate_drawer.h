@@ -19,14 +19,34 @@ namespace xe {
 namespace ui {
 namespace metal {
 
-// Phase 2b.3 placeholder immediate drawer. The Metal present path can clear and
-// present a frame before the UI (ImGui) overlay is ported, so this drawer is a
-// no-op: it accepts batches but draws nothing. Replaced by a real Metal
-// immediate drawer when the UI overlay is brought up.
+// Metal immediate-mode drawer for ImGui overlays: emulator dialogs (console /
+// controller / host settings, profiles, achievements) AND guest system dialogs
+// raised through XAM.
+//
+// Drawing these is not cosmetic. xeXamDispatchDialog blocks the calling guest
+// thread on fence.Wait() until an ImGui-drawn modal is dismissed, so while this
+// drawer did nothing, any title raising a system dialog hung there forever.
+//
+// Draws are recorded into the render encoder the presenter has already opened
+// on the CAMetalLayer drawable (see MetalUIDrawContext), after the guest-output
+// blit and before endEncoding. Nothing reachable from here touches EDRAM, guest
+// render targets, or guest memory, so overlay drawing cannot perturb guest
+// output.
+//
+// Metal objects are held as opaque void* so this header stays plain C++,
+// matching MetalPresenter/MetalProvider. Owned handles are retained with
+// CFBridgingRetain and released with CFBridgingRelease (this target builds with
+// ARC), so the header needs no Objective-C.
 class MetalImmediateDrawer : public ImmediateDrawer {
  public:
   MetalImmediateDrawer() = default;
-  ~MetalImmediateDrawer() override = default;
+  ~MetalImmediateDrawer() override;
+
+  // device is an id<MTLDevice> owned by the MetalProvider. Builds the overlay
+  // pipeline, the 1x1 white fallback texture, and the default sampler. Returns
+  // false if any of those fail, in which case the drawer must not be used.
+  bool Initialize(void* device);
+  void Shutdown();
 
   std::unique_ptr<ImmediateTexture> CreateTexture(uint32_t width,
                                                   uint32_t height,
@@ -34,9 +54,44 @@ class MetalImmediateDrawer : public ImmediateDrawer {
                                                   bool is_repeated,
                                                   const uint8_t* data) override;
 
+  void Begin(UIDrawContext& ui_draw_context, float coordinate_space_width,
+             float coordinate_space_height) override;
   void BeginDrawBatch(const ImmediateDrawBatch& batch) override;
   void Draw(const ImmediateDraw& draw) override;
   void EndDrawBatch() override;
+  void End() override;
+
+ private:
+  // id<MTLTexture> + id<MTLSamplerState>, both retained for the texture's
+  // lifetime and released in the destructor.
+  class MetalImmediateTexture : public ImmediateTexture {
+   public:
+    MetalImmediateTexture(uint32_t width, uint32_t height)
+        : ImmediateTexture(width, height) {}
+    ~MetalImmediateTexture() override;
+
+    void* texture = nullptr;
+    void* sampler = nullptr;
+  };
+
+  // Not owned; the provider outlives the drawer.
+  void* device_ = nullptr;
+
+  // Owned.
+  void* pipeline_ = nullptr;
+  void* white_texture_ = nullptr;
+  void* default_sampler_ = nullptr;
+
+  // Valid only between Begin and End; not owned.
+  void* current_render_encoder_ = nullptr;
+
+  // Owned for the duration of one batch. The command buffer separately retains
+  // any resource its encoders reference until completion, so releasing these at
+  // EndDrawBatch is safe even though the GPU has not finished with them.
+  void* current_vertex_buffer_ = nullptr;
+  void* current_index_buffer_ = nullptr;
+
+  bool batch_open_ = false;
 };
 
 }  // namespace metal
