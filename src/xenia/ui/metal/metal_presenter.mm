@@ -383,19 +383,6 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
           *this, uint32_t(drawable.texture.width),
           uint32_t(drawable.texture.height), (__bridge void*)command_buffer,
           (__bridge void*)encoder);
-      // TEMPORARY task-2.3 liveness assertion (REMOVE AT CLOSEOUT, task 6.1).
-      // Proves the call path is live before the drawer can draw anything, so a
-      // later "still nothing renders" is attributable to the drawer rather than
-      // to a presenter that never invoked it.
-      static bool s_ui_drawers_invoked_logged = false;
-      if (!s_ui_drawers_invoked_logged) {
-        s_ui_drawers_invoked_logged = true;
-        XELOGI(
-            "MetalPresenter: ExecuteUIDrawersFromUIThread reached (drawable "
-            "{}x{})",
-            uint32_t(drawable.texture.width),
-            uint32_t(drawable.texture.height));
-      }
       ExecuteUIDrawersFromUIThread(ui_draw_context);
     }
 
