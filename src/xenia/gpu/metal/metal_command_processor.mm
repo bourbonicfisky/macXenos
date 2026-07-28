@@ -1649,6 +1649,17 @@ bool MetalCommandProcessor::ReleaseCachesForClear() {
   // the device is idle and every GPU-produced guest write has already reached
   // RAM. Every release below is therefore immediate rather than retired.
   //
+  // DURABLE PIPELINE STORAGE IS DELIBERATELY NOT TOUCHED HERE (task 3.3f of
+  // implement-metal-shader-pipeline-lifetime). The promoted cache-clearing
+  // decision already retains pipelines and MSC-translated shaders by design and
+  // records that shader/pipeline lifetime is not covered by it, so the on-disk
+  // store follows the same rule as its in-memory counterparts. A clear releases
+  // DERIVED state that can be rebuilt from guest memory; the durable store is
+  // not derived from guest memory at all, and erasing it would turn a
+  // cache-control request into a permanent cold start for that title — every
+  // stall the census measured, paid again, with no guest-visible benefit.
+  // Deleting it is a separate, separately gated behavior if it is ever wanted.
+  //
   // ALL preconditions are checked FIRST, before a single object is released,
   // so a failure is reported with everything still intact rather than half way
   // through a partial release. Both of these describe submission-gated state

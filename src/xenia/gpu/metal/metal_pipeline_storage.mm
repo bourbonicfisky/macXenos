@@ -183,9 +183,9 @@ std::string MetalPipelineStorageIdentity::DescribeMismatch(
 MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   MetalPipelineStorageIdentity identity;
 
-  // 3.3b — must mirror MetalPipelineCache::Initialize exactly. If those
-  // constructor arguments change and this does not, a stale shader is served
-  // under an unchanged key. Keep the two in sync.
+  // 3.3b — read from MetalTranslatorConfig, the same constants
+  // MetalPipelineCache::Initialize constructs the translators from, so the
+  // schema cannot drift from the configuration it describes.
   struct SchemaBits {
     uint32_t vendor_apple : 1;
     uint32_t bindless_resources_used : 1;
@@ -195,10 +195,12 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
     uint32_t reserved : 27;
   } schema = {};
   schema.vendor_apple = 1;
-  schema.bindless_resources_used = 1;
-  schema.edram_rov_used = 0;
-  schema.gamma_render_target_as_unorm8 = 1;
-  schema.msc_bindless_resources_used = 1;
+  schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
+  schema.edram_rov_used = MetalTranslatorConfig::kEdramRovUsed;
+  schema.gamma_render_target_as_unorm8 =
+      MetalTranslatorConfig::kGammaRenderTargetAsUnorm8;
+  schema.msc_bindless_resources_used =
+      MetalTranslatorConfig::kMscBindlessResourcesUsed;
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));
 
   identity.dxc_artifact_hash = HashLoadedDylib("libdxilconv");

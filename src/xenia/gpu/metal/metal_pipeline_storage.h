@@ -42,6 +42,20 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+// The single source of truth for the translator configuration.
+// MetalPipelineCache::Initialize constructs the translators from these, and the
+// storage identity below fingerprints them, so the two cannot drift. Before
+// this existed the values were duplicated, and a change to one without the
+// other would have served a provably wrong shader under an unchanged cache key
+// — flipping kGammaRenderTargetAsUnorm8 alone is the difference behind the JC2
+// black-gameplay bug.
+struct MetalTranslatorConfig {
+  static constexpr bool kBindlessResourcesUsed = true;
+  static constexpr bool kEdramRovUsed = false;
+  static constexpr bool kGammaRenderTargetAsUnorm8 = true;
+  static constexpr bool kMscBindlessResourcesUsed = true;
+};
+
 // Everything that can change generated output for byte-identical guest ucode.
 // A mismatch in ANY field discards the whole title directory rather than
 // partially trusting it.

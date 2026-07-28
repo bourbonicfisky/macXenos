@@ -49,17 +49,21 @@ bool MetalPipelineCache::Initialize() {
   // translator never emits that codepath and the flag is silently ignored —
   // JC2's scene renders ~0.02-linear sunlight that only becomes visible
   // (0x5C-range) after gamma encoding + exposure (the "black gameplay" bug).
+  // Configuration comes from MetalTranslatorConfig so the durable cache's
+  // schema fingerprint (3.3b) cannot drift from what is actually built here.
   shader_translator_ = std::make_unique<DxbcShaderTranslator>(
       ui::GraphicsProvider::GpuVendorID::kApple,
-      /*bindless_resources_used=*/true, /*edram_rov_used=*/false,
-      /*gamma_render_target_as_unorm8=*/true);
+      MetalTranslatorConfig::kBindlessResourcesUsed,
+      MetalTranslatorConfig::kEdramRovUsed,
+      MetalTranslatorConfig::kGammaRenderTargetAsUnorm8);
 
   std::string error;
   if (!dxil_converter_.Initialize(&error)) {
     XELOGE("MetalPipelineCache: DXBC->DXIL converter init failed: {}", error);
     return false;
   }
-  if (!metal_converter_.Initialize(/*bindless_resources_used=*/true, &error)) {
+  if (!metal_converter_.Initialize(
+          MetalTranslatorConfig::kMscBindlessResourcesUsed, &error)) {
     XELOGE("MetalPipelineCache: Metal Shader Converter init failed: {}", error);
     return false;
   }
@@ -253,6 +257,41 @@ bool MetalPipelineCache::TranslateShader(
 }
 
 namespace {
+
+// 3.2 — content-derived shader identity for the pipeline key.
+//
+// The key previously used MTLFunction / translation POINTERS. Those are stable
+// within one run and meaningless across runs, so no durable entry could be
+// written against them. (ucode hash, modification, type) is the equivalent
+// identity in content terms: MetalShader owns exactly one translation per
+// modification and TranslateShader is idempotent per translation, so the
+// pointer and this triple are 1:1 within a run — the swap cannot merge two
+// distinct pipelines or split one.
+//
+// `present` keeps a null pixel shader distinct from any fragment-carrying
+// pipeline, which the spec requires and which the old key got from a null
+// pointer. A real shader can never collide with the absent case because
+// present=0 zeroes the whole triple.
+struct MetalShaderKeyIdentity {
+  uint64_t ucode_hash;
+  uint64_t modification;
+  uint32_t shader_type;
+  uint32_t present;
+};
+
+MetalShaderKeyIdentity MakeShaderKeyIdentity(
+    const MetalShader::MetalTranslation* translation) {
+  MetalShaderKeyIdentity identity = {};
+  if (!translation) {
+    return identity;
+  }
+  identity.ucode_hash = translation->shader().ucode_data_hash();
+  identity.modification = translation->modification();
+  identity.shader_type = uint32_t(translation->shader().type());
+  identity.present = 1;
+  return identity;
+}
+
 MTLBlendFactor ToMetalBlendFactor(MetalBlendFactor factor) {
   switch (factor) {
     case MetalBlendFactor::kZero:
@@ -392,12 +431,27 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     return nullptr;
   }
 
-  // Key on the identity of the host functions plus the attachment formats. The
-  // functions are stable for a given translation, so their pointers are a valid
-  // identity within one run.
+  // 3.2 — full pipeline identity, content-derived so it can back a durable
+  // entry. Audit of every input that reaches the descriptor below:
+  //   shader identities + modifications  -> vs / ps (MakeShaderKeyIdentity)
+  //   null-vs-present pixel shader       -> ps.present
+  //   render-target formats              -> colors
+  //   depth format                       -> depth (the stencil format is
+  //                                         derived from it, never independent)
+  //   blend state                        -> blends
+  //   write mask                         -> write_mask
+  //   sample state                       -> sample_count
+  //   vertex layout                      -> NOT APPLICABLE: this backend never
+  //                                         sets a vertexDescriptor; MSC-
+  //                                         translated shaders fetch vertices
+  //                                         themselves, so no layout reaches
+  //                                         the pipeline
+  //   alphaToCoverageEnabled             -> constant NO (Xenos alpha-to-mask is
+  //                                         exact SV_Coverage in the shader),
+  //                                         so it is not an identity input
   struct KeyBytes {
-    void* vs;
-    void* ps;
+    MetalShaderKeyIdentity vs;
+    MetalShaderKeyIdentity ps;
     uint64_t colors[xenos::kMaxColorRenderTargets];
     uint64_t depth;
     uint32_t sample_count;
@@ -405,8 +459,13 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     uint32_t write_mask;
     uint32_t pad;
   } key_bytes = {};
-  key_bytes.vs = vertex->metal_function();
-  key_bytes.ps = pixel ? pixel->metal_function() : nullptr;
+  key_bytes.vs = MakeShaderKeyIdentity(vertex);
+  // A pixel translation without a function produces the same depth-only
+  // pipeline as no pixel translation at all (see the descriptor below), so it
+  // must key the same. The old pointer key got this for free because
+  // metal_function() was null in both cases.
+  key_bytes.ps = MakeShaderKeyIdentity(
+      pixel && pixel->has_metal_function() ? pixel : nullptr);
   key_bytes.depth = depth_pixel_format;
   key_bytes.sample_count = raster_key.raster_sample_count;
   key_bytes.write_mask = color_write_mask;
@@ -650,10 +709,14 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     return nullptr;
   }
 
+  // 3.2 — same content-derived identity as the render-pipeline key. `gs_key` is
+  // already content-derived (topology type plus the interpolator/clip layout
+  // taken from the VS/PS modifications), so it needs no change.
   struct KeyBytes {
     uint32_t gs_key;
-    void* vs;  // vertex translation identity (object-stage source).
-    void* ps;  // fragment function identity.
+    uint32_t pad0;
+    MetalShaderKeyIdentity vs;  // object-stage source translation.
+    MetalShaderKeyIdentity ps;  // fragment stage.
     uint64_t colors[xenos::kMaxColorRenderTargets];
     uint64_t depth;
     uint32_t sample_count;
@@ -662,8 +725,8 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     uint32_t pad;
   } key_bytes = {};
   key_bytes.gs_key = gs_key.key;
-  key_bytes.vs = static_cast<void*>(vertex);
-  key_bytes.ps = pixel->metal_function();
+  key_bytes.vs = MakeShaderKeyIdentity(vertex);
+  key_bytes.ps = MakeShaderKeyIdentity(pixel);
   key_bytes.depth = depth_pixel_format;
   key_bytes.sample_count = raster_key.raster_sample_count;
   key_bytes.write_mask = color_write_mask;
