@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #import <Metal/Metal.h>
@@ -193,6 +194,68 @@ TEST_CASE("One shader under two topologies stores two distinct records",
 
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
+  }
+}
+
+TEST_CASE("In-memory object-stage key separates input topologies",
+          "[metal][geometry][identity]") {
+  // The production defect lived HERE, in the run-local map key, not in the
+  // durable one. `translation` is an opaque identity, so this needs no MSC
+  // fixture and no access to MetalPipelineCache internals.
+  int translation_a = 0;  // Stand-ins for two distinct translation objects.
+  int translation_b = 0;
+  const void* vs_a = &translation_a;
+  const void* vs_b = &translation_b;
+
+  const MetalGeometryVertexStageKey point{vs_a, kTopologyPoint};
+  const MetalGeometryVertexStageKey line{vs_a, kTopologyLine};
+  const MetalGeometryVertexStageKey other_shader{vs_b, kTopologyPoint};
+
+  // Same translated VS, different topology => different stages.
+  REQUIRE(point != line);
+  REQUIRE(point != other_shader);
+  REQUIRE(point == MetalGeometryVertexStageKey{vs_a, kTopologyPoint});
+
+  // Topology must reach the HASH too, not only equality. Equality alone would
+  // still be correct but would pile every topology into one bucket, and a
+  // hasher that ignores a field is a latent step toward dropping it.
+  const MetalGeometryVertexStageKey::Hasher hasher;
+  REQUIRE(hasher(point) != hasher(line));
+  REQUIRE(hasher(point) == hasher(MetalGeometryVertexStageKey{vs_a,
+                                                              kTopologyPoint}));
+}
+
+TEST_CASE("Object-stage map keeps both topologies in either insertion order",
+          "[metal][geometry][identity]") {
+  // The defect was order-dependent: whichever stage was built first won. Both
+  // orders must therefore end with TWO entries, each resolving to its own value.
+  int translation = 0;
+  const void* vs = &translation;
+  const MetalGeometryVertexStageKey point{vs, kTopologyPoint};
+  const MetalGeometryVertexStageKey line{vs, kTopologyLine};
+
+  for (bool point_first : {true, false}) {
+    std::unordered_map<MetalGeometryVertexStageKey, std::string,
+                       MetalGeometryVertexStageKey::Hasher>
+        stages;
+    if (point_first) {
+      stages.emplace(point, "object_stage_point");
+      stages.emplace(line, "object_stage_line");
+    } else {
+      stages.emplace(line, "object_stage_line");
+      stages.emplace(point, "object_stage_point");
+    }
+
+    // Two entries, not one deduplicated.
+    REQUIRE(stages.size() == 2);
+
+    // And each lookup returns ITS OWN stage, never the first-inserted one.
+    auto point_it = stages.find(point);
+    auto line_it = stages.find(line);
+    REQUIRE(point_it != stages.end());
+    REQUIRE(line_it != stages.end());
+    REQUIRE(point_it->second == "object_stage_point");
+    REQUIRE(line_it->second == "object_stage_line");
   }
 }
 

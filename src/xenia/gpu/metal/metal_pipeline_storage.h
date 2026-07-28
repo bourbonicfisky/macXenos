@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -113,6 +114,40 @@ inline constexpr uint32_t kMetalGeometryRecordKindShaderStage = 2;
 // conformance/metal_geometry_stage_identity_test.mm.
 uint64_t MetalGeometryRecordKey(uint32_t kind, uint64_t shader_identity,
                                 uint32_t input_topology);
+
+// In-memory identity of a geometry object stage, for the run-local cache.
+//
+// Same load-bearing rule as MetalGeometryRecordKey above: `input_topology` is
+// what the object stage is COMPILED AGAINST, so it must participate in BOTH
+// equality and hashing. Dropping it from either collapses two distinct stages
+// onto one entry and the first one built wins — the production defect this
+// type exists to prevent. `translation` is an opaque identity only; the key
+// deliberately does not depend on the translation type, which keeps it pure
+// and directly testable.
+struct MetalGeometryVertexStageKey {
+  const void* translation = nullptr;
+  uint32_t input_topology = 0;
+
+  bool operator==(const MetalGeometryVertexStageKey& other) const {
+    return translation == other.translation &&
+           input_topology == other.input_topology;
+  }
+  bool operator!=(const MetalGeometryVertexStageKey& other) const {
+    return !(*this == other);
+  }
+
+  struct Hasher {
+    size_t operator()(const MetalGeometryVertexStageKey& key) const {
+      // Both fields must reach the hash, or two topologies land in the same
+      // bucket and rely on equality alone to separate them.
+      const size_t pointer_hash = std::hash<const void*>{}(key.translation);
+      const size_t topology_hash =
+          std::hash<uint32_t>{}(key.input_topology) * 0x9E3779B97F4A7C15ull;
+      return pointer_hash ^ (topology_hash + 0x9E3779B9u + (pointer_hash << 6) +
+                             (pointer_hash >> 2));
+    }
+  };
+};
 
 // Computes the identity for the running process. `device` is an id<MTLDevice>.
 // Never fails: an unavailable input hashes to 0, which still participates in

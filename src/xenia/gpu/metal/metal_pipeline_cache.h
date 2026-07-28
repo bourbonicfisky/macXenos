@@ -129,26 +129,6 @@ class MetalPipelineCache {
     uint32_t gs_max_input_primitives = 0;
   };
 
-  // Identity of a geometry object stage. The MSC input topology must be part of
-  // it: `geometry_type` selects the topology the object stage is compiled
-  // against, so the same guest VS produces different object stages for
-  // different geometry types. Keying on the translation alone returned whichever
-  // was built first.
-  struct GeometryVertexStageKey {
-    MetalShader::MetalTranslation* translation;
-    uint32_t input_topology;
-    bool operator==(const GeometryVertexStageKey& other) const {
-      return translation == other.translation &&
-             input_topology == other.input_topology;
-    }
-  };
-  struct GeometryVertexStageKeyHasher {
-    size_t operator()(const GeometryVertexStageKey& key) const {
-      return std::hash<const void*>{}(key.translation) ^
-             (size_t(key.input_topology) * 0x9E3779B97F4A7C15ull);
-    }
-  };
-
   // Object-stage VS for geometry emulation, cached by the vertex translation.
   const GeometryVertexStage* GetOrCreateGeometryVertexStage(
       MetalShader::MetalTranslation* vertex,
@@ -174,8 +154,8 @@ class MetalPipelineCache {
   // Geometry-emulation caches: object-stage VS by vertex translation, mesh-stage
   // GS by GeometryShaderKey, assembled pipeline by the full pipeline key. The
   // libraries are owned (retained) here and released in Shutdown.
-  std::unordered_map<GeometryVertexStageKey, GeometryVertexStage,
-                     GeometryVertexStageKeyHasher>
+  std::unordered_map<MetalGeometryVertexStageKey, GeometryVertexStage,
+                     MetalGeometryVertexStageKey::Hasher>
       geometry_vertex_stages_;
   std::unordered_map<uint32_t, GeometryShaderStage> geometry_shader_stages_;
   std::unordered_map<uint64_t, GeometryPipeline> geometry_pipelines_;

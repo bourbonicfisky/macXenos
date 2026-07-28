@@ -664,8 +664,9 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   // whichever was built first; the topology is now part of the key. Found while
   // building the durable key for 3.10, where persisting the same mistake would
   // have made it survive across runs instead of only within one.
-  const GeometryVertexStageKey stage_key{
-      vertex, uint32_t(GeometryInputTopology(geometry_type))};
+  const MetalGeometryVertexStageKey stage_key{
+      static_cast<const void*>(vertex),
+      uint32_t(GeometryInputTopology(geometry_type))};
   auto it = geometry_vertex_stages_.find(stage_key);
   if (it != geometry_vertex_stages_.end()) {
     return it->second.valid ? &it->second : nullptr;
