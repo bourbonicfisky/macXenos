@@ -81,6 +81,37 @@ inline const char* EventName(Event event) {
   }
 }
 
+// Sub-stages OF kShaderTranslate, for task 3.9. The census originally timed the
+// whole chain as one unit, which makes its 50-97% translation share an UPPER
+// bound on what a durable metallib store (M1) could remove, not a prediction:
+// a warm hit still has to run newLibraryWithData + newFunctionWithName, and it
+// still needs DXBC if the shader is later used for geometry emulation.
+//
+// These are a breakdown, NOT additional work — they are deliberately excluded
+// from the run total, which would otherwise double-count them.
+enum class SubEvent : uint32_t {
+  kUcodeToDxbc = 0,       // shared DxbcShaderTranslator
+  kDxbcToDxil,            // dxilconv
+  kDxilToMetallib,        // Metal Shader Converter
+  kCreateMetalFunction,   // newLibraryWithData + newFunctionWithName
+  kCount,
+};
+
+inline const char* SubEventName(SubEvent event) {
+  switch (event) {
+    case SubEvent::kUcodeToDxbc:
+      return "ucode->DXBC";
+    case SubEvent::kDxbcToDxil:
+      return "DXBC->DXIL";
+    case SubEvent::kDxilToMetallib:
+      return "DXIL->metallib";
+    case SubEvent::kCreateMetalFunction:
+      return "metallib->fn";
+    default:
+      return "unknown";
+  }
+}
+
 struct EventStats {
   uint64_t count = 0;
   uint64_t failed = 0;
@@ -107,6 +138,14 @@ class State {
 
   bool enabled() const { return enabled_; }
   double budget_ms() const { return budget_ms_; }
+
+  void RecordSub(SubEvent event, double ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EventStats& stats = sub_events_[static_cast<uint32_t>(event)];
+    ++stats.count;
+    stats.total_ms += ms;
+    stats.max_ms = std::max(stats.max_ms, ms);
+  }
 
   void Record(Event event, double ms, bool succeeded) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -178,6 +217,36 @@ class State {
           EventName(static_cast<Event>(i)), stats.count, stats.failed,
           stats.total_ms, 100.0 * stats.total_ms / std::max(run_total_ms, 1e-9),
           stats.total_ms / double(stats.count), stats.max_ms);
+    }
+
+    // Task 3.9 — the shader-translate breakdown. Reported as a share of
+    // shader-translate, NOT added to the run total. The last row is what a
+    // warm M1 hit still has to pay, so M1's ceiling is everything above it.
+    const double xlat_ms =
+        events_[static_cast<uint32_t>(Event::kShaderTranslate)].total_ms;
+    if (xlat_ms > 0.0) {
+      double removable_ms = 0.0;
+      for (uint32_t i = 0; i < static_cast<uint32_t>(SubEvent::kCount); ++i) {
+        const EventStats& stats = sub_events_[i];
+        if (!stats.count) {
+          continue;
+        }
+        const bool irreducible =
+            static_cast<SubEvent>(i) == SubEvent::kCreateMetalFunction;
+        if (!irreducible) {
+          removable_ms += stats.total_ms;
+        }
+        XELOGI(
+            "MetalPipelineCensus     {:<16} n={:<6} total={:9.2f} ms "
+            "({:5.1f}% of translate)  mean={:7.3f} ms  max={:8.3f} ms{}",
+            SubEventName(static_cast<SubEvent>(i)), stats.count, stats.total_ms,
+            100.0 * stats.total_ms / xlat_ms, stats.total_ms / double(stats.count),
+            stats.max_ms, irreducible ? "  <- still paid on a warm M1 hit" : "");
+      }
+      XELOGI(
+          "MetalPipelineCensus     M1 ceiling: {:.2f} ms of {:.2f} ms translate "
+          "({:.1f}%) is removable by a durable metallib store",
+          removable_ms, xlat_ms, 100.0 * removable_ms / xlat_ms);
     }
 
     // Per-frame distribution (task 1.2): which frames spent more than a frame
@@ -296,6 +365,8 @@ class State {
   double budget_ms_ = 1000.0 / 60.0;
   std::mutex mutex_;
   std::array<EventStats, static_cast<size_t>(Event::kCount)> events_ = {};
+  // Breakdown of kShaderTranslate; never summed into the run total.
+  std::array<EventStats, static_cast<size_t>(SubEvent::kCount)> sub_events_ = {};
   uint32_t frame_index_ = 0;
   std::vector<double> frame_ms_;
   std::vector<uint32_t> frame_count_;
@@ -350,6 +421,31 @@ class Scope {
   bool enabled_;
   const bool* result_flag_ = nullptr;
   bool succeeded_ = true;
+  std::chrono::steady_clock::time_point start_;
+};
+
+// Times one sub-stage of the translation chain (task 3.9).
+class SubScope {
+ public:
+  explicit SubScope(SubEvent event) : event_(event), enabled_(Enabled()) {
+    if (enabled_) {
+      start_ = std::chrono::steady_clock::now();
+    }
+  }
+  SubScope(const SubScope&) = delete;
+  SubScope& operator=(const SubScope&) = delete;
+  ~SubScope() {
+    if (!enabled_) {
+      return;
+    }
+    State::Get().RecordSub(event_, std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - start_)
+                                       .count());
+  }
+
+ private:
+  SubEvent event_;
+  bool enabled_;
   std::chrono::steady_clock::time_point start_;
 };
 

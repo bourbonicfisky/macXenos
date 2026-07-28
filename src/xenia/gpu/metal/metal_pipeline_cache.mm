@@ -158,6 +158,26 @@ MetalShader* MetalPipelineCache::LoadShader(xenos::ShaderType shader_type,
   return shader;
 }
 
+namespace {
+// M1 entry key. Same content-derived identity the pipeline key uses, hashed to
+// a filename. The storage-wide provenance (device, OS, translator artifacts and
+// schema) was validated when the directory was opened, so it is not repeated
+// per entry.
+uint64_t MetallibCacheKey(const MetalShader::MetalTranslation& translation) {
+  struct KeyBytes {
+    uint64_t ucode_hash;
+    uint64_t modification;
+    uint32_t shader_type;
+    uint32_t pad;
+  } key_bytes = {};
+  key_bytes.ucode_hash = translation.shader().ucode_data_hash();
+  key_bytes.modification = translation.modification();
+  key_bytes.shader_type = uint32_t(translation.shader().type());
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
+
+}  // namespace
+
 bool MetalPipelineCache::TranslateShader(
     MetalShader::MetalTranslation& translation) {
   if (translation.is_translated()) {
@@ -173,10 +193,14 @@ bool MetalPipelineCache::TranslateShader(
                                       &census_ok);
 
   // Stage 1: microcode -> DXBC (reused DxbcShaderTranslator).
-  if (!shader_translator_->TranslateAnalyzedShader(translation)) {
-    XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
-           shader.ucode_data_hash());
-    return false;
+  {
+    pipeline_census::SubScope stage_scope(
+        pipeline_census::SubEvent::kUcodeToDxbc);
+    if (!shader_translator_->TranslateAnalyzedShader(translation)) {
+      XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
+             shader.ucode_data_hash());
+      return false;
+    }
   }
   const std::vector<uint8_t>& dxbc = translation.translated_binary();
   if (dxbc.empty()) {
@@ -185,13 +209,44 @@ bool MetalPipelineCache::TranslateShader(
     return false;
   }
 
+  // M1 (3.7/3.8) — durable metallib store. Stage 1 above always runs even on a
+  // hit: it costs 0.8-0.9% of translation time (~0.06 ms mean, measured in
+  // task 3.9) and it keeps translated_binary() populated, which the
+  // geometry-emulation stages consume. Skipping it to save that would break
+  // geometry emulation for a saving smaller than the measurement noise.
+  //
+  // What a hit DOES skip is stages 2 and 3 — DXBC->DXIL and DXIL->metallib —
+  // which are 99.7-99.8% of translation cost.
+  const uint64_t m1_key = MetallibCacheKey(translation);
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
+    std::vector<uint8_t> cached_metallib;
+    if (storage_.LoadMetallib(m1_key, &cached_metallib)) {
+      pipeline_census::SubScope stage_scope(
+          pipeline_census::SubEvent::kCreateMetalFunction);
+      if (translation.CreateMetalFunction(device_, cached_metallib)) {
+        census_ok = true;
+        return true;
+      }
+      // A stored blob the device will not load is not trustworthy — fall
+      // through to a full cold translation rather than failing the draw.
+      XELOGW(
+          "MetalPipelineCache: cached metallib {:016X} failed to load; "
+          "retranslating",
+          m1_key);
+    }
+  }
+
   // Stage 2: DXBC -> DXIL.
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
-    XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
-           shader.ucode_data_hash(), error);
-    return false;
+  {
+    pipeline_census::SubScope stage_scope(
+        pipeline_census::SubEvent::kDxbcToDxil);
+    if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+      XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
+             shader.ucode_data_hash(), error);
+      return false;
+    }
   }
 
   // Shader-chain forensics (XE_METAL_DUMP_XLAT=<hex ucode hash>): dump the
@@ -230,10 +285,14 @@ bool MetalPipelineCache::TranslateShader(
     }
   }
   std::vector<uint8_t> metallib;
-  if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
-    XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
-           shader.ucode_data_hash(), error);
-    return false;
+  {
+    pipeline_census::SubScope stage_scope(
+        pipeline_census::SubEvent::kDxilToMetallib);
+    if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
+      XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
+             shader.ucode_data_hash(), error);
+      return false;
+    }
   }
 
   // Load onto the device as an MTLFunction.
@@ -247,10 +306,23 @@ bool MetalPipelineCache::TranslateShader(
       XELOGW("MetalPipelineCache: dumped {} ({} bytes)", path, metallib.size());
     }
   }
-  if (!translation.CreateMetalFunction(device_, metallib)) {
-    XELOGE("MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
-           shader.ucode_data_hash());
-    return false;
+  {
+    // The one stage a warm M1 hit still pays: the metallib must still become an
+    // MTLLibrary and MTLFunction. Everything above it is M1's ceiling (3.9).
+    pipeline_census::SubScope stage_scope(
+        pipeline_census::SubEvent::kCreateMetalFunction);
+    if (!translation.CreateMetalFunction(device_, metallib)) {
+      XELOGE(
+          "MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
+          shader.ucode_data_hash());
+      return false;
+    }
+  }
+
+  // Publish only after the device has accepted it, so a blob that cannot load
+  // is never written for a later run to trip over.
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
+    storage_.StoreMetallib(m1_key, metallib);
   }
   census_ok = true;
   return true;

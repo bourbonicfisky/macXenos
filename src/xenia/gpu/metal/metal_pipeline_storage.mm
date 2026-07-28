@@ -407,6 +407,85 @@ void MetalPipelineStorage::LogSizeReport(const char* reason) const {
   }
 }
 
+namespace {
+// Per-entry header for an M1 metallib. Deliberately small: the storage-wide
+// provenance was validated at Open, so an entry only has to prove it is the
+// entry that was asked for and that it is whole.
+#pragma pack(push, 1)
+struct MetallibFileHeader {
+  uint32_t magic;
+  uint32_t format_version;
+  uint64_t key;
+  uint64_t metallib_size;
+};
+#pragma pack(pop)
+constexpr uint32_t kMetallibMagic = 0x314D4C4Du;  // 'MLM1'
+// A metallib far larger than this is a corrupt length field, not a shader.
+constexpr uint64_t kMaxMetallibBytes = 64ull * 1024ull * 1024ull;
+}  // namespace
+
+bool MetalPipelineStorage::LoadMetallib(uint64_t key,
+                                        std::vector<uint8_t>* metallib_out) const {
+  if (!is_open_ || !metallib_out) {
+    return false;
+  }
+  const std::filesystem::path path =
+      metallib_dir() / fmt::format("{:016X}.metallib", key);
+  FILE* file = fopen(path.string().c_str(), "rb");
+  if (!file) {
+    return false;  // Ordinary miss.
+  }
+  MetallibFileHeader header = {};
+  bool ok = fread(&header, 1, sizeof(header), file) == sizeof(header) &&
+            header.magic == kMetallibMagic &&
+            header.format_version == MetalPipelineStorageIdentity::kFormatVersion &&
+            header.key == key && header.metallib_size &&
+            header.metallib_size <= kMaxMetallibBytes;
+  if (ok) {
+    metallib_out->resize(header.metallib_size);
+    ok = fread(metallib_out->data(), 1, header.metallib_size, file) ==
+         header.metallib_size;
+  }
+  fclose(file);
+  if (!ok) {
+    // 3.5 — corrupt or truncated is a MISS, never a fault. Remove it so the
+    // cold translation that follows can republish a whole one.
+    metallib_out->clear();
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    XELOGW("MetalPipelineStorage: discarded corrupt metallib entry {:016X}", key);
+    return false;
+  }
+  return true;
+}
+
+bool MetalPipelineStorage::StoreMetallib(uint64_t key,
+                                         const std::vector<uint8_t>& metallib) {
+  if (!is_open_ || metallib.empty() || metallib.size() > kMaxMetallibBytes) {
+    return false;
+  }
+  const uint64_t total = sizeof(MetallibFileHeader) + metallib.size();
+  // 3.6e — at cap, stop admitting NEW artifacts; existing ones keep serving.
+  if (!CanAdmit(total)) {
+    RecordAdmitted(0);  // Latches admission_stopped_ and logs once.
+    return false;
+  }
+  std::vector<uint8_t> buffer(total);
+  MetallibFileHeader header = {};
+  header.magic = kMetallibMagic;
+  header.format_version = MetalPipelineStorageIdentity::kFormatVersion;
+  header.key = key;
+  header.metallib_size = metallib.size();
+  std::memcpy(buffer.data(), &header, sizeof(header));
+  std::memcpy(buffer.data() + sizeof(header), metallib.data(), metallib.size());
+  if (!WriteFileAtomic(metallib_dir() / fmt::format("{:016X}.metallib", key),
+                       buffer.data(), buffer.size())) {
+    return false;
+  }
+  RecordAdmitted(total);
+  return true;
+}
+
 bool MetalPipelineStorage::WriteFileAtomic(const std::filesystem::path& path,
                                            const void* data, size_t size) {
   std::filesystem::path tmp = path;

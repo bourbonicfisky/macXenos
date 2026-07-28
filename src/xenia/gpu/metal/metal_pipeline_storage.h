@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "xenia/base/cvar.h"
 
@@ -143,6 +144,17 @@ class MetalPipelineStorage {
   // 3.6f — reported before promotion, so the 512 MiB default is revised from
   // evidence rather than shipped close to a boundary nobody measured.
   void LogSizeReport(const char* reason) const;
+
+  // M1 (3.7/3.8) — the durable metallib store. `key` is the content-derived
+  // shader identity; the storage-wide provenance was already validated at Open,
+  // so an entry does not repeat it. Only the metallib is stored: the function
+  // name is recovered from the library's own function list, exactly as the cold
+  // path does.
+  //
+  // Load returns false for a miss, a corrupt entry, or a truncated one — all
+  // three are simply misses, and a miss costs a normal cold translation.
+  bool LoadMetallib(uint64_t key, std::vector<uint8_t>* metallib_out) const;
+  bool StoreMetallib(uint64_t key, const std::vector<uint8_t>& metallib);
 
   // Atomic publish: writes to `<final>.tmp` then renames. A crash mid-write
   // therefore cannot leave a torn file at the real path. Shape borrowed from
