@@ -36,7 +36,8 @@
 
 #include "xenia/base/cvar.h"
 
-// 3.1 — one exact rollback switch per mechanism, both default OFF.
+// One exact rollback switch per mechanism. M1 (metallib cache) is promoted
+// and default ON; M2 (binary archive) is default OFF pending its successor.
 DECLARE_bool(metal_pipeline_metallib_cache);
 DECLARE_bool(metal_pipeline_binary_archive);
 

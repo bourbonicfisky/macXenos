@@ -32,12 +32,14 @@
 
 // 3.6b — size-based bounds, configurable. Not age-based: a large title touched
 // rarely is the thing worth evicting, and its age says nothing about its cost.
-// 3.1 — one exact rollback switch per mechanism, both default OFF, so a
-// regression bisects to one mechanism rather than to "the durable cache".
-DEFINE_bool(metal_pipeline_metallib_cache, false,
-            "Persist translated metallib across runs (M1). Addresses the "
-            "translation cost the census measured at 50-97% of pipeline "
-            "creation. Default off until gated.",
+// One exact rollback switch per mechanism, so a regression bisects to one
+// mechanism rather than to "the durable cache". M1 is PROMOTED (default on);
+// M2 remains default off pending its own successor change and gates.
+DEFINE_bool(metal_pipeline_metallib_cache, true,
+            "Persist translated metallib across runs so a warm launch does not "
+            "re-translate what a previous run already translated. Removes "
+            "95-96% of measured translation cost on a warm launch. Set to "
+            "false for the exact rollback: no durable reads or writes.",
             "GPU");
 DEFINE_bool(metal_pipeline_binary_archive, false,
             "Persist host pipeline state in an MTLBinaryArchive (M2). "
