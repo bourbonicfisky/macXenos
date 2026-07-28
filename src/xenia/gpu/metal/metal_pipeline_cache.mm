@@ -19,6 +19,7 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
+#include "xenia/gpu/metal/metal_pipeline_census.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
@@ -65,6 +66,10 @@ bool MetalPipelineCache::Initialize() {
 }
 
 void MetalPipelineCache::Shutdown() {
+  // CENSUS (temporary; see metal_pipeline_census.h). A live title is usually
+  // killed rather than shut down cleanly, so this full report is a bonus — the
+  // periodic swap line is the evidence that always survives.
+  pipeline_census::Report("pipeline cache shutdown");
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
       id<MTLRenderPipelineState> state =
@@ -132,6 +137,12 @@ bool MetalPipelineCache::TranslateShader(
   }
 
   MetalShader& shader = static_cast<MetalShader&>(translation.shader());
+
+  // CENSUS (temporary; see metal_pipeline_census.h). Placed after the
+  // is_translated() early-out so a cache hit is not counted as a creation.
+  bool census_ok = false;
+  pipeline_census::Scope census_scope(pipeline_census::Event::kShaderTranslate,
+                                      &census_ok);
 
   // Stage 1: microcode -> DXBC (reused DxbcShaderTranslator).
   if (!shader_translator_->TranslateAnalyzedShader(translation)) {
@@ -213,6 +224,7 @@ bool MetalPipelineCache::TranslateShader(
            shader.ucode_data_hash());
     return false;
   }
+  census_ok = true;
   return true;
 }
 
@@ -384,6 +396,13 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     return it->second;
   }
 
+  // CENSUS (temporary; see metal_pipeline_census.h). Cache miss only: this is
+  // the wall time the frame that first wants this pipeline actually pays, which
+  // is descriptor assembly plus the synchronous host creation call.
+  bool census_ok = false;
+  pipeline_census::Scope census_scope(pipeline_census::Event::kRenderPipeline,
+                                      &census_ok);
+
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLRenderPipelineDescriptor* desc =
       [[MTLRenderPipelineDescriptor alloc] init];
@@ -427,6 +446,7 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   }
   void* state_ptr = (__bridge_retained void*)state;
   render_pipeline_states_.emplace(key, state_ptr);
+  census_ok = true;
   return state_ptr;
 }
 
@@ -462,6 +482,11 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   }
   // Cache the result even on failure so a bad shader isn't retried every draw.
   GeometryVertexStage stage;
+
+  // CENSUS (temporary; see metal_pipeline_census.h). Cache miss only.
+  bool census_ok = false;
+  pipeline_census::Scope census_scope(
+      pipeline_census::Event::kGeometryVertexStage, &census_ok);
 
   // Reuse the DXBC the normal VS translation already produced (the guest VS runs
   // as the object stage with host_vertex_shader_type kVertex — geometry emulation
@@ -510,6 +535,7 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   stage.vertex_output_size = result.vertex_output_size_in_bytes;
   stage.valid = true;
   auto inserted = geometry_vertex_stages_.emplace(vertex, std::move(stage));
+  census_ok = true;
   return &inserted.first->second;
 }
 
@@ -520,6 +546,11 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
     return it->second.valid ? &it->second : nullptr;
   }
   GeometryShaderStage stage;
+
+  // CENSUS (temporary; see metal_pipeline_census.h). Cache miss only.
+  bool census_ok = false;
+  pipeline_census::Scope census_scope(
+      pipeline_census::Event::kGeometryShaderStage, &census_ok);
 
   // Generate the DXBC geometry shader (shared point/rect/quad generator), then
   // run it through the same DXBC->DXIL->MSC chain as a MESH stage.
@@ -561,6 +592,7 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   stage.max_input_primitives = result.gs_max_input_primitives_per_mesh_threadgroup;
   stage.valid = true;
   auto inserted = geometry_shader_stages_.emplace(key.key, std::move(stage));
+  census_ok = true;
   return &inserted.first->second;
 }
 
@@ -686,8 +718,17 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
       gstage->max_input_primitives;
 
   NSError* error = nil;
-  id<MTLRenderPipelineState> pipeline =
-      IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
+  id<MTLRenderPipelineState> pipeline = nil;
+  {
+    // CENSUS (temporary; see metal_pipeline_census.h). Deliberately narrow: the
+    // object/mesh stage builds above have their own scopes, so a wider scope
+    // here would double-count their time in the run total.
+    bool census_ok = false;
+    pipeline_census::Scope census_scope(
+        pipeline_census::Event::kGeometryPipeline, &census_ok);
+    pipeline = IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
+    census_ok = pipeline != nil;
+  }
   if (!pipeline) {
     XELOGE("MetalPipelineCache: geometry pipeline creation failed: {}",
            error ? [[error localizedDescription] UTF8String] : "unknown");

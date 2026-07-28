@@ -48,6 +48,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
+#include "xenia/gpu/metal/metal_pipeline_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -6596,6 +6597,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  // CENSUS (temporary; see metal_pipeline_census.h — task group 1 of
+  // implement-metal-shader-pipeline-lifetime). Attributes pipeline-creation
+  // wall time to the frame that paid it; default-off, changes nothing.
+  pipeline_census::AdvanceFrame();
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
