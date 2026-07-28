@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_pipeline_storage.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/xenos.h"
@@ -92,6 +94,16 @@ class MetalPipelineCache {
     return shader_translator_.get();
   }
 
+  // Opens the durable pipeline storage for a title (task group 3a). Called from
+  // MetalCommandProcessor::InitializeShaderStorage, which the emulator invokes
+  // on launch. A no-op unless a durable mechanism is enabled by cvar; failure
+  // to open is never fatal — the backend runs exactly as it does today.
+  void InitializeDurableStorage(const std::filesystem::path& cache_root,
+                                uint32_t title_id);
+  void ShutdownDurableStorage();
+
+  const MetalPipelineStorage& durable_storage() const { return storage_; }
+
  private:
   // A guest VS compiled as an MSC geometry-emulation OBJECT stage, plus its
   // synthesized stage-in. Metal objects held as retained void*.
@@ -144,6 +156,10 @@ class MetalPipelineCache {
   std::unordered_map<void*, GeometryVertexStage> geometry_vertex_stages_;
   std::unordered_map<uint32_t, GeometryShaderStage> geometry_shader_stages_;
   std::unordered_map<uint64_t, GeometryPipeline> geometry_pipelines_;
+
+  // Durable on-disk storage for M1/M2. Closed means "no durable cache", which
+  // is today's behavior and the default.
+  MetalPipelineStorage storage_;
 };
 
 }  // namespace metal

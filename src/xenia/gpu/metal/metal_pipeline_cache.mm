@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "third_party/xxhash/xxhash.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/metal/metal_pipeline_census.h"
@@ -65,7 +66,30 @@ bool MetalPipelineCache::Initialize() {
   return true;
 }
 
+void MetalPipelineCache::InitializeDurableStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  ShutdownDurableStorage();
+  // 3.1 — exact rollback switches, default OFF. Neither mechanism consumes the
+  // storage yet (that is 3b/3c); opening it here is what makes the identity,
+  // bounds, and locking path live rather than dormant.
+  if (!cvars::metal_pipeline_metallib_cache &&
+      !cvars::metal_pipeline_binary_archive) {
+    return;
+  }
+  MetalPipelineStorageIdentity identity =
+      ComputeMetalPipelineStorageIdentity(device_);
+  if (!storage_.Open(cache_root, title_id, identity)) {
+    XELOGW(
+        "MetalPipelineCache: durable storage unavailable for title {:08X}; "
+        "continuing with in-memory caches only",
+        title_id);
+  }
+}
+
+void MetalPipelineCache::ShutdownDurableStorage() { storage_.Close(); }
+
 void MetalPipelineCache::Shutdown() {
+  ShutdownDurableStorage();
   // CENSUS (temporary; see metal_pipeline_census.h). A live title is usually
   // killed rather than shut down cleanly, so this full report is a bonus — the
   // periodic swap line is the evidence that always survives.

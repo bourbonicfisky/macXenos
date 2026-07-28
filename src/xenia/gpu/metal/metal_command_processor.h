@@ -137,6 +137,14 @@ class MetalCommandProcessor : public CommandProcessor {
   void InitializeTrace() override;
   std::string GetCaptureDeviceInfoJson() const override;
 
+  // Opens the durable pipeline storage for the launched title (task group 3a).
+  // The emulator already calls this on every launch; Metal simply never
+  // overrode it before.
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id, bool blocking,
+                               std::function<void()> completion_callback =
+                                   nullptr) override;
+
   // Converges completed resolve writebacks and memexports to guest RAM. The
   // promoted selected executor supplies a unique authority sequence, allowing
   // ordered lookup and exact retirement without rebuilding either full pending

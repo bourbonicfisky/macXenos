@@ -5591,6 +5591,19 @@ bool MetalCommandProcessor::IssueCopy() {
   return true;
 }
 
+void MetalCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::function<void()> completion_callback) {
+  CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking,
+                                            nullptr);
+  if (pipeline_cache_) {
+    pipeline_cache_->InitializeDurableStorage(cache_root, title_id);
+  }
+  if (completion_callback) {
+    completion_callback();
+  }
+}
+
 void MetalCommandProcessor::InitializeTrace() {
   // Warm-entry and shared-memory trace initialization read arbitrary guest RAM
   // ranges. Converge every pending producer once before either sweep so the
