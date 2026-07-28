@@ -48,6 +48,14 @@
 
 DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
 DEFINE_path(trace_dump_path, "", "Output path for dumped files.", "GPU");
+DEFINE_path(
+    trace_dump_cache_root, "",
+    "Host cache root to open durable shader/pipeline storage against, using "
+    "the replayed trace's own title ID. Empty (the default) means no durable "
+    "storage is opened and replay behaves exactly as before. Set it to make a "
+    "trace exercise a durable cache: wipe the directory for a cold run, keep "
+    "it for a warm one, and compare the two captures.",
+    "GPU");
 DEFINE_string(dump_guest_memory, "",
               "After playback, dump a guest physical memory range next to the "
               "output image as <output>.mem.bin. Format: hexaddr,hexlength "
@@ -245,6 +253,31 @@ bool TraceDump::Load(const std::filesystem::path& trace_file_path) {
 }
 
 int TraceDump::Run() {
+  // Durable shader/pipeline storage for the replayed trace's own title.
+  // Without this a trace can never exercise a durable cache at all -- trace
+  // replay has no title launch, so the emulator's InitializeShaderStorage call
+  // never happens and the backend always runs cold. That made the cold-vs-warm
+  // byte-equivalence gate impossible to run on the trace corpus.
+  //
+  // Default-empty, so every existing trace gate is byte-for-byte unaffected.
+  // Blocking, so storage is open before the first draw translates anything.
+  if (!cvars::trace_dump_cache_root.empty()) {
+    const TraceHeader* header = player_ ? player_->header() : nullptr;
+    const uint32_t title_id = header ? header->title_id : 0;
+    if (!title_id) {
+      // A trace recorded outside a game, or from a build that could not read
+      // the ID, would otherwise all share title 0 and cross-contaminate.
+      XELOGW(
+          "TraceDump: --trace_dump_cache_root given but the trace carries no "
+          "title ID; durable storage NOT opened");
+    } else {
+      XELOGI("TraceDump: opening durable storage for title {:08X} under {}",
+             title_id, xe::path_to_utf8(cvars::trace_dump_cache_root));
+      graphics_system_->InitializeShaderStorage(cvars::trace_dump_cache_root,
+                                                title_id, /*blocking=*/true);
+    }
+  }
+
   BeginHostCapture();
   XELOGI("TraceDump: {} frames parsed; frame 0 has {} commands",
          player_->frame_count(),
