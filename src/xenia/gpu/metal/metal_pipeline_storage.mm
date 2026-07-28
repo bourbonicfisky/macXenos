@@ -486,6 +486,119 @@ bool MetalPipelineStorage::StoreMetallib(uint64_t key,
   return true;
 }
 
+namespace {
+// One record, all components, or nothing (3.10). Sizes are declared up front so
+// a short file is detected before any component is trusted.
+#pragma pack(push, 1)
+struct GeometryFileHeader {
+  uint32_t magic;
+  uint32_t format_version;
+  uint64_t key;
+  uint32_t reflection;
+  uint32_t function_name_size;
+  uint64_t blob_size;
+  uint64_t aux_blob_size;
+};
+#pragma pack(pop)
+constexpr uint32_t kGeometryMagic = 0x314D4547u;  // 'GEM1'
+constexpr uint32_t kMaxFunctionNameBytes = 4096u;
+}  // namespace
+
+bool MetalPipelineStorage::LoadGeometryRecord(uint64_t key,
+                                              GeometryRecord* record_out) const {
+  if (!is_open_ || !record_out) {
+    return false;
+  }
+  const std::filesystem::path path =
+      metallib_dir() / fmt::format("{:016X}.geom", key);
+  FILE* file = fopen(path.string().c_str(), "rb");
+  if (!file) {
+    return false;  // Ordinary miss.
+  }
+  GeometryFileHeader header = {};
+  bool ok = fread(&header, 1, sizeof(header), file) == sizeof(header) &&
+            header.magic == kGeometryMagic &&
+            header.format_version == MetalPipelineStorageIdentity::kFormatVersion &&
+            header.key == key && header.reflection != 0 &&
+            header.function_name_size &&
+            header.function_name_size <= kMaxFunctionNameBytes &&
+            header.blob_size && header.blob_size <= kMaxMetallibBytes &&
+            header.aux_blob_size <= kMaxMetallibBytes;
+  GeometryRecord record;
+  if (ok) {
+    record.reflection = header.reflection;
+    record.function_name.resize(header.function_name_size);
+    ok = fread(record.function_name.data(), 1, header.function_name_size, file) ==
+         header.function_name_size;
+  }
+  if (ok) {
+    record.blob.resize(header.blob_size);
+    ok = fread(record.blob.data(), 1, header.blob_size, file) == header.blob_size;
+  }
+  if (ok && header.aux_blob_size) {
+    record.aux_blob.resize(header.aux_blob_size);
+    ok = fread(record.aux_blob.data(), 1, header.aux_blob_size, file) ==
+         header.aux_blob_size;
+  }
+  fclose(file);
+  if (!ok) {
+    // Any component bad => the WHOLE record is a miss. Never return a
+    // partially populated record: half of it would be fresh and half stale,
+    // and the pipeline built from that mixture would be silently wrong.
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    XELOGW("MetalPipelineStorage: discarded corrupt geometry record {:016X}", key);
+    return false;
+  }
+  *record_out = std::move(record);
+  return true;
+}
+
+bool MetalPipelineStorage::StoreGeometryRecord(uint64_t key,
+                                               const GeometryRecord& record) {
+  if (!is_open_ || record.blob.empty() || record.function_name.empty() ||
+      !record.reflection || record.blob.size() > kMaxMetallibBytes ||
+      record.aux_blob.size() > kMaxMetallibBytes ||
+      record.function_name.size() > kMaxFunctionNameBytes) {
+    return false;
+  }
+  const uint64_t total = sizeof(GeometryFileHeader) + record.function_name.size() +
+                         record.blob.size() + record.aux_blob.size();
+  if (!CanAdmit(total)) {
+    RecordAdmitted(0);
+    return false;
+  }
+  GeometryFileHeader header = {};
+  header.magic = kGeometryMagic;
+  header.format_version = MetalPipelineStorageIdentity::kFormatVersion;
+  header.key = key;
+  header.reflection = record.reflection;
+  header.function_name_size = uint32_t(record.function_name.size());
+  header.blob_size = record.blob.size();
+  header.aux_blob_size = record.aux_blob.size();
+
+  std::vector<uint8_t> buffer(total);
+  size_t offset = 0;
+  auto append = [&buffer, &offset](const void* data, size_t size) {
+    std::memcpy(buffer.data() + offset, data, size);
+    offset += size;
+  };
+  append(&header, sizeof(header));
+  append(record.function_name.data(), record.function_name.size());
+  append(record.blob.data(), record.blob.size());
+  if (!record.aux_blob.empty()) {
+    append(record.aux_blob.data(), record.aux_blob.size());
+  }
+  // One atomic publish for the whole record, so a crash mid-write cannot leave
+  // a record whose components disagree.
+  if (!WriteFileAtomic(metallib_dir() / fmt::format("{:016X}.geom", key),
+                       buffer.data(), buffer.size())) {
+    return false;
+  }
+  RecordAdmitted(total);
+  return true;
+}
+
 bool MetalPipelineStorage::WriteFileAtomic(const std::filesystem::path& path,
                                            const void* data, size_t size) {
   std::filesystem::path tmp = path;

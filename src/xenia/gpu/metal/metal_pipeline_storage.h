@@ -156,6 +156,24 @@ class MetalPipelineStorage {
   bool LoadMetallib(uint64_t key, std::vector<uint8_t>* metallib_out) const;
   bool StoreMetallib(uint64_t key, const std::vector<uint8_t>& metallib);
 
+  // M1 for geometry emulation (3.10). A geometry stage is not one blob: the
+  // object stage is a metallib PLUS a separate stage-in metallib PLUS
+  // reflection the pipeline descriptor cannot work without (entry-point name,
+  // and either the VS output size or the GS max input primitives).
+  //
+  // All of it lives in ONE versioned, atomically published record, because a
+  // partially valid record is the dangerous case: combining a fresh component
+  // with a stale one would build a pipeline out of mismatched stages. Any
+  // missing, short, or inconsistent component makes the WHOLE record a miss.
+  struct GeometryRecord {
+    std::string function_name;
+    uint32_t reflection = 0;      // vertex_output_size or max_input_primitives
+    std::vector<uint8_t> blob;    // object/mesh stage metallib
+    std::vector<uint8_t> aux_blob;  // stage-in metallib; empty for a GS stage
+  };
+  bool LoadGeometryRecord(uint64_t key, GeometryRecord* record_out) const;
+  bool StoreGeometryRecord(uint64_t key, const GeometryRecord& record);
+
   // Atomic publish: writes to `<final>.tmp` then renames. A crash mid-write
   // therefore cannot leave a torn file at the real path. Shape borrowed from
   // Edge's metallib cache, which is the one part of it worth copying verbatim.

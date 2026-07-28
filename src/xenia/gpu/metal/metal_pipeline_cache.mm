@@ -189,6 +189,21 @@ namespace {
 // a filename. The storage-wide provenance (device, OS, translator artifacts and
 // schema) was validated when the directory was opened, so it is not repeated
 // per entry.
+// 3.10 — geometry record kinds. Both kinds share one directory, so the kind is
+// part of the key; otherwise a vertex-stage record and a shader-stage record
+// could collide and one would be loaded as the other.
+constexpr uint32_t kGeometryRecordKindVertexStage = 1;
+constexpr uint32_t kGeometryRecordKindShaderStage = 2;
+
+uint64_t GeometryRecordKey(uint32_t kind, uint64_t identity, uint32_t variant) {
+  struct KeyBytes {
+    uint32_t kind;
+    uint32_t variant;
+    uint64_t identity;
+  } key_bytes = {kind, variant, identity};
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
+
 uint64_t MetallibCacheKey(const MetalShader::MetalTranslation& translation) {
   struct KeyBytes {
     uint64_t ucode_hash;
@@ -657,7 +672,16 @@ void* MetalPipelineCache::NewLibraryFromBytes(const std::vector<uint8_t>& bytes,
 const MetalPipelineCache::GeometryVertexStage*
 MetalPipelineCache::GetOrCreateGeometryVertexStage(
     MetalShader::MetalTranslation* vertex, PipelineGeometryShader geometry_type) {
-  auto it = geometry_vertex_stages_.find(vertex);
+  // The object stage is compiled against the MSC input topology that
+  // `geometry_type` selects (point -> kPoint, rect -> kTriangle, quad ->
+  // kLine), so two geometry types produce DIFFERENT object stages for the same
+  // guest VS. This cache used to key on `vertex` alone and would hand back
+  // whichever was built first; the topology is now part of the key. Found while
+  // building the durable key for 3.10, where persisting the same mistake would
+  // have made it survive across runs instead of only within one.
+  const GeometryVertexStageKey stage_key{
+      vertex, uint32_t(GeometryInputTopology(geometry_type))};
+  auto it = geometry_vertex_stages_.find(stage_key);
   if (it != geometry_vertex_stages_.end()) {
     return it->second.valid ? &it->second : nullptr;
   }
@@ -669,6 +693,47 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   pipeline_census::Scope census_scope(
       pipeline_census::Event::kGeometryVertexStage, &census_ok);
 
+  // 3.10 — durable geometry record. Keyed on every input that affects object-
+  // stage generation: the guest shader identity, its translation modification,
+  // and the MSC input topology.
+  const uint64_t record_key =
+      GeometryRecordKey(kGeometryRecordKindVertexStage,
+                        MetallibCacheKey(*vertex),
+                        uint32_t(GeometryInputTopology(geometry_type)));
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
+    MetalPipelineStorage::GeometryRecord record;
+    if (storage_.LoadGeometryRecord(record_key, &record) &&
+        !record.aux_blob.empty()) {
+      void* library = NewLibraryFromBytes(record.blob, "geometry VS (cached)");
+      void* stage_in =
+          NewLibraryFromBytes(record.aux_blob, "geometry VS stage-in (cached)");
+      if (library && stage_in) {
+        stage.library = library;
+        stage.stage_in_library = stage_in;
+        stage.function_name = record.function_name;
+        stage.vertex_output_size = record.reflection;
+        stage.valid = true;
+        census_ok = true;
+        auto inserted = geometry_vertex_stages_.emplace(stage_key, std::move(stage));
+        return &inserted.first->second;
+      }
+      // Either library failing makes the record unusable as a whole — release
+      // whichever loaded and fall through to a full cold build.
+      if (library) {
+        id<MTLLibrary> lib = (__bridge_transfer id<MTLLibrary>)library;
+        (void)lib;
+      }
+      if (stage_in) {
+        id<MTLLibrary> lib = (__bridge_transfer id<MTLLibrary>)stage_in;
+        (void)lib;
+      }
+      XELOGW(
+          "MetalPipelineCache: cached geometry VS record {:016X} failed to "
+          "load; rebuilding",
+          record_key);
+    }
+  }
+
   // Reuse the DXBC the normal VS translation already produced (the guest VS runs
   // as the object stage with host_vertex_shader_type kVertex — geometry emulation
   // does the primitive expansion in the GS/mesh stage, so the VS DXBC is
@@ -676,14 +741,14 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   const std::vector<uint8_t>& dxbc = vertex->translated_binary();
   if (dxbc.empty()) {
     XELOGE("MetalPipelineCache: geometry VS has no DXBC (translate VS first)");
-    geometry_vertex_stages_.emplace(vertex, std::move(stage));
+    geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
   }
   std::string error;
   std::vector<uint8_t> dxil;
   if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
     XELOGE("MetalPipelineCache: geometry VS DXBC->DXIL failed: {}", error);
-    geometry_vertex_stages_.emplace(vertex, std::move(stage));
+    geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
   }
   MetalShaderConverter::GeometryEmulationResult result;
@@ -692,7 +757,7 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
           GeometryInputTopology(geometry_type), result)) {
     XELOGE("MetalPipelineCache: geometry VS emulation convert failed: {}",
            result.error.empty() ? "unknown" : result.error);
-    geometry_vertex_stages_.emplace(vertex, std::move(stage));
+    geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
   }
   void* library = NewLibraryFromBytes(result.metallib, "geometry VS");
@@ -707,7 +772,7 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
       id<MTLLibrary> lib = (__bridge_transfer id<MTLLibrary>)stage_in;
       (void)lib;
     }
-    geometry_vertex_stages_.emplace(vertex, std::move(stage));
+    geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
   }
   stage.library = library;
@@ -715,7 +780,16 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   stage.function_name = result.function_name;
   stage.vertex_output_size = result.vertex_output_size_in_bytes;
   stage.valid = true;
-  auto inserted = geometry_vertex_stages_.emplace(vertex, std::move(stage));
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open() &&
+      stage.vertex_output_size) {
+    MetalPipelineStorage::GeometryRecord record;
+    record.function_name = stage.function_name;
+    record.reflection = stage.vertex_output_size;
+    record.blob = result.metallib;
+    record.aux_blob = result.stage_in_metallib;
+    storage_.StoreGeometryRecord(record_key, record);
+  }
+  auto inserted = geometry_vertex_stages_.emplace(stage_key, std::move(stage));
   census_ok = true;
   return &inserted.first->second;
 }
@@ -732,6 +806,32 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   bool census_ok = false;
   pipeline_census::Scope census_scope(
       pipeline_census::Event::kGeometryShaderStage, &census_ok);
+
+  // 3.10 — durable geometry record. The generated GS is fully determined by
+  // GeometryShaderKey (topology type plus the interpolator/clip layout derived
+  // from the VS/PS modifications), so that key IS the identity.
+  const uint64_t record_key =
+      GeometryRecordKey(kGeometryRecordKindShaderStage, key.key, 0);
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
+    MetalPipelineStorage::GeometryRecord record;
+    if (storage_.LoadGeometryRecord(record_key, &record)) {
+      void* library = NewLibraryFromBytes(record.blob, "geometry GS (cached)");
+      if (library) {
+        stage.library = library;
+        stage.function_name = record.function_name;
+        stage.max_input_primitives = record.reflection;
+        stage.valid = true;
+        census_ok = true;
+        auto inserted =
+            geometry_shader_stages_.emplace(key.key, std::move(stage));
+        return &inserted.first->second;
+      }
+      XELOGW(
+          "MetalPipelineCache: cached geometry GS record {:016X} failed to "
+          "load; rebuilding",
+          record_key);
+    }
+  }
 
   // Generate the DXBC geometry shader (shared point/rect/quad generator), then
   // run it through the same DXBC->DXIL->MSC chain as a MESH stage.
@@ -772,6 +872,14 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   stage.function_name = result.function_name;
   stage.max_input_primitives = result.gs_max_input_primitives_per_mesh_threadgroup;
   stage.valid = true;
+  if (cvars::metal_pipeline_metallib_cache && storage_.is_open() &&
+      stage.max_input_primitives) {
+    MetalPipelineStorage::GeometryRecord record;
+    record.function_name = stage.function_name;
+    record.reflection = stage.max_input_primitives;
+    record.blob = result.metallib;  // No stage-in for a mesh stage.
+    storage_.StoreGeometryRecord(record_key, record);
+  }
   auto inserted = geometry_shader_stages_.emplace(key.key, std::move(stage));
   census_ok = true;
   return &inserted.first->second;
