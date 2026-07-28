@@ -81,6 +81,7 @@ if(APPLE)
   xe_shader_rules_metal(xenia-gpu-conformance
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/shaders)
   target_sources(xenia-gpu-conformance PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_geometry_stage_identity_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_dispatch_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_buffer_backed_texture_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_direct_texture_load_test.mm
@@ -91,6 +92,7 @@ if(APPLE)
     # texture_info_formats.cc. Both are lean (pure math + the format table).
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_util.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_info_formats.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_pipeline_storage.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_load_shader_pipelines.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_upload_arena.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm

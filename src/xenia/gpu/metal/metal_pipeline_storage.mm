@@ -246,6 +246,16 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   return identity;
 }
 
+uint64_t MetalGeometryRecordKey(uint32_t kind, uint64_t shader_identity,
+                                uint32_t input_topology) {
+  struct KeyBytes {
+    uint32_t kind;
+    uint32_t input_topology;
+    uint64_t shader_identity;
+  } key_bytes = {kind, input_topology, shader_identity};
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
+
 MetalPipelineStorage::~MetalPipelineStorage() { Close(); }
 
 std::filesystem::path MetalPipelineStorage::metallib_dir() const {
@@ -363,6 +373,9 @@ void MetalPipelineStorage::RecordAdmitted(uint64_t byte_count) {
     return;
   }
   bytes_admitted_ += byte_count;
+  if (byte_count) {
+    ++admitted_entry_count_;
+  }
   const uint64_t cap = cvars::metal_pipeline_cache_title_cap_mib * 1024ull * 1024ull;
   if (!admission_stopped_ && bytes_on_open_ + bytes_admitted_ >= cap) {
     // 3.6e — stop admitting, keep serving. Deleting live entries or rebuilding

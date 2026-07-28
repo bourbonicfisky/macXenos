@@ -95,6 +95,25 @@ struct MetalPipelineStorageIdentity {
   std::string DescribeMismatch(const MetalPipelineStorageIdentity& other) const;
 };
 
+// Geometry-record kinds. Both kinds share one directory, so the kind is part of
+// the key; otherwise a vertex-stage record and a shader-stage record could
+// collide and one would be loaded as the other.
+inline constexpr uint32_t kMetalGeometryRecordKindVertexStage = 1;
+inline constexpr uint32_t kMetalGeometryRecordKindShaderStage = 2;
+
+// Durable identity of one geometry stage.
+//
+// `input_topology` is load-bearing and must never be dropped: it is the MSC
+// input topology the OBJECT STAGE IS COMPILED AGAINST, selected by the
+// geometry type (point -> kPoint, rect -> kTriangle, quad -> kLine). The same
+// guest VS therefore yields DIFFERENT object stages for different geometry
+// types, and an identity that omits it makes them collide — the first one
+// built wins and the other silently gets the wrong stage. That defect existed
+// in the in-memory cache and is covered by
+// conformance/metal_geometry_stage_identity_test.mm.
+uint64_t MetalGeometryRecordKey(uint32_t kind, uint64_t shader_identity,
+                                uint32_t input_topology);
+
 // Computes the identity for the running process. `device` is an id<MTLDevice>.
 // Never fails: an unavailable input hashes to 0, which still participates in
 // equality, so an entry written when it was unavailable is not served once it
@@ -174,6 +193,10 @@ class MetalPipelineStorage {
   bool LoadGeometryRecord(uint64_t key, GeometryRecord* record_out) const;
   bool StoreGeometryRecord(uint64_t key, const GeometryRecord& record);
 
+  // Test seam: how many entries this session admitted, so a test can prove a
+  // second distinct artifact was actually written rather than deduplicated.
+  uint64_t admitted_entry_count() const { return admitted_entry_count_; }
+
   // Atomic publish: writes to `<final>.tmp` then renames. A crash mid-write
   // therefore cannot leave a torn file at the real path. Shape borrowed from
   // Edge's metallib cache, which is the one part of it worth copying verbatim.
@@ -198,6 +221,7 @@ class MetalPipelineStorage {
   uint32_t title_id_ = 0;
   uint64_t bytes_on_open_ = 0;
   uint64_t bytes_admitted_ = 0;
+  uint64_t admitted_entry_count_ = 0;
   bool admission_stopped_ = false;
 };
 

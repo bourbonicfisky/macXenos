@@ -189,21 +189,6 @@ namespace {
 // a filename. The storage-wide provenance (device, OS, translator artifacts and
 // schema) was validated when the directory was opened, so it is not repeated
 // per entry.
-// 3.10 — geometry record kinds. Both kinds share one directory, so the kind is
-// part of the key; otherwise a vertex-stage record and a shader-stage record
-// could collide and one would be loaded as the other.
-constexpr uint32_t kGeometryRecordKindVertexStage = 1;
-constexpr uint32_t kGeometryRecordKindShaderStage = 2;
-
-uint64_t GeometryRecordKey(uint32_t kind, uint64_t identity, uint32_t variant) {
-  struct KeyBytes {
-    uint32_t kind;
-    uint32_t variant;
-    uint64_t identity;
-  } key_bytes = {kind, variant, identity};
-  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
-}
-
 uint64_t MetallibCacheKey(const MetalShader::MetalTranslation& translation) {
   struct KeyBytes {
     uint64_t ucode_hash;
@@ -697,7 +682,7 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   // stage generation: the guest shader identity, its translation modification,
   // and the MSC input topology.
   const uint64_t record_key =
-      GeometryRecordKey(kGeometryRecordKindVertexStage,
+      MetalGeometryRecordKey(kMetalGeometryRecordKindVertexStage,
                         MetallibCacheKey(*vertex),
                         uint32_t(GeometryInputTopology(geometry_type)));
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
@@ -811,7 +796,7 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   // GeometryShaderKey (topology type plus the interpolator/clip layout derived
   // from the VS/PS modifications), so that key IS the identity.
   const uint64_t record_key =
-      GeometryRecordKey(kGeometryRecordKindShaderStage, key.key, 0);
+      MetalGeometryRecordKey(kMetalGeometryRecordKindShaderStage, key.key, 0);
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
     MetalPipelineStorage::GeometryRecord record;
     if (storage_.LoadGeometryRecord(record_key, &record)) {
