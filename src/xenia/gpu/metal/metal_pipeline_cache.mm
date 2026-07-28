@@ -20,7 +20,6 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
-#include "xenia/gpu/metal/metal_coldcache_probe.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
@@ -120,7 +119,6 @@ void MetalPipelineCache::ShutdownDurableStorage() { storage_.Close(); }
 
 void MetalPipelineCache::Shutdown() {
   ShutdownDurableStorage();
-  coldcache_probe::Report();
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
       id<MTLRenderPipelineState> state =
@@ -209,7 +207,6 @@ bool MetalPipelineCache::TranslateShader(
 
   MetalShader& shader = static_cast<MetalShader&>(translation.shader());
 
-  coldcache_probe::Scope xlat_scope(coldcache_probe::Pool::kTranslation);
 
   // Stage 1: microcode -> DXBC (reused DxbcShaderTranslator).
   if (!shader_translator_->TranslateAnalyzedShader(translation)) {
@@ -237,7 +234,6 @@ bool MetalPipelineCache::TranslateShader(
     std::vector<uint8_t> cached_metallib;
     if (storage_.LoadMetallib(m1_key, &cached_metallib)) {
       if (translation.CreateMetalFunction(device_, cached_metallib)) {
-        xlat_scope.set_m1_hit();
         return true;
       }
       // A stored blob the device will not load is not trustworthy — fall
@@ -581,11 +577,8 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   }
 
   NSError* error = nil;
-  id<MTLRenderPipelineState> state;
-  {
-    coldcache_probe::Scope ps_scope(coldcache_probe::Pool::kPState);
-    state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
-  }
+  id<MTLRenderPipelineState> state =
+      [device newRenderPipelineStateWithDescriptor:desc error:&error];
   if (!state) {
     XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
            error ? [[error localizedDescription] UTF8String] : "unknown");
@@ -639,8 +632,6 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   }
   // Cache the result even on failure so a bad shader isn't retried every draw.
   GeometryVertexStage stage;
-
-  coldcache_probe::Scope geom_scope(coldcache_probe::Pool::kGeomStage);
 
   // 3.10 — durable geometry record. Keyed on every input that affects object-
   // stage generation: the guest shader identity, its translation modification,
@@ -748,8 +739,6 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
     return it->second.valid ? &it->second : nullptr;
   }
   GeometryShaderStage stage;
-
-  coldcache_probe::Scope geom_scope(coldcache_probe::Pool::kGeomStage);
 
   // 3.10 — durable geometry record. The generated GS is fully determined by
   // GeometryShaderKey (topology type plus the interpolator/clip layout derived
@@ -953,11 +942,8 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
       gstage->max_input_primitives;
 
   NSError* error = nil;
-  id<MTLRenderPipelineState> pipeline;
-  {
-    coldcache_probe::Scope ps_scope(coldcache_probe::Pool::kPState);
-    pipeline = IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
-  }
+  id<MTLRenderPipelineState> pipeline =
+      IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
   if (!pipeline) {
     XELOGE("MetalPipelineCache: geometry pipeline creation failed: {}",
            error ? [[error localizedDescription] UTF8String] : "unknown");
