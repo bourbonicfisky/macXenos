@@ -31,6 +31,11 @@
 // IRRuntimeNewGeometryEmulationPipeline for the geometry-emulation mesh pipeline.
 #include "metal_irconverter_runtime.h"
 
+// Defined in graphics_system.cc. Gates GraphicsSystem::InitializeShaderStorage
+// before any backend is consulted, so it silently disables both durable
+// mechanisms; reported in the effective-state line below.
+DECLARE_bool(store_shaders);
+
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -67,6 +72,27 @@ bool MetalPipelineCache::Initialize() {
     XELOGE("MetalPipelineCache: Metal Shader Converter init failed: {}", error);
     return false;
   }
+
+  // EFFECTIVE durable-cache state, logged unconditionally so a gate can assert
+  // on it instead of trusting that a flag was applied.
+  //
+  // Two ways a requested mode silently fails to take effect, both hit in
+  // practice: `xenia_canary` reads a persisted config that OVERRIDES
+  // command-line cvars (while the trace-dump tool has no config, so there the
+  // command line wins), and `store_shaders=false` makes
+  // GraphicsSystem::InitializeShaderStorage return before any backend is
+  // consulted, disabling BOTH mechanisms no matter what their own switches say.
+  // Either one produces a run that looks like the mechanism is on and measures
+  // as though it is off.
+  XELOGI(
+      "MetalPipelineCache: durable cache EFFECTIVE state — M1 metallib={}, "
+      "M2 archive={}, store_shaders={}{}",
+      cvars::metal_pipeline_metallib_cache ? "on" : "off",
+      cvars::metal_pipeline_binary_archive ? "on" : "off",
+      cvars::store_shaders ? "on" : "off",
+      cvars::store_shaders
+          ? ""
+          : "  <- store_shaders=off DISABLES BOTH regardless of the switches");
   return true;
 }
 
