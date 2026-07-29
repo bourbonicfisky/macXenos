@@ -5668,6 +5668,7 @@ void MetalCommandProcessor::InitializeShaderStorage(
   // Title/session boundary: start a fresh unrouted-export reporting session.
   // Touches only the reporter's own counters -- no cache state, no guest state.
   memexport_gap_reporter_.Reset();
+  present_census_.Reset();
   // Title/session boundary: the base class re-seeds its default ramp without
   // invoking the write hook, so re-arm rather than trusting the flag to have
   // survived.
@@ -7048,6 +7049,51 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       present_width = uint32_t(source_rt.width);
       present_height = uint32_t(source_rt.height);
       present_source_path = "ram-frontbuffer";
+    }
+  }
+  // Contract 2 discovery census. Counts EVERY swap, unlike the sampled log
+  // below -- the gamma work's "resolved-snapshot path never appears" came from
+  // a 1-in-60 sample, and this is what distinguishes never from never-sampled.
+  static const bool s_present_census =
+      std::getenv("XE_METAL_PRESENT_CENSUS") != nullptr;
+  if (s_present_census) {
+    present_census_.ObserveSwap(
+        source_rt ? present_source_path : "test-pattern",
+        source_rt ? uint32_t(source_rt.pixelFormat) : UINT32_MAX,
+        present_width, present_height, frontbuffer_width, frontbuffer_height);
+    if ((count % 256u) == 0u) {
+      std::string paths;
+      for (uint32_t i = 0; i < present_census_.path_distinct(); ++i) {
+        paths += fmt::format("{}{}={}", i ? " " : "",
+                             present_census_.path_name(i),
+                             present_census_.path_count(i));
+      }
+      std::string formats;
+      for (uint32_t i = 0; i < present_census_.format_distinct(); ++i) {
+        formats += fmt::format("{}fmt{}={}", i ? " " : "",
+                               present_census_.format_value(i),
+                               present_census_.format_count(i));
+      }
+      std::string sizes;
+      for (uint32_t i = 0; i < present_census_.present_size_distinct(); ++i) {
+        sizes += fmt::format("{}{}x{}={}", i ? " " : "",
+                             present_census_.present_size_w(i),
+                             present_census_.present_size_h(i),
+                             present_census_.present_size_count(i));
+      }
+      std::string fb_sizes;
+      for (uint32_t i = 0; i < present_census_.frontbuffer_size_distinct();
+           ++i) {
+        fb_sizes += fmt::format("{}{}x{}={}", i ? " " : "",
+                                present_census_.frontbuffer_size_w(i),
+                                present_census_.frontbuffer_size_h(i),
+                                present_census_.frontbuffer_size_count(i));
+      }
+      XELOGI(
+          "MetalPresentCensus swap#{} swaps={} | paths[{}] | src[{}] | "
+          "present[{}] | guestfb[{}] | size_mismatched={}",
+          count, present_census_.swaps(), paths, formats, sizes, fb_sizes,
+          present_census_.swaps_size_mismatched());
     }
   }
   if (count == 0 || (count % 60) == 0) {

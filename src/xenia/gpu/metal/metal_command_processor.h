@@ -24,6 +24,7 @@
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_classify.h"
+#include "xenia/gpu/metal/metal_present_census.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -345,6 +346,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // does not route. Reset at the title/session boundary; holds no guest state
   // and takes no part in cache clearing.
   MemexportGapReporter memexport_gap_reporter_;
+  // Contract 2 discovery. Default-off, observational; see the header.
+  MetalPresentCensus present_census_;
 
   // Contract 1 census state. Raw write counts are separated from completed
   // ramp changes: engagement requires a COMPLETE non-identity ramp observed at

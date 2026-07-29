@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <cstdlib>
+
 #include "xenia/ui/metal/metal_presenter.h"
 
 #import <Metal/Metal.h>
@@ -384,6 +386,46 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
           uint32_t(drawable.texture.height), (__bridge void*)command_buffer,
           (__bridge void*)encoder);
       ExecuteUIDrawersFromUIThread(ui_draw_context);
+    }
+
+    // Contract 2 discovery: how the drawable is actually composed. Records
+    // whether a guest image existed, whether UI drawers ran over it, and
+    // whether the drawable size ever changed -- the last being what makes
+    // resize a real question rather than a hypothetical one. Default-off and
+    // observational.
+    static const bool s_present_census =
+        std::getenv("XE_METAL_PRESENT_CENSUS") != nullptr;
+    if (s_present_census) {
+      static uint64_t s_paints = 0, s_with_guest = 0, s_with_ui = 0,
+                      s_letterboxed = 0;
+      static uint32_t s_last_w = 0, s_last_h = 0, s_size_changes = 0;
+      const uint32_t dw = uint32_t(drawable.texture.width);
+      const uint32_t dh = uint32_t(drawable.texture.height);
+      ++s_paints;
+      if (guest_output_texture) {
+        ++s_with_guest;
+        // Any axis not filling the drawable means bars are visible, i.e. the
+        // presenter is already doing aspect-preserving scaling.
+        if (uint32_t(guest_output_texture.width) != dw ||
+            uint32_t(guest_output_texture.height) != dh) {
+          ++s_letterboxed;
+        }
+      }
+      if (execute_ui_drawers) {
+        ++s_with_ui;
+      }
+      if (s_last_w && (dw != s_last_w || dh != s_last_h)) {
+        ++s_size_changes;
+      }
+      s_last_w = dw;
+      s_last_h = dh;
+      if ((s_paints % 256) == 0) {
+        XELOGI(
+            "MetalPresentCompose paints={} with_guest={} with_ui={} "
+            "scaled_or_letterboxed={} drawable={}x{} drawable_size_changes={}",
+            s_paints, s_with_guest, s_with_ui, s_letterboxed, dw, dh,
+            s_size_changes);
+      }
     }
 
     [encoder endEncoding];
