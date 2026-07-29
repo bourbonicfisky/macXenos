@@ -7417,6 +7417,72 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           gamma_ramp_upload_in_flight_ = true;
           ++gamma_ramp_applications_;
           gamma_applied = true;
+
+          // Integration oracle capture. Default OFF and removed before
+          // promotion. Dumps the PRE-ramp image, the exact table that was
+          // uploaded, and the POST-ramp image, so the device result can be
+          // checked offline against the CPU oracle. Applied-versus-ignored is
+          // not a correctness oracle, so this is what makes the live run
+          // verifiable rather than merely different.
+          static const char* s_dump_env = std::getenv("XE_METAL_GAMMA_DUMP");
+          static const uint32_t s_dump_swap =
+              s_dump_env ? uint32_t(std::atoi(s_dump_env)) : UINT32_MAX;
+          if (count == s_dump_swap) {
+            const size_t image_bytes = size_t(present_width) *
+                                       size_t(present_height) * 4;
+            id<MTLBuffer> pre_stage =
+                [gamma_device newBufferWithLength:image_bytes
+                                          options:MTLResourceStorageModeShared];
+            id<MTLBuffer> post_stage =
+                [gamma_device newBufferWithLength:image_bytes
+                                          options:MTLResourceStorageModeShared];
+            if (pre_stage && post_stage) {
+              id<MTLBlitCommandEncoder> dump =
+                  [command_buffer blitCommandEncoder];
+              [dump copyFromTexture:pre_ramp
+                        sourceSlice:0
+                        sourceLevel:0
+                       sourceOrigin:MTLOriginMake(0, 0, 0)
+                         sourceSize:MTLSizeMake(present_width, present_height, 1)
+                           toBuffer:pre_stage
+                  destinationOffset:0
+             destinationBytesPerRow:present_width * 4
+           destinationBytesPerImage:image_bytes];
+              [dump copyFromTexture:mailbox
+                        sourceSlice:0
+                        sourceLevel:0
+                       sourceOrigin:MTLOriginMake(0, 0, 0)
+                         sourceSize:MTLSizeMake(present_width, present_height, 1)
+                           toBuffer:post_stage
+                  destinationOffset:0
+             destinationBytesPerRow:present_width * 4
+           destinationBytesPerImage:image_bytes];
+              [dump endEncoding];
+              [command_buffer commit];
+              [command_buffer waitUntilCompleted];
+              gamma_ramp_upload_in_flight_ = false;
+              const std::string base =
+                  "/tmp/xe_gamma_dump_" + std::to_string(count);
+              auto write_file = [](const std::string& path, const void* data,
+                                   size_t size) {
+                FILE* f = std::fopen(path.c_str(), "wb");
+                if (f) {
+                  std::fwrite(data, 1, size, f);
+                  std::fclose(f);
+                }
+              };
+              write_file(base + "_pre.raw", pre_stage.contents, image_bytes);
+              write_file(base + "_post.raw", post_stage.contents, image_bytes);
+              write_file(base + "_table.bin", ramp_buffer.contents,
+                         kGammaRampTableBytes);
+              XELOGI(
+                  "MetalGammaDump swap#{} {}x{} -> {}_pre.raw/_post.raw/"
+                  "_table.bin uploads={} applications={}",
+                  count, present_width, present_height, base,
+                  gamma_ramp_uploads_, gamma_ramp_applications_);
+              return true;
+            }
+          }
         }
       }
       if (!gamma_applied) {
