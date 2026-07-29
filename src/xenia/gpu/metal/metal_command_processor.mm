@@ -6704,8 +6704,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       gamma_ramp_pwl_last_hash_ = hpwl;
       ++gamma_ramp_pwl_changes_;
     }
+    GammaIdentityVariant variant256 = GammaIdentityVariant::kNone;
     const GammaRampState s256 =
-        ClassifyGammaRamp256(gamma_ramp_256_entry_table());
+        ClassifyGammaRamp256(gamma_ramp_256_entry_table(), &variant256);
     // PWL is NOT classified: that classifier is quarantined as proven-false.
     // PWL is reported by write count and content hash only.
 
@@ -6762,12 +6763,13 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     if ((count % 256u) == 0u) {
       XELOGI(
           "MetalGammaCensus swap#{}: writes(256/pwl)={}/{} changes={}/{} "
-          "state256={} pwl=<unclassified> hash={:016X}/{:016X} "
+          "state256={}/{} pwl=<unclassified> hash={:016X}/{:016X} "
           "swaps(id/non-id)={}/{} "
           "non-id first={} last={}",
           count, gamma_ramp_256_writes_, gamma_ramp_pwl_writes_,
           gamma_ramp_256_changes_, gamma_ramp_pwl_changes_,
-          GammaRampStateName(s256), h256, hpwl,
+          GammaRampStateName(s256), GammaIdentityVariantName(variant256),
+          h256, hpwl,
           gamma_swaps_identity_, gamma_swaps_non_identity_,
           gamma_first_non_identity_swap_ == UINT32_MAX
               ? -1

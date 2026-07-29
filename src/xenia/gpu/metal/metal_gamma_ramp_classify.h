@@ -20,25 +20,40 @@
 // with its own flags. Conflating them would let PS-encode activity masquerade
 // as ramp engagement.
 //
-// WHY "EXACT" IS SUBTLE, AND HOW IT IS HANDLED WITHOUT AN EPSILON
-// ---------------------------------------------------------------
+// THE IDENTITY TEST IS GROUNDED IN THE EMULATOR'S OWN DEFAULT RAMP
+// -----------------------------------------------------------------
 // The 256-entry table maps an 8-bit front-buffer value to a 10-bit output
-// (apply_gamma_table.xesli fetches ramp[input] and writes rgb10_a2). An
-// "identity" ramp is therefore one whose entries reproduce the input unchanged
-// under the 8->10 bit widening the hardware would otherwise apply -- and there
-// are two exact, standard widenings a title could legitimately have programmed:
+// (apply_gamma_table.xesli fetches ramp[input] and normalizes by 1023). An
+// "identity" ramp is one that reproduces the input unchanged.
+//
+// The authoritative formula is stated by CommandProcessor::Initialize(), which
+// seeds the table to "their default (LINEAR) values - taken from what games set
+// when starting with the sRGB (return value 1) VdGetCurrentDisplayGamma":
+//
+//   LINEAR:  out = i * 0x3FF / 0xFF        (TRUNCATING integer division)
+//
+// That is the grounded reference: the emulator itself calls it linear and
+// derives it from observed guest behavior.
+//
+// Two other exact 8->10 widenings are also accepted, because a guest could
+// legitimately have programmed either and neither would alter the image:
 //
 //   REPLICATE:  out = (i << 2) | (i >> 6)     bit replication
-//   SCALE:      out = (i * 1023 + 127) / 255  exact rational scaling
+//   SCALE:      out = (i * 1023 + 127) / 255  round-half-up rational scaling
 //
-// These agree for most i and differ by at most 1 LSB elsewhere. Rather than
-// GUESS which one a given title used -- and risk calling a real identity ramp
-// "non-identity", manufacturing false engagement -- both are tested exactly and
-// a ramp matching EITHER is identity. A ramp matching neither is non-identity
-// by exact comparison, with no tolerance anywhere.
+// These are NOT interchangeable: LINEAR differs from each of the other two at
+// 126 of 256 entries, because truncation and rounding disagree across half the
+// range. An earlier revision of this header tested only REPLICATE and SCALE and
+// therefore classified the emulator's own default-linear ramp as NON-IDENTITY.
+// All three are now tested exactly, with no tolerance anywhere, and the census
+// reports WHICH one matched so a grounded match is never conflated with an
+// accepted-variant match.
 //
-// A ramp that is entirely zero is NOT identity: it is "never programmed", and
-// is reported separately so an unwritten ramp cannot be counted as engagement.
+// A ramp that is entirely zero is reported as "never programmed", but note that
+// this state is UNREACHABLE at runtime: Initialize() seeds the linear ramp
+// before any guest code runs, so an all-zero table only occurs in synthetic
+// tests. A title that never writes the ramp presents the LINEAR default, which
+// is an identity transfer -- not an absence of one.
 
 #include <cstdint>
 
@@ -50,10 +65,33 @@ namespace gpu {
 namespace metal {
 
 enum class GammaRampState : uint32_t {
-  kNeverProgrammed = 0,  // all entries zero -- guest has not written a ramp
-  kIdentity,             // exactly matches a standard 8->10 widening
-  kNonIdentity,          // differs from both exact widenings
+  kNeverProgrammed = 0,  // all entries zero -- synthetic only, see above
+  kIdentity,             // exactly matches one of the three exact widenings
+  kNonIdentity,          // matches none of them
 };
+
+// Which formula an identity ramp matched. kLinear is the grounded reference;
+// the other two are accepted variants and are reported separately so they can
+// never silently stand in for it.
+enum class GammaIdentityVariant : uint32_t {
+  kNone = 0,
+  kLinear,
+  kReplicate,
+  kScale,
+};
+
+inline const char* GammaIdentityVariantName(GammaIdentityVariant v) {
+  switch (v) {
+    case GammaIdentityVariant::kLinear:
+      return "linear-grounded";
+    case GammaIdentityVariant::kReplicate:
+      return "bit-replication";
+    case GammaIdentityVariant::kScale:
+      return "rational-scaling";
+    default:
+      return "none";
+  }
+}
 
 inline const char* GammaRampStateName(GammaRampState s) {
   switch (s) {
@@ -100,6 +138,10 @@ inline GammaRampMode GammaRampModeFromLutaControl(uint32_t dc_luta_control) {
 }
 
 // The two exact 8->10 widenings. No rounding tolerance is applied to either.
+// The grounded one: exactly CommandProcessor::Initialize()'s default ramp.
+constexpr uint32_t GammaIdentityLinear(uint32_t i) {
+  return (i * 0x3FFu) / 0xFFu;
+}
 constexpr uint32_t GammaIdentityReplicate(uint32_t i) {
   return ((i << 2) | (i >> 6)) & 0x3FF;
 }
@@ -110,8 +152,10 @@ constexpr uint32_t GammaIdentityScale(uint32_t i) {
 // Classifies the complete 256-entry table. `table` must be the full 256 entries
 // as the base command processor tracks them.
 inline GammaRampState ClassifyGammaRamp256(
-    const reg::DC_LUT_30_COLOR* table) {
+    const reg::DC_LUT_30_COLOR* table,
+    GammaIdentityVariant* variant_out = nullptr) {
   bool all_zero = true;
+  bool matches_linear = true;
   bool matches_replicate = true;
   bool matches_scale = true;
   for (uint32_t i = 0; i < 256; ++i) {
@@ -121,8 +165,12 @@ inline GammaRampState ClassifyGammaRamp256(
     if (r || g || b) {
       all_zero = false;
     }
+    const uint32_t lin = GammaIdentityLinear(i);
     const uint32_t rep = GammaIdentityReplicate(i);
     const uint32_t sca = GammaIdentityScale(i);
+    if (r != lin || g != lin || b != lin) {
+      matches_linear = false;
+    }
     if (r != rep || g != rep || b != rep) {
       matches_replicate = false;
     }
@@ -130,11 +178,22 @@ inline GammaRampState ClassifyGammaRamp256(
       matches_scale = false;
     }
   }
+  GammaIdentityVariant variant = GammaIdentityVariant::kNone;
+  if (matches_linear) {
+    variant = GammaIdentityVariant::kLinear;
+  } else if (matches_replicate) {
+    variant = GammaIdentityVariant::kReplicate;
+  } else if (matches_scale) {
+    variant = GammaIdentityVariant::kScale;
+  }
+  if (variant_out) {
+    *variant_out = variant;
+  }
   if (all_zero) {
     return GammaRampState::kNeverProgrammed;
   }
-  return (matches_replicate || matches_scale) ? GammaRampState::kIdentity
-                                              : GammaRampState::kNonIdentity;
+  return variant != GammaIdentityVariant::kNone ? GammaRampState::kIdentity
+                                                : GammaRampState::kNonIdentity;
 }
 
 // PWL CLASSIFICATION IS DELIBERATELY ABSENT -- QUARANTINED, NOT MISSING.
