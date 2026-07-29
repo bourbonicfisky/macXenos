@@ -22,6 +22,7 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_classify.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
@@ -370,6 +371,28 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t gamma_swaps_heuristic_pwl_ = 0;
   uint64_t gamma_swaps_selector_disagree_ = 0;
   uint32_t gamma_fb_format_last_ = UINT32_MAX;
+
+  // --- Standard 256-entry guest gamma ramp application (default OFF) ---
+  //
+  // Starts DIRTY so the first swap uploads whatever the base class seeded,
+  // without relying on a virtual hook having fired during base initialization
+  // (it does not -- CommandProcessor::Initialize() writes the default table
+  // directly). Re-armed at the title/session boundary for the same reason.
+  bool gamma_ramp_dirty_ = true;
+  uint64_t gamma_ramp_uploads_ = 0;
+  uint64_t gamma_ramp_applications_ = 0;
+  // id<MTLBuffer>, 256 dwords. Mutated only between swaps; see the lifetime
+  // invariant documented at MetalUploadGammaRamp.
+  void* gamma_ramp_buffer_ = nullptr;
+  // id<MTLTexture>, the pre-ramp copy of the selected swap source.
+  void* gamma_ramp_source_texture_ = nullptr;
+  uint32_t gamma_ramp_source_width_ = 0;
+  uint32_t gamma_ramp_source_height_ = 0;
+  // id<MTLRenderPipelineState>.
+  void* gamma_ramp_pipeline_ = nullptr;
+  // True between recording a ramp-reading pass and its completion wait. Exists
+  // so the "IssueSwap always waits" invariant is asserted rather than assumed.
+  bool gamma_ramp_upload_in_flight_ = false;
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;

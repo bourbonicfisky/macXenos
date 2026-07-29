@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
 
 #import <Metal/Metal.h>
 
@@ -72,6 +73,14 @@ extern "C" void objc_autoreleasePoolPop(void*);
 // ir_runtime_impl.mm). Provides IRDescriptorTableEntry, the kIR*BindPoint slot
 // constants, IRDescriptorTableSet*, and the IRRuntimeDraw* helpers.
 #include "metal_irconverter_runtime.h"
+
+DEFINE_bool(
+    metal_guest_gamma_ramp, false,
+    "Apply the guest's standard 256-entry gamma ramp to the presented guest "
+    "output on Metal. Default off: this is the exact rollback path -- when "
+    "false, no ramp buffer is created, no upload occurs, and the swap source "
+    "reaches the mailbox by the same blit as before.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -5659,6 +5668,10 @@ void MetalCommandProcessor::InitializeShaderStorage(
   // Title/session boundary: start a fresh unrouted-export reporting session.
   // Touches only the reporter's own counters -- no cache state, no guest state.
   memexport_gap_reporter_.Reset();
+  // Title/session boundary: the base class re-seeds its default ramp without
+  // invoking the write hook, so re-arm rather than trusting the flag to have
+  // survived.
+  gamma_ramp_dirty_ = true;
   if (pipeline_cache_) {
     pipeline_cache_->InitializeDurableStorage(cache_root, title_id);
   }
@@ -5667,6 +5680,8 @@ void MetalCommandProcessor::InitializeShaderStorage(
   }
 }
 
+
+
 // Contract 1 census. Raw write counters only -- a partial register update is
 // NOT a completed ramp, so no classification happens here. The base class
 // implementation is preserved by calling through, so guest tracking is
@@ -5674,6 +5689,11 @@ void MetalCommandProcessor::InitializeShaderStorage(
 void MetalCommandProcessor::OnGammaRamp256EntryTableValueWritten() {
   CommandProcessor::OnGammaRamp256EntryTableValueWritten();
   ++gamma_ramp_256_writes_;
+  // Mark stale so the next swap re-uploads. Deliberately unconditional on the
+  // switch: the flag is a single bool with no allocation behind it, and gating
+  // it would let a ramp written while disabled be missed if the switch were
+  // ever flipped at runtime. Nothing is uploaded until IssueSwap looks.
+  gamma_ramp_dirty_ = true;
 }
 
 void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
@@ -7275,17 +7295,144 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         [enc endEncoding];
       }
     } else if (source_rt) {
-      id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
-      [blit copyFromTexture:source_rt
-                sourceSlice:0
-                sourceLevel:0
-               sourceOrigin:MTLOriginMake(0, 0, 0)
-                 sourceSize:MTLSizeMake(present_width, present_height, 1)
-                  toTexture:mailbox
-           destinationSlice:0
-           destinationLevel:0
-          destinationOrigin:MTLOriginMake(0, 0, 0)];
-      [blit endEncoding];
+      // Standard 256-entry guest gamma ramp, applied AFTER the swap source has
+      // been selected (source_rt is already chosen above, by either the
+      // resolved-snapshot or the RAM/CPU-decoded FMV path) and BEFORE the
+      // presenter's scaling and UI composition, which happen later against the
+      // mailbox. Both sources therefore reach the identical ramp stage, and no
+      // UI pixel can be touched by it.
+      //
+      // Shape: blit the selected source into a private pre-ramp copy exactly as
+      // before, then render that copy into the mailbox through the ramp. The
+      // mailbox has no ShaderWrite usage, so it cannot be read-modify-written
+      // in place, and rewriting the blit itself would have coupled the ramp to
+      // swap-source selection.
+      bool gamma_applied = false;
+      if (cvars::metal_guest_gamma_ramp) {
+        id<MTLDevice> gamma_device = mailbox.device;
+        // Ramp buffer: 256 dwords, exactly the guest register layout.
+        if (!gamma_ramp_buffer_) {
+          id<MTLBuffer> buf =
+              [gamma_device newBufferWithLength:kGammaRampTableBytes
+                                        options:MTLResourceStorageModeShared];
+          if (buf) {
+            buf.label = @"cp:gamma-ramp-256";
+            gamma_ramp_buffer_ = (__bridge_retained void*)buf;
+          }
+        }
+        if (!gamma_ramp_pipeline_) {
+          NSError* err = nil;
+          id<MTLLibrary> lib =
+              [gamma_device newLibraryWithSource:kMetalGammaRampShader
+                                         options:nil
+                                           error:&err];
+          if (lib) {
+            MTLRenderPipelineDescriptor* d =
+                [[MTLRenderPipelineDescriptor alloc] init];
+            d.vertexFunction = [lib newFunctionWithName:@"xe_gamma_vs"];
+            d.fragmentFunction = [lib newFunctionWithName:@"xe_gamma_fs"];
+            d.colorAttachments[0].pixelFormat = mailbox.pixelFormat;
+            id<MTLRenderPipelineState> ps =
+                [gamma_device newRenderPipelineStateWithDescriptor:d
+                                                             error:&err];
+            if (ps) {
+              gamma_ramp_pipeline_ = (__bridge_retained void*)ps;
+            } else {
+              XELOGE("MetalGamma: ramp pipeline creation failed: {}",
+                     err ? err.localizedDescription.UTF8String : "unknown");
+            }
+          }
+        }
+        // Pre-ramp copy, resized with the guest output.
+        if (gamma_ramp_source_texture_ &&
+            (gamma_ramp_source_width_ != present_width ||
+             gamma_ramp_source_height_ != present_height)) {
+          id<MTLTexture> old_tex =
+              (__bridge_transfer id<MTLTexture>)gamma_ramp_source_texture_;
+          (void)old_tex;
+          gamma_ramp_source_texture_ = nullptr;
+        }
+        if (!gamma_ramp_source_texture_) {
+          MTLTextureDescriptor* td = [MTLTextureDescriptor
+              texture2DDescriptorWithPixelFormat:mailbox.pixelFormat
+                                           width:present_width
+                                          height:present_height
+                                       mipmapped:NO];
+          td.usage = MTLTextureUsageShaderRead;
+          td.storageMode = MTLStorageModePrivate;
+          id<MTLTexture> tex = [gamma_device newTextureWithDescriptor:td];
+          if (tex) {
+            tex.label = @"cp:gamma-pre-ramp-source";
+            gamma_ramp_source_texture_ = (__bridge_retained void*)tex;
+            gamma_ramp_source_width_ = present_width;
+            gamma_ramp_source_height_ = present_height;
+          }
+        }
+        id<MTLBuffer> ramp_buffer = (__bridge id<MTLBuffer>)gamma_ramp_buffer_;
+        id<MTLTexture> pre_ramp =
+            (__bridge id<MTLTexture>)gamma_ramp_source_texture_;
+        id<MTLRenderPipelineState> ramp_pipeline =
+            (__bridge id<MTLRenderPipelineState>)gamma_ramp_pipeline_;
+        if (ramp_buffer && pre_ramp && ramp_pipeline &&
+            source_rt.pixelFormat == mailbox.pixelFormat) {
+          // BUFFER LIFETIME INVARIANT: this refresher commits and then
+          // waitUntilCompleted's before returning (see the end of this lambda),
+          // and nothing else writes the ramp buffer. So no command buffer that
+          // reads the ramp can still be in flight when the next swap mutates
+          // it, and a single immutable-per-frame buffer is sufficient -- no
+          // ring, no per-frame versioning. The assertion below fails loudly if
+          // a future change removes that wait.
+          assert_false(gamma_ramp_upload_in_flight_);
+          if (gamma_ramp_dirty_) {
+            std::memcpy(ramp_buffer.contents, gamma_ramp_256_entry_table(),
+                        kGammaRampTableBytes);
+            gamma_ramp_dirty_ = false;
+            ++gamma_ramp_uploads_;
+          }
+          id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+          [blit copyFromTexture:source_rt
+                    sourceSlice:0
+                    sourceLevel:0
+                   sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(present_width, present_height, 1)
+                      toTexture:pre_ramp
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+          [blit endEncoding];
+          MTLRenderPassDescriptor* pass =
+              [MTLRenderPassDescriptor renderPassDescriptor];
+          pass.colorAttachments[0].texture = mailbox;
+          pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+          pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+          id<MTLRenderCommandEncoder> enc =
+              [command_buffer renderCommandEncoderWithDescriptor:pass];
+          [enc setRenderPipelineState:ramp_pipeline];
+          [enc setFragmentTexture:pre_ramp atIndex:0];
+          [enc setFragmentBuffer:ramp_buffer offset:0 atIndex:0];
+          [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:0
+                  vertexCount:3];
+          [enc endEncoding];
+          gamma_ramp_upload_in_flight_ = true;
+          ++gamma_ramp_applications_;
+          gamma_applied = true;
+        }
+      }
+      if (!gamma_applied) {
+        // Exact rollback path: byte-for-byte the pre-change behavior.
+        id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+        [blit copyFromTexture:source_rt
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(present_width, present_height, 1)
+                    toTexture:mailbox
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+      }
     } else {
       MTLRenderPassDescriptor* pass =
           [MTLRenderPassDescriptor renderPassDescriptor];
@@ -7300,6 +7447,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
+    // The wait above is what makes a single ramp buffer safe; clearing here
+    // ties the invariant to the wait rather than to a comment.
+    gamma_ramp_upload_in_flight_ = false;
     return true;
   };
   presenter->RefreshGuestOutput(present_width, present_height, /*aspect_x=*/16,
