@@ -20,7 +20,6 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
-#include "xenia/gpu/metal/metal_memexport_census.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
@@ -120,8 +119,6 @@ void MetalPipelineCache::ShutdownDurableStorage() { storage_.Close(); }
 
 void MetalPipelineCache::Shutdown() {
   ShutdownDurableStorage();
-  // Clean-exit report: trace replay never reaches a periodic tick.
-  memexport_census::Report();
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
       id<MTLRenderPipelineState> state =
