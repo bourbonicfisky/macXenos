@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
+#include "xenia/gpu/metal/metal_present_convert_shader.h"
 
 #import <Metal/Metal.h>
 
@@ -73,6 +74,13 @@ extern "C" void objc_autoreleasePoolPop(void*);
 // ir_runtime_impl.mm). Provides IRDescriptorTableEntry, the kIR*BindPoint slot
 // constants, IRDescriptorTableSet*, and the IRRuntimeDraw* helpers.
 #include "metal_irconverter_runtime.h"
+
+DEFINE_bool(
+    metal_present_format_convert, false,
+    "When the selected swap source's pixel format differs from the guest "
+    "output format, convert it per-channel instead of rendering the grayscale "
+    "debug visualization. Default off: this is the exact rollback path.",
+    "GPU");
 
 DEFINE_bool(
     metal_guest_gamma_ramp, false,
@@ -7286,27 +7294,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       // Debug visualization (XE_METAL_PRESENT_BASE of a non-BGRA8 snapshot,
       // e.g. an R32Float depth snapshot): a blit between different formats is
       // invalid, render grayscale (.r) into the mailbox instead.
-      static void* s_gray_pipeline = nullptr;  // id<MTLRenderPipelineState>.
+      static void* s_gray_pipeline = nullptr;   // id<MTLRenderPipelineState>.
+      static void* s_convert_pipeline = nullptr;
       if (!s_gray_pipeline) {
         id<MTLDevice> dev = mailbox.device;
-        NSString* src = @R"METAL(
-          #include <metal_stdlib>
-          using namespace metal;
-          struct VOut { float4 pos [[position]]; };
-          vertex VOut xe_gray_vs(uint vid [[vertex_id]]) {
-            VOut o;
-            float2 t = float2(float((vid << 1) & 2), float(vid & 2));
-            o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
-            return o;
-          }
-          fragment float4 xe_gray_fs(VOut in [[stage_in]],
-                                     texture2d_array<float> t [[texture(0)]]) {
-            // Resolve snapshots are 2D arrays (one slice) so the texture cache
-            // can consume them directly. Present the same slice explicitly.
-            float v = t.read(uint2(in.pos.xy), 0, 0).r;
-            return float4(v, v, v, 1.0);
-          }
-        )METAL";
+        NSString* src = kMetalPresentConvertShader;
         NSError* err = nil;
         id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil
                                                  error:&err];
@@ -7321,9 +7313,48 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           if (ps) {
             s_gray_pipeline = (__bridge_retained void*)ps;
           }
+          d.fragmentFunction = [lib newFunctionWithName:@"xe_convert_fs"];
+          id<MTLRenderPipelineState> cps =
+              [dev newRenderPipelineStateWithDescriptor:d error:&err];
+          if (cps) {
+            s_convert_pipeline = (__bridge_retained void*)cps;
+          }
         }
       }
-      if (s_gray_pipeline) {
+      const bool use_convert =
+          cvars::metal_present_format_convert && s_convert_pipeline;
+      // C2-a discriminating gate capture. Default OFF. Dumps the SELECTED
+      // swap source before any conversion, scaling, gamma, or UI, plus the
+      // resulting pre-UI RGBA8 mailbox, so an offline oracle can decide whether
+      // the grayscale path is harming meaningful content or merely rendering a
+      // black layer differently. Source SELECTION is untouched.
+      static const char* s_fmt_dump_env = std::getenv("XE_METAL_FMTDUMP");
+      static const uint32_t s_fmt_dump_swap =
+          s_fmt_dump_env ? uint32_t(std::atoi(s_fmt_dump_env)) : UINT32_MAX;
+      const bool fmt_dump = (count == s_fmt_dump_swap);
+      id<MTLBuffer> fmt_src_stage = nil;
+      if (fmt_dump) {
+        const uint32_t sw = uint32_t(source_rt.width);
+        const uint32_t sh = uint32_t(source_rt.height);
+        const size_t bpp =
+            source_rt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
+        fmt_src_stage = [mailbox.device newBufferWithLength:size_t(sw) * sh * bpp
+                                                   options:MTLResourceStorageModeShared];
+        if (fmt_src_stage) {
+          id<MTLBlitCommandEncoder> b = [command_buffer blitCommandEncoder];
+          [b copyFromTexture:source_rt
+                 sourceSlice:0
+                 sourceLevel:0
+                sourceOrigin:MTLOriginMake(0, 0, 0)
+                  sourceSize:MTLSizeMake(sw, sh, 1)
+                    toBuffer:fmt_src_stage
+           destinationOffset:0
+      destinationBytesPerRow:sw * bpp
+    destinationBytesPerImage:size_t(sw) * sh * bpp];
+          [b endEncoding];
+        }
+      }
+      if (s_gray_pipeline || use_convert) {
         MTLRenderPassDescriptor* pass =
             [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = mailbox;
@@ -7332,13 +7363,52 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
         id<MTLRenderCommandEncoder> enc =
             [command_buffer renderCommandEncoderWithDescriptor:pass];
-        [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                        s_gray_pipeline];
+        [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
+                                        use_convert ? s_convert_pipeline
+                                                    : s_gray_pipeline)];
         [enc setFragmentTexture:source_rt atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
         [enc endEncoding];
+      }
+      if (fmt_dump && fmt_src_stage) {
+        const uint32_t sw = uint32_t(source_rt.width);
+        const uint32_t sh = uint32_t(source_rt.height);
+        const size_t bpp =
+            source_rt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
+        const size_t out_bytes = size_t(present_width) * present_height * 4;
+        id<MTLBuffer> out_stage =
+            [mailbox.device newBufferWithLength:out_bytes
+                                        options:MTLResourceStorageModeShared];
+        if (out_stage) {
+          id<MTLBlitCommandEncoder> b = [command_buffer blitCommandEncoder];
+          [b copyFromTexture:mailbox
+                 sourceSlice:0
+                 sourceLevel:0
+                sourceOrigin:MTLOriginMake(0, 0, 0)
+                  sourceSize:MTLSizeMake(present_width, present_height, 1)
+                    toBuffer:out_stage
+           destinationOffset:0
+      destinationBytesPerRow:present_width * 4
+    destinationBytesPerImage:out_bytes];
+          [b endEncoding];
+          [command_buffer commit];
+          [command_buffer waitUntilCompleted];
+          const std::string base = "/tmp/xe_fmt_dump_" + std::to_string(count);
+          auto wf = [](const std::string& p, const void* d, size_t n) {
+            FILE* f = std::fopen(p.c_str(), "wb");
+            if (f) { std::fwrite(d, 1, n, f); std::fclose(f); }
+          };
+          wf(base + "_src.raw", fmt_src_stage.contents, size_t(sw) * sh * bpp);
+          wf(base + "_out.raw", out_stage.contents, out_bytes);
+          XELOGI(
+              "MetalFmtDump swap#{} src {}x{} fmt={} bpp={} -> {}_src.raw ; "
+              "out {}x{} RGBA8 -> {}_out.raw",
+              count, sw, sh, uint32_t(source_rt.pixelFormat), bpp, base,
+              present_width, present_height, base);
+          return true;
+        }
       }
     } else if (source_rt) {
       // Standard 256-entry guest gamma ramp, applied AFTER the swap source has
