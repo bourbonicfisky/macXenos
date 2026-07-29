@@ -47,6 +47,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_memexport_census.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -2442,6 +2443,33 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
+  // CENSUS (temporary; see metal_memexport_census.h — task 1.1 of
+  // complete-metal-memexport-producers). Classification only: it reads state
+  // the draw path already computed and changes nothing about execution.
+  if (memexport_census::Enabled()) {
+    const bool rt_bound = color_bound || (kDepthEnabled && depth_bound);
+    const bool ps_writes_eM =
+        pixel_shader && pixel_shader->memexport_eM_written();
+    if (!memexport_ranges.empty()) {
+      // The control stratum is the promoted VS no-RT route; the gate strata are
+      // the ones currently dropped. Geometry-emulated rasterizing export is
+      // reported separately because it would need its own object/mesh slice.
+      const memexport_census::Stratum s =
+          !rt_bound ? memexport_census::Stratum::kControlVsNoRt
+                    : (use_geometry_emulation
+                           ? memexport_census::Stratum::kGateVsRasterGeom
+                           : memexport_census::Stratum::kGateVsRaster);
+      for (const auto& r : memexport_ranges) {
+        memexport_census::Record(s, r.base_address_dwords, r.size_bytes);
+      }
+    }
+    if (ps_writes_eM) {
+      // Pixel-stage ranges are never gathered in production, so the draw is
+      // counted without them rather than inventing a range computation here.
+      memexport_census::RecordDrawOnly(memexport_census::Stratum::kGatePs);
+    }
+  }
+
   if (!color_bound && !(kDepthEnabled && depth_bound)) {
     bool ps_exports = pixel_shader && pixel_shader->memexport_eM_written();
     if (memexport_ranges.empty() || ps_exports) {
@@ -6620,6 +6648,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  memexport_census::AdvanceFrame();
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.

@@ -1,5 +1,11 @@
 # Building
 
+> **Legacy upstream/Canary build document.** It does not describe the native
+> Metal/macOS integration worktree and its clone/setup commands must not be used
+> to replace an existing checkout. For Metal work, confirm branch identity in
+> [Metal Current State](metal_current_state.md) and follow the repository's
+> current CMake presets and task-specific validation instructions.
+
 You must have a 64-bit machine for building and running the project. Always
 run your system updater before building and make sure you have the latest
 drivers.

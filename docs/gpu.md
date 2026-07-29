@@ -1,5 +1,10 @@
 # GPU Documentation
 
+> **Legacy architecture background.** This page predates the native Metal
+> backend and is not a pixel-pipeline capability map. Start with
+> [Metal Current State](metal_current_state.md) for current Metal behavior and
+> gaps, then use this page only for general Xenos concepts.
+
 ## The Xenos Chip
 
 The [Xenos](https://en.wikipedia.org/wiki/Xenos_\(graphics_chip\)) is a graphics
