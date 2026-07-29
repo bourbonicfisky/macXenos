@@ -76,11 +76,24 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "metal_irconverter_runtime.h"
 
 DEFINE_bool(
-    metal_present_format_convert, false,
+    metal_present_format_convert, true,
     "When the selected swap source's pixel format differs from the guest "
-    "output format, convert it per-channel instead of rendering the grayscale "
-    "debug visualization. Default off: this is the exact rollback path.",
+    "output format, convert it per-channel instead of replicating the red "
+    "channel. Enabled by default: the red-replication path was a debug "
+    "visualization that a real title reaches -- Halo 3 presents an "
+    "RGBA16Float source for every swap, and its guest image is fully "
+    "chromatic, so it was being flattened to grey. Set false to restore the "
+    "previous output exactly.",
     "GPU");
+// Without this, the flip above reaches NOBODY who has already launched Xenia:
+// the config file persists every cvar, so a stored `false` -- written while
+// false was the default -- wins over the new compiled default. Measured, not
+// assumed: the first default-on run still reported the cvar as false.
+//
+// UPDATE_from_bool migrates configs that still hold the OLD DEFAULT while
+// preserving any value a user chose deliberately, which is exactly the intent
+// here: adopt the fix, but never override someone who turned it off on purpose.
+UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
     metal_guest_gamma_ramp, false,
