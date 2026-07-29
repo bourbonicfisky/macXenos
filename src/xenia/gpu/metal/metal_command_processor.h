@@ -22,6 +22,7 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_gamma_ramp_classify.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -134,6 +135,13 @@ class MetalCommandProcessor : public CommandProcessor {
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
+
+  // Contract 1 gamma-ramp engagement census (temporary, default-off).
+  // These overrides ONLY count raw writes; they deliberately do not classify,
+  // because a partial register update is not yet a completed ramp. The base
+  // class's own tracking is preserved by calling through.
+  void OnGammaRamp256EntryTableValueWritten() override;
+  void OnGammaRampPWLValueWritten() override;
 
   void InitializeTrace() override;
   std::string GetCaptureDeviceInfoJson() const override;
@@ -336,6 +344,20 @@ class MetalCommandProcessor : public CommandProcessor {
   // does not route. Reset at the title/session boundary; holds no guest state
   // and takes no part in cache clearing.
   MemexportGapReporter memexport_gap_reporter_;
+
+  // Contract 1 census state. Raw write counts are separated from completed
+  // ramp changes: engagement requires a COMPLETE non-identity ramp observed at
+  // IssueSwap, not a hook count.
+  uint64_t gamma_ramp_256_writes_ = 0;
+  uint64_t gamma_ramp_pwl_writes_ = 0;
+  uint64_t gamma_ramp_256_changes_ = 0;
+  uint64_t gamma_ramp_pwl_changes_ = 0;
+  uint64_t gamma_ramp_256_last_hash_ = 0;
+  uint64_t gamma_ramp_pwl_last_hash_ = 0;
+  uint64_t gamma_swaps_identity_ = 0;
+  uint64_t gamma_swaps_non_identity_ = 0;
+  uint32_t gamma_first_non_identity_swap_ = UINT32_MAX;
+  uint32_t gamma_last_non_identity_swap_ = 0;
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;

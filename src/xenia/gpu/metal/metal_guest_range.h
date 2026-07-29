@@ -30,7 +30,8 @@ namespace metal {
 // checks, selective drains, consumer preparation, and audit telemetry all speak
 // one range shape instead of the raw 32-bit end arithmetic scattered across the
 // command processor today (which cannot establish wrap/boundary correctness --
-// see docs/metal_cross_writer_memory_authority_audit.md blocker 7).
+// see docs/archive/evidence/metal_cross_writer_memory_authority_audit.md
+// blocker 7).
 //
 // Invariants of a constructed GuestRange:
 //   * non-empty: begin < end;

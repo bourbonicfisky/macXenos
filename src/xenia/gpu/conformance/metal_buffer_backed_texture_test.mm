@@ -22,7 +22,7 @@
 // (paired ratio median AND p95 <= 1.10) and FAILED (median ~1.10-1.15, p95
 // ~1.16 across replicates: buffer-backed linear sampling is ~10-15% slower
 // than an optimally-tiled texture on the M4), killing C1P; see the G0
-// outcome in docs/metal_texture_cache_integration_adr.md.
+// outcome in docs/archive/evidence/metal_texture_cache_integration_adr.md.
 
 #include <algorithm>
 #include <cstring>

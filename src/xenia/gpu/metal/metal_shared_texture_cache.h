@@ -37,8 +37,9 @@ class MetalTextureCache;
 // each is canonical for its own shape. The legacy MetalTextureCache remains the
 // universal fallback and the single bindless-slot authority (this class
 // allocates/retires slots and registers residency through its narrow
-// external-slot adapter). Seam contract: docs/
-// metal_texture_cache_integration_adr.md "C1T-R Phase 0.2 seam audit" —
+// external-slot adapter). Seam contract:
+// docs/archive/evidence/metal_texture_cache_integration_adr.md
+// "C1T-R Phase 0.2 seam audit" —
 // classification stays ClassifyResolvedFetch + the eligibility header;
 // preparation runs at the pre-encoder post-overlap/drain seam on the
 // existing frame command buffer; serving is keyed by fetch-constant index

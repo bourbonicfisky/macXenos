@@ -5667,6 +5667,20 @@ void MetalCommandProcessor::InitializeShaderStorage(
   }
 }
 
+// Contract 1 census. Raw write counters only -- a partial register update is
+// NOT a completed ramp, so no classification happens here. The base class
+// implementation is preserved by calling through, so guest tracking is
+// unchanged whether the census is on or off.
+void MetalCommandProcessor::OnGammaRamp256EntryTableValueWritten() {
+  CommandProcessor::OnGammaRamp256EntryTableValueWritten();
+  ++gamma_ramp_256_writes_;
+}
+
+void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
+  CommandProcessor::OnGammaRampPWLValueWritten();
+  ++gamma_ramp_pwl_writes_;
+}
+
 void MetalCommandProcessor::InitializeTrace() {
   // Warm-entry and shared-memory trace initialization read arbitrary guest RAM
   // ranges. Converge every pending producer once before either sweep so the
@@ -6673,6 +6687,53 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  // Contract 1 census: classify the COMPLETE ramp state after all partial
+  // writes have landed. Default-off, isolated from the PS gamma flags, and
+  // purely observational -- it reads base-class state and emits nothing into
+  // presentation, bindings, or synchronization.
+  static const bool s_gamma_census =
+      std::getenv("XE_METAL_GAMMA_RAMP_CENSUS") != nullptr;
+  if (s_gamma_census) {
+    const uint64_t h256 = HashGammaRamp256(gamma_ramp_256_entry_table());
+    const uint64_t hpwl = HashGammaRampPWL(gamma_ramp_pwl_rgb());
+    if (h256 != gamma_ramp_256_last_hash_) {
+      gamma_ramp_256_last_hash_ = h256;
+      ++gamma_ramp_256_changes_;
+    }
+    if (hpwl != gamma_ramp_pwl_last_hash_) {
+      gamma_ramp_pwl_last_hash_ = hpwl;
+      ++gamma_ramp_pwl_changes_;
+    }
+    const GammaRampState s256 =
+        ClassifyGammaRamp256(gamma_ramp_256_entry_table());
+    const GammaRampState spwl = ClassifyGammaRampPWL(gamma_ramp_pwl_rgb());
+    const bool non_identity = s256 == GammaRampState::kNonIdentity ||
+                              spwl == GammaRampState::kNonIdentity;
+    if (non_identity) {
+      ++gamma_swaps_non_identity_;
+      gamma_first_non_identity_swap_ =
+          std::min(gamma_first_non_identity_swap_, count);
+      gamma_last_non_identity_swap_ = count;
+    } else if (s256 == GammaRampState::kIdentity ||
+               spwl == GammaRampState::kIdentity) {
+      ++gamma_swaps_identity_;
+    }
+    if ((count % 256u) == 0u) {
+      XELOGI(
+          "MetalGammaCensus swap#{}: writes(256/pwl)={}/{} changes={}/{} "
+          "state(256/pwl)={}/{} hash={:016X}/{:016X} swaps(id/non-id)={}/{} "
+          "non-id first={} last={}",
+          count, gamma_ramp_256_writes_, gamma_ramp_pwl_writes_,
+          gamma_ramp_256_changes_, gamma_ramp_pwl_changes_,
+          GammaRampStateName(s256), GammaRampStateName(spwl), h256, hpwl,
+          gamma_swaps_identity_, gamma_swaps_non_identity_,
+          gamma_first_non_identity_swap_ == UINT32_MAX
+              ? -1
+              : int32_t(gamma_first_non_identity_swap_),
+          gamma_swaps_non_identity_ ? int32_t(gamma_last_non_identity_swap_)
+                                    : -1);
+    }
+  }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
