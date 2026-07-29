@@ -63,7 +63,8 @@ uint16_t ToHalf(float f) {
 
 // Runs the production conversion shader over one row of RGBA16Float texels.
 // Empty if no device is available, so callers skip rather than fail.
-std::vector<Rgba8> RunConvert(const std::vector<float>& rgba) {
+std::vector<Rgba8> RunShader(const std::vector<float>& rgba,
+                            NSString* fragment_name) {
   @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) {
@@ -80,7 +81,7 @@ std::vector<Rgba8> RunConvert(const std::vector<float>& rgba) {
     MTLRenderPipelineDescriptor* pd =
         [[MTLRenderPipelineDescriptor alloc] init];
     pd.vertexFunction = [lib newFunctionWithName:@"xe_gray_vs"];
-    pd.fragmentFunction = [lib newFunctionWithName:@"xe_convert_fs"];
+    pd.fragmentFunction = [lib newFunctionWithName:fragment_name];
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     id<MTLRenderPipelineState> ps =
         [device newRenderPipelineStateWithDescriptor:pd error:&err];
@@ -170,6 +171,15 @@ float HalfToFloat(uint16_t h) {
 }
 
 float RoundTripHalf(float f) { return HalfToFloat(ToHalf(f)); }
+
+std::vector<Rgba8> RunConvert(const std::vector<float>& rgba) {
+  return RunShader(rgba, @"xe_convert_fs");
+}
+
+// The legacy grayscale path, retained as the exact rollback target.
+std::vector<Rgba8> RunLegacyGray(const std::vector<float>& rgba) {
+  return RunShader(rgba, @"xe_gray_fs");
+}
 
 std::vector<Rgba8> OracleOver(const std::vector<float>& rgba) {
   std::vector<Rgba8> out(rgba.size() / 4);
@@ -264,6 +274,33 @@ TEST_CASE("Alpha is forced opaque", "[metal][present][convert]") {
     return;
   }
   REQUIRE(got[0].a == 255);
+}
+
+TEST_CASE("The rollback path still replicates red, exactly",
+          "[metal][present][convert][rollback]") {
+  // Pins the ROLLBACK target at the shader level, so "explicit rollback
+  // reproduces the previous output" stays verified after all capture
+  // instrumentation was removed. Both shaders come from the production header,
+  // so this exercises the shipped rollback path rather than a description of
+  // it.
+  const std::vector<float> in{0.0684f, 0.0000f, 0.0547f, 1.0f,
+                              0.1407f, 0.0401f, 0.1281f, 1.0f};
+  const auto got = RunLegacyGray(in);
+  if (got.empty()) {
+    WARN("No Metal device; skipping");
+    return;
+  }
+  for (size_t i = 0; i < got.size(); ++i) {
+    const uint8_t red = PresentConvertChannelToUnorm8(RoundTripHalf(in[i * 4]));
+    REQUIRE(got[i].r == red);
+    REQUIRE(got[i].g == red);
+    REQUIRE(got[i].b == red);
+    REQUIRE(got[i].a == 255);
+  }
+  // And the two paths must genuinely differ on this chromatic input, or the
+  // rollback distinction would be untested.
+  const auto converted = RunConvert(in);
+  REQUIRE_FALSE(got == converted);
 }
 
 TEST_CASE("The oracle rejects red-channel replication",

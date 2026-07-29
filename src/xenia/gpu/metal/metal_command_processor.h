@@ -23,8 +23,6 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
-#include "xenia/gpu/metal/metal_gamma_ramp_classify.h"
-#include "xenia/gpu/metal/metal_present_census.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -346,35 +344,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // does not route. Reset at the title/session boundary; holds no guest state
   // and takes no part in cache clearing.
   MemexportGapReporter memexport_gap_reporter_;
-  // Contract 2 discovery. Default-off, observational; see the header.
-  MetalPresentCensus present_census_;
 
   // Contract 1 census state. Raw write counts are separated from completed
   // ramp changes: engagement requires a COMPLETE non-identity ramp observed at
   // IssueSwap, not a hook count.
-  uint64_t gamma_ramp_256_writes_ = 0;
-  uint64_t gamma_ramp_pwl_writes_ = 0;
-  uint64_t gamma_ramp_256_changes_ = 0;
-  uint64_t gamma_ramp_pwl_changes_ = 0;
-  uint64_t gamma_ramp_256_last_hash_ = 0;
-  uint64_t gamma_ramp_pwl_last_hash_ = 0;
-  uint64_t gamma_swaps_identity_ = 0;
-  uint64_t gamma_swaps_non_identity_ = 0;
-  uint32_t gamma_first_non_identity_swap_ = UINT32_MAX;
-  uint32_t gamma_last_non_identity_swap_ = 0;
-  // Selector census: the grounded DC_LUTA_CONTROL mode, and D3D12's
-  // frontbuffer-format heuristic alongside it so disagreement is visible
-  // rather than assumed away. Distinct raw selector values are accumulated
-  // because a mode that CHANGES mid-title would split the implementation.
-  uint32_t gamma_luta_control_last_ = UINT32_MAX;
-  uint32_t gamma_luta_control_distinct_ = 0;
-  uint32_t gamma_luta_control_values_[4] = {};
-  uint64_t gamma_swaps_mode_standard_ = 0;
-  uint64_t gamma_swaps_mode_pwl_ = 0;
-  uint64_t gamma_swaps_heuristic_pwl_ = 0;
-  uint64_t gamma_swaps_selector_disagree_ = 0;
-  uint32_t gamma_fb_format_last_ = UINT32_MAX;
-
   // --- Standard 256-entry guest gamma ramp application (default OFF) ---
   //
   // Starts DIRTY so the first swap uploads whatever the base class seeded,

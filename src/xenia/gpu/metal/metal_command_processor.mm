@@ -5676,7 +5676,6 @@ void MetalCommandProcessor::InitializeShaderStorage(
   // Title/session boundary: start a fresh unrouted-export reporting session.
   // Touches only the reporter's own counters -- no cache state, no guest state.
   memexport_gap_reporter_.Reset();
-  present_census_.Reset();
   // Title/session boundary: the base class re-seeds its default ramp without
   // invoking the write hook, so re-arm rather than trusting the flag to have
   // survived.
@@ -5691,13 +5690,10 @@ void MetalCommandProcessor::InitializeShaderStorage(
 
 
 
-// Contract 1 census. Raw write counters only -- a partial register update is
-// NOT a completed ramp, so no classification happens here. The base class
-// implementation is preserved by calling through, so guest tracking is
-// unchanged whether the census is on or off.
+// The base implementation is preserved by calling through, so guest ramp
+// tracking is unchanged.
 void MetalCommandProcessor::OnGammaRamp256EntryTableValueWritten() {
   CommandProcessor::OnGammaRamp256EntryTableValueWritten();
-  ++gamma_ramp_256_writes_;
   // Mark stale so the next swap re-uploads. Deliberately unconditional on the
   // switch: the flag is a single bool with no allocation behind it, and gating
   // it would let a ramp written while disabled be missed if the switch were
@@ -5707,7 +5703,6 @@ void MetalCommandProcessor::OnGammaRamp256EntryTableValueWritten() {
 
 void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
   CommandProcessor::OnGammaRampPWLValueWritten();
-  ++gamma_ramp_pwl_writes_;
 }
 
 void MetalCommandProcessor::InitializeTrace() {
@@ -6716,107 +6711,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
-  // Contract 1 census: classify the COMPLETE ramp state after all partial
-  // writes have landed. Default-off, isolated from the PS gamma flags, and
-  // purely observational -- it reads base-class state and emits nothing into
-  // presentation, bindings, or synchronization.
-  static const bool s_gamma_census =
-      std::getenv("XE_METAL_GAMMA_RAMP_CENSUS") != nullptr;
-  if (s_gamma_census) {
-    const uint64_t h256 = HashGammaRamp256(gamma_ramp_256_entry_table());
-    const uint64_t hpwl = HashGammaRampPWL(gamma_ramp_pwl_rgb());
-    if (h256 != gamma_ramp_256_last_hash_) {
-      gamma_ramp_256_last_hash_ = h256;
-      ++gamma_ramp_256_changes_;
-    }
-    if (hpwl != gamma_ramp_pwl_last_hash_) {
-      gamma_ramp_pwl_last_hash_ = hpwl;
-      ++gamma_ramp_pwl_changes_;
-    }
-    GammaIdentityVariant variant256 = GammaIdentityVariant::kNone;
-    const GammaRampState s256 =
-        ClassifyGammaRamp256(gamma_ramp_256_entry_table(), &variant256);
-    // PWL is NOT classified: that classifier is quarantined as proven-false.
-    // PWL is reported by write count and content hash only.
-
-    // The grounded selector. Reading the raw dword keeps an unexpected
-    // per-channel field layout visible instead of collapsing it to "standard".
-    const uint32_t luta_control =
-        register_file_->values[XE_GPU_REG_DC_LUTA_CONTROL];
-    const GammaRampMode mode = GammaRampModeFromLutaControl(luta_control);
-    if (luta_control != gamma_luta_control_last_) {
-      gamma_luta_control_last_ = luta_control;
-      if (gamma_luta_control_distinct_ <
-          uint32_t(std::size(gamma_luta_control_values_))) {
-        gamma_luta_control_values_[gamma_luta_control_distinct_] = luta_control;
-      }
-      ++gamma_luta_control_distinct_;
-    }
-    if (mode == GammaRampMode::kPWL) {
-      ++gamma_swaps_mode_pwl_;
-    } else {
-      ++gamma_swaps_mode_standard_;
-    }
-
-    // D3D12's stand-in heuristic, recorded for comparison only: it picks PWL
-    // for 10bpc frontbuffers, deriving the format from texture fetch slot 0.
-    // It does not decide anything here.
-    uint32_t fb_format = UINT32_MAX;
-    {
-      const auto fetch = register_file_->GetTextureFetch(0);
-      if (fetch.type == xenos::FetchConstantType::kTexture) {
-        fb_format = uint32_t(fetch.format);
-      }
-    }
-    gamma_fb_format_last_ = fb_format;
-    const bool heuristic_pwl =
-        fb_format == uint32_t(xenos::TextureFormat::k_2_10_10_10) ||
-        fb_format ==
-            uint32_t(xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16);
-    if (heuristic_pwl) {
-      ++gamma_swaps_heuristic_pwl_;
-    }
-    if (heuristic_pwl != (mode == GammaRampMode::kPWL)) {
-      ++gamma_swaps_selector_disagree_;
-    }
-
-    const bool non_identity = s256 == GammaRampState::kNonIdentity;
-    if (non_identity) {
-      ++gamma_swaps_non_identity_;
-      gamma_first_non_identity_swap_ =
-          std::min(gamma_first_non_identity_swap_, count);
-      gamma_last_non_identity_swap_ = count;
-    } else if (s256 == GammaRampState::kIdentity) {
-      ++gamma_swaps_identity_;
-    }
-    if ((count % 256u) == 0u) {
-      XELOGI(
-          "MetalGammaCensus swap#{}: writes(256/pwl)={}/{} changes={}/{} "
-          "state256={}/{} pwl=<unclassified> hash={:016X}/{:016X} "
-          "swaps(id/non-id)={}/{} "
-          "non-id first={} last={}",
-          count, gamma_ramp_256_writes_, gamma_ramp_pwl_writes_,
-          gamma_ramp_256_changes_, gamma_ramp_pwl_changes_,
-          GammaRampStateName(s256), GammaIdentityVariantName(variant256),
-          h256, hpwl,
-          gamma_swaps_identity_, gamma_swaps_non_identity_,
-          gamma_first_non_identity_swap_ == UINT32_MAX
-              ? -1
-              : int32_t(gamma_first_non_identity_swap_),
-          gamma_swaps_non_identity_ ? int32_t(gamma_last_non_identity_swap_)
-                                    : -1);
-      XELOGI(
-          "MetalGammaSelector swap#{}: DC_LUTA_CONTROL=0x{:08X} mode={} "
-          "distinct_selector_values={} first={:#x} second={:#x} "
-          "swaps(std/pwl)={}/{} fb_fetch0_format={} heuristic_pwl_swaps={} "
-          "selector_disagreements={}",
-          count, luta_control, GammaRampModeName(mode),
-          gamma_luta_control_distinct_, gamma_luta_control_values_[0],
-          gamma_luta_control_values_[1], gamma_swaps_mode_standard_,
-          gamma_swaps_mode_pwl_, int32_t(gamma_fb_format_last_),
-          gamma_swaps_heuristic_pwl_, gamma_swaps_selector_disagree_);
-    }
-  }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
@@ -7059,51 +6953,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       present_source_path = "ram-frontbuffer";
     }
   }
-  // Contract 2 discovery census. Counts EVERY swap, unlike the sampled log
-  // below -- the gamma work's "resolved-snapshot path never appears" came from
-  // a 1-in-60 sample, and this is what distinguishes never from never-sampled.
-  static const bool s_present_census =
-      std::getenv("XE_METAL_PRESENT_CENSUS") != nullptr;
-  if (s_present_census) {
-    present_census_.ObserveSwap(
-        source_rt ? present_source_path : "test-pattern",
-        source_rt ? uint32_t(source_rt.pixelFormat) : UINT32_MAX,
-        present_width, present_height, frontbuffer_width, frontbuffer_height);
-    if ((count % 256u) == 0u) {
-      std::string paths;
-      for (uint32_t i = 0; i < present_census_.path_distinct(); ++i) {
-        paths += fmt::format("{}{}={}", i ? " " : "",
-                             present_census_.path_name(i),
-                             present_census_.path_count(i));
-      }
-      std::string formats;
-      for (uint32_t i = 0; i < present_census_.format_distinct(); ++i) {
-        formats += fmt::format("{}fmt{}={}", i ? " " : "",
-                               present_census_.format_value(i),
-                               present_census_.format_count(i));
-      }
-      std::string sizes;
-      for (uint32_t i = 0; i < present_census_.present_size_distinct(); ++i) {
-        sizes += fmt::format("{}{}x{}={}", i ? " " : "",
-                             present_census_.present_size_w(i),
-                             present_census_.present_size_h(i),
-                             present_census_.present_size_count(i));
-      }
-      std::string fb_sizes;
-      for (uint32_t i = 0; i < present_census_.frontbuffer_size_distinct();
-           ++i) {
-        fb_sizes += fmt::format("{}{}x{}={}", i ? " " : "",
-                                present_census_.frontbuffer_size_w(i),
-                                present_census_.frontbuffer_size_h(i),
-                                present_census_.frontbuffer_size_count(i));
-      }
-      XELOGI(
-          "MetalPresentCensus swap#{} swaps={} | paths[{}] | src[{}] | "
-          "present[{}] | guestfb[{}] | size_mismatched={}",
-          count, present_census_.swaps(), paths, formats, sizes, fb_sizes,
-          present_census_.swaps_size_mismatched());
-    }
-  }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
         "MetalCommandProcessor: IssueSwap #{} (RT {}x{}, guest fb {}x{}, ptr "
@@ -7323,37 +7172,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       }
       const bool use_convert =
           cvars::metal_present_format_convert && s_convert_pipeline;
-      // C2-a discriminating gate capture. Default OFF. Dumps the SELECTED
-      // swap source before any conversion, scaling, gamma, or UI, plus the
-      // resulting pre-UI RGBA8 mailbox, so an offline oracle can decide whether
-      // the grayscale path is harming meaningful content or merely rendering a
-      // black layer differently. Source SELECTION is untouched.
-      static const char* s_fmt_dump_env = std::getenv("XE_METAL_FMTDUMP");
-      static const uint32_t s_fmt_dump_swap =
-          s_fmt_dump_env ? uint32_t(std::atoi(s_fmt_dump_env)) : UINT32_MAX;
-      const bool fmt_dump = (count == s_fmt_dump_swap);
-      id<MTLBuffer> fmt_src_stage = nil;
-      if (fmt_dump) {
-        const uint32_t sw = uint32_t(source_rt.width);
-        const uint32_t sh = uint32_t(source_rt.height);
-        const size_t bpp =
-            source_rt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
-        fmt_src_stage = [mailbox.device newBufferWithLength:size_t(sw) * sh * bpp
-                                                   options:MTLResourceStorageModeShared];
-        if (fmt_src_stage) {
-          id<MTLBlitCommandEncoder> b = [command_buffer blitCommandEncoder];
-          [b copyFromTexture:source_rt
-                 sourceSlice:0
-                 sourceLevel:0
-                sourceOrigin:MTLOriginMake(0, 0, 0)
-                  sourceSize:MTLSizeMake(sw, sh, 1)
-                    toBuffer:fmt_src_stage
-           destinationOffset:0
-      destinationBytesPerRow:sw * bpp
-    destinationBytesPerImage:size_t(sw) * sh * bpp];
-          [b endEncoding];
-        }
-      }
       if (s_gray_pipeline || use_convert) {
         MTLRenderPassDescriptor* pass =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -7371,44 +7189,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 vertexStart:0
                 vertexCount:3];
         [enc endEncoding];
-      }
-      if (fmt_dump && fmt_src_stage) {
-        const uint32_t sw = uint32_t(source_rt.width);
-        const uint32_t sh = uint32_t(source_rt.height);
-        const size_t bpp =
-            source_rt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
-        const size_t out_bytes = size_t(present_width) * present_height * 4;
-        id<MTLBuffer> out_stage =
-            [mailbox.device newBufferWithLength:out_bytes
-                                        options:MTLResourceStorageModeShared];
-        if (out_stage) {
-          id<MTLBlitCommandEncoder> b = [command_buffer blitCommandEncoder];
-          [b copyFromTexture:mailbox
-                 sourceSlice:0
-                 sourceLevel:0
-                sourceOrigin:MTLOriginMake(0, 0, 0)
-                  sourceSize:MTLSizeMake(present_width, present_height, 1)
-                    toBuffer:out_stage
-           destinationOffset:0
-      destinationBytesPerRow:present_width * 4
-    destinationBytesPerImage:out_bytes];
-          [b endEncoding];
-          [command_buffer commit];
-          [command_buffer waitUntilCompleted];
-          const std::string base = "/tmp/xe_fmt_dump_" + std::to_string(count);
-          auto wf = [](const std::string& p, const void* d, size_t n) {
-            FILE* f = std::fopen(p.c_str(), "wb");
-            if (f) { std::fwrite(d, 1, n, f); std::fclose(f); }
-          };
-          wf(base + "_src.raw", fmt_src_stage.contents, size_t(sw) * sh * bpp);
-          wf(base + "_out.raw", out_stage.contents, out_bytes);
-          XELOGI(
-              "MetalFmtDump swap#{} src {}x{} fmt={} bpp={} -> {}_src.raw ; "
-              "out {}x{} RGBA8 -> {}_out.raw",
-              count, sw, sh, uint32_t(source_rt.pixelFormat), bpp, base,
-              present_width, present_height, base);
-          return true;
-        }
       }
     } else if (source_rt) {
       // Standard 256-entry guest gamma ramp, applied AFTER the swap source has
@@ -7533,72 +7313,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           gamma_ramp_upload_in_flight_ = true;
           ++gamma_ramp_applications_;
           gamma_applied = true;
-
-          // Integration oracle capture. Default OFF and removed before
-          // promotion. Dumps the PRE-ramp image, the exact table that was
-          // uploaded, and the POST-ramp image, so the device result can be
-          // checked offline against the CPU oracle. Applied-versus-ignored is
-          // not a correctness oracle, so this is what makes the live run
-          // verifiable rather than merely different.
-          static const char* s_dump_env = std::getenv("XE_METAL_GAMMA_DUMP");
-          static const uint32_t s_dump_swap =
-              s_dump_env ? uint32_t(std::atoi(s_dump_env)) : UINT32_MAX;
-          if (count == s_dump_swap) {
-            const size_t image_bytes = size_t(present_width) *
-                                       size_t(present_height) * 4;
-            id<MTLBuffer> pre_stage =
-                [gamma_device newBufferWithLength:image_bytes
-                                          options:MTLResourceStorageModeShared];
-            id<MTLBuffer> post_stage =
-                [gamma_device newBufferWithLength:image_bytes
-                                          options:MTLResourceStorageModeShared];
-            if (pre_stage && post_stage) {
-              id<MTLBlitCommandEncoder> dump =
-                  [command_buffer blitCommandEncoder];
-              [dump copyFromTexture:pre_ramp
-                        sourceSlice:0
-                        sourceLevel:0
-                       sourceOrigin:MTLOriginMake(0, 0, 0)
-                         sourceSize:MTLSizeMake(present_width, present_height, 1)
-                           toBuffer:pre_stage
-                  destinationOffset:0
-             destinationBytesPerRow:present_width * 4
-           destinationBytesPerImage:image_bytes];
-              [dump copyFromTexture:mailbox
-                        sourceSlice:0
-                        sourceLevel:0
-                       sourceOrigin:MTLOriginMake(0, 0, 0)
-                         sourceSize:MTLSizeMake(present_width, present_height, 1)
-                           toBuffer:post_stage
-                  destinationOffset:0
-             destinationBytesPerRow:present_width * 4
-           destinationBytesPerImage:image_bytes];
-              [dump endEncoding];
-              [command_buffer commit];
-              [command_buffer waitUntilCompleted];
-              gamma_ramp_upload_in_flight_ = false;
-              const std::string base =
-                  "/tmp/xe_gamma_dump_" + std::to_string(count);
-              auto write_file = [](const std::string& path, const void* data,
-                                   size_t size) {
-                FILE* f = std::fopen(path.c_str(), "wb");
-                if (f) {
-                  std::fwrite(data, 1, size, f);
-                  std::fclose(f);
-                }
-              };
-              write_file(base + "_pre.raw", pre_stage.contents, image_bytes);
-              write_file(base + "_post.raw", post_stage.contents, image_bytes);
-              write_file(base + "_table.bin", ramp_buffer.contents,
-                         kGammaRampTableBytes);
-              XELOGI(
-                  "MetalGammaDump swap#{} {}x{} -> {}_pre.raw/_post.raw/"
-                  "_table.bin uploads={} applications={}",
-                  count, present_width, present_height, base,
-                  gamma_ramp_uploads_, gamma_ramp_applications_);
-              return true;
-            }
-          }
         }
       }
       if (!gamma_applied) {
