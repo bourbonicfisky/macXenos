@@ -358,6 +358,18 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t gamma_swaps_non_identity_ = 0;
   uint32_t gamma_first_non_identity_swap_ = UINT32_MAX;
   uint32_t gamma_last_non_identity_swap_ = 0;
+  // Selector census: the grounded DC_LUTA_CONTROL mode, and D3D12's
+  // frontbuffer-format heuristic alongside it so disagreement is visible
+  // rather than assumed away. Distinct raw selector values are accumulated
+  // because a mode that CHANGES mid-title would split the implementation.
+  uint32_t gamma_luta_control_last_ = UINT32_MAX;
+  uint32_t gamma_luta_control_distinct_ = 0;
+  uint32_t gamma_luta_control_values_[4] = {};
+  uint64_t gamma_swaps_mode_standard_ = 0;
+  uint64_t gamma_swaps_mode_pwl_ = 0;
+  uint64_t gamma_swaps_heuristic_pwl_ = 0;
+  uint64_t gamma_swaps_selector_disagree_ = 0;
+  uint32_t gamma_fb_format_last_ = UINT32_MAX;
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;

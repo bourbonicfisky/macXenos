@@ -68,6 +68,37 @@ inline const char* GammaRampStateName(GammaRampState s) {
   }
 }
 
+// THE SELECTOR, grounded in the guest register contract rather than inferred.
+//
+// registers.h on DC_LUT_PWL_DATA: the PWL output is
+// `base + (multiplier * delta) / 2^increment`, "where the increment is the
+// value specified in DC_LUTA_CONTROL for the specific color channel ... the
+// increment is nonzero, OTHERWISE THE 256-ENTRY TABLE SHOULD BE USED INSTEAD."
+//
+// So a zero increment selects the standard table and a nonzero one selects PWL.
+// DC_LUTA_CONTROL defaults to 0, and register_table.inc records that a title
+// which never writes it (535107D4) still expects the behavior of 0 -- so
+// "unset" and "standard" are the same state, and absence is not ambiguity.
+//
+// Any nonzero raw value is treated as PWL. The M56 documents per-channel
+// increment fields while this part appears to use a single set for all
+// channels, so testing the whole dword rather than one field cannot silently
+// misread an unexpected layout as standard. The census records the raw value
+// alongside the mode precisely so such a layout surprise would be visible.
+enum class GammaRampMode : uint32_t {
+  kStandard256 = 0,
+  kPWL,
+};
+
+inline const char* GammaRampModeName(GammaRampMode m) {
+  return m == GammaRampMode::kStandard256 ? "standard-256" : "PWL";
+}
+
+inline GammaRampMode GammaRampModeFromLutaControl(uint32_t dc_luta_control) {
+  return dc_luta_control == 0u ? GammaRampMode::kStandard256
+                               : GammaRampMode::kPWL;
+}
+
 // The two exact 8->10 widenings. No rounding tolerance is applied to either.
 constexpr uint32_t GammaIdentityReplicate(uint32_t i) {
   return ((i << 2) | (i >> 6)) & 0x3FF;
@@ -106,41 +137,24 @@ inline GammaRampState ClassifyGammaRamp256(
                                               : GammaRampState::kNonIdentity;
 }
 
-// Classifies the complete PWL ramp (128 entries x 3 channels as tracked).
+// PWL CLASSIFICATION IS DELIBERATELY ABSENT -- QUARANTINED, NOT MISSING.
 //
-// PWL output is `base + (input & 7) * delta / 8`, normalized by 64*1023
-// (apply_gamma_pwl.xesli). An identity PWL ramp is one whose segment bases step
-// exactly with the segment index over that normalization, with the delta
-// carrying the within-segment slope. Both exact widenings are again admitted,
-// applied to the segment's high bits.
-inline GammaRampState ClassifyGammaRampPWL(
-    const reg::DC_LUT_PWL_DATA* pwl_rgb) {
-  bool all_zero = true;
-  bool matches_replicate = true;
-  bool matches_scale = true;
-  for (uint32_t i = 0; i < 128 * 3; ++i) {
-    const uint32_t base = pwl_rgb[i].base;
-    const uint32_t delta = pwl_rgb[i].delta;
-    if (base || delta) {
-      all_zero = false;
-    }
-    // Segment index within its channel drives the expected base.
-    const uint32_t seg = i % 128u;
-    const uint32_t rep = GammaIdentityReplicate(seg << 1) << 6;
-    const uint32_t sca = GammaIdentityScale(seg << 1) << 6;
-    if (base != rep) {
-      matches_replicate = false;
-    }
-    if (base != sca) {
-      matches_scale = false;
-    }
-  }
-  if (all_zero) {
-    return GammaRampState::kNeverProgrammed;
-  }
-  return (matches_replicate || matches_scale) ? GammaRampState::kIdentity
-                                              : GammaRampState::kNonIdentity;
-}
+// A prior `ClassifyGammaRampPWL` was REMOVED after the 2026-07-27 census proved
+// it wrong: it reported NON-IDENTITY for five titles that had performed ZERO
+// PWL writes, all sharing one byte-identical hash. That constant was the
+// UNWRITTEN DEFAULT, so the classifier was manufacturing engagement out of
+// state no guest had touched.
+//
+// It was doubly ungrounded. It assumed PWL segment bases step under the same
+// 8->10 widenings as the standard table, when PWL semantics are
+// `output = base + (multiplier * delta) / 2^increment` with the increment taken
+// from DC_LUTA_CONTROL -- and the reference does not implement variable
+// increments at all (apply_gamma_pwl.xesli hardcodes 2^3, with its own TODO).
+//
+// No PWL correctness claim may be made from this header. The grounded PWL
+// signals are the WRITE COUNT and the selector, both of which the census
+// records directly. A PWL classifier may only return once the increment
+// contract is settled.
 
 // Stable content hash of a complete ramp, so a repeated write of the SAME table
 // is distinguishable from an actual table change. Hashing the tracked bytes

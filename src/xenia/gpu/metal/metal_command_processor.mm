@@ -6706,32 +6706,84 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }
     const GammaRampState s256 =
         ClassifyGammaRamp256(gamma_ramp_256_entry_table());
-    const GammaRampState spwl = ClassifyGammaRampPWL(gamma_ramp_pwl_rgb());
-    const bool non_identity = s256 == GammaRampState::kNonIdentity ||
-                              spwl == GammaRampState::kNonIdentity;
+    // PWL is NOT classified: that classifier is quarantined as proven-false.
+    // PWL is reported by write count and content hash only.
+
+    // The grounded selector. Reading the raw dword keeps an unexpected
+    // per-channel field layout visible instead of collapsing it to "standard".
+    const uint32_t luta_control =
+        register_file_->values[XE_GPU_REG_DC_LUTA_CONTROL];
+    const GammaRampMode mode = GammaRampModeFromLutaControl(luta_control);
+    if (luta_control != gamma_luta_control_last_) {
+      gamma_luta_control_last_ = luta_control;
+      if (gamma_luta_control_distinct_ <
+          uint32_t(std::size(gamma_luta_control_values_))) {
+        gamma_luta_control_values_[gamma_luta_control_distinct_] = luta_control;
+      }
+      ++gamma_luta_control_distinct_;
+    }
+    if (mode == GammaRampMode::kPWL) {
+      ++gamma_swaps_mode_pwl_;
+    } else {
+      ++gamma_swaps_mode_standard_;
+    }
+
+    // D3D12's stand-in heuristic, recorded for comparison only: it picks PWL
+    // for 10bpc frontbuffers, deriving the format from texture fetch slot 0.
+    // It does not decide anything here.
+    uint32_t fb_format = UINT32_MAX;
+    {
+      const auto fetch = register_file_->GetTextureFetch(0);
+      if (fetch.type == xenos::FetchConstantType::kTexture) {
+        fb_format = uint32_t(fetch.format);
+      }
+    }
+    gamma_fb_format_last_ = fb_format;
+    const bool heuristic_pwl =
+        fb_format == uint32_t(xenos::TextureFormat::k_2_10_10_10) ||
+        fb_format ==
+            uint32_t(xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16);
+    if (heuristic_pwl) {
+      ++gamma_swaps_heuristic_pwl_;
+    }
+    if (heuristic_pwl != (mode == GammaRampMode::kPWL)) {
+      ++gamma_swaps_selector_disagree_;
+    }
+
+    const bool non_identity = s256 == GammaRampState::kNonIdentity;
     if (non_identity) {
       ++gamma_swaps_non_identity_;
       gamma_first_non_identity_swap_ =
           std::min(gamma_first_non_identity_swap_, count);
       gamma_last_non_identity_swap_ = count;
-    } else if (s256 == GammaRampState::kIdentity ||
-               spwl == GammaRampState::kIdentity) {
+    } else if (s256 == GammaRampState::kIdentity) {
       ++gamma_swaps_identity_;
     }
     if ((count % 256u) == 0u) {
       XELOGI(
           "MetalGammaCensus swap#{}: writes(256/pwl)={}/{} changes={}/{} "
-          "state(256/pwl)={}/{} hash={:016X}/{:016X} swaps(id/non-id)={}/{} "
+          "state256={} pwl=<unclassified> hash={:016X}/{:016X} "
+          "swaps(id/non-id)={}/{} "
           "non-id first={} last={}",
           count, gamma_ramp_256_writes_, gamma_ramp_pwl_writes_,
           gamma_ramp_256_changes_, gamma_ramp_pwl_changes_,
-          GammaRampStateName(s256), GammaRampStateName(spwl), h256, hpwl,
+          GammaRampStateName(s256), h256, hpwl,
           gamma_swaps_identity_, gamma_swaps_non_identity_,
           gamma_first_non_identity_swap_ == UINT32_MAX
               ? -1
               : int32_t(gamma_first_non_identity_swap_),
           gamma_swaps_non_identity_ ? int32_t(gamma_last_non_identity_swap_)
                                     : -1);
+      XELOGI(
+          "MetalGammaSelector swap#{}: DC_LUTA_CONTROL=0x{:08X} mode={} "
+          "distinct_selector_values={} first={:#x} second={:#x} "
+          "swaps(std/pwl)={}/{} fb_fetch0_format={} heuristic_pwl_swaps={} "
+          "selector_disagreements={}",
+          count, luta_control, GammaRampModeName(mode),
+          gamma_luta_control_distinct_, gamma_luta_control_values_[0],
+          gamma_luta_control_values_[1], gamma_swaps_mode_standard_,
+          gamma_swaps_mode_pwl_, int32_t(gamma_fb_format_last_),
+          gamma_swaps_heuristic_pwl_, gamma_swaps_selector_disagree_);
     }
   }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
