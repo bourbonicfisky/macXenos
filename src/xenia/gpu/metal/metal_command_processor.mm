@@ -47,6 +47,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -2442,36 +2443,50 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
-  // OBSERVABILITY (census task 1, recommended residual). A draw whose shader
-  // writes eM but whose producer class this backend does not route would
-  // otherwise lose those writes SILENTLY: AddMemExportRanges above collects the
-  // ranges, `memexport_draw` is set only on the no-RT path below, and every
-  // downstream consumer -- residency request, write marking, typed publication
-  // -- gates on that flag. The result presents as missing or stale guest data
-  // with nothing in the log to attribute it.
-  //
-  // The 2026-07-28 census measured these classes at ZERO across five titles
-  // that reached content, so this is a latent hazard rather than an active one.
-  // It is reported unconditionally (rate-limited) rather than behind
-  // XE_METAL_MEMEXPORT_LOG precisely because the case that matters is the one
-  // nobody is looking for.
+  // Report memexport producer classes this backend does not route. Bounded and
+  // deduplicated by MemexportGapReporter; unconditional by design, because the
+  // symptom is missing guest data with nothing to attribute it to, and a
+  // switch-gated report cannot catch what nobody is yet looking for.
   {
     const bool rt_bound_for_export = color_bound || (kDepthEnabled && depth_bound);
     const bool ps_writes_eM =
         pixel_shader && pixel_shader->memexport_eM_written();
     if (rt_bound_for_export && (!memexport_ranges.empty() || ps_writes_eM)) {
-      static uint32_t s_unrouted_export_reports = 0;
-      if (s_unrouted_export_reports++ < 8) {
-        XELOGW(
-            "MetalMemexportUnrouted draw={} UNPUBLISHED memexport on a "
-            "rasterizing draw ({} VS range(s){}) -- this backend routes only "
-            "the vertex-stage no-render-target class, so these writes are NOT "
-            "published to guest memory",
-            trace_draw_index_, uint32_t(memexport_ranges.size()),
-            ps_writes_eM ? ", plus a pixel-stage export" : "");
+      const MemexportProducerClass producer_class =
+          ps_writes_eM ? MemexportProducerClass::kPixelStage
+                       : (use_geometry_emulation
+                              ? MemexportProducerClass::kRasterizingVertexGeometry
+                              : MemexportProducerClass::kRasterizingVertex);
+      auto report = [&](uint32_t base_dwords, uint32_t size_bytes) {
+        switch (memexport_gap_reporter_.Observe(producer_class, base_dwords,
+                                                size_bytes)) {
+          case MemexportGapReporter::Action::kReport:
+            // Guest addresses and producer classification only.
+            XELOGW(
+                "MetalMemexportUnrouted class={} guest_base=0x{:08X} size={} "
+                "-- UNPUBLISHED: this backend routes only the vertex-stage "
+                "no-render-target class, so these writes never reach guest "
+                "memory",
+                MemexportProducerClassName(producer_class), base_dwords << 2,
+                size_bytes);
+            break;
+          case MemexportGapReporter::Action::kEmitSuppressionSummary:
+            XELOGW(
+                "MetalMemexportUnrouted: reached {} distinct unrouted export "
+                "reports this title; further reports suppressed",
+                MemexportGapReporter::kMaxDistinctReports);
+            break;
+          case MemexportGapReporter::Action::kSuppressed:
+            break;
+        }
+      };
+      if (memexport_ranges.empty()) {
+        // A pixel-stage export whose ranges production never gathers still has
+        // a class worth reporting once; key it on a zero range.
+        report(0u, 0u);
+      } else {
         for (const auto& r : memexport_ranges) {
-          XELOGW("MetalMemexportUnrouted   dropped range base=0x{:08X} size={}",
-                 r.base_address_dwords << 2, r.size_bytes);
+          report(r.base_address_dwords, r.size_bytes);
         }
       }
     }
@@ -5641,6 +5656,9 @@ void MetalCommandProcessor::InitializeShaderStorage(
     std::function<void()> completion_callback) {
   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking,
                                             nullptr);
+  // Title/session boundary: start a fresh unrouted-export reporting session.
+  // Touches only the reporter's own counters -- no cache state, no guest state.
+  memexport_gap_reporter_.Reset();
   if (pipeline_cache_) {
     pipeline_cache_->InitializeDurableStorage(cache_root, title_id);
   }

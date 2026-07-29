@@ -22,6 +22,7 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
 #include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
@@ -330,6 +331,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
   uint32_t draw_skip_count_ = 0;
+
+  // Bounded, deduplicated reporting of memexport producer classes this backend
+  // does not route. Reset at the title/session boundary; holds no guest state
+  // and takes no part in cache clearing.
+  MemexportGapReporter memexport_gap_reporter_;
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;
