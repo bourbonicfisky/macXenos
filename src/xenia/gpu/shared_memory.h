@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_SHARED_MEMORY_H_
 #define XENIA_GPU_SHARED_MEMORY_H_
 
+#include "xenia/gpu/watch_admission.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -72,6 +73,23 @@ class SharedMemory {
   // ensures the host GPU memory backing the range are resident. Returns true if
   // the range has been fully updated and is usable.
   bool RequestRange(uint32_t start, uint32_t length);
+
+  // WATCH-ONLY admission for a consumer that reads guest RAM DIRECTLY instead
+  // of through the shared buffer (the Metal legacy texture untile). Enables
+  // CPU-write invalidation notifications for the admissible mapped pages of
+  // [start, length) so an in-place guest rewrite fires the ordinary
+  // MemoryInvalidationCallback -> FireWatches path, and returns the admitted
+  // byte count (0 = nothing admissible, which is NOT an error).
+  //
+  // Deliberately NOT RequestRange: it uploads nothing and marks NO page valid,
+  // because the shared buffer does not hold this content and must not claim to
+  // — a valid bit here would make a later genuine RequestRange skip a needed
+  // upload. Unmapped holes anywhere in the extent are skipped, never fatal, so
+  // a caller can always fall back to serving the bytes it already read. Global
+  // invalidation ownership stays here: this only widens which pages notify,
+  // and reuses the single physical-memory callback registered in the
+  // constructor. See xenia/gpu/watch_admission.h for the admission rule.
+  uint32_t RequestWatchOnlyRange(uint32_t start, uint32_t length);
 
   void TryFindUploadRange(const uint32_t& block_first,
                           const uint32_t& block_last,
@@ -201,6 +219,9 @@ class SharedMemory {
   // std::vector<std::pair<uint32_t, uint32_t>> upload_ranges_;
   FixedVMemVector<MAX_UPLOAD_RANGES * sizeof(std::pair<uint32_t, uint32_t>)>
       upload_ranges_;
+  // Scratch for RequestWatchOnlyRange's admission scan (GPU thread only, reused
+  // to keep the per-upload watch registration allocation-free in steady state).
+  std::vector<WatchAdmissionRun> watch_admission_runs_;
 
   // Mutex between the guest memory subsystem and the command processor, to be
   // locked when checking or updating validity of pages/ranges and when firing

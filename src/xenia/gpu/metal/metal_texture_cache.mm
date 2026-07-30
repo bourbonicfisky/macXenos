@@ -902,19 +902,26 @@ uint32_t MetalTextureCache::GetTextureSlot(
                     size_t(kPhysicalSize - base)))
               : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h, bpb,
                                         base, kPhysicalSize);
-  // NOTE: this cache deliberately does NOT call SharedMemory::RequestRange to
-  // register these pages for CPU write-watching. RequestRange does host-GPU
-  // buffer residency + guest-page write protection (EnsureHostGpuMemoryAllocated
-  // -> UploadRanges), a memory model this bring-up cache doesn't otherwise use:
-  // it reads guest RAM directly below. Enabling it CORRUPTED that direct read —
-  // font-atlas glyphs rendered as noise blocks and the HDR/exposure chain blew
-  // out to white live (SF4 434307FC), because protecting/relocating the source
-  // pages tore the concurrent untile read. Live-bisected 2026-07-14: this call
-  // was the sole cause; removing it renders SF4 clean. It was added to refresh
-  // FMV/video textures the CPU rewrites in place — that refresh now needs a
-  // Metal-safe page watch (physical access callbacks) instead; tracked
-  // separately. The retire path (QueueInvalidation/InvalidateRange) stays for
-  // that future watch and for trace playback's explicit restores.
+  // WATCH-ONLY admission for the pages this untile is about to read directly.
+  // This cache still does NOT call SharedMemory::RequestRange: that path
+  // uploads into the shared buffer and marks pages valid, which this cache
+  // never reads, and its whole-range rejection of extents containing unmapped
+  // pages dropped entire textures to the null slot (measured: 300 null serves
+  // of one 1280x720 base in a live SF4 session). RequestWatchOnlyRange instead
+  // enables CPU-write notifications for the admissible mapped pages only,
+  // uploading nothing and validating nothing, so an in-place guest rewrite
+  // (FMV/video decoders reusing one buffer, font atlases) reaches
+  // QueueInvalidation/InvalidateRange and the next fetch re-untiles fresh
+  // bytes. Without it those rewrites were served stale forever (measured: 418
+  // stale hits in one live SF4 session; corrupted menu glyphs).
+  //
+  // Admission is advisory BY CONTRACT: a partially or wholly unadmitted extent
+  // is not an error and never changes what this fetch serves — the direct-RAM
+  // untile below already has the bytes. Only watching is lost, which is the
+  // pre-existing behavior.
+  if (!trace_playback_ && shared_memory_) {
+    shared_memory_->RequestWatchOnlyRange(base, watched_base_bytes);
+  }
 
   // Untile / copy into a linear block-major staging buffer (host byte order).
   // Rows are independent — run them concurrently: stage-3 re-uploads big

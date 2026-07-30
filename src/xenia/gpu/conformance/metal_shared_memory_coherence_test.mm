@@ -480,6 +480,46 @@ TEST_CASE("SM coherence: initially-invalid range validates and GPU-reads",
   REQUIRE(h.GpuRead(addr, kPage) == bytes);
 }
 
+TEST_CASE("SM coherence: watch-only admission uploads nothing and validates "
+          "nothing",
+          "[l1][metal][sharedmem]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  // Never-requested page: the shared buffer cannot already hold its bytes.
+  const uint32_t addr = 0x0A200000;
+  auto bytes = h.Pattern(kPage, 0x44);
+  h.RamWrite(addr, bytes);
+  // Admission works in whole SYSTEM pages (16 KiB here) and requires every
+  // covered 4 KiB guest page to be mapped, so commit the containing system
+  // page — the 4 KiB RamWrite above only backs one quarter of it.
+  h.EnsureAllocated(addr, xe::memory::page_size());
+  // Mapped guest memory is admissible for watching...
+  REQUIRE(h.shared->RequestWatchOnlyRange(addr, kPage) > 0);
+  // ...but admission must NOT upload: the buffer still lacks the RAM bytes.
+  REQUIRE(h.GpuRead(addr, kPage) != bytes);
+  // ...and must NOT mark the pages valid, or this RequestRange would skip the
+  // upload the shared-buffer consumer genuinely needs and read stale bytes.
+  REQUIRE(h.shared->RequestRange(addr, kPage));
+  REQUIRE(h.GpuRead(addr, kPage) == bytes);
+}
+
+TEST_CASE("SM coherence: watch-only admission leaves an already-valid range "
+          "intact",
+          "[l1][metal][sharedmem]") {
+  REQUIRE_DEVICE();
+  auto& h = H();
+  const uint32_t addr = 0x0A280000;
+  auto bytes = h.Pattern(kPage, 0x55);
+  h.RamWrite(addr, bytes);
+  h.EnsureAllocated(addr, xe::memory::page_size());
+  REQUIRE(h.shared->RequestRange(addr, kPage));
+  REQUIRE(h.GpuRead(addr, kPage) == bytes);
+  // Watch-only admission over a valid range must neither invalidate nor
+  // re-upload — it only widens which pages notify on a CPU write.
+  REQUIRE(h.shared->RequestWatchOnlyRange(addr, kPage) > 0);
+  REQUIRE(h.GpuRead(addr, kPage) == bytes);
+}
+
 TEST_CASE("SM coherence: drain-sequence write + extent invalidation "
           "revalidates for a later submission",
           "[l1][metal][sharedmem]") {

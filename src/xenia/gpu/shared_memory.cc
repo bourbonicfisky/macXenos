@@ -419,6 +419,40 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   return UploadRanges(uploads, current_upload_range);
 }
 
+uint32_t SharedMemory::RequestWatchOnlyRange(uint32_t start, uint32_t length) {
+  if (!length || !memory_invalidation_callback_handle_) {
+    return 0;
+  }
+  if (start >= kBufferSize) {
+    return 0;
+  }
+  VirtualHeap* physical_heap = memory().GetPhysicalHeap();
+  if (!physical_heap) {
+    return 0;
+  }
+  uint32_t guest_page_size = physical_heap->page_size();
+  if (!guest_page_size) {
+    return 0;
+  }
+  uint32_t guest_page_log2 = xe::log2_ceil(guest_page_size);
+  watch_admission_runs_.clear();
+  uint32_t admitted = ComputeWatchAdmissionRuns(
+      start, length, page_size_log2_, guest_page_log2, kBufferSize,
+      [physical_heap, guest_page_log2](uint32_t guest_page) {
+        uint32_t address = guest_page << guest_page_log2;
+        return physical_heap->QueryRangeAccess(address, address) ==
+               xe::memory::PageAccess::kReadWrite;
+      },
+      watch_admission_runs_);
+  // Enable notifications only — no MakeRangeValid, so the shared buffer never
+  // claims to hold bytes it did not upload.
+  for (const WatchAdmissionRun& run : watch_admission_runs_) {
+    memory().EnablePhysicalMemoryAccessCallbacks(run.start, run.length, true,
+                                                 false);
+  }
+  return admitted;
+}
+
 template <typename T>
 XE_FORCEINLINE XE_NOALIAS static T mod_shift_left(T value, uint32_t by) {
 #if XE_ARCH_AMD64 == 1
