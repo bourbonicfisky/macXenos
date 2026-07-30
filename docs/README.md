@@ -8,11 +8,12 @@ records. It is intentionally not a flat list of equally authoritative inputs.
 | Need | Read first | Role |
 | --- | --- | --- |
 | Current capability or missing-gap question | [Metal current state](metal_current_state.md) | Compact, commit-pinned routing summary |
-| Delivery, evidence, and reference policy | [Fable Metal recovery strategy](fable_recovery_strategy.md) | Standing policy; operational snapshots inside may be historical |
+| Delivery, evidence, and reference policy | [Fable Metal recovery strategy](fable_recovery_strategy.md) | Standing policy; volatile branch and task state lives elsewhere |
 | Architecture research and backlog provenance | [Metal architecture gap roadmap](metal_architecture_gap_roadmap.md) | Dated research ledger, not live status authority |
 | Exact foundation lineage and integration evidence | [Metal foundation integration manifest](metal_foundation_integration_manifest.md) | Frozen integration record |
 | Ordered D3D12 draw comparison | [D3D12 IssueDraw parity ledger](metal_d3d12_issue_draw_parity_ledger.md) | Dated parity audit |
 | Current live observations | [Metal live compatibility matrix](metal_live_compatibility_matrix.md) | Observation record, not broad completion evidence |
+| Presentation and gamma | [Metal presentation/gamma status](metal_presentation_gamma_status.md) | Current delivered scopes and remaining boundaries |
 | Promoted behavior contracts | `../openspec/specs/metal-*/spec.md` | Standing requirements |
 
 Decision documents, censuses, negative experiments, and title investigations are
