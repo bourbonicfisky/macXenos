@@ -754,6 +754,25 @@ struct ResolveInfo {
     pitch_out = edram_info.pitch_tiles;
   }
 
+  // Whether a color resolve can be satisfied by copying the EDRAM bits
+  // unchanged, because the destination would read back exactly what the active
+  // EDRAM view already stores: no exponent bias to apply, a single source
+  // sample selected, and a destination format that is bitwise equivalent to
+  // the source render target format.
+  //
+  // This is the single authority for the raw-copy decision. Backends must call
+  // it rather than re-deriving the condition: a re-derived copy silently stops
+  // tracking changes to the shared semantics (the Metal backend carried such a
+  // duplicate, so upstream resolve-semantics work would not have reached it).
+  bool IsColorRawCopySafe() const {
+    return !copy_dest_info.copy_dest_exp_bias &&
+           xenos::IsSingleCopySampleSelected(
+               copy_dest_coordinate_info.copy_sample_select) &&
+           xenos::IsColorResolveFormatBitwiseEquivalent(
+               xenos::ColorRenderTargetFormat(color_edram_info.format),
+               xenos::ColorFormat(copy_dest_info.copy_dest_format));
+  }
+
   ResolveCopyShaderIndex GetCopyShader(
       uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
       ResolveCopyShaderConstants& constants_out, uint32_t& group_count_x_out,

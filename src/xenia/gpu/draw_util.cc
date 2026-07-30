@@ -1327,12 +1327,7 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(
   bool is_depth = IsCopyingDepth();
   ResolveEdramInfo edram_info = is_depth ? depth_edram_info : color_edram_info;
   bool source_is_64bpp = !is_depth && color_edram_info.format_is_64bpp != 0;
-  if (is_depth || (!copy_dest_info.copy_dest_exp_bias &&
-                   xenos::IsSingleCopySampleSelected(
-                       copy_dest_coordinate_info.copy_sample_select) &&
-                   xenos::IsColorResolveFormatBitwiseEquivalent(
-                       xenos::ColorRenderTargetFormat(color_edram_info.format),
-                       xenos::ColorFormat(copy_dest_info.copy_dest_format)))) {
+  if (is_depth || IsColorRawCopySafe()) {
     if (edram_info.msaa_samples >= xenos::MsaaSamples::k4X) {
       shader = source_is_64bpp ? ResolveCopyShaderIndex::kFast64bpp4xMSAA
                                : ResolveCopyShaderIndex::kFast32bpp4xMSAA;

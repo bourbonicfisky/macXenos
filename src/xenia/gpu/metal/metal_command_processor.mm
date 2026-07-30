@@ -5078,16 +5078,10 @@ bool MetalCommandProcessor::IssueCopy() {
         float exp_bias_scale = std::ldexp(
             1.0f,
             int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias));
-        const uint32_t canonical_dest_format =
-            uint32_t(resolve_info.copy_dest_info.copy_dest_format);
-        const bool canonical_raw_copy =
-            !resolve_info.copy_dest_info.copy_dest_exp_bias &&
-            xenos::IsSingleCopySampleSelected(
-                resolve_info.copy_dest_coordinate_info.copy_sample_select) &&
-            xenos::IsColorResolveFormatBitwiseEquivalent(
-                xenos::ColorRenderTargetFormat(
-                    resolve_info.color_edram_info.format),
-                xenos::ColorFormat(canonical_dest_format));
+        // Raw-copy eligibility is shared resolve semantics, not a Metal
+        // decision: ask draw_util rather than re-deriving the condition here,
+        // so shared changes to it cannot silently skip this backend.
+        const bool canonical_raw_copy = resolve_info.IsColorRawCopySafe();
         bool resolved = false;
         bool canonical_prepared = false;
         if (canonical_resolve) {
