@@ -96,12 +96,21 @@ DEFINE_bool(
 UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
-    metal_guest_gamma_ramp, false,
+    metal_guest_gamma_ramp, true,
     "Apply the guest's standard 256-entry gamma ramp to the presented guest "
-    "output on Metal. Default off: this is the exact rollback path -- when "
-    "false, no ramp buffer is created, no upload occurs, and the swap source "
-    "reaches the mailbox by the same blit as before.",
+    "output on Metal. Enabled by default: five calibrated titles program a "
+    "complete non-identity ramp that is present at every swap, and ignoring it "
+    "presented an untransformed image. Set false to restore the previous "
+    "output exactly -- no ramp buffer is created, no upload occurs, and the "
+    "swap source reaches the mailbox by the same blit as before.",
     "GPU");
+// The compiled default alone reaches nobody who has already launched Xenia --
+// measured during the C2-a promotion, where a persisted `false` beat a new
+// `true` default. The hour is deliberately LATER than the C2-a update
+// (2026-07-29 13) so configs that recorded this cvar as false while it was
+// experimental also adopt the promoted default; a value a user set on purpose
+// is still preserved.
+UPDATE_from_bool(metal_guest_gamma_ramp, 2026, 7, 29, 14, false);
 
 namespace xe {
 namespace gpu {
