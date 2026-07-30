@@ -34,12 +34,6 @@ See the top of [src/xenia/gpu/gpu_flags.cc](../src/xenia/gpu/gpu_flags.cc).
 `--vsync=false` will attempt to render the game as fast as possible instead of
 waiting for a fixed 60hz timer.
 
-### Vulkan
-
-See the top of [src/xenia/gpu/vulkan/vulkan_gpu_flags.cc](../src/xenia/gpu/vulkan/vulkan_gpu_flags.cc).
-
-`vulkan_dump_disasm=true` "Dump shader disassembly. NVIDIA only supported."
-
 ## Tools
 
 ### Shaders
