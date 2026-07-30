@@ -48,11 +48,11 @@ struct MetalUploadAllocation;
 // skeleton / stubs for now / behaves like the null backend" description this
 // comment used to carry has been false for a long time and is retired here.
 //
-// Known deliberate divergences from D3D12/Vulkan, kept honest by
-// tools/metal_silent_gap_audit.sh: gamma-ramp write hooks
-// (OnGammaRamp*ValueWritten) are NOT overridden, so guest gamma changes are
-// tracked by the base and silently ignored. That is a real, recorded gap
-// (roadmap P1 presentation row), not an oversight.
+// Known deliberate divergence from D3D12/Vulkan: the standard 256-entry
+// gamma-ramp hook is overridden and applied at present, while the PWL hook only
+// preserves base tracking. PWL lookup/upload/application remains an explicit
+// presentation gap; the structural silent-gap audit cannot detect this semantic
+// partial implementation.
 class MetalCommandProcessor : public CommandProcessor {
  protected:
   // Give this backend its own statically-bound PM4 packet chain so the execute
