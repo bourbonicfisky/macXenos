@@ -194,7 +194,8 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
     uint32_t edram_rov_used : 1;
     uint32_t gamma_render_target_as_unorm8 : 1;
     uint32_t msc_bindless_resources_used : 1;
-    uint32_t reserved : 27;
+    uint32_t fetch_abi_revision : 8;
+    uint32_t reserved : 19;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -203,6 +204,14 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
       MetalTranslatorConfig::kGammaRenderTargetAsUnorm8;
   schema.msc_bindless_resources_used =
       MetalTranslatorConfig::kMscBindlessResourcesUsed;
+  // 3.3b-2 — the fetch ABI revision. The five booleans above describe the
+  // translator's CONFIGURATION; they do not move when the emitted code for
+  // identical ucode changes for another reason. The integer-texture-scale work
+  // added a system constant and a fetch-time codepath without touching any of
+  // them, so a cache written before it would have been served shaders compiled
+  // against the previous cbuffer layout — exactly the failure this field
+  // exists to prevent. Bump on ANY change to the emitted shader ABI.
+  schema.fetch_abi_revision = MetalTranslatorConfig::kFetchAbiRevision;
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));
 
   identity.dxc_artifact_hash = HashLoadedDylib("libdxilconv");

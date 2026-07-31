@@ -57,6 +57,16 @@ struct MetalTranslatorConfig {
   static constexpr bool kEdramRovUsed = false;
   static constexpr bool kGammaRenderTargetAsUnorm8 = true;
   static constexpr bool kMscBindlessResourcesUsed = true;
+  // Revision of the emitted shader ABI — the system-constant layout and the
+  // fetch-path codegen. Unlike the booleans above this does not describe a
+  // configuration choice; it exists so a change to what the translator EMITS
+  // for byte-identical guest ucode still invalidates cached metallibs. Bump it
+  // whenever DxbcShaderTranslator::SystemConstants changes layout or the fetch
+  // path emits different code.
+  //   1 - baseline
+  //   2 - texture_integer_scale_bits added; fetch applies the integer scale
+  //       after signs/gamma and before exponent bias
+  static constexpr uint32_t kFetchAbiRevision = 2;
 };
 
 // Everything that can change generated output for byte-identical guest ucode.

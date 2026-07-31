@@ -2058,6 +2058,55 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         a_.OpBreak();
         a_.OpEndSwitch();
       }
+
+      // Integer num_format on a fixed-point format: the host view sampled
+      // normalized, but the guest asked for unnormalized units. Restore the
+      // range HERE — after signs and gamma, before exponent bias — matching the
+      // order the guest applies them in.
+      //
+      // texture_util::IntegerScaleBits packs 5 bits per OUTPUT component:
+      // bits 0:3 = source width - 1, bit 4 = signed. The multiplier is
+      // (1 << (width - signed)) - 1, e.g. 255 for unsigned 8-bit.
+      //
+      // The whole block is behind a UNIFORM branch on the packed value, which
+      // is zero for every fetch that needs no rescaling — which, measured over
+      // the trace corpus, is all but one binding class. An unengaged fetch
+      // therefore does no extra per-sample work. The branch is emitted
+      // unconditionally so the shader ABI does not depend on a runtime switch;
+      // with the feature off the CPU publishes zero and this is inert.
+      uint32_t integer_scale_bits_temp = PushSystemTemp();
+      uint32_t integer_scale_temp = PushSystemTemp();
+      dxbc::Dest integer_scale_bits_dest(
+          dxbc::Dest::R(integer_scale_bits_temp, used_result_nonzero_components));
+      dxbc::Src integer_scale_bits_src(dxbc::Src::R(integer_scale_bits_temp));
+      dxbc::Dest integer_scale_dest(
+          dxbc::Dest::R(integer_scale_temp, used_result_nonzero_components));
+      dxbc::Src integer_scale_src(dxbc::Src::R(integer_scale_temp));
+      MarkSystemConstantUsed(SystemConstants::Index::kTextureIntegerScaleBits);
+      dxbc::Src integer_scale_bits_packed(GetSystemConstantSrc(
+          offsetof(SystemConstants, texture_integer_scale_bits) +
+              sizeof(uint32_t) * tfetch_index,
+          dxbc::Src::kXXXX));
+      a_.OpIf(true, integer_scale_bits_packed);
+      // Unpack the 5-bit field of each output component.
+      a_.OpUBFE(integer_scale_bits_dest, dxbc::Src::LU(5),
+                dxbc::Src::LU(0, 5, 10, 15), integer_scale_bits_packed);
+      // width = (field & 0xF) + 1
+      a_.OpAnd(integer_scale_dest, integer_scale_bits_src, dxbc::Src::LU(0xF));
+      a_.OpIAdd(integer_scale_dest, integer_scale_src, dxbc::Src::LU(1));
+      // signed = field >> 4
+      a_.OpUShR(integer_scale_bits_dest, integer_scale_bits_src,
+                dxbc::Src::LU(4));
+      // (1 << (width - signed)) - 1
+      a_.OpIAdd(integer_scale_dest, integer_scale_src, -integer_scale_bits_src);
+      a_.OpIShL(integer_scale_dest, dxbc::Src::LU(1), integer_scale_src);
+      a_.OpIAdd(integer_scale_dest, integer_scale_src, dxbc::Src::LI(-1));
+      a_.OpUToF(integer_scale_dest, integer_scale_src);
+      a_.OpMul(
+          dxbc::Dest::R(system_temp_result_, used_result_nonzero_components),
+          dxbc::Src::R(system_temp_result_), integer_scale_src);
+      a_.OpEndIf();
+      PopSystemTemp(2);
     }
     if (signs_temp != UINT32_MAX) {
       PopSystemTemp();

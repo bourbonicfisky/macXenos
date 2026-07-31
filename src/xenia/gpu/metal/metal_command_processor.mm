@@ -25,6 +25,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <set>
 #include <cstring>
 #include <chrono>
 #include <exception>
@@ -3482,6 +3483,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // to decode gamma-signed fetches (TextureSign::kGamma) to linear on sample
     // and handle signed formats. Left zeroed, every gamma texture (incl. the
     // resolved scene the composite samples) was read raw.
+    // Unsigned fixed-point integer texture scaling
+    // (openspec/changes/implement-unsigned-integer-texture-scaling). DEFAULT
+    // OFF: with the switch off no scale is ever published, so every fetch reads
+    // a zero packed value and takes the shader's uniform early-out, leaving
+    // output identical to before the change. Promotion to default-on is a
+    // separate evidence-backed decision.
+    static const bool integer_texture_scaling_enabled =
+        std::getenv("XE_METAL_INTEGER_TEXTURE_SCALE") != nullptr;
     auto fill_texture_signs = [&](MetalShader* shader) {
       if (!shader) return;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
@@ -3490,6 +3499,57 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t signs = texture_util::SwizzleSigns(fetch);
         system_constants.texture_swizzled_signs[fc >> 2] |=
             signs << ((fc & 3) * 8);
+        // Integer num_format on a fixed-point format needs the guest's
+        // unnormalized range restored in the shader. Derive it HERE, beside the
+        // signs, from the same fetch constant.
+        //
+        // Deliberately not routed through shared TextureCache::RequestTextures
+        // / TextureBinding the way upstream does: MetalTextureCache is a
+        // standalone class, not a shared-TextureCache subclass, and shared
+        // RequestTextures only ever runs for the C1T-R eligible subset. A
+        // census probe placed there reported two binding classes for an entire
+        // Just Cause 2 frame — a false zero that would have closed this work
+        // wrongly. This loop, over GetTextureBindingsAfterTranslation, is the
+        // site that sees EVERY Metal binding.
+        //
+        // fetch.swizzle is passed as the swizzle, matching SwizzleSigns above
+        // exactly: both resolve output component i back to the same source
+        // component, so the scale field for a lane always describes the same
+        // component as that lane's sign. They are consumed together, in the
+        // same shader, one immediately after the other.
+        if (integer_texture_scaling_enabled) {
+          uint32_t scale_bits = texture_util::IntegerScaleBits(
+              fetch.format, uint32_t(fetch.num_format), fetch.swizzle,
+              uint8_t(signs));
+          system_constants.texture_integer_scale_bits[fc] = scale_bits;
+          // TEMPORARY acceptance probe (XE_INTEGER_SCALE_REPORT=1), removed
+          // before closure: reports what is actually published per slot, and
+          // the per-component multiplier the shader will form from it.
+          static const bool s_scale_report =
+              std::getenv("XE_INTEGER_SCALE_REPORT") != nullptr;
+          if (s_scale_report) {
+            uint64_t site = (uint64_t(shader->ucode_data_hash()) << 8) | fc;
+            static std::set<uint64_t> s_reported;
+            if (s_reported.insert(site).second) {
+              uint32_t mul[4];
+              for (uint32_t c = 0; c < 4; ++c) {
+                uint32_t field = (scale_bits >> (c * 5)) & 0x1F;
+                uint32_t width = (field & 0xF) + 1;
+                uint32_t sgn = (field & 0x10) ? 1 : 0;
+                mul[c] = field ? ((1u << (width - sgn)) - 1u) : 0u;
+              }
+              XELOGI(
+                  "IntegerScaleReport: stage={} shader={:016X} slot={} "
+                  "format={} num_format={} signs={:02X} swizzle={:03X} "
+                  "packed={:08X} mul={},{},{},{}",
+                  shader->type() == xenos::ShaderType::kVertex ? "VS" : "PS",
+                  shader->ucode_data_hash(), fc,
+                  FormatInfo::GetName(uint32_t(fetch.format)),
+                  uint32_t(fetch.num_format), signs, uint32_t(fetch.swizzle),
+                  scale_bits, mul[0], mul[1], mul[2], mul[3]);
+            }
+          }
+        }
         // Gamma-parity diagnostic: the game's signs describe the raw bytes
         // hardware resolves preserve — compare against the resolve source's
         // gamma-ness we recorded (see IssueCopy).

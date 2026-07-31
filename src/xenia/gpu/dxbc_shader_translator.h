@@ -114,7 +114,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
     // version number (0xYYYYMMDD)!
-    static constexpr uint32_t kVersion = 0x20251216;
+    static constexpr uint32_t kVersion = 0x20260730;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -401,6 +401,22 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
 
+    // APPEND-ONLY. Integer num_format on fixed-point textures: each dword packs
+    // the per-output-component scale that turns a normalized host sample back
+    // into guest integer units, as produced by texture_util::IntegerScaleBits.
+    //   bits 0:3 = source component width - 1
+    //   bit 4    = signed
+    // Five bits per component, four components per fetch constant. Zero means
+    // "leave the sample alone" and is the shader's uniform early-out.
+    //
+    // This field is appended at the end of the struct deliberately: the layout
+    // is shared with the D3D12 backend, which is not built on macOS and so
+    // cannot be revalidated here. Appending keeps every pre-existing offset
+    // fixed; the static_asserts below pin them so a future edit that reorders
+    // the struct fails at compile time rather than silently repointing every
+    // constant a cached shader reads.
+    uint32_t texture_integer_scale_bits[32];
+
    private:
     friend class DxbcShaderTranslator;
 
@@ -454,12 +470,65 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
       kEdramBlendConstant,
 
+      kTextureIntegerScaleBits,
+
       kCount,
     };
     static_assert(
         uint32_t(Index::kCount) <= 64,
         "Too many system constants, can't use uint64_t for usage bits");
   };
+
+  // The SystemConstants layout is a binary ABI: it is shared with the D3D12
+  // backend (not built on macOS, so not revalidated here), it is the cbuffer
+  // every translated shader indexes, and cached shader binaries are compiled
+  // against it. Reordering a field silently repoints every constant a cached
+  // shader reads, which no test that only checks values can catch.
+  //
+  // These assertions pin the offset of every field and the total size. Add new
+  // fields by APPENDING and adding a line here; never insert or reorder. If one
+  // of these fails, the fix is to restore the layout, not to update the number
+  // — unless every shader/pipeline cache identity is bumped in the same change.
+#define XE_DXBC_PIN_SYSTEM_CONSTANT(field, expected_offset)                 static_assert(offsetof(SystemConstants, field) == (expected_offset),                    "SystemConstants::" #field                                                " moved; the cbuffer ABI changed. Append, do not reorder.")
+  XE_DXBC_PIN_SYSTEM_CONSTANT(flags, 0);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(tessellation_factor_range, 4);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(line_loop_closing_index, 12);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(vertex_index_endian, 16);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(vertex_index_offset, 20);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(vertex_index_min_max, 24);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(user_clip_planes, 32);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(ndc_scale, 128);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(point_vertex_diameter_min, 140);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(ndc_offset, 144);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(point_vertex_diameter_max, 156);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(point_constant_diameter, 160);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(point_screen_diameter_to_ndc_radius, 168);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(texture_swizzled_signs, 176);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(textures_resolution_scaled, 208);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(sample_count_log2, 212);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(alpha_test_reference, 220);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(alpha_to_mask, 224);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_32bpp_tile_pitch_dwords_scaled, 228);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_depth_base_dwords_scaled, 232);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(zpd_rov_counter_index, 236);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(color_exp_bias, 240);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_poly_offset_front, 256);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_poly_offset_back, 264);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_stencil, 272);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_rt_base_dwords_scaled, 304);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_rt_format_flags, 320);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_rt_clamp, 336);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_rt_keep_mask, 400);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_rt_blend_factors_ops, 432);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(edram_blend_constant, 448);
+  // Appended by implement-unsigned-integer-texture-scaling. 16-byte aligned, so
+  // it starts on a cbuffer register boundary.
+  XE_DXBC_PIN_SYSTEM_CONSTANT(texture_integer_scale_bits, 464);
+#undef XE_DXBC_PIN_SYSTEM_CONSTANT
+  static_assert(sizeof(SystemConstants) == 592,
+                "SystemConstants total size changed; bump every shader and "
+                "pipeline cache identity that stores binaries compiled "
+                "against this layout.");
 
   // Shader resource view binding spaces.
   enum class SRVSpace {
