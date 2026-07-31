@@ -2301,22 +2301,88 @@ static void* GetDebugSolidPipeline(
 }
 
 // Env-configured, diagnostics-default-off (house rule): XE_METAL_AUTO_TRACE=1
-// enables; _SKIPS / _COOLDOWN / _MAX tune the policy. Parsed once at first
-// swap on the GPU thread.
+// enables — EXACTLY "1"; anything else fails closed to off. Numeric tuning
+// values (_SKIPS / _COOLDOWN / _MAX) must parse completely or the default is
+// kept and a warning names the rejected value. Parsed once at first swap on
+// the GPU thread.
+static bool ParseAutoTraceUint(const char* name, uint32_t* out) {
+  const char* value = std::getenv(name);
+  if (!value) {
+    return false;
+  }
+  char* end = nullptr;
+  unsigned long parsed = std::strtoul(value, &end, 10);
+  if (!value[0] || !end || *end || parsed > UINT32_MAX) {
+    XELOGW("MetalAutoTrace: malformed {}='{}' ignored; keeping default {}",
+           name, value, *out);
+    return false;
+  }
+  *out = uint32_t(parsed);
+  return true;
+}
+
 static MetalAutoTraceConfig ParseAutoTraceConfigFromEnv() {
   MetalAutoTraceConfig config;
   const char* enabled = std::getenv("XE_METAL_AUTO_TRACE");
-  config.enabled = enabled && enabled[0] && std::strcmp(enabled, "0") != 0;
-  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_SKIPS")) {
-    config.skip_threshold = uint32_t(std::strtoul(v, nullptr, 10));
+  if (enabled && enabled[0]) {
+    if (std::strcmp(enabled, "1") == 0) {
+      config.enabled = true;
+    } else if (std::strcmp(enabled, "0") != 0) {
+      XELOGW(
+          "MetalAutoTrace: malformed XE_METAL_AUTO_TRACE='{}' fails closed "
+          "(off); use 1 to enable",
+          enabled);
+    }
   }
-  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_COOLDOWN")) {
-    config.cooldown_frames = uint32_t(std::strtoul(v, nullptr, 10));
-  }
-  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_MAX")) {
-    config.max_captures = uint32_t(std::strtoul(v, nullptr, 10));
-  }
+  ParseAutoTraceUint("XE_METAL_AUTO_TRACE_SKIPS", &config.skip_threshold);
+  ParseAutoTraceUint("XE_METAL_AUTO_TRACE_COOLDOWN", &config.cooldown_frames);
+  ParseAutoTraceUint("XE_METAL_AUTO_TRACE_MAX", &config.max_captures);
   return config;
+}
+
+// Swap-boundary finalization shared by EVERY IssueSwap return path, including
+// the suppressed-present and no-presenter/no-queue early exits. Evaluating the
+// auto-trace trigger only on successful publication would misattribute faults
+// and skips carried across a failed swap to a later good one — and a
+// PERSISTENT publication failure (the case most likely caused by GPU faults)
+// would never capture at all. Uses its own monotonic index for cooldown math:
+// swap_count_ does not advance on suppressed frames.
+void MetalCommandProcessor::FinalizeSwapFrame() {
+  uint64_t finalize_index = ++swap_finalize_index_;
+  if (!auto_trace_trigger_) {
+    auto_trace_trigger_ =
+        std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
+    if (auto_trace_trigger_->config().enabled) {
+      XELOGI(
+          "MetalAutoTrace: armed (skips>={}, on-fault={}, cooldown={} frames, "
+          "budget={})",
+          auto_trace_trigger_->config().skip_threshold,
+          auto_trace_trigger_->config().on_gpu_fault,
+          auto_trace_trigger_->config().cooldown_frames,
+          auto_trace_trigger_->config().max_captures);
+    }
+  }
+  // Only arm when no capture is pending or streaming: RequestFrameTrace would
+  // reject anyway, but going through it would log a spurious error.
+  if (auto_trace_trigger_->config().enabled &&
+      trace_state_ == TraceState::kDisabled) {
+    MetalAutoTraceTrigger::Decision auto_trace = auto_trace_trigger_->Evaluate(
+        finalize_index, draw_skip_accounting_.frame_actionable_count(),
+        frame_gpu_fault_count_);
+    if (auto_trace.fire) {
+      XELOGW(
+          "MetalAutoTrace: {} at swap#{} (actionable-skips={} gpu-faults={}); "
+          "capturing NEXT frame ({}/{}) -> {}",
+          auto_trace.reason, swap_count_,
+          draw_skip_accounting_.frame_actionable_count(),
+          frame_gpu_fault_count_, auto_trace_trigger_->fired_count(),
+          auto_trace_trigger_->config().max_captures,
+          xe::path_to_utf8(cvars::trace_gpu_prefix));
+      RequestFrameTrace(cvars::trace_gpu_prefix);
+    }
+  }
+  frame_gpu_fault_count_ = 0;
+  draw_skip_accounting_.EndFrame();
 }
 
 void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
@@ -6841,6 +6907,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // land: releasing now would discard the records the retry depends on. The
     // request stays latched for the next swap.
     ExecuteDeferredCacheClear(/*publication_failed=*/true);
+    FinalizeSwapFrame();
     return;
   }
 
@@ -6850,6 +6917,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // Publication converged and the device is quiesced, so a latched clear is
     // eligible even though this frame never presents (headless boundaries).
     ExecuteDeferredCacheClear(/*publication_failed=*/false);
+    FinalizeSwapFrame();
     return;
   }
   auto* provider =
@@ -6857,6 +6925,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (!provider || !provider->command_queue()) {
     frame_has_render_ = false;
     ExecuteDeferredCacheClear(/*publication_failed=*/false);
+    FinalizeSwapFrame();
     return;
   }
   id<MTLCommandQueue> queue =
@@ -7133,41 +7202,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
            draw_skip_accounting_.FormatReport(/*frame_scope=*/true,
                                               /*actionable_only=*/false));
   }
-  if (!auto_trace_trigger_) {
-    auto_trace_trigger_ =
-        std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
-    if (auto_trace_trigger_->config().enabled) {
-      XELOGI(
-          "MetalAutoTrace: armed (skips>={}, on-fault={}, cooldown={} frames, "
-          "budget={})",
-          auto_trace_trigger_->config().skip_threshold,
-          auto_trace_trigger_->config().on_gpu_fault,
-          auto_trace_trigger_->config().cooldown_frames,
-          auto_trace_trigger_->config().max_captures);
-    }
-  }
-  // Only arm when no capture is pending or streaming: RequestFrameTrace would
-  // reject anyway, but going through it would log a spurious error.
-  if (auto_trace_trigger_->config().enabled &&
-      trace_state_ == TraceState::kDisabled) {
-    MetalAutoTraceTrigger::Decision auto_trace =
-        auto_trace_trigger_->Evaluate(swap_count_,
-                                      draw_skip_accounting_.frame_actionable_count(),
-                                      frame_gpu_fault_count_);
-    if (auto_trace.fire) {
-      XELOGW(
-          "MetalAutoTrace: {} at swap#{} (actionable-skips={} gpu-faults={}); "
-          "capturing NEXT frame ({}/{}) -> {}",
-          auto_trace.reason, swap_count_,
-          draw_skip_accounting_.frame_actionable_count(),
-          frame_gpu_fault_count_, auto_trace_trigger_->fired_count(),
-          auto_trace_trigger_->config().max_captures,
-          xe::path_to_utf8(cvars::trace_gpu_prefix));
-      RequestFrameTrace(cvars::trace_gpu_prefix);
-    }
-  }
-  frame_gpu_fault_count_ = 0;
-  draw_skip_accounting_.EndFrame();
+  FinalizeSwapFrame();
 
   // MetalFlicker probe (testing framework): async center-strip readback of
   // the presented texture; each swap reads the PREVIOUS swap's strip (a full

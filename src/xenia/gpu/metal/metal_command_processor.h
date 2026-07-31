@@ -356,8 +356,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // Lazily constructed so env parsing happens once, on the GPU thread.
   std::unique_ptr<MetalAutoTraceTrigger> auto_trace_trigger_;
   // Faulted command buffers drained since the previous swap (GPU thread
-  // only: bumped in DrainFaultedCommandBuffers, reset in IssueSwap).
+  // only: bumped in DrainFaultedCommandBuffers, reset in FinalizeSwapFrame).
   uint32_t frame_gpu_fault_count_ = 0;
+  // Swap-boundary finalization (trigger evaluation + per-frame counter
+  // reset). MUST run on every IssueSwap return path — the suppressed-present
+  // and no-presenter/no-queue early exits included — or faults/skips carry
+  // into a later successful swap and get misattributed.
+  void FinalizeSwapFrame();
+  // Monotonic per-finalization index for trigger cooldown math; swap_count_
+  // is unsuitable because it does not advance on suppressed frames.
+  uint64_t swap_finalize_index_ = 0;
 
   // Bounded, deduplicated reporting of memexport producer classes this backend
   // does not route. Reset at the title/session boundary; holds no guest state

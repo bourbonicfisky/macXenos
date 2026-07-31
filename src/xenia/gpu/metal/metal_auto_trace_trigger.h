@@ -71,7 +71,10 @@ class MetalAutoTraceTrigger {
   const MetalAutoTraceConfig& config() const { return config_; }
   uint32_t fired_count() const { return fired_count_; }
 
-  // Evaluate at swap. frame_index must be monotonic (the swap counter).
+  // Evaluate once per swap boundary — successful, suppressed, or headless.
+  // frame_index must be strictly monotonic across calls; the caller supplies
+  // a dedicated finalization counter (NOT the presented-swap counter, which
+  // stalls on suppressed frames and would freeze the cooldown window).
   Decision Evaluate(uint64_t frame_index, uint64_t actionable_skips,
                     uint32_t gpu_faults) {
     Decision decision;
