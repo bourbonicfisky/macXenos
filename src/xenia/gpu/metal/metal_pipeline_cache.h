@@ -127,6 +127,10 @@ class MetalPipelineCache {
     void* pipeline = nullptr;  // id<MTLRenderPipelineState> (mesh), retained.
     uint32_t gs_vertex_size = 0;
     uint32_t gs_max_input_primitives = 0;
+    // Draws suppressed by a cached FAILED creation (pipeline == nullptr). Two
+    // failed creations can suppress many later draws; this is the impact
+    // number, counted separately from creation attempts.
+    uint32_t negative_hits = 0;
   };
 
   // Object-stage VS for geometry emulation, cached by the vertex translation.

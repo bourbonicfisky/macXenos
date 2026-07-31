@@ -357,6 +357,45 @@ MetalShaderKeyIdentity MakeShaderKeyIdentity(
   return identity;
 }
 
+// The COMPLETE pipeline-creation identity for a geometry-emulation pipeline —
+// the exact bytes hashed into its cache key. Everything MTLRenderPipelineState
+// creation consumes is here: shader identities, every MRT format, blend
+// controls, write mask, depth (and thereby stencil: Depth32Float_Stencil8
+// implies the stencil attachment) format, and sample count.
+//
+// Depth/stencil ENABLE/WRITE state is deliberately absent: on Metal that lives
+// in MTLDepthStencilState, set per-encoder, and does not participate in
+// pipeline creation — logging it here would imply a discriminator that cannot
+// exist at this boundary.
+struct GeometryPipelineKeyBytes {
+  uint32_t gs_key;
+  uint32_t pad0;
+  MetalShaderKeyIdentity vs;  // object-stage source translation.
+  MetalShaderKeyIdentity ps;  // fragment stage.
+  uint64_t colors[xenos::kMaxColorRenderTargets];
+  uint64_t depth;
+  uint32_t sample_count;
+  uint32_t blends[xenos::kMaxColorRenderTargets];
+  uint32_t write_mask;
+  uint32_t pad;
+};
+
+// One formatter for BOTH the success and failure logs, so they cannot drift
+// apart: the first attribution round found the same geometry triple both
+// succeeding and failing, and the depth-format correlation could not be tested
+// precisely because successes logged fewer fields than failures.
+std::string DescribeGeometryPipelineKey(uint64_t key_digest,
+                                        const GeometryPipelineKeyBytes& kb) {
+  return fmt::format(
+      "key={:016X} gs_key={:08X} vs={:016X}/{:08X} ps={:016X}/{:08X} "
+      "colors=[{:X},{:X},{:X},{:X}] blends=[{:08X},{:08X},{:08X},{:08X}] "
+      "write_mask={:X} depth_fmt={} samples={}",
+      key_digest, kb.gs_key, kb.vs.ucode_hash, uint32_t(kb.vs.modification),
+      kb.ps.ucode_hash, uint32_t(kb.ps.modification), kb.colors[0],
+      kb.colors[1], kb.colors[2], kb.colors[3], kb.blends[0], kb.blends[1],
+      kb.blends[2], kb.blends[3], kb.write_mask, kb.depth, kb.sample_count);
+}
+
 MTLBlendFactor ToMetalBlendFactor(MetalBlendFactor factor) {
   switch (factor) {
     case MetalBlendFactor::kZero:
@@ -849,18 +888,7 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   // 3.2 — same content-derived identity as the render-pipeline key. `gs_key` is
   // already content-derived (topology type plus the interpolator/clip layout
   // taken from the VS/PS modifications), so it needs no change.
-  struct KeyBytes {
-    uint32_t gs_key;
-    uint32_t pad0;
-    MetalShaderKeyIdentity vs;  // object-stage source translation.
-    MetalShaderKeyIdentity ps;  // fragment stage.
-    uint64_t colors[xenos::kMaxColorRenderTargets];
-    uint64_t depth;
-    uint32_t sample_count;
-    uint32_t blends[xenos::kMaxColorRenderTargets];
-    uint32_t write_mask;
-    uint32_t pad;
-  } key_bytes = {};
+  GeometryPipelineKeyBytes key_bytes = {};
   key_bytes.gs_key = gs_key.key;
   key_bytes.vs = MakeShaderKeyIdentity(vertex);
   key_bytes.ps = MakeShaderKeyIdentity(pixel);
@@ -875,6 +903,17 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   auto cache_it = geometry_pipelines_.find(key);
   if (cache_it != geometry_pipelines_.end()) {
     if (!cache_it->second.pipeline) {
+      // A cached negative is not "one failure": every hit here is a DRAW the
+      // failed creation is still suppressing. Count them separately from
+      // creation attempts so impact is visible; log the first suppression and
+      // then powers of two, joined to the failure line by the key digest.
+      uint32_t count = ++cache_it->second.negative_hits;
+      if ((count & (count - 1)) == 0) {
+        XELOGW(
+            "MetalPipelineCache: geometry pipeline negative-cache hit #{} "
+            "(draws suppressed by one failed creation) key={:016X}",
+            count, key);
+      }
       return nullptr;
     }
     if (gs_vertex_size_out) {
@@ -954,25 +993,22 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     XELOGE(
         "MetalPipelineCache: geometry pipeline creation failed: {} "
         "(type={}, gs_vertex_size={}, gs_max_input_primitives={}, "
-        "vs_fn='{}', gs_fn='{}', ps_fn='{}', raster_samples={}, "
-        "color0_fmt={}, depth_fmt={})",
+        "vs_fn='{}', gs_fn='{}', ps_fn='{}') {}",
         error ? [[error localizedDescription] UTF8String] : "unknown",
         uint32_t(geometry_type), vstage->vertex_output_size,
         gstage->max_input_primitives, vstage->function_name,
         gstage->function_name, pixel_function_name,
-        raster_key.raster_sample_count,
-        uint32_t(desc.colorAttachments[0].pixelFormat),
-        uint32_t(depth_pixel_format));
+        DescribeGeometryPipelineKey(key, key_bytes));
     geometry_pipelines_.emplace(key, GeometryPipeline{});
     return nullptr;
   }
 
   XELOGI(
       "MetalPipelineCache: built geometry pipeline (type={}, gs_vertex_size={}, "
-      "gs_max_input_primitives={}, vs_fn='{}', gs_fn='{}')",
+      "gs_max_input_primitives={}, vs_fn='{}', gs_fn='{}') {}",
       uint32_t(geometry_type), vstage->vertex_output_size,
       gstage->max_input_primitives, vstage->function_name,
-      gstage->function_name);
+      gstage->function_name, DescribeGeometryPipelineKey(key, key_bytes));
 
   GeometryPipeline state;
   state.pipeline = (__bridge_retained void*)pipeline;
