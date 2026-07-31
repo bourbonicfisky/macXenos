@@ -607,6 +607,33 @@ TEST_CASE("Clip relabel transport oracle: payload preserved, only the hop is ren
   }
 }
 
+TEST_CASE("Clip fixture: nondegenerate guest positions disassemble as intended",
+          "[l1][metal][geometry][clip][fixture]") {
+  // Gate A needs positions that actually cover pixels. The original fixture
+  // exports (vertex_index, 0, 0, 1) — degenerate in Y, fine for a creation
+  // discriminator and useless for a coverage one. This one computes
+  // y = x * x so the three rect-list vertices are not collinear.
+  static const uint32_t kUcode[] = {
+      0x00001002, 0x00001000, 0xC2000000, 0x00001003,
+      0x00002000, 0x00000000, 0xC8020000, 0x006C6C00,
+      0xC1000000, 0xC88F803E, 0x00000000, 0xC2000000};
+  MetalShader shader(xenos::ShaderType::kVertex, 0x3333333333333333ull, kUcode,
+                     sizeof(kUcode) / sizeof(uint32_t), std::endian::little);
+  StringBuffer disasm;
+  shader.AnalyzeUcode(disasm);
+  std::string text = disasm.to_string();
+  INFO(text);
+  // Assert the shape rather than the exact text: a multiply feeding a position
+  // export. If the hand assembly is wrong this fails as bad test input.
+  // Sources must be TEMP registers (r0), not constants: src_sel=1 selects the
+  // temp file. The first assembly used sel=0 and decoded as c0, which would
+  // have made the fixture read uninitialised constants instead of the guest
+  // vertex index.
+  CHECK(text.find("mul r0._y__, r0.xxxx, r0.xxxx") != std::string::npos);
+  CHECK(text.find("max oPos.xyz1, r0, r0") != std::string::npos);
+  CHECK(text.find("exece") != std::string::npos);
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe
