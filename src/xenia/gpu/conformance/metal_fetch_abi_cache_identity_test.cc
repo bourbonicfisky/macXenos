@@ -102,7 +102,7 @@ TEST_CASE("The production fetch ABI revision is the current one",
           "[integer_scale][cache_identity]") {
   // If this fails, either the revision was bumped without updating the tests
   // below, or it was reverted and the stale-cache hazard is open again.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 2);
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 3);
 }
 
 TEST_CASE("Fetch ABI revision participates in the cache identity",
@@ -205,6 +205,49 @@ TEST_CASE("An unchanged build keeps reusing its own cache",
     CHECK(served == SampleMetallib());
     CHECK(warm.is_open());
     warm.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("A geometry record written under a previous ABI is not served",
+          "[integer_scale][cache_identity][geometry]") {
+  // Geometry records share the title directory with metallibs, so the same
+  // identity guards them. The clip-distance boundary relabel changes the
+  // EMITTED object/mesh stages for byte-identical guest ucode — exactly the
+  // case a configuration-only identity would miss.
+  std::filesystem::path root = MakeScratchRoot("geometry_stale");
+  constexpr uint64_t kGeometryKey = 0x0F0F0F0F0F0F0F0Full;
+  MetalPipelineStorage::GeometryRecord record;
+  record.function_name = "main";
+  record.reflection = 32;
+  record.blob = {0x01, 0x02, 0x03, 0x04};
+  record.aux_blob = {0x05, 0x06};
+
+  {
+    MetalPipelineStorage storage;
+    REQUIRE(storage.Open(root, kTitleId, IdentityWithFetchAbi(2)));
+    REQUIRE(storage.StoreGeometryRecord(kGeometryKey, record));
+    storage.Close();
+    // Same revision must SERVE it, or the rejection below proves nothing.
+    MetalPipelineStorage warm;
+    REQUIRE(warm.Open(root, kTitleId, IdentityWithFetchAbi(2)));
+    MetalPipelineStorage::GeometryRecord served;
+    REQUIRE(warm.LoadGeometryRecord(kGeometryKey, &served));
+    CHECK(served.blob == record.blob);
+    CHECK(served.reflection == record.reflection);
+    warm.Close();
+  }
+
+  {
+    MetalPipelineStorage storage;
+    REQUIRE(storage.Open(root, kTitleId,
+                         IdentityWithFetchAbi(
+                             MetalTranslatorConfig::kFetchAbiRevision)));
+    MetalPipelineStorage::GeometryRecord served;
+    CHECK_FALSE(storage.LoadGeometryRecord(kGeometryKey, &served));
+    storage.Close();
   }
 
   std::error_code ec;

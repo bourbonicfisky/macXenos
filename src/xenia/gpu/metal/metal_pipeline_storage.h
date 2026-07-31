@@ -57,16 +57,22 @@ struct MetalTranslatorConfig {
   static constexpr bool kEdramRovUsed = false;
   static constexpr bool kGammaRenderTargetAsUnorm8 = true;
   static constexpr bool kMscBindlessResourcesUsed = true;
-  // Revision of the emitted shader ABI — the system-constant layout and the
-  // fetch-path codegen. Unlike the booleans above this does not describe a
-  // configuration choice; it exists so a change to what the translator EMITS
-  // for byte-identical guest ucode still invalidates cached metallibs. Bump it
-  // whenever DxbcShaderTranslator::SystemConstants changes layout or the fetch
-  // path emits different code.
+  // Revision of the emitted shader ABI — the system-constant layout, the
+  // fetch-path codegen, and the geometry-emulation stage signatures. Unlike the
+  // booleans above this does not describe a configuration choice; it exists so
+  // a change to what the translator or the bridge EMITS for byte-identical
+  // guest ucode still invalidates cached metallibs AND cached geometry records.
+  // Bump it whenever SystemConstants changes layout, the fetch path emits
+  // different code, or the object/mesh stage signatures change.
   //   1 - baseline
   //   2 - texture_integer_scale_bits added; fetch applies the integer scale
   //       after signs/gamma and before exponent bias
-  static constexpr uint32_t kFetchAbiRevision = 2;
+  //   3 - geometry-emulation clip-distance boundary relabel: the object-stage
+  //       output and mesh-stage input signatures carry the clip payload under a
+  //       private semantic. Same guest ucode, DIFFERENT emitted geometry
+  //       stages, so durable geometry records written before this are stale and
+  //       must not be served.
+  static constexpr uint32_t kFetchAbiRevision = 3;
 };
 
 // Everything that can change generated output for byte-identical guest ucode.
