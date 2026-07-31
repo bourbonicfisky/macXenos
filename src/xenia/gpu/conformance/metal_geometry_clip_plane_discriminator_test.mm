@@ -40,6 +40,7 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/ucode.h"
@@ -441,6 +442,169 @@ TEST_CASE("Geometry clip-plane AUDIT: preserve minimal-pair artifacts",
                            AuditSemantics(gs_bytes)));
   }
   SUCCEED("audit artifacts written");
+}
+
+
+// ---------------------------------------------------------------------------
+// Task 2 candidate 1: byte/value transport oracle for the boundary relabel.
+//
+// The relabel must preserve the payload EXACTLY and change only the label at
+// the object->mesh hop. Merely stripping the intermediate semantic is not an
+// acceptable outcome, so this asserts what survives, not just what changes.
+
+namespace {
+
+// Describes one signature element well enough to prove the payload layout did
+// not move: register, mask, semantic index, component type, system value.
+struct SigElement {
+  std::string name;
+  uint32_t semantic_index = 0;
+  uint32_t system_value = 0;
+  uint32_t component_type = 0;
+  uint32_t register_index = 0;
+  uint32_t mask = 0;
+};
+
+std::vector<SigElement> ReadSignature(const std::vector<uint8_t>& c,
+                                      const char* fourcc, bool gs_stream) {
+  using namespace xe::gpu::metal::dxbc_relabel_detail;
+  std::vector<SigElement> out;
+  if (c.size() < sizeof(uint32_t) * 8) return out;
+  uint32_t chunk_count = ReadU32(c, sizeof(uint32_t) * 7);
+  uint32_t want = FourCC(fourcc);
+  for (uint32_t i = 0; i < chunk_count; ++i) {
+    uint32_t off = ReadU32(c, sizeof(uint32_t) * 8 + i * sizeof(uint32_t));
+    if (size_t(off) + 8 > c.size() || ReadU32(c, off) != want) continue;
+    size_t data = size_t(off) + 8;
+    uint32_t n = ReadU32(c, data);
+    uint32_t ptr = ReadU32(c, data + 4);
+    size_t stride = gs_stream ? sizeof(uint32_t) * 7 : sizeof(uint32_t) * 6;
+    for (uint32_t p = 0; p < n; ++p) {
+      size_t e = data + ptr + size_t(p) * stride;
+      if (e + stride > c.size()) break;
+      size_t base = gs_stream ? e + sizeof(uint32_t) : e;
+      SigElement el;
+      uint32_t name_ptr = ReadU32(c, base);
+      const char* nm = reinterpret_cast<const char*>(c.data() + data + name_ptr);
+      el.name = std::string(nm);
+      el.semantic_index = ReadU32(c, base + 4);
+      el.system_value = ReadU32(c, base + 8);
+      el.component_type = ReadU32(c, base + 12);
+      el.register_index = ReadU32(c, base + 16);
+      el.mask = c[base + 20];
+      out.push_back(el);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST_CASE("Clip relabel transport oracle: payload preserved, only the hop is renamed",
+          "[l1][metal][geometry][clip][relabel]") {
+  auto& h = H();
+  if (!h.ok) {
+    SUCCEED("no Metal device");
+    return;
+  }
+
+  for (uint32_t clip : {0u, 1u, 2u}) {
+    INFO("clip count " << clip);
+    Arm arm;
+    REQUIRE(BuildArm(clip, &arm));
+
+    std::vector<uint8_t> vs = arm.vertex->translated_binary();
+    std::vector<uint32_t> gs_dwords;
+    CreateDxbcGeometryShader(arm.gs_key, gs_dwords);
+    std::vector<uint8_t> gs(gs_dwords.size() * sizeof(uint32_t));
+    if (!gs_dwords.empty()) {
+      std::memcpy(gs.data(), gs_dwords.data(), gs.size());
+    }
+    REQUIRE_FALSE(vs.empty());
+    REQUIRE_FALSE(gs.empty());
+
+    const size_t vs_size_before = vs.size();
+    const size_t gs_size_before = gs.size();
+    auto vs_out_before = ReadSignature(vs, "OSGN", false);
+    auto gs_in_before = ReadSignature(gs, "ISGN", false);
+    auto gs_out_before = ReadSignature(gs, "OSG5", true);
+
+    uint32_t vs_relabeled =
+        RelabelDxbcClipDistance(vs, DxbcSignatureKind::kOutput);
+    uint32_t gs_relabeled =
+        RelabelDxbcClipDistance(gs, DxbcSignatureKind::kInput);
+
+    auto vs_out_after = ReadSignature(vs, "OSGN", false);
+    auto gs_in_after = ReadSignature(gs, "ISGN", false);
+    auto gs_out_after = ReadSignature(gs, "OSG5", true);
+
+    // Container size is untouched — the rewrite is strictly in place.
+    CHECK(vs.size() == vs_size_before);
+    CHECK(gs.size() == gs_size_before);
+
+    if (clip == 0) {
+      // Nothing to relabel, and nothing may change.
+      CHECK(vs_relabeled == 0);
+      CHECK(gs_relabeled == 0);
+    } else {
+      CHECK(vs_relabeled >= 1);
+      CHECK(gs_relabeled >= 1);
+    }
+
+    // Element COUNTS are preserved — this is a relabel, not a strip.
+    REQUIRE(vs_out_after.size() == vs_out_before.size());
+    REQUIRE(gs_in_after.size() == gs_in_before.size());
+    REQUIRE(gs_out_after.size() == gs_out_before.size());
+
+    // Every element keeps its register, mask, semantic index and component
+    // type. Only the clip elements' name and system value may differ, and only
+    // on the boundary signatures.
+    auto compare = [&](const std::vector<SigElement>& before,
+                       const std::vector<SigElement>& after,
+                       bool boundary) {
+      for (size_t i = 0; i < before.size(); ++i) {
+        INFO("element " << i << " '" << before[i].name << "'");
+        CHECK(after[i].register_index == before[i].register_index);
+        CHECK(after[i].mask == before[i].mask);
+        CHECK(after[i].semantic_index == before[i].semantic_index);
+        CHECK(after[i].component_type == before[i].component_type);
+        bool was_clip =
+            before[i].system_value == uint32_t(dxbc::Name::kClipDistance);
+        if (boundary && was_clip) {
+          CHECK(after[i].name == std::string(kMetalClipPayloadSemantic));
+          CHECK(after[i].system_value == uint32_t(dxbc::Name::kUndefined));
+        } else {
+          CHECK(after[i].name == before[i].name);
+          CHECK(after[i].system_value == before[i].system_value);
+        }
+      }
+    };
+    compare(vs_out_before, vs_out_after, /*boundary=*/true);
+    compare(gs_in_before, gs_in_after, /*boundary=*/true);
+
+    // THE POINT OF THE MECHANISM: the mesh stage's rasterizer-facing OUTPUT
+    // must still carry SV_ClipDistance. This is also the string-pooling check —
+    // if the container shared one name string between input and output, the
+    // input relabel would have renamed this too.
+    compare(gs_out_before, gs_out_after, /*boundary=*/false);
+    if (clip != 0) {
+      bool output_has_clip = false;
+      for (const auto& el : gs_out_after) {
+        if (el.system_value == uint32_t(dxbc::Name::kClipDistance) &&
+            el.name == "SV_ClipDistance") {
+          output_has_clip = true;
+        }
+      }
+      CHECK(output_has_clip);
+    }
+
+    // No collision with guest interpolators or any other element.
+    for (const auto& el : vs_out_after) {
+      if (el.name == std::string(kMetalClipPayloadSemantic)) {
+        CHECK(el.system_value == uint32_t(dxbc::Name::kUndefined));
+      }
+    }
+  }
 }
 
 }  // namespace metal

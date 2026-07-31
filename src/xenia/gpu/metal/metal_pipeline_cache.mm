@@ -19,6 +19,7 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/registers.h"
@@ -716,11 +717,24 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   // as the object stage with host_vertex_shader_type kVertex — geometry emulation
   // does the primitive expansion in the GS/mesh stage, so the VS DXBC is
   // identical to the normal path; see XeniOS host-VS-type remap).
-  const std::vector<uint8_t>& dxbc = vertex->translated_binary();
-  if (dxbc.empty()) {
+  const std::vector<uint8_t>& dxbc_source = vertex->translated_binary();
+  if (dxbc_source.empty()) {
     XELOGE("MetalPipelineCache: geometry VS has no DXBC (translate VS first)");
     geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
+  }
+  // EXPERIMENT (XE_METAL_CLIP_RELABEL=1), task 2 candidate 1: relabel the
+  // clip-distance semantic on the OBJECT STAGE'S OUTPUT only, so it crosses the
+  // object->mesh hop as a private user parameter. The payload layout is
+  // untouched — see metal_dxbc_clip_relabel.h and its transport oracle.
+  std::vector<uint8_t> dxbc = dxbc_source;
+  static const bool s_clip_relabel =
+      std::getenv("XE_METAL_CLIP_RELABEL") != nullptr;
+  if (s_clip_relabel) {
+    uint32_t n = RelabelDxbcClipDistance(dxbc, DxbcSignatureKind::kOutput);
+    if (n) {
+      XELOGI("MetalPipelineCache: clip relabel — object-stage output, {} element(s)", n);
+    }
   }
   std::string error;
   std::vector<uint8_t> dxil;
@@ -815,6 +829,19 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   }
   std::vector<uint8_t> dxbc_bytes(dxbc_dwords.size() * sizeof(uint32_t));
   std::memcpy(dxbc_bytes.data(), dxbc_dwords.data(), dxbc_bytes.size());
+  // EXPERIMENT (XE_METAL_CLIP_RELABEL=1): matching relabel on the MESH STAGE'S
+  // INPUT. Its rasterizer-facing OUTPUT deliberately keeps SV_ClipDistance.
+  {
+    static const bool s_clip_relabel_gs =
+        std::getenv("XE_METAL_CLIP_RELABEL") != nullptr;
+    if (s_clip_relabel_gs) {
+      uint32_t n =
+          RelabelDxbcClipDistance(dxbc_bytes, DxbcSignatureKind::kInput);
+      if (n) {
+        XELOGI("MetalPipelineCache: clip relabel — mesh-stage input, {} element(s)", n);
+      }
+    }
+  }
 
   std::string error;
   std::vector<uint8_t> dxil;
