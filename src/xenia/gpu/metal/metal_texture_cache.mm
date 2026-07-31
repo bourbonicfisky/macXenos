@@ -425,9 +425,16 @@ static uint32_t xe_lineage_fnv(const void* p, size_t n) {
 // entry for a later draw (the proven slice-4/5R GPU loads did; a shared-cache
 // replay will) MUST derive the key identically or it degrades to a safe
 // CPU-path miss (never corruption).
+// `mip_min_level` / `mip_max_level` are the NORMALIZED EFFECTIVE range from
+// texture_util::GetSubresourcesFromFetchConstant, never the raw fetch fields.
+// They are passed in rather than read here so that exactly one normalization
+// result reaches both this key and the upload that decides the host texture's
+// level count; recomputing on either side would let identity and content
+// disagree, which is the defect this key change closes.
 static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
                                bool is_signed, uint32_t base, uint32_t width,
-                               uint32_t height, uint32_t pitch_texels) {
+                               uint32_t height, uint32_t pitch_texels,
+                               uint32_t mip_min_level, uint32_t mip_max_level) {
   struct KeyBytes {
     uint32_t base, width, height, pitch;
     uint32_t format_tiled_endian;
@@ -436,11 +443,20 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
     // swizzle must NOT share a cache entry (the second would reuse the first's
     // wrong-channel view — alpha read from the wrong channel discards draws).
     uint32_t swizzle;
+    // Normalized effective mip level range. Two fetches agreeing on everything
+    // above but resolving to different ranges describe different host textures
+    // (the upload's level count follows this range), so they must not share an
+    // entry. The raw mip address, packed-mips state, stacked identity and depth
+    // are NOT direct inputs here — measured engagement zero — though the first
+    // and, for 3D, the last legitimately reach this field through the shared
+    // normalization.
+    uint32_t mip_level_range;
   } kb{base, width, height, pitch_texels,
        (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
            (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
            uint32_t(fetch.endianness),
-       uint32_t(fetch.swizzle & 0xFFF)};
+       uint32_t(fetch.swizzle & 0xFFF),
+       (mip_min_level << 8) | (mip_max_level & 0xFF)};
   return XXH3_64bits(&kb, sizeof(kb));
 }
 
@@ -827,9 +843,22 @@ uint32_t MetalTextureCache::GetTextureSlot(
     pitch_texels = (width + 31) & ~31u;
   }
 
-  uint64_t key = MakeTextureKey(fetch, is_signed, base, width, height,
-                                pitch_texels);
+  // Normalize ONCE. This single result feeds both the cache identity below and
+  // the host level count in the upload path, so the two cannot diverge.
+  // Normalization is what makes the excluded fields safe: an absent mip page
+  // collapses the range to the base level, and both ends are bounded by the
+  // size-derived maximum, so fetches whose raw fields differ but whose ranges
+  // are equivalent still share one entry.
+  uint32_t normalized_mip_min = 0;
+  uint32_t normalized_mip_max = 0;
+  texture_util::GetSubresourcesFromFetchConstant(
+      fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &normalized_mip_min,
+      &normalized_mip_max);
+  uint64_t key =
+      MakeTextureKey(fetch, is_signed, base, width, height, pitch_texels,
+                     normalized_mip_min, normalized_mip_max);
   auto it = cache_.find(key);
+
   // Lineage probe: this fetch of the watched base is the composite's temporal
   // read. A cache HIT means the untile is SKIPPED and the STALE cached upload is
   // served -- the freshly-resolved guest RAM never reaches the composite (the
@@ -1082,10 +1111,14 @@ uint32_t MetalTextureCache::GetTextureSlot(
   bool mip_format_allowed = !(s_mips_dxt_only && !plan.compressed) &&
                             !(s_mips_uncomp_only && plan.compressed);
   if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && mip_addr &&
-      mip_addr < kPhysicalSize && fetch.mip_max_level > 0 &&
+      mip_addr < kPhysicalSize && normalized_mip_max > 0 &&
       !plan.decode_4444 && !plan.decode_r16) {
+    // Same normalized value the key was built from — see the normalization
+    // above. The size-derived clamp is retained; normalization already applies
+    // an equivalent bound, so this is belt-and-braces rather than a second
+    // opinion.
     host_levels = std::min<uint32_t>(
-        uint32_t(fetch.mip_max_level) + 1,
+        normalized_mip_max + 1,
         xe::log2_floor(std::max(width, height)) + 1);
     if (s_no_packed_mips && fetch.packed_mips) {
       host_levels = std::min(
@@ -1174,7 +1207,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (host_levels > 1) {
     texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
         fetch.dimension, fetch.pitch, width, height, 1, tiled, fetch.format,
-        fetch.packed_mips != 0, /*has_base=*/true, fetch.mip_max_level);
+        fetch.packed_mips != 0, /*has_base=*/true, normalized_mip_max);
     entry_mip_bytes = std::min<uint32_t>(layout.mips_total_extent_bytes,
                                          kPhysicalSize - mip_addr);
     // Mips live at mip_address, NOT relative to the base level — read through
