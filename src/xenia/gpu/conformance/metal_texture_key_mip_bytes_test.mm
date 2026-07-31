@@ -216,6 +216,100 @@ TEST_CASE("Key mip range 4.3: the lv1..1 entry is populated from the mip source"
   }
 }
 
+TEST_CASE("Key mip range 6.x: the split siblings invalidate independently",
+          "[l1][metal][texture_key][lifecycle]") {
+  auto& h = H();
+  if (!h.ok) {
+    SUCCEED("no Metal device");
+    return;
+  }
+
+  // The two siblings the key split creates for one guest texture: a base-only
+  // entry (no mip data uploaded) and a minified entry that carries BOTH the
+  // base level and the mip level. Their invalidation footprints therefore
+  // differ, and that difference is the point of testing them as siblings rather
+  // than by aggregate count.
+  auto base_only = MakeFetch(/*mip_min=*/0, /*mip_max=*/0);
+  auto minified = MakeFetch(/*mip_min=*/1, /*mip_max=*/1);
+
+  auto admit_both = [&]() {
+    FillMemory(*h.memory, kBase, 0x8000, kBaseFill);
+    FillMemory(*h.memory, kMipBase, 0x8000, kMipFill);
+    h.cache->ClearCache();
+    h.cache->ResetActive();
+    uint32_t a = h.cache->GetTextureSlot(base_only, false);
+    uint32_t b = h.cache->GetTextureSlot(minified, false);
+    REQUIRE(a != 0);
+    REQUIRE(b != 0);
+    REQUIRE(a != b);
+    REQUIRE(h.cache->cached_texture_count() == 2u);
+  };
+
+  // Provenance after re-admission, so each event is followed by a
+  // correctness check rather than only a count check.
+  auto check_provenance = [&]() {
+    h.cache->ResetActive();
+    REQUIRE(h.cache->GetTextureSlot(minified, false) != 0);
+    id<MTLTexture> t =
+        (__bridge id<MTLTexture>)h.cache->active_textures().back();
+    REQUIRE(t != nil);
+    REQUIRE(t.mipmapLevelCount >= 2);
+    uint8_t l0 = 0, l1 = 0;
+    REQUIRE(ReadLevelByte(t, 0, &l0));
+    REQUIRE(ReadLevelByte(t, 1, &l1));
+    CHECK(l0 == kBaseFill);
+    CHECK(l1 == kMipFill);
+  };
+
+  SECTION("a base-page write invalidates BOTH siblings") {
+    admit_both();
+    // Both entries uploaded host level 0 from the base region, so both must go.
+    uint32_t evicted = h.cache->InvalidateRange(kBase, 0x1000);
+    CHECK(evicted == 2u);
+    CHECK(h.cache->cached_texture_count() == 0u);
+    check_provenance();
+  }
+
+  SECTION("a mip-page write invalidates ONLY the minified sibling") {
+    admit_both();
+    // The base-only entry uploaded no mip data at all — its recorded mip range
+    // is empty — so evicting it here would be unnecessary work, not safety.
+    uint32_t evicted = h.cache->InvalidateRange(kMipBase, 0x1000);
+    CHECK(evicted == 1u);
+    CHECK(h.cache->cached_texture_count() == 1u);
+
+    // The survivor must be the base-only entry: re-requesting it is a HIT that
+    // does not grow the cache, while the minified one must be rebuilt.
+    h.cache->ResetActive();
+    REQUIRE(h.cache->GetTextureSlot(base_only, false) != 0);
+    CHECK(h.cache->cached_texture_count() == 1u);
+    check_provenance();
+    CHECK(h.cache->cached_texture_count() == 2u);
+  }
+
+  SECTION("ClearCache releases both siblings and frees their slots") {
+    admit_both();
+    h.cache->ClearCache();
+    CHECK(h.cache->cached_texture_count() == 0u);
+    // Slots return through the free list rather than by resetting the
+    // allocator, which is the documented behavior; re-admission must therefore
+    // succeed and repopulate correct provenance.
+    check_provenance();
+  }
+
+  SECTION("repeated clear/re-admit cycles are stable") {
+    for (int cycle = 0; cycle < 3; ++cycle) {
+      INFO("cycle " << cycle);
+      admit_both();
+      CHECK(h.cache->cached_texture_count() == 2u);
+      h.cache->ClearCache();
+      CHECK(h.cache->cached_texture_count() == 0u);
+    }
+    admit_both();
+    check_provenance();
+  }
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe
