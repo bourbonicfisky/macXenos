@@ -83,6 +83,90 @@ TEST_CASE("20e4 depth endpoints", "[l0][float24]") {
   }
 }
 
+// --- 20e4 invariance for the float24 PS modes (implement-metal-depth-semantics
+// task 1.2). Stage A converts depth in the pixel shader under one of two
+// rounding modes; these pin the properties the modes contract to hold.
+
+TEST_CASE("20e4 decode->encode is identity for EVERY code, both modes",
+          "[l0][float24][depth_semantics]") {
+  // Exhaustive over the 24-bit space (denormals, max exponent, everything).
+  // On an exact value the two rounding modes must agree — invariance means a
+  // value that already round-tripped is a fixed point under either mode.
+  // Manual mismatch counting: 33M Catch REQUIREs would swamp the run.
+  uint32_t mismatches = 0;
+  uint32_t first_bad_code = 0;
+  for (uint32_t code = 0; code < (1u << 24); ++code) {
+    float f = xenos::Float20e4To32(code);
+    if (xenos::Float32To20e4(f, /*round_to_nearest_even=*/true) != code ||
+        xenos::Float32To20e4(f, /*round_to_nearest_even=*/false) != code) {
+      if (!mismatches) {
+        first_bad_code = code;
+      }
+      ++mismatches;
+    }
+  }
+  INFO("first mismatching code " << first_bad_code);
+  REQUIRE(mismatches == 0);
+}
+
+TEST_CASE("20e4 rounding modes diverge exactly at a code midpoint",
+          "[l0][float24][depth_semantics]") {
+  // Two adjacent normal codes; their float midpoint is representable in f32
+  // (f32 mantissa is wider than 20 bits). Truncation must take the lower
+  // code; round-to-nearest-even must take the even neighbor. This is the
+  // observable difference between kFloat24Truncating and kFloat24Rounding —
+  // if this case ever passes with both modes equal, the mode plumbing is
+  // dead and the invariance A/B is meaningless.
+  const uint32_t lower = (5u << 20) | 0x12344u;  // even mantissa neighbor
+  const uint32_t upper = lower + 1;
+  float f_lower = xenos::Float20e4To32(lower);
+  float f_upper = xenos::Float20e4To32(upper);
+  float midpoint = f_lower + (f_upper - f_lower) * 0.5f;
+  REQUIRE(midpoint > f_lower);
+  REQUIRE(midpoint < f_upper);
+  REQUIRE(xenos::Float32To20e4(midpoint, /*round_to_nearest_even=*/false) ==
+          lower);
+  REQUIRE(xenos::Float32To20e4(midpoint, /*round_to_nearest_even=*/true) ==
+          lower);  // lower has the even mantissa
+  // One code up: midpoint between an odd-mantissa lower and even upper — RNE
+  // now goes UP while truncation still goes down.
+  float f_upper2 = xenos::Float20e4To32(upper + 1);
+  float midpoint2 = f_upper + (f_upper2 - f_upper) * 0.5f;
+  REQUIRE(xenos::Float32To20e4(midpoint2, /*round_to_nearest_even=*/false) ==
+          upper);
+  REQUIRE(xenos::Float32To20e4(midpoint2, /*round_to_nearest_even=*/true) ==
+          upper + 1);
+}
+
+TEST_CASE("20e4 encode saturates above the format maximum, both modes",
+          "[l0][float24][depth_semantics]") {
+  // 20e4 max (code 0xFFFFFF) decodes to just under 32; anything at or above
+  // must saturate to the max code, never wrap — the float24 sibling of the
+  // unorm24 far-plane overflow that zeroed JC2's shadow atlas.
+  const uint32_t kMaxCode = 0xFFFFFFu;
+  float max_value = xenos::Float20e4To32(kMaxCode);
+  REQUIRE(xenos::Float32To20e4(max_value, true) == kMaxCode);
+  REQUIRE(xenos::Float32To20e4(32.0f, true) == kMaxCode);
+  REQUIRE(xenos::Float32To20e4(32.0f, false) == kMaxCode);
+  REQUIRE(xenos::Float32To20e4(1.0e6f, true) == kMaxCode);
+  // Denormal floor: the smallest nonzero code survives, zero stays zero.
+  REQUIRE(xenos::Float32To20e4(xenos::Float20e4To32(1u), false) == 1u);
+}
+
+TEST_CASE("20e4 identity survives the canonical EDRAM half-range mapping",
+          "[l0][float24][depth_semantics]") {
+  // The canonical per-sample EDRAM store keeps float24 depth in host [0,1]
+  // via *0.5 / *2.0 (metal_edram_msl.h). Both are exact power-of-two scales
+  // in binary floating point, so the invariance property must be unaffected.
+  // If someone changes the mapping to a non-power-of-two, this catches it.
+  for (uint32_t code = 0; code < (1u << 24); code += 997u) {
+    float f = xenos::Float20e4To32(code);
+    float mapped = (f * 0.5f) * 2.0f;
+    REQUIRE(xenos::Float32To20e4(mapped, true) == code);
+    REQUIRE(xenos::Float32To20e4(mapped, false) == code);
+  }
+}
+
 // --- unorm24 depth (UNorm24To32) ---------------------------------------------
 // The non-float24 depth decode. The exact 2^24 divide matters: 0xC00000 (a very
 // common 2_10_10_10 clear) must decode precisely, not via 1/16777215.
