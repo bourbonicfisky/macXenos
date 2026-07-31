@@ -1239,6 +1239,40 @@ void MetalRenderTargetCache::PerformTransfers(
   }
 }
 
+uint32_t MetalRenderTargetCache::HostLaneMode(bool materialize) const {
+  if (!host_depth_gate_enabled_ || f24_ps_engaged_) {
+    return 0;
+  }
+  uint32_t mode = materialize ? 2u : 1u;
+  if (cvars::depth_float24_round) {
+    mode |= 4u;
+  }
+  return mode;
+}
+
+void* MetalRenderTargetCache::EnsureHostLaneBuffer(void* device_handle) {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_handle;
+  if (host_depth_gate_enabled_ && !f24_ps_engaged_) {
+    if (!host_depth_lane_) {
+      // Same index space as the canonical words: 10 MiB of float.
+      id<MTLBuffer> lane =
+          [device newBufferWithLength:10 * 1024 * 1024
+                              options:MTLResourceStorageModePrivate];
+      lane.label = @"rtcache:host-depth-lane";
+      host_depth_lane_ = (__bridge_retained void*)lane;
+    }
+    return host_depth_lane_;
+  }
+  if (!host_lane_dummy_) {
+    id<MTLBuffer> dummy =
+        [device newBufferWithLength:16
+                            options:MTLResourceStorageModePrivate];
+    dummy.label = @"rtcache:host-depth-lane-dummy";
+    host_lane_dummy_ = (__bridge_retained void*)dummy;
+  }
+  return host_lane_dummy_;
+}
+
 void MetalRenderTargetCache::RecordTransition(TransferKind kind,
                                               const RenderTargetKey& src_key,
                                               const RenderTargetKey& dst_key,
@@ -1252,7 +1286,30 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   rec.start_tiles = transfer.start_tiles;
   rec.end_tiles = transfer.end_tiles;
   transition_manifest_.push_back(rec);
+  // Stage B 3.4: DIRECT measurement of the two host-depth transfer classes.
+  // Generic color_to_depth counts do not prove kColorAndHostDepthToDepth —
+  // only a transfer carrying host_depth_source does. Class is named by the
+  // guest-word SOURCE type (the host-depth side is a depth RT by
+  // construction). One-shot per class unconditionally (engagement evidence
+  // must not depend on a diagnostic env), every occurrence in the manifest.
+  const char* two_source_class = nullptr;
+  if (transfer.host_depth_source) {
+    two_source_class = src_key.is_depth ? "depth_and_host_depth_to_depth"
+                                        : "color_and_host_depth_to_depth";
+    static bool s_seen[2] = {false, false};
+    bool& seen = s_seen[src_key.is_depth ? 0 : 1];
+    if (!seen) {
+      seen = true;
+      XELOGI("MetalHostDepth: FIRST two-source transfer class {} @draw {}",
+             two_source_class, rec.draw_index);
+    }
+  }
   static const bool s_manifest = std::getenv("XE_METAL_TRANSITION_MANIFEST");
+  if (s_manifest && two_source_class) {
+    XELOGW("MetalXferTwoSource[{}] @draw {}: {} -> {} tiles [{},{})",
+           two_source_class, rec.draw_index, src_key.GetDebugName(),
+           dst_key.GetDebugName(), rec.start_tiles, rec.end_tiles);
+  }
   if (s_manifest) {
     // Warning level (not GPU/Debug): the sibling transfer logs use XELOGW and a
     // Release build filters Debug, so a Debug line here logs nothing on-device
@@ -1320,6 +1377,8 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
                              device uint* canonical [[buffer(0)]],
                              constant SurfaceParams& sp [[buffer(1)]],
                              constant RangeParams& rp [[buffer(2)]],
+                             constant HostLaneParams& hl [[buffer(3)]],
+                             device float* lane [[buffer(4)]],
                              uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
@@ -1339,14 +1398,21 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
     uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                      sp.is_depth, 0u, sid);
     uint idx = off >> 2;
-    if (idx < sp.words) canonical[idx] = word;
+    if (idx < sp.words) {
+      canonical[idx] = word;
+      // Stage B: host-precision lane beside every replicated slot, so a
+      // later reconcile at ANY sample of the group can restore it.
+      if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
+    }
   }
 }
 fragment DepthFragOut materialize_depth_range_fs(
     DepthVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
     constant SurfaceParams& sp [[buffer(1)]],
-    constant RangeParams& rp [[buffer(2)]]) {
+    constant RangeParams& rp [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device const float* lane [[buffer(4)]]) {
   uint2 gid = uint2(in.pos.xy);
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
   if (tile < rp.start_tiles || tile >= rp.end_tiles) discard_fragment();
@@ -1355,7 +1421,11 @@ fragment DepthFragOut materialize_depth_range_fs(
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
   DepthFragOut o;
-  o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  if ((hl.mode & 2u) && sp.is_depth == 2u && idx < sp.words) {
+    o.depth = xe_host_depth_reconcile(w, lane[idx], (hl.mode >> 2u) & 1u);
+  } else {
+    o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  }
   return o;
 }
 fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
@@ -1560,6 +1630,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  {
+    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                                   (__bridge void*)texture.device)
+                        offset:0
+                       atIndex:4];
+  }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipelines->mat_sten_range];
@@ -1620,6 +1698,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&range length:sizeof(range) atIndex:2];
+  {
+    uint32_t hl_mode = HostLaneMode(/*materialize=*/false);
+    [encoder setBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                           (__bridge void*)command.device)
+                offset:0
+               atIndex:4];
+  }
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
@@ -1701,6 +1787,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  {
+    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                                   (__bridge void*)texture.device)
+                        offset:0
+                       atIndex:4];
+  }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipelines->mat_sten_ms_range];
@@ -1767,6 +1861,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   [encoder setBuffer:canonical offset:0 atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&range length:sizeof(range) atIndex:2];
+  {
+    uint32_t hl_mode = HostLaneMode(/*materialize=*/false);
+    [encoder setBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                           (__bridge void*)command.device)
+                offset:0
+               atIndex:4];
+  }
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
@@ -2043,6 +2145,14 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
   [e setFragmentBuffer:canonical offset:0 atIndex:0];
   [e setFragmentBytes:&sp_dst length:sizeof(sp_dst) atIndex:1];
   [e setFragmentBytes:&rp length:sizeof(rp) atIndex:2];
+  {
+    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    [e setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [e setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                             (__bridge void*)cb.device)
+                  offset:0
+                 atIndex:4];
+  }
   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   // Stencil bit-plane REPLACE passes.
   [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)p->mat_sten_range];

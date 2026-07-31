@@ -33,6 +33,7 @@
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
+#include "xenia/gpu/metal/metal_host_depth_reconcile.h"
 #include "xenia/gpu/metal/metal_edram_msl.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
 #include "xenia/gpu/trace_analysis_decode.h"
@@ -122,6 +123,31 @@ kernel void k_resolve_color_value(
 // Color materialize/pack helpers and kernels live in the shared kEdramMsl
 // production source prepended by Init(). The tests below invoke those exact
 // functions, so the live cache and the conformance oracle cannot drift.
+
+// Stage B (implement-metal-depth-semantics 3.3): pin the RNE f20e4 encoder
+// and the host-depth reconcile against their CPU oracles. Reconcile consumes
+// interleaved pairs (word, host-bits) so the unary harness carries it.
+kernel void k_f20e4_rne(device const uint* in [[buffer(0)]],
+                        device uint* out [[buffer(1)]],
+                        uint i [[thread_position_in_grid]]) {
+  out[i] = xe_f32_to_f20e4_rne(as_type<float>(in[i]));
+}
+// One thread per ELEMENT (matching the harness grid): even threads own a
+// (word, host) pair and write the reconciled bits; odd threads write 0.
+kernel void k_host_depth_reconcile_trunc(
+    device const uint* in [[buffer(0)]], device uint* out [[buffer(1)]],
+    uint i [[thread_position_in_grid]]) {
+  if (i & 1u) { out[i] = 0u; return; }
+  out[i] = as_type<uint>(
+      xe_host_depth_reconcile(in[i], as_type<float>(in[i + 1u]), 0u));
+}
+kernel void k_host_depth_reconcile_rne(
+    device const uint* in [[buffer(0)]], device uint* out [[buffer(1)]],
+    uint i [[thread_position_in_grid]]) {
+  if (i & 1u) { out[i] = 0u; return; }
+  out[i] = as_type<uint>(
+      xe_host_depth_reconcile(in[i], as_type<float>(in[i + 1u]), 1u));
+}
 
 kernel void k_gpuswap(device const uint* in [[buffer(0)]],
                       device uint* out [[buffer(1)]],
@@ -1912,6 +1938,81 @@ TEST_CASE("Metal unorm24 decode matches CPU oracle bit-for-bit", "[l1][metal][un
   }
   auto gpu = mc.Run("k_unorm24", codes);
   REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal RNE 20e4 encode matches CPU oracle bit-for-bit",
+          "[l1][metal][float24][depth_semantics]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Encode every decoded code (exactness fixed points) plus midpoints between
+  // adjacent codes (the rounding decision points) plus saturation inputs.
+  std::vector<uint32_t> inputs;
+  auto push_f = [&](float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    inputs.push_back(u);
+  };
+  for (uint32_t c = 0; c < (1u << 24); c += 509u) {
+    float lo = xenos::Float20e4To32(c);
+    float hi = xenos::Float20e4To32(c + 1);
+    push_f(lo);
+    push_f(lo + (hi - lo) * 0.5f);  // exact midpoint (tie)
+    push_f(lo + (hi - lo) * 0.75f);
+  }
+  push_f(32.0f);
+  push_f(1.0e6f);
+  push_f(0.0f);
+  std::vector<uint32_t> cpu(inputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    float f;
+    std::memcpy(&f, &inputs[i], 4);
+    cpu[i] = xenos::Float32To20e4(f, /*round_to_nearest_even=*/true);
+  }
+  auto gpu = mc.Run("k_f20e4_rne", inputs);
+  REQUIRE(CountMismatches(inputs, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal host-depth reconcile matches the CPU oracle, both modes",
+          "[l1][metal][depth_semantics][host_depth]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Interleaved (guest word, host bits) pairs: exact matches (host wins),
+  // one-code clobbers (guest wins), one-ULP host nudges (host wins), and the
+  // midpoint whose winner flips with the mode.
+  std::vector<uint32_t> pairs;
+  auto push_pair = [&](uint32_t d24, float host) {
+    uint32_t hbits;
+    std::memcpy(&hbits, &host, 4);
+    pairs.push_back((d24 << 8) | 0xA5u);
+    pairs.push_back(hbits);
+  };
+  for (uint32_t c = 1; c < (1u << 24); c += 1021u) {
+    float host = xenos::Float20e4To32(c) * 0.5f;
+    push_pair(c, host);                       // exact -> host wins
+    push_pair((c + 1) & 0xFFFFFFu, host);     // clobbered -> guest wins
+  }
+  const uint32_t lower = (5u << 20) | 0x12345u;
+  float mid = (xenos::Float20e4To32(lower) +
+               (xenos::Float20e4To32(lower + 1) -
+                xenos::Float20e4To32(lower)) *
+                   0.5f) *
+              0.5f;
+  push_pair(lower, mid);
+  push_pair(lower + 1, mid);
+  for (bool rne : {false, true}) {
+    INFO("rne=" << rne);
+    std::vector<uint32_t> cpu(pairs.size(), 0u);
+    for (size_t i = 0; i + 1 < pairs.size(); i += 2) {
+      float host;
+      std::memcpy(&host, &pairs[i + 1], 4);
+      float r = metal::MetalHostDepthReconcile(pairs[i], host, rne);
+      std::memcpy(&cpu[i], &r, 4);
+    }
+    auto gpu = mc.Run(
+        rne ? "k_host_depth_reconcile_rne" : "k_host_depth_reconcile_trunc",
+        pairs);
+    REQUIRE(CountMismatches(pairs, gpu, cpu) == 0u);
+  }
 }
 
 TEST_CASE("Canonical depth resolve exposes guest rather than attachment domain",

@@ -732,6 +732,44 @@ inline uint xe_f32_to_f20e4(float f) {  // inverse; mirrors the d2c encode
   }
   return (u >> 3) & 0xFFFFFFu;
 }
+// Round-to-nearest-even f20e4 encode: same biasing as the truncating form,
+// but the 3 dropped mantissa bits round to nearest with ties to even, and the
+// increment saturates at the format maximum instead of wrapping. Mirrors
+// xenos::Float32To20e4(f, /*round_to_nearest_even=*/true) — the stage-B
+// reconcile arm and any future rounding-mode pack share ONE definition here.
+inline uint xe_f32_to_f20e4_rne(float f) {
+  if (!(f > 0.0)) return 0u;
+  uint u = as_type<uint>(f);
+  if (u >= 0x40000000u) return 0xFFFFFFu;
+  if (u < 0x38800000u) {
+    uint shift = min(113u - (u >> 23), 24u);
+    u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
+  } else {
+    u -= 0x38000000u;
+  }
+  uint dropped = u & 7u;
+  uint code = (u >> 3) & 0x1FFFFFFu;
+  if (dropped > 4u || (dropped == 4u && (code & 1u))) ++code;
+  return min(code, 0xFFFFFFu);
+}
+inline uint xe_f24_pack_mode(float f, uint rne) {
+  return rne != 0u ? xe_f32_to_f20e4_rne(f) : xe_f32_to_f20e4(f);
+}
+// Stage B host-depth lane (implement-metal-depth-semantics). mode bits:
+//   1 = pack writes the host-precision depth into the lane
+//   2 = materialize reconciles from the lane
+//   4 = the arm's f20e4 rounding is round-to-nearest-even
+// The lane is a plain float array parallel to the canonical words (same idx
+// space); validity is POINTWISE — the host value is used only if packing it
+// under the arm's mode reproduces the guest word's depth bits, so a stale
+// lane self-invalidates and no ownership metadata exists. Mirrored on the
+// CPU by metal_host_depth_reconcile.h; the L1 kernel case pins the pair.
+struct HostLaneParams { uint mode; };
+inline float xe_host_depth_reconcile(uint word, float host_d, uint rne) {
+  uint guest_d24 = xe_depth24(word);
+  if (xe_f24_pack_mode(host_d * 2.0, rne) == guest_d24) return host_d;
+  return xe_f20e4_to_f32(guest_d24) * 0.5;
+}
 // UNorm24 (kD24S8): the exact Xenia mapping. The numerator n24+(n24>>23) is an
 // integer <= 2^24 (exactly representable in f32) and the *2^-24 only shifts the
 // exponent, so EVERY decoded value is an exact f32 -- no near-1.0 collision.
@@ -876,6 +914,8 @@ fragment DepthFragOut materialize_depth_ms_range_fs(
     device const uint* canonical [[buffer(0)]],
     constant SurfaceParams& sp [[buffer(1)]],
     constant AuthorityRangeParams& range [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device const float* lane [[buffer(4)]],
     uint sid [[sample_id]]) {
   uint2 gid = uint2(in.pos.xy);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, sid);
@@ -887,7 +927,11 @@ fragment DepthFragOut materialize_depth_ms_range_fs(
   uint idx = off >> 2;
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
   DepthFragOut o;
-  o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  if ((hl.mode & 2u) && sp.is_depth == 2u && idx < sp.words) {
+    o.depth = xe_host_depth_reconcile(w, lane[idx], (hl.mode >> 2u) & 1u);
+  } else {
+    o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  }
   return o;
 }
 fragment void materialize_sten_ms_range_fs(
@@ -914,6 +958,8 @@ kernel void pack_depth_ms_range(
     device uint* canonical [[buffer(0)]],
     constant SurfaceParams& sp [[buffer(1)]],
     constant AuthorityRangeParams& range [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device float* lane [[buffer(4)]],
     uint3 gid [[thread_position_in_grid]]) {
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
@@ -927,6 +973,9 @@ kernel void pack_depth_ms_range(
   uint s = sten.read(uint2(gid.x, gid.y), gid.z).r & 0xFFu;
   canonical[idx] =
       xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
+  // Stage B: preserve the host-precision depth beside the packed word. Only
+  // float24 (is_depth==2) carries extra precision worth a lane slot.
+  if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
 }
 
 // Canonical resolve source. Destination formatting is performed by the Metal

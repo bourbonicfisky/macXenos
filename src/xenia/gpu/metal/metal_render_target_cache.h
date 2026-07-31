@@ -305,6 +305,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // are set (the misconfigured-arm guard reviewers required).
   bool host_depth_gate_enabled_ = false;
   bool f24_ps_engaged_ = false;
+  // Host-precision depth lane parallel to the canonical words (10 MiB of
+  // float, private) — allocated lazily only when the gate is on. The dummy
+  // (16 B) satisfies the changed kernel signatures when the gate is off;
+  // mode bits 0 guard every access. HostLaneMode: bit0 pack-write, bit1
+  // materialize-reconcile, bit2 round-to-nearest-even.
+  void* host_depth_lane_ = nullptr;   // id<MTLBuffer>, retained
+  void* host_lane_dummy_ = nullptr;   // id<MTLBuffer>, retained
+  uint32_t HostLaneMode(bool materialize) const;
+  void* EnsureHostLaneBuffer(void* device);
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,
