@@ -22,6 +22,8 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_auto_trace_trigger.h"
+#include "xenia/gpu/metal/metal_draw_skip_accounting.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
@@ -339,6 +341,23 @@ class MetalCommandProcessor : public CommandProcessor {
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
   uint32_t draw_skip_count_ = 0;
+
+  // Reason-coded skip classification behind draw_skip_count_. Records the
+  // current draw's primitive/shader identity at each skip site; reported at
+  // swap and consulted by trace triggering. See metal_draw_skip_accounting.h.
+  MetalDrawSkipAccounting draw_skip_accounting_;
+  // The one place every skip site goes through: bumps draw_skip_count_,
+  // records the reason, and emits a one-shot log line for actionable sites.
+  void RecordDrawSkip(MetalDrawSkipReason reason, const char* site);
+
+  // Condition-triggered next-frame capture (XE_METAL_AUTO_TRACE, default
+  // off): evaluated at swap against this frame's actionable skips and GPU
+  // faults; a fire arms RequestFrameTrace so the NEXT frame is captured.
+  // Lazily constructed so env parsing happens once, on the GPU thread.
+  std::unique_ptr<MetalAutoTraceTrigger> auto_trace_trigger_;
+  // Faulted command buffers drained since the previous swap (GPU thread
+  // only: bumped in DrainFaultedCommandBuffers, reset in IssueSwap).
+  uint32_t frame_gpu_fault_count_ = 0;
 
   // Bounded, deduplicated reporting of memexport producer classes this backend
   // does not route. Reset at the title/session boundary; holds no guest state

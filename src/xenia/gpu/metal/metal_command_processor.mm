@@ -40,6 +40,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
@@ -1518,6 +1519,7 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     faulted.swap(faulted_command_buffers_);
     faulted_ids.swap(faulted_submission_ids_);
   }
+  frame_gpu_fault_count_ += uint32_t(faulted_ids.size());
   for (uint64_t id : faulted_ids) {
     faulted_submissions_.insert(id);
     // Bounded: fault-attribution evidence, not a growing ledger.
@@ -2298,6 +2300,55 @@ static void* GetDebugSolidPipeline(
   return ps_ptr;
 }
 
+// Env-configured, diagnostics-default-off (house rule): XE_METAL_AUTO_TRACE=1
+// enables; _SKIPS / _COOLDOWN / _MAX tune the policy. Parsed once at first
+// swap on the GPU thread.
+static MetalAutoTraceConfig ParseAutoTraceConfigFromEnv() {
+  MetalAutoTraceConfig config;
+  const char* enabled = std::getenv("XE_METAL_AUTO_TRACE");
+  config.enabled = enabled && enabled[0] && std::strcmp(enabled, "0") != 0;
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_SKIPS")) {
+    config.skip_threshold = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_COOLDOWN")) {
+    config.cooldown_frames = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_MAX")) {
+    config.max_captures = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  return config;
+}
+
+void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
+                                           const char* site) {
+  ++draw_skip_count_;
+  const RegisterFile& regs = *register_file_;
+  uint32_t prim_type =
+      uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type);
+  const Shader* vs = active_vertex_shader();
+  const Shader* ps = active_pixel_shader();
+  bool first_in_session = draw_skip_accounting_.Record(
+      site, reason, trace_draw_index_, prim_type,
+      vs ? vs->ucode_data_hash() : 0, ps ? ps->ucode_data_hash() : 0);
+  // One log line per site per session, actionable severities only: the info
+  // tier (expected pruning, diagnostic rollbacks) is high-frequency by nature
+  // and lives in the swap report / XE_METAL_SKIP_REPORT dump instead.
+  if (first_in_session) {
+    MetalDrawSkipSeverity severity = MetalDrawSkipSeverityFor(reason);
+    if (severity == MetalDrawSkipSeverity::kError) {
+      XELOGE("MetalDrawSkip[{}] {} first draw={} prim={} vs={:016X} ps={:016X}",
+             MetalDrawSkipReasonName(reason), site, trace_draw_index_,
+             prim_type, vs ? vs->ucode_data_hash() : 0,
+             ps ? ps->ucode_data_hash() : 0);
+    } else if (severity == MetalDrawSkipSeverity::kWarning) {
+      XELOGW("MetalDrawSkip[{}] {} first draw={} prim={} vs={:016X} ps={:016X}",
+             MetalDrawSkipReasonName(reason), site, trace_draw_index_,
+             prim_type, vs ? vs->ucode_data_hash() : 0,
+             ps ? ps->ucode_data_hash() : 0);
+    }
+  }
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -2315,7 +2366,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
   auto* pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
   if (!vertex_shader || !pipeline_cache_ || !upload_arena_) {
-    ++draw_skip_count_;
+    RecordDrawSkip(!vertex_shader ? MetalDrawSkipReason::kInvalidGuestState
+                                  : MetalDrawSkipReason::kResourceFailure,
+                   !vertex_shader ? "no-vertex-shader" : "draw-objects-missing");
     return true;
   }
 
@@ -2348,7 +2401,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // return true and just render nothing so the game keeps advancing.
   MTLPrimitiveType mtl_prim = MTLPrimitiveTypeTriangle;
   if (!use_geometry_emulation && !auto_line_loop_route && !MapPrimitiveType(prim_type, &mtl_prim)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                   "prim-unmappable");
     return true;
   }
 
@@ -2360,7 +2414,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              "banks VS={:08X} PS={:08X}",
              regs[XE_GPU_REG_SQ_VS_CONST], regs[XE_GPU_REG_SQ_PS_CONST]);
     }
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                   "constant-banks");
     return true;
   }
 
@@ -2569,7 +2624,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
         }
       }
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                     "no-rt-no-export");
       return true;
     }
     // Commit the destination pages; failure means the exports have nowhere
@@ -2593,7 +2649,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     if (!ranges_ok) {
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "memexport-range");
       return true;
     }
     // Rasterization is disabled on this path: the pixel shader (if any) and
@@ -2607,7 +2663,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         XELOGW("MetalMemexportSkip draw={} unmappable prim {} for export",
                trace_draw_index_, uint32_t(prim_type));
       }
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                     "memexport-prim-unmappable");
       return true;
     }
     if (s_memexport_log) {
@@ -2768,7 +2825,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           "of {} selected producers; skipping draw",
           dependency_outcome.drain.drained_records,
           authority_decision.selected.size());
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "vertex-dependency-drain");
       return true;
     }
   }
@@ -2846,7 +2904,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       XELOGE("MetalCommandProcessor: failed to validate vertex range "
              "{:08X}(+{})",
              dependency.range.start(), dependency.range.length());
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "vertex-range-validate");
       return true;
     }
   }
@@ -2867,7 +2926,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (!memexport_draw &&
       !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
                                     normalized_color_mask, *vertex_shader)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "rt-cache-update");
     return true;
   }
   // A/B probe: XE_METAL_NO_SMALL_DEPTH=1 disables the depth test on
@@ -2880,7 +2939,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     depth_bound = false;
     if (!render_target_cache_->Update(color_bound, norm_depth,
                                       normalized_color_mask, *vertex_shader)) {
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kDiagnosticRollback,
+                     "rt-cache-update-nosmalldepth");
       return true;
     }
   }
@@ -2898,7 +2958,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   depth_bound = !memexport_draw && kDepthEnabled &&
                 render_target_cache_->current_depth_texture() != nullptr;
   if (!have_color && !depth_bound && !memexport_draw) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                   "no-bound-targets");
     return true;
   }
   // Diagnostic: XE_METAL_PRECLEAR_RT=<trace draw index> clears the bound
@@ -2979,7 +3040,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
   if (!pipeline_cache_->TranslateShader(*vs_translation)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
     return true;
   }
   MetalShader::MetalTranslation* ps_translation = nullptr;
@@ -3104,7 +3165,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       XELOGW("MetalCommandProcessor: NULL PIPELINE skip ps={:016X} fmt={:X}",
              pixel_shader->ucode_data_hash(), color_pixel_formats[0]);
     }
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kPipelineFailure, "pipeline-null");
     return true;
   }
 
@@ -3166,7 +3227,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           "of {} selected producers; skipping draw",
           dependency_outcome.drain.drained_records,
           authority_decision.selected.size());
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "texture-dependency-drain");
       return true;
     }
   }
@@ -3378,13 +3440,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // intentionally unmapped. If view consistency, Process, or the exact shape
   // guard rejected the route, preserve the prior behavior and skip.
   if (auto_line_loop_route && !pp_routed) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                   "line-loop-route");
     return true;
   }
   // A degenerate loop is a successful no-draw. Skip before opening an encoder
   // or allocating constants, and never expose the synthetic closing vertex.
   if (auto_line_loop_route && pp_result.host_draw_vertex_count == 0) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                   "line-loop-degenerate");
     return true;
   }
 
@@ -3393,7 +3457,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                   "encoder-unavailable");
     return true;
   }
 
@@ -3803,7 +3868,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         intersect_render_extent(render_target_cache_->current_depth_texture());
       }
       if (!have_render_extent) {
-        ++draw_skip_count_;
+        RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                       "empty-render-extent");
         return true;
       }
       draw_util::Scissor guest_scissor;
@@ -3855,7 +3921,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
   if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "sysconst-alloc");
     return true;
   }
   std::memcpy(system_alloc.cpu_ptr, &system_constants, sizeof(system_constants));
@@ -3873,7 +3939,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   MetalUploadAllocation float_vertex_alloc{};
   if (!marshal_floats(vs_map, XE_GPU_REG_SHADER_CONSTANT_000_X,
                       &float_vertex_alloc)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                   "float-consts-vs-alloc");
     return true;
   }
   // Forensics (with XE_METAL_DUMP_PS): log the packed VS b1 upload once —
@@ -3919,7 +3986,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (pixel_shader) {
     if (!marshal_floats(pixel_shader->constant_register_map(),
                         XE_GPU_REG_SHADER_CONSTANT_256_X, &float_pixel_alloc)) {
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "float-consts-ps-alloc");
       return true;
     }
     // Exposure telemetry (XE_METAL_EXPO_TRACE=<ps hash hex>): capture the
@@ -3984,7 +4052,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      &bool_loop_alloc) ||
       !marshal_block(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, kMetalFetchConstantsSize,
                      &fetch_alloc)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                   "boolloop-fetch-alloc");
     return true;
   }
 
@@ -4115,7 +4184,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   MetalUploadAllocation desc_idx_pixel_alloc{};
   if (!marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc) ||
       !marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
     return true;
   }
 
@@ -4131,7 +4200,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   MetalUploadAllocation ab_alloc{};
   if (!upload_arena_->Allocate(kMetalBindingSlotCount * sizeof(uint64_t), 256, &ab_alloc)) {
-    ++draw_skip_count_;
+    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "argbuffer-alloc");
     return true;
   }
   MetalBindingAddresses binding_addresses;
@@ -4318,7 +4387,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           memory_->TranslatePhysical(index_buffer_info->guest_base);
       MetalUploadAllocation index_alloc{};
       if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
-        ++draw_skip_count_;
+        RecordDrawSkip(!guest_indices
+                           ? MetalDrawSkipReason::kInvalidGuestState
+                           : MetalDrawSkipReason::kResourceFailure,
+                       !guest_indices ? "index-guest-null" : "index-alloc");
         return true;
       }
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
@@ -4353,14 +4425,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // works whether the guest draw is indexed or sequential (auto).
   if (prim_type == xenos::PrimitiveType::kTriangleFan && !pp_routed) {
     if (index_count < 3) {
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "fan-degenerate");
       return true;
     }
     uint32_t host_index_count = (index_count - 2) * 3;
     MetalUploadAllocation fan_alloc{};
     if (!upload_arena_->Allocate(host_index_count * sizeof(uint32_t), 16,
                                  &fan_alloc)) {
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "fan-index-alloc");
       return true;
     }
     // Source vertex indices: the (endian-swapped) guest index buffer, or the
@@ -4369,7 +4441,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (index_buffer_info && index_buffer_info->guest_base) {
       const void* gi = memory_->TranslatePhysical(index_buffer_info->guest_base);
       if (!gi) {
-        ++draw_skip_count_;
+        RecordDrawSkip(MetalDrawSkipReason::kInvalidGuestState,
+                       "fan-guest-null");
         return true;
       }
       bool i32 = index_buffer_info->format == xenos::IndexFormat::kInt32;
@@ -4426,7 +4499,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const void* guest_indices = memory_->TranslatePhysical(pp_result.guest_index_base);
       MetalUploadAllocation index_alloc{};
       if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
-        ++draw_skip_count_;
+        RecordDrawSkip(!guest_indices
+                           ? MetalDrawSkipReason::kInvalidGuestState
+                           : MetalDrawSkipReason::kResourceFailure,
+                       !guest_indices ? "pp-index-guest-null"
+                                      : "pp-index-alloc");
         return true;
       }
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count, pp_result.host_index_format,
@@ -4451,20 +4528,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // inline path) and draw UInt16. count<3 -> host_count 0 -> no-draw skip,
       // matching the inline path exactly.
       if (host_count == 0) {
-        ++draw_skip_count_;
+        RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                       "pp2-degenerate");
         return true;
       }
       uint32_t total = host_count * uint32_t(sizeof(uint16_t));
       MetalUploadAllocation index_alloc{};
       if (!upload_arena_->Allocate(total, 16, &index_alloc)) {
-        ++draw_skip_count_;
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "pp2-index-alloc");
         return true;
       }
       if (!primitive_processor_->CopyBuiltinIndexData(
               pp_result.host_index_buffer_handle, total, index_alloc.cpu_ptr)) {
         // Out-of-bounds slice (never expected: num_indices is 16-bit and the
         // table covers UINT16_MAX). Fail closed to a skip rather than read past.
-        ++draw_skip_count_;
+        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                       "pp2-builtin-copy");
         return true;
       }
       id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
@@ -4482,7 +4562,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              "unexpected index_buffer_type {}; skipping.",
              uint32_t(pp_result.index_buffer_type));
       assert_always();
-      ++draw_skip_count_;
+      RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                     "pp-index-type");
       return true;
     }
   } else if (index_buffer_info && index_buffer_info->guest_base) {
@@ -4494,7 +4575,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     MetalUploadAllocation index_alloc{};
     if (!guest_indices ||
         !upload_arena_->Allocate(total, 16, &index_alloc)) {
-      ++draw_skip_count_;
+      RecordDrawSkip(!guest_indices ? MetalDrawSkipReason::kInvalidGuestState
+                                    : MetalDrawSkipReason::kResourceFailure,
+                     !guest_indices ? "dma-index-guest-null"
+                                    : "dma-index-alloc");
       return true;
     }
     SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
@@ -7029,7 +7113,61 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         frontbuffer_height, frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
+    // Session-scope reason breakdown, actionable sites only: harmless pruning
+    // (kInfo) never earns a periodic line — that separation is what lets a
+    // trace trigger arm on "actionable skips this frame" without firing on
+    // no-effect draws.
+    std::string skip_report =
+        draw_skip_accounting_.FormatReport(/*frame_scope=*/false,
+                                           /*actionable_only=*/true);
+    if (!skip_report.empty()) {
+      XELOGW("MetalDrawSkip session report: {}", skip_report);
+    }
   }
+  static const bool s_skip_report_every_swap =
+      std::getenv("XE_METAL_SKIP_REPORT") != nullptr;
+  if (s_skip_report_every_swap && draw_skip_accounting_.frame_total_count()) {
+    XELOGI("MetalDrawSkip frame report ({} total, {} actionable): {}",
+           draw_skip_accounting_.frame_total_count(),
+           draw_skip_accounting_.frame_actionable_count(),
+           draw_skip_accounting_.FormatReport(/*frame_scope=*/true,
+                                              /*actionable_only=*/false));
+  }
+  if (!auto_trace_trigger_) {
+    auto_trace_trigger_ =
+        std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
+    if (auto_trace_trigger_->config().enabled) {
+      XELOGI(
+          "MetalAutoTrace: armed (skips>={}, on-fault={}, cooldown={} frames, "
+          "budget={})",
+          auto_trace_trigger_->config().skip_threshold,
+          auto_trace_trigger_->config().on_gpu_fault,
+          auto_trace_trigger_->config().cooldown_frames,
+          auto_trace_trigger_->config().max_captures);
+    }
+  }
+  // Only arm when no capture is pending or streaming: RequestFrameTrace would
+  // reject anyway, but going through it would log a spurious error.
+  if (auto_trace_trigger_->config().enabled &&
+      trace_state_ == TraceState::kDisabled) {
+    MetalAutoTraceTrigger::Decision auto_trace =
+        auto_trace_trigger_->Evaluate(swap_count_,
+                                      draw_skip_accounting_.frame_actionable_count(),
+                                      frame_gpu_fault_count_);
+    if (auto_trace.fire) {
+      XELOGW(
+          "MetalAutoTrace: {} at swap#{} (actionable-skips={} gpu-faults={}); "
+          "capturing NEXT frame ({}/{}) -> {}",
+          auto_trace.reason, swap_count_,
+          draw_skip_accounting_.frame_actionable_count(),
+          frame_gpu_fault_count_, auto_trace_trigger_->fired_count(),
+          auto_trace_trigger_->config().max_captures,
+          xe::path_to_utf8(cvars::trace_gpu_prefix));
+      RequestFrameTrace(cvars::trace_gpu_prefix);
+    }
+  }
+  frame_gpu_fault_count_ = 0;
+  draw_skip_accounting_.EndFrame();
 
   // MetalFlicker probe (testing framework): async center-strip readback of
   // the presented texture; each swap reads the PREVIOUS swap's strip (a full
