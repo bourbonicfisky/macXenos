@@ -210,6 +210,10 @@ if(APPLE)
   # DXBC -> DXIL -> MSC and executes the closing-index remap on the device.
   add_executable(xenia-gpu-metal-line-loop-conformance
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_line_loop_shader_remap_test.mm
+    # Same executable, same reason: this drives the production DXBC ->
+    # DXBC-to-DXIL -> MetalShaderConverter -> geometry-emulation pipeline chain,
+    # so it needs the monolithic GPU closure that the lean L0 binary avoids.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_geometry_clip_plane_discriminator_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )
