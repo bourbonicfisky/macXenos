@@ -3519,51 +3519,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // component as that lane's sign. They are consumed together, in the
         // same shader, one immediately after the other.
         if (integer_texture_scaling_enabled) {
-          uint32_t scale_bits = PublishIntegerScaleBits(
-              fc, fetch, uint8_t(signs),
-              system_constants.texture_integer_scale_bits,
-              kMetalIntegerScaleSlotCount);
-          // TEMPORARY acceptance probe (XE_INTEGER_SCALE_REPORT=1), removed
-          // before closure: reports what is actually published per slot, and
-          // the per-component multiplier the shader will form from it.
-          static const bool s_scale_report =
-              std::getenv("XE_INTEGER_SCALE_REPORT") != nullptr;
-          if (s_scale_report) {
-            uint64_t site = (uint64_t(shader->ucode_data_hash()) << 8) | fc;
-            static std::set<uint64_t> s_reported;
-            if (s_reported.insert(site).second) {
-              uint32_t mul[4];
-              for (uint32_t c = 0; c < 4; ++c) {
-                uint32_t field = (scale_bits >> (c * 5)) & 0x1F;
-                uint32_t width = (field & 0xF) + 1;
-                uint32_t sgn = (field & 0x10) ? 1 : 0;
-                mul[c] = field ? ((1u << (width - sgn)) - 1u) : 0u;
-              }
-              auto filter_name = [](xenos::TextureFilter f) {
-                switch (f) {
-                  case xenos::TextureFilter::kPoint: return "point";
-                  case xenos::TextureFilter::kLinear: return "linear";
-                  case xenos::TextureFilter::kBaseMap: return "basemap";
-                  default: return "usefetchconst";
-                }
-              };
-              XELOGI(
-                  "IntegerScaleReport: stage={} shader={:016X} slot={} "
-                  "format={} num_format={} signs={:02X} swizzle={:03X} "
-                  "packed={:08X} mul={},{},{},{} mag={} min={} mip={} "
-                  "aniso={} mip_min={} mip_max={} mip_addr={:X}",
-                  shader->type() == xenos::ShaderType::kVertex ? "VS" : "PS",
-                  shader->ucode_data_hash(), fc,
-                  FormatInfo::GetName(uint32_t(fetch.format)),
-                  uint32_t(fetch.num_format), signs, uint32_t(fetch.swizzle),
-                  scale_bits, mul[0], mul[1], mul[2], mul[3],
-                  filter_name(fetch.mag_filter), filter_name(fetch.min_filter),
-                  filter_name(fetch.mip_filter), uint32_t(fetch.aniso_filter),
-                  uint32_t(fetch.mip_min_level),
-                  uint32_t(fetch.mip_max_level),
-                  uint32_t(fetch.mip_address) << 12);
-            }
-          }
+          PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
+                                  system_constants.texture_integer_scale_bits,
+                                  kMetalIntegerScaleSlotCount);
         }
         // Gamma-parity diagnostic: the game's signs describe the raw bytes
         // hardware resolves preserve — compare against the resolve source's
