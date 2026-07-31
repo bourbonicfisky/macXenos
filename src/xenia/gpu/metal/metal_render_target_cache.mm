@@ -211,6 +211,22 @@ bool MetalRenderTargetCache::Initialize() {
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_SELF_CHECK");
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
+  // Stage B (implement-metal-depth-semantics): host-depth ownership gate.
+  // Default OFF; the predicate additionally fails closed while the Stage A
+  // float24 PS conversion is engaged (both-gates arms self-disable B).
+  host_depth_gate_enabled_ =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_HOST_DEPTH");
+  f24_ps_engaged_ =
+      MetalF24PsEngaged(ParseMetalF24PsMode(std::getenv("XE_METAL_F24_PS")));
+  if (host_depth_gate_enabled_ && f24_ps_engaged_) {
+    XELOGW(
+        "MetalRenderTargetCache: XE_METAL_HOST_DEPTH=1 with XE_METAL_F24_PS "
+        "engaged — host-depth ownership self-disables (PS-converted depth "
+        "carries no extra host precision); run Stage B arms with "
+        "XE_METAL_F24_PS=0");
+  } else if (host_depth_gate_enabled_) {
+    XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B)");
+  }
   const bool canonical_depth_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_CANONICAL_DEPTH");
   canonical_depth_enabled_ = sample_edram_enabled_ && canonical_depth_requested;

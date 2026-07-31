@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/render_target_transfer_class.h"
@@ -282,16 +283,28 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
   // Host depth is D32F vs guest unorm24/float24, but tracking the separate
-  // host-depth ownership (two-source transfers + host depth store) is out of
-  // bring-up scope; accept the precision loss on aliasing.
+  // Stage B (implement-metal-depth-semantics): format-accurate host-depth
+  // ownership behind XE_METAL_HOST_DEPTH (default off = the historic
+  // accept-precision-loss behavior). The decision matrix is the pure
+  // MetalHostDepthEncodingDifferent (canary semantics: kD24FS8 only, and
+  // never while the Stage A float24 PS conversion is engaged), pinned by
+  // metal_depth_semantics_matrix_test.cc.
   bool IsHostDepthEncodingDifferent(
       xenos::DepthRenderTargetFormat format) const override {
-    return false;
+    return MetalHostDepthEncodingDifferent(host_depth_gate_enabled_, format,
+                                           f24_ps_engaged_);
   }
 
   bool IsGammaFormatHostStorageSeparate() const override { return false; }
 
+  bool host_depth_enabled() const { return host_depth_gate_enabled_; }
+
  private:
+  // Stage B gate state, parsed once at InitializeCommon time. f24_ps_engaged_
+  // mirrors the Stage A env so the predicate can fail closed when both gates
+  // are set (the misconfigured-arm guard reviewers required).
+  bool host_depth_gate_enabled_ = false;
+  bool f24_ps_engaged_ = false;
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,

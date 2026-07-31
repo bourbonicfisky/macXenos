@@ -51,6 +51,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_integer_scale_publish.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
@@ -3154,26 +3155,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // MSC acceptance of both modes proven by task 1.1
     // (xenia-gpu-metal-float24-conformance); early-Z survival of the
     // truncating form is measured, not assumed (task 2.4).
-    enum class F24PsMode { kOff, kCvar, kTruncating, kRounding };
-    static const F24PsMode s_f24_mode = [] {
+    static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
-      if (!value || !value[0] || !std::strcmp(value, "0")) {
-        return F24PsMode::kOff;
+      MetalF24PsMode mode = ParseMetalF24PsMode(value);
+      if (mode == MetalF24PsMode::kMalformed) {
+        XELOGW("XE_METAL_F24_PS='{}' is malformed; failing closed to off "
+               "(use 1, trunc, or round)",
+               value);
+        return MetalF24PsMode::kOff;
       }
-      if (!std::strcmp(value, "1")) return F24PsMode::kCvar;
-      if (!std::strcmp(value, "trunc")) return F24PsMode::kTruncating;
-      if (!std::strcmp(value, "round")) return F24PsMode::kRounding;
-      XELOGW("XE_METAL_F24_PS='{}' is malformed; failing closed to off "
-             "(use 1, trunc, or round)",
-             value);
-      return F24PsMode::kOff;
+      return mode;
     }();
-    if (s_f24_mode != F24PsMode::kOff && depth_bound &&
+    if (MetalF24PsEngaged(s_f24_mode) && depth_bound &&
         regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
             xenos::DepthRenderTargetFormat::kD24FS8) {
       bool round_mode =
-          s_f24_mode == F24PsMode::kRounding ||
-          (s_f24_mode == F24PsMode::kCvar && cvars::depth_float24_round);
+          s_f24_mode == MetalF24PsMode::kRounding ||
+          (s_f24_mode == MetalF24PsMode::kCvarDriven &&
+           cvars::depth_float24_round);
       ps_mod_decoded.pixel.depth_stencil_mode =
           round_mode ? DxbcShaderTranslator::Modification::DepthStencilMode::
                            kFloat24Rounding
