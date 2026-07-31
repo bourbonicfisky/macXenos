@@ -102,7 +102,63 @@ TEST_CASE("The production fetch ABI revision is the current one",
           "[integer_scale][cache_identity]") {
   // If this fails, either the revision was bumped without updating the tests
   // below, or it was reverted and the stale-cache hazard is open again.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 3);
+  // 4 = float24 depth invariance modes (implement-metal-depth-semantics
+  // stage A); the 3->4 boundary is pinned by its own transition case below.
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 4);
+}
+
+TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
+          "[cache_identity][float24][depth_semantics]") {
+  // Stage A's stale-artifact boundary, pinned explicitly: a metallib written
+  // by the last pre-float24 build (revision 3) must serve under revision 3,
+  // must be rejected under the production revision 4 — and after that
+  // rejection, MUTATING THE IDENTITY BACK to 3 must find nothing. The third
+  // leg distinguishes a store that DISCARDED the stale directory (required:
+  // rev-3 records were all written with the depth-stencil-mode bits at zero,
+  // so they can never be trusted again) from one that merely filtered reads
+  // by identity while leaving poisoned bytes to be resurrected by a
+  // downgrade or an A/B rollback build.
+  std::filesystem::path root = MakeScratchRoot("f24_transition");
+
+  {
+    MetalPipelineStorage rev3;
+    REQUIRE(rev3.Open(root, kTitleId, IdentityWithFetchAbi(3)));
+    REQUIRE(rev3.StoreMetallib(kMetallibKey, SampleMetallib()));
+    rev3.Close();
+    // Control: revision 3 serves its own artifact, or the rejections below
+    // prove nothing.
+    MetalPipelineStorage warm3;
+    REQUIRE(warm3.Open(root, kTitleId, IdentityWithFetchAbi(3)));
+    std::vector<uint8_t> served;
+    REQUIRE(warm3.LoadMetallib(kMetallibKey, &served));
+    CHECK(served == SampleMetallib());
+    warm3.Close();
+  }
+
+  {
+    // Production revision (4): the revision-3 artifact must not be served.
+    MetalPipelineStorage rev4;
+    REQUIRE(rev4.Open(root, kTitleId,
+                      IdentityWithFetchAbi(
+                          MetalTranslatorConfig::kFetchAbiRevision)));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(rev4.LoadMetallib(kMetallibKey, &served));
+    rev4.Close();
+  }
+
+  {
+    // Downgrade back to 3 AFTER the revision-4 open: still nothing. The
+    // rev-4 open must have discarded the stale directory, so there is no
+    // revision-3 artifact left to resurrect.
+    MetalPipelineStorage back3;
+    REQUIRE(back3.Open(root, kTitleId, IdentityWithFetchAbi(3)));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(back3.LoadMetallib(kMetallibKey, &served));
+    back3.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
 }
 
 TEST_CASE("Fetch ABI revision participates in the cache identity",
