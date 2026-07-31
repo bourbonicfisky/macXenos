@@ -305,6 +305,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // are set (the misconfigured-arm guard reviewers required).
   bool host_depth_gate_enabled_ = false;
   bool f24_ps_engaged_ = false;
+  MetalHostDepthStage host_depth_stage_ = MetalHostDepthStage::kFull;
   // Host-precision depth lane parallel to the canonical words (10 MiB of
   // float, private) — allocated lazily only when the gate is on. The dummy
   // (16 B) satisfies the changed kernel signatures when the gate is off;
@@ -314,6 +315,18 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* host_lane_dummy_ = nullptr;   // id<MTLBuffer>, retained
   uint32_t HostLaneMode(bool materialize) const;
   void* EnsureHostLaneBuffer(void* device);
+  // Two-source tile ranges of the CURRENT transfer batch (the shared plan's
+  // host_depth_source transfers) — the join that scopes reconciliation.
+  // Cleared at PerformTransfers entry; populated by RecordTransition.
+  std::vector<std::pair<uint32_t, uint32_t>> two_source_ranges_;
+  bool TwoSourceRangeOverlaps(uint32_t start_tiles, uint32_t end_tiles) const {
+    for (const auto& range : two_source_ranges_) {
+      if (start_tiles < range.second && range.first < end_tiles) {
+        return true;
+      }
+    }
+    return false;
+  }
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,

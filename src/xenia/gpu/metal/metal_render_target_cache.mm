@@ -225,7 +225,20 @@ bool MetalRenderTargetCache::Initialize() {
         "carries no extra host precision); run Stage B arms with "
         "XE_METAL_F24_PS=0");
   } else if (host_depth_gate_enabled_) {
-    XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B)");
+    host_depth_stage_ =
+        ParseMetalHostDepthStage(std::getenv("XE_METAL_HOST_DEPTH_STAGE"));
+    if (host_depth_stage_ == MetalHostDepthStage::kMalformed) {
+      XELOGW(
+          "MetalRenderTargetCache: malformed XE_METAL_HOST_DEPTH_STAGE='{}' "
+          "runs full (use plan, write, or full)",
+          std::getenv("XE_METAL_HOST_DEPTH_STAGE"));
+      host_depth_stage_ = MetalHostDepthStage::kFull;
+    }
+    XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B, "
+           "sub-stage {})",
+           host_depth_stage_ == MetalHostDepthStage::kPlanOnly    ? "plan"
+           : host_depth_stage_ == MetalHostDepthStage::kWriteOnly ? "write"
+                                                                  : "full");
   }
   const bool canonical_depth_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_CANONICAL_DEPTH");
@@ -982,6 +995,13 @@ uint64_t MetalRenderTargetCache::current_attachment_key() const {
 void MetalRenderTargetCache::PerformTransfers(
     RenderTarget* const* render_targets,
     const std::vector<Transfer>* transfer_lists) {
+  // Stage B: the explicit JOIN between the shared two-source plan and the
+  // canonical operation stream. Ranges are recorded per two-source transfer
+  // (RecordTransition) and consulted by the canonical depth materialize
+  // encoders; the scope is THIS transfer batch only — 8551 proved that
+  // reconciling ordinary materializes (out-of-plan lane state) corrupts
+  // 1.5M EDRAM words while in-plan reconciliation is exact.
+  two_source_ranges_.clear();
   bool any = false;
   for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets && !any; ++i) {
     any = render_targets[i] && !transfer_lists[i].empty();
@@ -1243,6 +1263,15 @@ uint32_t MetalRenderTargetCache::HostLaneMode(bool materialize) const {
   if (!host_depth_gate_enabled_ || f24_ps_engaged_) {
     return 0;
   }
+  // Diagnostic sub-stages peel the mechanism (8551 root-cause split):
+  // plan = planning only (mode 0 everywhere), write = pack writes only,
+  // full = writes + reconciliation.
+  if (host_depth_stage_ == MetalHostDepthStage::kPlanOnly) {
+    return 0;
+  }
+  if (materialize && host_depth_stage_ == MetalHostDepthStage::kWriteOnly) {
+    return 0;
+  }
   uint32_t mode = materialize ? 2u : 1u;
   if (cvars::depth_float24_round) {
     mode |= 4u;
@@ -1296,6 +1325,7 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   if (transfer.host_depth_source) {
     two_source_class = src_key.is_depth ? "depth_and_host_depth_to_depth"
                                         : "color_and_host_depth_to_depth";
+    two_source_ranges_.emplace_back(transfer.start_tiles, transfer.end_tiles);
     static bool s_seen[2] = {false, false};
     bool& seen = s_seen[src_key.is_depth ? 0 : 1];
     if (!seen) {
@@ -1631,7 +1661,11 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   {
-    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    // Reconcile ONLY inside the shared plan's two-source ranges (the join);
+    // ordinary materializes must run the pure guest-word path.
+    uint32_t hl_mode = TwoSourceRangeOverlaps(start_tiles, end_tiles)
+                           ? HostLaneMode(/*materialize=*/true)
+                           : 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -1788,7 +1822,9 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   {
-    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    uint32_t hl_mode = TwoSourceRangeOverlaps(start_tiles, end_tiles)
+                           ? HostLaneMode(/*materialize=*/true)
+                           : 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -2146,7 +2182,8 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
   [e setFragmentBytes:&sp_dst length:sizeof(sp_dst) atIndex:1];
   [e setFragmentBytes:&rp length:sizeof(rp) atIndex:2];
   {
-    uint32_t hl_mode = HostLaneMode(/*materialize=*/true);
+    // Same-key cross-MSAA transfer: never a shared-plan two-source op.
+    uint32_t hl_mode = 0u;
     [e setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [e setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                              (__bridge void*)cb.device)

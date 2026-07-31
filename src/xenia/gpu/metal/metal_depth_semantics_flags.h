@@ -52,6 +52,26 @@ inline bool MetalF24PsEngaged(MetalF24PsMode mode) {
          mode == MetalF24PsMode::kRounding;
 }
 
+// Diagnostic sub-stages of the Stage B mechanism (XE_METAL_HOST_DEPTH_STAGE),
+// for the 8551 root-cause split. All three keep the ownership predicate ON —
+// they peel the mechanism from the top:
+//   plan  — shared ownership planning only; lane reads AND writes off
+//   write — planning + lane writes at pack; reconciliation off
+//   full  — the complete mechanism (production shape; the default)
+// Malformed values run full (the production shape) after the caller's
+// one-shot warning: a diagnostic misspelling must not silently change what
+// the production gate means.
+enum class MetalHostDepthStage { kPlanOnly, kWriteOnly, kFull, kMalformed };
+
+inline MetalHostDepthStage ParseMetalHostDepthStage(const char* value) {
+  if (!value || !value[0] || !std::strcmp(value, "full")) {
+    return MetalHostDepthStage::kFull;
+  }
+  if (!std::strcmp(value, "plan")) return MetalHostDepthStage::kPlanOnly;
+  if (!std::strcmp(value, "write")) return MetalHostDepthStage::kWriteOnly;
+  return MetalHostDepthStage::kMalformed;
+}
+
 // The canary-accurate host-depth ownership predicate (design decision 1):
 // true exactly for 20e4 (kD24FS8) when float24 conversion is NOT performed in
 // the pixel shader, and only while the Stage B gate is on. Never true for
