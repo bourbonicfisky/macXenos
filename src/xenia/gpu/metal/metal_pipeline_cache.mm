@@ -945,8 +945,24 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
   id<MTLRenderPipelineState> pipeline =
       IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
   if (!pipeline) {
-    XELOGE("MetalPipelineCache: geometry pipeline creation failed: {}",
-           error ? [[error localizedDescription] UTF8String] : "unknown");
+    // Report the SAME identifying fields the success path logs. Without them a
+    // failure is an unattributable string: it names neither which geometry type
+    // failed, nor which guest shaders, nor the two pipeline-config values that
+    // are the usual cause of a converter rejection. A negative cached below is
+    // permanent for the run, so a draw class is silently dropped for the rest
+    // of the session — that must be diagnosable from one log.
+    XELOGE(
+        "MetalPipelineCache: geometry pipeline creation failed: {} "
+        "(type={}, gs_vertex_size={}, gs_max_input_primitives={}, "
+        "vs_fn='{}', gs_fn='{}', ps_fn='{}', raster_samples={}, "
+        "color0_fmt={}, depth_fmt={})",
+        error ? [[error localizedDescription] UTF8String] : "unknown",
+        uint32_t(geometry_type), vstage->vertex_output_size,
+        gstage->max_input_primitives, vstage->function_name,
+        gstage->function_name, pixel_function_name,
+        raster_key.raster_sample_count,
+        uint32_t(desc.colorAttachments[0].pixelFormat),
+        uint32_t(depth_pixel_format));
     geometry_pipelines_.emplace(key, GeometryPipeline{});
     return nullptr;
   }
