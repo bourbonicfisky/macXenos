@@ -98,6 +98,24 @@ DEFINE_bool(
 UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
+    metal_texture_integer_scale, true,
+    "Restore the guest's integer range for texture fetches whose fetch "
+    "constant declares an integer num_format on a fixed-point format. The host "
+    "view samples normalized, so without this the guest receives [0, 1] where "
+    "it asked for unnormalized units. Enabled by default: Just Cause 2 fetches "
+    "a per-texel light/material index table this way and truncates the result "
+    "into the address register, so normalized delivery collapsed every index "
+    "to 0 and pinned the whole per-texel selection to one constant. Set false "
+    "to restore the previous behavior exactly.",
+    "GPU");
+// Same hazard the presentation flip hit and measured: the config persists every
+// cvar, so a stored `false` -- written while false was the default -- beats a
+// new compiled default, and the flip would reach nobody who has already
+// launched. UPDATE_from_bool migrates configs still holding the OLD DEFAULT
+// while preserving a value the user chose deliberately.
+UPDATE_from_bool(metal_texture_integer_scale, 2026, 7, 30, 13, false);
+
+DEFINE_bool(
     metal_guest_gamma_ramp, true,
     "Apply the guest's standard 256-entry gamma ramp to the presented guest "
     "output on Metal. Enabled by default: five calibrated titles program a "
@@ -3485,13 +3503,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // and handle signed formats. Left zeroed, every gamma texture (incl. the
     // resolved scene the composite samples) was read raw.
     // Unsigned fixed-point integer texture scaling
-    // (openspec/changes/implement-unsigned-integer-texture-scaling). DEFAULT
-    // OFF: with the switch off no scale is ever published, so every fetch reads
-    // a zero packed value and takes the shader's uniform early-out, leaving
-    // output identical to before the change. Promotion to default-on is a
-    // separate evidence-backed decision.
-    static const bool integer_texture_scaling_enabled =
-        std::getenv("XE_METAL_INTEGER_TEXTURE_SCALE") != nullptr;
+    // (openspec/changes/implement-unsigned-integer-texture-scaling).
+    // metal_texture_integer_scale=false is the EXACT rollback: no scale is
+    // published, so every fetch reads a zero packed value and takes the
+    // shader's uniform early-out, leaving output identical to before this
+    // capability existed. The shader ABI is emitted either way, so the rollback
+    // does not change which cached shaders are valid.
+    const bool integer_texture_scaling_enabled =
+        cvars::metal_texture_integer_scale;
     auto fill_texture_signs = [&](MetalShader* shader) {
       if (!shader) return;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
