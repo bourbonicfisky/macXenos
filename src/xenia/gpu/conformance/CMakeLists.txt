@@ -92,6 +92,10 @@ if(APPLE)
     # guest's integer index. This is the one link the L0 packing cases and the
     # live publication probe cannot cover.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_integer_fetch_index_test.mm
+    # End-to-end stale-cache rejection for the shader fetch ABI revision: needs
+    # the real MetalPipelineStorage (already linked just above for the durable
+    # cache tests), not just its identity struct.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_fetch_abi_cache_identity_test.cc
     # 6.1-G0: the direct mip-chain/packed-tail test drives its per-level
     # dispatch plan from the production guest-layout helpers (no re-implemented
     # tiled/packing math). GetGuestTextureLayout/GetPackedMipOffset live in

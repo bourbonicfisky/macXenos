@@ -50,6 +50,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_integer_scale_publish.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
@@ -3518,10 +3519,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // component as that lane's sign. They are consumed together, in the
         // same shader, one immediately after the other.
         if (integer_texture_scaling_enabled) {
-          uint32_t scale_bits = texture_util::IntegerScaleBits(
-              fetch.format, uint32_t(fetch.num_format), fetch.swizzle,
-              uint8_t(signs));
-          system_constants.texture_integer_scale_bits[fc] = scale_bits;
+          uint32_t scale_bits = PublishIntegerScaleBits(
+              fc, fetch, uint8_t(signs),
+              system_constants.texture_integer_scale_bits,
+              kMetalIntegerScaleSlotCount);
           // TEMPORARY acceptance probe (XE_INTEGER_SCALE_REPORT=1), removed
           // before closure: reports what is actually published per slot, and
           // the per-component multiplier the shader will form from it.
