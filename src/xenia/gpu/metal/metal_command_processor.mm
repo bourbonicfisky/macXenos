@@ -40,6 +40,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
@@ -1518,6 +1519,7 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     faulted.swap(faulted_command_buffers_);
     faulted_ids.swap(faulted_submission_ids_);
   }
+  frame_gpu_fault_count_ += uint32_t(faulted_ids.size());
   for (uint64_t id : faulted_ids) {
     faulted_submissions_.insert(id);
     // Bounded: fault-attribution evidence, not a growing ledger.
@@ -2296,6 +2298,25 @@ static void* GetDebugSolidPipeline(
   void* ps_ptr = ps ? (__bridge_retained void*)ps : nullptr;
   cache.emplace(vs_function, ps_ptr);
   return ps_ptr;
+}
+
+// Env-configured, diagnostics-default-off (house rule): XE_METAL_AUTO_TRACE=1
+// enables; _SKIPS / _COOLDOWN / _MAX tune the policy. Parsed once at first
+// swap on the GPU thread.
+static MetalAutoTraceConfig ParseAutoTraceConfigFromEnv() {
+  MetalAutoTraceConfig config;
+  const char* enabled = std::getenv("XE_METAL_AUTO_TRACE");
+  config.enabled = enabled && enabled[0] && std::strcmp(enabled, "0") != 0;
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_SKIPS")) {
+    config.skip_threshold = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_COOLDOWN")) {
+    config.cooldown_frames = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  if (const char* v = std::getenv("XE_METAL_AUTO_TRACE_MAX")) {
+    config.max_captures = uint32_t(std::strtoul(v, nullptr, 10));
+  }
+  return config;
 }
 
 void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
@@ -7112,6 +7133,40 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
            draw_skip_accounting_.FormatReport(/*frame_scope=*/true,
                                               /*actionable_only=*/false));
   }
+  if (!auto_trace_trigger_) {
+    auto_trace_trigger_ =
+        std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
+    if (auto_trace_trigger_->config().enabled) {
+      XELOGI(
+          "MetalAutoTrace: armed (skips>={}, on-fault={}, cooldown={} frames, "
+          "budget={})",
+          auto_trace_trigger_->config().skip_threshold,
+          auto_trace_trigger_->config().on_gpu_fault,
+          auto_trace_trigger_->config().cooldown_frames,
+          auto_trace_trigger_->config().max_captures);
+    }
+  }
+  // Only arm when no capture is pending or streaming: RequestFrameTrace would
+  // reject anyway, but going through it would log a spurious error.
+  if (auto_trace_trigger_->config().enabled &&
+      trace_state_ == TraceState::kDisabled) {
+    MetalAutoTraceTrigger::Decision auto_trace =
+        auto_trace_trigger_->Evaluate(swap_count_,
+                                      draw_skip_accounting_.frame_actionable_count(),
+                                      frame_gpu_fault_count_);
+    if (auto_trace.fire) {
+      XELOGW(
+          "MetalAutoTrace: {} at swap#{} (actionable-skips={} gpu-faults={}); "
+          "capturing NEXT frame ({}/{}) -> {}",
+          auto_trace.reason, swap_count_,
+          draw_skip_accounting_.frame_actionable_count(),
+          frame_gpu_fault_count_, auto_trace_trigger_->fired_count(),
+          auto_trace_trigger_->config().max_captures,
+          xe::path_to_utf8(cvars::trace_gpu_prefix));
+      RequestFrameTrace(cvars::trace_gpu_prefix);
+    }
+  }
+  frame_gpu_fault_count_ = 0;
   draw_skip_accounting_.EndFrame();
 
   // MetalFlicker probe (testing framework): async center-strip readback of
