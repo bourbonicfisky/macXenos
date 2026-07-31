@@ -341,6 +341,37 @@ constexpr bool IsAnySignSigned(uint8_t packed_signs) {
   return ((xor_signed | (xor_signed >> 1)) & 0b01010101) != 0b01010101;
 }
 
+// Number of bits each output component occupies in a packed integer scale, and
+// the layout within one component's field.
+constexpr uint32_t kIntegerScaleBitsPerComponent = 5;
+constexpr uint32_t kIntegerScaleWidthMask = 0xF;
+constexpr uint32_t kIntegerScaleSignedBit = 1u << 4;
+
+// Returns the packed per-OUTPUT-component integer scale for a texture fetch, or
+// 0 meaning "the sample needs no rescaling".
+//
+// A fetch constant declaring an integer num_format on a fixed-point format asks
+// for unnormalized guest units, but the host view samples normalized. This
+// packs, for each output component, the information the shader needs to restore
+// the guest range: bits 0:3 are (source width - 1) and bit 4 is the signed flag,
+// from which the shader forms (1 << (width - signed)) - 1.
+//
+// The scale is applied AFTER swizzling, so each output component is resolved
+// back through the host swizzle to its source component's width. Components
+// that carry nothing to rescale contribute zero: constant 0/1 swizzle lanes,
+// gamma components, zero or over-wide source widths, non-fixed formats, and any
+// fractional num_format (which returns 0 outright).
+//
+// TextureSign::kUnsignedBiased is deliberately NOT special-cased here. Upstream
+// 2ddc5ef73 gives biased components half scale with a -0.5 offset; that class
+// has zero measured engagement in the trace corpus and no available repro
+// title, so it is an excluded measured negative rather than unfinished work.
+// The 5-bit field reserves no room for it on purpose.
+// num_format is the fetch constant's 1-bit field: 0 = fractional, 1 = integer.
+uint32_t IntegerScaleBits(xenos::TextureFormat guest_format,
+                          uint32_t num_format, uint32_t host_swizzle,
+                          uint8_t swizzled_signs);
+
 // Returns normalized clamp modes specified in the fetch constant based on the
 // texture data dimension in it.
 void GetClampModesForDimension(const xenos::xe_gpu_texture_fetch_t& fetch,

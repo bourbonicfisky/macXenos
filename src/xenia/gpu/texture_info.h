@@ -195,6 +195,13 @@ struct FormatInfo {
   const uint32_t block_width;
   const uint32_t block_height;
   const uint32_t bits_per_pixel;
+  // Fixed-point width of each component, in guest component order. Zero for a
+  // component the format does not carry, and for every component of a format
+  // that is not fixed-point.
+  const uint8_t component_bits[4];
+  // Whether the format encodes fixed-point data. Float, compressed, and
+  // expand formats are not fixed, and their component_bits are not meaningful.
+  const bool fixed;
 
   uint32_t bytes_per_block() const {
     return block_width * block_height * bits_per_pixel / 8;
