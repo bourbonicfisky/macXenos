@@ -30,11 +30,13 @@
 #import <Metal/Metal.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
@@ -231,6 +233,50 @@ uint32_t CountSemantic(const std::vector<uint8_t>& binary, const char* name) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Task 1.1 audit (XE_CLIP_AUDIT=<dir>): preserve the exact artifacts for the
+// minimal pair so the divergence point can be located rather than inferred.
+// Writes per-arm files; inert unless the variable is set.
+namespace {
+
+void AuditWrite(const char* dir, const std::string& name,
+                const std::string& text) {
+  std::string path = std::string(dir) + "/" + name;
+  FILE* f = fopen(path.c_str(), "wb");
+  if (!f) return;
+  fwrite(text.data(), 1, text.size(), f);
+  fclose(f);
+}
+
+void AuditWriteBinary(const char* dir, const std::string& name,
+                      const std::vector<uint8_t>& bytes) {
+  std::string path = std::string(dir) + "/" + name;
+  FILE* f = fopen(path.c_str(), "wb");
+  if (!f) return;
+  if (!bytes.empty()) fwrite(bytes.data(), 1, bytes.size(), f);
+  fclose(f);
+}
+
+// Signature semantics carried by a DXBC/DXIL container, in order, with the
+// index byte that follows each name in the signature element records.
+std::string AuditSemantics(const std::vector<uint8_t>& binary) {
+  static const char* kNames[] = {
+      "SV_Position",   "SV_ClipDistance", "SV_CullDistance", "SV_PointSize",
+      "SV_RenderTargetArrayIndex", "SV_Target", "TEXCOORD", "COLOR",
+      "XEVERTEXID", "XEPSINVOCATION", "NORMAL", "POSITION"};
+  std::string out;
+  for (const char* n : kNames) {
+    uint32_t c = CountSemantic(binary, n);
+    if (c) {
+      out += fmt::format("  {} x{}\n", n, c);
+    }
+  }
+  return out.empty() ? std::string("  (none matched)\n") : out;
+}
+
+}  // namespace
+
+
 TEST_CASE("Geometry clip-plane discriminator: count 0 materializes, count 1 does not",
           "[l1][metal][geometry][clip]") {
   auto& h = H();
@@ -322,6 +368,79 @@ TEST_CASE("Geometry clip-plane control: the same clip output WITHOUT geometry em
     SUCCEED("clip distances fail outside geometry emulation too — the "
             "incompatibility is general to the converter, not the bridge");
   }
+}
+
+TEST_CASE("Geometry clip-plane AUDIT: preserve minimal-pair artifacts",
+          "[l1][metal][geometry][clip][audit]") {
+  const char* dir = std::getenv("XE_CLIP_AUDIT");
+  if (!dir) {
+    SUCCEED("XE_CLIP_AUDIT not set; audit artifact capture skipped");
+    return;
+  }
+  auto& h = H();
+  if (!h.ok) {
+    SUCCEED("no Metal device");
+    return;
+  }
+
+  for (uint32_t clip : {0u, 1u, 2u}) {
+    Arm arm;
+    if (!BuildArm(clip, &arm)) {
+      AuditWrite(dir, fmt::format("clip{}_BUILD_FAILED.txt", clip), "\n");
+      continue;
+    }
+    const auto& vs_binary = arm.vertex->translated_binary();
+    const auto& ps_binary = arm.pixel->translated_binary();
+
+    // The reflected object-stage size is the load-bearing number: if the added
+    // clip-distance semantic does not change it, the bridge never reserves or
+    // describes transport for the semantic it is being handed.
+    AuditWrite(
+        dir, fmt::format("clip{}_summary.txt", clip),
+        fmt::format(
+            "clip_plane_count={}\n"
+            "gs_key=0x{:08X} (type={} interp={} clip={} cull={} killand={} "
+            "pointsize={} pointcoord={})\n"
+            "vertex_modification=0x{:016X}\n"
+            "pixel_modification=0x{:016X}\n"
+            "REFLECTED vertex_output_size={} bytes\n"
+            "gs_max_input_primitives={}\n"
+            "pipeline_created={}\n"
+            "vs_translated_binary_bytes={}\n"
+            "ps_translated_binary_bytes={}\n"
+            "\nVS signature semantics:\n{}"
+            "\nPS signature semantics:\n{}",
+            clip, arm.gs_key.key, uint32_t(arm.gs_key.type),
+            uint32_t(arm.gs_key.interpolator_count),
+            uint32_t(arm.gs_key.user_clip_plane_count),
+            uint32_t(arm.gs_key.user_clip_plane_cull),
+            uint32_t(arm.gs_key.has_vertex_kill_and),
+            uint32_t(arm.gs_key.has_point_size),
+            uint32_t(arm.gs_key.has_point_coordinates),
+            arm.vertex_modification.value, arm.pixel_modification.value,
+            arm.gs_vertex_size, arm.gs_max_input_primitives,
+            arm.pipeline ? "YES" : "NO", vs_binary.size(), ps_binary.size(),
+            AuditSemantics(vs_binary), AuditSemantics(ps_binary)));
+
+    AuditWriteBinary(dir, fmt::format("clip{}_vs.dxbc", clip), vs_binary);
+    AuditWriteBinary(dir, fmt::format("clip{}_ps.dxbc", clip), ps_binary);
+
+    // The GENERATED geometry stage — what the bridge is actually handed. Taken
+    // from the shared producer so the artifact is the production one.
+    std::vector<uint32_t> gs_dwords;
+    CreateDxbcGeometryShader(arm.gs_key, gs_dwords);
+    std::vector<uint8_t> gs_bytes(gs_dwords.size() * sizeof(uint32_t));
+    if (!gs_dwords.empty()) {
+      std::memcpy(gs_bytes.data(), gs_dwords.data(), gs_bytes.size());
+    }
+    AuditWriteBinary(dir, fmt::format("clip{}_gs.dxbc", clip), gs_bytes);
+    AuditWrite(dir, fmt::format("clip{}_gs_semantics.txt", clip),
+               fmt::format("generated GS dwords={} bytes={}\n"
+                           "GS signature semantics:\n{}",
+                           gs_dwords.size(), gs_bytes.size(),
+                           AuditSemantics(gs_bytes)));
+  }
+  SUCCEED("audit artifacts written");
 }
 
 }  // namespace metal
