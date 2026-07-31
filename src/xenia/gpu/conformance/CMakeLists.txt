@@ -164,6 +164,42 @@ if(APPLE)
   target_link_libraries(xenia-gpu-conformance PRIVATE
     "-framework Metal" "-framework Foundation" xxhash)
 
+  # Shader-ABI translation gate: like the PP3 target below, this needs the
+  # monolithic GPU closure (DxbcShaderTranslator and the ucode front end), so it
+  # is a SEPARATE executable rather than being linked into the lean L0 binary.
+  # It needs no device and no Metal frameworks — it inspects emitted DXBC.
+  add_executable(xenia-gpu-integer-scale-translation-conformance
+    ${CMAKE_CURRENT_SOURCE_DIR}/integer_scale_translation_case.cc
+    ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
+  )
+  target_compile_definitions(xenia-gpu-integer-scale-translation-conformance
+    PRIVATE
+    "XE_TEST_SUITE_NAME=\"xenia-gpu-integer-scale-translation-conformance\""
+  )
+  target_include_directories(xenia-gpu-integer-scale-translation-conformance
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/tools/build
+    ${PROJECT_SOURCE_DIR}/tools/build/src
+    ${PROJECT_SOURCE_DIR}/tools/build/third_party/catch/include
+  )
+  target_link_libraries(xenia-gpu-integer-scale-translation-conformance PRIVATE
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-gpu-metal xenia-gpu-metal-backend
+    xenia-hid xenia-hid-nop xenia-kernel xenia-patcher
+    xenia-ui xenia-ui-metal xenia-vfs
+    aes_128 capstone fmt imgui libavcodec libavutil mspack snappy xxhash
+    "-framework Metal" "-framework Foundation"
+  )
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-integer-scale-translation-conformance
+      PRIVATE xenia-cpu-backend-a64)
+  elseif(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-integer-scale-translation-conformance
+      PRIVATE xenia-cpu-backend-x64)
+  endif()
+  xe_target_defaults(xenia-gpu-integer-scale-translation-conformance)
+
   # PP3 L1: the full guest VS chain is deliberately a separate executable.
   # Pulling MetalPipelineCache (and therefore the monolithic GPU/backend
   # closure) into the lean general conformance binary would defeat its fast L0
