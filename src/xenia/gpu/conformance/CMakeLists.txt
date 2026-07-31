@@ -87,6 +87,11 @@ if(APPLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_dispatch_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_buffer_backed_texture_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_direct_texture_load_test.mm
+    # L1 acceptance oracle for integer texture scaling: proves a point-sampled
+    # RGBA8Unorm fetch scaled by the published multiplier truncates back to the
+    # guest's integer index. This is the one link the L0 packing cases and the
+    # live publication probe cannot cover.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_integer_fetch_index_test.mm
     # 6.1-G0: the direct mip-chain/packed-tail test drives its per-level
     # dispatch plan from the production guest-layout helpers (no re-implemented
     # tiled/packing math). GetGuestTextureLayout/GetPackedMipOffset live in

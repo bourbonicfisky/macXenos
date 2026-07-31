@@ -3538,15 +3538,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 uint32_t sgn = (field & 0x10) ? 1 : 0;
                 mul[c] = field ? ((1u << (width - sgn)) - 1u) : 0u;
               }
+              auto filter_name = [](xenos::TextureFilter f) {
+                switch (f) {
+                  case xenos::TextureFilter::kPoint: return "point";
+                  case xenos::TextureFilter::kLinear: return "linear";
+                  case xenos::TextureFilter::kBaseMap: return "basemap";
+                  default: return "usefetchconst";
+                }
+              };
               XELOGI(
                   "IntegerScaleReport: stage={} shader={:016X} slot={} "
                   "format={} num_format={} signs={:02X} swizzle={:03X} "
-                  "packed={:08X} mul={},{},{},{}",
+                  "packed={:08X} mul={},{},{},{} mag={} min={} mip={} "
+                  "aniso={} mip_min={} mip_max={} mip_addr={:X}",
                   shader->type() == xenos::ShaderType::kVertex ? "VS" : "PS",
                   shader->ucode_data_hash(), fc,
                   FormatInfo::GetName(uint32_t(fetch.format)),
                   uint32_t(fetch.num_format), signs, uint32_t(fetch.swizzle),
-                  scale_bits, mul[0], mul[1], mul[2], mul[3]);
+                  scale_bits, mul[0], mul[1], mul[2], mul[3],
+                  filter_name(fetch.mag_filter), filter_name(fetch.min_filter),
+                  filter_name(fetch.mip_filter), uint32_t(fetch.aniso_filter),
+                  uint32_t(fetch.mip_min_level),
+                  uint32_t(fetch.mip_max_level),
+                  uint32_t(fetch.mip_address) << 12);
             }
           }
         }
