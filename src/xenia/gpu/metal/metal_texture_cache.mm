@@ -22,6 +22,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
+#include "xenia/gpu/metal/metal_texture_key.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
@@ -425,39 +426,51 @@ static uint32_t xe_lineage_fnv(const void* p, size_t n) {
 // entry for a later draw (the proven slice-4/5R GPU loads did; a shared-cache
 // replay will) MUST derive the key identically or it degrades to a safe
 // CPU-path miss (never corruption).
-// `mip_min_level` / `mip_max_level` are the NORMALIZED EFFECTIVE range from
-// texture_util::GetSubresourcesFromFetchConstant, never the raw fetch fields.
-// They are passed in rather than read here so that exactly one normalization
+// Composes the cache identity from a fetch. The composition itself lives in
+// metal_texture_key.h so conformance exercises the REAL key rather than a
+// re-implementation; this function only maps a fetch onto its inputs.
+//
+// Normalizes the mip range HERE and hands it back, so exactly one normalization
 // result reaches both this key and the upload that decides the host texture's
-// level count; recomputing on either side would let identity and content
-// disagree, which is the defect this key change closes.
+// level count.
+//
+// There is deliberately NO parameter for the range. An earlier shape took it as
+// an argument, which left a call site where raw register levels could be
+// substituted for the normalized ones — and that substitution proved invisible
+// to every gate available: it changes neither the rendered image nor the entry
+// count on any corpus trace, because no two fetches there agree on every other
+// key field while differing only in their raw range. Rather than ship a defect
+// class that no test can see, the seam is removed: a caller cannot pass raw
+// levels because it never supplies levels at all.
 static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
                                bool is_signed, uint32_t base, uint32_t width,
                                uint32_t height, uint32_t pitch_texels,
-                               uint32_t mip_min_level, uint32_t mip_max_level) {
-  struct KeyBytes {
-    uint32_t base, width, height, pitch;
-    uint32_t format_tiled_endian;
-    // FinalizeTexture bakes the 12-bit guest fetch swizzle into the sampled
-    // view, so two fetches identical in every other field but differing in
-    // swizzle must NOT share a cache entry (the second would reuse the first's
-    // wrong-channel view — alpha read from the wrong channel discards draws).
-    uint32_t swizzle;
-    // Normalized effective mip level range. Two fetches agreeing on everything
-    // above but resolving to different ranges describe different host textures
-    // (the upload's level count follows this range), so they must not share an
-    // entry. The raw mip address, packed-mips state, stacked identity and depth
-    // are NOT direct inputs here — measured engagement zero — though the first
-    // and, for 3D, the last legitimately reach this field through the shared
-    // normalization.
-    uint32_t mip_level_range;
-  } kb{base, width, height, pitch_texels,
-       (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
-           (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
-           uint32_t(fetch.endianness),
-       uint32_t(fetch.swizzle & 0xFFF),
-       (mip_min_level << 8) | (mip_max_level & 0xFF)};
-  return XXH3_64bits(&kb, sizeof(kb));
+                               uint32_t* normalized_mip_min_out,
+                               uint32_t* normalized_mip_max_out) {
+  uint32_t mip_min_level = 0;
+  uint32_t mip_max_level = 0;
+  texture_util::GetSubresourcesFromFetchConstant(
+      fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &mip_min_level,
+      &mip_max_level);
+  if (normalized_mip_min_out) *normalized_mip_min_out = mip_min_level;
+  if (normalized_mip_max_out) *normalized_mip_max_out = mip_max_level;
+  MetalTextureKeyInputs inputs;
+  inputs.base = base;
+  inputs.width = width;
+  inputs.height = height;
+  inputs.pitch_texels = pitch_texels;
+  inputs.format_tiled_endian =
+      (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
+      (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
+      uint32_t(fetch.endianness);
+  // FinalizeTexture bakes the 12-bit guest fetch swizzle into the sampled
+  // view, so two fetches identical in every other field but differing in
+  // swizzle must NOT share a cache entry (the second would reuse the first's
+  // wrong-channel view — alpha read from the wrong channel discards draws).
+  inputs.swizzle = uint32_t(fetch.swizzle & 0xFFF);
+  inputs.mip_min_level = mip_min_level;
+  inputs.mip_max_level = mip_max_level;
+  return MakeMetalTextureKey(inputs);
 }
 
 
@@ -843,20 +856,17 @@ uint32_t MetalTextureCache::GetTextureSlot(
     pitch_texels = (width + 31) & ~31u;
   }
 
-  // Normalize ONCE. This single result feeds both the cache identity below and
-  // the host level count in the upload path, so the two cannot diverge.
-  // Normalization is what makes the excluded fields safe: an absent mip page
-  // collapses the range to the base level, and both ends are bounded by the
-  // size-derived maximum, so fetches whose raw fields differ but whose ranges
-  // are equivalent still share one entry.
+  // The key normalizes internally and hands the range back; the upload below
+  // uses THIS value, so identity and content cannot diverge. Normalization is
+  // also what makes the excluded fields safe: an absent mip page collapses the
+  // range to the base level, and both ends are bounded by the size-derived
+  // maximum, so fetches whose raw fields differ but whose ranges are equivalent
+  // still share one entry.
   uint32_t normalized_mip_min = 0;
   uint32_t normalized_mip_max = 0;
-  texture_util::GetSubresourcesFromFetchConstant(
-      fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &normalized_mip_min,
-      &normalized_mip_max);
   uint64_t key =
       MakeTextureKey(fetch, is_signed, base, width, height, pitch_texels,
-                     normalized_mip_min, normalized_mip_max);
+                     &normalized_mip_min, &normalized_mip_max);
   auto it = cache_.find(key);
 
   // Lineage probe: this fetch of the watched base is the composite's temporal
