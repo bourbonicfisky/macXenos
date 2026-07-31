@@ -72,7 +72,14 @@ struct MetalTranslatorConfig {
   //       private semantic. Same guest ucode, DIFFERENT emitted geometry
   //       stages, so durable geometry records written before this are stale and
   //       must not be served.
-  static constexpr uint32_t kFetchAbiRevision = 3;
+  //   4 - float24 depth invariance modes (implement-metal-depth-semantics
+  //       stage A): depth_stencil_mode joined the PS modification. The
+  //       modification value already keys translations, but records cached
+  //       before revision 4 were all written with the mode bits at zero under
+  //       XE_METAL_F24_PS builds that did not exist yet — the revision pins
+  //       the SCHEMA so a pre-stage-A cache can never satisfy a stage-A
+  //       lookup (or vice versa) through an incidentally-equal key.
+  static constexpr uint32_t kFetchAbiRevision = 4;
 };
 
 // Everything that can change generated output for byte-identical guest ucode.

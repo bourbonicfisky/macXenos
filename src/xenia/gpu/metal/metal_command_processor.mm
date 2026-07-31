@@ -3146,6 +3146,49 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         xenos::BlendFactor::kOne;
     ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
         xenos::BlendFactor::kOne;
+    // Stage A (implement-metal-depth-semantics): float24 depth invariance.
+    // XE_METAL_F24_PS=1 honors the shared depth_float24_round cvar;
+    // =trunc / =round force a mode; anything else fails closed to off with a
+    // one-shot warning. Engaged only when a 20e4 (kD24FS8) depth target is
+    // actually bound, so kD24S8 titles get zero new pipeline permutations.
+    // MSC acceptance of both modes proven by task 1.1
+    // (xenia-gpu-metal-float24-conformance); early-Z survival of the
+    // truncating form is measured, not assumed (task 2.4).
+    enum class F24PsMode { kOff, kCvar, kTruncating, kRounding };
+    static const F24PsMode s_f24_mode = [] {
+      const char* value = std::getenv("XE_METAL_F24_PS");
+      if (!value || !value[0] || !std::strcmp(value, "0")) {
+        return F24PsMode::kOff;
+      }
+      if (!std::strcmp(value, "1")) return F24PsMode::kCvar;
+      if (!std::strcmp(value, "trunc")) return F24PsMode::kTruncating;
+      if (!std::strcmp(value, "round")) return F24PsMode::kRounding;
+      XELOGW("XE_METAL_F24_PS='{}' is malformed; failing closed to off "
+             "(use 1, trunc, or round)",
+             value);
+      return F24PsMode::kOff;
+    }();
+    if (s_f24_mode != F24PsMode::kOff && depth_bound &&
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      bool round_mode =
+          s_f24_mode == F24PsMode::kRounding ||
+          (s_f24_mode == F24PsMode::kCvar && cvars::depth_float24_round);
+      ps_mod_decoded.pixel.depth_stencil_mode =
+          round_mode ? DxbcShaderTranslator::Modification::DepthStencilMode::
+                           kFloat24Rounding
+                     : DxbcShaderTranslator::Modification::DepthStencilMode::
+                           kFloat24Truncating;
+      // One-shot engagement evidence for headless/live A/B: without this, a
+      // pixel-identical run cannot distinguish "engaged and invariant" from
+      // "gate never fired".
+      static bool s_f24_logged = false;
+      if (!s_f24_logged) {
+        s_f24_logged = true;
+        XELOGI("MetalF24: engaged mode={} at draw {}",
+               round_mode ? "round" : "trunc", trace_draw_index_);
+      }
+    }
     uint64_t ps_mod = ps_mod_decoded.value;
     ps_mod_value = ps_mod;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
