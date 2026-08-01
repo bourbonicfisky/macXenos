@@ -125,6 +125,15 @@ struct MetalPipelineStorageIdentity {
 // collide and one would be loaded as the other.
 inline constexpr uint32_t kMetalGeometryRecordKindVertexStage = 1;
 inline constexpr uint32_t kMetalGeometryRecordKindShaderStage = 2;
+// Tessellation pipeline record (port-xenios-tessellation task 3.2). A NEW kind
+// with its own key derivation AND its own file extension (.tess), so it is
+// doubly disjoint from the existing kinds: a pre-change store can never
+// satisfy a tessellation lookup, and a tessellation record can never be loaded
+// as a metallib or geometry record even under a numerically identical key.
+// Design-D4 consequence: because no existing artifact kind changes meaning,
+// no fingerprint / fetch-ABI bump accompanies this kind — proven by
+// conformance/metal_tessellation_storage_disjointness_test.cc.
+inline constexpr uint32_t kMetalTessellationRecordKind = 3;
 
 // Durable identity of one geometry stage.
 //
@@ -138,6 +147,18 @@ inline constexpr uint32_t kMetalGeometryRecordKindShaderStage = 2;
 // conformance/metal_geometry_stage_identity_test.mm.
 uint64_t MetalGeometryRecordKey(uint32_t kind, uint64_t shader_identity,
                                 uint32_t input_topology);
+
+// Durable identity of one tessellation pipeline record
+// (kMetalTessellationRecordKind baked in). `domain_shader_identity` is the
+// content-derived identity of the guest domain-shader translation (ucode hash +
+// modification + type — the same triple the M1 metallib key hashes), never a
+// translation pointer (port notes gotcha 7). host_vertex_shader_type +
+// tessellation_mode select the prebuilt HS/tess-VS blobs, so they are part of
+// the record identity; host_primitive_type is NOT (it affects only dispatch,
+// not any stored stage), it travels inside the record as replay aux data.
+uint64_t MetalTessellationRecordKey(uint64_t domain_shader_identity,
+                                    uint32_t host_vertex_shader_type,
+                                    uint32_t tessellation_mode);
 
 // In-memory identity of a geometry object stage, for the run-local cache.
 //
@@ -251,6 +272,65 @@ class MetalPipelineStorage {
   };
   bool LoadGeometryRecord(uint64_t key, GeometryRecord* record_out) const;
   bool StoreGeometryRecord(uint64_t key, const GeometryRecord& record);
+
+  // M1 for tessellation (port-xenios-tessellation task 3.2). One tessellation
+  // pipeline family needs FOUR metallibs (prebuilt tess VS + its synthesized
+  // stage-in, prebuilt HS, guest DS), their function names, and the reflection
+  // fields IRRuntimeValidateTessellationPipeline and
+  // IRRuntimeTessellationPipelineConfig consume — none of which the plain
+  // metallib store or the single-reflection GeometryRecord can carry.
+  //
+  // Same all-or-nothing rule as GeometryRecord, for the same reason: a
+  // pipeline assembled from a fresh HS and a stale DS would validate against
+  // the wrong control-point layout. The whole record is published atomically
+  // and any missing, short, or zero-where-nonzero-required component makes the
+  // WHOLE record a miss.
+  //
+  // The aux triple (host_vertex_shader_type / tessellation_mode /
+  // host_primitive_type) mirrors XeniOS's kTessellation description aux0/1/2:
+  // it is what a warm-start prewarm pass would need to reconstruct a minimal
+  // ProcessingResult. Our storage replays lazily (records are consulted at
+  // first GetOrCreate, there is no prewarm enumeration), so today the triple
+  // is written and verified but only mode/type are re-derived on load paths;
+  // the record carries all three so prewarm wiring needs no format change.
+  struct TessellationRecord {
+    // Replay aux (see above).
+    uint32_t host_vertex_shader_type = 0;
+    uint32_t tessellation_mode = 0;
+    uint32_t host_primitive_type = 0;
+    // Stage entry points.
+    std::string vs_function_name;
+    std::string hs_function_name;
+    std::string ds_function_name;
+    // Reflection consumed by validation + the pipeline config. The config's
+    // gsMaxInputPrimitivesPerMeshThreadgroup comes from the DOMAIN block
+    // (ds_max_input_prims_per_mesh_threadgroup), never from an HS field.
+    uint32_t vs_output_size = 0;
+    uint32_t hs_max_patches_per_object_threadgroup = 0;
+    uint32_t hs_max_object_threads_per_patch = 0;
+    uint32_t hs_patch_constants_size = 0;
+    uint32_t hs_input_control_point_count = 0;
+    uint32_t hs_output_control_point_count = 0;
+    uint32_t hs_output_control_point_size = 0;
+    uint32_t hs_tessellator_domain = 0;
+    uint32_t hs_tessellator_partitioning = 0;
+    uint32_t hs_tessellator_output_primitive = 0;
+    float hs_max_tessellation_factor = 0.0f;
+    uint32_t ds_max_input_prims_per_mesh_threadgroup = 0;
+    uint32_t ds_input_control_point_count = 0;
+    uint32_t ds_input_control_point_size = 0;
+    uint32_t ds_patch_constants_size = 0;
+    uint32_t ds_tessellator_domain = 0;
+    // Stage metallibs. All four are required (an empty stage-in is a hard
+    // pipeline failure — port notes gotcha 9 — so it is required here too).
+    std::vector<uint8_t> vs_metallib;
+    std::vector<uint8_t> vs_stage_in_metallib;
+    std::vector<uint8_t> hs_metallib;
+    std::vector<uint8_t> ds_metallib;
+  };
+  bool LoadTessellationRecord(uint64_t key,
+                              TessellationRecord* record_out) const;
+  bool StoreTessellationRecord(uint64_t key, const TessellationRecord& record);
 
   // Test seam: how many entries this session admitted, so a test can prove a
   // second distinct artifact was actually written rather than deduplicated.

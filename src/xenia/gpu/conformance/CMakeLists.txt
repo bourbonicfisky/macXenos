@@ -245,6 +245,11 @@ if(APPLE)
   # IRRuntimeNewGeometryTessellationEmulationPipeline). Device required.
   add_executable(xenia-gpu-metal-tessellation-conformance
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_translation_probe_test.mm
+    # Task 3.1/3.2 cache-level case: GetOrCreateTessellationPipelineState end
+    # to end on-device (triangle + quad, memo hit, validation-failure null,
+    # durable-record round-trip). Same closure — MetalPipelineCache comes from
+    # xenia-gpu-metal-backend.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_pipeline_cache_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )
