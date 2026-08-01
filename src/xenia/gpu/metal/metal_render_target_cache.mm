@@ -225,20 +225,7 @@ bool MetalRenderTargetCache::Initialize() {
         "carries no extra host precision); run Stage B arms with "
         "XE_METAL_F24_PS=0");
   } else if (host_depth_gate_enabled_) {
-    host_depth_stage_ =
-        ParseMetalHostDepthStage(std::getenv("XE_METAL_HOST_DEPTH_STAGE"));
-    if (host_depth_stage_ == MetalHostDepthStage::kMalformed) {
-      XELOGW(
-          "MetalRenderTargetCache: malformed XE_METAL_HOST_DEPTH_STAGE='{}' "
-          "runs full (use plan, write, or full)",
-          std::getenv("XE_METAL_HOST_DEPTH_STAGE"));
-      host_depth_stage_ = MetalHostDepthStage::kFull;
-    }
-    XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B, "
-           "sub-stage {})",
-           host_depth_stage_ == MetalHostDepthStage::kPlanOnly    ? "plan"
-           : host_depth_stage_ == MetalHostDepthStage::kWriteOnly ? "write"
-                                                                  : "full");
+    XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B)");
   }
   const bool canonical_depth_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_CANONICAL_DEPTH");
@@ -1264,15 +1251,6 @@ uint32_t MetalRenderTargetCache::HostLaneMode(bool materialize) const {
   if (!host_depth_gate_enabled_ || f24_ps_engaged_) {
     return 0;
   }
-  // Diagnostic sub-stages peel the mechanism (8551 root-cause split):
-  // plan = planning only (mode 0 everywhere), write = pack writes only,
-  // full = writes + reconciliation.
-  if (host_depth_stage_ == MetalHostDepthStage::kPlanOnly) {
-    return 0;
-  }
-  if (materialize && host_depth_stage_ == MetalHostDepthStage::kWriteOnly) {
-    return 0;
-  }
   uint32_t mode = materialize ? 2u : 1u;
   if (cvars::depth_float24_round) {
     mode |= 4u;
@@ -1463,13 +1441,6 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
                                         : "color_and_host_depth_to_depth";
     two_source_records_.push_back({dst_key.key, transfer.host_depth_source,
                                    transfer.start_tiles, transfer.end_tiles});
-    static bool s_seen[2] = {false, false};
-    bool& seen = s_seen[src_key.is_depth ? 0 : 1];
-    if (!seen) {
-      seen = true;
-      XELOGI("MetalHostDepth: FIRST two-source transfer class {} @draw {}",
-             two_source_class, rec.draw_index);
-    }
   }
   static const bool s_manifest = std::getenv("XE_METAL_TRANSITION_MANIFEST");
   if (s_manifest && two_source_class) {
