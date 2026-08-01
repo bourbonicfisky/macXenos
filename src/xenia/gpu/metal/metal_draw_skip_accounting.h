@@ -66,6 +66,18 @@ enum class MetalDrawSkipReason : uint32_t {
   // backend bug, never guest behavior; distinct so it can never be mistaken
   // for an unsupported capability.
   kInternalInvariant,
+  // The guest tessellated with a shape the gated route does not support
+  // (patch strips/fans, an unsupported mode/domain cell, an index/factor
+  // stream endian the arena staging cannot reproduce). Distinct from
+  // kUnsupportedCapability so tessellation triage never has to detangle
+  // "route rejected the shape" from generic backend gaps
+  // (port-xenios-tessellation task 4.1/4.2).
+  kTessellationUnsupportedShape,
+  // A host resource the tessellation route requires unconditionally was
+  // never created (the tessellator-tables buffer, an init-time invariant this
+  // backend controls). Always a backend/initialization bug, never guest
+  // behavior; every tessellated draw fail-closed skips on it (task 4.3).
+  kTessellationResourceMissing,
   kCount,
 };
 
@@ -83,11 +95,13 @@ constexpr MetalDrawSkipSeverity MetalDrawSkipSeverityFor(
       return MetalDrawSkipSeverity::kInfo;
     case MetalDrawSkipReason::kUnsupportedCapability:
     case MetalDrawSkipReason::kInvalidGuestState:
+    case MetalDrawSkipReason::kTessellationUnsupportedShape:
       return MetalDrawSkipSeverity::kWarning;
     case MetalDrawSkipReason::kTranslationFailure:
     case MetalDrawSkipReason::kPipelineFailure:
     case MetalDrawSkipReason::kResourceFailure:
     case MetalDrawSkipReason::kInternalInvariant:
+    case MetalDrawSkipReason::kTessellationResourceMissing:
     default:
       return MetalDrawSkipSeverity::kError;
   }
@@ -111,6 +125,10 @@ inline const char* MetalDrawSkipReasonName(MetalDrawSkipReason reason) {
       return "diagnostic-rollback";
     case MetalDrawSkipReason::kInternalInvariant:
       return "internal-invariant";
+    case MetalDrawSkipReason::kTessellationUnsupportedShape:
+      return "tessellation-unsupported-shape";
+    case MetalDrawSkipReason::kTessellationResourceMissing:
+      return "tessellation-resource-missing";
     default:
       return "unknown";
   }

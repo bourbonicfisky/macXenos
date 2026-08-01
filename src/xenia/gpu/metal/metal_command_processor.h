@@ -274,6 +274,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // rectangle/point/quad lists. Set in InitializeDrawResources.
   bool mesh_shader_supported_ = false;
 
+  // IR-runtime tessellator tables (port-xenios-tessellation task 4.3):
+  // allocated once in InitializeDrawResources when mesh shaders are supported
+  // AND the XE_METAL_TESSELLATION gate is on (so the OFF arm allocates
+  // nothing), loaded with IRRuntimeLoadTessellatorTables, and bound to BOTH
+  // the object and mesh stages at kIRRuntimeTessellatorTablesBindPoint on
+  // every tessellated draw. Missing (allocation failed / gate off) makes
+  // every tessellated draw a fail-closed kTessellationResourceMissing skip.
+  // id<MTLBuffer>, retained; released in ShutdownDrawResources.
+  void* tessellator_tables_buffer_ = nullptr;
+
   // id<MTLRenderPipelineState> for the depth->R32Float conversion pass, built on
   // first depth resolve (see ConvertDepthToSnapshot).
   void* depth_convert_pipeline_ = nullptr;

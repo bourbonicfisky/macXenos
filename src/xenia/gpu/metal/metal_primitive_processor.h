@@ -93,8 +93,11 @@ inline bool IsPp1Routable(const RegisterFile& regs,
   }
   // Tessellated draws (explicit major mode + tessellation output path) make the
   // shared processor emit a domain host vertex-shader type; the inline Metal
-  // path draws them as plain primitives. Exclude to stay behavior-neutral
-  // (tessellation is a later capability slice).
+  // path draws them as plain primitives. Exclude to stay behavior-neutral.
+  // The gated tessellation route (XE_METAL_TESSELLATION, port-xenios-
+  // tessellation task 4.1) is selected in IssueDraw AHEAD of this predicate
+  // and calls Process directly, so with the gate on a tessellated draw never
+  // reaches here; with the gate off this rejection IS today's behavior.
   if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
       regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
           xenos::VGTOutputPath::kTessellationEnable) {
@@ -296,8 +299,12 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
 // result, but routes only auto-indexed reset-disabled loops. PP4 additionally
 // routes fixed-sentinel DMA line/triangle strips without conversion. DMA/reset
 // loops, point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle
-// fans, custom/32-bit reset, reset-disabled maximum protection, and
-// tessellation stay wholly on their existing paths.
+// fans, custom/32-bit reset, and reset-disabled maximum protection stay
+// wholly on their existing paths. Tessellated draws are consumed by the
+// dedicated XE_METAL_TESSELLATION route ahead of every predicate here (gate
+// on), or keep their historical inline behavior (gate off) — the four
+// tessellation rejections in the predicates are what keeps the non-routed
+// arms behavior-neutral, so they deliberately stay.
 //
 // Pure C++ (no Metal types): the built-in fan table is a CPU byte vector and
 // the routed draws allocate only from the command processor's arena, so this

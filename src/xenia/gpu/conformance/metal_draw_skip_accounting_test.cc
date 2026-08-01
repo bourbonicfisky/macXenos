@@ -25,6 +25,7 @@
 // Build-presence of a log string is NOT the acceptance gate; this is.
 
 #include <cstdint>
+#include <string>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_draw_skip_accounting.h"
@@ -130,6 +131,53 @@ TEST_CASE("actionable-only report omits info sites, full report keeps them",
   CHECK(full.find("expected-no-effect") != std::string::npos);
   // Count and first-draw fields appear in the record text.
   CHECK(full.find("=1 first@2") != std::string::npos);
+}
+
+TEST_CASE("tessellation reasons are distinct, correctly tiered, and named",
+          "[draw_skip][tessellation]") {
+  // port-xenios-tessellation task 4.7: an unsupported guest tessellation
+  // shape is guest-behavior triage (warning, like other capability gaps); a
+  // missing tessellator-tables buffer is an init invariant this backend
+  // controls (error). Neither may collide with the generic reasons.
+  CHECK(MetalDrawSkipSeverityFor(
+            MetalDrawSkipReason::kTessellationUnsupportedShape) ==
+        MetalDrawSkipSeverity::kWarning);
+  CHECK(MetalDrawSkipSeverityFor(
+            MetalDrawSkipReason::kTessellationResourceMissing) ==
+        MetalDrawSkipSeverity::kError);
+  CHECK(std::string(MetalDrawSkipReasonName(
+            MetalDrawSkipReason::kTessellationUnsupportedShape)) ==
+        "tessellation-unsupported-shape");
+  CHECK(std::string(MetalDrawSkipReasonName(
+            MetalDrawSkipReason::kTessellationResourceMissing)) ==
+        "tessellation-resource-missing");
+}
+
+TEST_CASE("tessellation pipeline-failure repeats are quieted per site",
+          "[draw_skip][tessellation]") {
+  // Task 4.7 repeat-quieting shape: the first negative-cache-suppressed
+  // tessellated draw is the one-shot log cue; a storm of repeats (many draws
+  // suppressed by one failed creation) never re-reports, but stays counted
+  // and actionable for the trace trigger.
+  MetalDrawSkipAccounting accounting;
+  CHECK(accounting.Record("tess-pipeline-null",
+                          MetalDrawSkipReason::kPipelineFailure,
+                          /*draw_index=*/12, /*prim_type=*/17,
+                          /*vs_hash=*/0xD0D0, /*ps_hash=*/0));
+  for (uint32_t i = 0; i < 64; ++i) {
+    CHECK_FALSE(accounting.Record("tess-pipeline-null",
+                                  MetalDrawSkipReason::kPipelineFailure,
+                                  13 + i, 17, 0xD0D0, 0));
+  }
+  const auto& record = accounting.session_records().at("tess-pipeline-null");
+  CHECK(record.count == 65);
+  CHECK(record.first_draw_index == 12);
+  CHECK(accounting.frame_actionable_count() == 65);
+  // A distinct tessellation site reports independently (per-site quieting,
+  // not per-reason).
+  CHECK(accounting.Record("tess-tables-missing",
+                          MetalDrawSkipReason::kTessellationResourceMissing,
+                          90, 17, 0xD0D0, 0));
 }
 
 TEST_CASE("ResetSession begins a fresh session", "[draw_skip]") {

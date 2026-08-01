@@ -250,6 +250,10 @@ if(APPLE)
     # durable-record round-trip). Same closure — MetalPipelineCache comes from
     # xenia-gpu-metal-backend.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_pipeline_cache_test.mm
+    # Task 4.5 encode smoke: pipeline via the cache + the full group-4 binding
+    # assembly (hull/domain AB alias, tessellator tables on both stages) into
+    # a real encoder, dispatched through the IR runtime patch draws.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_encode_smoke_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )

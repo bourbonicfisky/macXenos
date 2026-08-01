@@ -228,6 +228,65 @@ TEST_CASE("Metal top-level bindings keep inactive stages null",
   CHECK(exporting == expected_exporting);
 }
 
+TEST_CASE(
+    "Metal top-level bindings populate hull/domain slots only when "
+    "tessellating",
+    "[l0][metal][binding-parity][tessellation]") {
+  MetalBindingAddresses addresses;
+  addresses.null_buffer = 10;
+  addresses.view_heap = 20;
+  addresses.sampler_heap = 30;
+  addresses.shared_memory_srv = 40;
+  addresses.null_uav = 50;
+  addresses.shared_memory_uav = 60;
+  addresses.system_constants = 70;
+  addresses.float_vertex = 80;
+  addresses.bool_loop = 90;
+  addresses.fetch = 100;
+  addresses.descriptor_indices_vertex = 110;
+  addresses.float_pixel = 120;
+  addresses.descriptor_indices_pixel = 130;
+
+  // Tessellated draw with a guest PS: the six hull/domain CBV slots alias the
+  // VERTEX-stage allocations (the domain stage IS the guest VS translation;
+  // the HS consumes the same guest constant state) — XeniOS
+  // BuildGraphicsRootArgumentEntries :4247-4264 ported into the pure builder.
+  auto tessellated =
+      BuildMetalTopLevelArgumentBuffer(addresses, true, false, true);
+  const std::array<uint64_t, kMetalBindingSlotCount> expected_tessellated = {
+      40,  20,  20, 20,  20,  50,  20, 20,  20,  30,  70,  80, 90,
+      100, 110, 80, 100, 110, 80, 100, 110, 120, 100, 130, 10};
+  CHECK(tessellated == expected_tessellated);
+
+  // Depth-only tessellated draw (no guest PS -> the pipeline's depth-only
+  // fallback): hull/domain populated, pixel slots stay null.
+  auto tessellated_no_ps =
+      BuildMetalTopLevelArgumentBuffer(addresses, false, false, true);
+  CHECK(tessellated_no_ps[MetalBindingSlotIndex(
+            MetalBindingSlot::kCbvFloatHull)] == 80);
+  CHECK(tessellated_no_ps[MetalBindingSlotIndex(
+            MetalBindingSlot::kCbvFetchDomain)] == 100);
+  CHECK(tessellated_no_ps[MetalBindingSlotIndex(
+            MetalBindingSlot::kCbvFloatPixel)] == 10);
+
+  // Regression guard for every non-tessellated draw: the explicit-false form
+  // and the defaulted form are identical, hull/domain stay at the null
+  // buffer (a silent null-slot regression is what the oracle exists for).
+  auto normal_default = BuildMetalTopLevelArgumentBuffer(addresses, true,
+                                                         false);
+  auto normal_explicit =
+      BuildMetalTopLevelArgumentBuffer(addresses, true, false, false);
+  CHECK(normal_default == normal_explicit);
+  for (MetalBindingSlot slot :
+       {MetalBindingSlot::kCbvFloatHull, MetalBindingSlot::kCbvFetchHull,
+        MetalBindingSlot::kCbvDescriptorIndicesHull,
+        MetalBindingSlot::kCbvFloatDomain, MetalBindingSlot::kCbvFetchDomain,
+        MetalBindingSlot::kCbvDescriptorIndicesDomain}) {
+    CHECK(normal_default[MetalBindingSlotIndex(slot)] ==
+          addresses.null_buffer);
+  }
+}
+
 TEST_CASE("Metal binding stage plans cover geometry emulation",
           "[l0][metal][binding-parity]") {
   CHECK(GetMetalBindingStageMask(false) ==
