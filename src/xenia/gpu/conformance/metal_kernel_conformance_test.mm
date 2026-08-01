@@ -2121,6 +2121,213 @@ TEST_CASE("lane refresh installs the SELECTED source's provenance",
   CHECK(reconciled_bits != bits_b);
 }
 
+TEST_CASE("depth-test discriminator: preserved host precision changes the outcome",
+          "[l1][metal][depth_semantics][host_depth][discriminator]") {
+  // The spec's corrected oracle: EDRAM hashes CANNOT distinguish preserved
+  // host precision from guest-decoded depth (both repack to the same 20e4
+  // word). This is the end-to-end discriminator instead: materialize through
+  // the PRODUCTION range fragment (reconcile on vs off), then depth-test a
+  // quad at a comparison depth D strictly between host A and the decoded
+  // value — the two paths must produce OPPOSITE pass/fail results.
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  if (!device) { SUCCEED("no device"); return; }
+
+  const uint32_t kCode = 0x234567u;
+  float decoded = xenos::Float20e4To32(kCode) * 0.5f;  // pure guest path
+  uint32_t decoded_bits;
+  std::memcpy(&decoded_bits, &decoded, 4);
+  // f32 carries exactly 3 mantissa bits beyond 20e4 for normal codes: 8 f32
+  // ULPs per code. +4 stays strictly inside kCode under truncation.
+  uint32_t bits_a = decoded_bits + 4;  // host A: above decoded, same code
+  float value_a;
+  std::memcpy(&value_a, &bits_a, 4);
+  REQUIRE(xenos::Float32To20e4(value_a * 2.0f, false) == kCode);
+  float depth_d = decoded + (value_a - decoded) * 0.5f;  // strictly between
+  REQUIRE(depth_d > decoded);
+  REQUIRE(depth_d < value_a);
+
+  NSError* error = nil;
+  id<MTLLibrary> library = [device
+      newLibraryWithSource:[NSString stringWithUTF8String:
+                                         xe::gpu::metal::kEdramMsl]
+                   options:nil
+                     error:&error];
+  REQUIRE(library != nil);
+  static const char* kQuadSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct QOut { float4 pos [[position]]; };
+vertex QOut disc_vs(uint vid [[vertex_id]], constant float& depth [[buffer(0)]]) {
+  QOut o;
+  float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+  o.pos = float4(t * 2.0 - 1.0, depth, 1.0);
+  return o;
+}
+fragment float4 disc_fs() { return float4(1.0, 0.0, 0.0, 1.0); }
+)MSL";
+  id<MTLLibrary> quad_library = [device
+      newLibraryWithSource:[NSString stringWithUTF8String:kQuadSource]
+                   options:nil
+                     error:&error];
+  REQUIRE(quad_library != nil);
+
+  constexpr uint32_t kWords = 2 * 1280;
+  id<MTLBuffer> canonical =
+      [device newBufferWithLength:kWords * 4
+                          options:MTLResourceStorageModeShared];
+  uint32_t* canonical_cpu = static_cast<uint32_t*>(canonical.contents);
+  for (uint32_t i = 0; i < kWords; ++i) canonical_cpu[i] = (kCode << 8) | 0x5A;
+  id<MTLBuffer> lane =
+      [device newBufferWithLength:kWords * 4
+                          options:MTLResourceStorageModeShared];
+  float* lane_cpu = static_cast<float*>(lane.contents);
+  for (uint32_t i = 0; i < kWords; ++i) lane_cpu[i] = value_a;
+
+  MTLTextureDescriptor* depth_desc = [MTLTextureDescriptor new];
+  depth_desc.textureType = MTLTextureType2DMultisample;
+  depth_desc.pixelFormat = MTLPixelFormatDepth32Float;
+  depth_desc.width = 80;
+  depth_desc.height = 16;
+  depth_desc.sampleCount = 2;
+  depth_desc.usage = MTLTextureUsageRenderTarget;
+  depth_desc.storageMode = MTLStorageModePrivate;
+  MTLTextureDescriptor* color_desc = [MTLTextureDescriptor new];
+  color_desc.textureType = MTLTextureType2DMultisample;
+  color_desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
+  color_desc.width = 80;
+  color_desc.height = 16;
+  color_desc.sampleCount = 2;
+  color_desc.usage = MTLTextureUsageRenderTarget;
+  color_desc.storageMode = MTLStorageModePrivate;
+  MTLTextureDescriptor* resolve_desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                   width:80
+                                  height:16
+                               mipmapped:NO];
+  resolve_desc.usage = MTLTextureUsageRenderTarget;
+
+  MTLRenderPipelineDescriptor* mat_desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  mat_desc.vertexFunction = [library newFunctionWithName:@"xe_depth_vs"];
+  mat_desc.fragmentFunction =
+      [library newFunctionWithName:@"materialize_depth_ms_range_fs"];
+  mat_desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  mat_desc.rasterSampleCount = 2;
+  id<MTLRenderPipelineState> mat_pipeline =
+      [device newRenderPipelineStateWithDescriptor:mat_desc error:&error];
+  {
+    std::string pipeline_error =
+        error ? error.localizedDescription.UTF8String : "(none)";
+    INFO(pipeline_error);
+    REQUIRE(mat_pipeline != nil);
+  }
+  MTLRenderPipelineDescriptor* quad_desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  quad_desc.vertexFunction = [quad_library newFunctionWithName:@"disc_vs"];
+  quad_desc.fragmentFunction = [quad_library newFunctionWithName:@"disc_fs"];
+  quad_desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+  quad_desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  quad_desc.rasterSampleCount = 2;
+  id<MTLRenderPipelineState> quad_pipeline =
+      [device newRenderPipelineStateWithDescriptor:quad_desc error:&error];
+  REQUIRE(quad_pipeline != nil);
+
+  MTLDepthStencilDescriptor* write_desc = [MTLDepthStencilDescriptor new];
+  write_desc.depthCompareFunction = MTLCompareFunctionAlways;
+  write_desc.depthWriteEnabled = YES;
+  id<MTLDepthStencilState> write_state =
+      [device newDepthStencilStateWithDescriptor:write_desc];
+  MTLDepthStencilDescriptor* test_desc = [MTLDepthStencilDescriptor new];
+  test_desc.depthCompareFunction = MTLCompareFunctionLess;
+  test_desc.depthWriteEnabled = NO;
+  id<MTLDepthStencilState> test_state =
+      [device newDepthStencilStateWithDescriptor:test_desc];
+
+  struct { uint32_t base, pitch, msaa, is_depth, fmt_log2, words; } sp{
+      0u, 1u, 1u, 2u, 0u, kWords};
+  struct { uint32_t start_tiles, end_tiles; } range{0u, 2u};
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+
+  auto run_arm = [&](uint32_t hl_mode) -> double {
+    id<MTLTexture> depth = [device newTextureWithDescriptor:depth_desc];
+    id<MTLTexture> color = [device newTextureWithDescriptor:color_desc];
+    id<MTLTexture> resolved = [device newTextureWithDescriptor:resolve_desc];
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    // Pass 1: PRODUCTION materialize (reconcile per hl_mode).
+    MTLRenderPassDescriptor* mat_pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    mat_pass.depthAttachment.texture = depth;
+    mat_pass.depthAttachment.loadAction = MTLLoadActionClear;
+    mat_pass.depthAttachment.storeAction = MTLStoreActionStore;
+    mat_pass.depthAttachment.clearDepth = 0.0;
+    id<MTLRenderCommandEncoder> mat_encoder =
+        [command renderCommandEncoderWithDescriptor:mat_pass];
+    [mat_encoder setRenderPipelineState:mat_pipeline];
+    [mat_encoder setDepthStencilState:write_state];
+    [mat_encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+    [mat_encoder setFragmentBytes:&sp length:sizeof(sp) atIndex:1];
+    [mat_encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+    [mat_encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+    [mat_encoder setFragmentBuffer:lane offset:0 atIndex:4];
+    [mat_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:3];
+    [mat_encoder endEncoding];
+    // Pass 2: depth-tested quad at D (LESS, no write), red on pass.
+    MTLRenderPassDescriptor* quad_pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    quad_pass.colorAttachments[0].texture = color;
+    quad_pass.colorAttachments[0].resolveTexture = resolved;
+    quad_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    quad_pass.colorAttachments[0].storeAction =
+        MTLStoreActionMultisampleResolve;
+    quad_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    quad_pass.depthAttachment.texture = depth;
+    quad_pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    quad_pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    id<MTLRenderCommandEncoder> quad_encoder =
+        [command renderCommandEncoderWithDescriptor:quad_pass];
+    [quad_encoder setRenderPipelineState:quad_pipeline];
+    [quad_encoder setDepthStencilState:test_state];
+    [quad_encoder setVertexBytes:&depth_d length:sizeof(depth_d) atIndex:0];
+    [quad_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                     vertexStart:0
+                     vertexCount:3];
+    [quad_encoder endEncoding];
+    // Read back the resolved color.
+    id<MTLBuffer> readback =
+        [device newBufferWithLength:80 * 16 * 4
+                            options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    [blit copyFromTexture:resolved
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(80, 16, 1)
+                 toBuffer:readback
+        destinationOffset:0
+   destinationBytesPerRow:80 * 4
+ destinationBytesPerImage:80 * 16 * 4];
+    [blit endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    const uint8_t* pixels = static_cast<const uint8_t*>(readback.contents);
+    uint32_t red = 0;
+    for (uint32_t i = 0; i < 80 * 16; ++i) {
+      if (pixels[i * 4] > 128) ++red;
+    }
+    return double(red) / (80.0 * 16.0);
+  };
+
+  double host_arm = run_arm(2u);   // reconcile: attachment holds A
+  double guest_arm = run_arm(0u);  // pure: attachment holds decoded
+  INFO("host-arm red fraction " << host_arm << ", guest-arm " << guest_arm);
+  // D < A -> LESS passes everywhere under preserved host precision.
+  CHECK(host_arm > 0.99);
+  // D > decoded -> LESS fails everywhere under the pure guest path.
+  CHECK(guest_arm < 0.01);
+}
+
 TEST_CASE("Canonical depth resolve exposes guest rather than attachment domain",
           "[l1][metal][canonical][resolve][depth]") {
   MetalCompute mc;

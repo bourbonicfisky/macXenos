@@ -85,6 +85,31 @@ inline std::vector<MetalTwoSourceRecord> MetalSelectTwoSourceIntersections(
   return out;
 }
 
+// Disjointness pin: the executor runs ALL lane refreshes before ALL
+// reconcile draws, so two overlapping same-destination selections would let
+// the LAST refresh win both draws. The shared planner walks disjoint
+// ownership ranges per destination, so overlap is an invariant violation;
+// this drops every record overlapping an EARLIER one (fail closed: the
+// dropped range materializes pure guest words) and reports whether anything
+// was dropped so the caller can scream.
+inline bool MetalDropOverlappingTwoSourceRecords(
+    std::vector<MetalTwoSourceRecord>* records) {
+  bool dropped = false;
+  for (size_t i = 0; i < records->size(); ++i) {
+    for (size_t j = i + 1; j < records->size();) {
+      const MetalTwoSourceRecord& a = (*records)[i];
+      const MetalTwoSourceRecord& b = (*records)[j];
+      if (a.start_tiles < b.end_tiles && b.start_tiles < a.end_tiles) {
+        records->erase(records->begin() + j);
+        dropped = true;
+      } else {
+        ++j;
+      }
+    }
+  }
+  return dropped;
+}
+
 // The reconciled host-domain depth for one sample.
 inline float MetalHostDepthReconcile(uint32_t guest_word, float host_depth,
                                      bool round_to_nearest_even) {

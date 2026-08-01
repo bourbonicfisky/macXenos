@@ -1816,6 +1816,15 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   if (HostLaneMode(/*materialize=*/true) == 0u) {
     two_source.clear();
   }
+  if (MetalDropOverlappingTwoSourceRecords(&two_source)) {
+    // The shared planner walks disjoint ownership ranges per destination, so
+    // this is an invariant violation, not expected traffic. The overlapping
+    // later records were dropped (their tiles materialize pure guest words).
+    XELOGE(
+        "MetalRenderTargetCache: overlapping same-destination two-source "
+        "records dropped (planner disjointness invariant violated)");
+    assert_always();
+  }
   for (size_t i = 0; i < two_source.size();) {
     if (EncodeLaneRefresh(command_buffer, two_source[i])) {
       ++i;
@@ -2007,6 +2016,15 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
                                         end_tiles);
   if (HostLaneMode(/*materialize=*/true) == 0u) {
     two_source.clear();
+  }
+  if (MetalDropOverlappingTwoSourceRecords(&two_source)) {
+    // The shared planner walks disjoint ownership ranges per destination, so
+    // this is an invariant violation, not expected traffic. The overlapping
+    // later records were dropped (their tiles materialize pure guest words).
+    XELOGE(
+        "MetalRenderTargetCache: overlapping same-destination two-source "
+        "records dropped (planner disjointness invariant violated)");
+    assert_always();
   }
   for (size_t i = 0; i < two_source.size();) {
     if (EncodeLaneRefresh(command_buffer, two_source[i])) {

@@ -136,6 +136,30 @@ TEST_CASE("two-source selection is dest-keyed and intersection-clipped",
   }
 }
 
+TEST_CASE("overlapping same-destination selections are dropped fail-closed",
+          "[depth_semantics][host_depth][join]") {
+  // The executor refreshes ALL lanes before ALL reconcile draws; overlapping
+  // records would let the last refresh win both draws. The planner's
+  // ownership walk is disjoint per destination, so overlap is an invariant
+  // violation — the helper drops every record overlapping an earlier one and
+  // reports it happened.
+  int source_a = 1, source_b = 2, source_c = 3;
+  std::vector<MetalTwoSourceRecord> disjoint = {
+      {0xAAAA, &source_a, 0, 8}, {0xAAAA, &source_b, 8, 16}};
+  CHECK_FALSE(MetalDropOverlappingTwoSourceRecords(&disjoint));
+  REQUIRE(disjoint.size() == 2);
+
+  std::vector<MetalTwoSourceRecord> overlapping = {
+      {0xAAAA, &source_a, 0, 12},
+      {0xAAAA, &source_b, 8, 16},   // overlaps the first -> dropped
+      {0xAAAA, &source_c, 16, 20},  // disjoint -> kept
+  };
+  CHECK(MetalDropOverlappingTwoSourceRecords(&overlapping));
+  REQUIRE(overlapping.size() == 2);
+  CHECK(overlapping[0].host_source == &source_a);
+  CHECK(overlapping[1].host_source == &source_c);
+}
+
 TEST_CASE("stencil never participates in reconciliation",
           "[depth_semantics][host_depth][reconcile]") {
   // Same depth bits, wildly different stencil bytes: identical outcome. The
