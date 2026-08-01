@@ -363,6 +363,7 @@ void MetalRenderTargetCache::Shutdown() {
     release_render_pipeline(pipelines.mat_depth_range);
     release_render_pipeline(pipelines.mat_sten_range);
     release_compute_pipeline(pipelines.pack_ms_range);
+    release_compute_pipeline(pipelines.lane_store);
     release_render_pipeline(pipelines.mat_depth_ms_range);
     release_render_pipeline(pipelines.mat_sten_ms_range);
     release_depth_state(pipelines.depth_state);
@@ -1001,7 +1002,7 @@ void MetalRenderTargetCache::PerformTransfers(
   // encoders; the scope is THIS transfer batch only — 8551 proved that
   // reconciling ordinary materializes (out-of-plan lane state) corrupts
   // 1.5M EDRAM words while in-plan reconciliation is exact.
-  two_source_ranges_.clear();
+  two_source_records_.clear();
   bool any = false;
   for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets && !any; ++i) {
     any = render_targets[i] && !transfer_lists[i].empty();
@@ -1302,6 +1303,141 @@ void* MetalRenderTargetCache::EnsureHostLaneBuffer(void* device_handle) {
   return host_lane_dummy_;
 }
 
+// Stage B lane self-check + restore measurement (SAMPLE_EDRAM_SELF_CHECK):
+// blit the refreshed lane and the canonical words over the exact two-source
+// intersections into a shared buffer, and analyze on the command buffer's
+// completion handler with the PRODUCTION CPU oracle — counting host-wins,
+// guest-wins, and PRECISION RESTORES (host won AND its float differs from the
+// guest-decoded float). Zero EDRAM-word movement is only a regression result;
+// these counts are the positive evidence promotion needs.
+static void EncodeTwoSourceLaneDiagnostic(
+    id<MTLCommandBuffer> command, id<MTLBuffer> canonical, id<MTLBuffer> lane,
+    const std::vector<MetalTwoSourceRecord>& records, bool rne) {
+  constexpr uint32_t kTileBytes = 5120;  // 1280 words per tile
+  uint32_t total_bytes = 0;
+  for (const MetalTwoSourceRecord& record : records) {
+    total_bytes += (record.end_tiles - record.start_tiles) * kTileBytes;
+  }
+  if (!total_bytes) {
+    return;
+  }
+  id<MTLBuffer> readback =
+      [command.device newBufferWithLength:size_t(total_bytes) * 2
+                                  options:MTLResourceStorageModeShared];
+  if (!readback) {
+    return;
+  }
+  id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+  blit.label = @"rtcache:host-lane-diagnostic";
+  uint32_t cursor = 0;
+  for (const MetalTwoSourceRecord& record : records) {
+    uint32_t bytes = (record.end_tiles - record.start_tiles) * kTileBytes;
+    [blit copyFromBuffer:canonical
+             sourceOffset:size_t(record.start_tiles) * kTileBytes
+                 toBuffer:readback
+        destinationOffset:cursor
+                     size:bytes];
+    [blit copyFromBuffer:lane
+             sourceOffset:size_t(record.start_tiles) * kTileBytes
+                 toBuffer:readback
+        destinationOffset:size_t(total_bytes) + cursor
+                     size:bytes];
+    cursor += bytes;
+  }
+  [blit endEncoding];
+  std::vector<MetalTwoSourceRecord> records_copy = records;
+  [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    if (completed.status != MTLCommandBufferStatusCompleted) {
+      return;
+    }
+    const uint32_t* words = static_cast<const uint32_t*>(readback.contents);
+    const float* lane_values = reinterpret_cast<const float*>(
+        static_cast<const uint8_t*>(readback.contents) + total_bytes);
+    uint32_t offset_words = 0;
+    for (const MetalTwoSourceRecord& record : records_copy) {
+      uint32_t count = (record.end_tiles - record.start_tiles) * 1280u;
+      uint64_t host_wins = 0, guest_wins = 0, precision_restores = 0;
+      for (uint32_t i = 0; i < count; ++i) {
+        uint32_t word = words[offset_words + i];
+        float host = lane_values[offset_words + i];
+        float reconciled = MetalHostDepthReconcile(word, host, rne);
+        uint32_t reconciled_bits, host_bits;
+        std::memcpy(&reconciled_bits, &reconciled, 4);
+        std::memcpy(&host_bits, &host, 4);
+        if (reconciled_bits == host_bits) {
+          ++host_wins;
+          float guest_decoded =
+              xenos::Float20e4To32(word >> 8) * 0.5f;
+          uint32_t guest_bits;
+          std::memcpy(&guest_bits, &guest_decoded, 4);
+          if (guest_bits != host_bits) {
+            ++precision_restores;
+          }
+        } else {
+          ++guest_wins;
+        }
+      }
+      offset_words += count;
+      XELOGI(
+          "MetalHostDepthDiag tiles [{},{}): host-wins {} (precision "
+          "restores {}), guest-wins {} of {}",
+          record.start_tiles, record.end_tiles, host_wins, precision_restores,
+          guest_wins, count);
+    }
+  }];
+}
+
+bool MetalRenderTargetCache::EncodeLaneRefresh(
+    const void* command_buffer, const MetalTwoSourceRecord& record) {
+  if (!command_buffer || !record.host_source) {
+    return false;
+  }
+  auto* source = static_cast<MetalRenderTarget*>(
+      static_cast<RenderTarget*>(const_cast<void*>(record.host_source)));
+  const RenderTargetKey& key = source->key();
+  // Only a float24 depth source has host precision worth carrying.
+  if (!key.is_depth ||
+      key.GetDepthFormat() != xenos::DepthRenderTargetFormat::kD24FS8) {
+    return false;
+  }
+  bool ms = key.msaa_samples != xenos::MsaaSamples::k1X;
+  id<MTLTexture> texture =
+      (__bridge id<MTLTexture>)(ms ? source->msaa_texture()
+                                   : source->texture());
+  if (!texture) {
+    return false;
+  }
+  const ShadowDepthPipelines* pipelines =
+      EnsureShadowDepthPipelines(ms ? source->sample_count() : 1u);
+  if (!pipelines || !pipelines->lane_store) {
+    return false;
+  }
+  id<MTLCommandBuffer> command = (__bridge id<MTLCommandBuffer>)command_buffer;
+  EdramSurfaceParams params{key.base_tiles, key.GetPitchTiles(),
+                            uint32_t(key.msaa_samples), 2u, 0u,
+                            kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{record.start_tiles, record.end_tiles};
+  id<MTLComputePipelineState> pipeline =
+      (__bridge id<MTLComputePipelineState>)pipelines->lane_store;
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  encoder.label = @"rtcache:host-lane-refresh";
+  [encoder setComputePipelineState:pipeline];
+  [encoder setTexture:texture atIndex:0];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
+                         (__bridge void*)command.device)
+              offset:0
+             atIndex:0];
+  [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setBytes:&range length:sizeof(range) atIndex:2];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height,
+                                       ms ? texture.sampleCount : 1)
+      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+  [encoder endEncoding];
+  return true;
+}
+
 void MetalRenderTargetCache::RecordTransition(TransferKind kind,
                                               const RenderTargetKey& src_key,
                                               const RenderTargetKey& dst_key,
@@ -1325,7 +1461,8 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   if (transfer.host_depth_source) {
     two_source_class = src_key.is_depth ? "depth_and_host_depth_to_depth"
                                         : "color_and_host_depth_to_depth";
-    two_source_ranges_.emplace_back(transfer.start_tiles, transfer.end_tiles);
+    two_source_records_.push_back({dst_key.key, transfer.host_depth_source,
+                                   transfer.start_tiles, transfer.end_tiles});
     static bool s_seen[2] = {false, false};
     bool& seen = s_seen[src_key.is_depth ? 0 : 1];
     if (!seen) {
@@ -1434,6 +1571,28 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
       // later reconcile at ANY sample of the group can restore it.
       if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
     }
+  }
+}
+// Stage B provenance refresh (1x source): the SELECTED host source's depth
+// into the lane over the exact intersection; canonical words untouched.
+// Replicates across the sample group like pack_depth_range so a reconcile at
+// any slot of the group reads the source's value.
+kernel void lane_store_range(depth2d<float, access::read> tex [[texture(0)]],
+                             device float* lane [[buffer(0)]],
+                             constant SurfaceParams& sp [[buffer(1)]],
+                             constant RangeParams& rp [[buffer(2)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+  if (sp.is_depth != 2u) return;
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
+  uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
+  if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
+  float d = tex.read(gid);
+  uint nsamp = 1u << sp.msaa;
+  for (uint sid = 0u; sid < nsamp; ++sid) {
+    uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                     sp.is_depth, 0u, sid);
+    uint idx = off >> 2;
+    if (idx < sp.words) lane[idx] = d;
   }
 }
 fragment DepthFragOut materialize_depth_range_fs(
@@ -1554,8 +1713,21 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
     return nullptr;
   }
+  // Stage B lane refresh (warn-only: reconciliation fails closed to the pure
+  // materialize when the pipeline is absent).
+  id<MTLComputePipelineState> lane_store = [device
+      newComputePipelineStateWithFunction:
+          [lib newFunctionWithName:(ms ? @"lane_store_ms_range"
+                                       : @"lane_store_range")]
+                                    error:&err];
+  if (!lane_store) {
+    XELOGW("MetalShadow: lane_store pipeline build failed sc={}: {}",
+           sample_count,
+           err ? err.localizedDescription.UTF8String : "?");
+  }
   ShadowDepthPipelines p;
   p.sample_count = sample_count;
+  p.lane_store = (__bridge_retained void*)lane_store;
   p.materialize_depth = (__bridge_retained void*)matd;
   p.materialize_sten = (__bridge_retained void*)mats;
   p.pack = (__bridge_retained void*)pack;
@@ -1633,6 +1805,30 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  // Stage B provenance join: dest-keyed, intersection-clipped selection, and
+  // a lane refresh from each SELECTED source encoded BEFORE the render pass
+  // (compute cannot interleave with it). A failed refresh drops its record —
+  // reconciliation fails closed to the pure materialize.
+  std::vector<MetalTwoSourceRecord> two_source =
+      MetalSelectTwoSourceIntersections(two_source_records_,
+                                        target->key().key, start_tiles,
+                                        end_tiles);
+  if (HostLaneMode(/*materialize=*/true) == 0u) {
+    two_source.clear();
+  }
+  for (size_t i = 0; i < two_source.size();) {
+    if (EncodeLaneRefresh(command_buffer, two_source[i])) {
+      ++i;
+    } else {
+      two_source.erase(two_source.begin() + i);
+    }
+  }
+  if (!two_source.empty() && canonical_restore_self_check_enabled_ &&
+      host_depth_lane_) {
+    EncodeTwoSourceLaneDiagnostic(
+        command, canonical, (__bridge id<MTLBuffer>)host_depth_lane_,
+        two_source, cvars::depth_float24_round);
+  }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = texture;
@@ -1661,11 +1857,9 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   {
-    // Reconcile ONLY inside the shared plan's two-source ranges (the join);
-    // ordinary materializes must run the pure guest-word path.
-    uint32_t hl_mode = TwoSourceRangeOverlaps(start_tiles, end_tiles)
-                           ? HostLaneMode(/*materialize=*/true)
-                           : 0u;
+    // Base materialize is ALWAYS the pure guest-word path; reconciliation is
+    // applied only by the per-intersection draws below.
+    uint32_t hl_mode = 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -1673,6 +1867,22 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
                        atIndex:4];
   }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  // Per-intersection reconcile draws: rp narrowed to the EXACT two-source
+  // intersection (the fs discards outside rp), lane freshly holding the
+  // selected source's provenance. Overwrites the base draw's depth there.
+  for (const MetalTwoSourceRecord& ts : two_source) {
+    RangeParams ts_range{ts.start_tiles, ts.end_tiles};
+    uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
+    [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
+    [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+  }
+  if (!two_source.empty()) {
+    // Restore the full-range rp for the stencil bit-plane passes.
+    [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  }
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipelines->mat_sten_range];
   [encoder setStencilReferenceValue:0xFF];
@@ -1790,6 +2000,27 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  // Stage B provenance join (see the 1x sibling for the contract).
+  std::vector<MetalTwoSourceRecord> two_source =
+      MetalSelectTwoSourceIntersections(two_source_records_,
+                                        target->key().key, start_tiles,
+                                        end_tiles);
+  if (HostLaneMode(/*materialize=*/true) == 0u) {
+    two_source.clear();
+  }
+  for (size_t i = 0; i < two_source.size();) {
+    if (EncodeLaneRefresh(command_buffer, two_source[i])) {
+      ++i;
+    } else {
+      two_source.erase(two_source.begin() + i);
+    }
+  }
+  if (!two_source.empty() && canonical_restore_self_check_enabled_ &&
+      host_depth_lane_) {
+    EncodeTwoSourceLaneDiagnostic(
+        command, canonical, (__bridge id<MTLBuffer>)host_depth_lane_,
+        two_source, cvars::depth_float24_round);
+  }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.depthAttachment.texture = texture;
@@ -1822,9 +2053,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   {
-    uint32_t hl_mode = TwoSourceRangeOverlaps(start_tiles, end_tiles)
-                           ? HostLaneMode(/*materialize=*/true)
-                           : 0u;
+    uint32_t hl_mode = 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -1832,6 +2061,18 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
                        atIndex:4];
   }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  for (const MetalTwoSourceRecord& ts : two_source) {
+    RangeParams ts_range{ts.start_tiles, ts.end_tiles};
+    uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
+    [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
+    [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+  }
+  if (!two_source.empty()) {
+    [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  }
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipelines->mat_sten_ms_range];
   [encoder setStencilReferenceValue:0xFF];

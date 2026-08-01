@@ -2015,6 +2015,112 @@ TEST_CASE("Metal host-depth reconcile matches the CPU oracle, both modes",
   }
 }
 
+TEST_CASE("lane refresh installs the SELECTED source's provenance",
+          "[l1][metal][depth_semantics][host_depth][provenance]") {
+  // The positive provenance oracle: host depths A and B pack to the SAME
+  // guest word but differ in float precision. The lane previously contains B
+  // (another plan's value); the shared plan selects a source whose
+  // attachment holds A. After the production lane_store_ms_range refresh,
+  // every covered lane slot must hold A's bits — so reconciliation returns
+  // A, never the stale-but-predicate-satisfying B.
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  if (!device) { SUCCEED("no device"); return; }
+
+  const uint32_t kCode = 0x123456u;
+  float value_a = xenos::Float20e4To32(kCode) * 0.5f;  // the selected source
+  uint32_t bits_a, bits_b;
+  std::memcpy(&bits_a, &value_a, 4);
+  bits_b = bits_a + 1;  // +1 ULP: same 20e4 code under truncation
+  float value_b;
+  std::memcpy(&value_b, &bits_b, 4);
+  REQUIRE(xenos::Float32To20e4(value_a * 2.0f, false) == kCode);
+  REQUIRE(xenos::Float32To20e4(value_b * 2.0f, false) == kCode);
+
+  NSError* error = nil;
+  id<MTLLibrary> library = [device
+      newLibraryWithSource:[NSString stringWithUTF8String:
+                                         xe::gpu::metal::kEdramMsl]
+                   options:nil
+                     error:&error];
+  {
+    std::string library_error =
+        error ? error.localizedDescription.UTF8String : "(none)";
+    INFO(library_error);
+    REQUIRE(library != nil);
+  }
+  id<MTLComputePipelineState> lane_store = [device
+      newComputePipelineStateWithFunction:
+          [library newFunctionWithName:@"lane_store_ms_range"]
+                                    error:&error];
+  REQUIRE(lane_store != nil);
+
+  // 80x16 pixels at 2x = 2560 samples = exactly tiles [0,2).
+  MTLTextureDescriptor* desc = [MTLTextureDescriptor new];
+  desc.textureType = MTLTextureType2DMultisample;
+  desc.pixelFormat = MTLPixelFormatDepth32Float;
+  desc.width = 80;
+  desc.height = 16;
+  desc.sampleCount = 2;
+  desc.usage = MTLTextureUsageRenderTarget;
+  desc.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> depth = [device newTextureWithDescriptor:desc];
+  REQUIRE(depth != nil);
+
+  constexpr uint32_t kWords = 2 * 1280;
+  id<MTLBuffer> lane =
+      [device newBufferWithLength:kWords * 4
+                          options:MTLResourceStorageModeShared];
+  float* lane_cpu = static_cast<float*>(lane.contents);
+  for (uint32_t i = 0; i < kWords; ++i) lane_cpu[i] = value_b;  // stale B
+
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+  id<MTLCommandBuffer> command = [queue commandBuffer];
+  MTLRenderPassDescriptor* clear_pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  clear_pass.depthAttachment.texture = depth;
+  clear_pass.depthAttachment.loadAction = MTLLoadActionClear;
+  clear_pass.depthAttachment.storeAction = MTLStoreActionStore;
+  clear_pass.depthAttachment.clearDepth = double(value_a);
+  [[command renderCommandEncoderWithDescriptor:clear_pass] endEncoding];
+
+  struct { uint32_t base, pitch, msaa, is_depth, fmt_log2, words; } sp{
+      0u, 1u, 1u /*2x*/, 2u /*float24*/, 0u, kWords};
+  struct { uint32_t start_tiles, end_tiles; } range{0u, 2u};
+  id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+  [compute setComputePipelineState:lane_store];
+  [compute setTexture:depth atIndex:0];
+  [compute setBuffer:lane offset:0 atIndex:0];
+  [compute setBytes:&sp length:sizeof(sp) atIndex:1];
+  [compute setBytes:&range length:sizeof(range) atIndex:2];
+  [compute dispatchThreads:MTLSizeMake(80, 16, 2)
+      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+  [compute endEncoding];
+  [command commit];
+  [command waitUntilCompleted];
+  REQUIRE(command.status == MTLCommandBufferStatusCompleted);
+
+  uint32_t stale_b = 0, holds_a = 0, other = 0;
+  const uint32_t* lane_bits = static_cast<const uint32_t*>(lane.contents);
+  for (uint32_t i = 0; i < kWords; ++i) {
+    if (lane_bits[i] == bits_a) ++holds_a;
+    else if (lane_bits[i] == bits_b) ++stale_b;
+    else ++other;
+  }
+  INFO("A=" << holds_a << " staleB=" << stale_b << " other=" << other);
+  CHECK(holds_a == kWords);   // every covered slot carries the SELECTED source
+  CHECK(stale_b == 0);        // no stale provenance survives the refresh
+  CHECK(other == 0);
+
+  // And the oracle: with the lane refreshed to A, reconciliation returns A —
+  // bit-exact — for the guest word both values pack to.
+  uint32_t word = (kCode << 8) | 0x5Au;
+  float reconciled = metal::MetalHostDepthReconcile(word, lane_cpu[0], false);
+  uint32_t reconciled_bits;
+  std::memcpy(&reconciled_bits, &reconciled, 4);
+  CHECK(reconciled_bits == bits_a);
+  CHECK(reconciled_bits != bits_b);
+}
+
 TEST_CASE("Canonical depth resolve exposes guest rather than attachment domain",
           "[l1][metal][canonical][resolve][depth]") {
   MetalCompute mc;

@@ -100,6 +100,42 @@ TEST_CASE("the rounding mode decides the winner at a code midpoint",
         BitsOf(xenos::Float20e4To32(lower) * 0.5f));
 }
 
+TEST_CASE("two-source selection is dest-keyed and intersection-clipped",
+          "[depth_semantics][host_depth][join]") {
+  int source_a = 1, source_b = 2;
+  std::vector<MetalTwoSourceRecord> records = {
+      {/*dest_key=*/0xAAAA, &source_a, 0, 16},
+      {/*dest_key=*/0xBBBB, &source_b, 8, 24},  // other dest, same tiles
+  };
+
+  SECTION("partial overlap clips to the exact intersection") {
+    auto out = MetalSelectTwoSourceIntersections(records, 0xAAAA, 10, 20);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].start_tiles == 10);
+    CHECK(out[0].end_tiles == 16);
+    CHECK(out[0].host_source == &source_a);
+  }
+
+  SECTION("two destinations sharing tiles never cross-select") {
+    // The 8551 defect class: dest A's materialize over tiles B also claims
+    // must select ONLY A's record and A's source.
+    auto for_a = MetalSelectTwoSourceIntersections(records, 0xAAAA, 8, 16);
+    REQUIRE(for_a.size() == 1);
+    CHECK(for_a[0].host_source == &source_a);
+    auto for_b = MetalSelectTwoSourceIntersections(records, 0xBBBB, 8, 16);
+    REQUIRE(for_b.size() == 1);
+    CHECK(for_b[0].host_source == &source_b);
+  }
+
+  SECTION("an unknown destination selects nothing") {
+    CHECK(MetalSelectTwoSourceIntersections(records, 0xCCCC, 0, 2048).empty());
+  }
+
+  SECTION("disjoint op range selects nothing") {
+    CHECK(MetalSelectTwoSourceIntersections(records, 0xAAAA, 16, 32).empty());
+  }
+}
+
 TEST_CASE("stencil never participates in reconciliation",
           "[depth_semantics][host_depth][reconcile]") {
   // Same depth bits, wildly different stencil bytes: identical outcome. The

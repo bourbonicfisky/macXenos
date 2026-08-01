@@ -34,6 +34,7 @@
 // authoritative (the host lane stores no stencil).
 
 #include <cstdint>
+#include <vector>
 
 #include "xenia/gpu/xenos.h"
 
@@ -47,6 +48,41 @@ namespace metal {
 inline uint32_t MetalHostDepthPack(float host_depth,
                                    bool round_to_nearest_even) {
   return xenos::Float32To20e4(host_depth * 2.0f, round_to_nearest_even);
+}
+
+// The provenance-complete two-source join record: the shared plan's FULL
+// identity — destination attachment, SELECTED host source, exact tile range.
+// Reducing this to bare ranges was the 8551 regression's shape (a different
+// destination or source sharing tiles in the batch could consume the wrong
+// lane provenance); the selection below keys on all three.
+struct MetalTwoSourceRecord {
+  uint32_t dest_key;        // RenderTargetKey.key of the transfer destination
+  const void* host_source;  // RenderTarget* identity of the selected source
+  uint32_t start_tiles;
+  uint32_t end_tiles;
+};
+
+// Pure selection: the EXACT intersections of one canonical materialize
+// operation [op_start, op_end) for `dest_key` with the batch's two-source
+// records. Only matching destinations select; results carry the source
+// identity and are clipped to the intersection — reconciliation must never
+// exceed it.
+inline std::vector<MetalTwoSourceRecord> MetalSelectTwoSourceIntersections(
+    const std::vector<MetalTwoSourceRecord>& records, uint32_t dest_key,
+    uint32_t op_start, uint32_t op_end) {
+  std::vector<MetalTwoSourceRecord> out;
+  for (const MetalTwoSourceRecord& record : records) {
+    if (record.dest_key != dest_key) {
+      continue;
+    }
+    uint32_t start = record.start_tiles > op_start ? record.start_tiles
+                                                   : op_start;
+    uint32_t end = record.end_tiles < op_end ? record.end_tiles : op_end;
+    if (start < end) {
+      out.push_back({record.dest_key, record.host_source, start, end});
+    }
+  }
+  return out;
 }
 
 // The reconciled host-domain depth for one sample.

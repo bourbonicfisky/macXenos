@@ -16,6 +16,7 @@
 
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
+#include "xenia/gpu/metal/metal_host_depth_reconcile.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
@@ -315,18 +316,18 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* host_lane_dummy_ = nullptr;   // id<MTLBuffer>, retained
   uint32_t HostLaneMode(bool materialize) const;
   void* EnsureHostLaneBuffer(void* device);
-  // Two-source tile ranges of the CURRENT transfer batch (the shared plan's
-  // host_depth_source transfers) — the join that scopes reconciliation.
-  // Cleared at PerformTransfers entry; populated by RecordTransition.
-  std::vector<std::pair<uint32_t, uint32_t>> two_source_ranges_;
-  bool TwoSourceRangeOverlaps(uint32_t start_tiles, uint32_t end_tiles) const {
-    for (const auto& range : two_source_ranges_) {
-      if (start_tiles < range.second && range.first < end_tiles) {
-        return true;
-      }
-    }
-    return false;
-  }
+  // Two-source records of the CURRENT transfer batch — the provenance-
+  // complete join {destination key, selected host source, exact range}.
+  // Cleared at PerformTransfers entry; populated by RecordTransition;
+  // consumed by the canonical depth materialize encoders via
+  // MetalSelectTwoSourceIntersections (dest-keyed, intersection-clipped).
+  std::vector<MetalTwoSourceRecord> two_source_records_;
+  // Encodes a lane refresh from the SELECTED host source over the exact
+  // intersection, so reconciliation reads the plan's provenance rather than
+  // whatever pack last touched the lane. Returns false on setup failure
+  // (the caller then materializes WITHOUT reconcile — fail closed).
+  bool EncodeLaneRefresh(const void* command_buffer,
+                         const MetalTwoSourceRecord& record);
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,
@@ -467,6 +468,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* mat_sten_range = nullptr;  // canonical authority: materialize stencil, ranged
     void* pack_ms_range = nullptr;   // real-MSAA canonical authority, ranged
     void* mat_depth_ms_range = nullptr;
+    // Stage B: host-lane provenance refresh from a SELECTED source
+    // (lane_store_range for 1x sources, lane_store_ms_range for 2x/4x).
+    void* lane_store = nullptr;
     void* mat_sten_ms_range = nullptr;
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each

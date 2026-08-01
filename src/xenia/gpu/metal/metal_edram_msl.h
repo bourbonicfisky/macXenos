@@ -977,6 +977,26 @@ kernel void pack_depth_ms_range(
   // float24 (is_depth==2) carries extra precision worth a lane slot.
   if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
 }
+// Stage B provenance refresh: write the SELECTED host source's depth into
+// the lane over the exact two-source intersection, without touching the
+// canonical words. Run before a reconciling materialize so the lane carries
+// the plan's provenance, not whatever pack last touched these slots.
+kernel void lane_store_ms_range(
+    depth2d_ms<float, access::read> tex [[texture(0)]],
+    device float* lane [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    uint3 gid [[thread_position_in_grid]]) {
+  if (sp.is_depth != 2u) return;
+  uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
+  if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
+      gid.z >= tex.get_num_samples() ||
+      !xe_authority_in_range(gid.x, gid.y, sp, guest_sample, range)) return;
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, guest_sample);
+  uint idx = off >> 2;
+  if (idx < sp.words) lane[idx] = tex.read(uint2(gid.x, gid.y), gid.z);
+}
 
 // Canonical resolve source. Destination formatting is performed by the Metal
 // color attachment selected from RB_COPY_DEST_INFO; the existing writeback
