@@ -28,6 +28,10 @@ IRShaderStage ToIRStage(MetalShaderConverter::Stage stage) {
       return IRShaderStageFragment;
     case MetalShaderConverter::Stage::kGeometry:
       return IRShaderStageGeometry;
+    case MetalShaderConverter::Stage::kHull:
+      return IRShaderStageHull;
+    case MetalShaderConverter::Stage::kDomain:
+      return IRShaderStageDomain;
   }
   return IRShaderStageInvalid;
 }
@@ -303,8 +307,11 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
     Stage stage, const std::vector<uint8_t>& dxil, InputTopology input_topology,
     GeometryEmulationResult& result) {
   result = GeometryEmulationResult{};
-  if (stage != Stage::kVertex && stage != Stage::kGeometry) {
-    result.error = "geometry emulation only converts the vertex or geometry stage";
+  if (stage != Stage::kVertex && stage != Stage::kGeometry &&
+      stage != Stage::kHull && stage != Stage::kDomain) {
+    result.error =
+        "geometry emulation only converts vertex, geometry, hull or domain "
+        "stages";
     return false;
   }
   if (!root_signature_) {
@@ -389,6 +396,14 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
       result.has_geometry_stage = true;
       reflect_stage = IRShaderStageGeometry;
     }
+  } else if (stage == Stage::kHull) {
+    if (ExtractMetalLib(metal_object, IRShaderStageHull, result.metallib)) {
+      reflect_stage = IRShaderStageHull;
+    }
+  } else if (stage == Stage::kDomain) {
+    if (ExtractMetalLib(metal_object, IRShaderStageDomain, result.metallib)) {
+      reflect_stage = IRShaderStageDomain;
+    }
   } else {
     if (ExtractMetalLib(metal_object, IRShaderStageVertex, result.metallib)) {
       reflect_stage = IRShaderStageVertex;
@@ -440,6 +455,54 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
           }
         }
         IRMetalLibBinaryDestroy(stage_in_lib);
+      }
+    } else if (reflect_stage == IRShaderStageHull) {
+      IRVersionedHSInfo hs_info = {};
+      hs_info.version = IRReflectionVersion_1_0;
+      if (IRShaderReflectionCopyHullInfo(reflection, IRReflectionVersion_1_0,
+                                         &hs_info)) {
+        result.has_hull_info = true;
+        result.hs_max_patches_per_object_threadgroup =
+            hs_info.info_1_0.max_patches_per_object_threadgroup;
+        result.hs_max_object_threads_per_patch =
+            hs_info.info_1_0.max_object_threads_per_patch;
+        result.hs_patch_constants_size = hs_info.info_1_0.patch_constants_size;
+        result.hs_input_control_point_count =
+            hs_info.info_1_0.input_control_point_count;
+        result.hs_output_control_point_count =
+            hs_info.info_1_0.output_control_point_count;
+        result.hs_output_control_point_size =
+            hs_info.info_1_0.output_control_point_size;
+        result.hs_tessellator_domain =
+            uint32_t(hs_info.info_1_0.tessellator_domain);
+        result.hs_tessellator_partitioning =
+            uint32_t(hs_info.info_1_0.tessellator_partitioning);
+        result.hs_tessellator_output_primitive =
+            uint32_t(hs_info.info_1_0.tessellator_output_primitive);
+        result.hs_tessellation_type_half =
+            hs_info.info_1_0.tessellation_type_half;
+        result.hs_max_tessellation_factor =
+            hs_info.info_1_0.max_tessellation_factor;
+        IRShaderReflectionReleaseHullInfo(&hs_info);
+      }
+    } else if (reflect_stage == IRShaderStageDomain) {
+      IRVersionedDSInfo ds_info = {};
+      ds_info.version = IRReflectionVersion_1_0;
+      if (IRShaderReflectionCopyDomainInfo(reflection, IRReflectionVersion_1_0,
+                                           &ds_info)) {
+        result.has_domain_info = true;
+        result.ds_max_input_prims_per_mesh_threadgroup =
+            ds_info.info_1_0.max_input_prims_per_mesh_threadgroup;
+        result.ds_input_control_point_count =
+            ds_info.info_1_0.input_control_point_count;
+        result.ds_input_control_point_size =
+            ds_info.info_1_0.input_control_point_size;
+        result.ds_patch_constants_size = ds_info.info_1_0.patch_constants_size;
+        result.ds_tessellator_domain =
+            uint32_t(ds_info.info_1_0.tessellator_domain);
+        result.ds_tessellation_type_half =
+            ds_info.info_1_0.tessellation_type_half;
+        IRShaderReflectionReleaseDomainInfo(&ds_info);
       }
     } else {
       IRVersionedGSInfo gs_info = {};

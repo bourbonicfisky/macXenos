@@ -29,7 +29,7 @@ namespace metal {
 // it is usable offline.
 class MetalShaderConverter {
  public:
-  enum class Stage { kVertex, kFragment, kGeometry };
+  enum class Stage { kVertex, kFragment, kGeometry, kHull, kDomain };
 
   // Input topology for geometry/tessellation emulation, mirroring IRInputTopology
   // (kept ABI-free in the public header so callers don't include the IR headers).
@@ -49,6 +49,30 @@ class MetalShaderConverter {
     uint32_t gs_max_input_primitives_per_mesh_threadgroup = 0;  // GS reflection.
     bool has_mesh_stage = false;
     bool has_geometry_stage = false;
+    // Hull (kHull) reflection — the COMPLETE set IRRuntimeTessellationPipelineConfig
+    // and IRRuntimeValidateTessellationPipeline consume (port notes §2/§3). Note
+    // the config's gsMaxInputPrimitivesPerMeshThreadgroup comes from the DOMAIN
+    // stage's ds_max_input_prims_per_mesh_threadgroup, not from any HS field.
+    bool has_hull_info = false;
+    uint32_t hs_max_patches_per_object_threadgroup = 0;
+    uint32_t hs_max_object_threads_per_patch = 0;
+    uint32_t hs_patch_constants_size = 0;
+    uint32_t hs_input_control_point_count = 0;
+    uint32_t hs_output_control_point_count = 0;
+    uint32_t hs_output_control_point_size = 0;
+    uint32_t hs_tessellator_domain = 0;
+    uint32_t hs_tessellator_partitioning = 0;
+    uint32_t hs_tessellator_output_primitive = 0;
+    bool hs_tessellation_type_half = false;
+    float hs_max_tessellation_factor = 0.0f;
+    // Domain (kDomain) reflection.
+    bool has_domain_info = false;
+    uint32_t ds_max_input_prims_per_mesh_threadgroup = 0;
+    uint32_t ds_input_control_point_count = 0;
+    uint32_t ds_input_control_point_size = 0;
+    uint32_t ds_patch_constants_size = 0;
+    uint32_t ds_tessellator_domain = 0;
+    bool ds_tessellation_type_half = false;
     std::string error;
   };
 
@@ -67,9 +91,12 @@ class MetalShaderConverter {
                std::string* error_out = nullptr);
 
   // Compiles a DXIL container with geometry+tessellation emulation enabled and
-  // captures the reflection needed to build a geometry-emulation pipeline. Used by
-  // the point/rectangle/quad primitive-expansion path (guest VS as object stage,
-  // generated GS as mesh stage). stage must be kVertex or kGeometry.
+  // captures the reflection needed to build a geometry- or tessellation-emulation
+  // pipeline. Used by the point/rectangle/quad primitive-expansion path (guest VS
+  // as object stage, generated GS as mesh stage) and by the tessellation leg
+  // (prebuilt tess VS as object stage, prebuilt HS, guest VS compiled as the
+  // domain stage). stage must be kVertex, kGeometry, kHull or kDomain; only
+  // kVertex synthesizes (and requires) a stage-in function.
   bool ConvertForGeometryEmulation(Stage stage,
                                    const std::vector<uint8_t>& dxil,
                                    InputTopology input_topology,
