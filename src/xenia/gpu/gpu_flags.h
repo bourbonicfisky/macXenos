@@ -13,6 +13,7 @@
 
 DECLARE_path(trace_gpu_prefix);
 DECLARE_bool(trace_gpu_stream);
+DECLARE_int32(trace_gpu_frame_at_swap);
 
 DECLARE_path(dump_shaders);
 

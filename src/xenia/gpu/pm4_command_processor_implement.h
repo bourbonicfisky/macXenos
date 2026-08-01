@@ -569,6 +569,15 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
 #if XE_ENABLE_TRACE_WRITER_INSTRUMENTATION == 1
 
     if (opcode == PM4_XE_SWAP) {
+      // Unattended single-frame capture: arm the same state the Trace Frame
+      // hotkey sets when the swap counter hits the requested value (0 = off).
+      // counter_ increments once per XE_SWAP, so this fires exactly once.
+      if (cvars::trace_gpu_frame_at_swap > 0 &&
+          counter_ == uint32_t(cvars::trace_gpu_frame_at_swap) &&
+          trace_state_ == TraceState::kDisabled && !trace_writer_.is_open()) {
+        trace_state_ = TraceState::kSingleFrame;
+        trace_frame_path_ = cvars::trace_gpu_prefix;
+      }
       // End the trace writer frame.
       if (trace_writer_.is_open()) {
         trace_writer_.WriteEvent(EventCommand::Type::kSwap);

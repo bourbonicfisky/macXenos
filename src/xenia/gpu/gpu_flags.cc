@@ -12,6 +12,11 @@
 DEFINE_path(trace_gpu_prefix, "scratch/gpu/",
             "Prefix path for GPU trace files.", "GPU");
 DEFINE_bool(trace_gpu_stream, false, "Trace all GPU packets.", "GPU");
+DEFINE_int32(trace_gpu_frame_at_swap, 0,
+             "Capture a single-frame GPU trace (like the Trace Frame hotkey) "
+             "when the swap counter reaches this value. 0 disables. For "
+             "unattended captures where no UI hotkey is available.",
+             "GPU");
 
 DEFINE_path(
     dump_shaders, "",
