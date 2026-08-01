@@ -211,11 +211,14 @@ bool MetalRenderTargetCache::Initialize() {
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_SELF_CHECK");
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
-  // Stage B (implement-metal-depth-semantics): host-depth ownership gate.
-  // Default OFF; the predicate additionally fails closed while the Stage A
-  // float24 PS conversion is engaged (both-gates arms self-disable B).
+  // Stage B (implement-metal-depth-semantics): host-depth ownership.
+  // PROMOTED DEFAULT-ON 2026-08-01 (docs/metal_depth_semantics_probe.md:
+  // corpus + determinism + live gates green; matched-content perf gate shows
+  // no regression with two valid samples per mode). Exact rollback:
+  // XE_METAL_HOST_DEPTH=0. The predicate additionally fails closed while the
+  // Stage A float24 PS conversion is engaged (both-gates arms self-disable).
   host_depth_gate_enabled_ =
-      IsMetalEnvironmentFlagEnabled("XE_METAL_HOST_DEPTH");
+      IsMetalEnvironmentFlagEnabled("XE_METAL_HOST_DEPTH", true);
   f24_ps_engaged_ =
       MetalF24PsEngaged(ParseMetalF24PsMode(std::getenv("XE_METAL_F24_PS")));
   if (host_depth_gate_enabled_ && f24_ps_engaged_) {
