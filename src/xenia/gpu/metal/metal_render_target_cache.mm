@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <set>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
@@ -1249,11 +1250,37 @@ void MetalRenderTargetCache::PerformTransfers(
         PerformColorConvertTransfer((__bridge const void*)cb, source, dest,
                                     transfer);
       } else {
-        static uint32_t s_skips = 0;
-        if (s_skips++ < 24) {
-          XELOGW("MetalRenderTargetCache: SKIP transfer {} -> {} tiles [{},{})",
-                 src_key.GetDebugName(), dest_key.GetDebugName(),
-                 transfer.start_tiles, transfer.end_tiles);
+        // Stage D 5.2: BOUNDED, reason-coded residual report. This branch is
+        // unreachable across the current corpus (all engaged classes route
+        // canonically or through the legacy branches above) — if it EVER
+        // fires, the report must carry everything triage needs without
+        // replaying: source/destination formats + sample counts (the debug
+        // names), exact tile range, and transition order. Deduplicated by
+        // key pair, capped, unconditional (a residual gated behind a
+        // diagnostic env is a silent skip with extra steps). A 64bpp key
+        // pair appearing here is the reopening tripwire for the unclaimed
+        // 64bpp transfer classes.
+        static std::set<uint64_t> s_residual_pairs;
+        static uint32_t s_residual_reports = 0;
+        uint64_t pair_key =
+            (uint64_t(src_key.key) << 32) | uint64_t(dest_key.key);
+        if (s_residual_pairs.insert(pair_key).second &&
+            s_residual_reports < 32) {
+          ++s_residual_reports;
+          XELOGE(
+              "MetalXferResidual[{}]: {} -> {} tiles [{},{}) transition #{} "
+              "@draw {}{}",
+              s_residual_reports, src_key.GetDebugName(),
+              dest_key.GetDebugName(), transfer.start_tiles,
+              transfer.end_tiles, transition_counter_,
+              command_processor_.trace_draw_index(),
+              (src_key.Is64bpp() || dest_key.Is64bpp())
+                  ? " [64BPP CLASS — unclaimed-coverage tripwire]"
+                  : "");
+          if (s_residual_reports == 32) {
+            XELOGE("MetalXferResidual: report cap reached; further distinct "
+                   "pairs suppressed");
+          }
         }
       }
     }
