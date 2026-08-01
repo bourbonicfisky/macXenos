@@ -1141,11 +1141,8 @@ void MetalRenderTargetCache::PerformTransfers(
         }
         PerformColorToDepthTransfer((__bridge const void*)cb, source, dest,
                                     transfer);
-        // Remember who lent these tiles: if the SAME color key takes them
-        // back this frame, that d2c must transport the real bits (below).
-        c2d_pingpong_[dest] = C2dPingPong{source, transfer.start_tiles,
-                                          transfer.end_tiles,
-                                          command_processor_.swap_count()};
+        // Lineage (who lent these tiles) is recorded centrally in
+        // RecordTransition, keyed by RenderTargetKey values.
       } else if (!dest_key.is_depth && src_key.is_depth &&
                  dest->pixel_format() == kColorFormat) {
         // Depth reinterpreted as raw-bits color (a color pass reuses tiles a
@@ -1160,37 +1157,64 @@ void MetalRenderTargetCache::PerformTransfers(
         // (hardware-accurate raw reinterpret, for titles that genuinely
         // read them).
         static const bool s_d2c_real = std::getenv("XE_METAL_D2C_REAL");
-        // Same-frame ping-pong exception: this color key lent exactly these
-        // tiles to that depth key THIS frame (Sonic's DoF pass writes a
-        // packed motion-vector/CoC map as 4x depth bits over the blur
-        // buffer's tiles and the composite decodes the raw bits — skipping
-        // left stale scene pixels to be decoded as gather vectors: the
-        // melted mip / white screen).
-        bool pingpong_return = false;
-        auto pp = c2d_pingpong_.find(source);
-        if (pp != c2d_pingpong_.end() &&
-            pp->second.src_color_rt == (const void*)dest &&
-            pp->second.swap == command_processor_.swap_count() &&
-            transfer.start_tiles < pp->second.end_tiles &&
-            transfer.end_tiles > pp->second.start_tiles) {
-          pingpong_return = true;
-          static uint32_t s_pp_logs = 0;
-          if (s_pp_logs++ < 16) {
-            XELOGW("MetalXferD2C @draw {}: ping-pong return {} -> {} tiles "
-                   "[{},{}) — real bit transport",
-                   command_processor_.trace_draw_index(),
-                   src_key.GetDebugName(), dest_key.GetDebugName(),
-                   transfer.start_tiles, transfer.end_tiles);
+        // Same-frame ping-pong rule, now through the key-identity classifier
+        // (Sonic's DoF pass writes a packed motion-vector/CoC map as 4x
+        // depth bits over the blur buffer's tiles and the composite decodes
+        // the raw bits — skipping left stale scene pixels decoded as gather
+        // vectors: the melted mip / white screen). Verdicts SPLIT: only the
+        // proven intersections transport real bits; the remainder keeps
+        // key-local persistence. XE_METAL_D2C_REAL=1 forces the whole range
+        // real (unchanged legacy A/B override).
+        std::vector<MetalD2cSegment> segments;
+        if (s_d2c_real) {
+          segments.push_back({transfer.start_tiles, transfer.end_tiles,
+                              MetalD2cVerdict::kRealTransfer, "forced"});
+        } else {
+          segments = d2c_lineage_.Classify(
+              src_key.key, dest_key.key, transfer.start_tiles,
+              transfer.end_tiles, command_processor_.swap_count(),
+              /*allow_cross_frame=*/false);
+          // Review-mandated measurement BEFORE any cross-frame enablement.
+          uint32_t cross_frame_tiles =
+              d2c_lineage_.CountCrossFrameCandidateTiles(
+                  src_key.key, dest_key.key, transfer.start_tiles,
+                  transfer.end_tiles, command_processor_.swap_count());
+          if (cross_frame_tiles) {
+            static uint32_t s_cf_logs = 0;
+            if (s_cf_logs++ < 32) {
+              XELOGI("MetalD2C cross-frame candidate: {} tiles {} -> {} "
+                     "(measured, not acted on)",
+                     cross_frame_tiles, src_key.GetDebugName(),
+                     dest_key.GetDebugName());
+            }
           }
         }
-        if (s_d2c_real || pingpong_return) {
+        for (const MetalD2cSegment& segment : segments) {
+          if (segment.verdict != MetalD2cVerdict::kRealTransfer) {
+            continue;
+          }
           if (blit) {
             [blit endEncoding];
             blit = nil;
           }
+          static uint32_t s_pp_logs = 0;
+          if (s_pp_logs++ < 16) {
+            XELOGW("MetalXferD2C @draw {}: {} {} -> {} tiles [{},{}) — real "
+                   "bit transport",
+                   command_processor_.trace_draw_index(), segment.reason,
+                   src_key.GetDebugName(), dest_key.GetDebugName(),
+                   segment.start_tiles, segment.end_tiles);
+          }
+          Transfer segment_transfer = transfer;
+          segment_transfer.start_tiles = segment.start_tiles;
+          segment_transfer.end_tiles = segment.end_tiles;
           PerformDepthToColorTransfer((__bridge const void*)cb, source, dest,
-                                      transfer, pingpong_return);
+                                      segment_transfer, !s_d2c_real);
         }
+        // Consume-once: this return (executed or skipped) is the tiles' next
+        // ownership movement — an earlier lend can no longer prove a later
+        // return without a fresh c2d.
+        d2c_lineage_.SupersedeRange(transfer.start_tiles, transfer.end_tiles);
       } else if (!src_key.is_depth && !dest_key.is_depth &&
                  !src_key.Is64bpp() && !dest_key.Is64bpp() &&
                  ((source->pixel_format() == kColorFormat &&
@@ -1432,6 +1456,18 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   rec.start_tiles = transfer.start_tiles;
   rec.end_tiles = transfer.end_tiles;
   transition_manifest_.push_back(rec);
+  // Stage C lineage maintenance (key identities, sequence = transition_id):
+  // a c2d lend records; every OTHER kind supersedes its overlap — EXCEPT
+  // kDepthToColor, whose branch consumes-then-supersedes itself so this
+  // (earlier) call cannot destroy the lineage it is about to classify.
+  if (kind == TransferKind::kColorToDepth) {
+    d2c_lineage_.RecordColorToDepth(src_key.key, dst_key.key,
+                                    transfer.start_tiles, transfer.end_tiles,
+                                    command_processor_.swap_count(),
+                                    rec.transition_id);
+  } else if (kind != TransferKind::kDepthToColor) {
+    d2c_lineage_.SupersedeRange(transfer.start_tiles, transfer.end_tiles);
+  }
   // Stage B 3.4: DIRECT measurement of the two host-depth transfer classes.
   // Generic color_to_depth counts do not prove kColorAndHostDepthToDepth —
   // only a transfer carrying host_depth_source does. Class is named by the
@@ -4495,7 +4531,7 @@ void MetalRenderTargetCache::ClearCache() {
   // Derived state keyed by render-target identity, dropped BEFORE the shared
   // clear can destroy the targets it names. Both are same-frame/per-present
   // records, so dropping them costs nothing but a recomputation.
-  c2d_pingpong_.clear();
+  d2c_lineage_.InvalidateAll();
   presentable_color_target_ = nullptr;  // borrowed from a render target.
   // Deferred releases are held until the submissions encoded against them
   // complete. The clear runs only at a fully quiesced boundary, so every one
@@ -5252,6 +5288,9 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
 }
 
 void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
+  // A snapshot restore replaces EDRAM content wholesale: no prior lend can
+  // prove a return against it.
+  d2c_lineage_.InvalidateAll();
   // Full-EDRAM 1280-pitch k_8_8_8_8 render target owning all tiles.
   RenderTarget* full_rt = PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
       xenos::ColorRenderTargetFormat::k_8_8_8_8);

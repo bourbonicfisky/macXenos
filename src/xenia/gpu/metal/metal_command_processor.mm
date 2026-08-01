@@ -6949,6 +6949,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // land: releasing now would discard the records the retry depends on. The
     // request stays latched for the next swap.
     ExecuteDeferredCacheClear(/*publication_failed=*/true);
+    // Failed publication also invalidates d2c lineage: lends recorded this
+    // frame may describe content that never landed.
+    if (render_target_cache_) {
+      render_target_cache_->InvalidateD2cLineage();
+    }
     FinalizeSwapFrame();
     return;
   }

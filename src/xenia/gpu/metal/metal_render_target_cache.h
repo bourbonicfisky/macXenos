@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_d2c_classifier.h"
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_host_depth_reconcile.h"
@@ -65,6 +66,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   Path GetPath() const override {
     return Path::kHostRenderTargets;
   }
+
+  // Failed-publication hook (command processor): lineage recorded before a
+  // failed publication may describe content that never reached its
+  // destination — nothing before this point may prove a d2c return.
+  void InvalidateD2cLineage() { d2c_lineage_.InvalidateAll(); }
 
   bool Update(bool is_rasterization_done,
               reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -664,13 +670,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // the tiles and when. The d2c transfer runs the REAL bit transport only
   // for this pattern — everywhere else it keeps the key-local-persistence
   // SKIP (JC2 casino dst-blend, SF4: real bits regress both).
-  struct C2dPingPong {
-    const void* src_color_rt;
-    uint32_t start_tiles;
-    uint32_t end_tiles;
-    uint32_t swap;
-  };
-  std::unordered_map<const void*, C2dPingPong> c2d_pingpong_;
+  // Stage C: key-identity d2c lineage (replaces the pointer-keyed
+  // C2dPingPong tracker — RT addresses recycle; keys do not). Maintained
+  // centrally in RecordTransition (c2d records; other kinds supersede their
+  // overlap; the d2c branch itself consumes-then-supersedes so its own
+  // manifest record cannot self-destroy the lineage it classifies against).
+  MetalD2cLineage d2c_lineage_;
 
   // Ordered ownership-transition manifest (see RecordTransition). Grows for the
   // life of the cache; cheap metadata, capped-throttled logging.
