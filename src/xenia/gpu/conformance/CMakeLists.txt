@@ -238,6 +238,43 @@ if(APPLE)
   endif()
   xe_target_defaults(xenia-gpu-metal-float24-conformance)
 
+  # port-xenios-tessellation task 2.2: the standalone MSC tessellation probe.
+  # Same closure shape as the float24 target above (DxbcShaderTranslator +
+  # dxilconv + MetalShaderConverter + the IR runtime TU from
+  # xenia-gpu-metal-backend for IRRuntimeValidateTessellationPipeline /
+  # IRRuntimeNewGeometryTessellationEmulationPipeline). Device required.
+  add_executable(xenia-gpu-metal-tessellation-conformance
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_translation_probe_test.mm
+    ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
+  )
+  target_compile_definitions(xenia-gpu-metal-tessellation-conformance PRIVATE
+    "XE_TEST_SUITE_NAME=\"xenia-gpu-metal-tessellation-conformance\""
+  )
+  target_include_directories(xenia-gpu-metal-tessellation-conformance PRIVATE
+    ${PROJECT_SOURCE_DIR}/tools/build
+    ${PROJECT_SOURCE_DIR}/tools/build/src
+    ${PROJECT_SOURCE_DIR}/tools/build/third_party/catch/include
+  )
+  target_link_libraries(xenia-gpu-metal-tessellation-conformance PRIVATE
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-gpu-metal xenia-gpu-metal-backend
+    xenia-hid xenia-hid-nop xenia-kernel xenia-patcher
+    xenia-ui xenia-ui-metal xenia-vfs
+    aes_128 capstone fmt imgui libavcodec libavutil mspack snappy xxhash
+    "-framework Metal" "-framework Foundation"
+  )
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-metal-tessellation-conformance
+      PRIVATE xenia-cpu-backend-a64)
+  elseif(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-metal-tessellation-conformance
+      PRIVATE xenia-cpu-backend-x64)
+  endif()
+  xe_target_defaults(xenia-gpu-metal-tessellation-conformance)
+  set_target_properties(xenia-gpu-metal-tessellation-conformance PROPERTIES
+    FOLDER "tests")
+
   # PP3 L1: the full guest VS chain is deliberately a separate executable.
   # Pulling MetalPipelineCache (and therefore the monolithic GPU/backend
   # closure) into the lean general conformance binary would defeat its fast L0
