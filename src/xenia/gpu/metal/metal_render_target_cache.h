@@ -30,15 +30,18 @@ namespace metal {
 
 class MetalCommandProcessor;
 
-// Metal implementation of the shared copy-based EDRAM ownership model
-// (stage 2 of the production-shaped vertical slice). The base class owns the
-// EDRAM 80x16-tile ownership ranges and computes the transfers each draw's
-// render targets need; this subclass creates the MTLTextures and executes the
-// transfers. Bring-up scope (see openspec reduce-apple-gpu-frametime):
-// 1x resolution scale, 1x MSAA textures, gamma collapsed to 8888 storage,
-// IsHostDepthEncodingDifferent()=false (no two-source host-depth modes),
-// transfers executed as standalone blits for the same-format cases and
-// log-skipped otherwise, resolve still through the snapshot bridge.
+// Metal implementation of the shared copy-based EDRAM ownership model. The
+// base class owns the EDRAM 80x16-tile ownership ranges and computes the
+// transfers each draw's render targets need; this subclass creates the
+// MTLTextures and executes the transfers. Current scope (2026-08-01,
+// implement-metal-depth-semantics closeout): canonical per-sample EDRAM +
+// real 2x/4x MSAA default-on; host-depth ownership with two-source
+// pointwise reconciliation PROMOTED default-on (XE_METAL_HOST_DEPTH=0 exact
+// rollback); same-frame d2c classification via the key-identity classifier;
+// transfer tail verified word-level with bounded residual reporting (64bpp
+// classes unengaged/unclaimed, residual-report tripwire); resolve does
+// snapshot registration AND guest-RAM writeback. 1x resolution scale;
+// gamma collapsed to 8888 storage (blend-domain is a tracked P0).
 // Metal objects held as opaque void* (retained) so the header stays C++.
 class MetalRenderTargetCache final : public RenderTargetCache {
  public:
@@ -51,7 +54,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // drawable is unaffected. (Was BGRA8: drawn content then disagreed
   // with the raw crossings by an R<->B swap.)
   static const uint64_t kColorFormat;
-  // MTLPixelFormatDepth32Float — depth-only (no stencil yet).
+  // MTLPixelFormatDepth32Float_Stencil8 — full depth + stencil planes.
   static const uint64_t kDepthFormat;
 
   MetalRenderTargetCache(const RegisterFile& register_file,
