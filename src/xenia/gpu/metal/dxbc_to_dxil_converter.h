@@ -38,16 +38,14 @@ class DxbcToDxilConverter {
   bool is_available() const { return is_available_; }
 
   // Converts a DXBC container to a DXIL container. Returns false and fills
-  // error_out on failure. Thread-safe: each calling thread gets its own
-  // converter instance (dxilconv converters are not shareable across threads).
+  // error_out on failure. Thread-safe: each call creates (and releases) a
+  // fresh converter instance — dxilconv converters carry call history that
+  // corrupts later conversions, so instances are never reused or shared.
   bool Convert(const std::vector<uint8_t>& dxbc,
                std::vector<uint8_t>& dxil_out,
                std::string* error_out = nullptr);
 
  private:
-  // Returns a converter owned by thread-local storage, creating it on first use.
-  IDxbcConverter* GetThreadConverter(std::string* error_out);
-
   bool is_available_ = false;
   // Converter option string passed to Convert(); overridable via
   // XENIA_DXBC2DXIL_FLAGS for debugging. Stored as wide chars (the dxilconv ABI

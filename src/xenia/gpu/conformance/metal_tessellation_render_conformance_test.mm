@@ -283,6 +283,21 @@ struct RenderSpec {
   // Harness CONTROL 2: plain vertex+fragment pipeline (no mesh stages at all)
   // over the same AB/constants — splits "mesh dispatch" from "content".
   bool plain_control = false;
+  // --- Nondeterminism-campaign dimensions (defaults preserve the original
+  // behavior byte-for-byte; see the [nondeterm] diagnostic case). ---
+  uint32_t sample_count = 1;   // rasterSampleCount; >1 = MSAA targets +
+                               // per-sample compute readback.
+  bool depth_stencil8 = false;  // production Depth32Float_Stencil8 instead of
+                                // the harness default Depth32Float.
+  bool depth_compare_lequal = false;  // LessEqual instead of Always.
+  // Dispatch-parameter experiments (adaptive INDEXED draws only). Any nonzero
+  // value routes the draw through a LOCAL replica of
+  // IRRuntimeDrawIndexedPatchesTessellationEmulation (the vendored header's
+  // body is IR_INLINE and its helpers are public) so single dispatch knobs
+  // can vary without touching the vendored code.
+  uint32_t tg_mem_length = 0;       // 0 = runtime default (15360 hardcoded).
+  uint32_t hs_patches_override = 0; // 0 = pipeline-reflected value.
+  uint32_t index_pad_words = 0;     // prepend N filler words, startIndex = N.
   std::vector<DrawSpec> draws;
 };
 
@@ -313,12 +328,163 @@ struct RenderResult {
   }
 };
 
+// LOCAL replica of IRRuntimeDrawIndexedPatchesTessellationEmulation (the
+// vendored header's body is IR_INLINE and every helper it calls is public in
+// the same header) with the one hardcoded dispatch parameter exposed:
+// objectThreadgroupMemoryLength (vendored: 15360). TEST-ONLY per the
+// nondeterminism-campaign rules — the vendored header is not modified, and
+// production keeps calling the vendored helper.
+void LocalDrawIndexedPatchesTessellationEmulation(
+    id<MTLRenderCommandEncoder> enc, IRRuntimePrimitiveType primitive_topology,
+    MTLIndexType index_type, id<MTLBuffer> index_buffer,
+    IRRuntimeTessellationPipelineConfig cfg, uint32_t instance_count,
+    uint32_t index_count_per_instance, uint32_t base_instance,
+    int32_t base_vertex, uint32_t start_index, uint32_t threadgroup_mem) {
+  // The vendored Calculate* helpers are `static` under
+  // IR_PRIVATE_IMPLEMENTATION (visible only to ir_runtime_impl.mm), so their
+  // pure arithmetic is mirrored here verbatim from the header bodies
+  // (IRTessellatorThreadgroupVertexOverlap :1072,
+  // IRRuntimeCalculateDrawInfoForGSTSEmulation :1084,
+  // IRRuntimeCalculateObjectTgCountForTessellationAndGeometryEmulation :905,
+  // IRRuntimeCalculateThreadgroupSizeForTessellationAndGeometry :935 —
+  // patchlists are not strips, so the strip-overlap branch never engages).
+  uint16_t vertex_overlap =
+      cfg.outputPrimitiveType == IRRuntimeTessellatorOutputPoint
+          ? 0
+          : (cfg.outputPrimitiveType == IRRuntimeTessellatorOutputLine ? 1
+                                                                       : 2);
+  IRRuntimeDrawInfo draw_info = {};
+  draw_info.meshThreadgroupPrimitiveStride =
+      (uint16_t)cfg.gsMaxInputPrimitivesPerMeshThreadgroup - vertex_overlap;
+  draw_info.objectThreadgroupVertexStride =
+      (uint16_t)(cfg.hsMaxPatchesPerObjectThreadgroup *
+                 cfg.hsInputControlPointCount);
+  draw_info.patchesPerObjectThreadgroup =
+      (uint16_t)cfg.hsMaxPatchesPerObjectThreadgroup;
+  draw_info.threadsPerPatch = (uint8_t)cfg.hsMaxObjectThreadsPerThreadgroup;
+  draw_info.inputControlPointsPerPatch =
+      (uint16_t)cfg.hsInputControlPointCount;
+  draw_info.gsInstanceCount = (uint16_t)cfg.gsInstanceCount;
+  draw_info.maxInputPrimitivesPerMeshThreadgroup =
+      (uint16_t)cfg.gsMaxInputPrimitivesPerMeshThreadgroup;
+  draw_info.indexType = (uint8_t)index_type + 1;
+  draw_info.primitiveTopology = (uint8_t)primitive_topology;
+  MTLSize object_threadgroup_count = MTLSizeMake(
+      (index_count_per_instance + draw_info.objectThreadgroupVertexStride -
+       1) /
+          draw_info.objectThreadgroupVertexStride,
+      instance_count, 1);
+  uint32_t object_threadgroup_size = cfg.hsMaxPatchesPerObjectThreadgroup *
+                                     cfg.hsMaxObjectThreadsPerThreadgroup;
+  uint32_t mesh_threadgroup_size = cfg.gsMaxInputPrimitivesPerMeshThreadgroup;
+  IRRuntimeDrawParams draw_params;
+  draw_params.drawIndexed = (IRRuntimeDrawIndexedArgument){
+      .indexCountPerInstance = index_count_per_instance,
+      .instanceCount = instance_count,
+      .startIndexLocation = start_index,
+      .baseVertexLocation = base_vertex,
+      .startInstanceLocation = base_instance};
+  draw_info.indexBuffer = index_buffer.gpuAddress;
+  [enc setObjectBytes:&draw_info
+               length:sizeof(IRRuntimeDrawInfo)
+              atIndex:kIRArgumentBufferUniformsBindPoint];
+  [enc setMeshBytes:&draw_info
+             length:sizeof(IRRuntimeDrawInfo)
+            atIndex:kIRArgumentBufferUniformsBindPoint];
+  [enc setObjectBytes:&draw_params
+               length:sizeof(IRRuntimeDrawParams)
+              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+  [enc setMeshBytes:&draw_params
+             length:sizeof(IRRuntimeDrawParams)
+            atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+  [enc setObjectThreadgroupMemoryLength:threadgroup_mem atIndex:0];
+  [enc drawMeshThreadgroups:object_threadgroup_count
+      threadsPerObjectThreadgroup:MTLSizeMake(object_threadgroup_size, 1, 1)
+        threadsPerMeshThreadgroup:MTLSizeMake(mesh_threadgroup_size, 1, 1)];
+}
+
+// Per-sample readback kernels (MSAA targets cannot be blitted to buffers;
+// combined depth-stencil depth planes read uniformly through depth2d).
+constexpr const char* kExpandKernelsSource = R"(
+#include <metal_stdlib>
+using namespace metal;
+kernel void expand_depth_1x(depth2d<float, access::read> t [[texture(0)]],
+                            device float* out [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  uint w = t.get_width();
+  if (gid.x >= w || gid.y >= t.get_height()) return;
+  out[gid.y * w + gid.x] = t.read(gid);
+}
+kernel void expand_depth_ms(depth2d_ms<float, access::read> t [[texture(0)]],
+                            device float* out [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  uint w = t.get_width();
+  uint h = t.get_height();
+  if (gid.x >= w || gid.y >= h) return;
+  uint n = t.get_num_samples();
+  for (uint s = 0; s < n; ++s) {
+    out[(s * h + gid.y) * w + gid.x] = t.read(gid, s);
+  }
+}
+kernel void expand_color_ms(texture2d_ms<float, access::read> t [[texture(0)]],
+                            device uchar* out [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  uint w = t.get_width();
+  uint h = t.get_height();
+  if (gid.x >= w || gid.y >= h) return;
+  uint n = t.get_num_samples();
+  for (uint s = 0; s < n; ++s) {
+    float4 c = saturate(t.read(gid, s));
+    uint base = ((s * h + gid.y) * w + gid.x) * 4;
+    out[base + 0] = uchar(c.r * 255.0f + 0.5f);
+    out[base + 1] = uchar(c.g * 255.0f + 0.5f);
+    out[base + 2] = uchar(c.b * 255.0f + 0.5f);
+    out[base + 3] = uchar(c.a * 255.0f + 0.5f);
+  }
+}
+)";
+
 struct RenderHarness {
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
   std::unique_ptr<MetalPipelineCache> cache;
   bool ok = false;
   std::string error;
+  // Per-sample readback pipelines (lazy; nondeterminism campaign only).
+  id<MTLComputePipelineState> expand_depth_1x = nil;
+  id<MTLComputePipelineState> expand_depth_ms = nil;
+  id<MTLComputePipelineState> expand_color_ms = nil;
+
+  bool EnsureExpandPipelines(std::string* out_error) {
+    if (expand_depth_1x) {
+      return true;
+    }
+    NSError* ns_error = nil;
+    id<MTLLibrary> library = [device
+        newLibraryWithSource:[NSString stringWithUTF8String:
+                                           kExpandKernelsSource]
+                     options:nil
+                       error:&ns_error];
+    if (!library) {
+      *out_error = ns_error ? ns_error.localizedDescription.UTF8String
+                            : "expand library failed";
+      return false;
+    }
+    auto make = [&](NSString* name) -> id<MTLComputePipelineState> {
+      id<MTLFunction> fn = [library newFunctionWithName:name];
+      if (!fn) return nil;
+      NSError* pe = nil;
+      return [device newComputePipelineStateWithFunction:fn error:&pe];
+    };
+    expand_depth_1x = make(@"expand_depth_1x");
+    expand_depth_ms = make(@"expand_depth_ms");
+    expand_color_ms = make(@"expand_color_ms");
+    if (!expand_depth_1x || !expand_depth_ms || !expand_color_ms) {
+      *out_error = "expand pipeline creation failed";
+      return false;
+    }
+    return true;
+  }
 
   RenderHarness() {
     device = MTLCreateSystemDefaultDevice();
@@ -423,8 +589,17 @@ struct RenderHarness {
     uint64_t depth_format;
     // D32F (no stencil) everywhere so depth can be blitted back on every arm
     // — depth coverage is the rasterization proof independent of the fragment
-    // stage's color output.
-    depth_format = uint64_t(MTLPixelFormatDepth32Float);
+    // stage's color output. The nondeterminism campaign can select the
+    // production D32F_S8 instead (depth then reads back via the expand
+    // kernel).
+    depth_format = uint64_t(spec.depth_stencil8
+                                ? MTLPixelFormatDepth32Float_Stencil8
+                                : MTLPixelFormatDepth32Float);
+    // Per-sample compute readback whenever blit cannot express the readback.
+    const bool kernel_readback = spec.sample_count > 1 || spec.depth_stencil8;
+    if (kernel_readback && !EnsureExpandPipelines(&result.error)) {
+      return result;
+    }
     if (!spec.depth_only) {
       colors[0] = uint64_t(MTLPixelFormatRGBA8Unorm);
     }
@@ -528,7 +703,7 @@ struct RenderHarness {
       }
       tess = cache->GetOrCreateTessellationPipelineState(
           domain, pixel, spec.host_vs_type, spec.mode, spec.host_prim, colors,
-          depth_format, MetalPipelineRasterKey{1}, blends,
+          depth_format, MetalPipelineRasterKey{spec.sample_count}, blends,
           /*color_write_mask=*/0xF);
       if (!tess || !tess->pipeline) {
         result.error = "GetOrCreateTessellationPipelineState returned null";
@@ -569,6 +744,11 @@ struct RenderHarness {
                                    mipmapped:NO];
       cd.usage = MTLTextureUsageRenderTarget;
       cd.storageMode = MTLStorageModePrivate;
+      if (spec.sample_count > 1) {
+        cd.textureType = MTLTextureType2DMultisample;
+        cd.sampleCount = spec.sample_count;
+        cd.usage |= MTLTextureUsageShaderRead;
+      }
       color_rt = [device newTextureWithDescriptor:cd];
     }
     {
@@ -579,11 +759,20 @@ struct RenderHarness {
                                    mipmapped:NO];
       dd.usage = MTLTextureUsageRenderTarget;
       dd.storageMode = MTLStorageModePrivate;
+      if (spec.sample_count > 1) {
+        dd.textureType = MTLTextureType2DMultisample;
+        dd.sampleCount = spec.sample_count;
+      }
+      if (kernel_readback) {
+        dd.usage |= MTLTextureUsageShaderRead;
+      }
       depth_rt = [device newTextureWithDescriptor:dd];
     }
-    id<MTLBuffer> readback = NewZeroBuffer(kRT * kRT * 4, @"Readback");
+    const uint32_t sample_planes = spec.sample_count;
+    id<MTLBuffer> readback =
+        NewZeroBuffer(kRT * kRT * 4 * sample_planes, @"Readback");
     id<MTLBuffer> depth_readback =
-        NewZeroBuffer(kRT * kRT * 4, @"Depth readback");
+        NewZeroBuffer(kRT * kRT * 4 * sample_planes, @"Depth readback");
     if ((!spec.depth_only && !color_rt) || !depth_rt || !readback ||
         !depth_readback) {
       result.error = "RT/readback alloc failed";
@@ -732,10 +921,15 @@ struct RenderHarness {
                         draw.words16.size() * sizeof(uint16_t));
           }
         } else {
-          buffer = NewZeroBuffer(draw.words32.size() * sizeof(uint32_t),
-                                 @"Indices32");
+          uint32_t pad = spec.index_pad_words;
+          buffer = NewZeroBuffer(
+              (pad + draw.words32.size()) * sizeof(uint32_t), @"Indices32");
           if (buffer) {
-            std::memcpy([buffer contents], draw.words32.data(),
+            uint32_t* words = static_cast<uint32_t*>([buffer contents]);
+            for (uint32_t p = 0; p < pad; ++p) {
+              words[p] = 0x7F7F7F7Fu;  // Large-finite filler before the data.
+            }
+            std::memcpy(words + pad, draw.words32.data(),
                         draw.words32.size() * sizeof(uint32_t));
           }
         }
@@ -780,7 +974,9 @@ struct RenderHarness {
     // Depth always written (compare Always): depth coverage doubles as the
     // rasterization oracle on every arm.
     MTLDepthStencilDescriptor* dssd = [[MTLDepthStencilDescriptor alloc] init];
-    dssd.depthCompareFunction = MTLCompareFunctionAlways;
+    dssd.depthCompareFunction = spec.depth_compare_lequal
+                                    ? MTLCompareFunctionLessEqual
+                                    : MTLCompareFunctionAlways;
     dssd.depthWriteEnabled = YES;
     id<MTLDepthStencilState> dss =
         [device newDepthStencilStateWithDescriptor:dssd];
@@ -881,7 +1077,23 @@ struct RenderHarness {
                                   draw.vp_h, 0.0,     1.0};
           [encoder setViewport:viewport];
         }
-        if (draw.indexed) {
+        const bool local_dispatch = spec.tg_mem_length != 0 ||
+                                    spec.hs_patches_override != 0 ||
+                                    spec.index_pad_words != 0;
+        if (draw.indexed && local_dispatch) {
+          IRRuntimeTessellationPipelineConfig local_config = config;
+          if (spec.hs_patches_override) {
+            local_config.hsMaxPatchesPerObjectThreadgroup =
+                spec.hs_patches_override;
+          }
+          LocalDrawIndexedPatchesTessellationEmulation(
+              encoder, patch_primitive,
+              draw.indices_16bit ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
+              index_buffers[i], local_config, /*instance_count=*/1,
+              /*index_count_per_instance=*/draw.count, /*base_instance=*/0,
+              /*base_vertex=*/0, /*start_index=*/spec.index_pad_words,
+              spec.tg_mem_length ? spec.tg_mem_length : 15360u);
+        } else if (draw.indexed) {
           IRRuntimeDrawIndexedPatchesTessellationEmulation(
               encoder, patch_primitive,
               draw.indices_16bit ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
@@ -898,28 +1110,51 @@ struct RenderHarness {
     }
     [encoder endEncoding];
 
-    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
-    if (color_rt) {
-      [blit copyFromTexture:color_rt
-                   sourceSlice:0
-                   sourceLevel:0
-                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                    sourceSize:MTLSizeMake(kRT, kRT, 1)
-                      toBuffer:readback
-             destinationOffset:0
-        destinationBytesPerRow:kRT * 4
-      destinationBytesPerImage:kRT * kRT * 4];
+    if (kernel_readback) {
+      id<MTLComputeCommandEncoder> compute =
+          [command_buffer computeCommandEncoder];
+      [compute setComputePipelineState:spec.sample_count > 1
+                                           ? expand_depth_ms
+                                           : expand_depth_1x];
+      [compute setTexture:depth_rt atIndex:0];
+      [compute setBuffer:depth_readback offset:0 atIndex:0];
+      [compute dispatchThreads:MTLSizeMake(kRT, kRT, 1)
+          threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+      if (color_rt && spec.sample_count > 1) {
+        [compute setComputePipelineState:expand_color_ms];
+        [compute setTexture:color_rt atIndex:0];
+        [compute setBuffer:readback offset:0 atIndex:0];
+        [compute dispatchThreads:MTLSizeMake(kRT, kRT, 1)
+            threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+      }
+      [compute endEncoding];
     }
-    [blit copyFromTexture:depth_rt
-                 sourceSlice:0
-                 sourceLevel:0
-                sourceOrigin:MTLOriginMake(0, 0, 0)
-                  sourceSize:MTLSizeMake(kRT, kRT, 1)
-                    toBuffer:depth_readback
-           destinationOffset:0
-      destinationBytesPerRow:kRT * 4
-    destinationBytesPerImage:kRT * kRT * 4];
-    [blit endEncoding];
+    if (!kernel_readback || (color_rt && spec.sample_count == 1)) {
+      id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+      if (color_rt && spec.sample_count == 1) {
+        [blit copyFromTexture:color_rt
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(kRT, kRT, 1)
+                        toBuffer:readback
+               destinationOffset:0
+          destinationBytesPerRow:kRT * 4
+        destinationBytesPerImage:kRT * kRT * 4];
+      }
+      if (!kernel_readback) {
+        [blit copyFromTexture:depth_rt
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(kRT, kRT, 1)
+                        toBuffer:depth_readback
+               destinationOffset:0
+          destinationBytesPerRow:kRT * 4
+        destinationBytesPerImage:kRT * kRT * 4];
+      }
+      [blit endEncoding];
+    }
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
     if (command_buffer.status != MTLCommandBufferStatusCompleted ||
@@ -931,14 +1166,16 @@ struct RenderHarness {
       return result;
     }
 
-    // --- Read back + coverage count. ---
+    // --- Read back + coverage count (sample-plane-major; plane 0 first so
+    // the single-sample coverage/oracle indexing is unchanged). ---
     if (!spec.depth_only) {
-      result.rgba.resize(kRT * kRT * 4);
-      std::memcpy(result.rgba.data(), [readback contents], kRT * kRT * 4);
+      result.rgba.resize(kRT * kRT * 4 * sample_planes);
+      std::memcpy(result.rgba.data(), [readback contents],
+                  result.rgba.size());
     }
-    result.depth.resize(kRT * kRT);
+    result.depth.resize(kRT * kRT * sample_planes);
     std::memcpy(result.depth.data(), [depth_readback contents],
-                kRT * kRT * sizeof(float));
+                result.depth.size() * sizeof(float));
     result.ok = true;
     for (uint32_t y = 0; y < kRT; ++y) {
       for (uint32_t x = 0; x < kRT; ++x) {
@@ -1736,15 +1973,14 @@ TEST_CASE("domain translation is independent of prior translator use",
 // DxbcToDxilConverter and MetalShaderConverter instances, quad artifacts
 // converted fresh vs after the corresponding triangle artifacts.
 
-// KNOWN-ISSUE [!mayfail]: passes in isolation; in a full-suite run this case
-// is disturbed by in-process cross-case backend state (same family as the
-// snapshot-bridge/pool persistence root-caused for gate 5.2 replay loops) and,
-// for the converter case, by dxilconv's call-history byte-nondeterminism
-// (14-byte delta, reflection identical) — which is a kill-gate input for
-// adopt-xenios-shader-artifact-caching task 2.1. Evidence in the
-// port-xenios-tessellation ledger (5.1/5.2 annotations, 2026-08-02).
+// RESOLVED 2026-08-02 (was KNOWN-ISSUE [!mayfail]): the order dependence was
+// dxilconv per-instance call-history corruption — a reused IDxbcConverter
+// carries state from the previous conversion into the next DXIL module.
+// Fixed by creating a fresh converter per Convert
+// (dxbc_to_dxil_converter.cc); conversions are now byte-identical regardless
+// of order, in default and rand suite orderings.
 TEST_CASE("dxilconv and MSC conversions are order-independent",
-          "[!mayfail]"  "[tessellation][render][converterpurity]") {
+          "[tessellation][render][converterpurity]") {
   // Translate both domain payloads once (pure per the previous case).
   DxbcShaderTranslator translator(ui::GraphicsProvider::GpuVendorID::kApple,
                                   true, false, true);
@@ -1821,12 +2057,13 @@ TEST_CASE("dxilconv and MSC conversions are order-independent",
       "first_diff@%zu diff_bytes=%zu second_after_quad_vs_after_tri_same=%d\n",
       quad_dxil_fresh.size(), quad_dxil_after.size(), int(dxil_identical),
       stats.first, stats.second, int(second_calls_identical));
-  // Mechanism confirmation: the reused object is the FUNCTION-STATIC
-  // thread_local IDxbcConverter inside DxbcToDxilConverter::GetThreadConverter
-  // (dxbc_to_dxil_converter.cc) — shared across DxbcToDxilConverter INSTANCES
-  // on a thread, reset only by a new thread. A fresh thread converting quad
-  // alone must reproduce the fresh artifact; a fresh thread converting
-  // tri-then-quad must reproduce the contaminated one.
+  // Thread-isolation probe (historical mechanism confirmation): pre-fix, the
+  // reused object was a per-thread IDxbcConverter shared across
+  // DxbcToDxilConverter instances, so a fresh thread converting quad alone
+  // reproduced the fresh artifact while tri-then-quad reproduced the
+  // contaminated one. Post-fix (fresh converter per Convert) both threads
+  // must produce the identical artifact; the probe stays as a regression
+  // tripwire for any reintroduction of converter reuse.
   std::vector<uint8_t> quad_dxil_fresh_thread;
   std::vector<uint8_t> quad_dxil_after_tri_thread;
   {
@@ -1859,14 +2096,14 @@ TEST_CASE("dxilconv and MSC conversions are order-independent",
       int(fresh_thread_matches_fresh), int(tri_thread_matches_after));
   CHECK(fresh_thread_matches_fresh);
 
-  // PRODUCTION FINDING (left failing intentionally, do-not-fix-in-tests):
-  // DxbcToDxilConverter reuses one dxilconv IDxbcConverter per thread, and
-  // that object carries state from the PREVIOUS conversion into the next
-  // DXIL module (11 bitcode bytes here). Render-level consequence measured
-  // by the stagectx case: an adaptive-QUAD tessellation pipeline whose
-  // domain-stage DXIL was produced after an adaptive-TRIANGLE conversion on
-  // the same thread renders NOTHING (or, with other conversions interleaved,
-  // a DIFFERENT tessellation pattern than the clean artifact).
+  // PRODUCTION FINDING (resolved 2026-08-02): a reused dxilconv
+  // IDxbcConverter carried state from the PREVIOUS conversion into the next
+  // DXIL module (measured bitcode delta here). Render-level consequence: an
+  // adaptive-QUAD tessellation pipeline whose domain-stage DXIL was produced
+  // after an adaptive-TRIANGLE conversion on the same instance rendered
+  // NOTHING (or a DIFFERENT tessellation pattern than the clean artifact).
+  // DxbcToDxilConverter::Convert now creates a fresh converter per call, so
+  // repeated conversions must be byte-identical.
   CHECK(second_calls_identical);
   if (const char* dump_dir = std::getenv("XE_TESS_DXIL_DUMP")) {
     auto dump = [&](const char* name, const std::vector<uint8_t>& bytes) {
@@ -2026,15 +2263,14 @@ TEST_CASE("adaptive quad wire after adaptive triangle build (stage context)",
 // 3. Two tessellated draws in one submission keep their own factors (spec:
 // "Tess-factor buffers are safe across multiple tessellated draws").
 
-// KNOWN-ISSUE [!mayfail]: passes in isolation; in a full-suite run this case
-// is disturbed by in-process cross-case backend state (same family as the
-// snapshot-bridge/pool persistence root-caused for gate 5.2 replay loops) and,
-// for the converter case, by dxilconv's call-history byte-nondeterminism
-// (14-byte delta, reflection identical) — which is a kill-gate input for
-// adopt-xenios-shader-artifact-caching task 2.1. Evidence in the
-// port-xenios-tessellation ledger (5.1/5.2 annotations, 2026-08-02).
+// RESOLVED 2026-08-02 (was KNOWN-ISSUE [!mayfail]): the earlier "cross-case
+// backend state" attribution was wrong — the full-suite disturbance was
+// converter CONVERSION ORDER: dxilconv per-instance call-history corruption
+// polluted the DXIL of pipelines built after other cases' conversions.
+// Fixed by fresh-per-convert (dxbc_to_dxil_converter.cc); passes in default
+// and rand suite orderings.
 TEST_CASE("two tessellated draws in one submission render their own factors",
-          "[!mayfail]"  "[tessellation][render][isolation][device]") {
+          "[tessellation][render][isolation][device]") {
   auto& h = H();
   {
     INFO(h.error);
@@ -2218,6 +2454,275 @@ TEST_CASE("memexport predicate input: eM-writing guest VS is detected",
     shader.AnalyzeUcode(disasm);
     CHECK(shader.memexport_eM_written() == 0);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Adaptive-dispatch nondeterminism campaign (hidden diagnostics — run
+// explicitly with the [nondeterm]/[nondeterm2] tags; they never gate the
+// suite). Sweeps the config delta between the KNOWN-STABLE repeatability case
+// (2c: adaptive quad WIRE, color RGBA8 1x, D32F, 1 patch, factor word 7.0,
+// range [2,8], one draw per encoder) and the VP frame-3454 first-diverging
+// draw shape measured live by MetalTessDispatchCfg (draw 1096: 2xMSAA,
+// D32F_S8, fill, 256 patches = 8 FULL 32-patch object threadgroups, factor
+// words 0x00000000 clamping to range min 2, guest PS + color mask F, 13
+// adaptive quad draws in the encoder).
+
+namespace {
+
+uint64_t Fnv1a64(const uint8_t* data, size_t size) {
+  uint64_t hash = 14695981039346656037ull;
+  for (size_t i = 0; i < size; ++i) {
+    hash = (hash ^ data[i]) * 1099511628211ull;
+  }
+  return hash;
+}
+
+DrawSpec PatchDraw(uint32_t patches, float factor_value) {
+  DrawSpec draw;
+  draw.indexed = true;
+  draw.words32.assign(patches * 4, FloatBits(factor_value));
+  draw.count = patches * 4;
+  return draw;
+}
+
+RenderSpec NondetBaseSpec() {
+  RenderSpec spec;
+  spec.mode = xenos::TessellationMode::kAdaptive;
+  spec.host_vs_type = HostVertexShaderType::kQuadDomainPatchIndexed;
+  spec.host_prim = xenos::PrimitiveType::kQuadPatch;
+  spec.wireframe = true;
+  spec.range_min = 2.0f;
+  spec.range_max = 8.0f;
+  spec.draws.push_back(PatchDraw(1, 7.0f));
+  return spec;
+}
+
+// The measured VP draw-1096 shape (minus the guest content, which the input
+// hash already proved byte-stable): 13 draws x 256 zero-word patches, fill,
+// 2xMSAA, production D32F_S8, guest PS + color.
+RenderSpec NondetVpShapeSpec() {
+  RenderSpec spec = NondetBaseSpec();
+  spec.wireframe = false;
+  spec.sample_count = 2;
+  spec.depth_stencil8 = true;
+  spec.draws.clear();
+  for (int i = 0; i < 13; ++i) {
+    spec.draws.push_back(PatchDraw(256, 0.0f));
+  }
+  return spec;
+}
+
+int NondetIters() {
+  const char* value = std::getenv("XE_TESS_NONDET_ITERS");
+  int iters = value ? std::atoi(value) : 5;
+  return iters > 1 ? iters : 5;
+}
+
+// Renders the spec `iters` times and byte-compares depth + color across runs.
+void RunNondetArm(RenderHarness& h, const char* name, const RenderSpec& spec,
+                  int iters) {
+  std::vector<RenderResult> runs;
+  runs.reserve(iters);
+  for (int i = 0; i < iters; ++i) {
+    runs.push_back(h.Render(spec));
+    if (!runs.back().ok) {
+      std::printf("TESSNONDET|%s|ERROR|run=%d err=%s\n", name, i,
+                  runs.back().error.c_str());
+      CHECK(runs.back().ok);
+      return;
+    }
+  }
+  // Distinct-image census.
+  std::vector<uint64_t> hashes;
+  for (const RenderResult& r : runs) {
+    uint64_t hash = Fnv1a64(
+        reinterpret_cast<const uint8_t*>(r.depth.data()),
+        r.depth.size() * sizeof(float));
+    if (!r.rgba.empty()) {
+      hash ^= Fnv1a64(r.rgba.data(), r.rgba.size()) * 1099511628211ull;
+    }
+    hashes.push_back(hash);
+  }
+  int distinct = 0;
+  for (size_t i = 0; i < hashes.size(); ++i) {
+    bool seen = false;
+    for (size_t j = 0; j < i; ++j) {
+      if (hashes[j] == hashes[i]) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) ++distinct;
+  }
+  bool stable = distinct == 1;
+  // Divergence anatomy vs run 0 (first diverging run): per-sample-plane depth
+  // diff counts + color byte diffs.
+  uint32_t depth_diffs_plane[4] = {};
+  uint32_t color_diffs = 0;
+  int first_diverging = -1;
+  if (!stable) {
+    for (int i = 1; i < iters; ++i) {
+      if (hashes[i] != hashes[0]) {
+        first_diverging = i;
+        const RenderResult& a = runs[0];
+        const RenderResult& b = runs[i];
+        uint32_t planes = uint32_t(a.depth.size() / (kRT * kRT));
+        for (uint32_t p = 0; p < planes && p < 4; ++p) {
+          for (uint32_t k = 0; k < kRT * kRT; ++k) {
+            if (a.depth[p * kRT * kRT + k] != b.depth[p * kRT * kRT + k]) {
+              ++depth_diffs_plane[p];
+            }
+          }
+        }
+        for (size_t k = 0; k < a.rgba.size(); ++k) {
+          if (a.rgba[k] != b.rgba[k]) ++color_diffs;
+        }
+        break;
+      }
+    }
+  }
+  std::printf(
+      "TESSNONDET|%s|%s|iters=%d distinct=%d covered0=%u depth_covered0=%u "
+      "first_div=%d depth_diffs=[%u,%u,%u,%u] color_diffs=%u "
+      "cfg(vs_out=%u gs_max=%u hs_patches=%u hs_cp=%u hs_threads=%u "
+      "factor=%.0f)\n",
+      name, stable ? "STABLE" : "DIVERGES", iters, distinct, runs[0].covered,
+      runs[0].depth_covered, first_diverging, depth_diffs_plane[0],
+      depth_diffs_plane[1], depth_diffs_plane[2], depth_diffs_plane[3],
+      color_diffs, runs[0].cfg_vs_output, runs[0].cfg_gs_max_input,
+      runs[0].cfg_hs_patches, runs[0].cfg_hs_cp, runs[0].cfg_hs_threads,
+      runs[0].cfg_max_factor);
+  std::fflush(stdout);
+}
+
+}  // namespace
+
+TEST_CASE("adaptive dispatch nondeterminism config sweep",
+          "[.][nondeterm][device]") {
+  auto& h = H();
+  {
+    INFO(h.error);
+    REQUIRE(h.ok);
+  }
+  int iters = NondetIters();
+
+  struct Arm {
+    const char* name;
+    RenderSpec spec;
+  };
+  std::vector<Arm> arms;
+  arms.push_back({"control", NondetBaseSpec()});
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.wireframe = false;
+    arms.push_back({"fill", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.draws[0] = PatchDraw(1, 0.0f);  // words 0x0 -> clamp to range min 2.
+    arms.push_back({"words0", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.draws[0] = PatchDraw(256, 7.0f);  // 8 FULL 32-patch threadgroups.
+    arms.push_back({"patches256", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.draws[0] = PatchDraw(60, 7.0f);  // 1 full + 28-of-32 tail threadgroup.
+    arms.push_back({"tail28of32", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.sample_count = 2;
+    arms.push_back({"msaa2", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.depth_stencil8 = true;
+    arms.push_back({"ds8", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.depth_compare_lequal = true;
+    arms.push_back({"lequal", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    s.depth_only = true;
+    s.use_guest_ps = false;
+    arms.push_back({"depthonly", s});
+  }
+  {
+    RenderSpec s = NondetBaseSpec();
+    for (int i = 1; i < 13; ++i) {
+      s.draws.push_back(s.draws[0]);
+    }
+    arms.push_back({"multidraw13", s});
+  }
+  arms.push_back({"vp-shape", NondetVpShapeSpec()});
+  {
+    RenderSpec s = NondetVpShapeSpec();
+    s.depth_only = true;
+    s.use_guest_ps = false;
+    arms.push_back({"vp-depthonly", s});
+  }
+
+  for (const Arm& arm : arms) {
+    RunNondetArm(h, arm.name, arm.spec, iters);
+  }
+  SUCCEED("sweep recorded");
+}
+
+// Phase 2: dispatch-parameter bisect on a reproducing config
+// (XE_TESS_NONDET2_BASE=vp-shape|<sweep arm name>; default vp-shape). Local
+// dispatch replica varies the knobs the vendored helper hardcodes.
+TEST_CASE("adaptive dispatch nondeterminism knob bisect",
+          "[.][nondeterm2][device]") {
+  auto& h = H();
+  {
+    INFO(h.error);
+    REQUIRE(h.ok);
+  }
+  int iters = NondetIters();
+  const char* base_name = std::getenv("XE_TESS_NONDET2_BASE");
+  std::string base = base_name ? base_name : "vp-shape";
+  RenderSpec spec = base == "vp-shape" ? NondetVpShapeSpec() : NondetBaseSpec();
+  if (base == "msaa2") spec.sample_count = 2;
+  if (base == "patches256") spec.draws[0] = PatchDraw(256, 7.0f);
+  if (base == "multidraw13") {
+    for (int i = 1; i < 13; ++i) spec.draws.push_back(spec.draws[0]);
+  }
+
+  struct Knob {
+    const char* name;
+    uint32_t tg_mem;
+    uint32_t hs_patches;
+    uint32_t pad_words;
+  };
+  const Knob knobs[] = {
+      {"vendored", 0, 0, 0},        // control: the vendored dispatch helper.
+      {"local15360", 15360, 0, 0},  // local replica parity control.
+      {"tg64", 64, 0, 0},   // DELIBERATE undersize: the shader-validation
+                            // engagement probe (MTL_SHADER_VALIDATION=1 must
+                            // flag threadgroup-memory OOB if it instruments
+                            // object/mesh pipelines at all).
+      {"tg16384", 16384, 0, 0},     // larger object threadgroup memory.
+      {"tg23040", 23040, 0, 0},     // 1.5x.
+      {"hs16", 15360, 16, 0},       // fewer patches per object threadgroup.
+      {"hs8", 15360, 8, 0},
+      {"hs1", 15360, 1, 0},         // one patch per threadgroup.
+      {"pad32", 15360, 0, 32},      // nonzero startIndex (arena-offset model).
+  };
+  for (const Knob& knob : knobs) {
+    RenderSpec s = spec;
+    s.tg_mem_length = knob.tg_mem;
+    s.hs_patches_override = knob.hs_patches;
+    s.index_pad_words = knob.pad_words;
+    std::string label = base + "+" + knob.name;
+    RunNondetArm(h, label.c_str(), s, iters);
+  }
+  SUCCEED("bisect recorded");
 }
 
 }  // namespace test

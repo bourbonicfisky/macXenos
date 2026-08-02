@@ -75,18 +75,6 @@ bool HasDxbcMagic(const std::vector<uint8_t>& data) {
          data[2] == 'B' && data[3] == 'C';
 }
 
-// Owns a per-thread converter and releases it on thread exit. dxilconv's
-// converter object is single-threaded, so one instance per thread avoids
-// cross-thread contention without a shared lock.
-struct ThreadConverter {
-  IDxbcConverter* converter = nullptr;
-  ~ThreadConverter() {
-    if (converter) {
-      converter->Release();
-    }
-  }
-};
-
 }  // namespace
 
 bool DxbcToDxilConverter::Initialize(std::string* error_out) {
@@ -119,25 +107,6 @@ bool DxbcToDxilConverter::Initialize(std::string* error_out) {
   return true;
 }
 
-IDxbcConverter* DxbcToDxilConverter::GetThreadConverter(std::string* error_out) {
-  static thread_local ThreadConverter tls;
-  if (tls.converter) {
-    return tls.converter;
-  }
-  HRESULT hr = DxcCreateInstance(kClsidDxbcConverter, __uuidof(IDxbcConverter),
-                                 reinterpret_cast<void**>(&tls.converter));
-  if (hr != S_OK || !tls.converter) {
-    tls.converter = nullptr;
-    if (error_out) {
-      char buf[32];
-      std::snprintf(buf, sizeof(buf), "hr=0x%08X", static_cast<unsigned>(hr));
-      *error_out = std::string("failed to create thread converter (") + buf + ")";
-    }
-    return nullptr;
-  }
-  return tls.converter;
-}
-
 bool DxbcToDxilConverter::Convert(const std::vector<uint8_t>& dxbc,
                                   std::vector<uint8_t>& dxil_out,
                                   std::string* error_out) {
@@ -154,10 +123,32 @@ bool DxbcToDxilConverter::Convert(const std::vector<uint8_t>& dxbc,
     return false;
   }
 
-  IDxbcConverter* converter = GetThreadConverter(error_out);
-  if (!converter) {
+  // A FRESH IDxbcConverter per conversion, never reused: a reused instance
+  // carries call HISTORY into later conversions — measured as a 14-byte
+  // bitcode delta, and, decisively, an adaptive-QUAD domain artifact
+  // converted after an adaptive-TRIANGLE conversion on the same instance is
+  // CORRUPT at runtime (run-to-run nondeterministic per-sample coverage in
+  // Viva Pinata replay; renders-nothing in the synthetic quad-after-tri
+  // conformance case). Root-caused 2026-08-02; fresh-per-convert proven to
+  // cure both the determinism failures and byte order-dependence end to end.
+  // Cost: one DxcCreateInstance per shader translation, off the frame path.
+  IDxbcConverter* converter = nullptr;
+  HRESULT chr = DxcCreateInstance(kClsidDxbcConverter, __uuidof(IDxbcConverter),
+                                  reinterpret_cast<void**>(&converter));
+  if (chr != S_OK || !converter) {
+    if (error_out) {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "hr=0x%08X", static_cast<unsigned>(chr));
+      *error_out = std::string("failed to create converter (") + buf + ")";
+    }
     return false;
   }
+  struct FreshReleaser {
+    IDxbcConverter* converter;
+    ~FreshReleaser() {
+      if (converter) converter->Release();
+    }
+  } fresh_releaser{converter};
 
   void* dxil_ptr = nullptr;
   UINT32 dxil_size = 0;

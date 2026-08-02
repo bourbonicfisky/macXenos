@@ -195,7 +195,8 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
     uint32_t gamma_render_target_as_unorm8 : 1;
     uint32_t msc_bindless_resources_used : 1;
     uint32_t fetch_abi_revision : 8;
-    uint32_t reserved : 19;
+    uint32_t dxilconv_generation : 4;
+    uint32_t reserved : 15;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -212,6 +213,15 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   // against the previous cbuffer layout — exactly the failure this field
   // exists to prevent. Bump on ANY change to the emitted shader ABI.
   schema.fetch_abi_revision = MetalTranslatorConfig::kFetchAbiRevision;
+  // 3.3b-3 — the DXBC->DXIL conversion generation. Generation 1 = the
+  // 2026-08-02 fresh-IDxbcConverter-per-convert fix: reused converter
+  // instances carried call history and emitted CORRUPT quad-domain artifacts
+  // (runtime-nondeterministic). The dylib hash below cannot see this (the bug
+  // was in xenia's wrapper, not libdxilconv), and the metallib key carries no
+  // DXIL bytes — so without this bump a warm cache would serve reuse-era
+  // corruption indefinitely. Bump on any wrapper-side change to how
+  // conversions are produced.
+  schema.dxilconv_generation = 1;
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));
 
   identity.dxc_artifact_hash = HashLoadedDylib("libdxilconv");

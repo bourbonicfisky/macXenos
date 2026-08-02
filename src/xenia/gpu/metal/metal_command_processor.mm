@@ -878,6 +878,46 @@ void InstallMetalCrashCapture() {
   s_installed = true;
   g_prev_terminate = std::set_terminate(&MetalTerminateHandler);
 }
+
+// XE_METAL_TESS_DRAW_RANGE (bisection diagnostic, default unset = all): the
+// tessellation route engages only for the selected trace draw indices; every
+// other tessellated draw behaves exactly as the gate-OFF arm (skipped
+// downstream). Proven tool for bisecting a defective tessellated draw out of
+// a frame.
+// Selector syntax: "a,b" inclusive range, or "L:a,b,c,..." exact index list.
+bool TessDrawRangeAllows(uint32_t draw_index) {
+  struct Selector {
+    std::pair<uint32_t, uint32_t> range{0u, 0xFFFFFFFFu};
+    std::vector<uint32_t> list;  // non-empty = list mode.
+  };
+  static const Selector selector = [] {
+    Selector s;
+    if (const char* v = std::getenv("XE_METAL_TESS_DRAW_RANGE")) {
+      if (v[0] == 'L' && v[1] == ':') {
+        const char* p = v + 2;
+        while (*p) {
+          s.list.push_back(uint32_t(strtoul(p, const_cast<char**>(&p), 10)));
+          if (*p == ',') ++p;
+        }
+        XELOGW("TessDrawRange ENGAGED: list of {}", s.list.size());
+      } else {
+        unsigned a = 0, b = 0;
+        if (std::sscanf(v, "%u,%u", &a, &b) == 2) {
+          s.range = {a, b};
+          XELOGW("TessDrawRange ENGAGED: [{},{}]", a, b);
+        }
+      }
+    }
+    return s;
+  }();
+  if (!selector.list.empty()) {
+    return std::find(selector.list.begin(), selector.list.end(), draw_index) !=
+           selector.list.end();
+  }
+  return draw_index >= selector.range.first &&
+         draw_index <= selector.range.second;
+}
+
 }  // namespace
 
 bool MetalCommandProcessor::SetupContext() {
@@ -2660,7 +2700,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                    prim_type) &&
         tess_regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
             xenos::VGTOutputPath::kTessellationEnable;
-    if (tessellation_enabled && MetalTessellationGateOn()) {
+    if (tessellation_enabled && MetalTessellationGateOn() &&
+        TessDrawRangeAllows(trace_draw_index_)) {
       // Capability first (XeniOS :2726-2735's warn-once success-skip shape,
       // through our reason-coded accounting).
       if (!mesh_shader_supported_) {
@@ -4939,7 +4980,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const void* guest_indices =
           memory_->TranslatePhysical(tess_pp.guest_index_base);
       MetalUploadAllocation index_alloc{};
-      if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
+      if (!guest_indices ||
+          !upload_arena_->Allocate(total, 16, &index_alloc)) {
         RecordDrawSkip(!guest_indices
                            ? MetalDrawSkipReason::kInvalidGuestState
                            : MetalDrawSkipReason::kResourceFailure,
@@ -4960,14 +5002,48 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return value && value[0] == '1';
       }();
       if (tess_input_hash_log) {
-        uint64_t input_hash = 14695981039346656037ull;  // FNV-1a 64.
+        auto fnv1a = [](const uint8_t* data, uint32_t count) {
+          uint64_t hash = 14695981039346656037ull;  // FNV-1a 64.
+          for (uint32_t i = 0; i < count; ++i) {
+            hash = (hash ^ data[i]) * 1099511628211ull;
+          }
+          return hash;
+        };
         const uint8_t* bytes =
             static_cast<const uint8_t*>(index_alloc.cpu_ptr);
-        for (uint32_t i = 0; i < total; ++i) {
-          input_hash = (input_hash ^ bytes[i]) * 1099511628211ull;
+        uint64_t logical_hash = fnv1a(bytes, total);
+        XELOGI(
+            "MetalTessInputHash draw={} base={:08X} bytes={} hash={:016X}",
+            trace_draw_index_, tess_pp.guest_index_base, total, logical_hash);
+        // Campaign diagnostic (same env gate, log-only): the full dispatch
+        // configuration + leading stream words, so the conformance repro can
+        // mirror the exact VP draw shape.
+        char words_text[9 * 12] = {0};
+        if (index_size == 4) {
+          const uint32_t* words32 =
+              static_cast<const uint32_t*>(index_alloc.cpu_ptr);
+          size_t pos = 0;
+          for (uint32_t i = 0; i < host_count && i < 8; ++i) {
+            pos += std::snprintf(words_text + pos, sizeof(words_text) - pos,
+                                 "%08X,", words32[i]);
+          }
         }
-        XELOGI("MetalTessInputHash draw={} base={:08X} bytes={} hash={:016X}",
-               trace_draw_index_, tess_pp.guest_index_base, total, input_hash);
+        XELOGI(
+            "MetalTessDispatchCfg draw={} samples={} depth_fmt={} "
+            "color_mask={:X} range=[{},{}] host_count={} prim={} "
+            "cfg(vs_out={} gs_max={} hs_patches={} hs_cp={} hs_threads={} "
+            "max_factor={} gs_inst={}) words=[{}]",
+            trace_draw_index_, raster_sample_count,
+            uint64_t(pipeline_depth_format), normalized_color_mask,
+            regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f,
+            regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f,
+            host_count, int(tess_primitive), tess_config.vsOutputSizeInBytes,
+            tess_config.gsMaxInputPrimitivesPerMeshThreadgroup,
+            tess_config.hsMaxPatchesPerObjectThreadgroup,
+            tess_config.hsInputControlPointCount,
+            tess_config.hsMaxObjectThreadsPerThreadgroup,
+            tess_config.hsMaxTessellationFactor, tess_config.gsInstanceCount,
+            words_text);
       }
       id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer
