@@ -284,9 +284,39 @@ bool MemexportWatchOverlaps(uint32_t base, uint32_t size) {
   if (!watch.enabled || !size) {
     return false;
   }
-  uint64_t a_begin = base, a_end = uint64_t(base) + size;
-  uint64_t b_begin = watch.base, b_end = uint64_t(watch.base) + watch.size;
-  return a_begin < b_end && b_begin < a_end;
+  return metal::MetalGuestRangesOverlap(base, size, watch.base, watch.size);
+}
+
+// XE_METAL_MEMEXPORT_RASTER_FAULT=<no-tess-range|undersize-tess-range>: fault
+// injection for the staleness backstop's own oracle. Default none. A safety
+// net never observed firing is not evidence of safety, and the only honest way
+// to observe this one is to break the mechanism it backs up.
+MetalMemexportRasterFault MemexportRasterFault() {
+  static const MetalMemexportRasterFault s_fault = [] {
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_RASTER_FAULT");
+    MetalMemexportRasterFault fault = ParseMetalMemexportRasterFault(value);
+    if (fault != MetalMemexportRasterFault::kNone) {
+      XELOGW(
+          "XE_METAL_MEMEXPORT_RASTER_FAULT='{}': the consumer-range mutation "
+          "is deliberately broken -- the staleness backstop MUST fail closed",
+          value);
+    }
+    return fault;
+  }();
+  return s_fault;
+}
+
+// FNV-1a over guest bytes: the JOIN hash. Used at BOTH ends of the
+// producer->consumer chain (the bytes convergence wrote to RAM, and the raw
+// pre-swap bytes the consumer stages), so equality proves the consumer read
+// exactly the converged export rather than merely proving both changed.
+uint64_t MemexportJoinHash(const void* data, uint32_t size) {
+  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  uint64_t hash = 14695981039346656037ull;
+  for (uint32_t i = 0; i < size; ++i) {
+    hash = (hash ^ bytes[i]) * 1099511628211ull;
+  }
+  return hash;
 }
 
 // Concrete task-3.1 RamWritePublicationTarget: forwards the seam's two
@@ -3496,7 +3526,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vertex_dependency_ranges.Add(*range);
     }
   }
-  if (index_buffer_info && index_buffer_info->guest_base && index_count) {
+  // FAULT INJECTION (default none): on a tessellated draw, suppress the
+  // PRE-EXISTING guest-index interval too. Measured on every VP frame, that
+  // interval is byte-identical to the host factor-stream extent
+  // (index_count == host_draw_vertex_count), so suppressing only the task-2.4
+  // mutation leaves the consumer range fully covered and proves nothing. To
+  // observe the staleness backstop at all, the consumer range has to actually
+  // go missing.
+  const bool suppress_consumer_range =
+      use_tessellation_emulation &&
+      MemexportRasterFault() != MetalMemexportRasterFault::kNone;
+  if (index_buffer_info && index_buffer_info->guest_base && index_count &&
+      !suppress_consumer_range) {
     uint32_t index_size_bytes =
         index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
     vertex_dependency_ranges.Add(metal::GuestRange::FromBounds(
@@ -3529,12 +3570,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       tess_pp.guest_index_base && tess_pp.host_draw_vertex_count) {
     // The HOST patch-stream extent, through the pure helper the L0 boundary
     // matrix pins (host > guest index_count is the under-covering case).
+    // FAULT INJECTION (default none) breaks exactly this mutation so the
+    // staleness backstop at the read site can be OBSERVED failing closed.
+    const MetalMemexportRasterFault fault = MemexportRasterFault();
+    uint32_t mutation_count = tess_pp.host_draw_vertex_count;
+    if (fault == MetalMemexportRasterFault::kUndersizeTessRange) {
+      mutation_count = 1;
+    }
     metal::MetalGuestStreamExtent tess_extent =
         metal::ComputeMetalIndexStreamExtent(
-            tess_pp.guest_index_base, tess_pp.host_draw_vertex_count,
+            tess_pp.guest_index_base, mutation_count,
             tess_pp.host_index_format == xenos::IndexFormat::kInt32);
     auto tess_stream_range =
-        tess_extent.valid
+        (tess_extent.valid && fault != MetalMemexportRasterFault::kNoTessRange)
             ? metal::GuestRange::FromBaseLength(tess_extent.base,
                                                 tess_extent.size)
             : std::nullopt;
@@ -5370,9 +5418,51 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       : "tess-index-alloc");
         return true;
       }
+      // FAIL-CLOSED STALENESS BACKSTOP (task 2.4). The consumer-range mutation
+      // above is what makes the vertex barrier converge an overlapping
+      // producer. If that mutation is wrong -- removed, under-sized, or simply
+      // not matching -- the barrier selects nothing and these bytes are older
+      // than the shared buffer. Missing convergence must never degrade into
+      // stale consumption, so re-check the invariant HERE, against the
+      // pending-record state at the moment of the read rather than against the
+      // request set assembled earlier: a request-set bug cannot hide from this.
+      {
+        metal::MetalGuestStreamExtent staged_extent =
+            metal::ComputeMetalIndexStreamExtent(
+                tess_pp.guest_index_base, host_count,
+                tess_pp.host_index_format == xenos::IndexFormat::kInt32);
+        for (const PendingMemexport& pending : pending_memexports_) {
+          if (!metal::MetalStreamReadWouldBeStale(staged_extent,
+                                                  pending.base_address,
+                                                  pending.size_bytes)) {
+            continue;
+          }
+          XELOGE(
+              "MetalMemexportRasterStale draw={} tessellation factor stream "
+              "{:08X}(+{}) still owed by pending memexport {:08X}(+{}); "
+              "skipping rather than tessellating from stale RAM",
+              trace_draw_index_, staged_extent.base, staged_extent.size,
+              pending.base_address, pending.size_bytes);
+          RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                         "memexport-raster-stale-factor-stream");
+          return true;
+        }
+      }
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count,
                       tess_pp.host_index_format,
                       tess_pp.host_shader_index_endian);
+      // JOIN hash (XE_METAL_MEMEXPORT_LOG=1, log only): FNV-1a over the RAW
+      // pre-swap guest bytes this consumer stages. The convergence site hashes
+      // the bytes it wrote to the same RAM with the same function, so equality
+      // JOINS the two ends of the chain -- proving the consumer read exactly
+      // the converged export, not merely that both sides changed.
+      if (s_memexport_log) {
+        XELOGW(
+            "MetalMemexportJoin draw={} consumer stream={:08X}(+{}) "
+            "raw_guest_hash={:016X}",
+            trace_draw_index_, tess_pp.guest_index_base, total,
+            MemexportJoinHash(guest_indices, total));
+      }
       // XE_METAL_TESS_INPUT_HASH=1 (default off): fix-metal-trace-replay-
       // state-reset D4 oracle -- hashes the exact factor/index bytes this
       // draw hands the tessellator so run-to-run divergence can be
@@ -7311,6 +7401,22 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             "invalidated_texture_entries={}",
             me.base_address, me.size_bytes, me.submission,
             result.invalidated_entries);
+      }
+      // Producer half of the JOIN: FNV-1a over the bytes convergence just
+      // wrote into guest RAM. A consumer that stages the same range logs the
+      // same hash over its RAW pre-swap read, so equality is a byte-level
+      // join of producer to consumer rather than two independent "it changed"
+      // observations.
+      if (me_log || MemexportWatchOverlaps(me.base_address, me.size_bytes)) {
+        const uint8_t* converged =
+            memory_->TranslatePhysical<const uint8_t*>(me.base_address);
+        if (converged) {
+          XELOGW(
+              "MetalMemexportJoin producer range={:08X}(+{}) "
+              "converged_ram_hash={:016X}",
+              me.base_address, me.size_bytes,
+              MemexportJoinHash(converged, me.size_bytes));
+        }
       }
       retire_exact_export = exact_sequence;
       if (me_log && me_contents) {

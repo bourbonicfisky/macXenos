@@ -217,6 +217,65 @@ inline bool MetalTessFactorStreamUnderCovered(uint32_t guest_base,
   return !guest.valid || host.size > guest.size;
 }
 
+// --- Fail-closed staleness audit -------------------------------------------
+//
+// The consumer-range mutation is what makes the vertex-dependency barrier
+// select an overlapping producer and converge it. If that mutation were
+// removed, under-sized, or simply failed to match, the barrier would select
+// nothing and the tessellation route would read guest RAM that is still older
+// than the shared buffer -- SILENTLY. Missing convergence must never degrade
+// into stale consumption, so the route re-checks the invariant at the point of
+// the read: if any pending memexport record still overlaps the bytes about to
+// be staged, convergence demonstrably did not happen and the draw fail-closed
+// skips instead of tessellating from stale factors.
+//
+// This is a real backstop rather than a restatement of the barrier: it keys on
+// PENDING-RECORD state at the moment of the read, not on the request set
+// assembled earlier, so a request-set bug cannot hide from it.
+inline bool MetalGuestRangesOverlap(uint32_t a_base, uint32_t a_size,
+                                    uint32_t b_base, uint32_t b_size) {
+  if (!a_size || !b_size) {
+    return false;
+  }
+  const uint64_t a_begin = a_base, a_end = uint64_t(a_base) + a_size;
+  const uint64_t b_begin = b_base, b_end = uint64_t(b_base) + b_size;
+  return a_begin < b_end && b_begin < a_end;
+}
+
+// True when the bytes this stream is about to stage are still owed by a
+// pending memexport record -- reading them now would consume stale RAM.
+inline bool MetalStreamReadWouldBeStale(const MetalGuestStreamExtent& extent,
+                                        uint32_t pending_base,
+                                        uint32_t pending_size) {
+  if (!extent.valid) {
+    return false;
+  }
+  return MetalGuestRangesOverlap(extent.base, extent.size, pending_base,
+                                 pending_size);
+}
+
+// Fault injection for the backstop's own oracle (default kNone, set only by
+// XE_METAL_MEMEXPORT_RASTER_FAULT). A safety net that is never observed firing
+// is not evidence of safety, and the only honest way to observe this one is to
+// break the mechanism it backs up. kNoTessRange removes the consumer-range
+// mutation entirely; kUndersizeTessRange keeps it but shrinks it to the first
+// element, modelling a mutation that exists but under-covers.
+enum class MetalMemexportRasterFault { kNone, kNoTessRange, kUndersizeTessRange };
+
+inline MetalMemexportRasterFault ParseMetalMemexportRasterFault(
+    const char* value) {
+  if (!value || !value[0] || !std::strcmp(value, "0")) {
+    return MetalMemexportRasterFault::kNone;
+  }
+  if (!std::strcmp(value, "no-tess-range")) {
+    return MetalMemexportRasterFault::kNoTessRange;
+  }
+  if (!std::strcmp(value, "undersize-tess-range")) {
+    return MetalMemexportRasterFault::kUndersizeTessRange;
+  }
+  return MetalMemexportRasterFault::kNone;
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe

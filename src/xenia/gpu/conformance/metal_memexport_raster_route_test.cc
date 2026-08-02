@@ -14,6 +14,8 @@
 // rasterizing draw, so a regression here is a regression in whether guest
 // writes reach guest memory at all.
 
+#include <string>
+
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 
@@ -216,6 +218,60 @@ TEST_CASE("tessellation factor-stream consumer extent boundary matrix",
     REQUIRE(extent.valid);
     CHECK(uint64_t(extent.base) + extent.size == 0xFFFFFFFFull);
   }
+}
+
+TEST_CASE("staleness backstop: a pending producer over the staged stream is "
+          "always caught",
+          "[memexport][raster][backstop]") {
+  using metal::ComputeMetalIndexStreamExtent;
+  using metal::MetalGuestRangesOverlap;
+  using metal::MetalStreamReadWouldBeStale;
+  constexpr uint32_t kBase = 0x1AFF8000u;
+  auto extent = ComputeMetalIndexStreamExtent(kBase, 1024, true);  // +4096
+  REQUIRE(extent.valid);
+  REQUIRE(extent.size == 4096);
+
+  // The measured VP shape: producer and consumer name the SAME range.
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase, 4096));
+  // Partial overlaps in either direction are still stale reads -- a producer
+  // owing even one byte of the staged stream must stop the read.
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase + 4092, 8));
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase - 4, 8));
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase + 2048, 16));
+  // A producer strictly containing the stream, and one strictly inside it.
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase - 0x1000, 0x4000));
+  CHECK(MetalStreamReadWouldBeStale(extent, kBase + 16, 16));
+  // ADJACENCY IS NOT OVERLAP -- the backstop must not skip draws whose stream
+  // merely abuts an unrelated export, or every neighbouring allocation would
+  // become a spurious fail-closed skip.
+  CHECK_FALSE(MetalStreamReadWouldBeStale(extent, kBase + 4096, 4096));
+  CHECK_FALSE(MetalStreamReadWouldBeStale(extent, kBase - 4096, 4096));
+  // Empty producers and an absent stream are never stale.
+  CHECK_FALSE(MetalStreamReadWouldBeStale(extent, kBase, 0));
+  CHECK_FALSE(MetalStreamReadWouldBeStale(
+      ComputeMetalIndexStreamExtent(kBase, 0, true), kBase, 4096));
+  // Overlap arithmetic must not wrap at the top of the address space.
+  CHECK(MetalGuestRangesOverlap(0xFFFFF000u, 0x1000u, 0xFFFFF800u, 0x800u));
+  CHECK_FALSE(MetalGuestRangesOverlap(0xFFFFF000u, 0x800u, 0xFFFFF800u, 0x800u));
+  CHECK_FALSE(MetalGuestRangesOverlap(0u, 0x1000u, 0xFFFFF000u, 0x1000u));
+}
+
+TEST_CASE("backstop fault injection parses conservatively",
+          "[memexport][raster][backstop]") {
+  using metal::MetalMemexportRasterFault;
+  using metal::ParseMetalMemexportRasterFault;
+  // Default and every unrecognized value mean NO fault: a typo must never
+  // silently disable a safety mechanism.
+  for (const char* value :
+       {(const char*)nullptr, "", "0", "1", "yes", "no-tess-ranges", "TESS"}) {
+    INFO(std::string(value ? value : "(null)"));
+    CHECK(ParseMetalMemexportRasterFault(value) ==
+          MetalMemexportRasterFault::kNone);
+  }
+  CHECK(ParseMetalMemexportRasterFault("no-tess-range") ==
+        MetalMemexportRasterFault::kNoTessRange);
+  CHECK(ParseMetalMemexportRasterFault("undersize-tess-range") ==
+        MetalMemexportRasterFault::kUndersizeTessRange);
 }
 
 }  // namespace test
