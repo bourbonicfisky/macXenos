@@ -254,6 +254,13 @@ if(APPLE)
     # assembly (hull/domain AB alias, tessellator tables on both stages) into
     # a real encoder, dispatched through the IR runtime patch draws.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_encode_smoke_test.mm
+    # Task 5.1 render family: all six mode/domain cells rendered through the
+    # production pipeline + group-4 binding assembly with pixel readback;
+    # factor-value arms (line fill mode) incl. the live Viva Pinata [2,1]
+    # min>max clamp pin and the endian double-swap arm; two-draws-one-
+    # submission factor isolation; depth-only/no-PS fallback render;
+    # memexport route-predicate input.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_render_conformance_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )
