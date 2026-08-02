@@ -3570,6 +3570,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       tess_pp.guest_index_base && tess_pp.host_draw_vertex_count) {
     // The HOST patch-stream extent, through the pure helper the L0 boundary
     // matrix pins (host > guest index_count is the under-covering case).
+    //
+    // KEPT DELIBERATELY THOUGH REDUNDANT ON ALL OBSERVED CONTENT (2026-08-02):
+    // every VP tessellated draw has index_count == host_draw_vertex_count, so
+    // the pre-existing guest-index interval already covers this stream —
+    // measured by suppressing ONLY this mutation, which produced a
+    // byte-identical image with zero stale skips. Retained for the host >
+    // guest shape, which adaptive tessellation can produce because the host
+    // patch stream is sized from host_draw_vertex_count rather than the guest
+    // index count. Without it in that shape the read is uncovered and the
+    // backstop below FAILS CLOSED — correct, but a dropped draw. With it the
+    // barrier converges and the draw renders. One interval per tessellated
+    // draw buys that.
+    //
     // FAULT INJECTION (default none) breaks exactly this mutation so the
     // staleness backstop at the read site can be OBSERVED failing closed.
     const MetalMemexportRasterFault fault = MemexportRasterFault();
