@@ -217,6 +217,41 @@ inline bool MetalTessFactorStreamUnderCovered(uint32_t guest_base,
   return !guest.valid || host.size > guest.size;
 }
 
+// True when `outer` fully contains `inner`. Keeps the consumer request free of
+// REDUNDANT intervals: the tessellation factor extent is added only when the
+// guest-index interval does not already cover the bytes the backend reads.
+//
+// Measured on every VP frame, index_count == host_draw_vertex_count and the two
+// extents are byte-identical, so today's path adds nothing. The addition is
+// STRUCTURALLY REQUIRED but CORPUS-UNENGAGED: it is retained because it
+// describes the bytes this backend ACTUALLY READS (host_draw_vertex_count
+// elements), not a speculative feature -- if the two ever diverge, the request
+// must follow the read, not the guest draw's index count.
+inline bool MetalExtentContains(const MetalGuestStreamExtent& outer,
+                                const MetalGuestStreamExtent& inner) {
+  if (!outer.valid || !inner.valid) {
+    return false;
+  }
+  const uint64_t outer_end = uint64_t(outer.base) + outer.size;
+  const uint64_t inner_end = uint64_t(inner.base) + inner.size;
+  return uint64_t(outer.base) <= uint64_t(inner.base) && inner_end <= outer_end;
+}
+
+// FNV-1a over guest bytes: the producer->consumer JOIN hash. Used at BOTH ends
+// of the chain (the bytes convergence wrote to RAM, and the raw pre-swap bytes
+// the consumer stages), so equality joins them byte-for-byte instead of
+// separately observing that each changed. Lives here so the L0 suite can
+// MUTATION-PIN it -- a join hash that missed a single-byte corruption would
+// make the entire join argument worthless.
+inline uint64_t MetalMemexportJoinHash(const void* data, uint32_t size) {
+  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  uint64_t hash = 14695981039346656037ull;
+  for (uint32_t i = 0; i < size; ++i) {
+    hash = (hash ^ bytes[i]) * 1099511628211ull;
+  }
+  return hash;
+}
+
 // --- Fail-closed staleness audit -------------------------------------------
 //
 // The consumer-range mutation is what makes the vertex-dependency barrier

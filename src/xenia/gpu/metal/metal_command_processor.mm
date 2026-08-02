@@ -306,18 +306,6 @@ MetalMemexportRasterFault MemexportRasterFault() {
   return s_fault;
 }
 
-// FNV-1a over guest bytes: the JOIN hash. Used at BOTH ends of the
-// producer->consumer chain (the bytes convergence wrote to RAM, and the raw
-// pre-swap bytes the consumer stages), so equality proves the consumer read
-// exactly the converged export rather than merely proving both changed.
-uint64_t MemexportJoinHash(const void* data, uint32_t size) {
-  const uint8_t* bytes = static_cast<const uint8_t*>(data);
-  uint64_t hash = 14695981039346656037ull;
-  for (uint32_t i = 0; i < size; ++i) {
-    hash = (hash ^ bytes[i]) * 1099511628211ull;
-  }
-  return hash;
-}
 
 // Concrete task-3.1 RamWritePublicationTarget: forwards the seam's two
 // invalidation primitives to the operations that already exist on this
@@ -3599,10 +3587,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             ? metal::GuestRange::FromBaseLength(tess_extent.base,
                                                 tess_extent.size)
             : std::nullopt;
-    if (tess_stream_range) {
+    // Add the interval ONLY when the guest-index interval does not already
+    // contain it. On today's VP content the two are byte-identical, so this
+    // costs the request set nothing; the protection survives for the
+    // host > guest expansion case, where containment fails and the interval is
+    // the difference between a converged read and a fail-closed skip.
+    const metal::MetalGuestStreamExtent guest_index_extent =
+        (index_buffer_info && index_buffer_info->guest_base && index_count &&
+         !suppress_consumer_range)
+            ? metal::ComputeMetalIndexStreamExtent(
+                  index_buffer_info->guest_base, index_count,
+                  index_buffer_info->format == xenos::IndexFormat::kInt32)
+            : metal::MetalGuestStreamExtent{};
+    const bool already_covered =
+        metal::MetalExtentContains(guest_index_extent, tess_extent);
+    if (tess_stream_range && !already_covered) {
       vertex_dependency_ranges.Add(*tess_stream_range);
-      memexport_raster_consumer_range = true;
     }
+    // The distinct fail-closed reason applies whenever the factor stream is
+    // part of this consumer's request AT ALL -- whether it got there via the
+    // guest-index interval or the addition above. The reason names the
+    // investigation ("exported factors could not be proven converged"), not
+    // which interval carried the range.
+    memexport_raster_consumer_range =
+        tess_stream_range != std::nullopt || already_covered;
   }
   vertex_dependency_ranges.Normalize();
 
@@ -5474,7 +5482,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             "MetalMemexportJoin draw={} consumer stream={:08X}(+{}) "
             "raw_guest_hash={:016X}",
             trace_draw_index_, tess_pp.guest_index_base, total,
-            MemexportJoinHash(guest_indices, total));
+            metal::MetalMemexportJoinHash(guest_indices, total));
       }
       // XE_METAL_TESS_INPUT_HASH=1 (default off): fix-metal-trace-replay-
       // state-reset D4 oracle -- hashes the exact factor/index bytes this
@@ -7428,7 +7436,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
               "MetalMemexportJoin producer range={:08X}(+{}) "
               "converged_ram_hash={:016X}",
               me.base_address, me.size_bytes,
-              MemexportJoinHash(converged, me.size_bytes));
+              metal::MetalMemexportJoinHash(converged, me.size_bytes));
         }
       }
       retire_exact_export = exact_sequence;

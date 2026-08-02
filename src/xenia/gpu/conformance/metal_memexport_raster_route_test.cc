@@ -15,6 +15,7 @@
 // writes reach guest memory at all.
 
 #include <string>
+#include <vector>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
@@ -254,6 +255,68 @@ TEST_CASE("staleness backstop: a pending producer over the staged stream is "
   CHECK(MetalGuestRangesOverlap(0xFFFFF000u, 0x1000u, 0xFFFFF800u, 0x800u));
   CHECK_FALSE(MetalGuestRangesOverlap(0xFFFFF000u, 0x800u, 0xFFFFF800u, 0x800u));
   CHECK_FALSE(MetalGuestRangesOverlap(0u, 0x1000u, 0xFFFFF000u, 0x1000u));
+}
+
+TEST_CASE("consumer interval is added only when not already contained",
+          "[memexport][raster][consumer-extent]") {
+  using metal::ComputeMetalIndexStreamExtent;
+  using metal::MetalExtentContains;
+  constexpr uint32_t kBase = 0x1AFF8000u;
+
+  // TODAY'S VP SHAPE: index_count == host_draw_vertex_count, so the two
+  // extents are byte-identical, the guest-index interval already contains the
+  // factor stream, and the addition is skipped -- the request set stays free
+  // of redundant intervals. Structurally required, corpus-unengaged.
+  auto guest_same = ComputeMetalIndexStreamExtent(kBase, 1024, true);
+  auto host_same = ComputeMetalIndexStreamExtent(kBase, 1024, true);
+  CHECK(MetalExtentContains(guest_same, host_same));
+
+  // THE UNOBSERVED EXPANSION CASE: the backend reads MORE than the guest index
+  // count, containment fails, and the interval must be added or the read is
+  // uncovered (and the backstop would fail the draw closed).
+  auto guest_small = ComputeMetalIndexStreamExtent(kBase, 256, true);
+  auto host_big = ComputeMetalIndexStreamExtent(kBase, 1024, true);
+  CHECK_FALSE(MetalExtentContains(guest_small, host_big));
+  // Containment the other way (the backend reads less) is covered.
+  CHECK(MetalExtentContains(host_big, guest_small));
+  // No guest interval at all (auto-indexed draw): contains nothing, so the
+  // addition always happens.
+  CHECK_FALSE(MetalExtentContains(metal::MetalGuestStreamExtent{}, host_big));
+  CHECK_FALSE(MetalExtentContains(host_big, metal::MetalGuestStreamExtent{}));
+  // A smaller stream at a DIFFERENT base is not contained -- containment is
+  // about bytes, not sizes.
+  auto elsewhere = ComputeMetalIndexStreamExtent(kBase + 0x8000, 4, true);
+  CHECK_FALSE(MetalExtentContains(host_big, elsewhere));
+  // Partial overlap is not containment.
+  auto straddling = ComputeMetalIndexStreamExtent(kBase + 4088, 8, true);
+  CHECK_FALSE(MetalExtentContains(host_big, straddling));
+}
+
+TEST_CASE("join hash is mutation-pinned: one flipped bit must be caught",
+          "[memexport][raster][join]") {
+  using metal::MetalMemexportJoinHash;
+  // The measured VP factor-stream size. A join hash that missed a single-byte
+  // corruption would make the producer==consumer equality argument worthless,
+  // so pin exactly that.
+  constexpr uint32_t kSize = 4096;
+  std::vector<uint8_t> bytes(kSize);
+  for (uint32_t i = 0; i < kSize; ++i) {
+    bytes[i] = uint8_t(i * 31u + 7u);
+  }
+  const uint64_t baseline = MetalMemexportJoinHash(bytes.data(), kSize);
+  // Identical input reproduces the hash -- the join's other half.
+  CHECK(MetalMemexportJoinHash(bytes.data(), kSize) == baseline);
+  // Flip ONE BIT at the head, middle and tail. The tail matters most: a hash
+  // that folded only a prefix would still pass a head-only test.
+  for (uint32_t index : {0u, 1u, kSize / 2u, kSize - 2u, kSize - 1u}) {
+    std::vector<uint8_t> mutated = bytes;
+    mutated[index] ^= 0x01u;
+    INFO("flipped bit in byte " << index);
+    CHECK(MetalMemexportJoinHash(mutated.data(), kSize) != baseline);
+  }
+  // Truncation is a real failure mode (a short read) and must also be caught.
+  CHECK(MetalMemexportJoinHash(bytes.data(), kSize - 1) != baseline);
+  CHECK(MetalMemexportJoinHash(bytes.data(), 0) != baseline);
 }
 
 TEST_CASE("backstop fault injection parses conservatively",
