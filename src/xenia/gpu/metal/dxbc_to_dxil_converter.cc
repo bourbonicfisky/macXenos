@@ -132,6 +132,15 @@ bool DxbcToDxilConverter::Convert(const std::vector<uint8_t>& dxbc,
   // conformance case). Root-caused 2026-08-02; fresh-per-convert proven to
   // cure both the determinism failures and byte order-dependence end to end.
   // Cost: one DxcCreateInstance per shader translation, off the frame path.
+  //
+  // DO NOT reintroduce instance reuse (thread-local, pooled, or otherwise) to
+  // save that create. The invariant is pinned by the conformance case
+  // "dxilconv and MSC conversions are order-independent"
+  // (conformance/metal_tessellation_render_conformance_test.mm): it converts a
+  // quad-domain payload standalone and again after a triangle conversion and
+  // requires byte-identical output — reuse fails it. Callers that need to
+  // amortize should cache the RESULT (the DXIL artifact cache in
+  // adopt-xenios-shader-artifact-caching), never the converter.
   IDxbcConverter* converter = nullptr;
   HRESULT chr = DxcCreateInstance(kClsidDxbcConverter, __uuidof(IDxbcConverter),
                                   reinterpret_cast<void**>(&converter));
