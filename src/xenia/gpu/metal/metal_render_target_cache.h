@@ -247,6 +247,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     return uint32_t(resolve_snapshots_.size());
   }
 
+  // Replay-determinism oracle (XE_METAL_SNAPHASH=1, default off): logs one
+  // "MetalSnapHash" line per registered resolve snapshot — FNV-1a 64 over the
+  // full texture contents, deterministic (key-sorted) order. Called by the
+  // command processor at the quiesced swap boundary so per-replay-loop
+  // snapshot content can be compared across loops (the
+  // fix-metal-trace-replay-state-reset content-hash sweep; it covers ALL
+  // registered snapshots, not just bases a bridge currently serves). Reads
+  // through its own command buffer on `queue` (blit + wait); costs nothing
+  // unless invoked.
+  void LogResolveSnapshotHashes(void* queue, uint32_t swap_index);
+
   // Frame-dissection tooling: enumerates the render targets owning each EDRAM
   // tile range (full-EDRAM span through the base class's dump-rectangle
   // machinery) so the command processor can reconstruct the 10MB tile-major

@@ -8004,6 +8004,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                 /*aspect_y=*/9, refresher);
   frame_has_render_ = false;
 
+  // Replay-determinism oracle (fix-metal-trace-replay-state-reset task 1.2):
+  // XE_METAL_SNAPHASH=1 logs every registered resolve snapshot's content hash
+  // at this quiesced boundary (encoder ended, submissions waited, publication
+  // complete, presenter committed+waited), one comparable sweep per swap /
+  // replay loop. Default off: one static branch per swap.
+  static const bool s_snaphash_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SNAPHASH");
+    return value && value[0] && value[0] != '0';
+  }();
+  if (s_snaphash_enabled && render_target_cache_) {
+    render_target_cache_->LogResolveSnapshotHashes((__bridge void*)queue,
+                                                   count);
+  }
+
   // The frame boundary, and the Metal analogue of D3D12 executing its deferred
   // clear inside EndSubmission when the frame closes. Everything the ordering
   // contract requires has already happened for this frame: the encoder ended,

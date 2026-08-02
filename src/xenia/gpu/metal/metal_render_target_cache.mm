@@ -11,10 +11,12 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <set>
+#include <vector>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
@@ -4552,6 +4554,85 @@ uint32_t MetalRenderTargetCache::ReleaseResolveSnapshotsForBases(
     ++released;
   }
   return released;
+}
+
+void MetalRenderTargetCache::LogResolveSnapshotHashes(void* queue,
+                                                      uint32_t swap_index) {
+  if (!queue || resolve_snapshots_.empty()) {
+    return;
+  }
+  id<MTLCommandQueue> command_queue = (__bridge id<MTLCommandQueue>)queue;
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  // Deterministic emission order so per-loop logs diff line-for-line.
+  std::vector<uint64_t> keys;
+  keys.reserve(resolve_snapshots_.size());
+  for (const auto& pair : resolve_snapshots_) {
+    if (pair.second.texture) {
+      keys.push_back(pair.first);
+    }
+  }
+  std::sort(keys.begin(), keys.end());
+  for (uint64_t key : keys) {
+    const Snapshot& snap = resolve_snapshots_[key];
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)snap.texture;
+    uint32_t bytes_per_pixel = 0;
+    switch (texture.pixelFormat) {
+      case MTLPixelFormatBGRA8Unorm:
+      case MTLPixelFormatRGBA8Unorm:
+      case MTLPixelFormatR32Float:
+      case MTLPixelFormatRG16Float:
+      case MTLPixelFormatRG16Unorm:
+      case MTLPixelFormatRGB10A2Unorm:
+        bytes_per_pixel = 4;
+        break;
+      case MTLPixelFormatRGBA16Float:
+      case MTLPixelFormatRGBA16Unorm:
+      case MTLPixelFormatRG32Float:
+        bytes_per_pixel = 8;
+        break;
+      default:
+        XELOGW("MetalSnapHash swap={} base={:08X} kind={} fmt={} UNHASHED",
+               swap_index, uint32_t(key >> 1), (key & 1) ? "r32f" : "color",
+               uint64_t(texture.pixelFormat));
+        continue;
+    }
+    size_t width = texture.width;
+    size_t height = texture.height;
+    size_t row_bytes = width * bytes_per_pixel;
+    size_t total_bytes = row_bytes * height;
+    id<MTLBuffer> readback =
+        [device newBufferWithLength:total_bytes
+                            options:MTLResourceStorageModeShared];
+    if (!readback) {
+      XELOGW("MetalSnapHash swap={} base={:08X} readback alloc failed",
+             swap_index, uint32_t(key >> 1));
+      continue;
+    }
+    id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+    blit.label = @"rtcache:snaphash";
+    [blit copyFromTexture:texture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(width, height, 1)
+                        toBuffer:readback
+               destinationOffset:0
+          destinationBytesPerRow:row_bytes
+        destinationBytesPerImage:total_bytes];
+    [blit endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    const uint8_t* bytes = static_cast<const uint8_t*>(readback.contents);
+    uint64_t hash = 14695981039346656037ull;  // FNV-1a 64.
+    for (size_t i = 0; i < total_bytes; ++i) {
+      hash = (hash ^ bytes[i]) * 1099511628211ull;
+    }
+    XELOGI("MetalSnapHash swap={} base={:08X} kind={} {}x{} fmt={} hash={:016X}",
+           swap_index, uint32_t(key >> 1), (key & 1) ? "r32f" : "color",
+           uint32_t(width), uint32_t(height), uint64_t(texture.pixelFormat),
+           hash);
+  }
 }
 
 void MetalRenderTargetCache::ClearCache() {
