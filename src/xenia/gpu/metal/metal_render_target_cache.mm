@@ -4635,6 +4635,40 @@ void MetalRenderTargetCache::LogResolveSnapshotHashes(void* queue,
   }
 }
 
+uint32_t MetalRenderTargetCache::ReleaseAllResolveSnapshots() {
+  // See the header. Immediate (not deferred) release: the replay-reset seam
+  // runs only where every submission has completed, the same argument that
+  // makes ReleaseResolveSnapshotsForBases' immediate release legal.
+  uint32_t released = 0;
+  for (auto& pair : resolve_snapshots_) {
+    if (pair.second.texture) {
+      id<MTLTexture> snapshot =
+          (__bridge_transfer id<MTLTexture>)pair.second.texture;
+      (void)snapshot;
+      pair.second.texture = nullptr;
+      ++released;
+    }
+  }
+  resolve_snapshots_.clear();
+  return released;
+}
+
+void MetalRenderTargetCache::ResetForReplayRestore() {
+  // See the header. Order: destroy first (retirements land in the deferred
+  // list), drain last -- the same shape Shutdown uses.
+  d2c_lineage_.InvalidateAll();
+  presentable_color_target_ = nullptr;  // borrowed from a render target.
+  // Destroys every pool render target regardless of EDRAM ownership --
+  // ownership is re-seeded from scratch by the imminent restore
+  // (PrepareFullEdram1280xRenderTargetForSnapshotRestoration) -- and re-seeds
+  // the empty full-range ownership entry.
+  DestroyAllRenderTargets(/*shutting_down=*/false);
+  // last_update_* attachment pointers may name just-destroyed targets; force
+  // the next Update to rebuild instead of reusing them.
+  ResetAccumulatedRenderTargets();
+  DrainDeferredReleases(UINT64_MAX);
+}
+
 void MetalRenderTargetCache::ClearCache() {
   // Derived state keyed by render-target identity, dropped BEFORE the shared
   // clear can destroy the targets it names. Both are same-frame/per-present

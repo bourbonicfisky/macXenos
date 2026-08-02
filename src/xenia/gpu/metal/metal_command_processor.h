@@ -86,6 +86,19 @@ class MetalCommandProcessor : public CommandProcessor {
     return cache_clears_executed_.load(std::memory_order_acquire);
   }
 
+  // Replay-boundary derived-state retirement (fix-metal-trace-replay-state-
+  // reset). IMMEDIATE, all-or-nothing, no live retention rules -- the inverse
+  // of ClearCaches' deferred, retention-ruled clear. Sanctioned call sites:
+  // TracePlayer's frame-initial playback entry (before the trace's restore
+  // commands) and conformance harnesses (which must SetTracePlaybackContext()
+  // first). Fails closed -- loud log, nothing retired -- if invoked without
+  // replay/test context or at a non-quiescent boundary.
+  void ResetDerivedReplayState() override;
+  uint32_t replay_resets_executed() const override {
+    // Same cross-thread publication contract as cache_clears_executed().
+    return replay_resets_executed_.load(std::memory_order_acquire);
+  }
+
   void RestoreEdramSnapshot(const void* snapshot) override;
 
   // Frame-dissection tooling (--capture_dir per-draw captures + --decode):
@@ -326,12 +339,6 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t fb_ram_content_hash_ = 0;
   uint32_t fb_ram_width_ = 0;
   uint32_t fb_ram_height_ = 0;
-  // Textures (id<MTLTexture> pointer identity) initialized once EVER: a render
-  // target clears only on its first-lifetime use (uninitialized Metal memory),
-  // and LOADS afterwards — in the ownership model, content comes from
-  // transfers/persistence and clears come from guest RESOLVE CLEARS; a
-  // per-frame clear would wipe what the ownership transfer just placed.
-  std::unordered_set<uint64_t> frame_cleared_targets_;
 
   // Bring-up diagnostic: pair the real guest vertex function with a hardcoded
   // solid-color fragment function to isolate vertex-side (positions/constants)
@@ -471,6 +478,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // therefore 0 for as long as release is unimplemented, which correctly fails
   // the engagement gate.
   std::atomic<uint32_t> cache_clears_executed_{0};
+  // Replay resets that EXECUTED (quiescence held and retirement ran).
+  // Telemetry for the replay/test-only guard: a live run must end with 0.
+  std::atomic<uint32_t> replay_resets_executed_{0};
   std::deque<std::pair<uint64_t, std::function<void()>>> completion_actions_;
   // Submissions whose command buffer FAULTED (GPU error status): their GPU
   // work never executed, yet the submission still publishes as completed

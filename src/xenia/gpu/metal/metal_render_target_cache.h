@@ -247,6 +247,33 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     return uint32_t(resolve_snapshots_.size());
   }
 
+  // Replay-boundary retirement (fix-metal-trace-replay-state-reset, carrier
+  // C1): immediate release of EVERY resolve snapshot texture -- color AND
+  // depth/R32F, bridge-served or not -- and erasure of the map. No live
+  // retention rules: at the replay restore boundary the trace is about to
+  // re-deliver authoritative RAM + EDRAM, so cross-loop snapshot texels are
+  // exactly the state that must die. The next loop's resolves re-create and
+  // creation-clear, reproducing loop-0 (fresh-playback) semantics. Immediate
+  // release is legal ONLY at the quiesced boundary the caller asserts
+  // (MetalCommandProcessor::ResetDerivedReplayState). Returns the number of
+  // textures released.
+  uint32_t ReleaseAllResolveSnapshots();
+
+  // Replay-boundary pool retirement (carrier C5) -- deliberately STRONGER
+  // than ClearCache: the shared clear keeps every EDRAM-owning render target
+  // because its content may be the only copy of guest data, but the imminent
+  // RestoreEdramSnapshot re-seeds ownership and content from the
+  // authoritative snapshot, so pool texels (including MSAA companions, which
+  // the restore never rewrites) are pure stale lineage here. Destroys ALL
+  // pool render targets (their textures + MSAA companions retire to the
+  // deferred list), invalidates d2c lineage, drops the borrowed presentable
+  // target, invalidates accumulated attachment state (its pointers name
+  // destroyed targets), and drains the deferred-release list outright.
+  // Canonical EDRAM and its pipelines are untouched (authority, not derived
+  // content -- the restore rewrites the buffer itself). Call ONLY at the
+  // quiesced replay-reset boundary.
+  void ResetForReplayRestore();
+
   // Replay-determinism oracle (XE_METAL_SNAPHASH=1, default off): logs one
   // "MetalSnapHash" line per registered resolve snapshot — FNV-1a 64 over the
   // full texture contents, deterministic (key-sorted) order. Called by the

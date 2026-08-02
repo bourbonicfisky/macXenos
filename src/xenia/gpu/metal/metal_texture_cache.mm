@@ -262,6 +262,16 @@ void MetalTextureCache::ReleaseDerivedResolveBridges(
   }
 }
 
+void MetalTextureCache::RetireAllResolvedTargets() {
+  // See the header. Atomic with the snapshot owners' release at the
+  // replay-reset seam: a serving entry must never outlive its texture, and a
+  // texture must not survive with no register describing it.
+  for (auto& pair : resolved_targets_) {
+    RetireResolvedTarget(pair.second);
+  }
+  resolved_targets_.clear();
+}
+
 void MetalTextureCache::ClearCache() {
   // Ordinary cached textures are pure derived content: every one of them is
   // reconstructible from guest RAM on the next fetch, which is what makes a

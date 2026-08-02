@@ -186,6 +186,42 @@ class CommandProcessor {
   // unspecified edge from whatever the caller waited on.
   virtual uint32_t cache_clears_executed() const { return 0; }
 
+  // Replay-boundary derived-state retirement (trace playback and conformance
+  // harnesses ONLY -- never the live frame path). TracePlayer invokes this at
+  // the entry of every FRAME-INITIAL playback, immediately before the trace's
+  // restore commands (kMemoryRead / kEdramSnapshot) re-deliver authoritative
+  // guest RAM + EDRAM, so nothing GPU-derived (resolve snapshots, bridge
+  // registrations, descriptor-slot references, render-target pool texel
+  // lineage) survives to be observed by the new playback. Distinct from
+  // ClearCaches by contract: that clear is deferred to a later frame boundary
+  // and applies LIVE retention rules ("the snapshot is the only copy of
+  // guest-visible content"), which are exactly inverted under replay
+  // restoration -- here the restored RAM/EDRAM is about to become the only
+  // authority, so retirement is immediate and all-or-nothing.
+  //
+  // The base method is intentionally empty: a backend without derived replay
+  // state keeps fresh-playback semantics for free, and LIVE behavior is
+  // provably unchanged for every backend because the only call sites are the
+  // trace player's frame-initial playback entry and test harnesses -- nothing
+  // on the live path calls this (replay_resets_executed() is the telemetry
+  // that proves it: it must stay 0 for a live run).
+  virtual void ResetDerivedReplayState() {}
+
+  // Number of derived-replay-state resets actually EXECUTED (retirement ran
+  // to completion). Base returns 0 -- the honest answer for a backend whose
+  // ResetDerivedReplayState is the empty default. Same cross-thread
+  // publication contract as cache_clears_executed().
+  virtual uint32_t replay_resets_executed() const { return 0; }
+
+  // Replay/test-context latch: set by TracePlayer on the command-processor
+  // thread before any playback command executes, and by conformance harnesses
+  // that drive a backend directly. Backends assert this in
+  // ResetDerivedReplayState so a stray live-path invocation fails loudly
+  // (and closed) instead of silently retiring state. Never cleared: once a
+  // process has hosted trace playback it is a replay/tooling process.
+  void SetTracePlaybackContext() { trace_playback_context_ = true; }
+  bool trace_playback_context() const { return trace_playback_context_; }
+
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const {
     return swap_post_effect_desired_;
@@ -630,6 +666,10 @@ class CommandProcessor {
   // Per-playback draw counter for the replay_draw_first/last bisection gate
   // (reset by TracePlayer at the start of each playback).
   uint32_t trace_draw_index_ = 0;
+
+  // See SetTracePlaybackContext(). GPU-thread written (TracePlayer call-in /
+  // harness setup) and GPU-thread read (backend ResetDerivedReplayState).
+  bool trace_playback_context_ = false;
 
   // Headless trace-analysis capture (--capture_dir). manifest.jsonl is
   // lazily opened on the first captured draw; capture_meta.json (run/build/

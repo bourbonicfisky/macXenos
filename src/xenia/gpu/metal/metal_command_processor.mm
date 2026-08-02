@@ -1905,7 +1905,6 @@ bool MetalCommandProcessor::ReleaseCachesForClear() {
     }
   }
   dummy_depth_textures_.clear();
-  frame_cleared_targets_.clear();  // per-frame clear bookkeeping.
 
   // NOT released, and each for a stated reason:
   //   - pipeline_cache_ (pipeline states + MSC-translated shaders): the D3D12
@@ -1966,6 +1965,162 @@ bool MetalCommandProcessor::ReleaseCachesForClear() {
       texture_cache_ ? texture_cache_->slots_capacity() : 0,
       before.footprint_mib, after.footprint_mib);
   return true;
+}
+
+void MetalCommandProcessor::ResetDerivedReplayState() {
+  // Quiescent replay-boundary derived-state retirement
+  // (fix-metal-trace-replay-state-reset tasks 2.1-2.3). Invoked ONLY from
+  // TracePlayer's frame-initial playback entry -- immediately BEFORE the
+  // trace's kMemoryRead / kEdramSnapshot commands re-deliver authoritative
+  // guest RAM + EDRAM -- and from conformance harnesses via the same public
+  // method. ALL-or-nothing with NO live retention rules: under replay
+  // restoration the cache clear's "the snapshot is the only copy of
+  // guest-visible content" retention is exactly inverted (restored RAM/EDRAM
+  // is about to become the only authority), so every derived carrier dies:
+  //   C1 resolve-snapshot textures        (render-target cache)
+  //   C2 resolved-target bridge registry  (texture cache)
+  //   C3 descriptor/view-heap slot state  (texture cache drain/rebind-null)
+  //   C4 per-base resolve metadata        (this class -- incl. the
+  //      held_writeback_content_ hold-last-value guard, a genuine cross-loop
+  //      content carrier)
+  //   C5 RT-pool texel lineage            (render-target cache, STRONGER than
+  //      the shared ClearCache: ownership is re-seeded by the imminent
+  //      restore)
+  // plus the shared texture cache and shared memory for uniformity with the
+  // deferred clear's release order. Canonical EDRAM, pipelines/shaders,
+  // sampler/depth-stencil states, and the ZPD pool are retained for the same
+  // stated reasons as ReleaseCachesForClear.
+
+  // Live-path guard (task 2.2): replay/test context must have been declared
+  // (TracePlayer does so on this thread before any playback command; a
+  // harness must call SetTracePlaybackContext()). The live frame path never
+  // does either, so a trip here is a wiring bug -- fail closed, retire
+  // nothing, and leave live behavior untouched.
+  if (!trace_playback_context()) {
+    XELOGE(
+        "MetalCommandProcessor: ResetDerivedReplayState invoked OUTSIDE "
+        "trace-playback/test context -- live-path invocation is forbidden; "
+        "nothing was retired");
+    assert_always();
+    return;
+  }
+
+  // Defensive quiesce: a strict no-op at the sanctioned boundary (the
+  // previous loop's swap already ended the frame encoder, awaited every
+  // submission, and pumped completion actions; the first playback starts
+  // from process-initial state with nothing open). Kept so the seam is safe
+  // from any future call site at zero cost when already quiesced.
+  EndFrameEncoderAndWait();
+  PumpCompletedActions();
+
+  // Quiescence assert (task 2.1): the SAME inputs the deferred cache-clear
+  // admission predicate decides on, but demanded to ALREADY hold --
+  // can_end_submission/can_publish_pending are false because this seam cures
+  // nothing: a violated invariant means the replay-boundary contract is
+  // broken, and retiring would release resources in-flight work can touch.
+  metal::CacheClearAdmissionInputs in{};
+  in.request_latched = true;  // Value-form reuse: evaluate the preconditions.
+  in.encoder_open = frame_open_;
+  in.has_unsubmitted_work = frame_command_buffer_ != nullptr;
+  in.last_submitted_submission = submission_counter_;
+  in.completed_submission =
+      completed_submission_.load(std::memory_order_acquire);
+  in.has_pending_producers =
+      !pending_writebacks_.empty() || !pending_memexports_.empty();
+  in.publication_failed = false;
+  in.can_end_submission = false;
+  in.can_publish_pending = false;
+  uint32_t queued_actions = uint32_t(completion_actions_.size());
+  uint32_t consumed_ranges =
+      shared_memory_ ? shared_memory_->consumed_range_count() : 0;
+  if (metal::DecideCacheClearAdmission(in) !=
+          metal::CacheClearAdmission::kExecute ||
+      queued_actions || consumed_ranges) {
+    XELOGE(
+        "MetalCommandProcessor: replay-reset boundary NOT quiescent "
+        "(encoder_open={} unsubmitted_work={} submitted={} completed={} "
+        "pending_producers={} completion_actions={} consumed_ranges={}) -- "
+        "fail closed, NOTHING retired; this loop replays against stale "
+        "derived state and any determinism gate on it must fail",
+        in.encoder_open, in.has_unsubmitted_work,
+        in.last_submitted_submission, in.completed_submission,
+        in.has_pending_producers, queued_actions, consumed_ranges);
+    assert_always();
+    return;
+  }
+
+  const uint32_t bridges_before =
+      texture_cache_ ? texture_cache_->resolved_bridge_count() : 0;
+  const uint32_t textures_before =
+      texture_cache_ ? texture_cache_->cached_texture_count() : 0;
+  const uint32_t snapshots_before =
+      render_target_cache_ ? render_target_cache_->resolve_snapshot_count()
+                           : 0;
+
+  // The order is the deferred clear's, for the same load-bearing reason:
+  // every step that RETIRES into the legacy texture cache's pools must run
+  // before the step that DRAINS them.
+  // 1. Shared TextureCache subclass first (retires its binding slots/views
+  //    into the legacy pools).
+  if (shared_texture_cache_) {
+    shared_texture_cache_->ClearCache();
+  }
+  // 2. C2: EVERY bridge registration -- no classification, no retention.
+  if (texture_cache_) {
+    texture_cache_->RetireAllResolvedTargets();
+  }
+  // 3. C1: EVERY resolve snapshot texture, color and depth alike.
+  uint32_t snapshots_released =
+      render_target_cache_ ? render_target_cache_->ReleaseAllResolveSnapshots()
+                           : 0;
+  // 4. C4: per-base resolve metadata for ALL bases (the clear erases only
+  //    released bases; here every generation is about to be superseded by
+  //    the restore). held_writeback_content_ is the one genuine content
+  //    carrier -- loop N-1 words re-injected into loop N's writebacks.
+  for (auto& tip_pair : tip_view_textures_) {
+    if (tip_pair.second) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)tip_pair.second;
+      (void)released;
+    }
+  }
+  tip_view_textures_.clear();
+  ram_color_layouts_.clear();
+  resolve_snapshot_generation_.clear();
+  held_writeback_content_.clear();
+  // 5. C3 drain: frees cached textures and everything steps 1-2 retired,
+  //    returning every freed view-heap descriptor to the null texture.
+  if (texture_cache_) {
+    texture_cache_->ClearCache();
+  }
+  // 6. C5: the RT pool, stronger than the shared ClearCache -- all pool
+  //    textures (incl. MSAA companions), presentable target, d2c lineage,
+  //    deferred releases. Ownership is re-seeded by the imminent restore.
+  if (render_target_cache_) {
+    render_target_cache_->ResetForReplayRestore();
+  }
+  // 7. Shared memory + Metal-owned transients, mirroring the clear's tail.
+  if (shared_memory_) {
+    shared_memory_->ClearCache();
+  }
+  if (upload_arena_) {
+    upload_arena_->Reset();
+  }
+  for (auto& pair : dummy_depth_textures_) {
+    if (pair.second) {
+      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second;
+      (void)released;
+    }
+  }
+  dummy_depth_textures_.clear();
+
+  replay_resets_executed_.fetch_add(1, std::memory_order_release);
+  XELOGI(
+      "MetalReplayResetStats swap={} bridges_retired={} textures_released={} "
+      "snapshots_released={}/{} resets_executed={}",
+      swap_count_, bridges_before, textures_before, snapshots_released,
+      snapshots_before,
+      replay_resets_executed_.load(std::memory_order_relaxed));
 }
 
 void MetalCommandProcessor::EnsureZPDQueryResources() {
@@ -4795,6 +4950,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count,
                       tess_pp.host_index_format,
                       tess_pp.host_shader_index_endian);
+      // XE_METAL_TESS_INPUT_HASH=1 (default off): fix-metal-trace-replay-
+      // state-reset D4 oracle -- hashes the exact factor/index bytes this
+      // draw hands the tessellator so run-to-run divergence can be
+      // attributed to INPUT (a stale/unconverged guest stream) vs the
+      // dispatch itself.
+      static const bool tess_input_hash_log = [] {
+        const char* value = std::getenv("XE_METAL_TESS_INPUT_HASH");
+        return value && value[0] == '1';
+      }();
+      if (tess_input_hash_log) {
+        uint64_t input_hash = 14695981039346656037ull;  // FNV-1a 64.
+        const uint8_t* bytes =
+            static_cast<const uint8_t*>(index_alloc.cpu_ptr);
+        for (uint32_t i = 0; i < total; ++i) {
+          input_hash = (input_hash ^ bytes[i]) * 1099511628211ull;
+        }
+        XELOGI("MetalTessInputHash draw={} base={:08X} bytes={} hash={:016X}",
+               trace_draw_index_, tess_pp.guest_index_base, total, input_hash);
+      }
       id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer
                      usage:MTLResourceUsageRead

@@ -215,6 +215,20 @@ class MetalTextureCache {
   // (!generation_ram_backed || is_depth).
   void ReleaseDerivedResolveBridges(
       std::vector<std::pair<uint32_t, void*>>* released_out);
+
+  // Replay-boundary retirement (fix-metal-trace-replay-state-reset, carrier
+  // C2): retires EVERY resolved-target bridge -- slots, tip slot, and
+  // cache-owned swizzle views into the retire pools ClearCache drains -- and
+  // erases the map, with NO live retention rules. The clear path's retention
+  // above ("the snapshot is the only copy of guest-visible content") is
+  // exactly inverted under replay restoration: authoritative RAM + EDRAM are
+  // about to be re-delivered by the trace, so a snapshot that is the only
+  // copy of PRE-RESTORE content is precisely the state that must die.
+  // Snapshot/tip textures are owned elsewhere and are released by their
+  // owners at the same seam. Call ONLY from the quiesced replay-reset
+  // boundary (MetalCommandProcessor::ResetDerivedReplayState), followed by
+  // ClearCache() to drain what this retires.
+  void RetireAllResolvedTargets();
   // Post-clear consistency evidence (a clear must return these toward their
   // post-initialization baseline, and leave nothing queued).
   uint32_t cached_texture_count() const { return uint32_t(cache_.size()); }

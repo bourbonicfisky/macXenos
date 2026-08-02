@@ -57,10 +57,19 @@ class TracePlayer : public TraceReader {
   void WaitOnPlayback();
 
  private:
+  // frame_initial: this playback starts at the frame's start_ptr, whose
+  // leading commands are the authoritative restores (kMemoryRead /
+  // kEdramSnapshot). Such playbacks retire the backend's derived replay state
+  // first (CommandProcessor::ResetDerivedReplayState) so restoration
+  // re-materializes from authoritative content only. Incremental forward
+  // steps (SeekCommand within a frame) deliberately continue from live state
+  // and must NOT pass it.
   void PlayTrace(const uint8_t* trace_data, size_t trace_size,
-                 TracePlaybackMode playback_mode, bool clear_caches);
+                 TracePlaybackMode playback_mode, bool clear_caches,
+                 bool frame_initial);
   void PlayTraceOnThread(const uint8_t* trace_data, size_t trace_size,
-                         TracePlaybackMode playback_mode, bool clear_caches);
+                         TracePlaybackMode playback_mode, bool clear_caches,
+                         bool frame_initial);
 
   GraphicsSystem* graphics_system_;
   int current_frame_index_;

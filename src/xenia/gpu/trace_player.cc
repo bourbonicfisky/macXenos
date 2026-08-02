@@ -51,8 +51,12 @@ void TracePlayer::SeekFrame(int target_frame) {
   current_command_index_ = int(frame->commands.size()) - 1;
 
   assert_true(frame->start_ptr <= frame->end_ptr);
+  // NOT frame_initial: stepping the viewer to another frame continues from
+  // the state the preceding frames built (a frame's restore prologue only
+  // re-delivers what the capture-time GPU read; cross-frame derived state is
+  // the live-continuation semantic here, unlike a same-frame replay loop).
   PlayTrace(frame->start_ptr, frame->end_ptr - frame->start_ptr,
-            TracePlaybackMode::kBreakOnSwap, false);
+            TracePlaybackMode::kBreakOnSwap, false, /*frame_initial=*/false);
 }
 
 void TracePlayer::SeekCommand(int target_command) {
@@ -68,15 +72,18 @@ void TracePlayer::SeekCommand(int target_command) {
   const auto& command = frame->commands[target_command];
   assert_true(frame->start_ptr <= command.end_ptr);
   if (previous_command_index != -1 && target_command > previous_command_index) {
-    // Seek forward.
+    // Seek forward: incremental continuation from live mid-frame state --
+    // never frame_initial.
     const auto& previous_command = frame->commands[previous_command_index];
     PlayTrace(previous_command.end_ptr,
               command.end_ptr - previous_command.end_ptr,
-              TracePlaybackMode::kBreakOnSwap, false);
+              TracePlaybackMode::kBreakOnSwap, false,
+              /*frame_initial=*/false);
   } else {
-    // Full playback from frame start.
+    // Full playback from frame start: the leading commands are the frame's
+    // authoritative restores, so derived replay state retires first.
     PlayTrace(frame->start_ptr, command.end_ptr - frame->start_ptr,
-              TracePlaybackMode::kBreakOnSwap, true);
+              TracePlaybackMode::kBreakOnSwap, true, /*frame_initial=*/true);
   }
 }
 
@@ -87,7 +94,8 @@ void TracePlayer::ReplayCurrentFrame(bool clear_caches) {
   }
   current_command_index_ = int(frame->commands.size()) - 1;
   PlayTrace(frame->start_ptr, frame->end_ptr - frame->start_ptr,
-            TracePlaybackMode::kBreakOnSwap, clear_caches);
+            TracePlaybackMode::kBreakOnSwap, clear_caches,
+            /*frame_initial=*/true);
 }
 
 void TracePlayer::WaitOnPlayback() {
@@ -96,20 +104,35 @@ void TracePlayer::WaitOnPlayback() {
 
 void TracePlayer::PlayTrace(const uint8_t* trace_data, size_t trace_size,
                             TracePlaybackMode playback_mode,
-                            bool clear_caches) {
+                            bool clear_caches, bool frame_initial) {
   playing_trace_ = true;
   graphics_system_->command_processor()->CallInThread([=, this]() {
-    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches);
+    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches,
+                      frame_initial);
   });
 }
 
 void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
                                     size_t trace_size,
                                     TracePlaybackMode playback_mode,
-                                    bool clear_caches) {
+                                    bool clear_caches, bool frame_initial) {
   auto memory = graphics_system_->memory();
   auto command_processor = graphics_system_->command_processor();
 
+  // Declare replay context (on the command-processor thread, before any
+  // playback command) so backends may assert their replay-only seams are
+  // never reached from a live title path.
+  command_processor->SetTracePlaybackContext();
+
+  if (frame_initial) {
+    // Quiescent replay-boundary retirement, BEFORE the frame's restore
+    // commands re-deliver authoritative RAM + EDRAM: nothing GPU-derived
+    // (resolve snapshots, bridge registrations, RT-pool lineage) may survive
+    // into this playback (fix-metal-trace-replay-state-reset design D2).
+    // Unconditional -- unlike clear_caches, which is a scripted-gate request
+    // for the DEFERRED live-semantics cache clear.
+    command_processor->ResetDerivedReplayState();
+  }
   if (clear_caches) {
     command_processor->ClearCaches();
   }
