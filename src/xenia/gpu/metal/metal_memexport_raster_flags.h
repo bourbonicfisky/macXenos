@@ -157,6 +157,66 @@ constexpr uint32_t GetMetalMemexportRasterWritingStage(bool geometry_emulated) {
                            : kMetalMemexportRasterStageVertex;
 }
 
+// --- Task 2.4: the tessellation factor-stream consumer extent ---------------
+//
+// The gated tessellation route reads its index/FACTOR stream directly from
+// guest RAM at encode time, and the count it reads is the HOST patch-stream
+// count (ProcessingResult::host_draw_vertex_count), NOT the guest draw's
+// index_count. The generic vertex-dependency interval is built from the guest
+// count, so whenever host > guest it UNDER-COVERS the bytes actually read --
+// the exact shape in which a range that looks converged can still hand the
+// tessellator stale tail bytes.
+//
+// Pure so the boundary matrix (host > guest, host == guest, host < guest,
+// zero counts, and end-of-address-space saturation) is pinned without a
+// device, a register file, or a trace.
+struct MetalGuestStreamExtent {
+  uint32_t base = 0;
+  uint32_t size = 0;
+  bool valid = false;
+};
+
+inline MetalGuestStreamExtent ComputeMetalIndexStreamExtent(
+    uint32_t guest_base, uint32_t element_count, bool index_32bit) {
+  MetalGuestStreamExtent extent;
+  if (!guest_base || !element_count) {
+    // No stream, or a zero-length one: never a dependency, and never a range
+    // that should enter a consumer request.
+    return extent;
+  }
+  const uint64_t element_size = index_32bit ? 4u : 2u;
+  const uint64_t end =
+      uint64_t(guest_base) + uint64_t(element_count) * element_size;
+  // Saturate at the end of the 32-bit guest address space rather than wrapping
+  // -- a wrapped interval would silently become DISJOINT from the producer it
+  // depends on, which is the failure this whole task exists to prevent.
+  const uint64_t clamped_end = end > 0xFFFFFFFFull ? 0xFFFFFFFFull : end;
+  if (clamped_end <= uint64_t(guest_base)) {
+    return extent;
+  }
+  extent.base = guest_base;
+  extent.size = uint32_t(clamped_end - uint64_t(guest_base));
+  extent.valid = true;
+  return extent;
+}
+
+// True when the tessellation route's HOST stream extent reads bytes the guest
+// index_count interval does not cover -- i.e. when adding the host extent to
+// the consumer request is load-bearing rather than redundant.
+inline bool MetalTessFactorStreamUnderCovered(uint32_t guest_base,
+                                              uint32_t guest_index_count,
+                                              uint32_t host_vertex_count,
+                                              bool index_32bit) {
+  MetalGuestStreamExtent guest =
+      ComputeMetalIndexStreamExtent(guest_base, guest_index_count, index_32bit);
+  MetalGuestStreamExtent host =
+      ComputeMetalIndexStreamExtent(guest_base, host_vertex_count, index_32bit);
+  if (!host.valid) {
+    return false;
+  }
+  return !guest.valid || host.size > guest.size;
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe

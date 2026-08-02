@@ -196,6 +196,99 @@ bool MetalMemexportRasterGateOn() {
   return s_gate_on;
 }
 
+// ATTRIBUTION DIAGNOSTICS (both default-off, log/route-filter only; neither
+// can alter behavior unless explicitly set).
+//
+// XE_METAL_MEMEXPORT_RASTER_ONLY=<hexbase>[,<hexbase>...]: with the raster
+// gate on, route ONLY producers whose destination base is in this list.
+// Bisects "which producer moved the image" one destination at a time, which
+// is the only way to attribute an image delta to a specific guest range
+// without guessing.
+const std::vector<uint32_t>& MemexportRasterOnlyBases() {
+  static const std::vector<uint32_t> s_bases = [] {
+    std::vector<uint32_t> bases;
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_RASTER_ONLY");
+    if (!value || !value[0]) {
+      return bases;
+    }
+    const char* cursor = value;
+    while (*cursor) {
+      char* end = nullptr;
+      unsigned long parsed = std::strtoul(cursor, &end, 16);
+      if (end == cursor) {
+        break;
+      }
+      bases.push_back(uint32_t(parsed));
+      cursor = (*end == ',') ? end + 1 : end;
+    }
+    XELOGW("XE_METAL_MEMEXPORT_RASTER_ONLY: routing {} destination base(s)",
+           bases.size());
+    return bases;
+  }();
+  return s_bases;
+}
+
+// True when this destination base is admitted by the bisect filter (an empty
+// filter admits everything, so the default path is unchanged).
+bool MemexportRasterBaseAdmitted(uint32_t base_bytes) {
+  const std::vector<uint32_t>& bases = MemexportRasterOnlyBases();
+  if (bases.empty()) {
+    return true;
+  }
+  for (uint32_t base : bases) {
+    if (base == base_bytes) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// XE_METAL_MEMEXPORT_WATCH=<hexbase>[:<hexsize>]: an ACCESS CENSUS over one
+// guest range, independent of whether a pending producer record still exists.
+//
+// WHY THIS EXISTS AND THE PENDING-PRODUCER LOG DOES NOT SUFFICE: the
+// MetalMemexportConsumer line reports only producers the authority decision
+// SELECTED, which requires the record to still be pending at that moment. A
+// downstream reader whose record was already retired by an earlier unfiltered
+// drain reads the converged bytes and logs NOTHING -- so "no consumer was
+// logged" is not evidence of "no consumer exists". This census keys on range
+// overlap alone and therefore cannot miss a reader for that reason.
+struct MemexportWatchRange {
+  uint32_t base = 0;
+  uint32_t size = 0;
+  bool enabled = false;
+};
+
+const MemexportWatchRange& MemexportWatch() {
+  static const MemexportWatchRange s_watch = [] {
+    MemexportWatchRange watch;
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_WATCH");
+    if (!value || !value[0]) {
+      return watch;
+    }
+    char* end = nullptr;
+    watch.base = uint32_t(std::strtoul(value, &end, 16));
+    watch.size = (end && *end == ':') ? uint32_t(std::strtoul(end + 1, nullptr,
+                                                              16))
+                                      : 0x10000u;
+    watch.enabled = watch.size != 0;
+    XELOGW("XE_METAL_MEMEXPORT_WATCH: census over {:08X}(+{})", watch.base,
+           watch.size);
+    return watch;
+  }();
+  return s_watch;
+}
+
+bool MemexportWatchOverlaps(uint32_t base, uint32_t size) {
+  const MemexportWatchRange& watch = MemexportWatch();
+  if (!watch.enabled || !size) {
+    return false;
+  }
+  uint64_t a_begin = base, a_end = uint64_t(base) + size;
+  uint64_t b_begin = watch.base, b_end = uint64_t(watch.base) + watch.size;
+  return a_begin < b_end && b_begin < a_end;
+}
+
 // Concrete task-3.1 RamWritePublicationTarget: forwards the seam's two
 // invalidation primitives to the operations that already exist on this
 // command processor's shared memory / legacy texture cache. Holds no state of
@@ -3060,8 +3153,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       metal::DecideMetalMemexportRasterRoute(
           MetalMemexportRasterGateOn(), rt_bound_for_export,
           !memexport_ranges.empty(), ps_writes_eM, use_tessellation_emulation);
-  const bool memexport_raster_routed =
+  bool memexport_raster_routed =
       metal::MetalMemexportRasterRouteRoutes(memexport_raster_route);
+  // Bisect filter (XE_METAL_MEMEXPORT_RASTER_ONLY, empty by default and
+  // therefore inert): de-route a producer whose destination is not on the
+  // list, so one destination at a time can be attributed to an image delta.
+  // A de-routed producer falls back to the unrouted path in full, gap report
+  // included -- the filter never produces a half-routed draw.
+  if (memexport_raster_routed && !MemexportRasterOnlyBases().empty()) {
+    for (const auto& range : memexport_ranges) {
+      if (!MemexportRasterBaseAdmitted(range.base_address_dwords << 2)) {
+        memexport_raster_routed = false;
+        break;
+      }
+    }
+  }
   // Report memexport producer classes this backend does not route. Bounded and
   // deduplicated by MemexportGapReporter; unconditional by design, because the
   // symptom is missing guest data with nothing to attribute it to, and a
@@ -3133,6 +3239,81 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             metal::GetMetalMemexportRasterStageMask(use_geometry_emulation),
             metal::GetMetalMemexportRasterWritingStage(use_geometry_emulation));
       }
+    }
+  }
+
+  // ACCESS CENSUS (XE_METAL_MEMEXPORT_WATCH, default off): every draw-input
+  // guest range this draw reads that OVERLAPS the watched range, reported by
+  // overlap alone. Deliberately independent of pending-producer state, of the
+  // memexport gate, and of whether this draw exports anything -- so it answers
+  // "does ANYTHING downstream read this range in this frame?" rather than the
+  // much weaker "was a still-pending producer selected?".
+  if (MemexportWatch().enabled) {
+    auto report_access = [&](const char* kind, uint32_t fetch_constant,
+                             uint32_t base, uint32_t size) {
+      if (!MemexportWatchOverlaps(base, size)) {
+        return;
+      }
+      XELOGW(
+          "MetalMemexportWatch draw={} access={} fc={} range={:08X}(+{}) "
+          "vs={:016X} ps={:016X}",
+          trace_draw_index_, kind, fetch_constant, base, size,
+          vertex_shader ? vertex_shader->ucode_data_hash() : 0ull,
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0ull);
+    };
+    auto census_textures = [&](MetalShader* shader, const char* kind) {
+      if (!shader) {
+        return;
+      }
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+        if (!(fetch.base_address << 12)) {
+          continue;
+        }
+        metal::FetchGuestRanges ranges = ComputeFetchGuestRanges(fetch);
+        report_access(kind, binding.fetch_constant, ranges.base_begin,
+                      ranges.base_end - ranges.base_begin);
+        if (ranges.mip_end > ranges.mip_begin) {
+          report_access(kind, binding.fetch_constant, ranges.mip_begin,
+                        ranges.mip_end - ranges.mip_begin);
+        }
+      }
+    };
+    census_textures(vertex_shader, "vs-texture");
+    census_textures(pixel_shader, "ps-texture");
+    const Shader::ConstantRegisterMap& census_map =
+        vertex_shader->constant_register_map();
+    for (uint32_t i = 0; i < xe::countof(census_map.vertex_fetch_bitmap); ++i) {
+      uint32_t bits = census_map.vertex_fetch_bitmap[i];
+      uint32_t j;
+      while (xe::bit_scan_forward(bits, &j)) {
+        bits = xe::clear_lowest_bit(bits);
+        uint32_t fetch_constant = i * 32 + j;
+        xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(fetch_constant);
+        if (fetch.type != xenos::FetchConstantType::kVertex &&
+            fetch.type != xenos::FetchConstantType::kInvalidVertex) {
+          continue;
+        }
+        report_access("vfetch", fetch_constant, fetch.address << 2,
+                      fetch.size * uint32_t(sizeof(uint32_t)));
+      }
+    }
+    if (index_buffer_info && index_buffer_info->guest_base && index_count) {
+      report_access(
+          "index", 0, index_buffer_info->guest_base,
+          index_count * (index_buffer_info->format == xenos::IndexFormat::kInt32
+                             ? 4u
+                             : 2u));
+    }
+    if (use_tessellation_emulation &&
+        tess_pp.index_buffer_type ==
+            PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+        tess_pp.guest_index_base) {
+      report_access("tess-factor-stream", 0, tess_pp.guest_index_base,
+                    tess_pp.host_draw_vertex_count *
+                        (tess_pp.host_index_format == xenos::IndexFormat::kInt32
+                             ? 4u
+                             : 2u));
     }
   }
 
@@ -3346,12 +3527,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       tess_pp.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
       tess_pp.guest_index_base && tess_pp.host_draw_vertex_count) {
-    uint32_t tess_index_size_bytes =
-        tess_pp.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
-    auto tess_stream_range = metal::GuestRange::FromBounds(
-        tess_pp.guest_index_base,
-        uint64_t(tess_pp.guest_index_base) +
-            uint64_t(tess_pp.host_draw_vertex_count) * tess_index_size_bytes);
+    // The HOST patch-stream extent, through the pure helper the L0 boundary
+    // matrix pins (host > guest index_count is the under-covering case).
+    metal::MetalGuestStreamExtent tess_extent =
+        metal::ComputeMetalIndexStreamExtent(
+            tess_pp.guest_index_base, tess_pp.host_draw_vertex_count,
+            tess_pp.host_index_format == xenos::IndexFormat::kInt32);
+    auto tess_stream_range =
+        tess_extent.valid
+            ? metal::GuestRange::FromBaseLength(tess_extent.base,
+                                                tess_extent.size)
+            : std::nullopt;
     if (tess_stream_range) {
       vertex_dependency_ranges.Add(*tess_stream_range);
       memexport_raster_consumer_range = true;
@@ -7114,6 +7300,18 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
+      // Census the PUBLICATION SIDE EFFECT, not just the value transfer:
+      // convergence invalidates overlapping texture-cache entries, which can
+      // retire a resolve-backed bridge and change what a later fetch is served
+      // from -- an image delta with no value consumer at all. Attribution has
+      // to be able to tell those two causes apart.
+      if (MemexportWatchOverlaps(me.base_address, me.size_bytes)) {
+        XELOGW(
+            "MetalMemexportWatch converge range={:08X}(+{}) submission={} "
+            "invalidated_texture_entries={}",
+            me.base_address, me.size_bytes, me.submission,
+            result.invalidated_entries);
+      }
       retire_exact_export = exact_sequence;
       if (me_log && me_contents) {
         const uint32_t* buf_words = reinterpret_cast<const uint32_t*>(

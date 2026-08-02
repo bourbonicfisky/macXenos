@@ -155,6 +155,69 @@ TEST_CASE("D2 stage masks: object-only writing stage under geometry emulation",
   }
 }
 
+TEST_CASE("tessellation factor-stream consumer extent boundary matrix",
+          "[memexport][raster][consumer-extent]") {
+  using metal::ComputeMetalIndexStreamExtent;
+  using metal::MetalTessFactorStreamUnderCovered;
+  constexpr uint32_t kBase = 0x1AFF8000u;
+
+  // THE case this consumer range exists for: the tessellation route reads
+  // host_draw_vertex_count elements, which EXCEEDS the guest draw's
+  // index_count, so the generic guest-index interval under-covers the read and
+  // adding the host extent is load-bearing rather than redundant.
+  {
+    auto guest = ComputeMetalIndexStreamExtent(kBase, 256, /*index_32bit=*/true);
+    auto host = ComputeMetalIndexStreamExtent(kBase, 1024, true);
+    REQUIRE(guest.valid);
+    REQUIRE(host.valid);
+    CHECK(guest.size == 1024);
+    CHECK(host.size == 4096);
+    CHECK(host.size > guest.size);
+    CHECK(MetalTessFactorStreamUnderCovered(kBase, 256, 1024, true));
+    // The measured VP shape: the producer exports 4096 bytes at 1AFF8000, and
+    // the consumer's HOST extent must span all of them.
+    CHECK(host.base == kBase);
+    CHECK(uint64_t(host.base) + host.size == uint64_t(kBase) + 4096);
+  }
+  // host == guest: redundant but harmless (the range set normalizes).
+  CHECK_FALSE(MetalTessFactorStreamUnderCovered(kBase, 1024, 1024, true));
+  // host < guest: the guest interval already covers the read.
+  CHECK_FALSE(MetalTessFactorStreamUnderCovered(kBase, 1024, 256, true));
+  // Zero/absent streams are never dependencies and never enter a request.
+  CHECK_FALSE(ComputeMetalIndexStreamExtent(kBase, 0, true).valid);
+  CHECK_FALSE(ComputeMetalIndexStreamExtent(0, 1024, true).valid);
+  CHECK_FALSE(MetalTessFactorStreamUnderCovered(kBase, 256, 0, true));
+  CHECK_FALSE(MetalTessFactorStreamUnderCovered(0, 256, 1024, true));
+  // A zero GUEST count with a real host count still under-covers: the guest
+  // interval does not exist at all, so nothing else would add the range.
+  CHECK(MetalTessFactorStreamUnderCovered(kBase, 0, 1024, true));
+  // 16-bit streams halve the extent.
+  {
+    auto extent = ComputeMetalIndexStreamExtent(kBase, 1024,
+                                                /*index_32bit=*/false);
+    REQUIRE(extent.valid);
+    CHECK(extent.size == 2048);
+  }
+  // End-of-address-space SATURATION, never wraparound: a wrapped interval
+  // would become disjoint from the producer it depends on and silently drop
+  // the dependency -- the precise failure this task exists to prevent.
+  {
+    auto extent = ComputeMetalIndexStreamExtent(0xFFFFFF00u, 1024, true);
+    REQUIRE(extent.valid);
+    CHECK(uint64_t(extent.base) + extent.size == 0xFFFFFFFFull);
+    CHECK(extent.size == 0xFFu);
+  }
+  // Saturating to exactly the base leaves nothing addressable: not a range.
+  CHECK_FALSE(ComputeMetalIndexStreamExtent(0xFFFFFFFFu, 1024, true).valid);
+  // A count large enough to overflow 32-bit multiplication must saturate
+  // rather than alias down to a small extent.
+  {
+    auto extent = ComputeMetalIndexStreamExtent(kBase, 0x40000000u, true);
+    REQUIRE(extent.valid);
+    CHECK(uint64_t(extent.base) + extent.size == 0xFFFFFFFFull);
+  }
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe
