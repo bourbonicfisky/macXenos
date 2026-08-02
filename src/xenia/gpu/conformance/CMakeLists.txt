@@ -261,6 +261,16 @@ if(APPLE)
     # submission factor isolation; depth-only/no-PS fallback render;
     # memexport route-predicate input.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_render_conformance_test.mm
+    # extend-metal-rasterizing-memexport-producers task 3.1: the L1/L2
+    # poison-then-prove family for memexport producers that ALSO rasterize
+    # (plain vertex+fragment and geometry-emulated object+mesh+fragment).
+    # Identical closure to the render family above — the production
+    # DxbcShaderTranslator -> dxilconv -> MetalShaderConverter chain, the
+    # production MetalPipelineCache geometry pipeline, and the production
+    # BuildMetalTopLevelArgumentBuffer — so it lives here rather than in the
+    # lean L0 binary. (The PURE gate/routing matrix is L0 and lives in
+    # metal_memexport_raster_route_test.cc, picked up by the L0 glob.)
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_memexport_raster_render_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )

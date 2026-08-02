@@ -42,6 +42,14 @@ namespace metal {
 // The producer classes this backend does not route. Kept distinct because they
 // need different work to support and are separately measured: the 2026-07-28
 // census returned NO-GO for all three, each for its own reason.
+//
+// UPDATE (extend-metal-rasterizing-memexport-producers): the two rasterizing
+// classes are now ROUTABLE behind XE_METAL_MEMEXPORT_RASTER (default OFF).
+// This reporter is unchanged and stays the authority on what is NOT routed:
+// the caller observes a class only when the routing decision
+// (metal_memexport_raster_flags.h) actually declined it, so the accounting
+// flips per draw as classes route rather than when a gate flips. Pixel-stage
+// export remains permanently unrouted and reported regardless of the gate.
 enum class MemexportProducerClass : uint32_t {
   kRasterizingVertex = 0,          // VS export with a bound RT
   kRasterizingVertexGeometry,      // same, on a geometry-emulated primitive

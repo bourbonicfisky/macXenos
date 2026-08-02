@@ -54,6 +54,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_integer_scale_publish.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
+#include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -172,6 +173,25 @@ bool MetalTessellationGateOn() {
           value);
     }
     return MetalTessellationGateEngaged(gate);
+  }();
+  return s_gate_on;
+}
+
+// extend-metal-rasterizing-memexport-producers task 2.1 (design D4):
+// XE_METAL_MEMEXPORT_RASTER, default OFF, warn-once malformed. OFF is today
+// exactly -- rasterizing producers still rasterize, their exports stay
+// unrouted, and the unconditional gap report keeps counting them.
+bool MetalMemexportRasterGateOn() {
+  static const bool s_gate_on = [] {
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_RASTER");
+    MetalMemexportRasterGate gate = ParseMetalMemexportRasterGate(value);
+    if (gate == MetalMemexportRasterGate::kMalformed) {
+      XELOGW(
+          "XE_METAL_MEMEXPORT_RASTER='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return MetalMemexportRasterGateEngaged(gate);
   }();
   return s_gate_on;
 }
@@ -3002,14 +3022,53 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
+  // Destination-page preparation, shared by BOTH memexport producer routes
+  // (task 1.2 reuse audit: the VS-only route's call shape generalizes
+  // untouched -- normalized range through DecideMemexportDestinationPreparation
+  // + PrepareMemexportDestination, i.e. the same SharedMemory::RequestRange the
+  // direct call site used before). MUST run before the frame encoder opens,
+  // because RequestRange uploads guest RAM into the shared buffer.
+  auto prepare_memexport_destinations = [&]() -> bool {
+    bool ranges_ok = true;
+    MetalMemexportPreparationTarget preparation_target(shared_memory_.get());
+    for (const auto& range : memexport_ranges) {
+      uint32_t range_base = range.base_address_dwords << 2;
+      auto preparation = metal::DecideMemexportDestinationPreparation(
+          range_base, range.size_bytes);
+      bool requested =
+          preparation && metal::PrepareMemexportDestination(
+                              *preparation, preparation_target);
+      if (!requested) {
+        XELOGE("MetalMemexport: failed to request range {:08X}(+{})",
+               range_base, range.size_bytes);
+        ranges_ok = false;
+      }
+    }
+    return ranges_ok;
+  };
+  const bool rt_bound_for_export = color_bound || (kDepthEnabled && depth_bound);
+  const bool ps_writes_eM =
+      pixel_shader && pixel_shader->memexport_eM_written();
+  // extend-metal-rasterizing-memexport-producers tasks 2.2/2.3 (design D1):
+  // a draw that rasterizes AND exports executes ONCE -- routing is BINDING
+  // (writable shared-memory UAV on the stage(s) MSC runs the guest VS on) and
+  // ORDERING (prepare, publish, converge), never a shadow draw. The pure
+  // predicate owns the whole decision matrix, including the two permanent
+  // exclusions (pixel-stage export; tessellated producers, which the
+  // tessellation route already fail-closed skips upstream at "tess-memexport").
+  const metal::MetalMemexportRasterRoute memexport_raster_route =
+      metal::DecideMetalMemexportRasterRoute(
+          MetalMemexportRasterGateOn(), rt_bound_for_export,
+          !memexport_ranges.empty(), ps_writes_eM, use_tessellation_emulation);
+  const bool memexport_raster_routed =
+      metal::MetalMemexportRasterRouteRoutes(memexport_raster_route);
   // Report memexport producer classes this backend does not route. Bounded and
   // deduplicated by MemexportGapReporter; unconditional by design, because the
   // symptom is missing guest data with nothing to attribute it to, and a
-  // switch-gated report cannot catch what nobody is yet looking for.
-  {
-    const bool rt_bound_for_export = color_bound || (kDepthEnabled && depth_bound);
-    const bool ps_writes_eM =
-        pixel_shader && pixel_shader->memexport_eM_written();
+  // switch-gated report cannot catch what nobody is yet looking for. The class
+  // accounting flips ONLY when the class is actually routed -- never merely
+  // because the gate is on.
+  if (!memexport_raster_routed) {
     if (rt_bound_for_export && (!memexport_ranges.empty() || ps_writes_eM)) {
       const MemexportProducerClass producer_class =
           ps_writes_eM ? MemexportProducerClass::kPixelStage
@@ -3049,6 +3108,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
     }
+  } else {
+    // Routed rasterizing producer: prepare the destination pages BEFORE any
+    // encoding, exactly like the VS-only route. Failure means the exports have
+    // nowhere to land, so the draw fail-closed skips with its OWN reason -- it
+    // is never rasterized-without-exporting behind the caller's back, because
+    // that would silently reintroduce the stale-RAM condition this route
+    // exists to remove.
+    if (!prepare_memexport_destinations()) {
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "memexport-raster-range");
+      return true;
+    }
+    if (s_memexport_log) {
+      for (const auto& range : memexport_ranges) {
+        XELOGW(
+            "MetalMemexportRasterExec draw={} VS shader={:016X} dest={:08X} "
+            "bytes={} prim={} n={} geometry_emulated={} eM_mask={:02X} "
+            "stage_mask={:X} writing_stage={:X}",
+            trace_draw_index_, vertex_shader->ucode_data_hash(),
+            range.base_address_dwords << 2, range.size_bytes,
+            uint32_t(prim_type), index_count, use_geometry_emulation ? 1 : 0,
+            uint32_t(vertex_shader->memexport_eM_written()),
+            metal::GetMetalMemexportRasterStageMask(use_geometry_emulation),
+            metal::GetMetalMemexportRasterWritingStage(use_geometry_emulation));
+      }
+    }
   }
 
   if (!color_bound && !(kDepthEnabled && depth_bound)) {
@@ -3077,23 +3162,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // to land — skip like the reference backends fail the draw. Routed
     // through the typed task-3.3 destination-preparation seam (normalized
     // range + the same RequestRange call the direct call site used before).
-    bool ranges_ok = true;
-    MetalMemexportPreparationTarget preparation_target(
-        shared_memory_.get());
-    for (const auto& range : memexport_ranges) {
-      uint32_t range_base = range.base_address_dwords << 2;
-      auto preparation = metal::DecideMemexportDestinationPreparation(
-          range_base, range.size_bytes);
-      bool requested =
-          preparation && metal::PrepareMemexportDestination(
-                              *preparation, preparation_target);
-      if (!requested) {
-        XELOGE("MetalMemexport: failed to request range {:08X}(+{})",
-               range_base, range.size_bytes);
-        ranges_ok = false;
-      }
-    }
-    if (!ranges_ok) {
+    if (!prepare_memexport_destinations()) {
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "memexport-range");
       return true;
     }
@@ -3254,6 +3323,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint64_t(index_buffer_info->guest_base) +
             uint64_t(index_count) * index_size_bytes));
   }
+  // extend-metal-rasterizing-memexport-producers task 2.4: same-frame consumer
+  // ordering for the ONE consumer shape the existing vfetch/index request set
+  // does not already cover. The gated tessellation route reads its
+  // index/FACTOR stream directly from guest RAM at encode time, and its extent
+  // is the HOST patch-stream extent (tess_pp.host_draw_vertex_count), not the
+  // guest draw's index_count -- so the interval added above can under-cover it.
+  // That stream is exactly what a rasterizing memexport producer writes
+  // earlier in the same frame (VP: the geometry-emulated producer exports the
+  // adaptive factor stream, the tessellated terrain draw consumes it two draws
+  // later). Adding it here puts it through the SAME
+  // QueryPendingProducerDependencies -> ResolvePendingProducerDependencies
+  // barrier the depth-resolve writeback established, so convergence is proven
+  // before the read or the draw fail-closed skips.
+  //
+  // Gated on XE_METAL_MEMEXPORT_RASTER: with the gate off nothing publishes
+  // into these ranges, and keeping the request set byte-identical is what makes
+  // the OFF arm bit-identical (an unconditional add would also start selecting
+  // overlapping pending RESOLVES that the pre-change code never selected).
+  bool memexport_raster_consumer_range = false;
+  if (MetalMemexportRasterGateOn() && use_tessellation_emulation &&
+      tess_pp.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+      tess_pp.guest_index_base && tess_pp.host_draw_vertex_count) {
+    uint32_t tess_index_size_bytes =
+        tess_pp.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
+    auto tess_stream_range = metal::GuestRange::FromBounds(
+        tess_pp.guest_index_base,
+        uint64_t(tess_pp.guest_index_base) +
+            uint64_t(tess_pp.host_draw_vertex_count) * tess_index_size_bytes);
+    if (tess_stream_range) {
+      vertex_dependency_ranges.Add(*tess_stream_range);
+      memexport_raster_consumer_range = true;
+    }
+  }
   vertex_dependency_ranges.Normalize();
 
   if (!vertex_dependency_ranges.empty() &&
@@ -3262,6 +3365,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         QueryPendingProducerDependencies(
             metal::ConsumerKind::kVertex,
             metal::ConsumerRequest::Uniform(vertex_dependency_ranges));
+    // Consumer-attribution diagnostic (XE_METAL_MEMEXPORT_LOG=1, default off,
+    // log only): names the CONSUMING draw for every exported range this
+    // vertex/index read depends on -- the evidence task 1.1 needs to decide
+    // whether a producer's destination has a same-frame consumer at all.
+    if (s_memexport_log) {
+      for (const metal::PendingProducer& producer : authority_decision.selected) {
+        if (producer.state != metal::TransitState::kPendingMemexport) {
+          continue;
+        }
+        XELOGW(
+            "MetalMemexportConsumer draw={} kind=vertex range={:08X}(+{}) "
+            "producer_seq={} await={}",
+            trace_draw_index_, producer.range.start(), producer.range.length(),
+            producer.sequence, authority_decision.await ? 1 : 0);
+      }
+    }
     ProducerDependencyOutcome dependency_outcome =
         ResolvePendingProducerDependencies(authority_decision);
     if (!dependency_outcome.complete) {
@@ -3270,8 +3389,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           "of {} selected producers; skipping draw",
           dependency_outcome.drain.drained_records,
           authority_decision.selected.size());
+      // Distinct reason when a routed rasterizing memexport range is part of
+      // this consumer's request: "the exported factors could not be proven
+      // converged before this read" is a different investigation from a
+      // generic vertex-dependency drain failure.
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
-                     "vertex-dependency-drain");
+                     memexport_raster_consumer_range
+                         ? "memexport-raster-consumer-drain"
+                         : "vertex-dependency-drain");
       return true;
     }
   }
@@ -3735,6 +3860,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    // Same consumer-attribution diagnostic as the vertex seam (log only).
+    if (s_memexport_log) {
+      for (const metal::PendingProducer& producer : authority_decision.selected) {
+        if (producer.state != metal::TransitState::kPendingMemexport) {
+          continue;
+        }
+        XELOGW(
+            "MetalMemexportConsumer draw={} kind=texture range={:08X}(+{}) "
+            "producer_seq={} await={}",
+            trace_draw_index_, producer.range.start(), producer.range.length(),
+            producer.sequence, authority_decision.await ? 1 : 0);
+      }
+    }
     // Task 4.3 routes both texture-cache implementations through the common
     // selected-record executor: one boundary, selective drain, before either
     // cache consumes the RAM-derived bytes below.
@@ -4028,9 +4166,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Position-relevant flags.
     auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
     uint32_t flags = 0;
-    if (memexport_draw) {
+    if (memexport_draw || memexport_raster_routed) {
       // The translator predicates every eA/eM store on this flag (exports
       // compile in but no-op without it — the "stores did not land" oracle).
+      // Task 2.2: the routed RASTERIZING producer needs it for exactly the
+      // same reason; binding the writable UAV without publishing this flag
+      // produces a silently export-free draw (measured: VP draws 530/693/733/
+      // 734/735 published GPU-written ranges whose buffer bytes never changed).
       flags |= DxbcShaderTranslator::kSysFlag_SharedMemoryIsUAV;
     }
     if (pa_cl_vte_cntl.vtx_xy_fmt) flags |= DxbcShaderTranslator::kSysFlag_XYDividedByW;
@@ -4757,8 +4899,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   binding_addresses.descriptor_indices_vertex = desc_idx_vertex_alloc.gpu_address;
   binding_addresses.float_pixel = float_pixel_alloc.gpu_address;
   binding_addresses.descriptor_indices_pixel = desc_idx_pixel_alloc.gpu_address;
+  // Design D2 (stage-true UAV binding): `memexport_draw` is the VS-only
+  // attachment-less pass; `memexport_raster_routed` is the NEW rasterizing
+  // class. Both need u0/space0 pointed at the writable shared-memory UAV
+  // instead of the null UAV -- and nothing else about the rasterizing draw
+  // changes (same pipeline, same attachments, same primitive).
+  const bool memexport_uav_bound = memexport_draw || memexport_raster_routed;
   std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
-      BuildMetalTopLevelArgumentBuffer(binding_addresses, pixel_shader != nullptr, memexport_draw,
+      BuildMetalTopLevelArgumentBuffer(binding_addresses, pixel_shader != nullptr,
+                                       memexport_uav_bound,
                                        use_tessellation_emulation);
   std::memcpy(ab_alloc.cpu_ptr, argument_buffer.data(), sizeof(argument_buffer));
 
@@ -4889,8 +5038,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (binding_stage_mask & kMetalBindingStageFragment) {
     stages |= MTLRenderStageFragment;
   }
+  // Residency: `stages` already spans exactly the stages this draw's shaders
+  // run on (vertex+fragment, or object+mesh+fragment under emulation), which
+  // is a superset of the memexport WRITING stage -- MSC compiles the guest
+  // VS's eM# stores onto the vertex stage for a plain draw and the OBJECT
+  // stage under geometry emulation (the mesh stage is the GENERATED GS, which
+  // declares no UAV; see metal_memexport_raster_flags.h's D2 note).
   [encoder useResource:shared_buffer
-                 usage:memexport_draw
+                 usage:memexport_uav_bound
                            ? (MTLResourceUsageRead | MTLResourceUsageWrite)
                            : MTLResourceUsageRead
                 stages:stages];
@@ -4910,6 +5065,46 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     render_target_cache_->MarkCurrentRasterTargetsWritten(
         normalized_color_mask,
         norm_depth.z_write_enable || norm_depth.stencil_enable);
+  };
+
+  // Post-encode memexport publication, shared by every draw path that can
+  // export (task 1.2 reuse: the VS-only route's publication call shape
+  // generalizes UNTOUCHED -- DecideMemexportPublication +
+  // PublishMemexportWrite register the pending record FIRST and then mark the
+  // same normalized range GPU-written, as ONE ordered transition under
+  // WriterKind::kMemexport). Every producer class therefore lands in
+  // pending_memexports_ identically, so the cross-writer authority's
+  // reconciliation, retain-on-failure, and texture invalidation are uniform by
+  // construction. Convergence happens at the EXISTING points: the vertex /
+  // texture consumer barriers above and the frame-boundary drain.
+  auto publish_memexport_ranges = [&] {
+    if (memexport_ranges.empty()) {
+      return;
+    }
+    uint64_t export_submission = S7TagsOff() ? 0 : CurrentEncodingSubmission();
+    MetalMemexportPublicationTarget publication_target(shared_memory_.get());
+    for (const auto& range : memexport_ranges) {
+      uint32_t range_base = range.base_address_dwords << 2;
+      auto publication = metal::DecideMemexportPublication(
+          range_base, range.size_bytes, export_submission);
+      metal::MemexportPublicationResult publish_result;
+      if (publication) {
+        publish_result = metal::PublishMemexportWrite(
+            *publication, publication_target,
+            [this](const metal::MemexportPublication& owned) {
+              pending_memexports_.push_back(PendingMemexport{
+                  owned.range.start(), owned.range.length(), owned.submission,
+                  ++memory_authority_sequence_});
+              return true;
+            });
+      }
+      if (!publish_result.marked) {
+        XELOGE(
+            "MetalMemexport: failed to publish GPU write {:08X}(+{}); "
+            "no GPU-written notification was issued",
+            range_base, range.size_bytes);
+      }
+    }
   };
 
   // --- Draw. ---
@@ -5065,6 +5260,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           /*baseVertex=*/0);
     }
     mark_raster_targets_written();
+    // OUT OF SCOPE (extend-metal-rasterizing-memexport-producers task 2.3):
+    // tessellated-draw memexport producers stay fail-closed. The tessellation
+    // route already skips such a draw upstream ("tess-memexport"), and
+    // DecideMetalMemexportRasterRoute answers kUnroutedTessellated, so
+    // memexport_raster_routed can never be true here -- deliberately NO
+    // publication call on this path.
     frame_has_render_ = true;
     ++draw_count_;
     return true;
@@ -5135,6 +5336,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           /*baseInstance=*/0);
     }
     mark_raster_targets_written();
+    // Task 2.3: the geometry-emulated rasterizing producer publishes on the
+    // SAME original draw it just encoded (design D1 -- no shadow draw). This
+    // path returns before the common tail, so the publication has to happen
+    // here or the exports would never acquire a pending record.
+    if (memexport_raster_routed) {
+      publish_memexport_ranges();
+    }
     frame_has_render_ = true;
     ++draw_count_;
     ++geo_draw_count_;
@@ -5198,6 +5406,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                    fan_alloc.offset, /*instanceCount=*/1,
                                    /*baseVertex=*/0, /*baseInstance=*/0);
     mark_raster_targets_written();
+    // Same reason as the geometry-emulation path: this branch returns before
+    // the common tail, so a routed producer publishes here.
+    if (memexport_raster_routed) {
+      publish_memexport_ranges();
+    }
     frame_has_render_ = true;
     ++draw_count_;
     return true;
@@ -5320,40 +5533,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   mark_raster_targets_written();
 
-  if (memexport_draw) {
+  if (memexport_draw || memexport_raster_routed) {
     // The exports now exist (GPU-ordered) in the shared-memory buffer. Mark
     // the ranges GPU-written (watches + stale-texture invalidation, and so
     // later RequestRange calls don't upload stale CPU RAM over them) and
-    // queue the RAM drain for when this submission completes. Routed through
-    // the typed task-3.3 publication seam: RangeWrittenByGpu and the pending-
-    // record registration form ONE ordered transition. The seam preflights the
-    // marker, registers ownership FIRST, then marks the same normalized range
-    // GPU-written, so no interval is GPU-newer before it has an owner.
-    uint64_t export_submission = S7TagsOff() ? 0 : CurrentEncodingSubmission();
-    MetalMemexportPublicationTarget publication_target(
-        shared_memory_.get());
-    for (const auto& range : memexport_ranges) {
-      uint32_t range_base = range.base_address_dwords << 2;
-      auto publication = metal::DecideMemexportPublication(
-          range_base, range.size_bytes, export_submission);
-      metal::MemexportPublicationResult publish_result;
-      if (publication) {
-        publish_result = metal::PublishMemexportWrite(
-            *publication, publication_target,
-            [this](const metal::MemexportPublication& owned) {
-              pending_memexports_.push_back(PendingMemexport{
-                  owned.range.start(), owned.range.length(), owned.submission,
-                  ++memory_authority_sequence_});
-              return true;
-            });
-      }
-      if (!publish_result.marked) {
-        XELOGE(
-            "MetalMemexport: failed to publish GPU write {:08X}(+{}); "
-            "no GPU-written notification was issued",
-            range_base, range.size_bytes);
-      }
-    }
+    // queue the RAM drain for when this submission completes.
+    publish_memexport_ranges();
   }
 
   frame_has_render_ = true;
