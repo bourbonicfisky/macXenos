@@ -22,7 +22,6 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
-#include "xenia/gpu/metal/metal_slot_reclaim_flags.h"
 #include "xenia/gpu/metal/metal_texture_key.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/trace_writer.h"
@@ -299,7 +298,6 @@ void MetalTextureCache::ClearCache() {
   for (auto& pair : cache_) {
     free_slot(pair.second.slot);
     if (pair.second.texture) {
-      ForgetResourceId(pair.second.texture);
       id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
       (void)released;
     }
@@ -316,7 +314,6 @@ void MetalTextureCache::ClearCache() {
   }
   stale_slots_.clear();
   for (const auto& entry : retired_textures_) {
-    ForgetResourceId(entry.second);
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
     (void)released;
   }
@@ -1632,24 +1629,7 @@ uint32_t MetalTextureCache::AllocateSlot() {
   return next_slot_++;
 }
 
-uint64_t MetalTextureCache::ResourceIdFor(void* texture_bridge) {
-  if (!texture_bridge) {
-    return 0;
-  }
-  auto it = resource_ids_.find(texture_bridge);
-  if (it != resource_ids_.end()) {
-    return it->second;
-  }
-  uint64_t id = next_resource_id_++;
-  resource_ids_.emplace(texture_bridge, id);
-  return id;
-}
 
-void MetalTextureCache::ForgetResourceId(void* texture_bridge) {
-  if (texture_bridge) {
-    resource_ids_.erase(texture_bridge);
-  }
-}
 
 void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
                                             void* texture_bridge) {
@@ -1659,72 +1639,28 @@ void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
   }
   IRDescriptorTableSetTexture(&entries[slot],
                               (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
-  // Every write advances the generation: the audit's "was this slot rewritten
-  // between descriptor encoding and the residency sweep" test is exactly a
-  // generation comparison, so a silent write would defeat it.
-  if (slot_generation_.size() <= slot) {
-    slot_generation_.resize(view_heap_slots_, 0);
-    slot_resource_id_.resize(view_heap_slots_, 0);
-  }
-  ++slot_generation_[slot];
-  slot_resource_id_[slot] = ResourceIdFor(texture_bridge);
 }
 
 void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
   // Free ONLY entries whose last-referencing submission has completed —
   // later in-flight submissions still read the rest (freeing them was the
-  // async-S8 page-fault flicker).
+  // async-S8 page-fault flicker). Descriptors are overwritten on the next
+  // AllocateSlot that hands a freed slot out.
   //
-  // WHAT HAPPENS TO THE DESCRIPTOR is selected by XE_METAL_SLOT_RECLAIM
-  // (metal_slot_reclaim_flags.h); kCurrent is the default and is exactly the
-  // historical behaviour. Under kCurrent the slot keeps describing the texture
-  // that is released just below until some later AllocateSlot hands it out —
-  // "descriptors are overwritten on the next AllocateSlot" — which is the
-  // assumption ClearCache's free_slot already rejects for the clear boundary.
-  // The submission gating below is IDENTICAL in all three modes: no mode ever
-  // touches a slot whose last-referencing submission is still in flight.
-  const MetalSlotReclaimMode mode = MetalSlotReclaimModeEffective(
-      ParseMetalSlotReclaimMode(std::getenv("XE_METAL_SLOT_RECLAIM")));
-  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
-  auto release_slot = [&](uint32_t slot) {
-    if (mode == MetalSlotReclaimMode::kNullOnReclaim && entries &&
-        null_texture && slot && slot < view_heap_slots_) {
-      // BEFORE the slot becomes allocatable: a freed slot must describe a
-      // valid resource, not a released one. Writing an EMPTY descriptor would
-      // leave an invalid resource reference, which is worse than the stale
-      // one -- same reasoning, and same null texture, as ClearCache.
-      WriteSlotDescriptor(slot, (__bridge void*)null_texture);
-    }
-    if (mode == MetalSlotReclaimMode::kWidenWindow) {
-      // Diagnostic probe: keep the slot OUT of the free list so its (now
-      // dangling) descriptor survives longer before reallocation rewrites it.
-      widen_held_slots_.emplace_back(
-          completed_submission + kMetalSlotReclaimWidenHoldSubmissions, slot);
-      return;
-    }
-    free_slots_.push_back(slot);
-  };
-  if (mode == MetalSlotReclaimMode::kWidenWindow) {
-    // Release slots whose extra hold has itself expired.
-    auto held_it = std::remove_if(
-        widen_held_slots_.begin(), widen_held_slots_.end(),
-        [&](const std::pair<uint64_t, uint32_t>& entry) {
-          if (entry.first > completed_submission) {
-            return false;
-          }
-          free_slots_.push_back(entry.second);
-          return true;
-        });
-    widen_held_slots_.erase(held_it, widen_held_slots_.end());
-  }
+  // NOTE (port-xenios-tessellation 5.3): leaving the descriptor naming the
+  // released texture until reallocation was investigated as a page-fault
+  // cause and MEASURED NOT TO BE ONE — closing the window entirely changed
+  // nothing (4.88 -> 5.37 per 10k over five matched runs each). Rebinding
+  // freed slots to the null texture, as ClearCache already does, remains
+  // defensible HARDENING for a separate bounded change; it is deliberately
+  // not carried here, where it would be unjustified as a fault fix.
   auto slot_it = std::remove_if(
       stale_slots_.begin(), stale_slots_.end(),
       [&](const std::pair<uint64_t, uint32_t>& entry) {
         if (entry.first > completed_submission) {
           return false;
         }
-        release_slot(entry.second);
+        free_slots_.push_back(entry.second);
         return true;
       });
   stale_slots_.erase(slot_it, stale_slots_.end());
@@ -1734,7 +1670,6 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
         if (entry.first > completed_submission) {
           return false;
         }
-        ForgetResourceId(entry.second);
         id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
         (void)released;
         return true;

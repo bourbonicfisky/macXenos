@@ -350,29 +350,22 @@ enum MetalBindingStageMask : uint32_t {
   kMetalBindingStageObject = 1u << 1,
   kMetalBindingStageMesh = 1u << 2,
   kMetalBindingStageFragment = 1u << 3,
-  // XeniOS's MetalAllGraphicsRenderStages() shape: every graphics stage
-  // declared unconditionally, whether or not the draw runs on it.
-  kMetalBindingStageAll = kMetalBindingStageVertex | kMetalBindingStageObject |
-                          kMetalBindingStageMesh | kMetalBindingStageFragment,
 };
 
-// The per-draw residency stage mask. Default (all_stages = false) spans
-// exactly the stages the draw's shaders run on -- vertex+fragment for a plain
-// draw, object+mesh+fragment under geometry/tessellation emulation, since no
-// vertex stage runs under mesh-shader emulation.
+// The per-draw residency stage mask: exactly the stages the draw's shaders run
+// on -- vertex+fragment for a plain draw, object+mesh+fragment under
+// geometry/tessellation emulation, since no vertex stage runs under
+// mesh-shader emulation.
 //
-// `all_stages` is the XE_METAL_ALL_STAGE_RESIDENCY diagnostic
-// (metal_residency_stage_flags.h, default OFF): it widens the mask to XeniOS's
-// unconditional all-graphics-stages shape. It exists because a narrow mask is
-// an optimization that depends on our stage model being exactly right, and a
-// wrongly-narrow mask is a GPU page fault -- the arm under investigation for
-// the tessellation-conditional fault. Widening can only ADD declarations, so
-// it can never itself cause a residency fault.
-constexpr uint32_t GetMetalBindingStageMask(bool geometry_emulation,
-                                            bool all_stages = false) {
-  if (all_stages) {
-    return kMetalBindingStageAll;
-  }
+// A wider, unconditional all-graphics-stages mask (XeniOS's shape) was tried as
+// a page-fault candidate under port-xenios-tessellation 5.3 and removed at
+// closeout: its A/B ran at an exposure now known to be underpowered, so it is
+// recorded as UNSUPPORTED rather than falsified. If revisited, the relevant
+// properties are that widening can only ADD declarations (so it cannot itself
+// cause a residency fault) and that a wrongly-NARROW mask is a page fault --
+// which is what makes this narrow mask an optimization depending on the stage
+// model being exactly right.
+constexpr uint32_t GetMetalBindingStageMask(bool geometry_emulation) {
   return geometry_emulation
              ? (kMetalBindingStageObject | kMetalBindingStageMesh |
                 kMetalBindingStageFragment)

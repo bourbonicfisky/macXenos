@@ -59,7 +59,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
-#include "xenia/gpu/metal/metal_residency_stage_flags.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
@@ -175,32 +174,6 @@ bool MetalTessellationGateOn() {
           value);
     }
     return MetalTessellationGateEngaged(gate);
-  }();
-  return s_gate_on;
-}
-
-// XE_METAL_ALL_STAGE_RESIDENCY (port-xenios-tessellation task 5.3, candidate
-// 1). Strict parse, warn-once malformed, default OFF. ON widens the per-draw
-// residency stage mask to XeniOS's unconditional all-graphics-stages shape;
-// see metal_residency_stage_flags.h for why this is a DIAGNOSTIC ARM and not a
-// fix (scheduling perturbation suppresses a stochastic fault as well as a real
-// cause does).
-bool MetalAllStageResidencyGateOn() {
-  static const bool s_gate_on = [] {
-    const char* value = std::getenv("XE_METAL_ALL_STAGE_RESIDENCY");
-    MetalAllStageResidencyGate gate = ParseMetalAllStageResidencyGate(value);
-    if (gate == MetalAllStageResidencyGate::kMalformed) {
-      XELOGW(
-          "XE_METAL_ALL_STAGE_RESIDENCY='{}' is malformed; failing closed to "
-          "off (use 0 or 1)",
-          value);
-    }
-    if (MetalAllStageResidencyGateEngaged(gate)) {
-      XELOGW(
-          "MetalCommandProcessor: XE_METAL_ALL_STAGE_RESIDENCY=1 -- per-draw "
-          "residency declares ALL graphics stages (diagnostic arm)");
-    }
-    return MetalAllStageResidencyGateEngaged(gate);
   }();
   return s_gate_on;
 }
@@ -1685,7 +1658,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // composition ONCE PER DISTINCT KEY -- bounded by the number of attachment
   // configurations a title uses (tens), not by draws -- so any rt= hash naming
   // a faulted encoder can be resolved after the fact.
-  ResidencyAuditOpenEncoder(want_key, MetalTessellationGateOn());
   {
     static std::unordered_set<uint64_t> s_logged_attachment_keys;
     if (s_logged_attachment_keys.insert(want_key).second) {
@@ -1719,17 +1691,6 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
                       count:resident_sweep_scratch_.size()
                       usage:MTLResourceUsageRead
                      stages:sweep_stages];
-      if (pending_residency_active_) {
-        // The sweep is a DECLARATION like any other: record what it covered so
-        // an encoded slot served by it is not reported as undeclared.
-        uint32_t sweep_mask = kMetalBindingStageVertex | kMetalBindingStageFragment;
-        if (mesh_shader_supported_) {
-          sweep_mask |= kMetalBindingStageObject | kMetalBindingStageMesh;
-        }
-        for (void* tex : resident_sweep_scratch_) {
-          ResidencyAuditNoteDeclared(tex, sweep_mask);
-        }
-      }
     }
   }
   frame_render_encoder_ = (__bridge_retained void*)encoder;
@@ -1953,159 +1914,6 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
   }
 }
 
-
-// --- Encoded-vs-resident audit (task 5.3, final attribution slice) ---------
-// Default OFF. When on, every tessellation-enabled render encoder records the
-// descriptor slots its draws ENCODED and the resources declared to Metal via
-// useResource, both as numeric ids/generations, and the pair is classified when
-// the submission completes. Nothing here retains an ObjC reference: a retained
-// texture would outlive its natural lifetime and suppress the fault.
-bool MetalCommandProcessor::ResidencyAuditOn() {
-  static const bool s_on = [] {
-    const char* v = std::getenv("XE_METAL_RESIDENCY_AUDIT");
-    return v && !std::strcmp(v, "1");
-  }();
-  return s_on;
-}
-
-void MetalCommandProcessor::ResidencyAuditOpenEncoder(uint64_t rt_hash,
-                                                      bool tessellation) {
-  if (!ResidencyAuditOn()) {
-    return;
-  }
-  pending_residency_record_ = MetalEncoderResidencyRecord{};
-  pending_residency_record_.rt_hash = rt_hash;
-  pending_residency_record_.tessellation = tessellation;
-  pending_residency_record_.draws_at_open = draw_count_;
-  pending_residency_active_ = true;
-}
-
-void MetalCommandProcessor::ResidencyAuditNoteEncodedSlot(
-    uint32_t slot, uint32_t required_stages) {
-  if (!pending_residency_active_ || !texture_cache_ || !slot) {
-    return;
-  }
-  // Identity is read at ENCODE time; the declaration side reads it again at
-  // its own moment, so a slot rewritten in between shows as a generation
-  // mismatch rather than silently agreeing.
-  MetalEncodedSlot e;
-  e.slot = slot;
-  e.resource_id = texture_cache_->SlotResourceId(slot);
-  e.generation = texture_cache_->SlotGeneration(slot);
-  e.required_stage_mask = required_stages;
-  for (const auto& existing : pending_residency_record_.encoded) {
-    if (existing.slot == slot && existing.resource_id == e.resource_id &&
-        existing.generation == e.generation &&
-        existing.required_stage_mask == e.required_stage_mask) {
-      return;  // same slot, same identity, same need -- one record is enough
-    }
-  }
-  pending_residency_record_.encoded.push_back(e);
-}
-
-void MetalCommandProcessor::ResidencyAuditNoteDeclared(void* texture_bridge,
-                                                       uint32_t stages) {
-  if (!pending_residency_active_ || !texture_cache_ || !texture_bridge) {
-    return;
-  }
-  MetalDeclaredResource d;
-  d.resource_id = texture_cache_->ResourceIdFor(texture_bridge);
-  d.declared_stage_mask = stages;
-  // Generation of whichever slot currently describes it is not knowable from
-  // the resource alone; the encoded side carries the slot generation, and a
-  // declaration is matched on identity + the generation recorded when the
-  // descriptor was written. Look it up by scanning the encoded set, which is
-  // small (per-draw bindings), so a rewritten slot still mismatches.
-  d.generation = 0;
-  for (const auto& e : pending_residency_record_.encoded) {
-    if (e.resource_id == d.resource_id) {
-      d.generation = texture_cache_->SlotGeneration(e.slot);
-      break;
-    }
-  }
-  for (auto& existing : pending_residency_record_.declared) {
-    if (existing.resource_id == d.resource_id &&
-        existing.generation == d.generation) {
-      existing.declared_stage_mask |= stages;  // declarations accumulate
-      return;
-    }
-  }
-  pending_residency_record_.declared.push_back(d);
-}
-
-void MetalCommandProcessor::ResidencyAuditSetRequiredStages(uint32_t mask) {
-  if (!pending_residency_active_) {
-    return;
-  }
-  // Entries recorded by this draw carry 0 until the mesh-path decision is made;
-  // fill them with the draw's real requirement. Entries from earlier draws in
-  // the same encoder already have theirs and are left alone.
-  for (auto& e : pending_residency_record_.encoded) {
-    if (e.required_stage_mask == 0) {
-      e.required_stage_mask = mask;
-    }
-  }
-}
-
-void MetalCommandProcessor::ResidencyAuditCloseEncoder(uint64_t submission) {
-  if (!pending_residency_active_) {
-    return;
-  }
-  pending_residency_active_ = false;
-  if (pending_residency_record_.encoded.empty()) {
-    return;
-  }
-  pending_residency_record_.submission = submission;
-  if (pending_residency_record_.tessellation) {
-    ++residency_tess_encoders_;
-  }
-  if (!residency_store_.Add(pending_residency_record_)) {
-    // FAIL LOUD: a dropped record would read as "no mismatch found", which is
-    // exactly the wrong conclusion during a fault storm.
-    XELOGE(
-        "MetalResidencyAudit: capture store FULL ({} live, {} dropped) -- "
-        "results for this run are INCOMPLETE and must not be read as clean",
-        residency_store_.size(), residency_store_.dropped());
-  }
-}
-
-void MetalCommandProcessor::ResidencyAuditReport(uint64_t completed_submission) {
-  if (!ResidencyAuditOn()) {
-    return;
-  }
-  for (const auto& r : residency_store_.Drain(completed_submission)) {
-    uint32_t verdict = ClassifyMetalEncoderResidency(r);
-    // POSITIVE CONTROL. Without a periodic "examined N, clean" line, zero
-    // mismatch lines is indistinguishable from "capture never ran" -- and a
-    // silent no-op reads as an exoneration. Emit a heartbeat regardless of
-    // verdict so a clean result is evidence rather than an absence.
-    ++residency_records_examined_;
-    if (verdict) {
-      ++residency_mismatches_;
-    }
-    if ((residency_records_examined_ % 2048) == 0) {
-      XELOGI(
-          "MetalResidencyAudit HEARTBEAT examined={} mismatches={} "
-          "live={} dropped={} (tess_encoders={})",
-          residency_records_examined_, residency_mismatches_,
-          residency_store_.size(), residency_store_.dropped(),
-          residency_tess_encoders_);
-    }
-    if (!verdict) {
-      continue;
-    }
-    XELOGE(
-        "MetalResidencyAudit MISMATCH submission={} rt={:016X} draws@{} "
-        "tess={} verdict={:X} (not_declared={} generation={} stage={}) "
-        "encoded={} declared={}",
-        r.submission, r.rt_hash, r.draws_at_open, r.tessellation ? 1 : 0,
-        verdict,
-        (verdict & uint32_t(MetalResidencyVerdict::kResourceNotDeclared)) ? 1 : 0,
-        (verdict & uint32_t(MetalResidencyVerdict::kGenerationMismatch)) ? 1 : 0,
-        (verdict & uint32_t(MetalResidencyVerdict::kMissingRequiredStage)) ? 1 : 0,
-        r.encoded.size(), r.declared.size());
-  }
-}
 
 bool MetalCommandProcessor::ArenaAllocate(uint32_t size, uint32_t alignment,
                                           MetalUploadAllocation* out) {
@@ -2919,7 +2727,6 @@ void MetalCommandProcessor::EndFrameEncoder() {
   reservation.counter = nullptr;
   // Stamp the upload ring: everything allocated since the previous mark is
   // owned by this submission until it completes.
-  ResidencyAuditCloseEncoder(submission);
   if (upload_arena_) {
     upload_arena_->MarkSubmission(submission);
   }
@@ -2959,7 +2766,6 @@ void MetalCommandProcessor::EndFrameEncoder() {
     if (texture_cache_) {
       texture_cache_->ReclaimStaleSlots(submission);
     }
-    ResidencyAuditReport(submission);
     if (shared_memory_) {
       shared_memory_->ReleaseConsumedRanges(submission);
     }
@@ -5428,11 +5234,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // captured with the identity the descriptor holds right now. The
           // stage mask is the draw's own requirement, taken from the same
           // GetMetalBindingStageMask the residency declarations use.
-          // Required stages are not known in this scope (the mesh-path
-          // decision happens later in the draw); recorded as 0 and filled by
-          // ResidencyAuditSetRequiredStages at the residency site, which uses
-          // the SAME mask the declarations use.
-          ResidencyAuditNoteEncodedSlot(texture_slot, 0);
           if (probe) {
             XELOGI(
                 "MetalTexProbe draw={} {} fc={} descidx={} -> slot={} "
@@ -5647,8 +5448,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   id<MTLBuffer> shared_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
-  uint32_t binding_stage_mask = GetMetalBindingStageMask(
-      use_mesh_path, MetalAllStageResidencyGateOn());
+  uint32_t binding_stage_mask = GetMetalBindingStageMask(use_mesh_path);
   MTLRenderStages stages = 0;
   if (binding_stage_mask & kMetalBindingStageVertex) {
     stages |= MTLRenderStageVertex;
@@ -5679,12 +5479,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   [encoder useResource:system_view usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:null_buffer usage:MTLResourceUsageRead stages:stages];
   [encoder useResource:null_texture usage:MTLResourceUsageRead stages:stages];
-  ResidencyAuditSetRequiredStages(binding_stage_mask);
   for (void* tex : texture_cache_->active_textures()) {
     [encoder useResource:(__bridge id<MTLTexture>)tex
                    usage:MTLResourceUsageRead
                   stages:stages];
-    ResidencyAuditNoteDeclared(tex, binding_stage_mask);
   }
 
   auto mark_raster_targets_written = [&] {

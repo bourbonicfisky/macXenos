@@ -25,7 +25,6 @@
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
 #include "xenia/gpu/metal/metal_draw_skip_accounting.h"
 #include "xenia/gpu/metal/metal_fault_episode.h"
-#include "xenia/gpu/metal/metal_residency_audit.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
@@ -757,23 +756,6 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
-  // --- Encoded-vs-resident audit (XE_METAL_RESIDENCY_AUDIT=1, default off) ---
-  // Accumulated for the CURRENT render encoder, pushed to the store at commit
-  // and classified when its submission completes. Numeric only: see
-  // metal_residency_audit.h for why no ObjC reference may be retained here.
-  static bool ResidencyAuditOn();
-  MetalEncoderResidencyRecord pending_residency_record_;
-  bool pending_residency_active_ = false;
-  MetalResidencyCaptureStore residency_store_{4096};
-  uint64_t residency_records_examined_ = 0;
-  uint64_t residency_mismatches_ = 0;
-  uint64_t residency_tess_encoders_ = 0;
-  void ResidencyAuditNoteEncodedSlot(uint32_t slot, uint32_t required_stages);
-  void ResidencyAuditNoteDeclared(void* texture_bridge, uint32_t stages);
-  void ResidencyAuditOpenEncoder(uint64_t rt_hash, bool tessellation);
-  void ResidencyAuditSetRequiredStages(uint32_t mask);
-  void ResidencyAuditCloseEncoder(uint64_t submission);
-  void ResidencyAuditReport(uint64_t completed_submission);
 
   // Exposure-loop telemetry (XE_METAL_EXPO_TRACE=<tonemap ps ucode hash hex>):
   // per-swap snapshot of the auto-exposure FEEDBACK LOOP's three stages —
