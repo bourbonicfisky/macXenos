@@ -108,6 +108,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        bool depth_or_stencil_written);
   // A stable identity for "did the attachment set change" pass management.
   uint64_t current_attachment_key() const;
+  // Human-readable composition behind current_attachment_key(). That key is a
+  // one-way rolling hash, so an rt= hash recurring in GPU fault reports cannot
+  // otherwise be resolved back to concrete render targets. Lives here because
+  // the accumulated-target accessor is protected on the base cache.
+  std::string DescribeCurrentAttachments() const;
 
   // The most recent BGRA8-format color target drawn into (pre-resolve present
   // fallback for splash/menus).

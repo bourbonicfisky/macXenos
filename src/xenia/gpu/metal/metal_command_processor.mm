@@ -1679,6 +1679,19 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   encoder.label = [NSString
       stringWithFormat:@"draws@%u rt=%016llX", draw_count_,
                        (unsigned long long)want_key];
+  // The label's rt= value is a one-way rolling hash of the accumulated
+  // attachment set (current_attachment_key), so a recurring hash in fault
+  // reports cannot be read back into a concrete render target. Log the
+  // composition ONCE PER DISTINCT KEY -- bounded by the number of attachment
+  // configurations a title uses (tens), not by draws -- so any rt= hash naming
+  // a faulted encoder can be resolved after the fact.
+  {
+    static std::unordered_set<uint64_t> s_logged_attachment_keys;
+    if (s_logged_attachment_keys.insert(want_key).second) {
+      XELOGI("MetalRTKeyMap: rt={:016X} draws@{} {}", want_key, draw_count_,
+             render_target_cache_->DescribeCurrentAttachments());
+    }
+  }
   [encoder setCullMode:MTLCullModeNone];
   // Residency sweep: make EVERY texture any live bindless slot can reach
   // resident on this encoder in one batched call. The per-draw useResource

@@ -986,6 +986,29 @@ uint64_t MetalRenderTargetCache::current_attachment_key() const {
   return key;
 }
 
+std::string MetalRenderTargetCache::DescribeCurrentAttachments() const {
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  std::string out;
+  for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+    // Index 0 is depth; 1..kMaxColorRenderTargets are colour (the same
+    // indexing current_attachment_key hashes over).
+    if (i) {
+      out += ' ';
+    }
+    if (!accumulated[i]) {
+      out += fmt::format("{}{}=none", i ? "color" : "depth", i ? i - 1 : 0);
+      continue;
+    }
+    RenderTargetKey k = accumulated[i]->key();
+    out += fmt::format(
+        "{}{}=(key={:08X} base_tiles={} pitch32={} msaa={} is_depth={} fmt={})",
+        i ? "color" : "depth", i ? i - 1 : 0, k.key, uint32_t(k.base_tiles),
+        uint32_t(k.pitch_tiles_at_32bpp), uint32_t(k.msaa_samples),
+        uint32_t(k.is_depth), uint32_t(k.resource_format));
+  }
+  return out;
+}
+
 void MetalRenderTargetCache::PerformTransfers(
     RenderTarget* const* render_targets,
     const std::vector<Transfer>* transfer_lists) {
