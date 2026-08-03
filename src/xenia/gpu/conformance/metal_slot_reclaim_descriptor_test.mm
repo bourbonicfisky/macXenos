@@ -289,6 +289,54 @@ TEST_CASE("Widen mode holds the slot out of the free list, then releases it",
   unsetenv("XE_METAL_SLOT_RECLAIM");
 }
 
+TEST_CASE("Slot identity: every descriptor write advances the generation",
+          "[l1][device][metal][slot-reclaim][residency-audit]") {
+  SlotEnv env;
+  if (!env.ok) {
+    WARN("no Metal device / shared memory; skipping");
+    return;
+  }
+  uint32_t slot = env.cache->AllocateExternalSlot();
+  REQUIRE(slot != 0);
+  const uint64_t g0 = env.cache->SlotGeneration(slot);
+  env.cache->BindExternalSlot(slot, (__bridge void*)env.live_texture);
+  const uint64_t g1 = env.cache->SlotGeneration(slot);
+  CHECK(g1 > g0);
+  // The audit's "slot rewritten between encode and sweep" test IS a generation
+  // comparison, so a silent write would defeat it. Rebinding the SAME texture
+  // still counts as a write.
+  env.cache->BindExternalSlot(slot, (__bridge void*)env.live_texture);
+  CHECK(env.cache->SlotGeneration(slot) > g1);
+  CHECK(env.cache->SlotResourceId(slot) ==
+        env.cache->ResourceIdFor((__bridge void*)env.live_texture));
+}
+
+TEST_CASE("Slot identity: stable ids survive pointer reuse",
+          "[l1][device][metal][slot-reclaim][residency-audit]") {
+  SlotEnv env;
+  if (!env.ok) {
+    WARN("no Metal device / shared memory; skipping");
+    return;
+  }
+  // Pointer reuse is the whole reason identity is numeric: an allocator may
+  // hand back a released texture's address, and an id inherited across that
+  // boundary would silently equate two different resources -- making a real
+  // mismatch look consistent.
+  void* addr = (__bridge void*)env.live_texture;
+  const uint64_t first = env.cache->ResourceIdFor(addr);
+  CHECK(first != 0);
+  CHECK(env.cache->ResourceIdFor(addr) == first);  // stable while live
+
+  env.cache->ForgetResourceId(addr);
+  const uint64_t second = env.cache->ResourceIdFor(addr);
+  CHECK(second != first);  // a NEW resource at a recycled address is NEW
+
+  // Distinct live textures never share an id.
+  CHECK(env.cache->ResourceIdFor((__bridge void*)env.null_texture) != second);
+  // Null names nothing.
+  CHECK(env.cache->ResourceIdFor(nullptr) == 0);
+}
+
 }  // namespace
 }  // namespace metal
 }  // namespace gpu

@@ -253,6 +253,35 @@ class MetalTextureCache {
   uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
   uint32_t slots_capacity() const { return view_heap_slots_; }
 
+  // --- Residency-audit identity (task 5.3, final attribution slice) ---
+  //
+  // NUMERIC ONLY, BY CONSTRUCTION. Nothing here retains an Objective-C
+  // reference: holding a texture alive to describe it later would extend its
+  // lifetime and SUPPRESS the very fault being measured. A resource is named
+  // by a monotonic uint64 id, and a slot by a monotonic generation.
+  //
+  // Pointer reuse is the hazard these exist to survive: a released texture's
+  // address can be handed back by the allocator, so the id map is ERASED when
+  // a texture is released (ReclaimStaleSlots / ClearCache). A later texture at
+  // the same address therefore gets a NEW id rather than inheriting the dead
+  // one.
+  //
+  // The generation is bumped by WriteSlotDescriptor, which every descriptor
+  // write funnels through, so "a descriptor write always advances the slot
+  // generation" is an invariant of the single writer rather than a convention
+  // spread over nine call sites.
+  uint64_t SlotGeneration(uint32_t slot) const {
+    return slot < slot_generation_.size() ? slot_generation_[slot] : 0;
+  }
+  uint64_t SlotResourceId(uint32_t slot) const {
+    return slot < slot_resource_id_.size() ? slot_resource_id_[slot] : 0;
+  }
+  // Stable id for a live texture, assigned on first sight. 0 for null.
+  uint64_t ResourceIdFor(void* texture_bridge);
+  // Drops the address->id mapping when a texture is released, so a future
+  // allocation reusing the address cannot inherit its identity.
+  void ForgetResourceId(void* texture_bridge);
+
   // Telemetry: uploads performed since the last query (frame stats).
   uint32_t ConsumeUploadCount() {
     uint32_t n = upload_count_;
@@ -314,6 +343,18 @@ class MetalTextureCache {
   // slot keeps pointing at the old texture until the submissions encoded
   // against it complete, then moves to free_slots_ for reuse. Tagged with the
   // last submission that may reference them.
+  // Single writer for every view-heap descriptor: writes the entry, bumps the
+  // slot generation and records the resource id. All nine former direct
+  // IRDescriptorTableSetTexture sites route through this.
+  void WriteSlotDescriptor(uint32_t slot, void* texture_bridge);
+  // Parallel to the view heap; index is the slot. Numeric only.
+  std::vector<uint64_t> slot_generation_;
+  std::vector<uint64_t> slot_resource_id_;
+  // Address -> stable id, erased on release so pointer reuse cannot inherit an
+  // identity. Holds raw addresses as keys ONLY; never a retained reference.
+  std::unordered_map<const void*, uint64_t> resource_ids_;
+  uint64_t next_resource_id_ = 1;
+
   std::vector<std::pair<uint64_t, uint32_t>> stale_slots_;
   // XE_METAL_SLOT_RECLAIM=widen ONLY: slots whose last-referencing submission
   // has completed but which are deliberately held out of free_slots_ for an

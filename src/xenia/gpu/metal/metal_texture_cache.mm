@@ -292,13 +292,14 @@ void MetalTextureCache::ClearCache() {
     // instead would leave an INVALID resource reference, which is worse than
     // the stale one.
     if (entries && null_texture) {
-      IRDescriptorTableSetTexture(&entries[slot], null_texture, 0.0f, 0);
+      WriteSlotDescriptor(slot, (__bridge void*)null_texture);
     }
     free_slots_.push_back(slot);
   };
   for (auto& pair : cache_) {
     free_slot(pair.second.slot);
     if (pair.second.texture) {
+      ForgetResourceId(pair.second.texture);
       id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
       (void)released;
     }
@@ -315,6 +316,7 @@ void MetalTextureCache::ClearCache() {
   }
   stale_slots_.clear();
   for (const auto& entry : retired_textures_) {
+    ForgetResourceId(entry.second);
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
     (void)released;
   }
@@ -589,7 +591,7 @@ uint32_t MetalTextureCache::GetSwizzledSnapshotSlot(
     return 0;
   }
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  IRDescriptorTableSetTexture(&entries[view_slot], view, 0.0f, 0);
+  WriteSlotDescriptor(view_slot, (__bridge void*)view);
   void* view_ptr = (__bridge_retained void*)view;
   views.emplace(guest_swizzle, ResolvedTarget::SwizzleView{view_ptr, view_slot});
   active_textures_.push_back(view_ptr);
@@ -685,9 +687,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
         s_synth_tex = (__bridge_retained void*)tex;
         auto* entries =
             static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-        IRDescriptorTableSetTexture(&entries[s_synth_slot],
-                                    (__bridge id<MTLTexture>)s_synth_tex, 0.0f,
-                                    0);
+        WriteSlotDescriptor(s_synth_slot, s_synth_tex);
         XELOGW("MetalSynthFetch: base {:08X} -> constant ({},{},{},{}) slot {}",
                s_synth.base, s_synth.rgba[0], s_synth.rgba[1], s_synth.rgba[2],
                s_synth.rgba[3], s_synth_slot);
@@ -1372,7 +1372,7 @@ uint32_t MetalTextureCache::FinalizeTexture(
     return 0;
   }
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  IRDescriptorTableSetTexture(&entries[slot], sampled, 0.0f, 0);
+  WriteSlotDescriptor(slot, (__bridge void*)sampled);
   // Retain the sampled view (or the base texture if identity) for the descriptor
   // and residency. A view keeps its base alive, so this covers both.
   void* texture_ptr = (__bridge_retained void*)sampled;
@@ -1452,8 +1452,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
         // generation gets a fresh slot while the old slot drains.
         stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
       }
-      IRDescriptorTableSetTexture(&entries[new_slot],
-                                  (__bridge id<MTLTexture>)texture, 0.0f, 0);
+      WriteSlotDescriptor(new_slot, texture);
       it->second.texture = texture;
       it->second.slot = new_slot;
     }
@@ -1491,7 +1490,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     return;
   }
   id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
-  IRDescriptorTableSetTexture(&entries[slot], tex, 0.0f, 0);
+  WriteSlotDescriptor(slot, (__bridge void*)tex);
   auto guest_extent = metal::GuestRange::FromBaseLength(
       guest_extent_start, guest_extent_length);
   resolved_targets_[base] = ResolvedTarget{
@@ -1533,8 +1532,7 @@ void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
   }
   it->second.tip_swizzle_views.clear();
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  IRDescriptorTableSetTexture(&entries[new_slot],
-                              (__bridge id<MTLTexture>)texture, 0.0f, 0);
+  WriteSlotDescriptor(new_slot, texture);
   it->second.tip_texture = texture;
   it->second.tip_slot = new_slot;
   XELOGI("MetalTex: tip view registered base={:08X} -> slot {}", base,
@@ -1611,8 +1609,7 @@ void MetalTextureCache::BindExternalSlot(uint32_t slot, void* texture_bridge) {
     return;
   }
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
-  IRDescriptorTableSetTexture(&entries[slot],
-                              (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
+  WriteSlotDescriptor(slot, texture_bridge);
 }
 
 uint32_t MetalTextureCache::AllocateSlot() {
@@ -1633,6 +1630,44 @@ uint32_t MetalTextureCache::AllocateSlot() {
     return 0;  // exhausted (0 == null texture).
   }
   return next_slot_++;
+}
+
+uint64_t MetalTextureCache::ResourceIdFor(void* texture_bridge) {
+  if (!texture_bridge) {
+    return 0;
+  }
+  auto it = resource_ids_.find(texture_bridge);
+  if (it != resource_ids_.end()) {
+    return it->second;
+  }
+  uint64_t id = next_resource_id_++;
+  resource_ids_.emplace(texture_bridge, id);
+  return id;
+}
+
+void MetalTextureCache::ForgetResourceId(void* texture_bridge) {
+  if (texture_bridge) {
+    resource_ids_.erase(texture_bridge);
+  }
+}
+
+void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
+                                            void* texture_bridge) {
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  if (!entries || !slot || slot >= view_heap_slots_) {
+    return;
+  }
+  IRDescriptorTableSetTexture(&entries[slot],
+                              (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
+  // Every write advances the generation: the audit's "was this slot rewritten
+  // between descriptor encoding and the residency sweep" test is exactly a
+  // generation comparison, so a silent write would defeat it.
+  if (slot_generation_.size() <= slot) {
+    slot_generation_.resize(view_heap_slots_, 0);
+    slot_resource_id_.resize(view_heap_slots_, 0);
+  }
+  ++slot_generation_[slot];
+  slot_resource_id_[slot] = ResourceIdFor(texture_bridge);
 }
 
 void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
@@ -1659,7 +1694,7 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
       // valid resource, not a released one. Writing an EMPTY descriptor would
       // leave an invalid resource reference, which is worse than the stale
       // one -- same reasoning, and same null texture, as ClearCache.
-      IRDescriptorTableSetTexture(&entries[slot], null_texture, 0.0f, 0);
+      WriteSlotDescriptor(slot, (__bridge void*)null_texture);
     }
     if (mode == MetalSlotReclaimMode::kWidenWindow) {
       // Diagnostic probe: keep the slot OUT of the free list so its (now
@@ -1699,6 +1734,7 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
         if (entry.first > completed_submission) {
           return false;
         }
+        ForgetResourceId(entry.second);
         id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
         (void)released;
         return true;
