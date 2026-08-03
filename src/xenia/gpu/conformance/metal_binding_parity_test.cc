@@ -13,6 +13,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_binding_layout.h"
+#include "xenia/gpu/metal/metal_residency_stage_flags.h"
 
 namespace xe {
 namespace gpu {
@@ -294,6 +295,81 @@ TEST_CASE("Metal binding stage plans cover geometry emulation",
   CHECK(GetMetalBindingStageMask(true) ==
         (kMetalBindingStageObject | kMetalBindingStageMesh |
          kMetalBindingStageFragment));
+}
+
+// port-xenios-tessellation task 5.3, candidate 1: the all-four-stage residency
+// A/B. These pin the DIAGNOSTIC's decision matrix, not a fix -- see
+// metal_residency_stage_flags.h.
+TEST_CASE("XE_METAL_ALL_STAGE_RESIDENCY parses strictly and fails closed",
+          "[l0][metal][binding-parity]") {
+  // Unset, empty and exact "0" are off; only exact "1" engages.
+  CHECK(ParseMetalAllStageResidencyGate(nullptr) ==
+        MetalAllStageResidencyGate::kOff);
+  CHECK(ParseMetalAllStageResidencyGate("") ==
+        MetalAllStageResidencyGate::kOff);
+  CHECK(ParseMetalAllStageResidencyGate("0") ==
+        MetalAllStageResidencyGate::kOff);
+  CHECK(ParseMetalAllStageResidencyGate("1") ==
+        MetalAllStageResidencyGate::kOn);
+  // Everything else is malformed -- reported so the caller warns once, and
+  // behaviorally off, so a typo can never silently change the residency shape.
+  for (const char* malformed : {"2", "on", "true", "1 ", " 1", "01", "yes"}) {
+    CHECK(ParseMetalAllStageResidencyGate(malformed) ==
+          MetalAllStageResidencyGate::kMalformed);
+    CHECK_FALSE(MetalAllStageResidencyGateEngaged(
+        ParseMetalAllStageResidencyGate(malformed)));
+  }
+  CHECK_FALSE(MetalAllStageResidencyGateEngaged(
+      MetalAllStageResidencyGate::kOff));
+  CHECK(MetalAllStageResidencyGateEngaged(MetalAllStageResidencyGate::kOn));
+}
+
+TEST_CASE("All-stage residency widens the mask and only widens it",
+          "[l0][metal][binding-parity]") {
+  // Gate on: XeniOS's unconditional all-graphics-stages shape, identical for
+  // both draw kinds.
+  CHECK(GetMetalBindingStageMask(false, true) == kMetalBindingStageAll);
+  CHECK(GetMetalBindingStageMask(true, true) == kMetalBindingStageAll);
+  CHECK(kMetalBindingStageAll ==
+        (kMetalBindingStageVertex | kMetalBindingStageObject |
+         kMetalBindingStageMesh | kMetalBindingStageFragment));
+
+  for (bool geometry_emulation : {false, true}) {
+    const uint32_t narrow = GetMetalBindingStageMask(geometry_emulation, false);
+    const uint32_t wide = GetMetalBindingStageMask(geometry_emulation, true);
+    // The OFF arm must be bit-identical to the pre-change default -- both the
+    // explicit-false and the defaulted-argument spellings.
+    CHECK(narrow == GetMetalBindingStageMask(geometry_emulation));
+    // Widening can only ADD stage declarations. This is the property that
+    // makes the arm safe to run: it cannot itself introduce a residency fault,
+    // so a fault under the arm falsifies the candidate rather than
+    // implicating it.
+    CHECK((narrow & wide) == narrow);
+    CHECK(wide == kMetalBindingStageAll);
+  }
+  // The arm is a real perturbation in both cases -- if it were a no-op the A/B
+  // would be vacuous. Geometry emulation gains Vertex (no vertex stage runs
+  // under mesh-shader emulation, which is exactly the mechanism in question);
+  // a plain draw gains Object|Mesh.
+  CHECK((GetMetalBindingStageMask(true, true) &
+         ~GetMetalBindingStageMask(true, false)) == kMetalBindingStageVertex);
+  CHECK((GetMetalBindingStageMask(false, true) &
+         ~GetMetalBindingStageMask(false, false)) ==
+        (kMetalBindingStageObject | kMetalBindingStageMesh));
+}
+
+TEST_CASE("All-stage residency defaults to the narrow mask end to end",
+          "[l0][metal][binding-parity]") {
+  // The composition the draw path performs, with the environment unset: the
+  // default build must keep the exact pre-change mask.
+  const bool engaged = MetalAllStageResidencyGateEngaged(
+      ParseMetalAllStageResidencyGate(nullptr));
+  CHECK_FALSE(engaged);
+  CHECK(GetMetalBindingStageMask(true, engaged) ==
+        (kMetalBindingStageObject | kMetalBindingStageMesh |
+         kMetalBindingStageFragment));
+  CHECK(GetMetalBindingStageMask(false, engaged) ==
+        (kMetalBindingStageVertex | kMetalBindingStageFragment));
 }
 
 }  // namespace

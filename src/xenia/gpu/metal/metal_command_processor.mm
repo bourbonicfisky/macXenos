@@ -59,6 +59,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_residency_stage_flags.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
@@ -174,6 +175,32 @@ bool MetalTessellationGateOn() {
           value);
     }
     return MetalTessellationGateEngaged(gate);
+  }();
+  return s_gate_on;
+}
+
+// XE_METAL_ALL_STAGE_RESIDENCY (port-xenios-tessellation task 5.3, candidate
+// 1). Strict parse, warn-once malformed, default OFF. ON widens the per-draw
+// residency stage mask to XeniOS's unconditional all-graphics-stages shape;
+// see metal_residency_stage_flags.h for why this is a DIAGNOSTIC ARM and not a
+// fix (scheduling perturbation suppresses a stochastic fault as well as a real
+// cause does).
+bool MetalAllStageResidencyGateOn() {
+  static const bool s_gate_on = [] {
+    const char* value = std::getenv("XE_METAL_ALL_STAGE_RESIDENCY");
+    MetalAllStageResidencyGate gate = ParseMetalAllStageResidencyGate(value);
+    if (gate == MetalAllStageResidencyGate::kMalformed) {
+      XELOGW(
+          "XE_METAL_ALL_STAGE_RESIDENCY='{}' is malformed; failing closed to "
+          "off (use 0 or 1)",
+          value);
+    }
+    if (MetalAllStageResidencyGateEngaged(gate)) {
+      XELOGW(
+          "MetalCommandProcessor: XE_METAL_ALL_STAGE_RESIDENCY=1 -- per-draw "
+          "residency declares ALL graphics stages (diagnostic arm)");
+    }
+    return MetalAllStageResidencyGateEngaged(gate);
   }();
   return s_gate_on;
 }
@@ -5430,7 +5457,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   id<MTLBuffer> shared_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
-  uint32_t binding_stage_mask = GetMetalBindingStageMask(use_mesh_path);
+  uint32_t binding_stage_mask = GetMetalBindingStageMask(
+      use_mesh_path, MetalAllStageResidencyGateOn());
   MTLRenderStages stages = 0;
   if (binding_stage_mask & kMetalBindingStageVertex) {
     stages |= MTLRenderStageVertex;

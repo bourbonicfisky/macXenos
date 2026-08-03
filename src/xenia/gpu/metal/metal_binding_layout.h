@@ -350,9 +350,29 @@ enum MetalBindingStageMask : uint32_t {
   kMetalBindingStageObject = 1u << 1,
   kMetalBindingStageMesh = 1u << 2,
   kMetalBindingStageFragment = 1u << 3,
+  // XeniOS's MetalAllGraphicsRenderStages() shape: every graphics stage
+  // declared unconditionally, whether or not the draw runs on it.
+  kMetalBindingStageAll = kMetalBindingStageVertex | kMetalBindingStageObject |
+                          kMetalBindingStageMesh | kMetalBindingStageFragment,
 };
 
-constexpr uint32_t GetMetalBindingStageMask(bool geometry_emulation) {
+// The per-draw residency stage mask. Default (all_stages = false) spans
+// exactly the stages the draw's shaders run on -- vertex+fragment for a plain
+// draw, object+mesh+fragment under geometry/tessellation emulation, since no
+// vertex stage runs under mesh-shader emulation.
+//
+// `all_stages` is the XE_METAL_ALL_STAGE_RESIDENCY diagnostic
+// (metal_residency_stage_flags.h, default OFF): it widens the mask to XeniOS's
+// unconditional all-graphics-stages shape. It exists because a narrow mask is
+// an optimization that depends on our stage model being exactly right, and a
+// wrongly-narrow mask is a GPU page fault -- the arm under investigation for
+// the tessellation-conditional fault. Widening can only ADD declarations, so
+// it can never itself cause a residency fault.
+constexpr uint32_t GetMetalBindingStageMask(bool geometry_emulation,
+                                            bool all_stages = false) {
+  if (all_stages) {
+    return kMetalBindingStageAll;
+  }
   return geometry_emulation
              ? (kMetalBindingStageObject | kMetalBindingStageMesh |
                 kMetalBindingStageFragment)
