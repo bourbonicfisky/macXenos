@@ -540,10 +540,20 @@ class MetalCommandProcessor : public CommandProcessor {
   // pinned by the L0 suite rather than only exercised when a stochastic
   // hardware fault happens to occur.
   FaultEpisodeTracker fault_episodes_;
-  uint64_t NoteFaultEpisodeMember(uint64_t submission,
-                                  uint64_t submit_epoch);
-  void CloseFaultEpisode(uint64_t epoch, const char* why);
-  void CloseAllFaultEpisodes(const char* why);
+  // OUTSTANDING CALLBACKS PER EPOCH. An episode's root/count stay provisional
+  // until every submission issued under its epoch has reported, so finalizing
+  // needs this count. Incremented on the submitting thread, decremented in the
+  // completion handler (arbitrary thread) -- hence atomic, and indexed by
+  // epoch slot so the success path takes no lock and logs nothing.
+  static constexpr uint32_t kFaultEpochSlots =
+      FaultEpisodeTracker::kMaxTrackedEpochs;
+  std::atomic<uint32_t> epoch_outstanding_[kFaultEpochSlots] = {};
+  // Set once capacity is exhausted: capture is disabled rather than evicting
+  // attribution that may still receive a late callback.
+  bool fault_capture_disabled_ = false;
+  uint64_t NoteFaultEpisodeMember(uint64_t submission, uint64_t submit_epoch);
+  void MarkFaultEpochClosed(uint64_t epoch);
+  void SweepFinalizedFaultEpisodes();
 
   // ZPD occlusion queries. The shared CommandProcessor owns the whole logical
   // report state machine (slots, segment splitting, normalization, guest

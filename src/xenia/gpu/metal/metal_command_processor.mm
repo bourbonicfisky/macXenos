@@ -1769,27 +1769,42 @@ void EmitFaultEpisode(const metal::FaultEpisodeSummary& s, const char* why) {
 }
 }  // namespace
 
-void MetalCommandProcessor::CloseFaultEpisode(uint64_t epoch,
-                                             const char* why) {
-  EmitFaultEpisode(fault_episodes_.CloseEpoch(epoch), why);
+void MetalCommandProcessor::MarkFaultEpochClosed(uint64_t epoch) {
+  // Closing is NOT finalizing: a late callback bearing this epoch can still
+  // revise the root downward, so the summary waits for outstanding == 0.
+  fault_episodes_.MarkEpochClosed(epoch);
+  SweepFinalizedFaultEpisodes();
 }
 
-void MetalCommandProcessor::CloseAllFaultEpisodes(const char* why) {
-  for (;;) {
-    metal::FaultEpisodeSummary summary = fault_episodes_.CloseAny();
-    if (!summary.valid) {
-      break;
-    }
-    EmitFaultEpisode(summary, why);
+void MetalCommandProcessor::SweepFinalizedFaultEpisodes() {
+  for (uint32_t i = 0; i < fault_episodes_.tracked_epoch_count(); ++i) {
+    uint64_t epoch = fault_episodes_.tracked_epoch_at(i);
+    uint32_t outstanding =
+        epoch_outstanding_[epoch % kFaultEpochSlots].load(
+            std::memory_order_acquire);
+    metal::FaultEpisodeSummary summary =
+        fault_episodes_.TryFinalize(epoch, outstanding);
+    EmitFaultEpisode(summary, "closed+drained");
   }
 }
 
 uint64_t MetalCommandProcessor::NoteFaultEpisodeMember(uint64_t submission,
                                                        uint64_t submit_epoch) {
-  metal::FaultEpisodeSummary retired;
+  metal::EpisodeAdmission admission = metal::EpisodeAdmission::kAdmitted;
   uint64_t episode =
-      fault_episodes_.NoteMember(submission, submit_epoch, &retired);
-  EmitFaultEpisode(retired, "capacity-retire");
+      fault_episodes_.NoteMember(submission, submit_epoch, &admission);
+  if (admission == metal::EpisodeAdmission::kNoCapacity &&
+      !fault_capture_disabled_) {
+    // NEVER evict: an evicted epoch may still receive a late callback, and
+    // losing that attribution silently is the failure this accounting exists
+    // to prevent. Fail loudly and stop capturing instead.
+    fault_capture_disabled_ = true;
+    XELOGE(
+        "MetalGpuFaultEpisode: episode capacity exhausted ({} live epochs, "
+        "none finalizable); DISABLING further episode capture rather than "
+        "evicting attribution that may still receive a late callback",
+        fault_episodes_.live_epochs());
+  }
   return episode;
 }
 
@@ -1805,6 +1820,8 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     faulted_ids.push_back(completion.submission);
   }
   frame_gpu_fault_count_ += uint32_t(faulted_ids.size());
+  // Any epoch that is closed and fully drained can now publish its FINAL root.
+  SweepFinalizedFaultEpisodes();
   for (uint64_t id : faulted_ids) {
     faulted_submissions_.insert(id);
     // Bounded: fault-attribution evidence, not a growing ledger.
@@ -1857,7 +1874,7 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
           // Close the episode for the epoch being retired, then advance.
           // Late callbacks carrying the OLD epoch still resolve correctly
           // because membership keys on the submission's own epoch.
-          CloseFaultEpisode(fault_episodes_.epoch(), "queue-recreated");
+          MarkFaultEpochClosed(fault_episodes_.epoch());
           fault_episodes_.BumpEpoch();
           XELOGE(
               "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}, "
@@ -2636,6 +2653,8 @@ void MetalCommandProcessor::EndFrameEncoder() {
   uint64_t submission = ++submission_counter_;
   // Epoch AT SUBMISSION: a late callback must still join its original episode.
   const uint64_t submit_epoch = fault_episodes_.epoch();
+  epoch_outstanding_[submit_epoch % kFaultEpochSlots].fetch_add(
+      1, std::memory_order_release);
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -2643,6 +2662,11 @@ void MetalCommandProcessor::EndFrameEncoder() {
           FaultedCompletion{(__bridge_retained void*)cb, submission,
                             submit_epoch});
     }
+    // Ordered: this epoch stops being outstanding BEFORE the submission is
+    // published, so a finalize sweep can never observe published-but-still-
+    // outstanding and emit a provisional root.
+    epoch_outstanding_[submit_epoch % kFaultEpochSlots].fetch_sub(
+        1, std::memory_order_release);
     PublishCompletedSubmission(submission);
   }];
   // Stamp the upload ring: everything allocated since the previous mark is

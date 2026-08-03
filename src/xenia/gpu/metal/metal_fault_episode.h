@@ -49,104 +49,128 @@ struct FaultEpisodeSummary {
   bool valid = false;
 };
 
+// Whether a failure could be admitted. Capacity exhaustion is NEVER resolved by
+// eviction: an evicted epoch may still receive a late callback, and losing that
+// attribution silently is the exact failure this accounting exists to prevent.
+enum class EpisodeAdmission { kAdmitted, kNoCapacity };
+
 class FaultEpisodeTracker {
  public:
-  // Concurrently-open epochs. Small: late callbacks trail the current epoch by
-  // at most a frame or two in practice. Overflow retires the OLDEST episode
-  // (emitting its summary) rather than dropping attribution silently.
-  static constexpr uint32_t kMaxOpenEpisodes = 8;
+  static constexpr uint32_t kMaxTrackedEpochs = 8;
 
-  // Assigns a failed `submission`, SUBMITTED under `submit_epoch`, to that
-  // epoch's episode. Returns the episode id. If admitting it retired an older
-  // episode, `retired` receives that summary so the caller can emit it.
+  // Admits a failed `submission` issued under `submit_epoch`. Returns the
+  // episode id, or 0 with kNoCapacity when every slot is still live -- the
+  // caller must then fail loudly / disable further capture, never evict.
   uint64_t NoteMember(uint64_t submission, uint64_t submit_epoch,
-                      FaultEpisodeSummary* retired) {
-    if (retired) {
-      *retired = FaultEpisodeSummary();
-    }
-    Episode* episode = Find(submit_epoch);
-    if (!episode) {
-      if (count_ == kMaxOpenEpisodes) {
-        uint32_t oldest = 0;
-        for (uint32_t i = 1; i < count_; ++i) {
-          if (open_[i].id < open_[oldest].id) {
-            oldest = i;
-          }
+                      EpisodeAdmission* admission) {
+    EpochRecord* record = Find(submit_epoch);
+    if (!record) {
+      record = Acquire(submit_epoch);
+      if (!record) {
+        if (admission) {
+          *admission = EpisodeAdmission::kNoCapacity;
         }
-        if (retired) {
-          *retired = SummaryOf(open_[oldest]);
-        }
-        open_[oldest] = open_[--count_];
+        return 0;
       }
-      episode = &open_[count_++];
-      episode->id = ++counter_;
-      episode->epoch = submit_epoch;
-      episode->root_serial = submission;
-      episode->members = 0;
+    }
+    if (admission) {
+      *admission = EpisodeAdmission::kAdmitted;
+    }
+    if (!record->episode_id) {
+      record->episode_id = ++counter_;
+      record->root_serial = submission;
+      record->members = 0;
     }
     // Out-of-order completion: a lower serial is the truer root. Serial 0 is
     // the unknown/unowned sentinel elsewhere and must never win the min().
     if (submission &&
-        (!episode->root_serial || submission < episode->root_serial)) {
-      episode->root_serial = submission;
+        (!record->root_serial || submission < record->root_serial)) {
+      record->root_serial = submission;
     }
-    ++episode->members;
-    return episode->id;
+    ++record->members;
+    return record->episode_id;
   }
 
-  // Closes one epoch's episode, if open.
-  FaultEpisodeSummary CloseEpoch(uint64_t epoch) {
-    for (uint32_t i = 0; i < count_; ++i) {
-      if (open_[i].epoch == epoch) {
-        FaultEpisodeSummary summary = SummaryOf(open_[i]);
-        open_[i] = open_[--count_];
-        return summary;
-      }
+  // The queue advanced past this epoch (revoke/recreate) or we are tearing
+  // down. Marks it closed -- it does NOT finalize, because a late callback can
+  // still arrive and revise the root downward.
+  void MarkEpochClosed(uint64_t epoch) {
+    if (EpochRecord* record = Find(epoch)) {
+      record->closed = true;
     }
-    return FaultEpisodeSummary();
   }
 
-  // Drains one open episode (teardown / end-of-session reporting).
-  FaultEpisodeSummary CloseAny() {
-    if (!count_) {
+  // Finalizes ONLY when the epoch is closed AND no callbacks remain
+  // outstanding for it. Until both hold, the root and member count are still
+  // provisional. Frees the slot on success.
+  FaultEpisodeSummary TryFinalize(uint64_t epoch, uint64_t outstanding) {
+    EpochRecord* record = Find(epoch);
+    if (!record || !record->closed || outstanding) {
       return FaultEpisodeSummary();
     }
-    FaultEpisodeSummary summary = SummaryOf(open_[count_ - 1]);
-    --count_;
+    FaultEpisodeSummary summary;
+    if (record->episode_id) {
+      summary.episode = record->episode_id;
+      summary.epoch = record->epoch;
+      summary.root_serial = record->root_serial;
+      summary.failed_submissions = record->members;
+      summary.valid = true;
+    }
+    record->used = false;  // No faults => slot released with no summary.
     return summary;
+  }
+
+  // Epochs currently tracked, for the caller's finalize sweep.
+  uint32_t tracked_epoch_count() const { return count_; }
+  uint64_t tracked_epoch_at(uint32_t index) const {
+    return records_[index].used ? records_[index].epoch : 0;
   }
 
   void BumpEpoch() { ++epoch_; }
   uint64_t epoch() const { return epoch_; }
   uint64_t episode_count() const { return counter_; }
-  uint32_t open_episodes() const { return count_; }
+  // Slots holding attribution that has not yet been finalized.
+  uint32_t live_epochs() const {
+    uint32_t live = 0;
+    for (uint32_t i = 0; i < kMaxTrackedEpochs; ++i) {
+      live += records_[i].used ? 1u : 0u;
+    }
+    return live;
+  }
 
  private:
-  struct Episode {
-    uint64_t id = 0;
+  struct EpochRecord {
+    bool used = false;
+    bool closed = false;
     uint64_t epoch = 0;
+    uint64_t episode_id = 0;  // 0 until a fault occurs in this epoch.
     uint64_t root_serial = 0;
     uint64_t members = 0;
   };
-  Episode* Find(uint64_t epoch) {
-    for (uint32_t i = 0; i < count_; ++i) {
-      if (open_[i].epoch == epoch) {
-        return &open_[i];
+  EpochRecord* Find(uint64_t epoch) {
+    for (uint32_t i = 0; i < kMaxTrackedEpochs; ++i) {
+      if (records_[i].used && records_[i].epoch == epoch) {
+        return &records_[i];
       }
     }
     return nullptr;
   }
-  static FaultEpisodeSummary SummaryOf(const Episode& e) {
-    FaultEpisodeSummary s;
-    s.episode = e.id;
-    s.epoch = e.epoch;
-    s.root_serial = e.root_serial;
-    s.failed_submissions = e.members;
-    s.valid = true;
-    return s;
+  EpochRecord* Acquire(uint64_t epoch) {
+    for (uint32_t i = 0; i < kMaxTrackedEpochs; ++i) {
+      if (!records_[i].used) {
+        records_[i] = EpochRecord();
+        records_[i].used = true;
+        records_[i].epoch = epoch;
+        if (i >= count_) {
+          count_ = i + 1;
+        }
+        return &records_[i];
+      }
+    }
+    return nullptr;  // Full: caller fails loudly. NEVER evict.
   }
 
-  Episode open_[kMaxOpenEpisodes];
+  EpochRecord records_[kMaxTrackedEpochs];
   uint32_t count_ = 0;
   uint64_t epoch_ = 0;
   uint64_t counter_ = 0;
