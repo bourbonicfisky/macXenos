@@ -898,10 +898,11 @@ static id<MTLCommandBuffer> MakeAttributedCommandBuffer(
 // necessarily 5 either. `grep -c` on any single one of these is misleading.
 static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
                                   const char* site, uint32_t swap_count,
-                                  uint64_t submission) {
+                                  uint64_t submission, uint64_t episode) {
   NSError* err = command_buffer.error;
-  XELOGE("Metal GPU FAULT ({}, swap#{}, submission={}): {} (code {})", site,
-         swap_count, submission,
+  XELOGE("Metal GPU FAULT ({}, swap#{}, episode={}, submission={}): {} "
+         "(code {})", site,
+         swap_count, episode, submission,
          err.localizedDescription ? err.localizedDescription.UTF8String
                                   : "(no description)",
          err ? long(err.code) : -1L);
@@ -922,9 +923,9 @@ static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
       // Carry the serial on every encoder line too, so encoder attributions
       // can be grouped by the submission they belong to without re-parsing
       // the surrounding header.
-      XELOGE("  encoder '{}': {} (submission={})",
+      XELOGE("  encoder '{}': {} (episode={} submission={})",
              info.label ? info.label.UTF8String : "(unlabeled)", state,
-             submission);
+             episode, submission);
     }
   }
 }
@@ -1755,6 +1756,30 @@ bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
   return ok;
 }
 
+namespace {
+void EmitFaultEpisode(const metal::FaultEpisodeSummary& s, const char* why) {
+  if (!s.valid) {
+    return;
+  }
+  // The one line answering "how many times did the GPU actually break".
+  XELOGE(
+      "MetalGpuFaultEpisode episode={} epoch={} root_serial={} "
+      "failed_submissions={} closed_by={}",
+      s.episode, s.epoch, s.root_serial, s.failed_submissions, why);
+}
+}  // namespace
+
+void MetalCommandProcessor::CloseFaultEpisode(const char* why) {
+  EmitFaultEpisode(fault_episodes_.Close(), why);
+}
+
+uint64_t MetalCommandProcessor::NoteFaultEpisodeMember(uint64_t submission) {
+  metal::FaultEpisodeSummary closed;
+  uint64_t episode = fault_episodes_.NoteMember(submission, &closed);
+  EmitFaultEpisode(closed, "epoch-change");
+  return episode;
+}
+
 void MetalCommandProcessor::DrainFaultedCommandBuffers() {
   std::vector<FaultedCompletion> faulted;
   {
@@ -1785,11 +1810,15 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     id<MTLCommandBuffer> command_buffer =
         (__bridge_transfer id<MTLCommandBuffer>)completion.command_buffer;
     const uint64_t faulted_submission = completion.submission;
+    // Episode assignment BEFORE logging, so every fault line carries the
+    // episode it belongs to and root/collateral can be told apart without
+    // reconstructing it from revoke lines afterwards.
+    const uint64_t episode = NoteFaultEpisodeMember(faulted_submission);
     static uint32_t s_cb_errors = 0;
     ++s_cb_errors;
     if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
       LogCommandBufferFault(command_buffer, "frame commit", swap_count_,
-                            faulted_submission);
+                            faulted_submission, episode);
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
@@ -1809,10 +1838,14 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
                   graphics_system_->presenter())) {
             presenter->SetCommandQueue(provider->command_queue());
           }
+          // Epoch bump defines episode membership: everything that failed
+          // before this recreate belongs to the episode now closing.
+          fault_episodes_.BumpEpoch();
+          CloseFaultEpisode("queue-recreated");
           XELOGE(
-              "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}); "
-              "display should resume",
-              swap_count_);
+              "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}, "
+              "epoch={}); display should resume",
+              swap_count_, fault_episodes_.epoch());
         }
       }
     }

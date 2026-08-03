@@ -24,6 +24,7 @@
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
 #include "xenia/gpu/metal/metal_draw_skip_accounting.h"
+#include "xenia/gpu/metal/metal_fault_episode.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
@@ -520,6 +521,23 @@ class MetalCommandProcessor : public CommandProcessor {
     uint64_t submission = 0;         // Serial of this failed completion.
   };
   std::vector<FaultedCompletion> faulted_completions_;
+
+  // FAULT EPISODES. A single GPU failure makes every in-flight submission
+  // complete with an error, so failed-serial counts over-report root events.
+  // An episode is therefore keyed by the QUEUE EPOCH (bumped on every
+  // revoke/recreate), not by arrival order: all failures observed within one
+  // epoch belong to one episode.
+  //
+  // WHY NOT "first callback wins": completion callbacks may arrive OUT OF
+  // SUBMISSION ORDER, so the first-reported failure is not necessarily the
+  // earliest one. The episode ROOT is the LOWEST failed submission serial seen
+  // within the episode, revised downward if a lower serial reports later.
+  // Pure state machine (metal_fault_episode.h) so the grouping rules are
+  // pinned by the L0 suite rather than only exercised when a stochastic
+  // hardware fault happens to occur.
+  FaultEpisodeTracker fault_episodes_;
+  uint64_t NoteFaultEpisodeMember(uint64_t submission);
+  void CloseFaultEpisode(const char* why);
 
   // ZPD occlusion queries. The shared CommandProcessor owns the whole logical
   // report state machine (slots, segment splitting, normalization, guest
