@@ -315,6 +315,11 @@ class MetalTextureCache {
   // against it complete, then moves to free_slots_ for reuse. Tagged with the
   // last submission that may reference them.
   std::vector<std::pair<uint64_t, uint32_t>> stale_slots_;
+  // XE_METAL_SLOT_RECLAIM=widen ONLY: slots whose last-referencing submission
+  // has completed but which are deliberately held out of free_slots_ for an
+  // extra span, lengthening the window in which their descriptor still names a
+  // released texture. Always empty in the default mode.
+  std::vector<std::pair<uint64_t, uint32_t>> widen_held_slots_;
   std::vector<uint32_t> free_slots_;
   // Textures evicted by InvalidateRange, released once their submissions
   // complete.

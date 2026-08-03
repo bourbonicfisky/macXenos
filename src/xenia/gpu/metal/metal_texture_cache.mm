@@ -22,6 +22,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
+#include "xenia/gpu/metal/metal_slot_reclaim_flags.h"
 #include "xenia/gpu/metal/metal_texture_key.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/trace_writer.h"
@@ -1637,15 +1638,58 @@ uint32_t MetalTextureCache::AllocateSlot() {
 void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
   // Free ONLY entries whose last-referencing submission has completed —
   // later in-flight submissions still read the rest (freeing them was the
-  // async-S8 page-fault flicker). Descriptors are overwritten on the next
-  // AllocateSlot that hands a freed slot out.
+  // async-S8 page-fault flicker).
+  //
+  // WHAT HAPPENS TO THE DESCRIPTOR is selected by XE_METAL_SLOT_RECLAIM
+  // (metal_slot_reclaim_flags.h); kCurrent is the default and is exactly the
+  // historical behaviour. Under kCurrent the slot keeps describing the texture
+  // that is released just below until some later AllocateSlot hands it out —
+  // "descriptors are overwritten on the next AllocateSlot" — which is the
+  // assumption ClearCache's free_slot already rejects for the clear boundary.
+  // The submission gating below is IDENTICAL in all three modes: no mode ever
+  // touches a slot whose last-referencing submission is still in flight.
+  const MetalSlotReclaimMode mode = MetalSlotReclaimModeEffective(
+      ParseMetalSlotReclaimMode(std::getenv("XE_METAL_SLOT_RECLAIM")));
+  auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
+  id<MTLTexture> null_texture = (__bridge id<MTLTexture>)null_texture_;
+  auto release_slot = [&](uint32_t slot) {
+    if (mode == MetalSlotReclaimMode::kNullOnReclaim && entries &&
+        null_texture && slot && slot < view_heap_slots_) {
+      // BEFORE the slot becomes allocatable: a freed slot must describe a
+      // valid resource, not a released one. Writing an EMPTY descriptor would
+      // leave an invalid resource reference, which is worse than the stale
+      // one -- same reasoning, and same null texture, as ClearCache.
+      IRDescriptorTableSetTexture(&entries[slot], null_texture, 0.0f, 0);
+    }
+    if (mode == MetalSlotReclaimMode::kWidenWindow) {
+      // Diagnostic probe: keep the slot OUT of the free list so its (now
+      // dangling) descriptor survives longer before reallocation rewrites it.
+      widen_held_slots_.emplace_back(
+          completed_submission + kMetalSlotReclaimWidenHoldSubmissions, slot);
+      return;
+    }
+    free_slots_.push_back(slot);
+  };
+  if (mode == MetalSlotReclaimMode::kWidenWindow) {
+    // Release slots whose extra hold has itself expired.
+    auto held_it = std::remove_if(
+        widen_held_slots_.begin(), widen_held_slots_.end(),
+        [&](const std::pair<uint64_t, uint32_t>& entry) {
+          if (entry.first > completed_submission) {
+            return false;
+          }
+          free_slots_.push_back(entry.second);
+          return true;
+        });
+    widen_held_slots_.erase(held_it, widen_held_slots_.end());
+  }
   auto slot_it = std::remove_if(
       stale_slots_.begin(), stale_slots_.end(),
       [&](const std::pair<uint64_t, uint32_t>& entry) {
         if (entry.first > completed_submission) {
           return false;
         }
-        free_slots_.push_back(entry.second);
+        release_slot(entry.second);
         return true;
       });
   stale_slots_.erase(slot_it, stale_slots_.end());
