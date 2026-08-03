@@ -510,8 +510,16 @@ class MetalCommandProcessor : public CommandProcessor {
   std::mutex completion_mutex_;
   std::condition_variable completion_cv_;
   std::mutex fault_mutex_;
-  std::vector<void*> faulted_command_buffers_;  // id<MTLCommandBuffer>, retained.
-  std::vector<uint64_t> faulted_submission_ids_;  // Same lock as above.
+  // ONE record per faulted completion. Previously two parallel vectors whose
+  // index correspondence held only by convention (both pushed under
+  // fault_mutex_ in the same handler); a single record makes the pairing
+  // structurally unbreakable rather than an invariant a future edit can
+  // silently violate.
+  struct FaultedCompletion {
+    void* command_buffer = nullptr;  // id<MTLCommandBuffer>, retained.
+    uint64_t submission = 0;         // Serial of this failed completion.
+  };
+  std::vector<FaultedCompletion> faulted_completions_;
 
   // ZPD occlusion queries. The shared CommandProcessor owns the whole logical
   // report state machine (slots, segment splitting, normalization, guest

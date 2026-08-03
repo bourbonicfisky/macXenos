@@ -875,10 +875,33 @@ static id<MTLCommandBuffer> MakeAttributedCommandBuffer(
 
 // Logs the per-encoder execution status carried by a faulted command buffer
 // (requires MakeAttributedCommandBuffer): which encoders faulted vs completed.
+//
+// `submission` is the SERIAL of this faulted command-buffer completion. It is
+// the ATTRIBUTION unit -- which submission failed -- and NOT by itself an
+// independent fault incident: one GPU failure or queue revocation makes every
+// in-flight submission complete with an error, so distinct serials still
+// over-count root events.
+//
+// Fault reporting therefore needs FOUR separate counts, none of which
+// substitutes for another:
+//   1. FAULT EPISODES        -- the first error observed while the queue is
+//                               healthy, grouped through its revoke/recovery.
+//                               The closest thing to "how many times did the
+//                               GPU actually break".
+//   2. DISTINCT FAILED SERIALS -- submissions that completed with an error.
+//   3. FAULT-BEARING SWAPS   -- presentation boundaries carrying any error.
+//   4. FAULTED ENCODER LINES -- per-encoder attributions inside those buffers.
+//
+// Measured on VP both_r1: 45 completion-error headers across 19 swaps, 5
+// FAULTED encoder lines, and 2 queue revokes -- most plausibly ~2 episodes
+// with a large collateral radius, certainly not 45 independent faults and not
+// necessarily 5 either. `grep -c` on any single one of these is misleading.
 static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
-                                  const char* site, uint32_t swap_count) {
+                                  const char* site, uint32_t swap_count,
+                                  uint64_t submission) {
   NSError* err = command_buffer.error;
-  XELOGE("Metal GPU FAULT ({}, swap#{}): {} (code {})", site, swap_count,
+  XELOGE("Metal GPU FAULT ({}, swap#{}, submission={}): {} (code {})", site,
+         swap_count, submission,
          err.localizedDescription ? err.localizedDescription.UTF8String
                                   : "(no description)",
          err ? long(err.code) : -1L);
@@ -896,8 +919,12 @@ static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
     // Only the interesting ones — a frame can have hundreds of completed
     // encoders.
     if (info.errorState != MTLCommandEncoderErrorStateCompleted) {
-      XELOGE("  encoder '{}': {}",
-             info.label ? info.label.UTF8String : "(unlabeled)", state);
+      // Carry the serial on every encoder line too, so encoder attributions
+      // can be grouped by the submission they belong to without re-parsing
+      // the surrounding header.
+      XELOGE("  encoder '{}': {} (submission={})",
+             info.label ? info.label.UTF8String : "(unlabeled)", state,
+             submission);
     }
   }
 }
@@ -1729,12 +1756,15 @@ bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
 }
 
 void MetalCommandProcessor::DrainFaultedCommandBuffers() {
-  std::vector<void*> faulted;
-  std::vector<uint64_t> faulted_ids;
+  std::vector<FaultedCompletion> faulted;
   {
     std::lock_guard<std::mutex> lock(fault_mutex_);
-    faulted.swap(faulted_command_buffers_);
-    faulted_ids.swap(faulted_submission_ids_);
+    faulted.swap(faulted_completions_);
+  }
+  std::vector<uint64_t> faulted_ids;
+  faulted_ids.reserve(faulted.size());
+  for (const FaultedCompletion& completion : faulted) {
+    faulted_ids.push_back(completion.submission);
   }
   frame_gpu_fault_count_ += uint32_t(faulted_ids.size());
   for (uint64_t id : faulted_ids) {
@@ -1751,13 +1781,15 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
   if (shared_texture_cache_ && !faulted_ids.empty()) {
     shared_texture_cache_->OnSubmissionsFaulted(faulted_ids);
   }
-  for (void* cb_ptr : faulted) {
+  for (const FaultedCompletion& completion : faulted) {
     id<MTLCommandBuffer> command_buffer =
-        (__bridge_transfer id<MTLCommandBuffer>)cb_ptr;
+        (__bridge_transfer id<MTLCommandBuffer>)completion.command_buffer;
+    const uint64_t faulted_submission = completion.submission;
     static uint32_t s_cb_errors = 0;
     ++s_cb_errors;
     if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
-      LogCommandBufferFault(command_buffer, "frame commit", swap_count_);
+      LogCommandBufferFault(command_buffer, "frame commit", swap_count_,
+                            faulted_submission);
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
@@ -2555,8 +2587,8 @@ void MetalCommandProcessor::EndFrameEncoder() {
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
-      faulted_command_buffers_.push_back((__bridge_retained void*)cb);
-      faulted_submission_ids_.push_back(submission);
+      faulted_completions_.push_back(
+          FaultedCompletion{(__bridge_retained void*)cb, submission});
     }
     PublishCompletedSubmission(submission);
   }];
