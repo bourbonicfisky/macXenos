@@ -1769,14 +1769,27 @@ void EmitFaultEpisode(const metal::FaultEpisodeSummary& s, const char* why) {
 }
 }  // namespace
 
-void MetalCommandProcessor::CloseFaultEpisode(const char* why) {
-  EmitFaultEpisode(fault_episodes_.Close(), why);
+void MetalCommandProcessor::CloseFaultEpisode(uint64_t epoch,
+                                             const char* why) {
+  EmitFaultEpisode(fault_episodes_.CloseEpoch(epoch), why);
 }
 
-uint64_t MetalCommandProcessor::NoteFaultEpisodeMember(uint64_t submission) {
-  metal::FaultEpisodeSummary closed;
-  uint64_t episode = fault_episodes_.NoteMember(submission, &closed);
-  EmitFaultEpisode(closed, "epoch-change");
+void MetalCommandProcessor::CloseAllFaultEpisodes(const char* why) {
+  for (;;) {
+    metal::FaultEpisodeSummary summary = fault_episodes_.CloseAny();
+    if (!summary.valid) {
+      break;
+    }
+    EmitFaultEpisode(summary, why);
+  }
+}
+
+uint64_t MetalCommandProcessor::NoteFaultEpisodeMember(uint64_t submission,
+                                                       uint64_t submit_epoch) {
+  metal::FaultEpisodeSummary retired;
+  uint64_t episode =
+      fault_episodes_.NoteMember(submission, submit_epoch, &retired);
+  EmitFaultEpisode(retired, "capacity-retire");
   return episode;
 }
 
@@ -1813,7 +1826,8 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     // Episode assignment BEFORE logging, so every fault line carries the
     // episode it belongs to and root/collateral can be told apart without
     // reconstructing it from revoke lines afterwards.
-    const uint64_t episode = NoteFaultEpisodeMember(faulted_submission);
+    const uint64_t episode =
+        NoteFaultEpisodeMember(faulted_submission, completion.submit_epoch);
     static uint32_t s_cb_errors = 0;
     ++s_cb_errors;
     if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
@@ -1840,8 +1854,11 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
           }
           // Epoch bump defines episode membership: everything that failed
           // before this recreate belongs to the episode now closing.
+          // Close the episode for the epoch being retired, then advance.
+          // Late callbacks carrying the OLD epoch still resolve correctly
+          // because membership keys on the submission's own epoch.
+          CloseFaultEpisode(fault_episodes_.epoch(), "queue-recreated");
           fault_episodes_.BumpEpoch();
-          CloseFaultEpisode("queue-recreated");
           XELOGE(
               "Metal GPU FAULT: queue revoked -> RECREATED (swap#{}, "
               "epoch={}); display should resume",
@@ -2617,11 +2634,14 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  // Epoch AT SUBMISSION: a late callback must still join its original episode.
+  const uint64_t submit_epoch = fault_episodes_.epoch();
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
       faulted_completions_.push_back(
-          FaultedCompletion{(__bridge_retained void*)cb, submission});
+          FaultedCompletion{(__bridge_retained void*)cb, submission,
+                            submit_epoch});
     }
     PublishCompletedSubmission(submission);
   }];

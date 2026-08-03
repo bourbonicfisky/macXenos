@@ -519,6 +519,10 @@ class MetalCommandProcessor : public CommandProcessor {
   struct FaultedCompletion {
     void* command_buffer = nullptr;  // id<MTLCommandBuffer>, retained.
     uint64_t submission = 0;         // Serial of this failed completion.
+    // Queue epoch captured AT SUBMISSION, not at drain. A callback can arrive
+    // after the queue was revoked and recreated; keying its episode on the
+    // drain-time epoch would split one episode across two.
+    uint64_t submit_epoch = 0;
   };
   std::vector<FaultedCompletion> faulted_completions_;
 
@@ -536,8 +540,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // pinned by the L0 suite rather than only exercised when a stochastic
   // hardware fault happens to occur.
   FaultEpisodeTracker fault_episodes_;
-  uint64_t NoteFaultEpisodeMember(uint64_t submission);
-  void CloseFaultEpisode(const char* why);
+  uint64_t NoteFaultEpisodeMember(uint64_t submission,
+                                  uint64_t submit_epoch);
+  void CloseFaultEpisode(uint64_t epoch, const char* why);
+  void CloseAllFaultEpisodes(const char* why);
 
   // ZPD occlusion queries. The shared CommandProcessor owns the whole logical
   // report state machine (slots, segment splitting, normalization, guest

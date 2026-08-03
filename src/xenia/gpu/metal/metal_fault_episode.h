@@ -25,8 +25,12 @@
 // another: EPISODES, distinct failed submission serials, fault-bearing swaps,
 // and FAULTED encoder lines.
 //
-// MEMBERSHIP RULE: an episode is keyed by the QUEUE EPOCH (bumped on every
-// revoke/recreate) -- all failures observed within one epoch are one episode.
+// MEMBERSHIP RULE: an episode is keyed by the QUEUE EPOCH THE SUBMISSION WAS
+// SUBMITTED UNDER -- never the epoch current when its callback is drained.
+// Callbacks can arrive late, after the queue has already been revoked and
+// recreated; keying on drain-time epoch would split one episode across two.
+// Each submission carries its own epoch and episodes are tracked per-epoch
+// concurrently.
 // The ROOT is the LOWEST failed submission serial in the episode, NOT the
 // first-reported one: completion callbacks may arrive out of submission order,
 // so a lower serial reporting later is the truer root and revises it downward.
@@ -47,77 +51,105 @@ struct FaultEpisodeSummary {
 
 class FaultEpisodeTracker {
  public:
-  // Assigns `submission` to an episode, opening one if the epoch changed.
-  // Returns the episode id. If this closes a previous episode, `closed`
-  // receives its summary so the caller can emit it.
-  uint64_t NoteMember(uint64_t submission, FaultEpisodeSummary* closed) {
-    if (closed) {
-      *closed = FaultEpisodeSummary();
+  // Concurrently-open epochs. Small: late callbacks trail the current epoch by
+  // at most a frame or two in practice. Overflow retires the OLDEST episode
+  // (emitting its summary) rather than dropping attribution silently.
+  static constexpr uint32_t kMaxOpenEpisodes = 8;
+
+  // Assigns a failed `submission`, SUBMITTED under `submit_epoch`, to that
+  // epoch's episode. Returns the episode id. If admitting it retired an older
+  // episode, `retired` receives that summary so the caller can emit it.
+  uint64_t NoteMember(uint64_t submission, uint64_t submit_epoch,
+                      FaultEpisodeSummary* retired) {
+    if (retired) {
+      *retired = FaultEpisodeSummary();
     }
-    if (open_ && open_epoch_ != epoch_) {
-      if (closed) {
-        *closed = Current();
+    Episode* episode = Find(submit_epoch);
+    if (!episode) {
+      if (count_ == kMaxOpenEpisodes) {
+        uint32_t oldest = 0;
+        for (uint32_t i = 1; i < count_; ++i) {
+          if (open_[i].id < open_[oldest].id) {
+            oldest = i;
+          }
+        }
+        if (retired) {
+          *retired = SummaryOf(open_[oldest]);
+        }
+        open_[oldest] = open_[--count_];
       }
-      Reset();
+      episode = &open_[count_++];
+      episode->id = ++counter_;
+      episode->epoch = submit_epoch;
+      episode->root_serial = submission;
+      episode->members = 0;
     }
-    if (!open_) {
-      open_ = true;
-      open_id_ = ++counter_;
-      open_epoch_ = epoch_;
-      root_serial_ = submission;
-      members_ = 0;
+    // Out-of-order completion: a lower serial is the truer root. Serial 0 is
+    // the unknown/unowned sentinel elsewhere and must never win the min().
+    if (submission &&
+        (!episode->root_serial || submission < episode->root_serial)) {
+      episode->root_serial = submission;
     }
-    // Out-of-order completion: revise the root downward.
-    if (submission && submission < root_serial_) {
-      root_serial_ = submission;
-    }
-    ++members_;
-    return open_id_;
+    ++episode->members;
+    return episode->id;
   }
 
-  // Closes the open episode (queue recreated, session end). Returns an invalid
-  // summary when nothing is open, so closing twice is harmless.
-  FaultEpisodeSummary Close() {
-    if (!open_) {
+  // Closes one epoch's episode, if open.
+  FaultEpisodeSummary CloseEpoch(uint64_t epoch) {
+    for (uint32_t i = 0; i < count_; ++i) {
+      if (open_[i].epoch == epoch) {
+        FaultEpisodeSummary summary = SummaryOf(open_[i]);
+        open_[i] = open_[--count_];
+        return summary;
+      }
+    }
+    return FaultEpisodeSummary();
+  }
+
+  // Drains one open episode (teardown / end-of-session reporting).
+  FaultEpisodeSummary CloseAny() {
+    if (!count_) {
       return FaultEpisodeSummary();
     }
-    FaultEpisodeSummary summary = Current();
-    Reset();
+    FaultEpisodeSummary summary = SummaryOf(open_[count_ - 1]);
+    --count_;
     return summary;
   }
 
-  // Queue revoke/recreate. Does NOT itself close the episode -- the caller
-  // closes explicitly so the summary is emitted with a reason.
   void BumpEpoch() { ++epoch_; }
-
   uint64_t epoch() const { return epoch_; }
   uint64_t episode_count() const { return counter_; }
-  bool open() const { return open_; }
+  uint32_t open_episodes() const { return count_; }
 
  private:
-  FaultEpisodeSummary Current() const {
+  struct Episode {
+    uint64_t id = 0;
+    uint64_t epoch = 0;
+    uint64_t root_serial = 0;
+    uint64_t members = 0;
+  };
+  Episode* Find(uint64_t epoch) {
+    for (uint32_t i = 0; i < count_; ++i) {
+      if (open_[i].epoch == epoch) {
+        return &open_[i];
+      }
+    }
+    return nullptr;
+  }
+  static FaultEpisodeSummary SummaryOf(const Episode& e) {
     FaultEpisodeSummary s;
-    s.episode = open_id_;
-    s.epoch = open_epoch_;
-    s.root_serial = root_serial_;
-    s.failed_submissions = members_;
+    s.episode = e.id;
+    s.epoch = e.epoch;
+    s.root_serial = e.root_serial;
+    s.failed_submissions = e.members;
     s.valid = true;
     return s;
   }
-  void Reset() {
-    open_ = false;
-    open_id_ = 0;
-    root_serial_ = 0;
-    members_ = 0;
-  }
 
+  Episode open_[kMaxOpenEpisodes];
+  uint32_t count_ = 0;
   uint64_t epoch_ = 0;
   uint64_t counter_ = 0;
-  bool open_ = false;
-  uint64_t open_id_ = 0;
-  uint64_t open_epoch_ = 0;
-  uint64_t root_serial_ = 0;
-  uint64_t members_ = 0;
 };
 
 }  // namespace metal
