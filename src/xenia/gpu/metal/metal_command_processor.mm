@@ -2652,9 +2652,33 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
   // Epoch AT SUBMISSION: a late callback must still join its original episode.
+  //
+  // CONCURRENCY INVARIANT (GPU THREAD ONLY): reading the epoch and reserving
+  // its outstanding slot must not interleave with BumpEpoch()/the finalize
+  // sweep, or a recreate could observe zero outstanding and finalize an epoch
+  // between our read and our increment -- publishing a root that this
+  // submission could still revise. Both sides are serialized by running on the
+  // GPU thread: this path, and PumpCompletedActions ->
+  // DrainFaultedCommandBuffers (documented GPU-thread-only) which owns every
+  // epoch mutation and every finalize. The ONLY cross-thread participant is the
+  // completion handler's DECREMENT, which is why the counter is atomic. If
+  // submission ever moves off the GPU thread, this pair needs real
+  // synchronization shared with the epoch mutations.
   const uint64_t submit_epoch = fault_episodes_.epoch();
   epoch_outstanding_[submit_epoch % kFaultEpochSlots].fetch_add(
       1, std::memory_order_release);
+  // The reservation is released by the completion handler below. This guard
+  // releases it if we return before that handler is attached -- today there is
+  // no such path, but a future early-out would otherwise leak the reservation
+  // and the epoch could NEVER finalize.
+  struct ReservationGuard {
+    std::atomic<uint32_t>* counter;
+    ~ReservationGuard() {
+      if (counter) {
+        counter->fetch_sub(1, std::memory_order_release);
+      }
+    }
+  } reservation{&epoch_outstanding_[submit_epoch % kFaultEpochSlots]};
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -2669,6 +2693,8 @@ void MetalCommandProcessor::EndFrameEncoder() {
         1, std::memory_order_release);
     PublishCompletedSubmission(submission);
   }];
+  // Ownership of the reservation has transferred to the handler.
+  reservation.counter = nullptr;
   // Stamp the upload ring: everything allocated since the previous mark is
   // owned by this submission until it completes.
   if (upload_arena_) {
