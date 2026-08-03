@@ -552,6 +552,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // attribution that may still receive a late callback.
   bool fault_capture_disabled_ = false;
   uint64_t NoteFaultEpisodeMember(uint64_t submission, uint64_t submit_epoch);
+  void AssertFaultEpochOwnership() const;
   void MarkFaultEpochClosed(uint64_t epoch);
   void SweepFinalizedFaultEpisodes();
 

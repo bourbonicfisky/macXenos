@@ -54,6 +54,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_integer_scale_publish.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
@@ -1769,7 +1770,19 @@ void EmitFaultEpisode(const metal::FaultEpisodeSummary& s, const char* why) {
 }
 }  // namespace
 
+void MetalCommandProcessor::AssertFaultEpochOwnership() const {
+  // ENFORCED, not merely documented. Episode attribution depends on epoch
+  // capture/reservation never interleaving with epoch mutation/finalization,
+  // and that is guaranteed only by both running on the GPU thread. A comment
+  // cannot survive a future submission-thread refactor; this will fail it
+  // loudly in Checked/Debug instead. worker_thread_ is null under trace replay,
+  // where there is no separate GPU thread and the invariant holds trivially.
+  assert_true(!worker_thread_ ||
+              kernel::XThread::IsInThread(worker_thread_.get()));
+}
+
 void MetalCommandProcessor::MarkFaultEpochClosed(uint64_t epoch) {
+  AssertFaultEpochOwnership();
   // Closing is NOT finalizing: a late callback bearing this epoch can still
   // revise the root downward, so the summary waits for outstanding == 0.
   fault_episodes_.MarkEpochClosed(epoch);
@@ -1809,6 +1822,8 @@ uint64_t MetalCommandProcessor::NoteFaultEpisodeMember(uint64_t submission,
 }
 
 void MetalCommandProcessor::DrainFaultedCommandBuffers() {
+  // Owns every epoch mutation and every finalize sweep.
+  AssertFaultEpochOwnership();
   std::vector<FaultedCompletion> faulted;
   {
     std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -2664,6 +2679,7 @@ void MetalCommandProcessor::EndFrameEncoder() {
   // completion handler's DECREMENT, which is why the counter is atomic. If
   // submission ever moves off the GPU thread, this pair needs real
   // synchronization shared with the epoch mutations.
+  AssertFaultEpochOwnership();
   const uint64_t submit_epoch = fault_episodes_.epoch();
   epoch_outstanding_[submit_epoch % kFaultEpochSlots].fetch_add(
       1, std::memory_order_release);
