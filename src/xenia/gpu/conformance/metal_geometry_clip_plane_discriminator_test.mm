@@ -174,8 +174,10 @@ struct Arm {
 };
 
 // Builds one arm. `clip_planes` is the ONLY input that differs between arms.
-bool BuildArm(uint32_t clip_planes, Arm* out) {
+bool BuildArm(uint32_t clip_planes, Arm* out,
+              MetalPipelineCache* cache_override = nullptr) {
   auto& h = H();
+  MetalPipelineCache* cache = cache_override ? cache_override : h.cache.get();
   auto* translator = h.cache->shader_translator();
 
   DxbcShaderTranslator::Modification vm(
@@ -199,8 +201,8 @@ bool BuildArm(uint32_t clip_planes, Arm* out) {
       h.vertex_shader->GetOrCreateTranslation(vm.value));
   out->pixel = static_cast<MetalShader::MetalTranslation*>(
       h.pixel_shader->GetOrCreateTranslation(pm.value));
-  if (!h.cache->TranslateShader(*out->vertex)) return false;
-  if (!h.cache->TranslateShader(*out->pixel)) return false;
+  if (!cache->TranslateShader(*out->vertex)) return false;
+  if (!cache->TranslateShader(*out->pixel)) return false;
 
   if (!GetGeometryShaderKey(PipelineGeometryShader::kRectangleList, vm, pm,
                             out->gs_key)) {
@@ -211,7 +213,7 @@ bool BuildArm(uint32_t clip_planes, Arm* out) {
   uint32_t blends[xenos::kMaxColorRenderTargets] = {0x00010001, 0x00010001,
                                                     0x00010001, 0x00010001};
   MetalPipelineRasterKey raster_key{kSampleCount};
-  out->pipeline = h.cache->GetOrCreateGeometryPipelineState(
+  out->pipeline = cache->GetOrCreateGeometryPipelineState(
       out->vertex, out->pixel, PipelineGeometryShader::kRectangleList, vm, pm,
       colors, kDepthFormat, raster_key, blends, kWriteMask,
       &out->gs_vertex_size, &out->gs_max_input_primitives);
@@ -324,6 +326,62 @@ TEST_CASE("Geometry clip-plane discriminator: count 0 materializes, count 1 does
                                               << " one=" << one_clip);
     CHECK(zero_clip == 0);
     CHECK(one_clip > 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.1 — REGRESSION CHECKPOINT. Pipeline creation proves AVAILABILITY ONLY.
+// It is not semantic acceptance: coverage against the independent Xenos-plane
+// oracle (tasks 4.2-4.5) is the load-bearing evidence. A pipeline that creates
+// and then clips wrongly is WORSE than one that fails loudly, because today's
+// failure is at least visible in the skip accounting as a dropped-draw class.
+//
+// A FRESH CACHE PER GATE STATE IS REQUIRED, not tidiness: a clip-1 failure is
+// NEGATIVE-CACHED, so reusing one cache across the gate flip would return the
+// cached nullptr and the relabel-on arm would fail for the wrong reason.
+TEST_CASE("Geometry clip-plane 4.1: relabel OFF still fails, ON creates 0/1/2",
+          "[l1][metal][geometry][clip][clip41]") {
+  auto& h = H();
+  if (!h.ok) {
+    SUCCEED("no Metal device");
+    return;
+  }
+
+  struct Outcome { void* pipe; };
+  auto build = [&](uint32_t planes, bool relabel_on) -> void* {
+    if (relabel_on) {
+      setenv("XE_METAL_CLIP_RELABEL", "1", 1);
+    } else {
+      unsetenv("XE_METAL_CLIP_RELABEL");
+    }
+    auto cache = std::make_unique<MetalPipelineCache>((__bridge void*)h.device);
+    void* pipe = nullptr;
+    if (cache->Initialize()) {
+      Arm arm;
+      if (BuildArm(planes, &arm, cache.get())) {
+        pipe = arm.pipeline;
+      }
+    }
+    unsetenv("XE_METAL_CLIP_RELABEL");
+    return pipe;
+  };
+
+  SECTION("relabel OFF — the default path is UNCHANGED (the preserved failure)") {
+    // The pre-fix expectation, deliberately NOT inverted: default behaviour must
+    // not drift while the remedy is gated off.
+    CHECK(build(0, false) != nullptr);
+    CHECK(build(1, false) == nullptr);
+    CHECK(build(2, false) == nullptr);
+  }
+
+  SECTION("relabel ON — clip counts 0, 1 and 2 all create") {
+    void* p0 = build(0, true);
+    void* p1 = build(1, true);
+    void* p2 = build(2, true);
+    INFO("pipelines: 0=" << p0 << " 1=" << p1 << " 2=" << p2);
+    CHECK(p0 != nullptr);
+    CHECK(p1 != nullptr);
+    CHECK(p2 != nullptr);
   }
 }
 

@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/gpu/metal/metal_clip_relabel_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 
 #import <Metal/Metal.h>
@@ -60,6 +61,27 @@ DECLARE_bool(store_shaders);
 namespace xe {
 namespace gpu {
 namespace metal {
+
+namespace {
+// Per-call (not a cached static) so the 4.1 regression checkpoint can assert
+// BOTH directions inside one test process; the gate is only read at geometry
+// pipeline creation, which is memoized, so the cost is irrelevant.
+bool ClipRelabelGateOn() {
+  const char* value = std::getenv("XE_METAL_CLIP_RELABEL");
+  MetalClipRelabelGate gate = ParseMetalClipRelabelGate(value);
+  if (gate == MetalClipRelabelGate::kMalformed) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      XELOGW(
+          "XE_METAL_CLIP_RELABEL='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+  }
+  return MetalClipRelabelGateEngaged(gate);
+}
+}  // namespace
 
 MetalPipelineCache::MetalPipelineCache(void* device) : device_(device) {}
 
@@ -791,9 +813,7 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   // object->mesh hop as a private user parameter. The payload layout is
   // untouched — see metal_dxbc_clip_relabel.h and its transport oracle.
   std::vector<uint8_t> dxbc = dxbc_source;
-  static const bool s_clip_relabel =
-      std::getenv("XE_METAL_CLIP_RELABEL") != nullptr;
-  if (s_clip_relabel) {
+  if (ClipRelabelGateOn()) {
     uint32_t n = RelabelDxbcClipDistance(dxbc, DxbcSignatureKind::kOutput);
     if (n) {
       XELOGI("MetalPipelineCache: clip relabel — object-stage output, {} element(s)", n);
@@ -895,9 +915,7 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   // EXPERIMENT (XE_METAL_CLIP_RELABEL=1): matching relabel on the MESH STAGE'S
   // INPUT. Its rasterizer-facing OUTPUT deliberately keeps SV_ClipDistance.
   {
-    static const bool s_clip_relabel_gs =
-        std::getenv("XE_METAL_CLIP_RELABEL") != nullptr;
-    if (s_clip_relabel_gs) {
+    if (ClipRelabelGateOn()) {
       uint32_t n =
           RelabelDxbcClipDistance(dxbc_bytes, DxbcSignatureKind::kInput);
       if (n) {
