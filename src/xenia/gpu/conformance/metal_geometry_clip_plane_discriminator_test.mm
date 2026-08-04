@@ -41,10 +41,13 @@
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
+#include "xenia/base/cvar.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/ucode.h"
 #include "xenia/gpu/xenos.h"
+
+DECLARE_bool(metal_pipeline_metallib_cache);
 
 namespace xe {
 namespace gpu {
@@ -347,7 +350,22 @@ TEST_CASE("Geometry clip-plane 4.1: relabel OFF still fails, ON creates 0/1/2",
     return;
   }
 
-  struct Outcome { void* pipe; };
+  // DURABLE-STORAGE ISOLATION, asserted rather than assumed. The geometry
+  // record keys OMIT the relabel state (object stage: MetallibCacheKey(vertex)
+  // + topology; mesh stage: GeometryShaderKey) and the durable LOAD runs BEFORE
+  // the relabel, so an OFF artifact could satisfy an ON arm or vice versa.
+  // Today the conformance harness never calls InitializeDurableStorage, so
+  // storage_.is_open() is false and every durable path is skipped -- but that
+  // is incidental, and wiring storage into a future harness would silently
+  // break arm isolation. Forcing the cvar off makes the isolation explicit and
+  // independent of that.
+  const bool saved_metallib_cache = cvars::metal_pipeline_metallib_cache;
+  cvars::metal_pipeline_metallib_cache = false;
+  struct RestoreCvar {
+    bool v;
+    ~RestoreCvar() { cvars::metal_pipeline_metallib_cache = v; }
+  } restore_cvar{saved_metallib_cache};
+
   auto build = [&](uint32_t planes, bool relabel_on) -> void* {
     if (relabel_on) {
       setenv("XE_METAL_CLIP_RELABEL", "1", 1);
