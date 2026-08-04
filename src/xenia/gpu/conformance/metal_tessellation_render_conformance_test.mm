@@ -280,6 +280,10 @@ struct RenderSpec {
   // Harness CONTROL: render through the live-proven geometry-emulation mesh
   // path instead of tessellation (same binding environment, same readback).
   bool geometry_control = false;
+  // clip-bridge tasks 4.2-4.5: user clip planes on the geometry-emulation leg.
+  // count 0 leaves the pre-existing behaviour untouched.
+  uint32_t user_clip_plane_count = 0;
+  float clip_plane0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   // Harness CONTROL 2: plain vertex+fragment pipeline (no mesh stages at all)
   // over the same AB/constants — splits "mesh dispatch" from "content".
   bool plain_control = false;
@@ -674,6 +678,8 @@ struct RenderHarness {
       DxbcShaderTranslator::Modification pm(
           cache->shader_translator()->GetDefaultPixelShaderModification(0));
       vm.vertex.interpolator_mask = 0;
+      vm.vertex.user_clip_plane_count = spec.user_clip_plane_count;
+      vm.vertex.user_clip_plane_cull = 0;
       pm.pixel.interpolator_mask = 0;
       // Must match MakeGuestPixelShader's translation modification.
       pm.pixel.rt0_blend_rgb_factor_for_premult = xenos::BlendFactor::kOne;
@@ -799,6 +805,10 @@ struct RenderHarness {
     system_constants.vertex_index_offset = 0;
     system_constants.vertex_index_min = 0;
     system_constants.vertex_index_max = 0xFFFFFFu;
+    // Real production layout: user_clip_planes[6][4], pinned at offset 32.
+    for (uint32_t i = 0; i < 4; ++i) {
+      system_constants.user_clip_planes[0][i] = spec.clip_plane0[i];
+    }
     system_constants.ndc_scale[0] = 1.0f;
     system_constants.ndc_scale[1] = 1.0f;
     system_constants.ndc_scale[2] = 1.0f;
@@ -1307,6 +1317,139 @@ TEST_CASE("tessellation render fixtures disassemble as intended",
 // constants, guest PS, and readback, but through the live-proven
 // geometry-emulation mesh path. If this renders and the tessellation cells do
 // not, the failure is tessellation-leg-specific by construction.
+
+// ---------------------------------------------------------------------------
+// fix-metal-geometry-clip-distance-bridge tasks 4.2-4.5: USER CLIP PLANE
+// SEMANTICS on the geometry-emulation leg. This is the load-bearing evidence;
+// 4.1's pipeline creation proved AVAILABILITY only.
+//
+// ORDERING IS A DEPENDENCY, NOT A PREFERENCE:
+//   INSIDE   proves the production draw and the constants binding work at all.
+//   OUTSIDE  proves clipping REMOVES that known-working geometry. An empty mask
+//            is meaningless on its own -- a broken draw or binding produces the
+//            same zero -- so outside is only read AFTER inside passes, on the
+//            SAME pipeline, geometry and attachments, varying ONLY the plane.
+//   CROSSING proves partial coverage against the independent oracle.
+//
+// WHAT THE ORACLE PREDICTS, stated precisely. The guest VS produces its own
+// shape, and geometry is NOT under test -- clipping is. So the INSIDE render is
+// taken as ground-truth geometry, and the oracle predicts the CLIPPED result
+// from it using the Xenos half-space rule projected to screen space. For the
+// plane x >= 0 on a 16-wide target that predicate is exactly "column >= 8",
+// which falls between columns 7 and 8 and so avoids pixel-centre ambiguity.
+TEST_CASE("clip-bridge 4.2-4.5: user clip plane coverage on geometry emulation",
+          "[tessellation][render][device][clip42]") {
+  auto& h = H();
+  {
+    INFO(h.error);
+    REQUIRE(h.ok);
+  }
+  // The remedy must be ON: with it off these pipelines do not create at all
+  // (that is 4.1's OFF arm, asserted separately).
+  setenv("XE_METAL_CLIP_RELABEL", "1", 1);
+  struct Restore { ~Restore() { unsetenv("XE_METAL_CLIP_RELABEL"); } } restore;
+
+  auto run = [&](const char* label, uint32_t count, float a, float b, float c,
+                 float d) {
+    RenderSpec spec;
+    spec.label = label;
+    spec.geometry_control = true;
+    spec.user_clip_plane_count = count;
+    spec.clip_plane0[0] = a;
+    spec.clip_plane0[1] = b;
+    spec.clip_plane0[2] = c;
+    spec.clip_plane0[3] = d;
+    spec.draws.push_back(NonIndexedDraw(3));
+    return h.Render(spec);
+  };
+
+  // --- 4.2 INSIDE: plane x + 2 >= 0 contains everything. Proves the draw and
+  // the constants binding work; every later reading depends on this. ---
+  RenderResult inside = run("clip-inside", 1, 1.0f, 0.0f, 0.0f, 2.0f);
+  INFO("inside: " << inside.error);
+  std::printf("CLIP42|inside|%s|covered=%u\n",
+              inside.ok && inside.covered > 0 ? "PASS" : "FAIL", inside.covered);
+  REQUIRE(inside.ok);
+  REQUIRE(inside.covered > 0);  // GATES everything below
+
+  // --- 4.3 OUTSIDE: plane x - 2 >= 0 excludes everything. Same pipeline,
+  // geometry and attachments; ONLY the plane constants differ. ---
+  RenderResult outside = run("clip-outside", 1, 1.0f, 0.0f, 0.0f, -2.0f);
+  INFO("outside: " << outside.error);
+  std::printf("CLIP42|outside|%s|covered=%u (inside was %u)\n",
+              outside.ok && outside.covered == 0 ? "PASS" : "FAIL",
+              outside.covered, inside.covered);
+  CHECK(outside.ok);
+  CHECK(outside.covered == 0);
+
+  // --- 4.4/4.5 CROSSING: plane x >= 0 keeps the right half. Compared against
+  // the oracle's prediction derived from the INSIDE mask. ---
+  // The geometry occupies screen x=[64,126], i.e. it begins exactly at NDC
+  // x=0 -- so a plane at x >= 0 would keep ALL of it and prove nothing (the
+  // guard below catches precisely that). Cut through its middle instead:
+  // x - 0.5 >= 0 keeps NDC x >= 0.5, which is screen column 96 on a 128-wide
+  // target. Pixel centres lie at 95.5 and 96.5, so the boundary falls strictly
+  // BETWEEN centres and no pixel is ambiguous.
+  constexpr float kCutNdcX = 0.5f;
+  RenderResult crossing = run("clip-crossing", 1, 1.0f, 0.0f, 0.0f, -kCutNdcX);
+  INFO("crossing: " << crossing.error);
+  REQUIRE(crossing.ok);
+
+  // Build both masks from the readback, then predict the crossing mask from the
+  // inside mask by the oracle's screen-space half-space rule.
+  auto mask_of = [](const RenderResult& r) {
+    std::vector<uint8_t> m(size_t(kRT) * kRT, 0);
+    for (size_t i = 0; i < m.size(); ++i) {
+      const uint8_t* px = r.rgba.data() + i * 4;
+      m[i] = (px[0] || px[1] || px[2] || px[3]) ? 1 : 0;
+    }
+    return m;
+  };
+  const std::vector<uint8_t> inside_mask = mask_of(inside);
+  {
+    // Locate the geometry before choosing a cutting plane: a plane that misses
+    // it entirely produces predicted == inside and proves nothing.
+    uint32_t min_x = kRT, max_x = 0, min_y = kRT, max_y = 0;
+    for (uint32_t y = 0; y < kRT; ++y) {
+      for (uint32_t x = 0; x < kRT; ++x) {
+        if (inside_mask[size_t(y) * kRT + x]) {
+          min_x = std::min(min_x, x); max_x = std::max(max_x, x);
+          min_y = std::min(min_y, y); max_y = std::max(max_y, y);
+        }
+      }
+    }
+    std::printf("CLIP42|geometry_extent|x=[%u,%u] y=[%u,%u] of %u\n",
+                min_x, max_x, min_y, max_y, kRT);
+  }
+  const std::vector<uint8_t> crossing_mask = mask_of(crossing);
+  std::vector<uint8_t> predicted(inside_mask.size(), 0);
+  uint32_t predicted_covered = 0;
+  for (uint32_t y = 0; y < kRT; ++y) {
+    for (uint32_t x = 0; x < kRT; ++x) {
+      // Oracle prediction, derived from the plane rather than hardcoded:
+      // NDC x >= kCutNdcX maps to screen column >= (kCutNdcX*0.5+0.5)*kRT.
+      const uint32_t cut_column =
+          uint32_t((kCutNdcX * 0.5f + 0.5f) * float(kRT));
+      const bool keep = x >= cut_column;
+      const size_t i = size_t(y) * kRT + x;
+      predicted[i] = (inside_mask[i] && keep) ? 1 : 0;
+      predicted_covered += predicted[i];
+    }
+  }
+  uint32_t mismatches = 0;
+  for (size_t i = 0; i < predicted.size(); ++i) {
+    if (predicted[i] != crossing_mask[i]) ++mismatches;
+  }
+  std::printf(
+      "CLIP42|crossing|%s|covered=%u predicted=%u mismatches=%u (inside %u)\n",
+      mismatches == 0 ? "PASS" : "FAIL", crossing.covered, predicted_covered,
+      mismatches, inside.covered);
+  // The crossing plane must actually cut: a prediction equal to the inside mask
+  // would mean the plane did nothing and the comparison proves nothing.
+  CHECK(predicted_covered > 0);
+  CHECK(predicted_covered < inside.covered);
+  CHECK(mismatches == 0);
+}
 
 TEST_CASE("harness control: geometry-emulation path renders in this environment",
           "[tessellation][render][control][device]") {
