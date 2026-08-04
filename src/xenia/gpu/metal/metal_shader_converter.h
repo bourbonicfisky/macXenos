@@ -97,10 +97,16 @@ class MetalShaderConverter {
   // (prebuilt tess VS as object stage, prebuilt HS, guest VS compiled as the
   // domain stage). stage must be kVertex, kGeometry, kHull or kDomain; only
   // kVertex synthesizes (and requires) a stage-in function.
+  // `enable_emulation` is TRUE for every production caller and must stay so.
+  // The pre-gate-native-metal-drawpatches probe passes false to answer whether
+  // MSC emits a NATIVE post-tessellation vertex function when geometry/
+  // tessellation emulation is disabled -- a case production never exercises.
+  // Removed with the probe at pre-gate closeout.
   bool ConvertForGeometryEmulation(Stage stage,
                                    const std::vector<uint8_t>& dxil,
                                    InputTopology input_topology,
-                                   GeometryEmulationResult& result);
+                                   GeometryEmulationResult& result,
+                                   bool enable_emulation = true);
 
  private:
   // Constructs the root signature mirroring DxbcShaderTranslator::CbufferRegister
