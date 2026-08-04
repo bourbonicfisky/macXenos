@@ -305,8 +305,7 @@ bool MetalShaderConverter::Convert(Stage stage,
 
 bool MetalShaderConverter::ConvertForGeometryEmulation(
     Stage stage, const std::vector<uint8_t>& dxil, InputTopology input_topology,
-    GeometryEmulationResult& result,
-    bool enable_emulation) {
+    GeometryEmulationResult& result) {
   result = GeometryEmulationResult{};
   if (stage != Stage::kVertex && stage != Stage::kGeometry &&
       stage != Stage::kHull && stage != Stage::kDomain) {
@@ -349,7 +348,7 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
   // The primitive-expansion path runs the guest VS as an object stage feeding a
   // generated GS as a mesh stage; both must be compiled with emulation enabled and
   // the guest input topology set so MSC sizes the mesh threadgroups correctly.
-  IRCompilerEnableGeometryAndTessellationEmulation(compiler, enable_emulation);
+  IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
   // The guest VS becomes the Metal OBJECT stage, which the geometry-emulation
   // runtime links against a SEPARATE stage-in function (synthesized below). Put
   // the compiler in separate-stage-in mode before the compile so the object
