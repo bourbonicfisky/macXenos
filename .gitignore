@@ -140,3 +140,7 @@ recent.toml
 .env
 .env.*
 !.env.example
+
+# Live-test baseline working tree: seeded storage root (game saves), isolated
+# cache roots, and per-run logs. Evidence, not source.
+/scratch/
