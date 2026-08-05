@@ -14,6 +14,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <sys/time.h>
+
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -260,14 +263,21 @@ bool MetalDxilStore::Open(const std::filesystem::path& cache_root,
     }
   }
 
+  // Reclaim before measuring, so bytes_on_open_ reflects the post-eviction
+  // size and the session's admission budget is the real remaining headroom.
+  evicted_entries_ = 0;
+  evicted_bytes_ = 0;
+  EvictToCapLocked();
   bytes_on_open_ = DirectorySizeBytes(root_);
   bytes_admitted_ = 0;
   admission_stopped_ = false;
   hits_ = misses_ = corrupt_rejects_ = stores_ = 0;
   is_open_ = true;
-  XELOGI("MetalDxilStore: opened {} ({} KiB present, cap {} MiB)",
-         root_.string(), bytes_on_open_ / 1024,
-         cvars::metal_dxil_cache_cap_mib);
+  XELOGI(
+      "MetalDxilStore: opened {} ({} KiB present, cap {} MiB, evicted {} "
+      "entries / {} KiB)",
+      root_.string(), bytes_on_open_ / 1024, cvars::metal_dxil_cache_cap_mib,
+      evicted_entries_, evicted_bytes_ / 1024);
   return true;
 }
 
@@ -302,6 +312,72 @@ void MetalDxilStore::ReleaseLock() {
     flock(lock_fd_, LOCK_UN);
     close(lock_fd_);
     lock_fd_ = -1;
+  }
+}
+
+void MetalDxilStore::EvictToCapLocked() {
+  const uint64_t cap = cvars::metal_dxil_cache_cap_mib * 1024ull * 1024ull;
+  if (!cap) {
+    return;
+  }
+  struct Entry {
+    std::filesystem::path path;
+    uint64_t bytes;
+    int64_t mtime;
+  };
+  std::vector<Entry> entries;
+  uint64_t total = 0;
+  std::error_code ec;
+  for (const auto& item : std::filesystem::directory_iterator(root_, ec)) {
+    if (ec) {
+      return;
+    }
+    std::error_code file_ec;
+    if (!item.is_regular_file(file_ec) || file_ec) {
+      continue;
+    }
+    if (item.path().extension() != ".dxil") {
+      continue;  // never the manifest or the lock
+    }
+    struct stat st = {};
+    if (stat(item.path().string().c_str(), &st) != 0) {
+      continue;
+    }
+    const uint64_t bytes = uint64_t(st.st_size);
+    total += bytes;
+    entries.push_back({item.path(), bytes, st.st_mtimespec.tv_sec});
+  }
+  // Reclaim to a LOW-WATER MARK whenever the store is above it — NOT only when
+  // it is over the cap. Over-cap is a state that can never occur: Store()
+  // refuses admission at the ceiling, so a full store would sit exactly at the
+  // cap forever, evict nothing at Open, and admit nothing for the rest of its
+  // life. Reclaiming to 75% guarantees every session real headroom, which is
+  // what makes this an LRU cache that rotates rather than a bucket that fills
+  // once. (Found by the conformance case: with an over-cap trigger it evicted
+  // 0 entries and CanAdmit was false — bounded, and useless.)
+  const uint64_t target = cap - cap / 4;
+  if (total <= target) {
+    return;
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const Entry& a, const Entry& b) { return a.mtime < b.mtime; });
+  for (const Entry& entry : entries) {
+    if (total <= target) {
+      break;
+    }
+    std::error_code remove_ec;
+    if (std::filesystem::remove(entry.path, remove_ec) && !remove_ec) {
+      total -= entry.bytes;
+      ++evicted_entries_;
+      evicted_bytes_ += entry.bytes;
+    }
+  }
+  if (evicted_entries_) {
+    XELOGI(
+        "MetalDxilStore: evicted {} least-recently-used artifacts ({} KiB) to "
+        "stay under the {} MiB cap",
+        evicted_entries_, evicted_bytes_ / 1024,
+        cvars::metal_dxil_cache_cap_mib);
   }
 }
 
@@ -411,6 +487,13 @@ MetalDxilLoadResult MetalDxilStore::Load(const MetalDxilArtifactKey& key,
     std::filesystem::remove(path, ec);
     return MetalDxilLoadResult::kRejectedCorrupt;
   }
+
+  // Touch on hit so mtime means "last used", which is what makes the LRU
+  // eviction above evict the unused rather than merely the old. Failure is
+  // ignored: a store that cannot be touched still serves correctly, it just
+  // evicts less well.
+  const struct timespec times[2] = {{0, UTIME_NOW}, {0, UTIME_NOW}};
+  utimensat(AT_FDCWD, path.string().c_str(), times, 0);
 
   *dxil_out = std::move(payload);
   ++hits_;

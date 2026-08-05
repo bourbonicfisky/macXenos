@@ -71,6 +71,7 @@
 
 DECLARE_bool(metal_dxil_cache);
 DECLARE_uint64(metal_dxil_cache_verify_every_nth);
+DECLARE_uint64(metal_dxil_cache_cap_mib);
 
 namespace xe {
 namespace gpu {
@@ -185,6 +186,9 @@ class MetalDxilStore {
   // session and existing ones keep being served.
   bool CanAdmit(uint64_t byte_count) const;
 
+  uint64_t evicted_entries() const { return evicted_entries_; }
+  uint64_t evicted_bytes() const { return evicted_bytes_; }
+
   uint64_t hits() const { return hits_; }
   uint64_t misses() const { return misses_; }
   uint64_t corrupt_rejects() const { return corrupt_rejects_; }
@@ -200,6 +204,22 @@ class MetalDxilStore {
   bool AcquireLock();
   void ReleaseLock();
   std::filesystem::path PathForKey(const MetalDxilArtifactKey& key) const;
+  // Reclamation, run once at Open while the store is locked.
+  //
+  // WHY THIS STORE NEEDS IT AND THE PER-TITLE ONE DOES NOT. MetalPipelineStorage
+  // is DISCARDED WHOLESALE whenever its identity changes, so it never
+  // accumulates entries from superseded contracts and "stop admitting at the
+  // cap" is a complete policy there. This store's entire value is that it is
+  // NOT discarded when the metallib identity moves — but a translator change
+  // that alters emitted DXBC mints new keys and orphans every old entry
+  // permanently. With a ceiling alone the store would fill with artifacts no
+  // build will ever ask for again and then stop caching while still occupying
+  // its full cap: bounded, and useless. LRU by mtime, touched on every hit.
+  //
+  // Eviction happens only at Open, never mid-session — deleting live entries
+  // while a title is busy would thrash exactly when it is least affordable,
+  // which is the same rule MetalPipelineStorage's global cap follows.
+  void EvictToCapLocked();
 
   bool is_open_ = false;
   std::filesystem::path root_;
@@ -212,6 +232,8 @@ class MetalDxilStore {
   uint64_t misses_ = 0;
   uint64_t corrupt_rejects_ = 0;
   uint64_t stores_ = 0;
+  uint64_t evicted_entries_ = 0;
+  uint64_t evicted_bytes_ = 0;
 };
 
 }  // namespace metal

@@ -114,6 +114,11 @@ class MetalShaderBuildCensus {
   // A stored artifact whose payload did not match its recorded hash. A
   // correctness incident, never folded into misses.
   std::atomic<uint64_t> dxil_cache_corrupt{0};
+  // The DXIL store's OWN cost, kept out of census.dxil so "dxilconv time" and
+  // "cache bookkeeping" can never be confused — the cold-regression promotion
+  // gate is decided on exactly this split.
+  std::atomic<uint64_t> dxil_load_ns{0};
+  std::atomic<uint64_t> dxil_store_ns{0};
   // Sampled hit-vs-fresh verification. `mismatches` must stay 0.
   MetalArtifactHitStats dxil_verify;
 
@@ -188,6 +193,7 @@ class MetalShaderBuildCensus {
         "|mlib_hit={}|mlib_miss={}|mlib_hitrate={:.1f}%|mlib_rejected={}"
         "|mlib_load_ms={:.1f}|mlib_store={}/{:.1f}ms/{}KiB"
         "|dxil_hit={}|dxil_corrupt={}|dxil_verified={}|dxil_verify_bad={}"
+        "|dxil_load_ms={:.1f}|dxil_store_ms={:.1f}"
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
         "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}",
         phase, swaps.load(std::memory_order_relaxed),
@@ -211,6 +217,8 @@ class MetalShaderBuildCensus {
         dxil_cache_corrupt.load(std::memory_order_relaxed),
         dxil_verify.verified.load(std::memory_order_relaxed),
         dxil_verify.mismatches.load(std::memory_order_relaxed),
+        double(dxil_load_ns.load(std::memory_order_relaxed)) / 1e6,
+        double(dxil_store_ns.load(std::memory_order_relaxed)) / 1e6,
         double(startup_build_ns.load(std::memory_order_relaxed)) / 1e6,
         double(stall_build_ns.load(std::memory_order_relaxed)) / 1e6,
         stall_events.load(std::memory_order_relaxed),

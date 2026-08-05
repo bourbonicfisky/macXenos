@@ -88,7 +88,7 @@ bool MetalPipelineCache::Initialize() {
       MetalTranslatorConfig::kGammaRenderTargetAsUnorm8);
 
   std::string error;
-  if (!dxil_converter_.Initialize(&error)) {
+  if (!dxil_converter_raw_.Initialize(&error)) {
     XELOGE("MetalPipelineCache: DXBC->DXIL converter init failed: {}", error);
     return false;
   }
@@ -282,6 +282,122 @@ uint64_t MetallibCacheKey(const MetalShader::MetalTranslation& translation) {
 
 }  // namespace
 
+
+// The ONE place DXBC becomes DXIL. Every production conversion site routes here
+// (adopt-xenios-shader-artifact-caching, scope correction 2026-08-05): before
+// this existed the cache covered only the ordinary vertex/pixel path while the
+// geometry object stage, the generated geometry stage, the depth-only fragment
+// stage and all three tessellation stages called dxilconv directly. Geometry
+// emulation is DEFAULT production behavior, so the majority of a
+// geometry-heavy title's conversions bypassed both the cache and the census —
+// which is also why the task 1.1 dxilconv figures UNDERSTATE the real cost.
+//
+// THE KEY IS THE EXACT BYTE BUFFER HANDED TO dxilconv, never a shader
+// identity. That is not a convenience: the geometry sites mutate the DXBC with
+// RelabelDxbcClipDistance immediately before converting, and a shader-level key
+// cannot see that mutation. Keying on the post-transform bytes makes every
+// present and future pre-Convert transform automatically covered — the same
+// class of blindness that made kFetchAbiRevision 4->5 necessary.
+//
+// `site` names the caller for diagnostics only; it deliberately does NOT
+// participate in the key, because two sites converting identical bytes must
+// share the artifact (the prebuilt tessellation blobs are identical across
+// every title, and 8 of Sonic's 94 conversions were duplicate DXBC).
+bool MetalPipelineCache::ConvertDxbcToDxilCached(
+    const std::vector<uint8_t>& dxbc, std::vector<uint8_t>& dxil_out,
+    std::string* error_out, const char* site) {
+  MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+  const bool cache_enabled =
+      cvars::metal_dxil_cache && dxil_store_.is_open();
+  const MetalDxilArtifactKey key = MetalDxilArtifactKey::ForDxbc(dxbc);
+
+  if (cache_enabled) {
+    std::vector<uint8_t> cached;
+    const auto load_start = std::chrono::steady_clock::now();
+    const MetalDxilLoadResult result = dxil_store_.Load(key, &cached);
+    census.dxil_load_ns.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - load_start)
+                     .count()),
+        std::memory_order_relaxed);
+    if (result == MetalDxilLoadResult::kRejectedCorrupt) {
+      // Not a miss. The store already logged and deleted the entry; the cold
+      // conversion below rebuilds it. Counted as a correctness incident.
+      census.dxil_cache_corrupt.fetch_add(1, std::memory_order_relaxed);
+    } else if (result == MetalDxilLoadResult::kHit) {
+      const uint64_t hit_index =
+          census.dxil_cache_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+      // SAMPLED HIT VERIFICATION (2.3, invariant from 2.1): a hit must equal a
+      // fresh conversion byte for byte, or it must miss. Sampled rather than
+      // universal because verifying every hit costs the very conversion the
+      // cache exists to skip.
+      const uint64_t every_nth = cvars::metal_dxil_cache_verify_every_nth;
+      if (!every_nth || (hit_index % every_nth) != 0) {
+        dxil_out = std::move(cached);
+        return true;
+      }
+      std::vector<uint8_t> fresh;
+      std::string verify_error;
+      const bool converted = dxil_converter_raw_.Convert(dxbc, fresh, &verify_error);
+      const MetalArtifactHitVerdict verdict =
+          converted ? VerifyMetalArtifactHit(cached, fresh)
+                    : MetalArtifactHitVerdict::kMissUnverifiable;
+      census.dxil_verify.Record(verdict);
+      if (MetalArtifactHitIsServable(verdict)) {
+        dxil_out = std::move(cached);
+        return true;
+      }
+      // A served artifact this build does not reproduce. Report it, drop the
+      // entry so it rebuilds, and use the FRESH bytes — never the cached ones.
+      XELOGE(
+          "MetalDxilStore: VERIFICATION FAILURE at site '{}' (verdict={}, "
+          "cached={} B, fresh={} B) — the served artifact is not what this "
+          "build produces. Entry dropped and rebuilt.",
+          site, MetalArtifactHitVerdictName(verdict), cached.size(),
+          fresh.size());
+      dxil_store_.Forget(key);
+      if (!converted || fresh.empty()) {
+        if (error_out) {
+          *error_out = verify_error.empty()
+                           ? std::string("verification re-convert failed")
+                           : verify_error;
+        }
+        return false;
+      }
+      dxil_out = std::move(fresh);
+      return true;
+    }
+  }
+
+  // Cold conversion. Timed into the census at EVERY site, so the per-stage
+  // totals finally cover geometry and tessellation too.
+  //
+  // The timer scope ends BEFORE the store write on purpose: census.dxil must
+  // mean "dxilconv time" and nothing else, or enabling the cache appears to
+  // make conversion slower. A first attempt left Store() inside the scope and
+  // the cold arm's dxil total rose by ~30 ms with the gate on — cache
+  // bookkeeping being reported as converter cost, which is exactly the
+  // measurement error a cold-regression promotion gate would then act on.
+  {
+    MetalShaderBuildTimer timer(census.dxil);
+    if (!dxil_converter_raw_.Convert(dxbc, dxil_out, error_out)) {
+      timer.Dismiss();
+      return false;
+    }
+    timer.set_bytes(dxil_out.size());
+  }
+  if (cache_enabled) {
+    const auto store_start = std::chrono::steady_clock::now();
+    dxil_store_.Store(key, dxil_out);
+    census.dxil_store_ns.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - store_start)
+                     .count()),
+        std::memory_order_relaxed);
+  }
+  return true;
+}
+
 bool MetalPipelineCache::TranslateShader(
     MetalShader::MetalTranslation& translation) {
   if (translation.is_translated()) {
@@ -353,83 +469,14 @@ bool MetalPipelineCache::TranslateShader(
     }
   }
 
-  // Stage 2: DXBC -> DXIL. THE stage the DXIL artifact cache removes, and the
-  // stage carrying the fresh-IDxbcConverter-per-Convert cost.
-  //
-  // Reached only on a metallib MISS (the hit above returns). Task 1.1 measured
-  // that on an ordinary warm launch that never happens — the DXIL store exists
-  // for launches after an OS or MSC change, where every metallib is
-  // legitimately invalid but the DXIL is not.
+  // Stage 2: DXBC -> DXIL, through the ONE cache-aware helper every conversion
+  // site uses (see ConvertDxbcToDxilCached).
   std::string error;
   std::vector<uint8_t> dxil;
-  bool dxil_from_cache = false;
-  const MetalDxilArtifactKey dxil_key = MetalDxilArtifactKey::ForDxbc(dxbc);
-  if (cvars::metal_dxil_cache && dxil_store_.is_open()) {
-    std::vector<uint8_t> cached_dxil;
-    const MetalDxilLoadResult result = dxil_store_.Load(dxil_key, &cached_dxil);
-    if (result == MetalDxilLoadResult::kHit) {
-      dxil = std::move(cached_dxil);
-      dxil_from_cache = true;
-    } else if (result == MetalDxilLoadResult::kRejectedCorrupt) {
-      // Not a miss. The store already deleted the entry and logged it; the
-      // cold conversion below rebuilds it. Surfaced in the census as a
-      // correctness incident, not a hit-rate figure.
-      census.dxil_cache_corrupt.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-
-  if (dxil_from_cache) {
-    census.dxil_cache_hits.fetch_add(1, std::memory_order_relaxed);
-    // SAMPLED HIT VERIFICATION (task 2.3, invariant from 2.1): a hit must equal
-    // a fresh conversion byte for byte, or it must miss. The key cannot see a
-    // behavior nobody knew had changed, so this is the behavioral backstop —
-    // sampled rather than universal because verifying every hit would cost the
-    // conversion the cache exists to skip.
-    if (cvars::metal_dxil_cache_verify_every_nth &&
-        (census.dxil_cache_hits.load(std::memory_order_relaxed) %
-             cvars::metal_dxil_cache_verify_every_nth ==
-         0)) {
-      std::vector<uint8_t> fresh;
-      std::string verify_error;
-      const bool converted = dxil_converter_.Convert(dxbc, fresh, &verify_error);
-      const MetalArtifactHitVerdict verdict =
-          converted ? VerifyMetalArtifactHit(dxil, fresh)
-                    : MetalArtifactHitVerdict::kMissUnverifiable;
-      census.dxil_verify.Record(verdict);
-      if (!MetalArtifactHitIsServable(verdict)) {
-        // A served artifact this build does not reproduce. Reject it, report
-        // it, drop the entry so it rebuilds, and use the fresh bytes — never
-        // the cached ones.
-        XELOGE(
-            "MetalDxilStore: VERIFICATION FAILURE for shader {:016X} "
-            "(verdict={}, cached={} B, fresh={} B) — the served artifact is "
-            "not what this build produces. Entry dropped and rebuilt.",
-            shader.ucode_data_hash(), MetalArtifactHitVerdictName(verdict),
-            dxil.size(), fresh.size());
-        dxil_store_.Forget(dxil_key);
-        dxil_from_cache = false;
-        dxil = std::move(fresh);
-        if (dxil.empty()) {
-          XELOGE(
-              "MetalPipelineCache: DXBC->DXIL verification re-convert failed "
-              "for shader {:016X}: {}",
-              shader.ucode_data_hash(), verify_error);
-          return false;
-        }
-      }
-    }
-  } else {
-    MetalShaderBuildTimer timer(census.dxil);
-    if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
-      timer.Dismiss();
-      XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
-             shader.ucode_data_hash(), error);
-      return false;
-    }
-    timer.set_bytes(dxil.size());
-    if (cvars::metal_dxil_cache && dxil_store_.is_open()) {
-      dxil_store_.Store(dxil_key, dxil);
-    }
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "vertex/pixel")) {
+    XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
+           shader.ucode_data_hash(), error);
+    return false;
   }
 
   // Shader-chain forensics (XE_METAL_DUMP_XLAT=<hex ucode hash>): dump the
@@ -948,7 +995,9 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
   }
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+  // Cache-aware: the key is the POST-RELABEL buffer above, which no
+  // shader-level key could see.
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "geometry-object")) {
     XELOGE("MetalPipelineCache: geometry VS DXBC->DXIL failed: {}", error);
     geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
@@ -1054,7 +1103,8 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
 
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc_bytes, dxil, &error)) {
+  // Cache-aware; same post-relabel keying rule as the object stage.
+  if (!ConvertDxbcToDxilCached(dxbc_bytes, dxil, &error, "geometry-mesh")) {
     XELOGE("MetalPipelineCache: geometry GS DXBC->DXIL failed: {}", error);
     geometry_shader_stages_.emplace(key.key, std::move(stage));
     return nullptr;
@@ -1439,7 +1489,7 @@ bool MetalPipelineCache::EnsureDepthOnlyPixelShader() {
   }
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "depth-only-ps")) {
     XELOGE("MetalPipelineCache: depth-only PS DXBC->DXIL failed: {}", error);
     return false;
   }
@@ -1481,7 +1531,9 @@ MetalPipelineCache::GetOrCreateTessellationVertexStage(
   std::vector<uint8_t> dxbc(blob.bytes, blob.bytes + blob.size);
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+  // A prebuilt constant blob: identical in every title, so the global
+  // content-keyed store shares one artifact across all of them.
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "tess-vs")) {
     XELOGE("MetalPipelineCache: tessellation VS {} DXBC->DXIL failed: {}",
            blob.name, error);
     tessellation_vertex_stages_.emplace(blob_id, std::move(stage));
@@ -1564,7 +1616,8 @@ MetalPipelineCache::GetOrCreateTessellationHullStage(
   std::vector<uint8_t> dxbc(blob.bytes, blob.bytes + blob.size);
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+  // Prebuilt constant blob, as above.
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "tess-hs")) {
     XELOGE("MetalPipelineCache: tessellation HS {} DXBC->DXIL failed: {}",
            blob.name, error);
     tessellation_hull_stages_.emplace(key, std::move(stage));
@@ -1642,7 +1695,7 @@ MetalPipelineCache::GetOrCreateTessellationDomainStage(
 
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+  if (!ConvertDxbcToDxilCached(dxbc, dxil, &error, "tess-ds")) {
     XELOGE("MetalPipelineCache: tessellation DS DXBC->DXIL failed: {}", error);
     tessellation_domain_stages_.emplace(key, std::move(stage));
     return nullptr;

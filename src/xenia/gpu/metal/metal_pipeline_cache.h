@@ -54,6 +54,16 @@ class MetalPipelineCache {
   // the translation produced a usable function. Idempotent per translation.
   bool TranslateShader(MetalShader::MetalTranslation& translation);
 
+  // The single cache-aware DXBC -> DXIL entry point. EVERY production
+  // conversion site must use it; calling dxil_converter_raw_.Convert directly
+  // silently opts that site out of both the DXIL store and the build census.
+  // The key is the exact byte buffer passed in, so any pre-Convert transform
+  // (e.g. RelabelDxbcClipDistance) is covered without being enumerated.
+  // `site` is a diagnostic label and does not participate in the key.
+  bool ConvertDxbcToDxilCached(const std::vector<uint8_t>& dxbc,
+                               std::vector<uint8_t>& dxil_out,
+                               std::string* error_out, const char* site);
+
   // Builds (or returns the cached) id<MTLRenderPipelineState> for a translated
   // vertex + pixel function pair and the given attachment formats. The format
   // values are MTLPixelFormat. Returns null on failure. The pixel translation
@@ -277,7 +287,13 @@ class MetalPipelineCache {
   void* device_;  // id<MTLDevice>, not owned.
 
   std::unique_ptr<DxbcShaderTranslator> shader_translator_;
-  DxbcToDxilConverter dxil_converter_;
+  // NAMED to make a bypass visible. Only ConvertDxbcToDxilCached may call this
+  // directly; every other site must go through it or it silently opts out of
+  // both the DXIL store and the build census — which is exactly what six
+  // production sites had done. `grep -c "dxil_converter_raw_\.Convert"` must
+  // stay at 2 (the cold conversion and the verification re-convert, both inside
+  // the helper).
+  DxbcToDxilConverter dxil_converter_raw_;
   MetalShaderConverter metal_converter_;
 
   // Owns the loaded shaders, keyed by ucode hash.
