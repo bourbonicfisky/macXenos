@@ -634,6 +634,10 @@ struct RenderHarness {
                   xenos::kMaxShaderTempRegisters),
               HostVertexShaderType::kVertex));
       vm.vertex.interpolator_mask = 0;
+      // 4.8 boundary control: the ORDINARY pipeline takes the same clip planes,
+      // so the relabel gate can be shown not to touch this path.
+      vm.vertex.user_clip_plane_count = spec.user_clip_plane_count;
+      vm.vertex.user_clip_plane_cull = 0;
       auto* vertex_translation = static_cast<MetalShader::MetalTranslation*>(
           vertex_shader->GetOrCreateTranslation(vm.value));
       if (!vertex_translation->has_metal_function() &&
@@ -649,7 +653,7 @@ struct RenderHarness {
           (__bridge id<MTLFunction>)pixel->metal_function();
       desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
       desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_format;
-      desc.rasterSampleCount = 1;
+      desc.rasterSampleCount = spec.sample_count;
       NSError* plain_error = nil;
       plain_pipeline =
           [device newRenderPipelineStateWithDescriptor:desc
@@ -693,7 +697,8 @@ struct RenderHarness {
       }
       control_pipeline = cache->GetOrCreateGeometryPipelineState(
           vertex_translation, pixel, PipelineGeometryShader::kRectangleList,
-          vm, pm, colors, depth_format, MetalPipelineRasterKey{1}, blends,
+          vm, pm, colors, depth_format,
+          MetalPipelineRasterKey{spec.sample_count}, blends,
           /*color_write_mask=*/0xF, &control_gs_vertex_size,
           &control_gs_max_input);
       if (!control_pipeline) {
@@ -1449,6 +1454,100 @@ TEST_CASE("clip-bridge 4.2-4.5: user clip plane coverage on geometry emulation",
   CHECK(predicted_covered > 0);
   CHECK(predicted_covered < inside.covered);
   CHECK(mismatches == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Tasks 4.6/4.7 (sample-count stability) and 4.8 (the ordinary non-geometry
+// path as the UNCHANGED boundary control).
+TEST_CASE("clip-bridge 4.6-4.8: sample counts and the non-geometry boundary",
+          "[tessellation][render][device][clip468]") {
+  auto& h = H();
+  {
+    INFO(h.error);
+    REQUIRE(h.ok);
+  }
+  constexpr float kCutNdcX = 0.5f;
+  const uint32_t cut_column = uint32_t((kCutNdcX * 0.5f + 0.5f) * float(kRT));
+
+  auto mask_of = [](const RenderResult& r) {
+    std::vector<uint8_t> m(size_t(kRT) * kRT, 0);
+    for (size_t i = 0; i < m.size(); ++i) {
+      const uint8_t* px = r.rgba.data() + i * 4;
+      m[i] = (px[0] || px[1] || px[2] || px[3]) ? 1 : 0;
+    }
+    return m;
+  };
+  auto run = [&](const char* label, bool geometry, uint32_t samples,
+                 uint32_t count, float d) {
+    RenderSpec spec;
+    spec.label = label;
+    spec.geometry_control = geometry;
+    spec.plain_control = !geometry;
+    spec.sample_count = samples;
+    spec.user_clip_plane_count = count;
+    spec.clip_plane0[0] = 1.0f;
+    spec.clip_plane0[3] = d;
+    spec.draws.push_back(NonIndexedDraw(3));
+    return h.Render(spec);
+  };
+
+  SECTION("4.6/4.7 sample-count stability at 1x and 4x") {
+    setenv("XE_METAL_CLIP_RELABEL", "1", 1);
+    struct R { ~R() { unsetenv("XE_METAL_CLIP_RELABEL"); } } r;
+    for (uint32_t samples : {1u, 4u}) {
+      // Expected geometry is derived from THIS sample count's own inside arm,
+      // never carried across sample counts: 4x rasterization legitimately
+      // covers different pixels, so borrowing the 1x mask would manufacture a
+      // mismatch that says nothing about clipping.
+      RenderResult inside = run("clip-inside", true, samples, 1, 2.0f);
+      INFO("inside(" << samples << "x): " << inside.error);
+      REQUIRE(inside.ok);
+      REQUIRE(inside.covered > 0);
+
+      RenderResult crossing = run("clip-crossing", true, samples, 1, -kCutNdcX);
+      REQUIRE(crossing.ok);
+
+      const auto in_mask = mask_of(inside);
+      const auto cr_mask = mask_of(crossing);
+      uint32_t predicted_covered = 0, mismatches = 0;
+      for (uint32_t y = 0; y < kRT; ++y) {
+        for (uint32_t x = 0; x < kRT; ++x) {
+          const size_t i = size_t(y) * kRT + x;
+          const uint8_t predicted = (in_mask[i] && x >= cut_column) ? 1 : 0;
+          predicted_covered += predicted;
+          if (predicted != cr_mask[i]) ++mismatches;
+        }
+      }
+      std::printf(
+          "CLIP468|%ux|%s|inside=%u crossing=%u predicted=%u mismatches=%u\n",
+          samples, mismatches == 0 ? "PASS" : "FAIL", inside.covered,
+          crossing.covered, predicted_covered, mismatches);
+      CHECK(predicted_covered > 0);
+      CHECK(predicted_covered < inside.covered);  // the plane must really cut
+      CHECK(mismatches == 0);
+    }
+  }
+
+  SECTION("4.8 the ordinary non-geometry path is UNCHANGED by the gate") {
+    // Rendered, not merely materialized: the gate must produce byte-identical
+    // coverage on the path it does not touch. This is the boundary witness --
+    // if the relabel leaked into ordinary pipelines it would show here.
+    unsetenv("XE_METAL_CLIP_RELABEL");
+    RenderResult off = run("plain-clip-off", false, 1, 1, -kCutNdcX);
+    setenv("XE_METAL_CLIP_RELABEL", "1", 1);
+    RenderResult on = run("plain-clip-on", false, 1, 1, -kCutNdcX);
+    unsetenv("XE_METAL_CLIP_RELABEL");
+    INFO("plain off: " << off.error << " on: " << on.error);
+    REQUIRE(off.ok);
+    REQUIRE(on.ok);
+    REQUIRE(off.covered > 0);  // the control must actually render
+    const bool identical = off.rgba == on.rgba;
+    std::printf("CLIP468|plain-boundary|%s|off=%u on=%u byte_identical=%d\n",
+                identical && off.covered == on.covered ? "PASS" : "FAIL",
+                off.covered, on.covered, identical ? 1 : 0);
+    CHECK(off.covered == on.covered);
+    CHECK(identical);
+  }
 }
 
 TEST_CASE("harness control: geometry-emulation path renders in this environment",
