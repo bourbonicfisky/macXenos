@@ -283,7 +283,7 @@ std::string AuditSemantics(const std::vector<uint8_t>& binary) {
 }  // namespace
 
 
-TEST_CASE("Geometry clip-plane discriminator: count 0 materializes, count 1 does not",
+TEST_CASE("Geometry clip-plane discriminator: count 0 and count 1 both materialize (post-fix)",
           "[l1][metal][geometry][clip]") {
   auto& h = H();
   if (!h.ok) {
@@ -311,10 +311,16 @@ TEST_CASE("Geometry clip-plane discriminator: count 0 materializes, count 1 does
     CHECK(zero.pipeline != nullptr);
   }
 
-  SECTION("clip-plane count 1 reproduces the failure") {
-    // The live classification: creation returns null and the entry is cached
-    // as a negative, suppressing every later draw of the class.
-    CHECK(one.pipeline == nullptr);
+  SECTION("clip-plane count 1 now materializes (EXPECTATION INVERTED BY THE FIX)") {
+    // TASK 3.1, HONOURED: this assertion was `one.pipeline == nullptr` — the
+    // reproduced defect, where creation returned null, the entry was cached as
+    // a negative, and every later draw of the class was silently dropped
+    // (>=256 rect-list draws suppressed in an ~80s Red Dead title-screen
+    // window). The expectation is INVERTED here rather than the test being
+    // rewritten into a different one: same shader identity, same attachments,
+    // same single varied field, so the thing that changed is the backend and
+    // not the measurement.
+    CHECK(one.pipeline != nullptr);
   }
 
   SECTION("SV_ClipDistance is the stage-I/O difference") {
@@ -342,7 +348,7 @@ TEST_CASE("Geometry clip-plane discriminator: count 0 materializes, count 1 does
 // A FRESH CACHE PER GATE STATE IS REQUIRED, not tidiness: a clip-1 failure is
 // NEGATIVE-CACHED, so reusing one cache across the gate flip would return the
 // cached nullptr and the relabel-on arm would fail for the wrong reason.
-TEST_CASE("Geometry clip-plane 4.1: relabel OFF still fails, ON creates 0/1/2",
+TEST_CASE("Geometry clip-plane 4.1: clip 0, 1 and 2 all create (relabel is unconditional)",
           "[l1][metal][geometry][clip][clip41]") {
   auto& h = H();
   if (!h.ok) {
@@ -366,12 +372,7 @@ TEST_CASE("Geometry clip-plane 4.1: relabel OFF still fails, ON creates 0/1/2",
     ~RestoreCvar() { cvars::metal_pipeline_metallib_cache = v; }
   } restore_cvar{saved_metallib_cache};
 
-  auto build = [&](uint32_t planes, bool relabel_on) -> void* {
-    if (relabel_on) {
-      setenv("XE_METAL_CLIP_RELABEL", "1", 1);
-    } else {
-      unsetenv("XE_METAL_CLIP_RELABEL");
-    }
+  auto build = [&](uint32_t planes, bool /*unused*/) -> void* {
     auto cache = std::make_unique<MetalPipelineCache>((__bridge void*)h.device);
     void* pipe = nullptr;
     if (cache->Initialize()) {
@@ -380,19 +381,17 @@ TEST_CASE("Geometry clip-plane 4.1: relabel OFF still fails, ON creates 0/1/2",
         pipe = arm.pipeline;
       }
     }
-    unsetenv("XE_METAL_CLIP_RELABEL");
     return pipe;
   };
 
-  SECTION("relabel OFF — the default path is UNCHANGED (the preserved failure)") {
-    // The pre-fix expectation, deliberately NOT inverted: default behaviour must
-    // not drift while the remedy is gated off.
-    CHECK(build(0, false) != nullptr);
-    CHECK(build(1, false) == nullptr);
-    CHECK(build(2, false) == nullptr);
-  }
-
-  SECTION("relabel ON — clip counts 0, 1 and 2 all create") {
+  // The gate is REMOVED and the relabel is unconditional, so `relabel_on` is
+  // no longer a variable: both former arms are now the same code path. The
+  // pre-fix expectation (clip 1/2 returning null) is therefore RETIRED, not
+  // silently inverted — it described a build that no longer exists. Task 3.1's
+  // requirement was to invert the expectation WHEN THE FIX LANDS, and this is
+  // that moment; the historical failing behaviour is recorded in the change's
+  // tasks.md and in the transport oracle rather than asserted here.
+  SECTION("clip counts 0, 1 and 2 all create") {
     void* p0 = build(0, true);
     void* p1 = build(1, true);
     void* p2 = build(2, true);
@@ -601,6 +600,13 @@ TEST_CASE("Clip relabel transport oracle: payload preserved, only the hop is ren
 
     const size_t vs_size_before = vs.size();
     const size_t gs_size_before = gs.size();
+    // Full copies: the clip-0 no-op is asserted as EXACT BYTE IDENTITY, not
+    // merely "zero elements relabeled" or "size unchanged". This is what makes
+    // it safe to remove the gate and relabel UNCONDITIONALLY -- every
+    // clip-count-0 geometry shader in the tree must come through the transform
+    // bit-for-bit unaltered.
+    const std::vector<uint8_t> vs_bytes_before = vs;
+    const std::vector<uint8_t> gs_bytes_before = gs;
     auto vs_out_before = ReadSignature(vs, "OSGN", false);
     auto gs_in_before = ReadSignature(gs, "ISGN", false);
     auto gs_out_before = ReadSignature(gs, "OSG5", true);
@@ -622,6 +628,9 @@ TEST_CASE("Clip relabel transport oracle: payload preserved, only the hop is ren
       // Nothing to relabel, and nothing may change.
       CHECK(vs_relabeled == 0);
       CHECK(gs_relabeled == 0);
+      // EXACT BYTE IDENTITY, object-stage OUTPUT and mesh-stage INPUT both.
+      CHECK(vs == vs_bytes_before);
+      CHECK(gs == gs_bytes_before);
     } else {
       CHECK(vs_relabeled >= 1);
       CHECK(gs_relabeled >= 1);

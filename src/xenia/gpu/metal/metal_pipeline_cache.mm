@@ -7,7 +7,6 @@
  ******************************************************************************
  */
 
-#include "xenia/gpu/metal/metal_clip_relabel_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 
 #import <Metal/Metal.h>
@@ -62,26 +61,6 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
-namespace {
-// Per-call (not a cached static) so the 4.1 regression checkpoint can assert
-// BOTH directions inside one test process; the gate is only read at geometry
-// pipeline creation, which is memoized, so the cost is irrelevant.
-bool ClipRelabelGateOn() {
-  const char* value = std::getenv("XE_METAL_CLIP_RELABEL");
-  MetalClipRelabelGate gate = ParseMetalClipRelabelGate(value);
-  if (gate == MetalClipRelabelGate::kMalformed) {
-    static bool warned = false;
-    if (!warned) {
-      warned = true;
-      XELOGW(
-          "XE_METAL_CLIP_RELABEL='{}' is malformed; failing closed to off "
-          "(use 0 or 1)",
-          value);
-    }
-  }
-  return MetalClipRelabelGateEngaged(gate);
-}
-}  // namespace
 
 MetalPipelineCache::MetalPipelineCache(void* device) : device_(device) {}
 
@@ -808,12 +787,16 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
     geometry_vertex_stages_.emplace(stage_key, std::move(stage));
     return nullptr;
   }
-  // EXPERIMENT (XE_METAL_CLIP_RELABEL=1), task 2 candidate 1: relabel the
-  // clip-distance semantic on the OBJECT STAGE'S OUTPUT only, so it crosses the
-  // object->mesh hop as a private user parameter. The payload layout is
-  // untouched — see metal_dxbc_clip_relabel.h and its transport oracle.
+  // Clip-distance semantic legalization, UNCONDITIONAL. Relabels the
+  // clip-distance semantic on the OBJECT STAGE'S OUTPUT so it crosses the
+  // object->mesh hop as a private user parameter; without it a geometry-
+  // emulation pipeline whose VS writes SV_ClipDistance fails to create and the
+  // whole draw class is silently dropped.
+  // Inert for clip-count-0 shaders: proven BYTE-IDENTICAL in and out by the
+  // transport oracle, which is what makes running it on every geometry stage
+  // safe rather than merely convenient.
   std::vector<uint8_t> dxbc = dxbc_source;
-  if (ClipRelabelGateOn()) {
+  {
     uint32_t n = RelabelDxbcClipDistance(dxbc, DxbcSignatureKind::kOutput);
     if (n) {
       XELOGI("MetalPipelineCache: clip relabel — object-stage output, {} element(s)", n);
@@ -912,10 +895,11 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
   }
   std::vector<uint8_t> dxbc_bytes(dxbc_dwords.size() * sizeof(uint32_t));
   std::memcpy(dxbc_bytes.data(), dxbc_dwords.data(), dxbc_bytes.size());
-  // EXPERIMENT (XE_METAL_CLIP_RELABEL=1): matching relabel on the MESH STAGE'S
-  // INPUT. Its rasterizer-facing OUTPUT deliberately keeps SV_ClipDistance.
+  // Matching relabel on the MESH STAGE'S INPUT. Its rasterizer-facing OUTPUT
+  // deliberately keeps SV_ClipDistance, which is what makes the hardware clip.
+  // Unconditional; inert byte-for-byte when the shader has no clip distances.
   {
-    if (ClipRelabelGateOn()) {
+    {
       uint32_t n =
           RelabelDxbcClipDistance(dxbc_bytes, DxbcSignatureKind::kInput);
       if (n) {

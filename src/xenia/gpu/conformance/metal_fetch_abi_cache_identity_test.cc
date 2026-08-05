@@ -102,9 +102,9 @@ TEST_CASE("The production fetch ABI revision is the current one",
           "[integer_scale][cache_identity]") {
   // If this fails, either the revision was bumped without updating the tests
   // below, or it was reverted and the stale-cache hazard is open again.
-  // 4 = float24 depth invariance modes (implement-metal-depth-semantics
-  // stage A); the 3->4 boundary is pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 4);
+  // 5 = the clip-distance relabel became UNCONDITIONAL. Each boundary is
+  // pinned by its own transition case below.
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 5);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
@@ -136,11 +136,11 @@ TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
   }
 
   {
-    // Production revision (4): the revision-3 artifact must not be served.
+    // Revision 4: the revision-3 artifact must not be served. Pinned at the
+    // LITERAL boundary, not at the production revision, so this case keeps
+    // testing the 3->4 transition after later bumps.
     MetalPipelineStorage rev4;
-    REQUIRE(rev4.Open(root, kTitleId,
-                      IdentityWithFetchAbi(
-                          MetalTranslatorConfig::kFetchAbiRevision)));
+    REQUIRE(rev4.Open(root, kTitleId, IdentityWithFetchAbi(4)));
     std::vector<uint8_t> served;
     CHECK_FALSE(rev4.LoadMetallib(kMetallibKey, &served));
     rev4.Close();
@@ -155,6 +155,64 @@ TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
     std::vector<uint8_t> served;
     CHECK_FALSE(back3.LoadMetallib(kMetallibKey, &served));
     back3.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+
+TEST_CASE("The revision-4 to revision-5 boundary discards, not filters",
+          "[cache_identity][clip][geometry]") {
+  // The clip-relabel boundary. Revision 3 INTRODUCED the relabel, but it
+  // shipped behind XE_METAL_CLIP_RELABEL defaulting OFF, so every record
+  // written at revisions 3 and 4 was in fact produced WITHOUT it. Now that the
+  // relabel is unconditional those records describe different emitted geometry
+  // stages for the same guest ucode, and the geometry record keys CANNOT see
+  // the difference — the object-stage key is (kind, MetallibCacheKey(vertex),
+  // topology) and the mesh-stage key is (kind, GeometryShaderKey). The revision
+  // is the only thing preventing a warm pre-fix cache from serving a silently
+  // wrong pipeline.
+  //
+  // Three legs, and the third is the point: a store that merely FILTERED reads
+  // by identity would leave the poisoned bytes on disk to be resurrected by a
+  // downgrade or an A/B rollback build. It must DISCARD.
+  std::filesystem::path root = MakeScratchRoot("clip_relabel_transition");
+
+  {
+    MetalPipelineStorage rev4;
+    REQUIRE(rev4.Open(root, kTitleId, IdentityWithFetchAbi(4)));
+    REQUIRE(rev4.StoreMetallib(kMetallibKey, SampleMetallib()));
+    rev4.Close();
+    // Control: revision 4 serves its own artifact, or the rejection below
+    // proves nothing.
+    MetalPipelineStorage warm4;
+    REQUIRE(warm4.Open(root, kTitleId, IdentityWithFetchAbi(4)));
+    std::vector<uint8_t> served;
+    REQUIRE(warm4.LoadMetallib(kMetallibKey, &served));
+    CHECK(served == SampleMetallib());
+    warm4.Close();
+  }
+
+  {
+    // Production revision (5): the pre-relabel artifact must not be served.
+    MetalPipelineStorage rev5;
+    REQUIRE(rev5.Open(root, kTitleId,
+                      IdentityWithFetchAbi(
+                          MetalTranslatorConfig::kFetchAbiRevision)));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(rev5.LoadMetallib(kMetallibKey, &served));
+    rev5.Close();
+  }
+
+  {
+    // Downgrade back to 4 AFTER the revision-5 open: still nothing. There is no
+    // pre-relabel artifact left to resurrect.
+    MetalPipelineStorage back4;
+    REQUIRE(back4.Open(root, kTitleId, IdentityWithFetchAbi(4)));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(back4.LoadMetallib(kMetallibKey, &served));
+    back4.Close();
   }
 
   std::error_code ec;

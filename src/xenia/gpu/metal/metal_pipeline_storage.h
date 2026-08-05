@@ -79,7 +79,20 @@ struct MetalTranslatorConfig {
   //       XE_METAL_F24_PS builds that did not exist yet — the revision pins
   //       the SCHEMA so a pre-stage-A cache can never satisfy a stage-A
   //       lookup (or vice versa) through an incidentally-equal key.
-  static constexpr uint32_t kFetchAbiRevision = 4;
+  //   5 - the clip-distance relabel became UNCONDITIONAL. Revision 3 introduced
+  //       the mechanism, but it shipped behind XE_METAL_CLIP_RELABEL defaulting
+  //       OFF, so every record written at revisions 3 and 4 was in fact produced
+  //       WITHOUT the relabel. Now that it always runs, those records describe
+  //       different emitted geometry stages for the same guest ucode. They must
+  //       not be served, and the geometry record keys CANNOT distinguish them:
+  //       the object-stage key is (kind, MetallibCacheKey(vertex), topology) and
+  //       the mesh-stage key is (kind, GeometryShaderKey), neither of which can
+  //       see the relabel. The revision is therefore the ONLY thing standing
+  //       between a warm pre-fix cache and a silently wrong pipeline — the same
+  //       failure shape as the dxilconv converter-reuse bug, where corrupt
+  //       metallibs were served from caches keyed on hashes that could not see
+  //       the fix.
+  static constexpr uint32_t kFetchAbiRevision = 5;
 };
 
 // Everything that can change generated output for byte-identical guest ucode.

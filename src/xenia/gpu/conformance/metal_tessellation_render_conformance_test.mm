@@ -1349,10 +1349,7 @@ TEST_CASE("clip-bridge 4.2-4.5: user clip plane coverage on geometry emulation",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  // The remedy must be ON: with it off these pipelines do not create at all
-  // (that is 4.1's OFF arm, asserted separately).
-  setenv("XE_METAL_CLIP_RELABEL", "1", 1);
-  struct Restore { ~Restore() { unsetenv("XE_METAL_CLIP_RELABEL"); } } restore;
+  // The relabel is UNCONDITIONAL now; nothing to enable.
 
   auto run = [&](const char* label, uint32_t count, float a, float b, float c,
                  float d) {
@@ -1492,8 +1489,6 @@ TEST_CASE("clip-bridge 4.6-4.8: sample counts and the non-geometry boundary",
   };
 
   SECTION("4.6/4.7 sample-count stability at 1x and 4x") {
-    setenv("XE_METAL_CLIP_RELABEL", "1", 1);
-    struct R { ~R() { unsetenv("XE_METAL_CLIP_RELABEL"); } } r;
     for (uint32_t samples : {1u, 4u}) {
       // Expected geometry is derived from THIS sample count's own inside arm,
       // never carried across sample counts: 4x rasterization legitimately
@@ -1529,14 +1524,12 @@ TEST_CASE("clip-bridge 4.6-4.8: sample counts and the non-geometry boundary",
   }
 
   SECTION("4.8 the ordinary non-geometry path is UNCHANGED by the gate") {
-    // Rendered, not merely materialized: the gate must produce byte-identical
-    // coverage on the path it does not touch. This is the boundary witness --
-    // if the relabel leaked into ordinary pipelines it would show here.
-    unsetenv("XE_METAL_CLIP_RELABEL");
-    RenderResult off = run("plain-clip-off", false, 1, 1, -kCutNdcX);
-    setenv("XE_METAL_CLIP_RELABEL", "1", 1);
-    RenderResult on = run("plain-clip-on", false, 1, 1, -kCutNdcX);
-    unsetenv("XE_METAL_CLIP_RELABEL");
+    // Rendered, not merely materialized. With the relabel unconditional this
+    // renders the ordinary path TWICE and requires byte identity: it is now a
+    // determinism + non-interference witness rather than a gate A/B, and it
+    // still fails loudly if the relabel ever leaked into ordinary pipelines.
+    RenderResult off = run("plain-clip-a", false, 1, 1, -kCutNdcX);
+    RenderResult on = run("plain-clip-b", false, 1, 1, -kCutNdcX);
     INFO("plain off: " << off.error << " on: " << on.error);
     REQUIRE(off.ok);
     REQUIRE(on.ok);
