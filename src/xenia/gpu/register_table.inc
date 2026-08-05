@@ -1106,9 +1106,10 @@ XE_GPU_REGISTER(0x1927, kDword, DC_LUT_WRITE_EN_MASK)
 
 // Single set of parameters for all channels apparently unlike on the M56
 // (4D5307E6 sets DC_LUTA_CONTROL to 0x00000003 for the data increment of 8 in
-// the 128-entry PWL gamma ramp for a 10bpc framebuffer). This note is the
-// AUTHORITY over the M56-shaped per-channel wording that used to appear in
-// registers.h; audited 2026-08-05, docs/metal_pwl_gamma_audit.md.
+// the 128-entry PWL gamma ramp for a 10bpc framebuffer). This is the only
+// Xenos-specific evidence to weigh against the verified M56 per-channel layout,
+// but "apparently" is deliberate: it suggests rather than proves a shared
+// control. Audited 2026-08-05, docs/metal_pwl_gamma_audit.md.
 // The BIT LAYOUT of this register is NOT established: only two values have ever
 // been observed anywhere (0x00000000 and 0x00000003), which is not enough to
 // locate the increment field, its width, or a distinct mode-select bit. A

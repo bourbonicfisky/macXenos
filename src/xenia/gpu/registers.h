@@ -942,16 +942,16 @@ union alignas(uint32_t) DC_LUT_PWL_DATA {
     // AUDITED 2026-08-05 (docs/metal_pwl_gamma_audit.md). Provenance and limits,
     // because this comment previously stated more than the evidence supports:
     //
-    // - The transfer function above is M56-derived (RRG-216M56), which is
-    //   MECHANISM evidence only and is not present in this tree.
-    // - The per-channel reading is UNSUPPORTED on Xenos. This comment used to
-    //   say "for the specific color channel", which is the M56 shape.
-    //   register_table.inc's Xenos-specific note ("single set of parameters for
-    //   all channels apparently unlike on the M56", evidenced by 4D5307E6
-    //   writing DC_LUTA_CONTROL = 3) is the authority and refutes it.
-    //   That does NOT prove Xenos uses a shared control: the note says
-    //   "apparently", it rests on one observed value, and the bit layout is
-    //   unknown. Suggested, not established — do not restate it as settled.
+    // - The transfer function above is verified in the AMD M56 guide
+    //   (RRG-216M56), which is MECHANISM evidence only for Xenos and is not
+    //   present in this tree.
+    // - The per-channel layout is established for M56, not Xenos. This comment
+    //   used to state the M56 shape as a Xenos contract. register_table.inc's
+    //   Xenos-specific note instead suggests a single set of parameters, but
+    //   does not prove it: it says "apparently", rests on one observed value,
+    //   and a driver may initialize identity PWL data for inactive channels.
+    //   Neither layout is established for Xenos; do not restate either as
+    //   settled.
     // - "increment nonzero, otherwise use the 256-entry table" is likewise
     //   M56-derived. It is consistent with the only two DC_LUTA_CONTROL values
     //   ever observed (0 and 3) but is NOT independently established on Xenos.
