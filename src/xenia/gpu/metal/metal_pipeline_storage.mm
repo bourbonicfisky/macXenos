@@ -29,6 +29,7 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/metal/metal_converter_options.h"
 
 // 3.6b — size-based bounds, configurable. Not age-based: a large title touched
 // rarely is the thing worth evicting, and its age says nothing about its cost.
@@ -84,7 +85,15 @@ struct ManifestFile {
   uint64_t device_hash;
   uint64_t os_build_hash;
   int64_t last_access_seconds;
-  uint64_t reserved;
+  // Was `reserved` (always written 0, never validated). Now carries the
+  // dxilconv option-string hash, which is a trust field like the ones above.
+  // Occupying the reserved slot keeps the record size and every other field
+  // offset unchanged; a manifest written before this field existed has 0 here
+  // while the running build hashes a non-empty option string, so the first
+  // launch after this change discards the directory and rebuilds once. That is
+  // the correct outcome: those entries were written under an option string
+  // nothing recorded.
+  uint64_t converter_options_hash;
 };
 #pragma pack(pop)
 
@@ -161,7 +170,8 @@ bool MetalPipelineStorageIdentity::operator==(
          dxc_artifact_hash == other.dxc_artifact_hash &&
          msc_artifact_hash == other.msc_artifact_hash &&
          device_hash == other.device_hash &&
-         os_build_hash == other.os_build_hash;
+         os_build_hash == other.os_build_hash &&
+         converter_options_hash == other.converter_options_hash;
 }
 
 std::string MetalPipelineStorageIdentity::DescribeMismatch(
@@ -179,6 +189,9 @@ std::string MetalPipelineStorageIdentity::DescribeMismatch(
   if (msc_artifact_hash != other.msc_artifact_hash) add("MSC artifact");
   if (device_hash != other.device_hash) add("device");
   if (os_build_hash != other.os_build_hash) add("OS build");
+  if (converter_options_hash != other.converter_options_hash) {
+    add("dxilconv options");
+  }
   return out.empty() ? "none" : out;
 }
 
@@ -220,8 +233,25 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   // was in xenia's wrapper, not libdxilconv), and the metallib key carries no
   // DXIL bytes — so without this bump a warm cache would serve reuse-era
   // corruption indefinitely. Bump on any wrapper-side change to how
-  // conversions are produced.
-  schema.dxilconv_generation = 1;
+  // conversions are produced. The value lives in MetalTranslatorConfig next to
+  // kFetchAbiRevision so the conformance mirror can name it rather than repeat
+  // a literal that would drift silently.
+  schema.dxilconv_generation = MetalTranslatorConfig::kDxilconvGeneration;
+  // A value wider than its bitfield does not fail to compile — it TRUNCATES,
+  // and a truncated revision aliases an older one onto a newer build: exactly
+  // the stale-serve these fields exist to prevent, arriving through the guard
+  // itself. Pinned here rather than in a test because the failure has to be
+  // impossible to build, not merely detectable at run time.
+  static_assert(MetalTranslatorConfig::kFetchAbiRevision < (1u << 8),
+                "kFetchAbiRevision no longer fits its 8-bit schema field; "
+                "widen the field (and bump kFormatVersion) before bumping "
+                "past 255, or the revision aliases an earlier one");
+  static_assert(MetalTranslatorConfig::kDxilconvGeneration < (1u << 4),
+                "kDxilconvGeneration no longer fits its 4-bit schema field; "
+                "widen the field (and bump kFormatVersion) before bumping "
+                "past 15, or the generation aliases an earlier one");
+  static_assert(sizeof(SchemaBits) == sizeof(identity.translator_schema),
+                "SchemaBits must exactly fill translator_schema");
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));
 
   identity.dxc_artifact_hash = HashLoadedDylib("libdxilconv");
@@ -233,6 +263,20 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
         "so a later resolvable build discards rather than reuses",
         identity.dxc_artifact_hash, identity.msc_artifact_hash);
   }
+
+  // 2.1 item 3 — HOW dxilconv is invoked, not just which dylib is loaded. The
+  // option string is read from the same header the converter reads, so the two
+  // cannot disagree about what this session actually passed to Convert.
+  //
+  // The prefix is load-bearing: HashString returns 0 for an empty input, and 0
+  // is also what a manifest written BEFORE this field existed carries in that
+  // slot. Without the prefix, running with XENIA_DXBC2DXIL_FLAGS="" would match
+  // every pre-field manifest and be served artifacts built under the DEFAULT
+  // option string — the stale-serve this field exists to close, arriving
+  // through its own encoding. With it, no option value can hash to 0, so a
+  // pre-field manifest always mismatches and is discarded exactly once.
+  identity.converter_options_hash =
+      HashString("dxilconv-options:" + MetalDxbcToDxilEffectiveOptions());
 
   if (device) {
     id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;
@@ -946,6 +990,7 @@ bool MetalPipelineStorage::LoadAndValidateManifest(
   on_disk.msc_artifact_hash = stored.msc_artifact_hash;
   on_disk.device_hash = stored.device_hash;
   on_disk.os_build_hash = stored.os_build_hash;
+  on_disk.converter_options_hash = stored.converter_options_hash;
   if (on_disk != identity) {
     *mismatch_out = identity.DescribeMismatch(on_disk);
     return false;
@@ -966,6 +1011,7 @@ bool MetalPipelineStorage::WriteManifest(
   out.msc_artifact_hash = identity.msc_artifact_hash;
   out.device_hash = identity.device_hash;
   out.os_build_hash = identity.os_build_hash;
+  out.converter_options_hash = identity.converter_options_hash;
   out.last_access_seconds = NowSeconds();
   return WriteFileAtomic(title_root_ / kManifestName, &out, sizeof(out));
 }

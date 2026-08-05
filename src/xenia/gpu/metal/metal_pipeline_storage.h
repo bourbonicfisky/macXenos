@@ -93,6 +93,20 @@ struct MetalTranslatorConfig {
   //       metallibs were served from caches keyed on hashes that could not see
   //       the fix.
   static constexpr uint32_t kFetchAbiRevision = 5;
+
+  // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
+  // produced, as distinct from which libdxilconv is loaded (that is
+  // dxc_artifact_hash) and from what the translator emits (that is
+  // kFetchAbiRevision).
+  //   1 - fresh IDxbcConverter per Convert (2026-08-02). Reused converter
+  //       instances carried call history and emitted CORRUPT quad-domain
+  //       artifacts. The bug was in xenia's wrapper, so the dylib hash could
+  //       not see it, and the metallib key carries no DXIL bytes — without
+  //       this field a warm cache would serve reuse-era corruption forever.
+  // Bump on ANY wrapper-side change to how conversions are produced. Lives
+  // here, next to the revision it is a sibling of, so the storage identity and
+  // the conformance mirror can both name it instead of repeating a literal.
+  static constexpr uint32_t kDxilconvGeneration = 1;
 };
 
 // Everything that can change generated output for byte-identical guest ucode.
@@ -122,6 +136,18 @@ struct MetalPipelineStorageIdentity {
   // 3.3d — a metallib is compiled against both a GPU family and an OS.
   uint64_t device_hash = 0;   // registry id + name + GPU family
   uint64_t os_build_hash = 0; // OS build string, not the marketing version
+
+  // adopt-xenios-shader-artifact-caching 2.1 item 3 — the dxilconv OPTION
+  // string (metal_converter_options.h). The three fields above cover WHICH
+  // translator binaries are loaded and WHAT our translator emits; none of them
+  // covers HOW dxilconv is invoked. The option string changes the emitted DXIL
+  // for byte-identical DXBC — measured 3644 B under the default
+  // "-skip-container-parts" vs 4436 B under an empty string on the same
+  // quad-domain payload — so before this field a warm cache written with one
+  // XENIA_DXBC2DXIL_FLAGS setting was served under another. Pinned by
+  // conformance/metal_fetch_abi_cache_identity_test.cc (identity + discard) and
+  // conformance/metal_dxil_determinism_test.mm (the byte-level premise).
+  uint64_t converter_options_hash = 0;
 
   bool operator==(const MetalPipelineStorageIdentity& other) const;
   bool operator!=(const MetalPipelineStorageIdentity& other) const {

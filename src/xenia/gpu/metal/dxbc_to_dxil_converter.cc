@@ -13,6 +13,7 @@
 #include <cstdlib>
 
 #include "xenia/base/logging.h"
+#include "xenia/gpu/metal/metal_converter_options.h"
 
 // dxilconv (Microsoft DirectXShaderCompiler component). On non-Windows this
 // pulls in the WinAdapter COM shim (__EMULATE_UUID, CoTaskMemFree=free, etc.).
@@ -49,11 +50,6 @@ namespace metal {
 
 namespace {
 
-// Default converter flags. -skip-container-parts drops the DXBC container parts
-// that don't survive the DXIL round-trip and that the Metal Shader Converter
-// does not consume, keeping the output to the DXIL module we care about.
-constexpr wchar_t kDefaultOptions[] = L"-skip-container-parts";
-
 std::wstring WidenAscii(const char* value) {
   std::wstring out;
   for (const char* p = value; p && *p; ++p) {
@@ -78,11 +74,13 @@ bool HasDxbcMagic(const std::vector<uint8_t>& data) {
 }  // namespace
 
 bool DxbcToDxilConverter::Initialize(std::string* error_out) {
-  if (const char* env = std::getenv("XENIA_DXBC2DXIL_FLAGS")) {
-    options_ = WidenAscii(env);
-  } else {
-    options_ = kDefaultOptions;
-  }
+  // The effective option string comes from metal_converter_options.h, which
+  // ComputeMetalPipelineStorageIdentity fingerprints. The two must read the
+  // same source: the options change the emitted DXIL for byte-identical DXBC
+  // (measured: 3644 B under the default vs 4436 B under an empty string for the
+  // same quad-domain payload), so a durable cache written under one option
+  // string must not be served under another.
+  options_ = WidenAscii(MetalDxbcToDxilEffectiveOptions().c_str());
 
   // A create/release round-trip proves the library is present and the CLSID is
   // registered before any shader depends on it.

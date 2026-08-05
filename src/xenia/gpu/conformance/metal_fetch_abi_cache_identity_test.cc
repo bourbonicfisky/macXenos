@@ -24,13 +24,16 @@
 // stale artifact is not served. A pure operator== check would not catch a
 // storage layer that ignored the identity.
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 
 namespace xe {
@@ -45,10 +48,16 @@ using metal::MetalTranslatorConfig;
 
 // The identity the running build computes, minus the device/OS hashes (which
 // need a device). Everything under test lives in translator_schema.
-MetalPipelineStorageIdentity IdentityWithFetchAbi(uint32_t fetch_abi_revision) {
-  // Mirrors ComputeMetalPipelineStorageIdentity's packing. Kept textually close
-  // so a change to the layout there without a change here trips the equality
-  // assertions below rather than passing silently.
+//
+// MIRROR DRIFT, AND WHY THE GUARD BELOW EXISTS. This function used to claim
+// that keeping it "textually close" to ComputeMetalPipelineStorageIdentity
+// would make a layout change there trip the assertions here. It did not:
+// dxilconv_generation was added to the production packing on 2026-08-02 and
+// this mirror never noticed, because every case compares mirror values against
+// other mirror values. A mirror can only catch drift by being compared to the
+// thing it mirrors — see "The identity mirror matches the production packing".
+MetalPipelineStorageIdentity IdentityWithSchema(uint32_t fetch_abi_revision,
+                                                uint32_t dxilconv_generation) {
   struct SchemaBits {
     uint32_t vendor_apple : 1;
     uint32_t bindless_resources_used : 1;
@@ -56,7 +65,8 @@ MetalPipelineStorageIdentity IdentityWithFetchAbi(uint32_t fetch_abi_revision) {
     uint32_t gamma_render_target_as_unorm8 : 1;
     uint32_t msc_bindless_resources_used : 1;
     uint32_t fetch_abi_revision : 8;
-    uint32_t reserved : 19;
+    uint32_t dxilconv_generation : 4;
+    uint32_t reserved : 15;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -66,6 +76,7 @@ MetalPipelineStorageIdentity IdentityWithFetchAbi(uint32_t fetch_abi_revision) {
   schema.msc_bindless_resources_used =
       MetalTranslatorConfig::kMscBindlessResourcesUsed;
   schema.fetch_abi_revision = fetch_abi_revision;
+  schema.dxilconv_generation = dxilconv_generation;
 
   MetalPipelineStorageIdentity identity;
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));
@@ -73,7 +84,15 @@ MetalPipelineStorageIdentity IdentityWithFetchAbi(uint32_t fetch_abi_revision) {
   identity.msc_artifact_hash = 0x2222222222222222ull;
   identity.device_hash = 0x3333333333333333ull;
   identity.os_build_hash = 0x4444444444444444ull;
+  identity.converter_options_hash = 0x5555555555555555ull;
   return identity;
+}
+
+// The generation is held at the production value wherever a case is varying
+// the fetch ABI, so the two boundaries stay independently readable.
+MetalPipelineStorageIdentity IdentityWithFetchAbi(uint32_t fetch_abi_revision) {
+  return IdentityWithSchema(fetch_abi_revision,
+                            MetalTranslatorConfig::kDxilconvGeneration);
 }
 
 // Unique scratch root per case; removed on the way in and out so a previous
@@ -362,6 +381,264 @@ TEST_CASE("A geometry record written under a previous ABI is not served",
     MetalPipelineStorage::GeometryRecord served;
     CHECK_FALSE(storage.LoadGeometryRecord(kGeometryKey, &served));
     storage.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+// ---------------------------------------------------------------------------
+// adopt-xenios-shader-artifact-caching task 2.1, items 2 and 3: the dxilconv
+// converter generation and the dxilconv option string.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("The identity mirror matches the production packing",
+          "[cache_identity][mirror]") {
+  // The guard the old "kept textually close" comment only promised. Without
+  // it, every case in this file compares mirror values to mirror values, so a
+  // field added to ComputeMetalPipelineStorageIdentity's packing — as
+  // dxilconv_generation was — leaves the whole file green while testing a
+  // layout production does not use.
+  //
+  // A null device is fine: device_hash is the only field it feeds, and this
+  // compares translator_schema.
+  const MetalPipelineStorageIdentity production =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr);
+  const MetalPipelineStorageIdentity mirrored =
+      IdentityWithSchema(MetalTranslatorConfig::kFetchAbiRevision,
+                         MetalTranslatorConfig::kDxilconvGeneration);
+  INFO("production=" << std::hex << production.translator_schema
+                     << " mirror=" << mirrored.translator_schema);
+  CHECK(production.translator_schema == mirrored.translator_schema);
+
+  // And the production identity must actually carry an option fingerprint. 0
+  // is what a manifest written before the field existed holds, so a computed 0
+  // would silently match every stale directory.
+  CHECK(production.converter_options_hash != 0ull);
+}
+
+TEST_CASE("The production dxilconv generation is the current one",
+          "[cache_identity][dxilconv]") {
+  // 1 = fresh IDxbcConverter per Convert (2026-08-02). A revert to reused
+  // instances without a generation bump would silently re-serve reuse-era
+  // artifacts, which is the failure this constant exists to make impossible.
+  CHECK(MetalTranslatorConfig::kDxilconvGeneration == 1);
+}
+
+TEST_CASE("A cache written under a previous dxilconv generation is discarded",
+          "[cache_identity][dxilconv]") {
+  // Item 2. Generation 0 is the pre-fix wrapper: reused IDxbcConverter
+  // instances carried call history and emitted CORRUPT quad-domain DXIL. The
+  // metallib key carries no DXIL bytes and dxc_artifact_hash fingerprints
+  // libdxilconv, not our wrapper, so NOTHING except this field distinguishes a
+  // metallib built from corrupt DXIL from a clean one.
+  //
+  // Three legs, and the third is the point: filtering reads by identity would
+  // leave the corrupt bytes on disk for a downgrade or an A/B rollback build
+  // to resurrect. It must DISCARD.
+  std::filesystem::path root = MakeScratchRoot("dxilconv_generation");
+  const MetalPipelineStorageIdentity pre_fix = IdentityWithSchema(
+      MetalTranslatorConfig::kFetchAbiRevision, /*dxilconv_generation=*/0);
+  const MetalPipelineStorageIdentity post_fix = IdentityWithSchema(
+      MetalTranslatorConfig::kFetchAbiRevision,
+      MetalTranslatorConfig::kDxilconvGeneration);
+  REQUIRE(pre_fix != post_fix);
+
+  {
+    MetalPipelineStorage gen0;
+    REQUIRE(gen0.Open(root, kTitleId, pre_fix));
+    REQUIRE(gen0.StoreMetallib(kMetallibKey, SampleMetallib()));
+    gen0.Close();
+    // Control: generation 0 serves its own artifact, or the rejection below
+    // proves nothing.
+    MetalPipelineStorage warm0;
+    REQUIRE(warm0.Open(root, kTitleId, pre_fix));
+    std::vector<uint8_t> served;
+    REQUIRE(warm0.LoadMetallib(kMetallibKey, &served));
+    CHECK(served == SampleMetallib());
+    warm0.Close();
+  }
+
+  {
+    MetalPipelineStorage gen1;
+    REQUIRE(gen1.Open(root, kTitleId, post_fix));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(gen1.LoadMetallib(kMetallibKey, &served));
+    gen1.Close();
+  }
+
+  {
+    MetalPipelineStorage back0;
+    REQUIRE(back0.Open(root, kTitleId, pre_fix));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(back0.LoadMetallib(kMetallibKey, &served));
+    back0.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("The dxilconv generation does not alias the fetch ABI revision",
+          "[cache_identity][dxilconv]") {
+  // The two fields are adjacent in the packing. If the generation overlapped
+  // the revision, a generation bump would read as a revision bump and — worse
+  // — some (revision, generation) pair would collide with another, which is a
+  // stale-serve arriving through the guard itself.
+  const uint32_t base =
+      IdentityWithSchema(0, 0).translator_schema;
+  const uint32_t revision_only =
+      IdentityWithSchema(0xFF, 0).translator_schema;
+  const uint32_t generation_only =
+      IdentityWithSchema(0, 0xF).translator_schema;
+
+  const uint32_t revision_bits = base ^ revision_only;
+  const uint32_t generation_bits = base ^ generation_only;
+  INFO("revision bits=" << std::hex << revision_bits
+                        << " generation bits=" << generation_bits);
+  CHECK(revision_bits != 0u);
+  CHECK(generation_bits != 0u);
+  CHECK((revision_bits & generation_bits) == 0u);
+  // Neither may touch the five configuration booleans in the low bits.
+  CHECK((revision_bits & 0x1Fu) == 0u);
+  CHECK((generation_bits & 0x1Fu) == 0u);
+
+  // Every (revision, generation) pair in range must be a distinct schema —
+  // the property a bit overlap would break.
+  std::vector<uint32_t> seen;
+  for (uint32_t revision = 0; revision < 256; ++revision) {
+    for (uint32_t generation = 0; generation < 16; ++generation) {
+      seen.push_back(IdentityWithSchema(revision, generation).translator_schema);
+    }
+  }
+  std::sort(seen.begin(), seen.end());
+  CHECK(std::adjacent_find(seen.begin(), seen.end()) == seen.end());
+  CHECK(seen.size() == 256u * 16u);
+}
+
+TEST_CASE("The dxilconv option string participates in the cache identity",
+          "[cache_identity][dxilconv][options]") {
+  // Item 3. The option string changes the emitted DXIL for byte-identical DXBC
+  // (measured in metal_dxil_determinism_test.mm: 3644 B under the default vs
+  // 4436 B under an empty string), and before this field it reached no cache
+  // key at all — a warm cache written under one setting was served under
+  // another.
+  const char* saved = std::getenv(metal::kMetalDxbcToDxilOptionsEnvVar);
+  const std::string saved_value = saved ? std::string(saved) : std::string();
+  const bool had_override = saved != nullptr;
+  auto restore = [&]() {
+    if (had_override) {
+      setenv(metal::kMetalDxbcToDxilOptionsEnvVar, saved_value.c_str(), 1);
+    } else {
+      unsetenv(metal::kMetalDxbcToDxilOptionsEnvVar);
+    }
+  };
+
+  unsetenv(metal::kMetalDxbcToDxilOptionsEnvVar);
+  REQUIRE(metal::MetalDxbcToDxilEffectiveOptions() ==
+          std::string(metal::kMetalDxbcToDxilDefaultOptions));
+  const uint64_t default_hash =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr)
+          .converter_options_hash;
+
+  setenv(metal::kMetalDxbcToDxilOptionsEnvVar, "-skip-container-parts -Zi", 1);
+  const uint64_t overridden_hash =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr)
+          .converter_options_hash;
+
+  setenv(metal::kMetalDxbcToDxilOptionsEnvVar, "", 1);
+  const uint64_t empty_hash =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr)
+          .converter_options_hash;
+
+  restore();
+
+  CHECK(default_hash != overridden_hash);
+  CHECK(default_hash != empty_hash);
+  CHECK(overridden_hash != empty_hash);
+  // No option value may hash to 0: that is the value a manifest written before
+  // this field existed carries, and matching it would serve entries built
+  // under an option string nothing recorded.
+  CHECK(default_hash != 0ull);
+  CHECK(overridden_hash != 0ull);
+  CHECK(empty_hash != 0ull);
+}
+
+TEST_CASE("A cache written under different dxilconv options is discarded",
+          "[cache_identity][dxilconv][options]") {
+  // The identity check above proves the field moves; this proves the STORE
+  // acts on it. Same three legs as the generation case, for the same reason.
+  std::filesystem::path root = MakeScratchRoot("dxilconv_options");
+  MetalPipelineStorageIdentity option_a = IdentityWithFetchAbi(
+      MetalTranslatorConfig::kFetchAbiRevision);
+  option_a.converter_options_hash = 0xA1A1A1A1A1A1A1A1ull;
+  MetalPipelineStorageIdentity option_b = option_a;
+  option_b.converter_options_hash = 0xB2B2B2B2B2B2B2B2ull;
+  REQUIRE(option_a != option_b);
+  CHECK(option_a.DescribeMismatch(option_b) == "dxilconv options");
+
+  {
+    MetalPipelineStorage a;
+    REQUIRE(a.Open(root, kTitleId, option_a));
+    REQUIRE(a.StoreMetallib(kMetallibKey, SampleMetallib()));
+    a.Close();
+    MetalPipelineStorage warm_a;
+    REQUIRE(warm_a.Open(root, kTitleId, option_a));
+    std::vector<uint8_t> served;
+    REQUIRE(warm_a.LoadMetallib(kMetallibKey, &served));
+    CHECK(served == SampleMetallib());
+    warm_a.Close();
+  }
+
+  {
+    MetalPipelineStorage b;
+    REQUIRE(b.Open(root, kTitleId, option_b));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(b.LoadMetallib(kMetallibKey, &served));
+    b.Close();
+  }
+
+  {
+    MetalPipelineStorage back_a;
+    REQUIRE(back_a.Open(root, kTitleId, option_a));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(back_a.LoadMetallib(kMetallibKey, &served));
+    back_a.Close();
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("A manifest written before the option field existed is discarded",
+          "[cache_identity][dxilconv][options]") {
+  // The upgrade path. Those entries were produced under an option string
+  // nothing recorded, so they cannot be trusted by a build that now records
+  // one — the same reasoning as every other boundary in this file.
+  std::filesystem::path root = MakeScratchRoot("dxilconv_options_upgrade");
+  MetalPipelineStorageIdentity pre_field =
+      IdentityWithFetchAbi(MetalTranslatorConfig::kFetchAbiRevision);
+  pre_field.converter_options_hash = 0ull;  // what the old `reserved` slot held
+
+  {
+    MetalPipelineStorage old_build;
+    REQUIRE(old_build.Open(root, kTitleId, pre_field));
+    REQUIRE(old_build.StoreMetallib(kMetallibKey, SampleMetallib()));
+    old_build.Close();
+  }
+
+  {
+    // A build that computes a real option fingerprint must not be served it.
+    MetalPipelineStorageIdentity current = pre_field;
+    current.converter_options_hash =
+        metal::ComputeMetalPipelineStorageIdentity(nullptr)
+            .converter_options_hash;
+    REQUIRE(current.converter_options_hash != 0ull);
+    MetalPipelineStorage new_build;
+    REQUIRE(new_build.Open(root, kTitleId, current));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(new_build.LoadMetallib(kMetallibKey, &served));
+    new_build.Close();
   }
 
   std::error_code ec;
