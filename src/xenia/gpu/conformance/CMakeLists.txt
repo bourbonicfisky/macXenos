@@ -105,6 +105,10 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_util.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/texture_info_formats.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_pipeline_storage.mm
+    # DXIL artifact store (task 2.2). Device-free, but it lives in a .mm
+    # because it shares the pipeline storage's atomic-publish helper; its test
+    # is a globbed *_test.cc.
+    ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_dxil_store.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_load_shader_pipelines.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_upload_arena.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_kernel_conformance_test.mm

@@ -22,6 +22,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
+#include "xenia/gpu/metal/metal_artifact_hit_verify.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/registers.h"
@@ -138,9 +139,24 @@ void MetalPipelineCache::InitializeDurableStorage(
         "continuing with in-memory caches only",
         title_id);
   }
+
+  // Task 2.2 — the DXIL store, opened independently and with its own identity.
+  // Note it is NOT under the title directory and its Open is not conditional on
+  // the pipeline storage having opened: the whole point is that the two
+  // invalidate on different facts.
+  if (cvars::metal_dxil_cache) {
+    if (!dxil_store_.Open(cache_root, ComputeMetalDxilStoreIdentity())) {
+      XELOGW(
+          "MetalPipelineCache: DXIL artifact store unavailable; DXBC->DXIL "
+          "runs cold this session");
+    }
+  }
 }
 
-void MetalPipelineCache::ShutdownDurableStorage() { storage_.Close(); }
+void MetalPipelineCache::ShutdownDurableStorage() {
+  storage_.Close();
+  dxil_store_.Close();
+}
 
 void MetalPipelineCache::Shutdown() {
   ShutdownDurableStorage();
@@ -339,9 +355,70 @@ bool MetalPipelineCache::TranslateShader(
 
   // Stage 2: DXBC -> DXIL. THE stage the DXIL artifact cache removes, and the
   // stage carrying the fresh-IDxbcConverter-per-Convert cost.
+  //
+  // Reached only on a metallib MISS (the hit above returns). Task 1.1 measured
+  // that on an ordinary warm launch that never happens — the DXIL store exists
+  // for launches after an OS or MSC change, where every metallib is
+  // legitimately invalid but the DXIL is not.
   std::string error;
   std::vector<uint8_t> dxil;
-  {
+  bool dxil_from_cache = false;
+  const MetalDxilArtifactKey dxil_key = MetalDxilArtifactKey::ForDxbc(dxbc);
+  if (cvars::metal_dxil_cache && dxil_store_.is_open()) {
+    std::vector<uint8_t> cached_dxil;
+    const MetalDxilLoadResult result = dxil_store_.Load(dxil_key, &cached_dxil);
+    if (result == MetalDxilLoadResult::kHit) {
+      dxil = std::move(cached_dxil);
+      dxil_from_cache = true;
+    } else if (result == MetalDxilLoadResult::kRejectedCorrupt) {
+      // Not a miss. The store already deleted the entry and logged it; the
+      // cold conversion below rebuilds it. Surfaced in the census as a
+      // correctness incident, not a hit-rate figure.
+      census.dxil_cache_corrupt.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  if (dxil_from_cache) {
+    census.dxil_cache_hits.fetch_add(1, std::memory_order_relaxed);
+    // SAMPLED HIT VERIFICATION (task 2.3, invariant from 2.1): a hit must equal
+    // a fresh conversion byte for byte, or it must miss. The key cannot see a
+    // behavior nobody knew had changed, so this is the behavioral backstop —
+    // sampled rather than universal because verifying every hit would cost the
+    // conversion the cache exists to skip.
+    if (cvars::metal_dxil_cache_verify_every_nth &&
+        (census.dxil_cache_hits.load(std::memory_order_relaxed) %
+             cvars::metal_dxil_cache_verify_every_nth ==
+         0)) {
+      std::vector<uint8_t> fresh;
+      std::string verify_error;
+      const bool converted = dxil_converter_.Convert(dxbc, fresh, &verify_error);
+      const MetalArtifactHitVerdict verdict =
+          converted ? VerifyMetalArtifactHit(dxil, fresh)
+                    : MetalArtifactHitVerdict::kMissUnverifiable;
+      census.dxil_verify.Record(verdict);
+      if (!MetalArtifactHitIsServable(verdict)) {
+        // A served artifact this build does not reproduce. Reject it, report
+        // it, drop the entry so it rebuilds, and use the fresh bytes — never
+        // the cached ones.
+        XELOGE(
+            "MetalDxilStore: VERIFICATION FAILURE for shader {:016X} "
+            "(verdict={}, cached={} B, fresh={} B) — the served artifact is "
+            "not what this build produces. Entry dropped and rebuilt.",
+            shader.ucode_data_hash(), MetalArtifactHitVerdictName(verdict),
+            dxil.size(), fresh.size());
+        dxil_store_.Forget(dxil_key);
+        dxil_from_cache = false;
+        dxil = std::move(fresh);
+        if (dxil.empty()) {
+          XELOGE(
+              "MetalPipelineCache: DXBC->DXIL verification re-convert failed "
+              "for shader {:016X}: {}",
+              shader.ucode_data_hash(), verify_error);
+          return false;
+        }
+      }
+    }
+  } else {
     MetalShaderBuildTimer timer(census.dxil);
     if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
       timer.Dismiss();
@@ -350,6 +427,9 @@ bool MetalPipelineCache::TranslateShader(
       return false;
     }
     timer.set_bytes(dxil.size());
+    if (cvars::metal_dxil_cache && dxil_store_.is_open()) {
+      dxil_store_.Store(dxil_key, dxil);
+    }
   }
 
   // Shader-chain forensics (XE_METAL_DUMP_XLAT=<hex ucode hash>): dump the

@@ -50,6 +50,7 @@
 #include <string>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/gpu/metal/metal_artifact_hit_verify.h"
 
 namespace xe {
 namespace gpu {
@@ -104,6 +105,17 @@ class MetalShaderBuildCensus {
   // A hit whose blob the device refused. Not a miss: a miss is cold, this is a
   // stored artifact that is wrong, and the two must never share a counter.
   std::atomic<uint64_t> metallib_rejected{0};
+
+  // DXIL artifact store (task 2.2/2.3). Kept apart from the metallib counters
+  // above because the two stores answer different questions: the metallib
+  // store is the warm-launch mechanism, the DXIL store only engages on a
+  // metallib miss.
+  std::atomic<uint64_t> dxil_cache_hits{0};
+  // A stored artifact whose payload did not match its recorded hash. A
+  // correctness incident, never folded into misses.
+  std::atomic<uint64_t> dxil_cache_corrupt{0};
+  // Sampled hit-vs-fresh verification. `mismatches` must stay 0.
+  MetalArtifactHitStats dxil_verify;
 
   // Frame attribution.
   std::atomic<uint64_t> swaps{0};
@@ -175,6 +187,7 @@ class MetalShaderBuildCensus {
         "|fn={}/{:.1f}ms|pso={}/{:.1f}ms/max{:.1f}|gpso={}/{:.1f}ms"
         "|mlib_hit={}|mlib_miss={}|mlib_hitrate={:.1f}%|mlib_rejected={}"
         "|mlib_load_ms={:.1f}|mlib_store={}/{:.1f}ms/{}KiB"
+        "|dxil_hit={}|dxil_corrupt={}|dxil_verified={}|dxil_verify_bad={}"
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
         "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}",
         phase, swaps.load(std::memory_order_relaxed),
@@ -194,6 +207,10 @@ class MetalShaderBuildCensus {
         metallib_stores.load(std::memory_order_relaxed),
         double(metallib_store_ns.load(std::memory_order_relaxed)) / 1e6,
         metallib_store_bytes.load(std::memory_order_relaxed) / 1024,
+        dxil_cache_hits.load(std::memory_order_relaxed),
+        dxil_cache_corrupt.load(std::memory_order_relaxed),
+        dxil_verify.verified.load(std::memory_order_relaxed),
+        dxil_verify.mismatches.load(std::memory_order_relaxed),
         double(startup_build_ns.load(std::memory_order_relaxed)) / 1e6,
         double(stall_build_ns.load(std::memory_order_relaxed)) / 1e6,
         stall_events.load(std::memory_order_relaxed),

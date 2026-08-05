@@ -22,6 +22,7 @@
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_dxil_store.h"
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
@@ -312,6 +313,14 @@ class MetalPipelineCache {
   // Durable on-disk storage for M1/M2. Closed means "no durable cache", which
   // is today's behavior and the default.
   MetalPipelineStorage storage_;
+
+  // Durable DXIL-intermediate store (task 2.2). SEPARATE from storage_ and
+  // deliberately so: its identity omits the MSC hash, the device and the OS
+  // build, none of which a DXIL artifact depends on. That is what lets it
+  // survive an OS or MSC change that legitimately discards every metallib.
+  // Default off (cvar metal_dxil_cache) — task 1.1 measured that it saves
+  // nothing on an ordinary warm launch.
+  MetalDxilStore dxil_store_;
 };
 
 }  // namespace metal

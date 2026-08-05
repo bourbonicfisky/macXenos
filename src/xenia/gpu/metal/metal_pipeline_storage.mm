@@ -30,6 +30,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_converter_options.h"
+#include "xenia/gpu/metal/metal_dxil_store.h"
 
 // 3.6b — size-based bounds, configurable. Not age-based: a large title touched
 // rarely is the thing worth evicting, and its age says nothing about its cost.
@@ -1045,6 +1046,16 @@ void MetalPipelineStorage::EvictToGlobalCapLocked(
     total += bytes;
     // 3.6d — never the active title.
     if (entry.path() == title_root_) {
+      continue;
+    }
+    // NEVER the DXIL artifact store. It lives under metal/ but is NOT a title
+    // directory: it has no title manifest, so it would read as
+    // last_access = 0 and sort FIRST for eviction — the newest and most
+    // broadly useful store deleted before any stale title. Its bytes still
+    // count toward `total` above, because it does consume the global cap; it
+    // enforces its own bound internally
+    // (metal_dxil_store.h, cvar metal_dxil_cache_cap_mib).
+    if (entry.path().filename() == kMetalDxilStoreDirName) {
       continue;
     }
     // 3.6d — never a directory another process holds. flock is advisory, so
