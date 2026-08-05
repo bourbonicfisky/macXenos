@@ -26,18 +26,55 @@
 #include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 
-// Default OFF, promoted individually on measured evidence (task 6.1). Task 1.1
-// measured that this saves nothing on an ordinary warm launch — its value is
-// confined to launches following an OS or MSC change — so it must not be
-// enabled by assumption.
-DEFINE_bool(metal_dxil_cache, false,
+// PROMOTED DEFAULT-ON 2026-08-05 on the task 2.4 evidence.
+//
+// WHAT THIS IS: a RESILIENT INTERMEDIATE cache. It is not a warm-start cache
+// and must never be described as one — on an ordinary warm launch it does
+// nothing at all, because the metallib store hits first and returns before
+// DXBC->DXIL runs (measured: zero DXIL activity, S1).
+//
+// What it does do, both measured:
+//   1. SURVIVES METALLIB-INVALIDATING CHANGES. A metallib is compiled against
+//      a GPU family and an OS build by the Metal Shader Converter; DXIL is
+//      none of those. When an OS update, an MSC upgrade, a different GPU or a
+//      shader-ABI bump legitimately discards every metallib, the dxilconv work
+//      does not have to be re-paid. Measured on the title-invalidated arm:
+//      Sonic 295.2 ms -> 0.0 ms (100 hits), worst frame 242.7 -> 150.2 ms;
+//      JC2 584.3 ms -> 0.0 ms (216 hits), worst frame 1015.5 -> 611.9 ms.
+//      MSC time was unchanged in both, which is what confirms the attribution.
+//   2. DEDUPLICATES IDENTICAL DXBC WITHIN A COLD RUN. Distinct
+//      (ucode, modification) pairs can emit byte-identical DXBC, which the
+//      metallib key cannot express: 11 of Sonic's 100 conversions and 7 of
+//      JC2's 216 were duplicates.
+//
+// Cold cost is a lookup plus a write (Sonic 1.4-7.4 ms + 16.1-16.3 ms; JC2
+// 6.2 + 38.6 ms). The cold arms measured slightly FASTER with the gate on, but
+// that difference is WITHIN RUN-TO-RUN NOISE and is not claimed as a gain — the
+// defensible statement is no measurable cold regression.
+//
+// Setting it false is the EXACT rollback: no DXIL reads, no writes, no store
+// opened. Both arms log their effective state (grep MetalDxilGate).
+DEFINE_bool(metal_dxil_cache, true,
             "Persist the DXBC->DXIL intermediate in a store keyed only on what "
             "DXIL depends on (libdxilconv, converter options, converter "
-            "generation), so an OS or Metal-Shader-Converter change that "
-            "legitimately invalidates cached metallibs does not also re-pay "
-            "dxilconv. No effect on an ordinary warm launch, where the metallib "
-            "store already serves.",
+            "generation). A RESILIENT INTERMEDIATE cache, not a warm-start "
+            "one: it does nothing on an ordinary warm launch, where the "
+            "metallib store already serves. It earns its place by surviving "
+            "changes that legitimately invalidate every metallib - an OS "
+            "update, a Metal Shader Converter upgrade, a different GPU, a "
+            "shader-ABI bump - so dxilconv is not re-paid (measured: 295 ms "
+            "Sonic, 584 ms Just Cause 2), and by deduplicating byte-identical "
+            "DXBC within a cold run. Set to false for the exact rollback: no "
+            "durable DXIL reads or writes.",
             "GPU");
+// Config migration for the promotion. Resets ONLY configs still carrying the
+// old default (false); anyone who deliberately set a value keeps it. A
+// deliberate pre-promotion opt-out that happens to equal the old default is
+// indistinguishable from the default itself -- the config file records values,
+// not provenance -- so it is reset once. The flag shipped default-off for a
+// single day (2026-08-04 to 2026-08-05), so that population is test configs.
+// Every opt-out made after this point is permanent.
+UPDATE_from_bool(metal_dxil_cache, 2026, 8, 5, 12, false);
 
 DEFINE_uint64(metal_dxil_cache_verify_every_nth, 0,
               "Sampled DXIL cache-hit verification: every Nth hit is compared "

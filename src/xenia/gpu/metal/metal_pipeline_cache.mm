@@ -144,12 +144,27 @@ void MetalPipelineCache::InitializeDurableStorage(
   // Note it is NOT under the title directory and its Open is not conditional on
   // the pipeline storage having opened: the whole point is that the two
   // invalidate on different facts.
+  // EFFECTIVE-STATE LOG. Emitted in BOTH arms and greppable (MetalDxilGate), so
+  // "this run was default-on" and "this run was the rollback" are provable from
+  // the log rather than assumed from the command line — a persisted config
+  // value silently overriding the code default is exactly how the promotion
+  // measurement could have been wrong (the config had metal_dxil_cache=false
+  // written into it while the flag was default-off).
+  XELOGI(
+      "MetalDxilGate: metal_dxil_cache={} (default-on since 2026-08-05; false "
+      "is the exact rollback), verify_every_nth={}, cap={} MiB",
+      cvars::metal_dxil_cache ? "TRUE" : "FALSE",
+      cvars::metal_dxil_cache_verify_every_nth,
+      cvars::metal_dxil_cache_cap_mib);
   if (cvars::metal_dxil_cache) {
     if (!dxil_store_.Open(cache_root, ComputeMetalDxilStoreIdentity())) {
       XELOGW(
-          "MetalPipelineCache: DXIL artifact store unavailable; DXBC->DXIL "
-          "runs cold this session");
+          "MetalDxilGate: store unavailable; DXBC->DXIL runs cold this session");
     }
+  } else {
+    XELOGI(
+        "MetalDxilGate: ROLLBACK ARM — no DXIL store opened, no durable reads "
+        "or writes this session");
   }
 }
 
