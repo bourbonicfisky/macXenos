@@ -7233,6 +7233,76 @@ void MetalCommandProcessor::OnGammaRamp256EntryTableValueWritten() {
 
 void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
   CommandProcessor::OnGammaRampPWLValueWritten();
+  ++gamma_pwl_writes_;
+}
+
+// Guest gamma-state census — implement-metal-pwl-gamma-ramp task 1.5, and the
+// instrument that would LIFT that change's NO-GO. Bounded (logs only on
+// change), env-gated (XE_GAMMA_CENSUS=1), zero cost when unset.
+//
+// RETAINED rather than removed with the rest of the audit scaffolding: the
+// audit stopped because DC_LUTA_CONTROL has only ever been observed holding two
+// values and no title with asymmetric PWL channels has been found
+// (docs/metal_pwl_gamma_audit.md §7). More census coverage over more titles is
+// precisely what would settle the bit layout, the valid increment domain, and
+// the RGB write order. Re-run it over any new corpus.
+//
+// Deliberately reports RAW state and performs NO engagement classification. Two
+// reasons, both measured: the default PWL table is nonzero and byte-identical
+// to 4D5307E6's sRGB setup ramp, so content proves nothing; and SetGammaRamp's
+// trace-restore path fires the written-callback, so a nonzero write count
+// proves nothing either. The removed PWL identity classifier failed on exactly
+// the first of these.
+void MetalCommandProcessor::CensusGammaState() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_GAMMA_CENSUS");
+    return v && v[0] == '1';
+  }();
+  if (!s_enabled) {
+    return;
+  }
+  const auto& regs = *register_file_;
+  const uint32_t control = regs[XE_GPU_REG_DC_LUTA_CONTROL];
+  const uint32_t rw_mode = regs[XE_GPU_REG_DC_LUT_RW_MODE];
+  const uint32_t write_en = regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK];
+  const uint32_t black_b = regs[XE_GPU_REG_DC_LUTA_BLACK_OFFSET_BLUE];
+  const uint32_t black_g = regs[XE_GPU_REG_DC_LUTA_BLACK_OFFSET_GREEN];
+  const uint32_t black_r = regs[XE_GPU_REG_DC_LUTA_BLACK_OFFSET_RED];
+  const uint32_t white_b = regs[XE_GPU_REG_DC_LUTA_WHITE_OFFSET_BLUE];
+  const uint32_t white_g = regs[XE_GPU_REG_DC_LUTA_WHITE_OFFSET_GREEN];
+  const uint32_t white_r = regs[XE_GPU_REG_DC_LUTA_WHITE_OFFSET_RED];
+
+  // Content hash of the full PWL table, plus whether the three channels are
+  // byte-identical. Channel ASYMMETRY is the fact that would let the corpus
+  // resolve the unverified R,G,B write order; symmetric tables cannot.
+  const reg::DC_LUT_PWL_DATA* pwl = gamma_ramp_pwl_rgb();
+  const uint64_t pwl_hash = XXH3_64bits(pwl, sizeof(reg::DC_LUT_PWL_DATA) * 128 * 3);
+  bool channels_asymmetric = false;
+  bool pwl_all_zero = true;
+  for (uint32_t entry = 0; entry < 128; ++entry) {
+    const reg::DC_LUT_PWL_DATA* triple = pwl + entry * 3;
+    if (triple[0].value != triple[1].value || triple[1].value != triple[2].value) {
+      channels_asymmetric = true;
+    }
+    if (triple[0].value || triple[1].value || triple[2].value) {
+      pwl_all_zero = false;
+    }
+  }
+  const uint64_t signature =
+      pwl_hash ^ (uint64_t(control) << 1) ^ (uint64_t(rw_mode) << 33) ^
+      (uint64_t(black_b | white_b) << 17) ^ uint64_t(gamma_pwl_writes_ != 0);
+  if (signature == gamma_census_signature_ && gamma_census_reports_) {
+    return;
+  }
+  gamma_census_signature_ = signature;
+  ++gamma_census_reports_;
+  XELOGI(
+      "GammaCensus|swap={}|DC_LUTA_CONTROL={:08X}|RW_MODE={:08X}|WRITE_EN={:08X}"
+      "|pwl_writes={}|pwl_hash={:016X}|pwl_all_zero={}|channels_asymmetric={}"
+      "|black_bgr={:08X}/{:08X}/{:08X}|white_bgr={:08X}/{:08X}/{:08X}",
+      swap_count_, control, rw_mode, write_en, gamma_pwl_writes_, pwl_hash,
+      pwl_all_zero ? 1 : 0, channels_asymmetric ? 1 : 0, black_b, black_g,
+      black_r, white_b, white_g, white_r);
 }
 
 void MetalCommandProcessor::InitializeTrace() {
@@ -8127,6 +8197,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     objc_autoreleasePoolPop(frame_autorelease_pool_);
   }
   frame_autorelease_pool_ = objc_autoreleasePoolPush();
+
+  // TEMPORARY census probe (task 1.5). At swap, because that is where a
+  // production decoder would read DC_LUTA_CONTROL under design D3.
+  CensusGammaState();
   if (shared_texture_cache_) {
     // Base-class per-frame reset so a failed creation is retried rather than
     // sticking as a permanently invalid binding.

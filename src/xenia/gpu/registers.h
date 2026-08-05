@@ -935,13 +935,31 @@ static_assert_size(DC_LUT_SEQ_COLOR, sizeof(uint32_t));
 union alignas(uint32_t) DC_LUT_PWL_DATA {
   uint32_t value;
   struct {
-    // See the M56 DC_LUTA_CONTROL for information about the way these should be
-    // interpreted (`output = base + (multiplier * delta) / 2^increment`, where
-    // the increment is the value specified in DC_LUTA_CONTROL for the specific
-    // color channel, the base is 7 bits of the front buffer value above
-    // `increment` bits, the multiplier is the lower `increment` bits of it; the
-    // increment is nonzero, otherwise the 256-entry table should be used
-    // instead).
+    // `output = base + (multiplier * delta) / 2^increment`, where the table
+    // index is the 7 bits of the front buffer value ABOVE the `increment` bits
+    // and the multiplier is the lower `increment` bits of it.
+    //
+    // AUDITED 2026-08-05 (docs/metal_pwl_gamma_audit.md). Provenance and limits,
+    // because this comment previously stated more than the evidence supports:
+    //
+    // - The transfer function above is M56-derived (RRG-216M56), which is
+    //   MECHANISM evidence only and is not present in this tree.
+    // - The increment is a SINGLE SHARED value for all three channels on the
+    //   Xenos, NOT per-channel. This comment used to say "for the specific
+    //   color channel", which is the M56 shape; register_table.inc's
+    //   Xenos-specific note ("single set of parameters for all channels
+    //   apparently unlike on the M56", evidenced by 4D5307E6 writing
+    //   DC_LUTA_CONTROL = 3) is the authority and wins.
+    // - "increment nonzero, otherwise use the 256-entry table" is likewise
+    //   M56-derived. It is consistent with the only two DC_LUTA_CONTROL values
+    //   ever observed (0 and 3) but is NOT independently established on Xenos.
+    // - Consequence of the index/multiplier split: the active input width is
+    //   7 + increment bits (10 at increment 3). The 128-entry table does not by
+    //   itself imply a 10-bit input.
+    // - UNRESOLVED: the DC_LUTA_CONTROL bit layout, the valid increment domain
+    //   (only 3 observed anywhere), and the RGB write order when channels
+    //   differ. A 49-trace census found no PWL selection and no asymmetric
+    //   channels, so the corpus cannot settle any of them.
     uint32_t base : 16;   // +0, bits 0:5 are hardwired to zero
     uint32_t delta : 16;  // +16, bits 0:5 are hardwired to zero
   };

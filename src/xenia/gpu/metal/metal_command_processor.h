@@ -158,6 +158,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // class's own tracking is preserved by calling through.
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
+  // Guest gamma-state census (XE_GAMMA_CENSUS=1). Retained audit instrument —
+  // see docs/metal_pwl_gamma_audit.md.
+  void CensusGammaState();
 
   void InitializeTrace() override;
   std::string GetCaptureDeviceInfoJson() const override;
@@ -402,6 +405,10 @@ class MetalCommandProcessor : public CommandProcessor {
   bool gamma_ramp_dirty_ = true;
   uint64_t gamma_ramp_uploads_ = 0;
   uint64_t gamma_ramp_applications_ = 0;
+  // Gamma census state (see CensusGammaState).
+  uint64_t gamma_pwl_writes_ = 0;
+  uint64_t gamma_census_signature_ = 0;
+  uint64_t gamma_census_reports_ = 0;
   // id<MTLBuffer>, 256 dwords. Mutated only between swaps; see the lifetime
   // invariant documented at MetalUploadGammaRamp.
   void* gamma_ramp_buffer_ = nullptr;

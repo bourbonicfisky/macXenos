@@ -1082,6 +1082,12 @@ XE_GPU_REGISTER(0x1923, kDword, DC_LUT_SEQ_COLOR)
 // one entry (the order is likely R, G, B, similar to DC_LUT_SEQ_COLOR, but this
 // hasn't been verified yet as no games using the PWL gamma ramp with separate
 // settings for each channel have been found yet).
+// Still unverified as of 2026-08-05: a census over 49 traces / 7 titles found
+// zero asymmetric-channel PWL tables and zero PWL mode selections, so the
+// available corpus cannot settle the order either. Note the write-enable mask
+// (DC_LUT_WRITE_EN_MASK) runs blue, green, red while this assumed data order
+// runs red, green, blue; command_processor.cc implements both.
+// See docs/metal_pwl_gamma_audit.md.
 // Default: 0x00000000.
 XE_GPU_REGISTER(0x1924, kDword, DC_LUT_PWL_DATA)
 // Read / write, 0:9 - blue, 10:19 - green, 20:29 - red. The LUT index is
@@ -1100,7 +1106,13 @@ XE_GPU_REGISTER(0x1927, kDword, DC_LUT_WRITE_EN_MASK)
 
 // Single set of parameters for all channels apparently unlike on the M56
 // (4D5307E6 sets DC_LUTA_CONTROL to 0x00000003 for the data increment of 8 in
-// the 128-entry PWL gamma ramp for a 10bpc framebuffer). Also set not only
+// the 128-entry PWL gamma ramp for a 10bpc framebuffer). This note is the
+// AUTHORITY over the M56-shaped per-channel wording that used to appear in
+// registers.h; audited 2026-08-05, docs/metal_pwl_gamma_audit.md.
+// The BIT LAYOUT of this register is NOT established: only two values have ever
+// been observed anywhere (0x00000000 and 0x00000003), which is not enough to
+// locate the increment field, its width, or a distinct mode-select bit. A
+// 49-trace census observed 0x00000000 in 44/44 cases. Also set not only
 // during setup, but also apparently during every swap by Direct3D 9, though not
 // directly in all games (happens in 4B4F07FE and 4D5307E6 even without proper
 // VdSwap emulation, but in 535107D4, with a fake VdSwap packet rather than the
