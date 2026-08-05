@@ -532,6 +532,9 @@ bool MetalPipelineCache::TranslateShader(
   std::vector<uint8_t> metallib;
   {
     MetalShaderBuildTimer timer(census.msc);
+    MetalStageRequestProbe probe(dxil, uint32_t(stage),
+                                 uint32_t(MetalShaderConverter::InputTopology::
+                                              kUndefined));
     if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
@@ -1018,6 +1021,9 @@ MetalPipelineCache::GetOrCreateGeometryVertexStage(
     return nullptr;
   }
   MetalShaderConverter::GeometryEmulationResult result;
+  MetalStageRequestProbe geom_vs_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kVertex),
+      uint32_t(GeometryInputTopology(geometry_type)));
   if (!metal_converter_.ConvertForGeometryEmulation(
           MetalShaderConverter::Stage::kVertex, dxil,
           GeometryInputTopology(geometry_type), result)) {
@@ -1125,6 +1131,10 @@ MetalPipelineCache::GetOrCreateGeometryShaderStage(GeometryShaderKey key) {
     return nullptr;
   }
   MetalShaderConverter::GeometryEmulationResult result;
+  MetalStageRequestProbe geom_gs_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kGeometry),
+      uint32_t(GeometryInputTopology(
+          static_cast<PipelineGeometryShader>(key.type))));
   if (!metal_converter_.ConvertForGeometryEmulation(
           MetalShaderConverter::Stage::kGeometry, dxil,
           GeometryInputTopology(static_cast<PipelineGeometryShader>(key.type)),
@@ -1509,6 +1519,9 @@ bool MetalPipelineCache::EnsureDepthOnlyPixelShader() {
     return false;
   }
   std::vector<uint8_t> metallib;
+  MetalStageRequestProbe depth_only_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kFragment),
+      uint32_t(MetalShaderConverter::InputTopology::kUndefined));
   if (!metal_converter_.Convert(MetalShaderConverter::Stage::kFragment, dxil,
                                 metallib, &error)) {
     XELOGE("MetalPipelineCache: depth-only PS DXIL->metallib failed: {}", error);
@@ -1560,6 +1573,9 @@ MetalPipelineCache::GetOrCreateTessellationVertexStage(
   // and its absence is already a converter-level hard failure (gotcha 9), but
   // it is re-checked here because an empty stage-in metallib is a guaranteed
   // pipeline failure (XeniOS metal_pipeline_cache.cc:810-813).
+  MetalStageRequestProbe tess_vs_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kVertex),
+      uint32_t(MetalShaderConverter::InputTopology::kUndefined));
   if (!metal_converter_.ConvertForGeometryEmulation(
           MetalShaderConverter::Stage::kVertex, dxil,
           MetalShaderConverter::InputTopology::kUndefined, result) ||
@@ -1640,6 +1656,9 @@ MetalPipelineCache::GetOrCreateTessellationHullStage(
   }
   MetalShaderConverter::GeometryEmulationResult result;
   // Topology decision (see the section comment): kUndefined, matching XeniOS.
+  MetalStageRequestProbe tess_hs_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kHull),
+      uint32_t(MetalShaderConverter::InputTopology::kUndefined));
   if (!metal_converter_.ConvertForGeometryEmulation(
           MetalShaderConverter::Stage::kHull, dxil,
           MetalShaderConverter::InputTopology::kUndefined, result) ||
@@ -1717,6 +1736,9 @@ MetalPipelineCache::GetOrCreateTessellationDomainStage(
   }
   MetalShaderConverter::GeometryEmulationResult result;
   // Topology decision (see the section comment): kUndefined, matching XeniOS.
+  MetalStageRequestProbe tess_ds_probe(
+      dxil, uint32_t(MetalShaderConverter::Stage::kDomain),
+      uint32_t(MetalShaderConverter::InputTopology::kUndefined));
   if (!metal_converter_.ConvertForGeometryEmulation(
           MetalShaderConverter::Stage::kDomain, dxil,
           MetalShaderConverter::InputTopology::kUndefined, result) ||

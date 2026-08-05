@@ -47,7 +47,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "third_party/xxhash/xxhash.h"
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/gpu/metal/metal_artifact_hit_verify.h"
@@ -122,6 +127,61 @@ class MetalShaderBuildCensus {
   // Sampled hit-vs-fresh verification. `mismatches` must stay 0.
   MetalArtifactHitStats dxil_verify;
 
+  // --- Stage-3 (MSC) request census -------------------------------------
+  //
+  // Measurement ONLY, deciding whether stage 3 (per-stage compile dedup) is
+  // worth opening. The question is not "does MSC cost a lot" — task 1.1 already
+  // showed it is the larger half of translation — but "how many MSC requests
+  // are REPEATS of a request already served in this process", because that is
+  // all a dedup cache can remove.
+  //
+  // Keyed on exactly what determines an MSC result: the DXIL bytes, the stage,
+  // and the input topology (the only per-call MSC option; the root signature is
+  // shared and constant for the process). The DXIL cache's within-run dedup
+  // counts a DIFFERENT thing — identical DXBC — so a duplicate here is not
+  // implied by one there.
+  struct StageRequestKey {
+    uint64_t dxil_hash_low = 0;
+    uint64_t dxil_hash_high = 0;
+    uint32_t stage = 0;
+    uint32_t input_topology = 0;
+    bool operator==(const StageRequestKey& other) const {
+      return dxil_hash_low == other.dxil_hash_low &&
+             dxil_hash_high == other.dxil_hash_high && stage == other.stage &&
+             input_topology == other.input_topology;
+    }
+  };
+  struct StageRequestKeyHasher {
+    size_t operator()(const StageRequestKey& key) const {
+      const uint64_t words[] = {key.dxil_hash_low, key.dxil_hash_high,
+                                uint64_t(key.stage),
+                                uint64_t(key.input_topology)};
+      return size_t(XXH3_64bits(words, sizeof(words)));
+    }
+  };
+
+  // Returns true if this exact request was already served in this process.
+  // `elapsed_ns` is attributed to the duplicate total so the decision can be
+  // made on TIME a dedup would recover, not merely on a count.
+  bool RecordStageRequest(const std::vector<uint8_t>& dxil, uint32_t stage,
+                          uint32_t input_topology, uint64_t elapsed_ns) {
+    StageRequestKey key;
+    const XXH128_hash_t hash =
+        XXH3_128bits(dxil.empty() ? nullptr : dxil.data(), dxil.size());
+    key.dxil_hash_low = hash.low64;
+    key.dxil_hash_high = hash.high64;
+    key.stage = stage;
+    key.input_topology = input_topology;
+    std::lock_guard<std::mutex> lock(stage_request_mutex_);
+    ++stage_requests_;
+    const bool duplicate = !stage_requests_seen_.emplace(key, 1).second;
+    if (duplicate) {
+      ++stage_request_duplicates_;
+      stage_request_duplicate_ns_ += elapsed_ns;
+    }
+    return duplicate;
+  }
+
   // Frame attribution.
   std::atomic<uint64_t> swaps{0};
   std::atomic<uint64_t> startup_build_ns{0};    // before the first swap
@@ -194,6 +254,7 @@ class MetalShaderBuildCensus {
         "|mlib_load_ms={:.1f}|mlib_store={}/{:.1f}ms/{}KiB"
         "|dxil_hit={}|dxil_corrupt={}|dxil_verified={}|dxil_verify_bad={}"
         "|dxil_load_ms={:.1f}|dxil_store_ms={:.1f}"
+        "|msc_req={}|msc_distinct={}|msc_dup={}|msc_dup_ms={:.1f}"
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
         "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}",
         phase, swaps.load(std::memory_order_relaxed),
@@ -219,6 +280,8 @@ class MetalShaderBuildCensus {
         dxil_verify.mismatches.load(std::memory_order_relaxed),
         double(dxil_load_ns.load(std::memory_order_relaxed)) / 1e6,
         double(dxil_store_ns.load(std::memory_order_relaxed)) / 1e6,
+        stage_requests_snapshot(), stage_distinct_snapshot(),
+        stage_duplicates_snapshot(), stage_duplicate_ms_snapshot(),
         double(startup_build_ns.load(std::memory_order_relaxed)) / 1e6,
         double(stall_build_ns.load(std::memory_order_relaxed)) / 1e6,
         stall_events.load(std::memory_order_relaxed),
@@ -229,9 +292,32 @@ class MetalShaderBuildCensus {
         frames_over_33ms.load(std::memory_order_relaxed));
   }
 
+  uint64_t stage_requests_snapshot() const {
+    std::lock_guard<std::mutex> lock(stage_request_mutex_);
+    return stage_requests_;
+  }
+  uint64_t stage_distinct_snapshot() const {
+    std::lock_guard<std::mutex> lock(stage_request_mutex_);
+    return stage_requests_seen_.size();
+  }
+  uint64_t stage_duplicates_snapshot() const {
+    std::lock_guard<std::mutex> lock(stage_request_mutex_);
+    return stage_request_duplicates_;
+  }
+  double stage_duplicate_ms_snapshot() const {
+    std::lock_guard<std::mutex> lock(stage_request_mutex_);
+    return double(stage_request_duplicate_ns_) / 1e6;
+  }
+
  private:
   std::chrono::steady_clock::time_point origin_;
   std::atomic<uint64_t> frame_build_ns_{0};
+  mutable std::mutex stage_request_mutex_;
+  std::unordered_map<StageRequestKey, uint32_t, StageRequestKeyHasher>
+      stage_requests_seen_;
+  uint64_t stage_requests_ = 0;
+  uint64_t stage_request_duplicates_ = 0;
+  uint64_t stage_request_duplicate_ns_ = 0;
 };
 
 inline MetalShaderBuildCensus& GetMetalShaderBuildCensus() {
@@ -267,6 +353,33 @@ class MetalShaderBuildTimer {
   std::chrono::steady_clock::time_point start_;
   uint64_t bytes_ = 0;
   bool dismissed_ = false;
+};
+
+// Scoped probe: records one MSC request and the time it took. Placed at the
+// call site so a stage that is never requested is never counted, and so the
+// timing includes exactly the converter call.
+class MetalStageRequestProbe {
+ public:
+  MetalStageRequestProbe(const std::vector<uint8_t>& dxil, uint32_t stage,
+                         uint32_t input_topology)
+      : dxil_(dxil),
+        stage_(stage),
+        input_topology_(input_topology),
+        start_(std::chrono::steady_clock::now()) {}
+  ~MetalStageRequestProbe() {
+    const uint64_t elapsed = uint64_t(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start_)
+            .count());
+    GetMetalShaderBuildCensus().RecordStageRequest(dxil_, stage_,
+                                                   input_topology_, elapsed);
+  }
+
+ private:
+  const std::vector<uint8_t>& dxil_;
+  uint32_t stage_;
+  uint32_t input_topology_;
+  std::chrono::steady_clock::time_point start_;
 };
 
 }  // namespace metal
