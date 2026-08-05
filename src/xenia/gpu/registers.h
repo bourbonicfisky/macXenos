@@ -944,18 +944,21 @@ union alignas(uint32_t) DC_LUT_PWL_DATA {
     //
     // - The transfer function above is M56-derived (RRG-216M56), which is
     //   MECHANISM evidence only and is not present in this tree.
-    // - The increment is a SINGLE SHARED value for all three channels on the
-    //   Xenos, NOT per-channel. This comment used to say "for the specific
-    //   color channel", which is the M56 shape; register_table.inc's
-    //   Xenos-specific note ("single set of parameters for all channels
-    //   apparently unlike on the M56", evidenced by 4D5307E6 writing
-    //   DC_LUTA_CONTROL = 3) is the authority and wins.
+    // - The per-channel reading is UNSUPPORTED on Xenos. This comment used to
+    //   say "for the specific color channel", which is the M56 shape.
+    //   register_table.inc's Xenos-specific note ("single set of parameters for
+    //   all channels apparently unlike on the M56", evidenced by 4D5307E6
+    //   writing DC_LUTA_CONTROL = 3) is the authority and refutes it.
+    //   That does NOT prove Xenos uses a shared control: the note says
+    //   "apparently", it rests on one observed value, and the bit layout is
+    //   unknown. Suggested, not established — do not restate it as settled.
     // - "increment nonzero, otherwise use the 256-entry table" is likewise
     //   M56-derived. It is consistent with the only two DC_LUTA_CONTROL values
     //   ever observed (0 and 3) but is NOT independently established on Xenos.
     // - Consequence of the index/multiplier split: the active input width is
     //   7 + increment bits (10 at increment 3). The 128-entry table does not by
-    //   itself imply a 10-bit input.
+    //   itself imply a 10-bit input. Established for M56, NOT for Xenos, and
+    //   untested at any increment but 3 — a strong hypothesis, not a finding.
     // - UNRESOLVED: the DC_LUTA_CONTROL bit layout, the valid increment domain
     //   (only 3 observed anywhere), and the RGB write order when channels
     //   differ. A 49-trace census found no PWL selection and no asymmetric

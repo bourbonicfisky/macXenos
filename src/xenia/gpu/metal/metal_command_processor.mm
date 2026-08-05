@@ -7237,8 +7237,14 @@ void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
 }
 
 // Guest gamma-state census — implement-metal-pwl-gamma-ramp task 1.5, and the
-// instrument that would LIFT that change's NO-GO. Bounded (logs only on
-// change), env-gated (XE_GAMMA_CENSUS=1), zero cost when unset.
+// instrument that would LIFT that change's NO-GO. Bounded: logs only when the
+// structured signature below changes.
+//
+// COST WHEN DISABLED, stated accurately rather than as "zero": one call and one
+// predictable branch on a function-local static per SWAP (not per draw), one
+// unconditional increment in OnGammaRampPWLValueWritten, and 24 bytes of member
+// state. The table hash and the asymmetry scan happen only when enabled. That is
+// small enough to leave in, and it is not nothing.
 //
 // RETAINED rather than removed with the rest of the audit scaffolding: the
 // audit stopped because DC_LUTA_CONTROL has only ever been observed holding two
@@ -7288,9 +7294,31 @@ void MetalCommandProcessor::CensusGammaState() {
       pwl_all_zero = false;
     }
   }
-  const uint64_t signature =
-      pwl_hash ^ (uint64_t(control) << 1) ^ (uint64_t(rw_mode) << 33) ^
-      (uint64_t(black_b | white_b) << 17) ^ uint64_t(gamma_pwl_writes_ != 0);
+  // Structured signature over EVERY field this line reports. A hand-rolled XOR
+  // of a subset was the first attempt and it was a real blind spot: write_en,
+  // four of the six offsets and the exact write count could all change without
+  // producing a new line — in an instrument whose entire job is catching rare
+  // state. Packing the reported fields and hashing the struct makes "reported"
+  // and "compared" the same set by construction, so adding a field to the log
+  // without adding it here is no longer possible without editing this struct.
+  struct CensusSignatureFields {
+    uint64_t pwl_hash;
+    uint64_t pwl_writes;
+    uint32_t control;
+    uint32_t rw_mode;
+    uint32_t write_en;
+    uint32_t black_b, black_g, black_r;
+    uint32_t white_b, white_g, white_r;
+    uint32_t channels_asymmetric;
+    uint32_t pwl_all_zero;
+  } fields = {pwl_hash,   gamma_pwl_writes_,
+              control,    rw_mode,
+              write_en,   black_b,
+              black_g,    black_r,
+              white_b,    white_g,
+              white_r,    channels_asymmetric ? 1u : 0u,
+              pwl_all_zero ? 1u : 0u};
+  const uint64_t signature = XXH3_64bits(&fields, sizeof(fields));
   if (signature == gamma_census_signature_ && gamma_census_reports_) {
     return;
   }
