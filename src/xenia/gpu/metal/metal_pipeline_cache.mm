@@ -11,6 +11,7 @@
 
 #import <Metal/Metal.h>
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/graphics_provider.h"
@@ -274,10 +276,18 @@ bool MetalPipelineCache::TranslateShader(
 
 
   // Stage 1: microcode -> DXBC (reused DxbcShaderTranslator).
-  if (!shader_translator_->TranslateAnalyzedShader(translation)) {
-    XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
-           shader.ucode_data_hash());
-    return false;
+  // Task 1.1 census: timed even though it is the cheap stage, because it is
+  // the floor a metallib hit cannot go below (it runs on a hit too).
+  MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+  {
+    MetalShaderBuildTimer timer(census.dxbc);
+    if (!shader_translator_->TranslateAnalyzedShader(translation)) {
+      timer.Dismiss();
+      XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
+             shader.ucode_data_hash());
+      return false;
+    }
+    timer.set_bytes(translation.translated_binary().size());
   }
   const std::vector<uint8_t>& dxbc = translation.translated_binary();
   if (dxbc.empty()) {
@@ -297,26 +307,49 @@ bool MetalPipelineCache::TranslateShader(
   const uint64_t m1_key = MetallibCacheKey(translation);
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
     std::vector<uint8_t> cached_metallib;
-    if (storage_.LoadMetallib(m1_key, &cached_metallib)) {
+    const auto load_start = std::chrono::steady_clock::now();
+    const bool loaded = storage_.LoadMetallib(m1_key, &cached_metallib);
+    census.metallib_load_ns.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - load_start)
+                     .count()),
+        std::memory_order_relaxed);
+    if (loaded) {
+      MetalShaderBuildTimer timer(census.function);
       if (translation.CreateMetalFunction(device_, cached_metallib)) {
+        timer.set_bytes(cached_metallib.size());
+        census.metallib_hits.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
+      timer.Dismiss();
       // A stored blob the device will not load is not trustworthy — fall
       // through to a full cold translation rather than failing the draw.
+      // Counted as REJECTED, never as a miss: a miss is cold, this is a stored
+      // artifact that is wrong, and one number covering both would hide the
+      // second inside the first.
+      census.metallib_rejected.fetch_add(1, std::memory_order_relaxed);
       XELOGW(
           "MetalPipelineCache: cached metallib {:016X} failed to load; "
           "retranslating",
           m1_key);
+    } else {
+      census.metallib_misses.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
-  // Stage 2: DXBC -> DXIL.
+  // Stage 2: DXBC -> DXIL. THE stage the DXIL artifact cache removes, and the
+  // stage carrying the fresh-IDxbcConverter-per-Convert cost.
   std::string error;
   std::vector<uint8_t> dxil;
-  if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
-    XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
-           shader.ucode_data_hash(), error);
-    return false;
+  {
+    MetalShaderBuildTimer timer(census.dxil);
+    if (!dxil_converter_.Convert(dxbc, dxil, &error)) {
+      timer.Dismiss();
+      XELOGE("MetalPipelineCache: DXBC->DXIL failed for shader {:016X}: {}",
+             shader.ucode_data_hash(), error);
+      return false;
+    }
+    timer.set_bytes(dxil.size());
   }
 
   // Shader-chain forensics (XE_METAL_DUMP_XLAT=<hex ucode hash>): dump the
@@ -355,10 +388,15 @@ bool MetalPipelineCache::TranslateShader(
     }
   }
   std::vector<uint8_t> metallib;
-  if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
-    XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
-           shader.ucode_data_hash(), error);
-    return false;
+  {
+    MetalShaderBuildTimer timer(census.msc);
+    if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
+      timer.Dismiss();
+      XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
+             shader.ucode_data_hash(), error);
+      return false;
+    }
+    timer.set_bytes(metallib.size());
   }
 
   // Load onto the device as an MTLFunction.
@@ -372,16 +410,32 @@ bool MetalPipelineCache::TranslateShader(
       XELOGW("MetalPipelineCache: dumped {} ({} bytes)", path, metallib.size());
     }
   }
-  if (!translation.CreateMetalFunction(device_, metallib)) {
-    XELOGE("MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
-           shader.ucode_data_hash());
-    return false;
+  {
+    MetalShaderBuildTimer timer(census.function);
+    if (!translation.CreateMetalFunction(device_, metallib)) {
+      timer.Dismiss();
+      XELOGE(
+          "MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
+          shader.ucode_data_hash());
+      return false;
+    }
+    timer.set_bytes(metallib.size());
   }
 
   // Publish only after the device has accepted it, so a blob that cannot load
   // is never written for a later run to trip over.
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
-    storage_.StoreMetallib(m1_key, metallib);
+    const auto store_start = std::chrono::steady_clock::now();
+    if (storage_.StoreMetallib(m1_key, metallib)) {
+      census.metallib_stores.fetch_add(1, std::memory_order_relaxed);
+      census.metallib_store_bytes.fetch_add(metallib.size(),
+                                            std::memory_order_relaxed);
+    }
+    census.metallib_store_ns.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - store_start)
+                     .count()),
+        std::memory_order_relaxed);
   }
   return true;
 }
@@ -681,8 +735,18 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   }
 
   NSError* error = nil;
-  id<MTLRenderPipelineState> state =
-      [device newRenderPipelineStateWithDescriptor:desc error:&error];
+  id<MTLRenderPipelineState> state = nil;
+  {
+    // Task 1.1 census: host pipeline-state creation, the cost M2 (the binary
+    // archive) targets and the one the async stage would move off the frame
+    // path. Timed around the API call alone; descriptor assembly above is
+    // ours and is not what either mechanism removes.
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
+    state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+    if (!state) {
+      timer.Dismiss();
+    }
+  }
   if (!state) {
     XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
            error ? [[error localizedDescription] UTF8String] : "unknown");
@@ -1073,8 +1137,18 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
       gstage->max_input_primitives;
 
   NSError* error = nil;
-  id<MTLRenderPipelineState> pipeline =
-      IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
+  id<MTLRenderPipelineState> pipeline = nil;
+  {
+    // Task 1.1 census: the geometry-emulation mesh pipeline is a separate
+    // stage from the plain PSO — it compiles an object+mesh+fragment triple
+    // through the IR runtime — so folding the two would make a title that uses
+    // geometry emulation look like one with expensive ordinary pipelines.
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().geometry_pso);
+    pipeline = IRRuntimeNewGeometryEmulationPipeline(device, &ir_desc, &error);
+    if (!pipeline) {
+      timer.Dismiss();
+    }
+  }
   if (!pipeline) {
     // Report the SAME identifying fields the success path logs. Without them a
     // failure is an unattributable string: it names neither which geometry type

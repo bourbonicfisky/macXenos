@@ -57,6 +57,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/kernel/xthread.h"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
+#include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -1377,6 +1378,10 @@ void MetalCommandProcessor::ShutdownDrawResources() {
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  // Task 1.1: the run's final build totals, emitted BEFORE the caches are torn
+  // down so a run killed during teardown still leaves a complete record. The
+  // periodic samples are progress; this line is the measurement.
+  XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -8272,6 +8277,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  // Task 1.1 shader/pipeline build census. NoteSwap closes this frame's build
+  // accumulator, which is what separates startup cost from an in-frame stall —
+  // neither is recoverable from a single total.
+  {
+    MetalShaderBuildCensus& build_census = GetMetalShaderBuildCensus();
+    build_census.NoteSwap();
+    if ((count & 127) == 0 && count) {
+      XELOGI("{}", build_census.Report("periodic"));
+    }
+  }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
