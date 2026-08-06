@@ -57,6 +57,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/kernel/xthread.h"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
+#include "xenia/gpu/metal/metal_memexport_census.h"
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -392,6 +393,12 @@ class MetalMemexportPublicationTarget
 
   void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
     shared_memory_->RangeWrittenByGpu(base, length);
+    // Task 1.4 §4 source 1: fires at producer publication, BEFORE any RAM
+    // convergence, and is the source that may already have made a direct
+    // texture load fresh. Entry count is unknown here (the watch queues), so
+    // the event is recorded with zero entries rather than a guess.
+    metal::GetMetalMemexportCensus().NoteInvalidation(
+        metal::InvalidationOrigin::kPublicationWatch, 0);
   }
 
  private:
@@ -434,6 +441,23 @@ class MetalMemexportConvergenceTarget
       // skips queue draining. Keep this direct retirement globally so replayed
       // memexports cannot leave aliases or resolved bridges stale.
       *invalidated_entries = texture_cache_->InvalidateRange(base, length);
+      // Origin tagging (task 1.4 §4): a consumer-forced drain is mid-frame; the
+      // boundary-triggered ones are named by their own seams.
+      const metal::PhysicalConsumerClass* origin_class =
+          metal::MetalMemexportCensusSeam::Current();
+      metal::InvalidationOrigin origin =
+          metal::InvalidationOrigin::kMidFrameConvergence;
+      if (origin_class) {
+        if (*origin_class ==
+            metal::PhysicalConsumerClass::kFrameEndPublication) {
+          origin = metal::InvalidationOrigin::kFrameEndConvergence;
+        } else if (*origin_class ==
+                   metal::PhysicalConsumerClass::kLifecyclePublication) {
+          origin = metal::InvalidationOrigin::kCacheClearConvergence;
+        }
+      }
+      metal::GetMetalMemexportCensus().NoteInvalidation(origin,
+                                                       *invalidated_entries);
     }
     return true;
   }
@@ -1382,6 +1406,13 @@ void MetalCommandProcessor::ShutdownContext() {
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
+  // Task 2.3: the FINAL memexport census. Emitted here and not only on the swap
+  // cadence because trace replay performs ZERO swaps — a swap-hooked report is
+  // silent under exactly the harness the census is most often run in, which
+  // reads identically to "nothing engaged".
+  if (metal::MetalMemexportCensus::Enabled()) {
+    XELOGI("{}", metal::GetMetalMemexportCensus().Report("final"));
+  }
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -2012,6 +2043,8 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         metal::GuestRangeSet publication_domain;
         publication_domain.Add(metal::GuestRange::FromBaseLength(
             0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
+        metal::MetalMemexportCensusSeam census_seam(
+            metal::PhysicalConsumerClass::kLifecyclePublication);
         if (!ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                             publication_domain)) {
           // Fail closed: keep the pending set intact and the request latched.
@@ -3786,6 +3819,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   if (!vertex_dependency_ranges.empty() &&
       (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
+    // The kVertex label spans shared vfetch AND CPU index/factor staging
+    // (task 1.3). The census names the shared-buffer half here; the CPU-staged
+    // streams are attributed at their own seams.
+    metal::MetalMemexportCensusSeam census_seam(
+        metal::PhysicalConsumerClass::kSharedVfetch);
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(
             metal::ConsumerKind::kVertex,
@@ -4282,6 +4320,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerRequest texture_request;
     collect_texture_ranges(pixel_shader, texture_request);
     collect_texture_ranges(vertex_shader, texture_request);
+    // The drain runs BEFORE route selection (task 1.4 §3), so this seam is
+    // named for the shared-texture route it may feed; the legacy CPU fallback
+    // and cache-hit branches are distinguished below the prepass seam.
+    metal::MetalMemexportCensusSeam census_seam(
+        metal::PhysicalConsumerClass::kSharedTextureLoad);
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
@@ -5638,6 +5681,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               "skipping rather than tessellating from stale RAM",
               trace_draw_index_, staged_extent.base, staged_extent.size,
               pending.base_address, pending.size_bytes);
+          metal::GetMetalMemexportCensus().NoteMetadataGuardConsult(
+              /*skipped_draw=*/true);
           RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                          "memexport-raster-stale-factor-stream");
           return true;
@@ -7554,8 +7599,40 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
   // from the two existing producer queues and owns no authority state. The
   // caller executes the promoted one-boundary commit/wait and selective
   // drain policy for the returned decision.
+  const std::vector<metal::PendingProducer> producers =
+      SnapshotPendingProducers();
+  // Task 2.3 census (exact-off): classify the request against the SAME producer
+  // snapshot the decision is about to be built from, so the observation and the
+  // production decision cannot disagree about the input. Records only — the
+  // decision below is unchanged, and this function stays const.
+  if (metal::MetalMemexportCensus::Enabled()) {
+    if (const metal::PhysicalConsumerClass* census_class =
+            metal::MetalMemexportCensusSeam::Current()) {
+      const metal::GuestRangeSet combined = request.Combined();
+      const metal::IntervalClassification classification =
+          metal::ClassifyLatestWriterIntervals(combined, producers);
+      metal::MemexportCensusCorridor& corridor =
+          metal::GetMetalMemexportCensus().Corridor(*census_class);
+      corridor.requested_bytes.fetch_add(classification.requested_bytes,
+                                         std::memory_order_relaxed);
+      corridor.classified_bytes.fetch_add(classification.classified_bytes,
+                                          std::memory_order_relaxed);
+      corridor.eligible_bytes.fetch_add(
+          metal::GpuDirectEligibleBytes(classification, *census_class),
+          std::memory_order_relaxed);
+      if (!classification.requested_bytes) {
+        corridor.zero_byte_consultations.fetch_add(1,
+                                                   std::memory_order_relaxed);
+      }
+      // Union equality, not a byte sum: a wrong partition can keep totals
+      // self-consistent (task 2.2).
+      if (!classification.IsExactPartition()) {
+        corridor.union_mismatches.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
   return metal::DecideConsumer(
-      consumer, request, SnapshotPendingProducers(),
+      consumer, request, producers,
       completed_submission_.load(std::memory_order_acquire));
 }
 
@@ -8116,6 +8193,28 @@ MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision) {
   ProducerDependencyOutcome outcome;
+  // Task 2.3 census (exact-off). Observational only: it records what this
+  // function is about to do and never alters the decision, the boundary, or
+  // the drain.
+  const metal::PhysicalConsumerClass* census_class =
+      metal::MetalMemexportCensusSeam::Current();
+  const bool census_on = metal::MetalMemexportCensus::Enabled();
+  if (census_on && !census_class) {
+    // An executor entry no seam claimed. Recorded as UNKNOWN rather than
+    // guessed into a corridor — a partition with an unattributed entry is not
+    // exact, and the pre-gate forbids drawing a verdict from one.
+    metal::NoteUnattributedExecutorEntry();
+  }
+  if (census_on && census_class) {
+    metal::MemexportCensusCorridor& corridor =
+        metal::GetMetalMemexportCensus().Corridor(*census_class);
+    corridor.consultations.fetch_add(1, std::memory_order_relaxed);
+    corridor.selected_records.fetch_add(decision.selected.size(),
+                                        std::memory_order_relaxed);
+    if (decision.selected.empty()) {
+      corridor.selected_empty.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   if (decision.selected.empty()) {
     // Early no-op: a disjoint (or no-pending) consumer adds no commit, wait, or
     // drain.
@@ -8128,9 +8227,37 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   // commit and prove it completed independently of the record tag.
   uint64_t boundary_submission =
       frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
+  // Measured, never inferred: EndFrameEncoderAndWait commits AND waits only
+  // when a frame command buffer exists, so "selected was non-empty" does not
+  // imply either.
+  const bool census_had_buffer = frame_command_buffer_ != nullptr;
+  const uint64_t census_submissions_before = submission_counter_;
   EndFrameEncoderAndWait();
+  if (census_on && census_class) {
+    metal::MemexportCensusCorridor& corridor =
+        metal::GetMetalMemexportCensus().Corridor(*census_class);
+    if (census_had_buffer) {
+      corridor.had_frame_command_buffer.fetch_add(1, std::memory_order_relaxed);
+      corridor.boundary_wait_attempted.fetch_add(1, std::memory_order_relaxed);
+      corridor.boundary_wait_blocked.fetch_add(1, std::memory_order_relaxed);
+    }
+    corridor.commits.fetch_add(submission_counter_ - census_submissions_before,
+                               std::memory_order_relaxed);
+  }
   uint64_t required_submission =
       std::max(boundary_submission, decision.max_wait_submission);
+  const bool census_required_wait_blocked =
+      required_submission > completed_submission_.load(std::memory_order_acquire);
+  if (census_on && census_class) {
+    metal::MemexportCensusCorridor& corridor =
+        metal::GetMetalMemexportCensus().Corridor(*census_class);
+    // Attempted every time the branch is evaluated; blocked only when taken.
+    // A wait that did not block is not a stall.
+    corridor.required_wait_attempted.fetch_add(1, std::memory_order_relaxed);
+    if (census_required_wait_blocked) {
+      corridor.required_wait_blocked.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   if (required_submission >
       completed_submission_.load(std::memory_order_acquire)) {
     bool waited = WaitForSubmission(required_submission);
@@ -8145,6 +8272,17 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   outcome.drain = DrainSelectedPendingProducers(decision);
   outcome.complete =
       metal::ConsumerPublicationComplete(decision, outcome.drain);
+  if (census_on && census_class) {
+    metal::MemexportCensusCorridor& corridor =
+        metal::GetMetalMemexportCensus().Corridor(*census_class);
+    if (outcome.complete) {
+      corridor.drains_succeeded.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      corridor.drains_failed.fetch_add(1, std::memory_order_relaxed);
+    }
+    corridor.retirements.fetch_add(outcome.drain.drained_records,
+                                   std::memory_order_relaxed);
+  }
   return outcome;
 }
 
@@ -8186,6 +8324,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
   }
   metal::GuestRangeSet requested;
   requested.Add(exact_range);
+  metal::MetalMemexportCensusSeam census_seam(
+      metal::PhysicalConsumerClass::kHostRead);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                         requested);
 }
@@ -8197,6 +8337,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
+  metal::MetalMemexportCensusSeam census_seam(
+      metal::PhysicalConsumerClass::kHostRead);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                         requested);
 }
@@ -8208,6 +8350,8 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
   // records; disjoint resolve/memexport traffic keeps its normal swap cadence.
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
+  metal::MetalMemexportCensusSeam census_seam(
+      metal::PhysicalConsumerClass::kWaitPredicate);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kWait,
                                         requested);
 }
@@ -8329,6 +8473,8 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   metal::GuestRangeSet swap_publication_domain;
   swap_publication_domain.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
+  metal::MetalMemexportCensusSeam census_seam(
+      metal::PhysicalConsumerClass::kFrameEndPublication);
   XE_UNLIKELY_IF(!ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, swap_publication_domain)) {
     // Fail closed: full-domain publication did not converge every selected
@@ -8387,6 +8533,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     build_census.NoteSwap();
     if ((count & 127) == 0 && count) {
       XELOGI("{}", build_census.Report("periodic"));
+    }
+    // Task 2.3 memexport census: heartbeat every swap so a run that produced no
+    // rows is distinguishable from one that never ran, and a periodic report.
+    if (metal::MetalMemexportCensus::Enabled()) {
+      metal::GetMetalMemexportCensus().NoteHeartbeat();
+      if ((count & 127) == 0 && count) {
+        XELOGI("{}", metal::GetMetalMemexportCensus().Report("periodic"));
+      }
     }
   }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
