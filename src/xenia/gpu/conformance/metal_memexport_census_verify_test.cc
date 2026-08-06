@@ -62,7 +62,8 @@ CensusObservation SharedVfetchObservation() {
   observation.classified = {
       Interval(0x1000, 0x100, IntervalAuthority::kLatestPendingMemexport, 7),
       Interval(0x1100, 0x100, IntervalAuthority::kUncovered, 0)};
-  observation.retirements = 1;
+  observation.memexport_retirements = 1;
+  observation.memexport_copies = 1;
   observation.bytes_copied = 0x100;
   return observation;
 }
@@ -228,10 +229,50 @@ TEST_CASE("A retirement with no copied bytes is caught",
   // scope, so copied=0 beside nonzero retirements was ambiguous rather than
   // wrong.
   CensusRunSummary run = AcceptedRun();
-  run.observations[0].bytes_copied = 0;
+  run.observations[0].memexport_copies = 0;  // retired without a completed copy
   const auto result = VerifyCensusRun(run);
   INFO(result.detail);
   CHECK(result.verdict == CensusVerdict::kCopiedRetiredMismatch);
+}
+
+TEST_CASE("Many retirements behind one copy is caught",
+          "[census_verify][mutation]") {
+  // The old rule was `retirements && !bytes_copied`, which accepted ten
+  // retirements justified by a single byte. The invariant is now a COUNT
+  // equality, so the imbalance is visible.
+  CensusRunSummary run = AcceptedRun();
+  run.observations[0].memexport_retirements = 10;
+  run.observations[0].memexport_copies = 1;
+  const auto result = VerifyCensusRun(run);
+  INFO(result.detail);
+  CHECK(result.verdict == CensusVerdict::kCopiedRetiredMismatch);
+}
+
+TEST_CASE("A resolve retirement needs no memexport copy",
+          "[census_verify]") {
+  // The old rule FALSELY REJECTED this: a resolve retirement legitimately has
+  // no memexport memcpy behind it, so a single combined counter could not
+  // express the invariant without over-rejecting resolves.
+  CensusRunSummary run = AcceptedRun();
+  run.observations[0].memexport_retirements = 0;
+  run.observations[0].memexport_copies = 0;
+  run.observations[0].resolve_retirements = 3;
+  run.observations[0].bytes_copied = 0;
+  const auto result = VerifyCensusRun(run);
+  INFO("verdict: " << CensusVerdictName(result.verdict) << " — "
+                   << result.detail);
+  CHECK(result.accepted());
+}
+
+TEST_CASE("A live but blind run is caught as engagement_missing",
+          "[census_verify][mutation]") {
+  // Distinct from heartbeat_missing: the harness ran, the seams saw nothing.
+  // Those are different repairs, so they are different verdicts.
+  CensusRunSummary run;
+  run.heartbeats = 9;
+  const auto result = VerifyCensusRun(run);
+  INFO(result.detail);
+  CHECK(result.verdict == CensusVerdict::kEngagementMissing);
 }
 
 TEST_CASE("Zero retirements with zero copied bytes is fine",
@@ -239,7 +280,8 @@ TEST_CASE("Zero retirements with zero copied bytes is fine",
   // The complement: a consumer that retired nothing owes no copy. Without this
   // the rule above would reject every disjoint consumer.
   CensusRunSummary run = AcceptedRun();
-  run.observations[0].retirements = 0;
+  run.observations[0].memexport_retirements = 0;
+  run.observations[0].memexport_copies = 0;
   run.observations[0].bytes_copied = 0;
   CHECK(VerifyCensusRun(run).accepted());
 }
@@ -254,12 +296,18 @@ TEST_CASE("Every seam has a declared expected class",
     INFO("seam " << metal::CensusSeamIdName(seam));
     // The metadata guard is the one seam with no consumer class: it reads no
     // guest bytes and is recorded on its own counters.
-    if (seam == CensusSeamId::kMetadataGuard) {
+    if (seam == CensusSeamId::kMetadataGuard ||
+        seam == CensusSeamId::kCount) {
       continue;
     }
+    // The expectation comes from an INDEPENDENT table, not from the function
+    // under test — reading it from ExpectedClassForSeam made this tautological,
+    // so a newly unhandled seam compared equal to the old default and passed.
+    const auto declared = metal::ExpectedClassForSeam(seam);
+    REQUIRE(declared.has_value());
     CensusObservation observation;
     observation.seam = seam;
-    observation.reported_class = metal::ExpectedClassForSeam(seam);
+    observation.reported_class = *declared;
     observation.requested.Add(*GuestRange::FromBaseLength(0x5000, 0x10));
     observation.classified = {
         Interval(0x5000, 0x10, IntervalAuthority::kUncovered, 0)};

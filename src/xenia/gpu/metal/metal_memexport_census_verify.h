@@ -33,6 +33,7 @@
 // different repairs.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,7 @@ enum class CensusSeamId {
   kTextureSharedDirectLoad,
   kTextureLegacyCpu,
   kTextureCacheHit,
+  kTextureResolveSnapshot,
   kWaitPredicate,
   kHostRead,
   kFrameEndPublication,
@@ -66,7 +68,12 @@ const char* CensusSeamIdName(CensusSeamId seam);
 // The class a given seam MUST report. Declared here, independently of the
 // production call site, so a seam that reports something else is a detectable
 // mismatch rather than the new truth.
-constexpr PhysicalConsumerClass ExpectedClassForSeam(CensusSeamId seam) {
+// Returns nullopt for a seam with no declared class. Deliberately NOT a
+// defaulted value: the previous version returned kHostRead for anything
+// unhandled, and the completeness test read its expectation from this same
+// function — so a newly added seam was compared against the default and passed.
+constexpr std::optional<PhysicalConsumerClass> ExpectedClassForSeam(
+    CensusSeamId seam) {
   switch (seam) {
     case CensusSeamId::kVertexSharedVfetch:
       return PhysicalConsumerClass::kSharedVfetch;
@@ -80,6 +87,8 @@ constexpr PhysicalConsumerClass ExpectedClassForSeam(CensusSeamId seam) {
       return PhysicalConsumerClass::kLegacyTextureCpuRead;
     case CensusSeamId::kTextureCacheHit:
       return PhysicalConsumerClass::kTextureCacheHit;
+    case CensusSeamId::kTextureResolveSnapshot:
+      return PhysicalConsumerClass::kResolveSnapshot;
     case CensusSeamId::kWaitPredicate:
       return PhysicalConsumerClass::kWaitPredicate;
     case CensusSeamId::kHostRead:
@@ -88,9 +97,11 @@ constexpr PhysicalConsumerClass ExpectedClassForSeam(CensusSeamId seam) {
       return PhysicalConsumerClass::kFrameEndPublication;
     case CensusSeamId::kLifecyclePublication:
       return PhysicalConsumerClass::kLifecyclePublication;
-    default:
-      return PhysicalConsumerClass::kHostRead;
+    case CensusSeamId::kMetadataGuard:
+    case CensusSeamId::kCount:
+      return std::nullopt;  // no consumer class: reads no guest bytes
   }
+  return std::nullopt;
 }
 
 // Named failures. Each names a DIFFERENT repair.
@@ -102,6 +113,7 @@ enum class CensusVerdict {
   kSeamClassMismatch,    // a seam reported a class it is not allowed to report
   kUnionMismatch,        // classified ranges are not the requested ranges
   kHeartbeatMissing,     // the run produced no liveness signal at all
+  kEngagementMissing,    // the run was alive but observed nothing
   kCopiedRetiredMismatch,// retirements without the bytes that justify them
 };
 
@@ -115,7 +127,15 @@ struct CensusObservation {
   PhysicalConsumerClass reported_class = PhysicalConsumerClass::kHostRead;
   GuestRangeSet requested;
   std::vector<ClassifiedInterval> classified;
-  uint64_t retirements = 0;
+  // Retirements split by writer kind. A resolve retirement legitimately has NO
+  // memexport memcpy behind it, so one combined counter cannot express the
+  // invariant without either over-rejecting resolves or under-checking
+  // memexports.
+  uint64_t memexport_retirements = 0;
+  uint64_t memexport_copies = 0;   // COUNT of copies, not bytes
+  uint64_t resolve_retirements = 0;
+  // Magnitude evidence only; never the invariant, because one byte can justify
+  // many retirements.
   uint64_t bytes_copied = 0;
 };
 
@@ -193,6 +213,15 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
                 "empty census cannot be distinguished from one that never ran");
   }
 
+  // Alive but blind: a run that observed nothing is not evidence of "nothing
+  // to observe". Separate from the heartbeat so the two failures name
+  // different repairs — the harness versus the seams.
+  if (run.observations.empty() && run.executed_seams.empty()) {
+    return fail(CensusVerdict::kEngagementMissing,
+                "the run produced a heartbeat but observed no physical "
+                "operation; an empty census is not a finding");
+  }
+
   if (run.unattributed_entries) {
     return fail(CensusVerdict::kUnknownAttribution,
                 "an observation reached the census with no seam class");
@@ -218,13 +247,17 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
     const std::string where = CensusSeamIdName(observation.seam);
 
     // A seam may only report the class it is defined to be.
-    if (observation.reported_class != ExpectedClassForSeam(observation.seam)) {
+    const std::optional<PhysicalConsumerClass> expected =
+        ExpectedClassForSeam(observation.seam);
+    if (!expected) {
+      return fail(CensusVerdict::kSeamClassMismatch,
+                  where + " has no declared expected class");
+    }
+    if (observation.reported_class != *expected) {
       return fail(CensusVerdict::kSeamClassMismatch,
                   where + " reported " +
                       PhysicalConsumerClassName(observation.reported_class) +
-                      ", expected " +
-                      PhysicalConsumerClassName(
-                          ExpectedClassForSeam(observation.seam)));
+                      ", expected " + PhysicalConsumerClassName(*expected));
     }
 
     if (CensusIntervalsOverlapBeforeNormalize(observation.classified)) {
@@ -238,11 +271,22 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
                   where + " classified ranges are not the requested ranges");
     }
 
-    // Retirements must be justified by copied bytes. A retirement with no copy
-    // is a record dropped without its data reaching RAM.
-    if (observation.retirements && !observation.bytes_copied) {
+    // EXACT invariant: every retired memexport record must correspond to one
+    // completed copy. The previous rule was `retirements && !bytes_copied`,
+    // which accepted ten retirements behind a single byte AND falsely rejected
+    // a legitimate resolve retirement that has no memexport memcpy at all.
+    // Byte count is retained as magnitude evidence, not as the invariant.
+    if (observation.memexport_copies != observation.memexport_retirements) {
       return fail(CensusVerdict::kCopiedRetiredMismatch,
-                  where + " retired records without copying any bytes");
+                  where + " retired " +
+                      std::to_string(observation.memexport_retirements) +
+                      " memexport records against " +
+                      std::to_string(observation.memexport_copies) +
+                      " completed copies");
+    }
+    if (observation.memexport_copies && !observation.bytes_copied) {
+      return fail(CensusVerdict::kCopiedRetiredMismatch,
+                  where + " reported completed copies of zero bytes");
     }
   }
   return result;
@@ -256,6 +300,8 @@ inline const char* CensusSeamIdName(CensusSeamId seam) {
     case CensusSeamId::kTextureSharedDirectLoad: return "texture/shared-direct";
     case CensusSeamId::kTextureLegacyCpu: return "texture/legacy-cpu";
     case CensusSeamId::kTextureCacheHit: return "texture/cache-hit";
+    case CensusSeamId::kTextureResolveSnapshot:
+      return "texture/resolve-snapshot";
     case CensusSeamId::kWaitPredicate: return "wait-predicate";
     case CensusSeamId::kHostRead: return "host-read";
     case CensusSeamId::kFrameEndPublication: return "frame-end-publication";
@@ -274,6 +320,7 @@ inline const char* CensusVerdictName(CensusVerdict verdict) {
     case CensusVerdict::kSeamClassMismatch: return "seam_class_mismatch";
     case CensusVerdict::kUnionMismatch: return "union_mismatch";
     case CensusVerdict::kHeartbeatMissing: return "heartbeat_missing";
+    case CensusVerdict::kEngagementMissing: return "engagement_missing";
     case CensusVerdict::kCopiedRetiredMismatch:
       return "copied_retired_mismatch";
     default: return "unknown";

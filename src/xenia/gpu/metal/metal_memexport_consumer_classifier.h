@@ -61,6 +61,11 @@ enum class PhysicalConsumerClass {
   kLegacyTextureCpuRead, // legacy texture fallback (base level or mip chain)
   kWaitPredicate,        // WAIT_REG_MEM / memory predicate poll
   kHostRead,             // host/trace/debug/save read
+  // Reads a resolve-produced snapshot rather than guest RAM or the shared
+  // memexport buffer. Neither GPU-direct eligible NOR RAM-required: its bytes
+  // come from a third source, and forcing it into either category would make
+  // the partition wrong in whichever direction it was forced.
+  kResolveSnapshot,
   // Reads no guest bytes at all.
   kTextureCacheHit,
   // Boundaries. Mandatory, and outside the avoidable-opportunity denominator.
@@ -103,6 +108,13 @@ constexpr bool ConsumerIsPublicationBoundary(PhysicalConsumerClass consumer) {
 // range, or the consult tally understates what was examined.
 constexpr bool ConsumerReadsNoGuestBytes(PhysicalConsumerClass consumer) {
   return consumer == PhysicalConsumerClass::kTextureCacheHit;
+}
+
+// Served from a resolve/bridge snapshot. A fourth category on purpose: task 1.3
+// listed it as a distinct texture source, and it is neither shared-buffer
+// eligible nor CPU-RAM-required.
+constexpr bool ConsumerReadsResolveSnapshot(PhysicalConsumerClass consumer) {
+  return consumer == PhysicalConsumerClass::kResolveSnapshot;
 }
 
 const char* PhysicalConsumerClassName(PhysicalConsumerClass consumer);
@@ -320,6 +332,8 @@ inline const char* PhysicalConsumerClassNameImpl(
       return "wait-predicate";
     case PhysicalConsumerClass::kHostRead:
       return "host-read";
+    case PhysicalConsumerClass::kResolveSnapshot:
+      return "resolve-snapshot";
     case PhysicalConsumerClass::kTextureCacheHit:
       return "texture-cache-hit";
     case PhysicalConsumerClass::kFrameEndPublication:

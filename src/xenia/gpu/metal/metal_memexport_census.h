@@ -82,7 +82,7 @@ inline const char* InvalidationOriginName(InvalidationOrigin origin) {
   }
 }
 
-inline constexpr size_t kMemexportCensusClassCount = 10;
+inline constexpr size_t kMemexportCensusClassCount = 11;
 
 // Per-physical-corridor accumulators. Every field is an ACTUAL observation, not
 // an inference from another field.
