@@ -71,6 +71,9 @@ enum class PhysicalConsumerClass {
   // Boundaries. Mandatory, and outside the avoidable-opportunity denominator.
   kFrameEndPublication,
   kLifecyclePublication,
+  // Sentinel. Array sizes derive from this so a category added above cannot
+  // silently drift past a hand-maintained constant.
+  kCount,
 };
 
 // Reads the shared Metal buffer, so it CAN observe GPU-newer bytes without RAM
@@ -340,6 +343,8 @@ inline const char* PhysicalConsumerClassNameImpl(
       return "frame-end-publication";
     case PhysicalConsumerClass::kLifecyclePublication:
       return "lifecycle-publication";
+    case PhysicalConsumerClass::kCount:
+      break;  // sentinel, never a real class
   }
   return "unknown";
 }

@@ -124,7 +124,12 @@ const char* CensusVerdictName(CensusVerdict verdict);
 // 2.3 defects.
 struct CensusObservation {
   CensusSeamId seam = CensusSeamId::kHostRead;
-  PhysicalConsumerClass reported_class = PhysicalConsumerClass::kHostRead;
+  // OPTIONAL, because not every observed physical operation reads guest bytes.
+  // The metadata guard has no consumer class at all: it inspects pending-record
+  // metadata. Requiring a class for it made the seam unrepresentable — omitting
+  // the observation failed missing_seam, and supplying one failed
+  // seam_class_mismatch, so the guard could not be recorded either way.
+  std::optional<PhysicalConsumerClass> reported_class;
   GuestRangeSet requested;
   std::vector<ClassifiedInterval> classified;
   // Retirements split by writer kind. A resolve retirement legitimately has NO
@@ -250,13 +255,30 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
     const std::optional<PhysicalConsumerClass> expected =
         ExpectedClassForSeam(observation.seam);
     if (!expected) {
-      return fail(CensusVerdict::kSeamClassMismatch,
-                  where + " has no declared expected class");
+      // A CLASSLESS seam (the metadata guard). It must carry no class and no
+      // bytes: it reads record metadata only, and letting it carry a range
+      // would fold a zero-byte guard into a corridor's byte accounting — which
+      // task 1.3 established is a content effect, not convergence cost.
+      if (observation.reported_class) {
+        return fail(CensusVerdict::kSeamClassMismatch,
+                    where + " is classless but reported " +
+                        PhysicalConsumerClassName(*observation.reported_class));
+      }
+      if (!observation.requested.ranges().empty() ||
+          !observation.classified.empty()) {
+        return fail(CensusVerdict::kSeamClassMismatch,
+                    where + " is a zero-byte guard but carried ranges");
+      }
+      continue;  // nothing further to validate for a classless observation
     }
-    if (observation.reported_class != *expected) {
+    if (!observation.reported_class) {
+      return fail(CensusVerdict::kSeamClassMismatch,
+                  where + " reported no class but one is required");
+    }
+    if (*observation.reported_class != *expected) {
       return fail(CensusVerdict::kSeamClassMismatch,
                   where + " reported " +
-                      PhysicalConsumerClassName(observation.reported_class) +
+                      PhysicalConsumerClassName(*observation.reported_class) +
                       ", expected " + PhysicalConsumerClassName(*expected));
     }
 

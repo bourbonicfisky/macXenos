@@ -82,7 +82,10 @@ inline const char* InvalidationOriginName(InvalidationOrigin origin) {
   }
 }
 
-inline constexpr size_t kMemexportCensusClassCount = 11;
+// DERIVED, never hand-maintained: this was manually set to 10 and then to 11,
+// and a category added without touching it would have written past the array.
+inline constexpr size_t kMemexportCensusClassCount =
+    size_t(PhysicalConsumerClass::kCount);
 
 // Per-physical-corridor accumulators. Every field is an ACTUAL observation, not
 // an inference from another field.

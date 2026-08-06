@@ -23,6 +23,7 @@
 // only the shape reveals it.
 
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -361,15 +362,26 @@ TEST_CASE("The consumer partition is total and non-overlapping",
       PhysicalConsumerClass::kLegacyTextureCpuRead,
       PhysicalConsumerClass::kWaitPredicate,
       PhysicalConsumerClass::kHostRead,
+      PhysicalConsumerClass::kResolveSnapshot,
       PhysicalConsumerClass::kTextureCacheHit,
       PhysicalConsumerClass::kFrameEndPublication,
       PhysicalConsumerClass::kLifecyclePublication,
   };
+  // Enumerated against the sentinel so a category added later is not silently
+  // left out of this array — the way kResolveSnapshot was.
+  static_assert(size_t(PhysicalConsumerClass::kCount) == 11,
+                "a consumer class was added; extend `all` and the category "
+                "predicates below before this test can pin it");
+  CHECK(std::size(all) == size_t(PhysicalConsumerClass::kCount));
   for (PhysicalConsumerClass consumer : all) {
     INFO("consumer " << metal::PhysicalConsumerClassName(consumer));
+    // FOUR categories, not three: a resolve snapshot is neither shared-buffer
+    // eligible nor CPU-RAM-required, and omitting the predicate here let the
+    // suite stay green while the new category was pinned by nothing.
     const int categories = int(ConsumerReadsSharedBuffer(consumer)) +
                            int(ConsumerRequiresRam(consumer)) +
-                           int(metal::ConsumerReadsNoGuestBytes(consumer));
+                           int(metal::ConsumerReadsNoGuestBytes(consumer)) +
+                           int(metal::ConsumerReadsResolveSnapshot(consumer));
     CHECK(categories == 1);
   }
   // Publication boundaries are RAM-required, never a separate escape hatch.
