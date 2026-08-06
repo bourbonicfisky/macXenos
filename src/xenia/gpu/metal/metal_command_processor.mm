@@ -58,6 +58,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_memexport_census.h"
+#include "xenia/gpu/metal/metal_memexport_census_verify.h"
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -435,6 +436,23 @@ class MetalMemexportConvergenceTarget
       return false;
     }
     std::memcpy(dest, contents + base, length);
+    // Task 2.4 gap 4: recorded HERE, at the copy, so `copied` is evidence
+    // rather than an unwritten counter — copied=0 beside nonzero retirements
+    // previously meant only that nobody wrote the field. Attributed to the seam
+    // that forced the convergence; an unattributed copy counts as unknown
+    // rather than being assigned to a corridor that did not cause it.
+    if (MetalMemexportCensus::Enabled()) {
+      if (const PhysicalConsumerClass* copy_class =
+              MetalMemexportCensusSeam::Current()) {
+        GetMetalMemexportCensus()
+            .Corridor(*copy_class)
+            .bytes_copied.fetch_add(length, std::memory_order_relaxed);
+      } else {
+        GetMetalMemexportCensus()
+            .Corridor(PhysicalConsumerClass::kHostRead)
+            .unknown_attributions.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     if (texture_cache_) {
       // Task 5.3 proved the earlier RangeWrittenByGpu watch is equivalent in
       // normal mode, but trace playback unregisters that global watch and
@@ -7624,9 +7642,13 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
         corridor.zero_byte_consultations.fetch_add(1,
                                                    std::memory_order_relaxed);
       }
-      // Union equality, not a byte sum: a wrong partition can keep totals
-      // self-consistent (task 2.2).
-      if (!classification.IsExactPartition()) {
+      // TRUE union equality — RANGES, not a byte sum. This previously called
+      // IsExactPartition(), which compares two totals, under a comment claiming
+      // otherwise: the exact weakness task 2.2 demonstrated, reproduced in the
+      // live path and made to look correct by its own comment.
+      if (!metal::CensusUnionEqualsRequest(classification.intervals,
+                                           combined) ||
+          !classification.IsExactPartition()) {
         corridor.union_mismatches.fetch_add(1, std::memory_order_relaxed);
       }
     }
