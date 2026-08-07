@@ -72,6 +72,21 @@ const char* CensusSeamIdName(CensusSeamId seam);
 // defaulted value: the previous version returned kHostRead for anything
 // unhandled, and the completeness test read its expectation from this same
 // function — so a newly added seam was compared against the default and passed.
+// A seam id that names a real physical operation. kCount is a sentinel and
+// anything outside the enum is a corrupt id; neither may be treated as a seam.
+constexpr bool IsDeclaredSeam(CensusSeamId seam) {
+  return size_t(seam) < size_t(CensusSeamId::kCount);
+}
+
+// The ONLY seam permitted to carry no consumer class: it inspects pending-record
+// metadata and reads no guest bytes. Written as an explicit allow-list rather
+// than "whatever ExpectedClassForSeam has no entry for", because the latter
+// silently admitted the kCount sentinel and any out-of-range id as valid
+// classless seams.
+constexpr bool IsClasslessSeam(CensusSeamId seam) {
+  return seam == CensusSeamId::kMetadataGuard;
+}
+
 constexpr std::optional<PhysicalConsumerClass> ExpectedClassForSeam(
     CensusSeamId seam) {
   switch (seam) {
@@ -114,6 +129,7 @@ enum class CensusVerdict {
   kUnionMismatch,        // classified ranges are not the requested ranges
   kHeartbeatMissing,     // the run produced no liveness signal at all
   kEngagementMissing,    // the run was alive but observed nothing
+  kInvalidSeam,          // a seam id outside the declared set (incl. kCount)
   kCopiedRetiredMismatch,// retirements without the bytes that justify them
 };
 
@@ -232,6 +248,23 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
                 "an observation reached the census with no seam class");
   }
 
+  // Seam ids are validated BEFORE anything is inferred from them. Previously a
+  // seam whose expected class was nullopt was treated as a valid classless
+  // seam, which admitted the kCount sentinel and any out-of-range id — a run
+  // consisting entirely of a bogus seam was ACCEPTED.
+  for (CensusSeamId executed : run.executed_seams) {
+    if (!IsDeclaredSeam(executed)) {
+      return fail(CensusVerdict::kInvalidSeam,
+                  "executed seam id is not a declared seam");
+    }
+  }
+  for (const CensusObservation& observation : run.observations) {
+    if (!IsDeclaredSeam(observation.seam)) {
+      return fail(CensusVerdict::kInvalidSeam,
+                  "observation carries a seam id that is not a declared seam");
+    }
+  }
+
   // Every physical operation the run performed must have been observed.
   for (CensusSeamId executed : run.executed_seams) {
     bool observed = false;
@@ -254,6 +287,13 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
     // A seam may only report the class it is defined to be.
     const std::optional<PhysicalConsumerClass> expected =
         ExpectedClassForSeam(observation.seam);
+    if (!expected && !IsClasslessSeam(observation.seam)) {
+      // A declared seam with no expected class that is not on the classless
+      // allow-list is a table gap, not a licence to skip validation.
+      return fail(CensusVerdict::kSeamClassMismatch,
+                  where + " has no declared expected class and is not a "
+                          "permitted classless seam");
+    }
     if (!expected) {
       // A CLASSLESS seam (the metadata guard). It must carry no class and no
       // bytes: it reads record metadata only, and letting it carry a range
@@ -343,6 +383,7 @@ inline const char* CensusVerdictName(CensusVerdict verdict) {
     case CensusVerdict::kUnionMismatch: return "union_mismatch";
     case CensusVerdict::kHeartbeatMissing: return "heartbeat_missing";
     case CensusVerdict::kEngagementMissing: return "engagement_missing";
+    case CensusVerdict::kInvalidSeam: return "invalid_seam";
     case CensusVerdict::kCopiedRetiredMismatch:
       return "copied_retired_mismatch";
     default: return "unknown";

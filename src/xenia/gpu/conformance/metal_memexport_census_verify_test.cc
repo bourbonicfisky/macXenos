@@ -286,6 +286,82 @@ TEST_CASE("Zero retirements with zero copied bytes is fine",
   CHECK(VerifyCensusRun(run).accepted());
 }
 
+// ---------------------------------------------------------------------------
+// The classless (metadata guard) rule, and seam-id validity
+//
+// Five cases, because the previous round left this rule with NO durable pin:
+// the completeness test skipped the metadata guard, and the verifier treated
+// ANY seam with no expected class as a valid classless seam — which admitted
+// the kCount sentinel and out-of-range ids. A run consisting solely of a bogus
+// seam was accepted.
+// ---------------------------------------------------------------------------
+
+namespace {
+CensusRunSummary GuardRun(CensusObservation observation) {
+  CensusRunSummary run;
+  run.heartbeats = 1;
+  run.observations = {observation};
+  run.executed_seams = {observation.seam};
+  return run;
+}
+CensusObservation BareGuard() {
+  CensusObservation observation;
+  observation.seam = CensusSeamId::kMetadataGuard;
+  return observation;  // no class, no requested range, no classified range
+}
+}  // namespace
+
+TEST_CASE("A classless zero-byte metadata guard is accepted",
+          "[census_verify][classless]") {
+  const auto result = VerifyCensusRun(GuardRun(BareGuard()));
+  INFO("verdict: " << CensusVerdictName(result.verdict) << " — "
+                   << result.detail);
+  CHECK(result.accepted());
+}
+
+TEST_CASE("A metadata guard claiming a class is rejected",
+          "[census_verify][classless]") {
+  CensusObservation guard = BareGuard();
+  guard.reported_class = PhysicalConsumerClass::kHostRead;
+  CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+        CensusVerdict::kSeamClassMismatch);
+}
+
+TEST_CASE("A metadata guard carrying a requested range is rejected",
+          "[census_verify][classless]") {
+  // The guard reads record METADATA. Letting it carry bytes would fold a
+  // zero-byte guard into a corridor's byte accounting and make it look like
+  // convergence cost, which task 1.3 established it is not.
+  CensusObservation guard = BareGuard();
+  guard.requested.Add(*GuestRange::FromBaseLength(0x400, 0x10));
+  CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+        CensusVerdict::kSeamClassMismatch);
+}
+
+TEST_CASE("A metadata guard carrying a classified range is rejected",
+          "[census_verify][classless]") {
+  CensusObservation guard = BareGuard();
+  guard.classified = {
+      Interval(0x400, 0x10, IntervalAuthority::kUncovered, 0)};
+  CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+        CensusVerdict::kSeamClassMismatch);
+}
+
+TEST_CASE("The sentinel and out-of-range seam ids are rejected",
+          "[census_verify][classless]") {
+  // Both were ACCEPTED before this round: the verifier inferred "classless"
+  // from a missing expected-class entry, and kCount has no entry.
+  CensusObservation sentinel;
+  sentinel.seam = CensusSeamId::kCount;
+  CHECK(VerifyCensusRun(GuardRun(sentinel)).verdict ==
+        CensusVerdict::kInvalidSeam);
+
+  CensusObservation bogus;
+  bogus.seam = static_cast<CensusSeamId>(99);
+  CHECK(VerifyCensusRun(GuardRun(bogus)).verdict ==
+        CensusVerdict::kInvalidSeam);
+}
+
 TEST_CASE("Every seam has a declared expected class",
           "[census_verify]") {
   // The expected-class table is what makes a relabel detectable, so a seam
@@ -296,8 +372,13 @@ TEST_CASE("Every seam has a declared expected class",
     INFO("seam " << metal::CensusSeamIdName(seam));
     // The metadata guard is the one seam with no consumer class: it reads no
     // guest bytes and is recorded on its own counters.
-    if (seam == CensusSeamId::kMetadataGuard ||
-        seam == CensusSeamId::kCount) {
+    if (seam == CensusSeamId::kCount) {
+      continue;  // sentinel, not a seam
+    }
+    if (metal::IsClasslessSeam(seam)) {
+      // Not skipped silently: the classless seams are pinned by their own
+      // five cases above, and this asserts the allow-list and the table agree.
+      CHECK_FALSE(metal::ExpectedClassForSeam(seam).has_value());
       continue;
     }
     // The expectation comes from an INDEPENDENT table, not from the function
