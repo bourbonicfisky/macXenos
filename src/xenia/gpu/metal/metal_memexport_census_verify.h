@@ -119,6 +119,34 @@ constexpr std::optional<PhysicalConsumerClass> ExpectedClassForSeam(
   return std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// Per-request balance (D2a). Multiplicities are compared PER REQUEST, before
+// anything is aggregated.
+//
+// Per-seam totals cancel errors. Two requests on one seam:
+//     request A: executed 2, observed 1
+//     request B: executed 0, observed 1
+//     aggregate: executed 2, observed 2   <-- passes, and both are wrong
+// A missing observation in A is paid for by an unjustified observation in B,
+// and the aggregate reports a clean partition. So each one-snapshot decision
+// closes with its OWN equality, and only a balanced request contributes to the
+// bounded totals.
+// ---------------------------------------------------------------------------
+struct CensusRequestBalance {
+  CensusSeamId seam = CensusSeamId::kHostRead;
+  // Emitted at INDEPENDENT locations per D2a: `executed` at the physical
+  // operation, `observed` at the classifier. Removing the observation hook must
+  // leave `executed` intact — if one marker wrote both, deleting it would drive
+  // both to zero and this equality would pass on a seam nobody observed.
+  uint64_t executed = 0;
+  uint64_t observed = 0;
+
+  bool balanced() const { return executed == observed; }
+};
+
+// Closes one request (defined below, after CensusVerdict). Returns the verdict
+// for THAT request; the caller must not aggregate an unbalanced one.
+
 // Named failures. Each names a DIFFERENT repair.
 enum class CensusVerdict {
   kAccepted,
@@ -130,6 +158,7 @@ enum class CensusVerdict {
   kHeartbeatMissing,     // the run produced no liveness signal at all
   kEngagementMissing,    // the run was alive but observed nothing
   kInvalidSeam,          // a seam id outside the declared set (incl. kCount)
+  kUnjustifiedObservation, // observed > executed for one request
   kCopiedRetiredMismatch,// retirements without the bytes that justify them
 };
 
@@ -161,6 +190,10 @@ struct CensusObservation {
 };
 
 struct CensusRunSummary {
+  // Per-request balances, checked before aggregation (see
+  // VerifyCensusRequestBalances). Bounded in the live census: a request that
+  // balances contributes to totals and is not retained.
+  std::vector<CensusRequestBalance> request_balances;
   std::vector<CensusObservation> observations;
   uint64_t heartbeats = 0;
   uint64_t unattributed_entries = 0;
@@ -218,6 +251,43 @@ inline bool CensusUnionEqualsRequest(
   return true;
 }
 
+inline CensusVerdict CloseCensusRequest(const CensusRequestBalance& balance) {
+  if (!IsDeclaredSeam(balance.seam)) {
+    return CensusVerdict::kInvalidSeam;
+  }
+  // BOTH directions. `executed > observed` means a physical operation ran
+  // unobserved; `observed > executed` means the census invented an observation
+  // for work that did not happen. Only one of the two is a missing hook, and
+  // conflating them would send the repair to the wrong place.
+  if (balance.executed > balance.observed) {
+    return CensusVerdict::kMissingSeam;
+  }
+  if (balance.observed > balance.executed) {
+    return CensusVerdict::kUnjustifiedObservation;
+  }
+  return CensusVerdict::kAccepted;
+}
+
+// Aggregation is only legal over balanced requests. Any unbalanced request
+// fails HERE, before its counts can be summed against another request's
+// opposite error.
+inline CensusVerifyResult VerifyCensusRequestBalances(
+    const std::vector<CensusRequestBalance>& balances) {
+  CensusVerifyResult result;
+  for (const CensusRequestBalance& balance : balances) {
+    const CensusVerdict verdict = CloseCensusRequest(balance);
+    if (verdict != CensusVerdict::kAccepted) {
+      result.verdict = verdict;
+      result.detail =
+          std::string(CensusSeamIdName(balance.seam)) + " request unbalanced: executed=" +
+          std::to_string(balance.executed) + " observed=" +
+          std::to_string(balance.observed);
+      return result;
+    }
+  }
+  return result;
+}
+
 inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
   CensusVerifyResult result;
   auto fail = [&result](CensusVerdict verdict, std::string detail) {
@@ -241,6 +311,17 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
     return fail(CensusVerdict::kEngagementMissing,
                 "the run produced a heartbeat but observed no physical "
                 "operation; an empty census is not a finding");
+  }
+
+  // Per-request balance BEFORE anything aggregated. A run whose per-seam totals
+  // agree can still contain a missing observation in one request cancelled by
+  // an unjustified one in another.
+  {
+    const CensusVerifyResult balance_result =
+        VerifyCensusRequestBalances(run.request_balances);
+    if (!balance_result.accepted()) {
+      return balance_result;
+    }
   }
 
   if (run.unattributed_entries) {
@@ -402,6 +483,8 @@ inline const char* CensusVerdictName(CensusVerdict verdict) {
     case CensusVerdict::kHeartbeatMissing: return "heartbeat_missing";
     case CensusVerdict::kEngagementMissing: return "engagement_missing";
     case CensusVerdict::kInvalidSeam: return "invalid_seam";
+    case CensusVerdict::kUnjustifiedObservation:
+      return "unjustified_observation";
     case CensusVerdict::kCopiedRetiredMismatch:
       return "copied_retired_mismatch";
     default: return "unknown";

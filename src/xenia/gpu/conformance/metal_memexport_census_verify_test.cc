@@ -34,10 +34,14 @@ namespace test {
 namespace {
 
 using metal::CensusObservation;
+using metal::CensusRequestBalance;
 using metal::CensusRunSummary;
 using metal::CensusSeamId;
 using metal::CensusVerdict;
 using metal::CensusVerdictName;
+using metal::CensusVerifyResult;
+using metal::CloseCensusRequest;
+using metal::VerifyCensusRequestBalances;
 using metal::ClassifiedInterval;
 using metal::GuestRange;
 using metal::GuestRangeSet;
@@ -430,6 +434,101 @@ TEST_CASE("Every seam has a declared expected class",
     run.executed_seams = {seam};
     CHECK(VerifyCensusRun(run).accepted());
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// Per-request balance (D2a). Aggregation is only legal over balanced requests.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Cancelling per-request errors are rejected despite equal totals",
+          "[metal][memexport][census]") {
+  // The concrete cancellation: request A drops an observation, request B
+  // invents one. Per-seam totals are 2 == 2 and a total-only check passes.
+  const std::vector<CensusRequestBalance> cancelling = {
+      {CensusSeamId::kVertexSharedVfetch, 2, 1},
+      {CensusSeamId::kVertexSharedVfetch, 0, 1},
+  };
+
+  uint64_t executed_total = 0;
+  uint64_t observed_total = 0;
+  for (const CensusRequestBalance& balance : cancelling) {
+    executed_total += balance.executed;
+    observed_total += balance.observed;
+  }
+  // Pin the premise: without per-request closure this run looks clean.
+  REQUIRE(executed_total == observed_total);
+
+  const CensusVerifyResult result = VerifyCensusRequestBalances(cancelling);
+  REQUIRE_FALSE(result.accepted());
+  REQUIRE(result.verdict == CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("Per-request balance separates the two directions",
+          "[metal][memexport][census]") {
+  // A dropped observation and an invented one need DIFFERENT repairs, so they
+  // must not share a verdict.
+  REQUIRE(CloseCensusRequest({CensusSeamId::kVertexSharedVfetch, 3, 1}) ==
+          CensusVerdict::kMissingSeam);
+  REQUIRE(CloseCensusRequest({CensusSeamId::kVertexSharedVfetch, 0, 1}) ==
+          CensusVerdict::kUnjustifiedObservation);
+  REQUIRE(CloseCensusRequest({CensusSeamId::kVertexSharedVfetch, 2, 2}) ==
+          CensusVerdict::kAccepted);
+}
+
+TEST_CASE("A zero-work request balances", "[metal][memexport][census]") {
+  // Nothing executed and nothing observed is a legal request, not a hole.
+  REQUIRE(CloseCensusRequest({CensusSeamId::kTextureCacheHit, 0, 0}) ==
+          CensusVerdict::kAccepted);
+}
+
+TEST_CASE("Per-request balance rejects an undeclared seam",
+          "[metal][memexport][census]") {
+  REQUIRE(CloseCensusRequest({CensusSeamId::kCount, 1, 1}) ==
+          CensusVerdict::kInvalidSeam);
+  REQUIRE(CloseCensusRequest({static_cast<CensusSeamId>(9999), 1, 1}) ==
+          CensusVerdict::kInvalidSeam);
+}
+
+TEST_CASE("Removing an observation hook fails with execution preserved",
+          "[metal][memexport][census]") {
+  // The D2a mutation. Because the counters are emitted at independent
+  // locations, deleting the observation hook leaves `executed` standing and the
+  // request fails locally. A single marker writing both would zero both and
+  // this would pass.
+  CensusRequestBalance mutated{CensusSeamId::kTextureSharedDirectLoad, 4, 4};
+  REQUIRE(CloseCensusRequest(mutated) == CensusVerdict::kAccepted);
+
+  mutated.observed = 0;
+  REQUIRE(mutated.executed == 4);
+  REQUIRE(CloseCensusRequest(mutated) == CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("An unbalanced request fails before run-level aggregation",
+          "[metal][memexport][census]") {
+  // Built on a run that is otherwise ACCEPTED, so the verdict below can only
+  // come from the balance check. (Heartbeat and engagement gate earlier by
+  // design — a bare run fails those first and would never reach here, which is
+  // what an earlier version of this test wrongly asserted against.)
+  CensusRunSummary healthy = GuardRun(BareGuard());
+  REQUIRE(VerifyCensusRun(healthy).accepted());
+
+  healthy.request_balances = {{CensusSeamId::kVertexSharedVfetch, 2, 1}};
+  const CensusVerifyResult result = VerifyCensusRun(healthy);
+  REQUIRE_FALSE(result.accepted());
+  REQUIRE(result.verdict == CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("Balance precedes the aggregate stages in the reported verdict",
+          "[metal][memexport][census]") {
+  // A run that is BOTH unbalanced and has an unattributed entry must name the
+  // unbalanced request. The aggregate failure is downstream of the local one,
+  // and reporting it would send the repair to the wrong place.
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.request_balances = {{CensusSeamId::kVertexSharedVfetch, 0, 1}};
+  run.unattributed_entries = 3;
+  const CensusVerifyResult result = VerifyCensusRun(run);
+  REQUIRE(result.verdict == CensusVerdict::kUnjustifiedObservation);
 }
 
 }  // namespace test
