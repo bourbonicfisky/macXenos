@@ -309,7 +309,25 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
         return fail(CensusVerdict::kSeamClassMismatch,
                     where + " is a zero-byte guard but carried ranges");
       }
-      continue;  // nothing further to validate for a classless observation
+      // EVERY accounting field must be zero. The classless branch previously
+      // `continue`d before the copy/retirement checks, so a guard reporting
+      // copies, retirements or bytes was accepted — a zero-byte guard would
+      // have contributed convergence accounting it cannot possibly have
+      // performed. Checked here rather than by falling through, because the
+      // invariant is "all zero", not the memexport count equality below.
+      if (observation.memexport_copies || observation.memexport_retirements ||
+          observation.resolve_retirements || observation.bytes_copied) {
+        return fail(CensusVerdict::kCopiedRetiredMismatch,
+                    where + " is a zero-byte guard but reported accounting: "
+                            "copies=" +
+                        std::to_string(observation.memexport_copies) +
+                        " memexport_retirements=" +
+                        std::to_string(observation.memexport_retirements) +
+                        " resolve_retirements=" +
+                        std::to_string(observation.resolve_retirements) +
+                        " bytes=" + std::to_string(observation.bytes_copied));
+      }
+      continue;  // a validated classless observation carries nothing else
     }
     if (!observation.reported_class) {
       return fail(CensusVerdict::kSeamClassMismatch,

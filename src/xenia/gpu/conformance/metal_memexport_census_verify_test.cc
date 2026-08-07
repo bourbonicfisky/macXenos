@@ -347,6 +347,38 @@ TEST_CASE("A metadata guard carrying a classified range is rejected",
         CensusVerdict::kSeamClassMismatch);
 }
 
+TEST_CASE("A metadata guard reporting any accounting is rejected",
+          "[census_verify][classless]") {
+  // The classless branch used to `continue` before the copy/retirement checks,
+  // so a zero-byte guard could report convergence accounting it cannot have
+  // performed. Each field is pinned INDEPENDENTLY: a single combined check
+  // would pass if only one field were wrongly permitted.
+  {
+    CensusObservation guard = BareGuard();
+    guard.memexport_copies = 5;
+    CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+          CensusVerdict::kCopiedRetiredMismatch);
+  }
+  {
+    CensusObservation guard = BareGuard();
+    guard.memexport_retirements = 5;
+    CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+          CensusVerdict::kCopiedRetiredMismatch);
+  }
+  {
+    CensusObservation guard = BareGuard();
+    guard.resolve_retirements = 5;
+    CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+          CensusVerdict::kCopiedRetiredMismatch);
+  }
+  {
+    CensusObservation guard = BareGuard();
+    guard.bytes_copied = 4096;
+    CHECK(VerifyCensusRun(GuardRun(guard)).verdict ==
+          CensusVerdict::kCopiedRetiredMismatch);
+  }
+}
+
 TEST_CASE("The sentinel and out-of-range seam ids are rejected",
           "[census_verify][classless]") {
   // Both were ACCEPTED before this round: the verifier inferred "classless"
