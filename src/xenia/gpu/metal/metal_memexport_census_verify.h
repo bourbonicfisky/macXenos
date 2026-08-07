@@ -182,10 +182,23 @@ enum class CensusVerdict {
                              // physical read (a real control-flow path, not a
                              // defect); never aggregates
   kPostCloseEmission,    // a counter was emitted on an already-closed token
+  kCanceledWithoutObservation, // canceled-after-observation, but nothing was
+                               // observed -- the classifier hook is missing
+  kRejectionTableMismatch, // per-verdict counters disagree with the count
+  kDuplicateSnapshotSeam,  // the same (snapshot, seam) child opened twice
   kCount,                // sentinel; not a verdict
 };
 
 inline constexpr size_t kCensusVerdictCount = size_t(CensusVerdict::kCount);
+
+// Slots that may legally hold a rejection. kAccepted and the cancellation
+// outcome are NOT rejections; a count in either slot means the recording path
+// diverged from the counting path.
+inline constexpr bool IsRejectionVerdict(CensusVerdict verdict) {
+  return verdict != CensusVerdict::kAccepted &&
+         verdict != CensusVerdict::kCanceledAfterObservation &&
+         verdict != CensusVerdict::kCount;
+}
 
 const char* CensusVerdictName(CensusVerdict verdict);
 
@@ -231,17 +244,28 @@ struct CensusLedgerStats {
   // abandoned_with_work could not survive into the live report.
   uint64_t rejected_by_verdict[kCensusVerdictCount] = {};
 
+  uint64_t duplicate_snapshot_seams = 0;
+
   bool balances() const { return opened == accepted + rejected + canceled; }
 
-  // The first recorded rejection verdict, so the live report names the actual
-  // repair instead of a stand-in.
-  CensusVerdict FirstRejectionVerdict() const {
+  // The first recorded rejection verdict. Returns nullopt for "no information",
+  // which is NOT the same as kAccepted: falling back to kAccepted turned an
+  // inconsistent table (rejected=1, every counter zero) into a PASSING run.
+  std::optional<CensusVerdict> FirstRejectionVerdict() const {
     for (size_t i = 0; i < kCensusVerdictCount; ++i) {
-      if (i != size_t(CensusVerdict::kAccepted) && rejected_by_verdict[i]) {
+      if (rejected_by_verdict[i]) {
         return CensusVerdict(i);
       }
     }
-    return CensusVerdict::kAccepted;
+    return std::nullopt;
+  }
+
+  uint64_t RejectionTableTotal() const {
+    uint64_t total = 0;
+    for (size_t i = 0; i < kCensusVerdictCount; ++i) {
+      total += rejected_by_verdict[i];
+    }
+    return total;
   }
 };
 
@@ -323,6 +347,8 @@ inline CensusVerdict CloseCensusRequest(const CensusRequestBalance& balance);
 // ---------------------------------------------------------------------------
 class CensusRequestLedger {
  public:
+  static_assert(size_t(CensusSeamId::kCount) <= 32,
+                "Snapshot::seam_mask_ is a uint32_t");
   class Token {
    public:
     Token(const Token&) = delete;
@@ -380,18 +406,49 @@ class CensusRequestLedger {
   };
 
   // One SNAPSHOT can fan out to several seams (the vertex three-way split), so
-  // tokens are (snapshot, seam) children sharing one request identity. The
-  // design's "one token per snapshot" is realized as children of one id, not as
-  // one token carrying several seams — each seam still closes on its own
-  // balance, which is what makes a per-seam hole visible.
-  uint64_t BeginSnapshot() { return ++next_request_id_; }
+  // tokens are (snapshot, seam) children sharing one request identity. Each
+  // child still closes on its own balance: one token carrying several seams
+  // would let one seam's hole be covered by another seam's surplus.
+  //
+  // Children are opened THROUGH this object rather than by passing a raw id, so
+  // an unissued snapshot id is unrepresentable rather than merely detected. The
+  // seam mask makes a duplicate (snapshot, seam) child detectable; without it
+  // two balanced children for one seam silently doubled that seam's totals.
+  class Snapshot {
+   public:
+    Snapshot(const Snapshot&) = delete;
+    Snapshot& operator=(const Snapshot&) = delete;
+    Snapshot(Snapshot&& other) noexcept
+        : ledger_(other.ledger_), id_(other.id_), seam_mask_(other.seam_mask_) {
+      other.ledger_ = nullptr;
+    }
+    Snapshot& operator=(Snapshot&&) = delete;
 
-  Token Begin(uint64_t request_id, CensusSeamId seam) {
-    ++stats_.opened;
-    return Token(this, request_id, seam);
-  }
+    Token Begin(CensusSeamId seam) {
+      const uint32_t bit =
+          IsDeclaredSeam(seam) ? (uint32_t(1) << uint32_t(seam)) : 0;
+      if (bit && (seam_mask_ & bit)) {
+        ++ledger_->stats_.duplicate_snapshot_seams;
+      }
+      seam_mask_ |= bit;
+      return ledger_->BeginChild(id_, seam);
+    }
+
+    uint64_t id() const { return id_; }
+
+   private:
+    friend class CensusRequestLedger;
+    Snapshot(CensusRequestLedger* ledger, uint64_t id)
+        : ledger_(ledger), id_(id) {}
+    CensusRequestLedger* ledger_ = nullptr;
+    uint64_t id_ = 0;
+    uint32_t seam_mask_ = 0;
+  };
+
+  Snapshot BeginSnapshot() { return Snapshot(this, ++next_request_id_); }
+
   // Single-seam convenience: its own snapshot identity.
-  Token Begin(CensusSeamId seam) { return Begin(BeginSnapshot(), seam); }
+  Token Begin(CensusSeamId seam) { return BeginChild(++next_request_id_, seam); }
 
   // The ONLY path that contributes to the totals.
   CensusVerdict Close(Token& token, CensusCloseOutcome outcome) {
@@ -407,9 +464,12 @@ class CensusRequestLedger {
       // the executed/observed totals, and it is not a defect.
       if (token.balance_.executed) {
         // A read did happen, so "canceled before the read" is false.
-        ++stats_.rejected;
-        ++stats_.rejected_by_verdict[size_t(CensusVerdict::kAbandonedWithWork)];
-        return CensusVerdict::kAbandonedWithWork;
+        return RecordRejected(CensusVerdict::kAbandonedWithWork);
+      }
+      if (!token.balance_.observed) {
+        // Cancellation is only meaningful AFTER an observation. Accepting the
+        // 0/0 case let a canceled draw with its classifier hook removed pass.
+        return RecordRejected(CensusVerdict::kCanceledWithoutObservation);
       }
       ++stats_.canceled;
       return CensusVerdict::kCanceledAfterObservation;
@@ -417,9 +477,7 @@ class CensusRequestLedger {
     if (outcome == CensusCloseOutcome::kAbandonedBeforeRead &&
         (token.balance_.executed || token.balance_.observed)) {
       // "Nothing was read" and "work was recorded" cannot both be true.
-      ++stats_.rejected;
-      ++stats_.rejected_by_verdict[size_t(CensusVerdict::kAbandonedWithWork)];
-      return CensusVerdict::kAbandonedWithWork;
+      return RecordRejected(CensusVerdict::kAbandonedWithWork);
     }
     const CensusVerdict verdict = CloseCensusRequest(token.balance_);
     if (verdict == CensusVerdict::kAccepted) {
@@ -427,9 +485,16 @@ class CensusRequestLedger {
       executed_total_ += token.balance_.executed;
       observed_total_ += token.balance_.observed;
     } else {
-      ++stats_.rejected;
-      ++stats_.rejected_by_verdict[size_t(verdict)];
+      RecordRejected(verdict);
     }
+    return verdict;
+  }
+
+  // The ONE place a rejection is recorded, so the count and the table cannot
+  // drift apart.
+  CensusVerdict RecordRejected(CensusVerdict verdict) {
+    ++stats_.rejected;
+    ++stats_.rejected_by_verdict[size_t(verdict)];
     return verdict;
   }
 
@@ -438,6 +503,12 @@ class CensusRequestLedger {
   uint64_t observed_total() const { return observed_total_; }
 
  private:
+  Token BeginChild(uint64_t request_id, CensusSeamId seam) {
+    ++stats_.opened;
+    return Token(this, request_id, seam);
+  }
+
+  friend class Snapshot;
   CensusLedgerStats stats_;
   uint64_t next_request_id_ = 0;
   uint64_t executed_total_ = 0;
@@ -537,13 +608,37 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
                 std::to_string(run.ledger.post_close_emissions) +
                     " counter emission(s) on already-closed token(s)");
   }
+  if (run.ledger.duplicate_snapshot_seams) {
+    return fail(CensusVerdict::kDuplicateSnapshotSeam,
+                std::to_string(run.ledger.duplicate_snapshot_seams) +
+                    " duplicate (snapshot, seam) child token(s)");
+  }
+  // The rejection table is validated BEFORE it is read. An inconsistent table
+  // is its own failure, never an acceptance.
+  for (size_t i = 0; i < kCensusVerdictCount; ++i) {
+    if (run.ledger.rejected_by_verdict[i] && !IsRejectionVerdict(CensusVerdict(i))) {
+      return fail(CensusVerdict::kRejectionTableMismatch,
+                  std::string("rejection counted in the non-rejection slot ") +
+                      CensusVerdictName(CensusVerdict(i)));
+    }
+  }
+  if (run.ledger.RejectionTableTotal() != run.ledger.rejected) {
+    return fail(CensusVerdict::kRejectionTableMismatch,
+                "rejection counters sum to " +
+                    std::to_string(run.ledger.RejectionTableTotal()) +
+                    " but rejected=" + std::to_string(run.ledger.rejected));
+  }
   if (run.ledger.rejected) {
     // The REAL verdict, not a stand-in. Collapsing these to missing_seam sent
     // every rejection to the wrong repair.
-    const CensusVerdict actual = run.ledger.FirstRejectionVerdict();
-    return fail(actual, std::to_string(run.ledger.rejected) +
-                            " request(s) closed with " +
-                            CensusVerdictName(actual));
+    const std::optional<CensusVerdict> actual = run.ledger.FirstRejectionVerdict();
+    if (!actual) {
+      return fail(CensusVerdict::kRejectionTableMismatch,
+                  "rejections recorded with no verdict attributed");
+    }
+    return fail(*actual, std::to_string(run.ledger.rejected) +
+                             " request(s) closed with " +
+                             CensusVerdictName(*actual));
   }
 
   // Per-request balance BEFORE anything aggregated. A run whose per-seam totals
@@ -725,6 +820,12 @@ inline const char* CensusVerdictName(CensusVerdict verdict) {
     case CensusVerdict::kCanceledAfterObservation:
       return "canceled_after_observation";
     case CensusVerdict::kPostCloseEmission: return "post_close_emission";
+    case CensusVerdict::kCanceledWithoutObservation:
+      return "canceled_without_observation";
+    case CensusVerdict::kRejectionTableMismatch:
+      return "rejection_table_mismatch";
+    case CensusVerdict::kDuplicateSnapshotSeam:
+      return "duplicate_snapshot_seam";
     case CensusVerdict::kCount: return "invalid(count)";
     case CensusVerdict::kCopiedRetiredMismatch:
       return "copied_retired_mismatch";

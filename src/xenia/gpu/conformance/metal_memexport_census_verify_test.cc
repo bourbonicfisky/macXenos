@@ -36,6 +36,7 @@ namespace {
 
 using metal::CensusObservation;
 using metal::CensusCloseOutcome;
+using metal::CensusLedgerStats;
 using metal::CensusRequestBalance;
 using metal::CensusRequestLedger;
 using metal::CensusRunSummary;
@@ -758,11 +759,10 @@ TEST_CASE("Snapshot children share one request identity",
   // request id, but each still closes on its OWN balance, which is what keeps a
   // single-seam hole visible.
   CensusRequestLedger ledger;
-  const uint64_t snapshot = ledger.BeginSnapshot();
-  auto vfetch = ledger.Begin(snapshot, CensusSeamId::kVertexSharedVfetch);
-  auto index = ledger.Begin(snapshot, CensusSeamId::kVertexCpuIndex);
+  auto snapshot = ledger.BeginSnapshot();
+  auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+  auto index = snapshot.Begin(CensusSeamId::kVertexCpuIndex);
   REQUIRE(vfetch.request_id() == index.request_id());
-  REQUIRE(ledger.BeginSnapshot() != snapshot);
 
   vfetch.RecordExecuted();
   vfetch.RecordObserved();
@@ -771,6 +771,147 @@ TEST_CASE("Snapshot children share one request identity",
   index.RecordExecuted();  // observation hook missing on THIS seam only
   REQUIRE(ledger.Close(index, CensusCloseOutcome::kCompleted) ==
           CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("An unissued snapshot id is unrepresentable",
+          "[metal][memexport][census]") {
+  // Children are opened THROUGH the snapshot object, so a caller cannot invent
+  // a request id. There is no ledger entry point taking a raw id.
+  STATIC_REQUIRE_FALSE(
+      std::is_invocable_v<decltype(&CensusRequestLedger::Begin),
+                          CensusRequestLedger&, uint64_t, CensusSeamId>);
+  CensusRequestLedger ledger;
+  auto first = ledger.BeginSnapshot();
+  auto second = ledger.BeginSnapshot();
+  REQUIRE(first.id() != second.id());
+}
+
+TEST_CASE("A duplicate (snapshot, seam) child is rejected",
+          "[metal][memexport][census]") {
+  // Two balanced children for ONE seam both close cleanly and silently double
+  // that seam's contribution to the totals.
+  CensusRequestLedger ledger;
+  auto snapshot = ledger.BeginSnapshot();
+  auto first = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+  auto duplicate = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+  for (auto* token : {&first, &duplicate}) {
+    token->RecordExecuted();
+    token->RecordObserved();
+    REQUIRE(ledger.Close(*token, CensusCloseOutcome::kCompleted) ==
+            CensusVerdict::kAccepted);
+  }
+  // Both balanced, ledger balances, totals doubled -- only the seam mask sees it.
+  REQUIRE(ledger.executed_total() == 2);
+  REQUIRE(ledger.stats().balances());
+  REQUIRE(ledger.stats().duplicate_snapshot_seams == 1);
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kDuplicateSnapshotSeam);
+}
+
+TEST_CASE("Distinct seams on one snapshot are legal",
+          "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  auto snapshot = ledger.BeginSnapshot();
+  auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+  auto index = snapshot.Begin(CensusSeamId::kVertexCpuIndex);
+  for (auto* token : {&vfetch, &index}) {
+    token->RecordExecuted();
+    token->RecordObserved();
+    REQUIRE(ledger.Close(*token, CensusCloseOutcome::kCompleted) ==
+            CensusVerdict::kAccepted);
+  }
+  REQUIRE(ledger.stats().duplicate_snapshot_seams == 0);
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).accepted());
+}
+
+TEST_CASE("An inconsistent rejection table is never an acceptance",
+          "[metal][memexport][census]") {
+  // FirstRejectionVerdict() fell back to kAccepted, so a run with rejected=1
+  // and an empty table PASSED -- missing information read as success.
+  SECTION("rejections recorded with no verdict attributed") {
+    CensusRunSummary run = GuardRun(BareGuard());
+    run.ledger.rejected = 1;
+    run.ledger.accepted = 0;  // keep opened == accepted + rejected + canceled
+    REQUIRE(run.ledger.balances());
+    REQUIRE(run.ledger.RejectionTableTotal() == 0);
+    REQUIRE(VerifyCensusRun(run).verdict ==
+            CensusVerdict::kRejectionTableMismatch);
+  }
+  SECTION("counters disagree with the rejection count") {
+    CensusRunSummary run = GuardRun(BareGuard());
+    run.ledger.rejected = 1;
+    run.ledger.accepted = 0;
+    run.ledger.rejected_by_verdict[size_t(CensusVerdict::kMissingSeam)] = 2;
+    REQUIRE(run.ledger.balances());  // the ledger balances; only the table lies
+    REQUIRE(VerifyCensusRun(run).verdict ==
+            CensusVerdict::kRejectionTableMismatch);
+  }
+  SECTION("a count in a non-rejection slot") {
+    for (const CensusVerdict slot : {CensusVerdict::kAccepted,
+                                     CensusVerdict::kCanceledAfterObservation}) {
+      INFO(metal::CensusVerdictName(slot));
+      REQUIRE_FALSE(metal::IsRejectionVerdict(slot));
+      CensusRunSummary run = GuardRun(BareGuard());
+      run.ledger.rejected = 1;
+      run.ledger.accepted = 0;
+      run.ledger.rejected_by_verdict[size_t(slot)] = 1;
+      CHECK(VerifyCensusRun(run).verdict ==
+            CensusVerdict::kRejectionTableMismatch);
+    }
+  }
+}
+
+TEST_CASE("FirstRejectionVerdict reports absence, not acceptance",
+          "[metal][memexport][census]") {
+  CensusLedgerStats stats;
+  REQUIRE_FALSE(stats.FirstRejectionVerdict().has_value());
+  stats.rejected_by_verdict[size_t(CensusVerdict::kUnjustifiedObservation)] = 1;
+  REQUIRE(stats.FirstRejectionVerdict() ==
+          CensusVerdict::kUnjustifiedObservation);
+}
+
+TEST_CASE("Cancellation requires an observation to have happened",
+          "[metal][memexport][census]") {
+  // Removing the classifier hook on a canceled draw left executed=0 observed=0,
+  // which the cancellation branch accepted -- so the missing hook passed.
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCanceledAfterObservation) ==
+          CensusVerdict::kCanceledWithoutObservation);
+  REQUIRE(ledger.stats().canceled == 0);
+  REQUIRE(ledger.stats().rejected == 1);
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict ==
+          CensusVerdict::kCanceledWithoutObservation);
+}
+
+TEST_CASE("Every rejection path records into the table",
+          "[metal][memexport][census]") {
+  // Centralized in RecordRejected so the count and the table cannot drift.
+  const std::pair<CensusVerdict, uint64_t> expectations[] = {
+      {CensusVerdict::kMissingSeam, 1},
+      {CensusVerdict::kUnjustifiedObservation, 1},
+  };
+  CensusRequestLedger ledger;
+  auto a = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  a.RecordExecuted(2);
+  a.RecordObserved(1);
+  ledger.Close(a, CensusCloseOutcome::kCompleted);
+  auto b = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  b.RecordObserved(1);
+  ledger.Close(b, CensusCloseOutcome::kCompleted);
+
+  REQUIRE(ledger.stats().RejectionTableTotal() == ledger.stats().rejected);
+  for (const auto& [verdict, count] : expectations) {
+    INFO(metal::CensusVerdictName(verdict));
+    CHECK(ledger.stats().rejected_by_verdict[size_t(verdict)] == count);
+  }
 }
 
 TEST_CASE("A moved-from token does not report abandonment",
