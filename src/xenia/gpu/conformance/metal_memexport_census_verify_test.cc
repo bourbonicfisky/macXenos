@@ -22,6 +22,7 @@
 // heartbeat, an unattributed entry, and a retirement with no copied bytes.
 
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
@@ -640,10 +641,136 @@ TEST_CASE("Only a balanced close contributes to the totals",
   REQUIRE(ledger.stats().rejected == 1);
   REQUIRE(ledger.stats().balances());
 
-  // opened == accepted + rejected holds, but a rejected request still fails.
+  // The ledger balances, but a rejected request still fails -- and it fails
+  // with its OWN verdict. This assertion previously pinned a collapse: every
+  // rejection was reported as missing_seam regardless of cause.
   CensusRunSummary run = GuardRun(BareGuard());
   run.ledger = ledger.stats();
   REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kMissingSeam);
+  REQUIRE(ledger.stats().FirstRejectionVerdict() == CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("Every rejection verdict survives into the run report",
+          "[metal][memexport][census]") {
+  // The ledger kept only a rejection COUNT, so unjustified_observation,
+  // abandoned_with_work and the rest all surfaced as missing_seam and sent the
+  // repair to the wrong place.
+  struct Case {
+    const char* what;
+    uint64_t executed;
+    uint64_t observed;
+    CensusCloseOutcome outcome;
+    CensusVerdict expected;
+  };
+  const Case cases[] = {
+      {"executed > observed", 2, 1, CensusCloseOutcome::kCompleted,
+       CensusVerdict::kMissingSeam},
+      {"observed > executed", 0, 1, CensusCloseOutcome::kCompleted,
+       CensusVerdict::kUnjustifiedObservation},
+      {"abandoned with work", 1, 0, CensusCloseOutcome::kAbandonedBeforeRead,
+       CensusVerdict::kAbandonedWithWork},
+  };
+  for (const Case& c : cases) {
+    INFO(c.what);
+    CensusRequestLedger ledger;
+    auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+    token.RecordExecuted(c.executed);
+    token.RecordObserved(c.observed);
+    CHECK(ledger.Close(token, c.outcome) == c.expected);
+
+    CensusRunSummary run = GuardRun(BareGuard());
+    run.ledger = ledger.stats();
+    // The verdict must survive the ledger -> summary -> VerifyCensusRun path,
+    // not just the Close() return value.
+    CHECK(VerifyCensusRun(run).verdict == c.expected);
+  }
+}
+
+TEST_CASE("Cancellation after observation is a named non-aggregating outcome",
+          "[metal][memexport][census]") {
+  // The real vertex path: classification runs in the dependency query, then the
+  // draw can be canceled on a drain failure. Observation has ALREADY been
+  // recorded, so kAbandonedBeforeRead would wrongly report abandoned_with_work.
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  token.RecordObserved();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCanceledAfterObservation) ==
+          CensusVerdict::kCanceledAfterObservation);
+
+  // Named and counted, and it does NOT poison the totals.
+  REQUIRE(ledger.stats().canceled == 1);
+  REQUIRE(ledger.stats().rejected == 0);
+  REQUIRE(ledger.executed_total() == 0);
+  REQUIRE(ledger.observed_total() == 0);
+  REQUIRE(ledger.stats().balances());
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).accepted());
+}
+
+TEST_CASE("Cancellation is rejected when the read actually happened",
+          "[metal][memexport][census]") {
+  // "Canceled before the read" and "the read ran" cannot both be true, so the
+  // outcome cannot be used to launder a genuine imbalance.
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  token.RecordObserved();
+  token.RecordExecuted();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCanceledAfterObservation) ==
+          CensusVerdict::kAbandonedWithWork);
+  REQUIRE(ledger.stats().canceled == 0);
+}
+
+TEST_CASE("A closed token is sealed against further emission",
+          "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  token.RecordExecuted();
+  token.RecordObserved();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kAccepted);
+
+  token.RecordExecuted(99);
+  token.RecordObserved(99);
+  // The balance was already aggregated; a late emission must not rewrite it.
+  REQUIRE(token.balance().executed == 1);
+  REQUIRE(token.balance().observed == 1);
+  REQUIRE(ledger.stats().post_close_emissions == 2);
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kPostCloseEmission);
+}
+
+TEST_CASE("A token is not move-assignable", "[metal][memexport][census]") {
+  // Move assignment could overwrite a still-open destination token, dropping
+  // its enrollment silently. Construction is the only transfer.
+  STATIC_REQUIRE_FALSE(
+      std::is_move_assignable_v<CensusRequestLedger::Token>);
+  STATIC_REQUIRE(
+      std::is_move_constructible_v<CensusRequestLedger::Token>);
+}
+
+TEST_CASE("Snapshot children share one request identity",
+          "[metal][memexport][census]") {
+  // The vertex three-way split: one snapshot, several seams. Children share the
+  // request id, but each still closes on its OWN balance, which is what keeps a
+  // single-seam hole visible.
+  CensusRequestLedger ledger;
+  const uint64_t snapshot = ledger.BeginSnapshot();
+  auto vfetch = ledger.Begin(snapshot, CensusSeamId::kVertexSharedVfetch);
+  auto index = ledger.Begin(snapshot, CensusSeamId::kVertexCpuIndex);
+  REQUIRE(vfetch.request_id() == index.request_id());
+  REQUIRE(ledger.BeginSnapshot() != snapshot);
+
+  vfetch.RecordExecuted();
+  vfetch.RecordObserved();
+  REQUIRE(ledger.Close(vfetch, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kAccepted);
+  index.RecordExecuted();  // observation hook missing on THIS seam only
+  REQUIRE(ledger.Close(index, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kMissingSeam);
 }
 
 TEST_CASE("A moved-from token does not report abandonment",

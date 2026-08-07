@@ -154,6 +154,11 @@ struct CensusRequestBalance {
 enum class CensusCloseOutcome {
   kCompleted,            // ran through to the physical read
   kAbandonedBeforeRead,  // explicit early exit, nothing read
+  // Observation already happened (classification runs in the dependency query)
+  // and the draw was then canceled — e.g. a drain failure — so the physical
+  // read never occurred. This is a REAL path at the vertex seam, so it is a
+  // named non-aggregating outcome rather than a generic missing_seam.
+  kCanceledAfterObservation,
 };
 
 // Named failures. Each names a DIFFERENT repair.
@@ -173,7 +178,14 @@ enum class CensusVerdict {
   kNoRequestsOpened,     // an engaged run enrolled no requests at all
   kAbandonedWithWork,    // closed as "no read performed" but work was recorded
   kCopiedRetiredMismatch,// retirements without the bytes that justify them
+  kCanceledAfterObservation, // observed, then the draw was canceled before the
+                             // physical read (a real control-flow path, not a
+                             // defect); never aggregates
+  kPostCloseEmission,    // a counter was emitted on an already-closed token
+  kCount,                // sentinel; not a verdict
 };
+
+inline constexpr size_t kCensusVerdictCount = size_t(CensusVerdict::kCount);
 
 const char* CensusVerdictName(CensusVerdict verdict);
 
@@ -209,10 +221,28 @@ struct CensusLedgerStats {
   uint64_t opened = 0;
   uint64_t accepted = 0;   // closed and balanced
   uint64_t rejected = 0;   // closed and unbalanced
+  uint64_t canceled = 0;   // closed as canceled-after-observation
   uint64_t duplicate_closes = 0;
   uint64_t silently_abandoned = 0;  // token destroyed while still open
+  uint64_t post_close_emissions = 0;
+  // Bounded (one slot per verdict, no per-request retention). Without this the
+  // ledger kept only a rejection COUNT and the run report collapsed every
+  // rejection to missing_seam, so unjustified_observation, invalid_seam and
+  // abandoned_with_work could not survive into the live report.
+  uint64_t rejected_by_verdict[kCensusVerdictCount] = {};
 
-  bool balances() const { return opened == accepted + rejected; }
+  bool balances() const { return opened == accepted + rejected + canceled; }
+
+  // The first recorded rejection verdict, so the live report names the actual
+  // repair instead of a stand-in.
+  CensusVerdict FirstRejectionVerdict() const {
+    for (size_t i = 0; i < kCensusVerdictCount; ++i) {
+      if (i != size_t(CensusVerdict::kAccepted) && rejected_by_verdict[i]) {
+        return CensusVerdict(i);
+      }
+    }
+    return CensusVerdict::kAccepted;
+  }
 };
 
 struct CensusRunSummary {
@@ -297,15 +327,17 @@ class CensusRequestLedger {
    public:
     Token(const Token&) = delete;
     Token& operator=(const Token&) = delete;
-    Token(Token&& other) noexcept { *this = std::move(other); }
-    Token& operator=(Token&& other) noexcept {
-      ledger_ = other.ledger_;
-      balance_ = other.balance_;
-      closed_ = other.closed_;
+    Token(Token&& other) noexcept
+        : ledger_(other.ledger_),
+          request_id_(other.request_id_),
+          balance_(other.balance_),
+          closed_(other.closed_) {
       other.ledger_ = nullptr;  // moved-from tokens must not report abandonment
       other.closed_ = true;
-      return *this;
     }
+    // DELETED: move assignment could overwrite a still-open destination token,
+    // silently losing its enrollment. Construction is the only transfer.
+    Token& operator=(Token&&) = delete;
     ~Token() {
       if (ledger_ && !closed_) {
         ++ledger_->stats_.silently_abandoned;
@@ -313,28 +345,53 @@ class CensusRequestLedger {
     }
 
     // Emitted at the physical operation. Independent of RecordObserved.
-    void RecordExecuted(uint64_t count = 1) { balance_.executed += count; }
+    void RecordExecuted(uint64_t count = 1) {
+      if (SealedForEmission()) return;
+      balance_.executed += count;
+    }
     // Emitted at the classifier. Independent of RecordExecuted.
-    void RecordObserved(uint64_t count = 1) { balance_.observed += count; }
+    void RecordObserved(uint64_t count = 1) {
+      if (SealedForEmission()) return;
+      balance_.observed += count;
+    }
+
+    uint64_t request_id() const { return request_id_; }
 
     const CensusRequestBalance& balance() const { return balance_; }
     bool closed() const { return closed_; }
 
    private:
     friend class CensusRequestLedger;
-    Token(CensusRequestLedger* ledger, CensusSeamId seam)
-        : ledger_(ledger) {
+    Token(CensusRequestLedger* ledger, uint64_t request_id, CensusSeamId seam)
+        : ledger_(ledger), request_id_(request_id) {
       balance_.seam = seam;
     }
+    // A closed token is SEALED: a late emission is recorded as a lifecycle
+    // failure rather than mutating a balance that has already been aggregated.
+    bool SealedForEmission() {
+      if (!closed_) return false;
+      if (ledger_) ++ledger_->stats_.post_close_emissions;
+      return true;
+    }
     CensusRequestLedger* ledger_ = nullptr;
+    uint64_t request_id_ = 0;
     CensusRequestBalance balance_;
     bool closed_ = false;
   };
 
-  Token Begin(CensusSeamId seam) {
+  // One SNAPSHOT can fan out to several seams (the vertex three-way split), so
+  // tokens are (snapshot, seam) children sharing one request identity. The
+  // design's "one token per snapshot" is realized as children of one id, not as
+  // one token carrying several seams — each seam still closes on its own
+  // balance, which is what makes a per-seam hole visible.
+  uint64_t BeginSnapshot() { return ++next_request_id_; }
+
+  Token Begin(uint64_t request_id, CensusSeamId seam) {
     ++stats_.opened;
-    return Token(this, seam);
+    return Token(this, request_id, seam);
   }
+  // Single-seam convenience: its own snapshot identity.
+  Token Begin(CensusSeamId seam) { return Begin(BeginSnapshot(), seam); }
 
   // The ONLY path that contributes to the totals.
   CensusVerdict Close(Token& token, CensusCloseOutcome outcome) {
@@ -343,10 +400,25 @@ class CensusRequestLedger {
       return CensusVerdict::kDuplicateClose;
     }
     token.closed_ = true;
+    if (outcome == CensusCloseOutcome::kCanceledAfterObservation) {
+      // Observation without a read is EXPECTED here: classification runs in the
+      // dependency query and the draw can be canceled afterwards. Named,
+      // counted, and deliberately non-aggregating -- it must not become part of
+      // the executed/observed totals, and it is not a defect.
+      if (token.balance_.executed) {
+        // A read did happen, so "canceled before the read" is false.
+        ++stats_.rejected;
+        ++stats_.rejected_by_verdict[size_t(CensusVerdict::kAbandonedWithWork)];
+        return CensusVerdict::kAbandonedWithWork;
+      }
+      ++stats_.canceled;
+      return CensusVerdict::kCanceledAfterObservation;
+    }
     if (outcome == CensusCloseOutcome::kAbandonedBeforeRead &&
         (token.balance_.executed || token.balance_.observed)) {
       // "Nothing was read" and "work was recorded" cannot both be true.
       ++stats_.rejected;
+      ++stats_.rejected_by_verdict[size_t(CensusVerdict::kAbandonedWithWork)];
       return CensusVerdict::kAbandonedWithWork;
     }
     const CensusVerdict verdict = CloseCensusRequest(token.balance_);
@@ -356,6 +428,7 @@ class CensusRequestLedger {
       observed_total_ += token.balance_.observed;
     } else {
       ++stats_.rejected;
+      ++stats_.rejected_by_verdict[size_t(verdict)];
     }
     return verdict;
   }
@@ -366,6 +439,7 @@ class CensusRequestLedger {
 
  private:
   CensusLedgerStats stats_;
+  uint64_t next_request_id_ = 0;
   uint64_t executed_total_ = 0;
   uint64_t observed_total_ = 0;
 };
@@ -458,10 +532,18 @@ inline CensusVerifyResult VerifyCensusRun(const CensusRunSummary& run) {
                 "run observed work but enrolled no requests; removing the "
                 "Close path must not read as a clean run");
   }
+  if (run.ledger.post_close_emissions) {
+    return fail(CensusVerdict::kPostCloseEmission,
+                std::to_string(run.ledger.post_close_emissions) +
+                    " counter emission(s) on already-closed token(s)");
+  }
   if (run.ledger.rejected) {
-    return fail(CensusVerdict::kMissingSeam,
-                std::to_string(run.ledger.rejected) +
-                    " request(s) closed unbalanced");
+    // The REAL verdict, not a stand-in. Collapsing these to missing_seam sent
+    // every rejection to the wrong repair.
+    const CensusVerdict actual = run.ledger.FirstRejectionVerdict();
+    return fail(actual, std::to_string(run.ledger.rejected) +
+                            " request(s) closed with " +
+                            CensusVerdictName(actual));
   }
 
   // Per-request balance BEFORE anything aggregated. A run whose per-seam totals
@@ -640,6 +722,10 @@ inline const char* CensusVerdictName(CensusVerdict verdict) {
     case CensusVerdict::kDuplicateClose: return "duplicate_close";
     case CensusVerdict::kNoRequestsOpened: return "no_requests_opened";
     case CensusVerdict::kAbandonedWithWork: return "abandoned_with_work";
+    case CensusVerdict::kCanceledAfterObservation:
+      return "canceled_after_observation";
+    case CensusVerdict::kPostCloseEmission: return "post_close_emission";
+    case CensusVerdict::kCount: return "invalid(count)";
     case CensusVerdict::kCopiedRetiredMismatch:
       return "copied_retired_mismatch";
     default: return "unknown";
