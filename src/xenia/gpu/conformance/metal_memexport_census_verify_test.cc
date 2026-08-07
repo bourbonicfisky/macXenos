@@ -34,7 +34,9 @@ namespace test {
 namespace {
 
 using metal::CensusObservation;
+using metal::CensusCloseOutcome;
 using metal::CensusRequestBalance;
+using metal::CensusRequestLedger;
 using metal::CensusRunSummary;
 using metal::CensusSeamId;
 using metal::CensusVerdict;
@@ -89,6 +91,11 @@ CensusRunSummary AcceptedRun() {
   run.observations = {SharedVfetchObservation(), CpuIndexObservation()};
   run.executed_seams = {CensusSeamId::kVertexSharedVfetch,
                         CensusSeamId::kVertexCpuIndex};
+  // Enrolled: one closed, balanced request per observed seam. A run that never
+  // enrolled is rejected outright (kNoRequestsOpened), so the accepted baseline
+  // every mutation starts from must carry a real ledger.
+  run.ledger.opened = 2;
+  run.ledger.accepted = 2;
   return run;
 }
 
@@ -306,6 +313,11 @@ CensusRunSummary GuardRun(CensusObservation observation) {
   run.heartbeats = 1;
   run.observations = {observation};
   run.executed_seams = {observation.seam};
+  // A run must be ENROLLED to be verifiable at all: one opened, closed and
+  // balanced request. Tests that specifically exercise the lifecycle overwrite
+  // run.ledger themselves.
+  run.ledger.opened = 1;
+  run.ledger.accepted = 1;
   return run;
 }
 CensusObservation BareGuard() {
@@ -432,6 +444,8 @@ TEST_CASE("Every seam has a declared expected class",
     run.heartbeats = 1;
     run.observations = {observation};
     run.executed_seams = {seam};
+    run.ledger.opened = 1;   // enrolled; see kNoRequestsOpened
+    run.ledger.accepted = 1;
     CHECK(VerifyCensusRun(run).accepted());
   }
 }
@@ -529,6 +543,138 @@ TEST_CASE("Balance precedes the aggregate stages in the reported verdict",
   run.unattributed_entries = 3;
   const CensusVerifyResult result = VerifyCensusRun(run);
   REQUIRE(result.verdict == CensusVerdict::kUnjustifiedObservation);
+}
+
+// ---------------------------------------------------------------------------
+// Token lifecycle. Closure must be MANDATORY, not available: an empty
+// `request_balances` was previously indistinguishable from a run in which
+// production never enrolled anything.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("An engaged run that enrolled no requests is rejected",
+          "[metal][memexport][census]") {
+  // THE pin against omitting the balance mechanism wholesale. Without this, a
+  // production path that never calls Begin/Close leaves the older aggregate
+  // census reporting a clean run.
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = {};  // production never called Begin/Close
+  REQUIRE(run.ledger.opened == 0);
+  const CensusVerifyResult result = VerifyCensusRun(run);
+  REQUIRE_FALSE(result.accepted());
+  REQUIRE(result.verdict == CensusVerdict::kNoRequestsOpened);
+}
+
+TEST_CASE("A discarded token is a named failure, not a quiet success",
+          "[metal][memexport][census]") {
+  // An early return between the dependency query and the physical read.
+  CensusRequestLedger ledger;
+  {
+    auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+    token.RecordExecuted();
+    // falls out of scope without Close
+  }
+  REQUIRE(ledger.stats().opened == 1);
+  REQUIRE(ledger.stats().silently_abandoned == 1);
+  REQUIRE_FALSE(ledger.stats().balances());
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kUnclosedRequest);
+}
+
+TEST_CASE("An explicit early exit closes cleanly",
+          "[metal][memexport][census]") {
+  // The legitimate counterpart: nothing read, and it SAYS so.
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kAbandonedBeforeRead) ==
+          CensusVerdict::kAccepted);
+  REQUIRE(ledger.stats().silently_abandoned == 0);
+  REQUIRE(ledger.stats().balances());
+}
+
+TEST_CASE("Closing as unread while work was recorded is rejected",
+          "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  token.RecordExecuted();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kAbandonedBeforeRead) ==
+          CensusVerdict::kAbandonedWithWork);
+}
+
+TEST_CASE("A token closes exactly once", "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  token.RecordExecuted();
+  token.RecordObserved();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kAccepted);
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kDuplicateClose);
+  REQUIRE(ledger.stats().duplicate_closes == 1);
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kDuplicateClose);
+}
+
+TEST_CASE("Only a balanced close contributes to the totals",
+          "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  auto unbalanced = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  unbalanced.RecordExecuted(2);
+  unbalanced.RecordObserved(1);
+  REQUIRE(ledger.Close(unbalanced, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kMissingSeam);
+
+  auto balanced = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+  balanced.RecordExecuted(3);
+  balanced.RecordObserved(3);
+  REQUIRE(ledger.Close(balanced, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kAccepted);
+
+  // The unbalanced request's counts are absent from both totals.
+  REQUIRE(ledger.executed_total() == 3);
+  REQUIRE(ledger.observed_total() == 3);
+  REQUIRE(ledger.stats().accepted == 1);
+  REQUIRE(ledger.stats().rejected == 1);
+  REQUIRE(ledger.stats().balances());
+
+  // opened == accepted + rejected holds, but a rejected request still fails.
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kMissingSeam);
+}
+
+TEST_CASE("A moved-from token does not report abandonment",
+          "[metal][memexport][census]") {
+  // Tokens are moved into per-request state; a move must not manufacture a
+  // phantom abandonment when the source is destroyed.
+  CensusRequestLedger ledger;
+  {
+    auto token = ledger.Begin(CensusSeamId::kVertexSharedVfetch);
+    auto moved = std::move(token);
+    moved.RecordExecuted();
+    moved.RecordObserved();
+    REQUIRE(ledger.Close(moved, CensusCloseOutcome::kCompleted) ==
+            CensusVerdict::kAccepted);
+  }
+  REQUIRE(ledger.stats().silently_abandoned == 0);
+  REQUIRE(ledger.stats().balances());
+}
+
+TEST_CASE("A fully enrolled run is accepted", "[metal][memexport][census]") {
+  // The unmodified path must still pass, or every pin above is vacuous.
+  CensusRequestLedger ledger;
+  auto token = ledger.Begin(CensusSeamId::kMetadataGuard);
+  token.RecordExecuted();
+  token.RecordObserved();
+  REQUIRE(ledger.Close(token, CensusCloseOutcome::kCompleted) ==
+          CensusVerdict::kAccepted);
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).accepted());
 }
 
 }  // namespace test
