@@ -37,6 +37,7 @@ namespace {
 using metal::CensusObservation;
 using metal::CensusCloseOutcome;
 using metal::CensusLedgerStats;
+using metal::CensusSeamMask;
 using metal::CensusRequestBalance;
 using metal::CensusRequestLedger;
 using metal::CensusRunSummary;
@@ -759,7 +760,9 @@ TEST_CASE("Snapshot children share one request identity",
   // request id, but each still closes on its OWN balance, which is what keeps a
   // single-seam hole visible.
   CensusRequestLedger ledger;
-  auto snapshot = ledger.BeginSnapshot();
+  auto snapshot = ledger.BeginSnapshot(
+      CensusSeamMask().Add(CensusSeamId::kVertexSharedVfetch)
+          .Add(CensusSeamId::kVertexCpuIndex));
   auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
   auto index = snapshot.Begin(CensusSeamId::kVertexCpuIndex);
   REQUIRE(vfetch.request_id() == index.request_id());
@@ -781,8 +784,8 @@ TEST_CASE("An unissued snapshot id is unrepresentable",
       std::is_invocable_v<decltype(&CensusRequestLedger::Begin),
                           CensusRequestLedger&, uint64_t, CensusSeamId>);
   CensusRequestLedger ledger;
-  auto first = ledger.BeginSnapshot();
-  auto second = ledger.BeginSnapshot();
+  auto first = ledger.BeginSnapshot(CensusSeamMask());
+  auto second = ledger.BeginSnapshot(CensusSeamMask());
   REQUIRE(first.id() != second.id());
 }
 
@@ -791,7 +794,8 @@ TEST_CASE("A duplicate (snapshot, seam) child is rejected",
   // Two balanced children for ONE seam both close cleanly and silently double
   // that seam's contribution to the totals.
   CensusRequestLedger ledger;
-  auto snapshot = ledger.BeginSnapshot();
+  auto snapshot = ledger.BeginSnapshot(
+      CensusSeamMask().Add(CensusSeamId::kVertexSharedVfetch));
   auto first = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
   auto duplicate = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
   for (auto* token : {&first, &duplicate}) {
@@ -813,7 +817,9 @@ TEST_CASE("A duplicate (snapshot, seam) child is rejected",
 TEST_CASE("Distinct seams on one snapshot are legal",
           "[metal][memexport][census]") {
   CensusRequestLedger ledger;
-  auto snapshot = ledger.BeginSnapshot();
+  auto snapshot = ledger.BeginSnapshot(
+      CensusSeamMask().Add(CensusSeamId::kVertexSharedVfetch)
+          .Add(CensusSeamId::kVertexCpuIndex));
   auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
   auto index = snapshot.Begin(CensusSeamId::kVertexCpuIndex);
   for (auto* token : {&vfetch, &index}) {
@@ -850,11 +856,18 @@ TEST_CASE("An inconsistent rejection table is never an acceptance",
     REQUIRE(VerifyCensusRun(run).verdict ==
             CensusVerdict::kRejectionTableMismatch);
   }
-  SECTION("a count in a non-rejection slot") {
+  SECTION("a count in a slot no close can produce") {
+    // Deny-list -> allow-list: the deny form admitted run-only verdicts such as
+    // heartbeat_missing, duplicate_close and rejection_table_mismatch into the
+    // per-request table, where they could only come from a recording bug.
     for (const CensusVerdict slot : {CensusVerdict::kAccepted,
-                                     CensusVerdict::kCanceledAfterObservation}) {
+                                     CensusVerdict::kCanceledAfterObservation,
+                                     CensusVerdict::kHeartbeatMissing,
+                                     CensusVerdict::kDuplicateClose,
+                                     CensusVerdict::kRejectionTableMismatch,
+                                     CensusVerdict::kIncompleteSnapshot}) {
       INFO(metal::CensusVerdictName(slot));
-      REQUIRE_FALSE(metal::IsRejectionVerdict(slot));
+      REQUIRE_FALSE(metal::IsCloseProducedRejection(slot));
       CensusRunSummary run = GuardRun(BareGuard());
       run.ledger.rejected = 1;
       run.ledger.accepted = 0;
@@ -943,6 +956,102 @@ TEST_CASE("A fully enrolled run is accepted", "[metal][memexport][census]") {
   CensusRunSummary run = GuardRun(BareGuard());
   run.ledger = ledger.stats();
   REQUIRE(VerifyCensusRun(run).accepted());
+}
+
+TEST_CASE("An undeclared seam is rejected under every close outcome",
+          "[metal][memexport][census]") {
+  // Cancellation was handled BEFORE CloseCensusRequest, so an undeclared seam
+  // with observed > 0 closed as a clean cancellation and never reached seam
+  // validation. The seam is now checked ahead of every outcome branch.
+  const CensusCloseOutcome outcomes[] = {
+      CensusCloseOutcome::kCompleted,
+      CensusCloseOutcome::kAbandonedBeforeRead,
+      CensusCloseOutcome::kCanceledAfterObservation};
+  for (const CensusCloseOutcome outcome : outcomes) {
+    CensusRequestLedger ledger;
+    auto token = ledger.Begin(static_cast<CensusSeamId>(9999));
+    token.RecordObserved();  // the shape that slipped through as "canceled"
+    CHECK(ledger.Close(token, outcome) == CensusVerdict::kInvalidSeam);
+    CHECK(ledger.stats().canceled == 0);
+
+    CensusRunSummary run = GuardRun(BareGuard());
+    run.ledger = ledger.stats();
+    CHECK(VerifyCensusRun(run).verdict == CensusVerdict::kInvalidSeam);
+  }
+}
+
+TEST_CASE("The sentinel verdict cannot reach the counter array",
+          "[metal][memexport][census]") {
+  // RecordRejected was public and took CensusVerdict, so kCount indexed one
+  // past rejected_by_verdict. It is now private and takes CloseRejection, whose
+  // every value maps to a real slot.
+  for (int i = 0; i <= int(metal::CloseRejection::kCanceledWithoutObservation);
+       ++i) {
+    const CensusVerdict verdict = metal::ToVerdict(metal::CloseRejection(i));
+    INFO(metal::CensusVerdictName(verdict));
+    CHECK(size_t(verdict) < metal::kCensusVerdictCount);
+    CHECK(metal::IsCloseProducedRejection(verdict));
+  }
+}
+
+TEST_CASE("A snapshot missing an expected child is caught",
+          "[metal][memexport][census]") {
+  // Dropping ONE child of an otherwise healthy snapshot: every token that did
+  // open closes cleanly, the ledger balances, and the run passed.
+  CensusRequestLedger ledger;
+  {
+    auto snapshot = ledger.BeginSnapshot(
+        CensusSeamMask().Add(CensusSeamId::kVertexSharedVfetch)
+            .Add(CensusSeamId::kVertexCpuIndex));
+    auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+    // the CpuIndex child is never opened
+    vfetch.RecordExecuted();
+    vfetch.RecordObserved();
+    REQUIRE(ledger.Close(vfetch, CensusCloseOutcome::kCompleted) ==
+            CensusVerdict::kAccepted);
+    REQUIRE_FALSE(snapshot.complete());
+  }
+  REQUIRE(ledger.stats().incomplete_snapshots == 1);
+  REQUIRE(ledger.stats().balances());  // the ledger itself is consistent
+
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).verdict == CensusVerdict::kIncompleteSnapshot);
+}
+
+TEST_CASE("A complete snapshot closes clean", "[metal][memexport][census]") {
+  CensusRequestLedger ledger;
+  {
+    auto snapshot = ledger.BeginSnapshot(
+        CensusSeamMask().Add(CensusSeamId::kVertexSharedVfetch)
+            .Add(CensusSeamId::kVertexCpuIndex));
+    auto vfetch = snapshot.Begin(CensusSeamId::kVertexSharedVfetch);
+    auto index = snapshot.Begin(CensusSeamId::kVertexCpuIndex);
+    for (auto* token : {&vfetch, &index}) {
+      token->RecordExecuted();
+      token->RecordObserved();
+      REQUIRE(ledger.Close(*token, CensusCloseOutcome::kCompleted) ==
+              CensusVerdict::kAccepted);
+    }
+    REQUIRE(snapshot.complete());
+  }
+  REQUIRE(ledger.stats().incomplete_snapshots == 0);
+  CensusRunSummary run = GuardRun(BareGuard());
+  run.ledger = ledger.stats();
+  REQUIRE(VerifyCensusRun(run).accepted());
+}
+
+TEST_CASE("An expected seam mask is required to open a snapshot",
+          "[metal][memexport][census]") {
+  // There is no argument-less BeginSnapshot: the expectation must be supplied,
+  // and it must come from draw state rather than from the children opened, or
+  // the completeness check would be tautological.
+  STATIC_REQUIRE_FALSE(
+      std::is_invocable_v<decltype(&CensusRequestLedger::BeginSnapshot),
+                          CensusRequestLedger&>);
+  STATIC_REQUIRE(
+      std::is_invocable_v<decltype(&CensusRequestLedger::BeginSnapshot),
+                          CensusRequestLedger&, CensusSeamMask>);
 }
 
 }  // namespace test
