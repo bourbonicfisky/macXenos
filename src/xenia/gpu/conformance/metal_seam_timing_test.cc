@@ -43,15 +43,35 @@ TEST_CASE("seam timing: boundary reasons are exhaustive, named, and unique",
 
 TEST_CASE("seam timing: consumer-kind count matches named kinds",
           "[seamtiming]") {
-  // kSeamConsumerKindCount is derived from the last enumerator because the
-  // production enum deliberately has no sentinel. Every index below the count
-  // must name a real kind; a kind appended after kMemexportDestination would
-  // fail here by producing an out-of-range name lookup in the accumulator.
+  // Pinned to the enum's own kCount sentinel. Every index below it must name
+  // a REAL kind: non-null, non-empty, unique, and NOT the "?" fallback --
+  // "?" would otherwise let an unnamed kind pass a naive non-null check.
+  // The sentinel itself must map to the fallback, proving the loop bound is
+  // exactly the named range.
+  REQUIRE(kSeamConsumerKindCount == uint32_t(ConsumerKind::kCount));
+  std::set<std::string> names;
   for (uint32_t i = 0; i < kSeamConsumerKindCount; ++i) {
     const char* name = ConsumerKindName(ConsumerKind(i));
     REQUIRE(name != nullptr);
     REQUIRE(name[0] != '\0');
+    CAPTURE(i, name);
+    REQUIRE(std::string(name) != "?");
+    REQUIRE(names.insert(name).second);
   }
+  CHECK(std::string(ConsumerKindName(ConsumerKind::kCount)) == "?");
+}
+
+TEST_CASE("seam timing: checked consumer indexing clamps out-of-range kinds",
+          "[seamtiming]") {
+  SeamTimingAccumulator acc;
+  // The kCount sentinel (and anything past it) must clamp to the last real
+  // slot rather than write past the array.
+  auto& sentinel_slot = acc.ConsumerSlot(ConsumerKind::kCount);
+  auto& last_real_slot =
+      acc.consumer[SeamTimingAccumulator::kConsumerCount - 1];
+  CHECK(&sentinel_slot == &last_real_slot);
+  auto& real_slot = acc.ConsumerSlot(ConsumerKind::kTexture);
+  CHECK(&real_slot == &acc.consumer[uint32_t(ConsumerKind::kTexture)]);
 }
 
 TEST_CASE("seam timing: stage totals record count, sum, and max",
@@ -81,6 +101,7 @@ TEST_CASE("seam timing: fake-clock stage decomposition stays nested-separate",
   ++r.boundaries;
   r.close.Record(1'000'000);
   r.gpu_wait.Record(6'000'000);
+  r.retire.Record(200'000);    // post-completion bookkeeping, its own stage
   r.post_wait.Record(10'000);  // pre-satisfied wrapper wait: near-zero
   auto& c = acc.consumer[uint32_t(ConsumerKind::kVertex)];
   ++c.consultations;
@@ -103,6 +124,7 @@ TEST_CASE("seam timing: fake-clock stage decomposition stays nested-separate",
         c.required_wait.total_ns + c.drain.total_ns);  // sanity of the fake
   CHECK(r.gpu_wait.total_ns == 6'000'000);
   CHECK(r.close.total_ns == 1'000'000);
+  CHECK(r.retire.total_ns == 200'000);
 
   CHECK(acc.AnyActivity());
   acc.Reset();
@@ -125,6 +147,41 @@ TEST_CASE("seam timing: empty early-outs and noop closes stay apart from work",
   CHECK(r.boundaries == 0);
   CHECK(c.consultations - c.empty_early_outs == c.non_empty);
   CHECK(acc.AnyActivity());
+}
+
+TEST_CASE("seam timing: an inactive side formats to a valid EMPTY string",
+          "[seamtiming]") {
+  // Both buffers are always passed to the logger; a side with no activity
+  // must yield "\0", never uninitialized stack memory. Poison the buffers to
+  // prove the formatter writes the terminator itself.
+  SeamTimingAccumulator acc;
+  char buf[256];
+  std::memset(buf, 0x7f, sizeof(buf));
+  size_t n = acc.FormatReasons(buf, sizeof(buf));
+  CHECK(n == 0);
+  REQUIRE(buf[0] == '\0');
+  std::memset(buf, 0x7f, sizeof(buf));
+  n = acc.FormatConsumers(buf, sizeof(buf));
+  CHECK(n == 0);
+  REQUIRE(buf[0] == '\0');
+
+  // One-sided activity: consumers active, reasons still empty-and-valid.
+  auto& c = acc.consumer[uint32_t(ConsumerKind::kWait)];
+  ++c.consultations;
+  std::memset(buf, 0x7f, sizeof(buf));
+  n = acc.FormatReasons(buf, sizeof(buf));
+  CHECK(n == 0);
+  REQUIRE(buf[0] == '\0');
+  CHECK(acc.FormatConsumers(buf, sizeof(buf)) > 0);
+
+  // And the mirror: reasons active, consumers empty-and-valid.
+  SeamTimingAccumulator acc2;
+  ++acc2.reason[uint32_t(SeamBoundaryReason::kSwapPacing)].boundaries;
+  std::memset(buf, 0x7f, sizeof(buf));
+  n = acc2.FormatConsumers(buf, sizeof(buf));
+  CHECK(n == 0);
+  REQUIRE(buf[0] == '\0');
+  CHECK(acc2.FormatReasons(buf, sizeof(buf)) > 0);
 }
 
 TEST_CASE("seam timing: formatter emits only non-zero entries",
@@ -159,12 +216,15 @@ TEST_CASE("seam timing: formatter emits only non-zero entries",
   c.copied_bytes = 4096;
   c.inclusive.Record(7'000'000);
   ++c.completed;
+  c.binding[uint32_t(SeamBindingTerm::kZero)] = 2;
   n = acc.FormatConsumers(buf, sizeof(buf));
   REQUIRE(n > 0);
   std::string consumers(buf);
   CHECK(consumers.find("sel r0/m2") != std::string::npos);
   CHECK(consumers.find("bytes 4096") != std::string::npos);
   CHECK(consumers.find("incl 7000us") != std::string::npos);
+  // The both-terms-zero binding bucket is distinct from tie in the output.
+  CHECK(consumers.find("bind b0/p0/t0/z2") != std::string::npos);
   CHECK(consumers.find("texture") == std::string::npos);
 }
 

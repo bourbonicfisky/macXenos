@@ -582,7 +582,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void EndFrameEncoderAndWait(metal::SeamBoundaryReason reason);
   // Blocks until `submission` completes (condition variable signaled by the
   // completion handler). Returns false on timeout — a wedged GPU.
-  bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000);
+  // `out_did_block`, when non-null, is set true ONLY on the locked re-check
+  // path that proves the condition-variable wait was actually entered — the
+  // single exact blocking fact this seam can state (the unlocked fast-path
+  // pre-check races with completion and must never be used as "blocked").
+  bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000,
+                         bool* out_did_block = nullptr);
   // XE_METAL_SEAM_TIMING=1 (exact, warn-once fail-closed): submission-boundary
   // attribution. A timing-enabled run is an ATTRIBUTION condition, not
   // comparable to the pinned performance baselines.

@@ -70,6 +70,9 @@ enum class ConsumerKind {
   // requests are about to be overwritten by a GPU store that must be the NEWEST
   // writer of them. See DecideMemexportDestinationOrdering.
   kMemexportDestination,
+  // Sentinel, not a kind: bounds checked indexing (seam timing) and pins the
+  // completeness tests. ConsumerKindName deliberately does NOT name it.
+  kCount,
 };
 
 // The bounded authority state of a range. RAM-current is the steady state; the

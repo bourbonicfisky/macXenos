@@ -1990,12 +1990,16 @@ void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
 }
 
 bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
-                                              uint32_t timeout_ms) {
+                                              uint32_t timeout_ms,
+                                              bool* out_did_block) {
   // Three separate facts, because collapsing them would misreport the cost: how
   // often the path was taken at all, how often it actually blocked, and how
   // often it gave up. The call is counted before the fast path so a wait
   // satisfied immediately is still visible as a wait that was requested.
   zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kWaitForSubmissionCalls);
+  if (out_did_block) {
+    *out_did_block = false;
+  }
   if (completed_submission_.load(std::memory_order_acquire) >= submission) {
     return true;
   }
@@ -2017,6 +2021,12 @@ bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
   if (completed_submission_.load(std::memory_order_acquire) < submission) {
     zero_copy_cost_.Count(
         metal::ZeroCopyCostCounter::kWaitForSubmissionBlocked);
+    // The one exact blocking fact (see the comment above): callers wanting
+    // blocked-attribution get it from HERE, never from their own unlocked
+    // pre-checks.
+    if (out_did_block) {
+      *out_did_block = true;
+    }
   }
   bool ok = completion_cv_.wait_for(
       lock, std::chrono::milliseconds(timeout_ms), [&] {
@@ -2981,6 +2991,10 @@ void MetalCommandProcessor::EmitLifecycleReports(const char* site) {
 
 void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   const bool seam_on = SeamTimingEnabled();
+  // Clock starts at ENTRY so `close` includes EndRenderEncoder -- "encoder
+  // close through commit" measured as claimed. A noop (no buffer) is counted
+  // but never timed; the entry read is the only cost it pays.
+  const uint64_t seam_t0 = seam_on ? SeamNowNs() : 0;
   EndRenderEncoder();
   if (!frame_command_buffer_) {
     if (seam_on) {
@@ -2990,8 +3004,7 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     }
     return;
   }
-  const uint64_t seam_t0 = seam_on ? SeamNowNs() : 0;
-  uint64_t seam_close_ns = 0;   // encoder end + commit, excluding the wait
+  uint64_t seam_close_ns = 0;   // entry through [command_buffer commit]
   uint64_t seam_wait_ns = 0;    // the actual GPU stall (see header)
   id<MTLCommandBuffer> command_buffer =
       (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
@@ -3054,6 +3067,10 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     upload_arena_->MarkSubmission(submission);
   }
   [command_buffer commit];
+  if (seam_on) {
+    // `close` ends HERE, at the commit: entry -> commit, nothing after.
+    seam_close_ns = SeamNowNs() - seam_t0;
+  }
   // Zero-copy cost evidence, counted AT the commit: this is the submission
   // cadence, not an inference from frames or swaps.
   zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kSubmissionCommits);
@@ -3117,14 +3134,15 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   });
   PumpCompletedActions();
   if (seam_on) {
-    // Inclusive minus the separately-recorded wait = CPU-side close + commit
-    // (+ completion-action bookkeeping). Nested stages are never summed back
-    // into each other.
-    seam_close_ns = (SeamNowNs() - seam_t0) - seam_wait_ns;
+    // Post-completion work (completion-action bookkeeping + pump) is its own
+    // named stage -- neither hidden inside `close` nor inside the wait.
+    const uint64_t seam_retire_ns =
+        (SeamNowNs() - seam_t0) - seam_close_ns - seam_wait_ns;
     auto& r = seam_timing_.reason[uint32_t(reason)];
     ++r.boundaries;
     r.close.Record(seam_close_ns);
     r.gpu_wait.Record(seam_wait_ns);
+    r.retire.Record(seam_retire_ns);
   }
 }
 
@@ -3140,18 +3158,19 @@ void MetalCommandProcessor::EndFrameEncoderAndWait(
     // Normally pre-satisfied on the default path (the sync commit already
     // waited and published); recorded separately so a genuinely blocking
     // post-wait is visible and a satisfied one reads as ~0, not as "free
-    // stall".
-    const bool blocked =
-        seam_on && completed_submission_.load(std::memory_order_acquire) <
-                       submission_counter_;
+    // stall". Blocked-ness comes from WaitForSubmission's LOCKED re-check
+    // (out_did_block), the only exact fact -- never from an unlocked
+    // pre-check that races with completion.
     const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
-    if (WaitForSubmission(submission_counter_)) {
+    bool did_block = false;
+    if (WaitForSubmission(submission_counter_, 4000,
+                          seam_on ? &did_block : nullptr)) {
       PumpCompletedActions();
     }
     if (seam_on) {
       auto& r = seam_timing_.reason[uint32_t(reason)];
       r.post_wait.Record(SeamNowNs() - seam_w0);
-      if (blocked) {
+      if (did_block) {
         ++r.post_wait_blocked;
       }
     }
@@ -8654,7 +8673,7 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   metal::SeamTimingAccumulator::PerConsumer* seam_c = nullptr;
   uint64_t seam_incl0 = 0;
   if (seam_on) {
-    seam_c = &seam_timing_.consumer[uint32_t(decision.consumer)];
+    seam_c = &seam_timing_.ConsumerSlot(decision.consumer);
     ++seam_c->consultations;
     seam_incl0 = SeamNowNs();
   }
@@ -8697,30 +8716,40 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
       std::max(boundary_submission, decision.max_wait_submission);
   if (seam_c) {
     // Which term of max() dominated -- current boundary, an older selected
-    // producer, or a tie. A zero required_submission cannot occur here (the
-    // non-empty selection guarantees at least one term).
-    uint32_t term =
-        boundary_submission > decision.max_wait_submission
-            ? uint32_t(metal::SeamBindingTerm::kBoundary)
-            : (decision.max_wait_submission > boundary_submission
-                   ? uint32_t(metal::SeamBindingTerm::kProducer)
-                   : uint32_t(metal::SeamBindingTerm::kTie));
+    // producer, an equal-and-nonzero tie, or BOTH ZERO. The zero case is
+    // representable (untagged producers under the default S7TagsOff lifecycle
+    // with no open buffer, e.g. right after a prior boundary) and is not a
+    // meaningful "tie", so it gets its own bucket.
+    uint32_t term;
+    if (!boundary_submission && !decision.max_wait_submission) {
+      term = uint32_t(metal::SeamBindingTerm::kZero);
+    } else if (boundary_submission > decision.max_wait_submission) {
+      term = uint32_t(metal::SeamBindingTerm::kBoundary);
+    } else if (decision.max_wait_submission > boundary_submission) {
+      term = uint32_t(metal::SeamBindingTerm::kProducer);
+    } else {
+      term = uint32_t(metal::SeamBindingTerm::kTie);
+    }
     ++seam_c->binding[term];
   }
   uint64_t completed_high_water =
       completed_submission_.load(std::memory_order_acquire);
   if (required_submission > completed_high_water) {
-    // Requested AND (by this same pre-check) actually behind the high-water
-    // mark -- a wait the fast path can still satisfy races to "requested",
-    // never to "blocked" (mirrors WaitForSubmission's own counting rule).
+    // "Requested" from this pre-check; "blocked" ONLY from WaitForSubmission's
+    // locked re-check (out_did_block) -- the pre-check races with completion
+    // and must never claim a stall (the function's own counting rule).
     if (seam_c) {
       ++seam_c->wait_requested;
-      ++seam_c->wait_blocked;
     }
     const uint64_t seam_rw0 = seam_on ? SeamNowNs() : 0;
-    bool waited = WaitForSubmission(required_submission);
+    bool did_block = false;
+    bool waited = WaitForSubmission(required_submission, 4000,
+                                    seam_c ? &did_block : nullptr);
     if (seam_c) {
       seam_c->required_wait.Record(SeamNowNs() - seam_rw0);
+      if (did_block) {
+        ++seam_c->wait_blocked;
+      }
     }
     if (!waited) {
       // Failed-wait path: the commit already happened but the drain did not.

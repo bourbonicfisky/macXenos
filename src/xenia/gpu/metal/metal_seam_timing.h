@@ -97,7 +97,10 @@ inline const char* SeamBoundaryReasonName(SeamBoundaryReason reason) {
 enum class SeamBindingTerm : uint32_t {
   kBoundary,  // the request's own just-committed boundary
   kProducer,  // an older selected producer's submission
-  kTie,
+  kTie,       // equal AND nonzero
+  kZero,      // both terms zero: untagged producers with no open buffer --
+              // representable (e.g. right after a prior boundary) and NOT a
+              // tie in any meaningful sense, so it is not counted as one
   kCount,
 };
 
@@ -113,13 +116,11 @@ struct SeamStageTotals {
   void Reset() { count = total_ns = max_ns = 0; }
 };
 
-// ConsumerKind deliberately has no kCount sentinel (its switches are
-// exhaustive); derived here from the last enumerator. If a kind is ever added
-// after kMemexportDestination this constant must follow it -- the device-free
-// test asserts ConsumerKindName() is non-null for every index below the
-// count, which catches a stale value.
+// Pinned to the enum's own sentinel: a kind added to ConsumerKind grows this
+// automatically, and the device-free test rejects any index below kCount
+// whose name is missing or the "?" fallback -- an unnamed kind cannot land.
 inline constexpr uint32_t kSeamConsumerKindCount =
-    uint32_t(ConsumerKind::kMemexportDestination) + 1;
+    uint32_t(ConsumerKind::kCount);
 
 struct SeamTimingAccumulator {
   static constexpr uint32_t kReasonCount =
@@ -130,14 +131,23 @@ struct SeamTimingAccumulator {
   struct PerReason {
     uint64_t boundaries = 0;  // calls that closed a live command buffer
     uint64_t noop_calls = 0;  // no buffer open: free, must not be conflated
-    SeamStageTotals close;     // encoder end + commit, excluding any wait
+    SeamStageTotals close;     // function entry (incl. EndRenderEncoder)
+                               // through [command_buffer commit] -- exactly
+                               // "encoder close through commit", no more
     SeamStageTotals gpu_wait;  // the actual stall (see header comment)
+    SeamStageTotals retire;    // post-wait completion-action bookkeeping +
+                               // PumpCompletedActions -- named for what it
+                               // is, NOT folded into close
     SeamStageTotals post_wait; // AndWait wrapper's conditional wait
-    uint64_t post_wait_blocked = 0;  // pre-check missed: it really waited
+    uint64_t post_wait_blocked = 0;  // WaitForSubmission's LOCKED re-check
+                                     // proved the CV wait was entered (its
+                                     // out_did_block); never the unlocked
+                                     // pre-check, which races
     void Reset() {
       boundaries = noop_calls = post_wait_blocked = 0;
       close.Reset();
       gpu_wait.Reset();
+      retire.Reset();
       post_wait.Reset();
     }
   };
@@ -158,8 +168,9 @@ struct SeamTimingAccumulator {
     uint64_t failed = 0;
     uint64_t binding[uint32_t(SeamBindingTerm::kCount)] = {};
     uint64_t wait_requested = 0;  // required > completed at the pre-check
-    uint64_t wait_blocked = 0;    // (same classification; fast-path races
-                                  //  are counted as requested, not blocked)
+    uint64_t wait_blocked = 0;    // WaitForSubmission's LOCKED re-check proved
+                                  // the CV wait was entered (out_did_block);
+                                  // a fast-path race counts as requested only
     uint64_t wait_timeout = 0;    // WaitForSubmission returned false
     SeamStageTotals required_wait;  // conditional WaitForSubmission only
     SeamStageTotals drain;          // DrainSelectedPendingProducers
@@ -182,6 +193,14 @@ struct SeamTimingAccumulator {
     for (auto& c : consumer) c.Reset();
   }
 
+  // Checked consumer indexing: an out-of-range kind (including the kCount
+  // sentinel) must never write past the array; it clamps to the last real
+  // kind, which the formatter names honestly and the completeness test pins.
+  PerConsumer& ConsumerSlot(ConsumerKind kind) {
+    uint32_t i = uint32_t(kind);
+    return consumer[i < kConsumerCount ? i : kConsumerCount - 1];
+  }
+
   bool AnyActivity() const {
     for (const auto& r : reason) {
       if (r.boundaries || r.noop_calls) return true;
@@ -197,6 +216,11 @@ struct SeamTimingAccumulator {
   // microseconds (integer) -- the decomposition question is ms-scale.
   // Returns chars written (clamped).
   size_t FormatReasons(char* buf, size_t cap) const {
+    if (!cap) return 0;
+    // A zero-activity side still yields a valid empty C string: both buffers
+    // are always passed to the logger, so an untouched buffer must never be
+    // uninitialized stack memory.
+    buf[0] = '\0';
     size_t n = 0;
     auto put = [&](const char* fmt, auto... args) {
       if (n < cap) {
@@ -208,13 +232,15 @@ struct SeamTimingAccumulator {
       const PerReason& r = reason[i];
       if (!r.boundaries && !r.noop_calls) continue;
       put(" %s=%llu(noop %llu, close %lluus/max%llu, gpuwait %lluus/max%llu,"
-          " postwait %lluus/max%llu blk%llu)",
+          " retire %lluus/max%llu, postwait %lluus/max%llu blk%llu)",
           SeamBoundaryReasonName(SeamBoundaryReason(i)),
           (unsigned long long)r.boundaries, (unsigned long long)r.noop_calls,
           (unsigned long long)(r.close.total_ns / 1000),
           (unsigned long long)(r.close.max_ns / 1000),
           (unsigned long long)(r.gpu_wait.total_ns / 1000),
           (unsigned long long)(r.gpu_wait.max_ns / 1000),
+          (unsigned long long)(r.retire.total_ns / 1000),
+          (unsigned long long)(r.retire.max_ns / 1000),
           (unsigned long long)(r.post_wait.total_ns / 1000),
           (unsigned long long)(r.post_wait.max_ns / 1000),
           (unsigned long long)r.post_wait_blocked);
@@ -223,6 +249,8 @@ struct SeamTimingAccumulator {
   }
 
   size_t FormatConsumers(char* buf, size_t cap) const {
+    if (!cap) return 0;
+    buf[0] = '\0';  // see FormatReasons: never an uninitialized C string
     size_t n = 0;
     auto put = [&](const char* fmt, auto... args) {
       if (n < cap) {
@@ -235,7 +263,8 @@ struct SeamTimingAccumulator {
       if (!c.consultations) continue;
       put(" %s=%llu(empty %llu, ne %llu, commits %llu, sel r%llu/m%llu,"
           " drained %llu, bytes %llu, inval %llu, ok %llu fail %llu,"
-          " bind b%llu/p%llu/t%llu, rw req%llu blk%llu to%llu %lluus/max%llu,"
+          " bind b%llu/p%llu/t%llu/z%llu, rw req%llu blk%llu to%llu"
+          " %lluus/max%llu,"
           " drain %lluus/max%llu, incl %lluus/max%llu)",
           ConsumerKindName(ConsumerKind(i)),
           (unsigned long long)c.consultations,
@@ -249,7 +278,7 @@ struct SeamTimingAccumulator {
           (unsigned long long)c.invalidated_entries,
           (unsigned long long)c.completed, (unsigned long long)c.failed,
           (unsigned long long)c.binding[0], (unsigned long long)c.binding[1],
-          (unsigned long long)c.binding[2],
+          (unsigned long long)c.binding[2], (unsigned long long)c.binding[3],
           (unsigned long long)c.wait_requested,
           (unsigned long long)c.wait_blocked,
           (unsigned long long)c.wait_timeout,
