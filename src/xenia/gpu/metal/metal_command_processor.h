@@ -28,6 +28,7 @@
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/metal/metal_seam_timing.h"
 #include "xenia/gpu/metal/metal_zero_copy_report.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
 #include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
@@ -112,7 +113,13 @@ class MetalCommandProcessor : public CommandProcessor {
   bool DumpEdramToBuffer(std::vector<uint8_t>& edram_out) override;
   // --serialize_draw_range probe: commit + wait the frame command buffer
   // (same flush DumpEdramToBuffer performs, minus the readback).
-  void FlushForDrawSerialization() override { EndFrameEncoder(); }
+  void FlushForDrawSerialization() override {
+    EndFrameEncoder(metal::SeamBoundaryReason::kDebugProbe);
+  }
+  // Headless-tool lifecycle hook (trace-dump): plain replay reaches neither
+  // FinalizeSwapFrame nor a live-logging ShutdownContext, so the seam-timing
+  // report is emitted from here for those runs.
+  void EmitLifecycleReports(const char* site) override;
 
   // For MetalRenderTargetCache: closes any open render encoder (a transfer is
   // a pass boundary) and returns the frame id<MTLCommandBuffer> (creating it if
@@ -276,7 +283,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // a resolve blit / the next pass can be encoded on it).
   void EndRenderEncoder();
   // Ends any open encoder, then commits + waits on the frame command buffer.
-  void EndFrameEncoder();
+  // The reason parameter is the seam-timing global attribution layer
+  // (metal_seam_timing.h) and is deliberately DEFAULT-FREE: a new call site
+  // does not compile until it declares why it closes the frame buffer.
+  void EndFrameEncoder(metal::SeamBoundaryReason reason);
 
   // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
   // texture (as depth2d) and writes its value into the R32Float snapshot
@@ -439,6 +449,13 @@ class MetalCommandProcessor : public CommandProcessor {
   // reads it.
   metal::ZeroCopyCostMeter zero_copy_cost_;
 
+  // Submission-boundary attribution (XE_METAL_SEAM_TIMING=1). Fixed arrays,
+  // GPU-thread only, accumulated only when the gate is on; emitted per swap
+  // from FinalizeSwapFrame and finally from ShutdownContext (covers zero-swap
+  // trace runs), reset after each emission. Pure accounting -- nothing in the
+  // rendering or authority path reads it.
+  metal::SeamTimingAccumulator seam_timing_;
+
   // Bounded, deduplicated reporting of memexport producer classes this backend
   // does not route. Reset at the title/session boundary; holds no guest state
   // and takes no part in cache clearing.
@@ -562,10 +579,17 @@ class MetalCommandProcessor : public CommandProcessor {
   // EndFrameEncoderAndWait. Faults are recorded by the completion handler
   // and drained (logged + auto-recovered) on the GPU thread from
   // PumpCompletedActions.
-  void EndFrameEncoderAndWait();
+  void EndFrameEncoderAndWait(metal::SeamBoundaryReason reason);
   // Blocks until `submission` completes (condition variable signaled by the
   // completion handler). Returns false on timeout — a wedged GPU.
   bool WaitForSubmission(uint64_t submission, uint32_t timeout_ms = 4000);
+  // XE_METAL_SEAM_TIMING=1 (exact, warn-once fail-closed): submission-boundary
+  // attribution. A timing-enabled run is an ATTRIBUTION condition, not
+  // comparable to the pinned performance baselines.
+  static bool SeamTimingEnabled();
+  // Formats + logs the seam accumulator under `site`, then resets it. No-op
+  // when the gate is off or nothing accumulated.
+  void EmitSeamTimingReport(const char* site);
   // Arena allocation with ring-full handling: on failure, waits for the
   // oldest in-flight submission, reclaims, and retries once.
   bool ArenaAllocate(uint32_t size, uint32_t alignment,

@@ -704,7 +704,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   // Flush all pending GPU work so texture contents are final. Mid-frame this
   // is a commit + wait; the next draw's BeginFrameEncoder starts a fresh
   // command buffer and LOADs the (persistent) render-target contents.
-  EndFrameEncoderAndWait();
+  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kEdramDump);
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   if (!provider || !provider->command_queue()) {
@@ -723,7 +723,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
     // The pack operations above use the ordinary frame command buffer so they
     // remain ordered after the producing draws. Complete them before the dump
     // command buffer reads the private canonical buffer.
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kEdramDump);
     return render_target_cache_->DumpCanonicalEdram((__bridge void*)queue,
                                                      edram_out);
   }
@@ -1188,7 +1188,9 @@ bool MetalCommandProcessor::SetupContext() {
   // before the draw's encoder opens.
   // Must WAIT: the caller is about to memcpy over shared-buffer ranges that
   // in-flight submissions read.
-  shared_memory_->SetHazardFlushCallback([this]() { EndFrameEncoderAndWait(); });
+  shared_memory_->SetHazardFlushCallback([this]() {
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kHazardFlush);
+  });
   // PP1 + PP2-auto: the shared PrimitiveProcessor normalization authority for
   // routed native restart-disabled line/triangle list/strip draws and
   // auto-indexed triangle fans. Depends on shared_memory_ (constructed above).
@@ -1581,7 +1583,7 @@ void MetalCommandProcessor::ShutdownContext() {
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
   if (frame_open_) {
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kShutdown);
   }
   PumpCompletedActions();
   // Drops any resolve still queued and releases the visibility buffer; the
@@ -1595,6 +1597,12 @@ void MetalCommandProcessor::ShutdownContext() {
   // a missing line there would be indistinguishable from "nothing overlapped"
   // and from "no work was done".
   ReportZeroCopyLifecycle("final");
+  // Seam-timing final report. NOTE: measured 2026-08-08, plain trace-dump
+  // replay does NOT surface lines from this teardown path (the zero-copy
+  // [final] line is likewise absent there); headless tools therefore call
+  // EmitLifecycleReports explicitly while logging is alive. This emission
+  // still covers live-run teardown remainders.
+  EmitSeamTimingReport("final");
   // PrimitiveProcessor: destroy before shared_memory_ (it holds a reference).
   primitive_processor_.reset();
   shared_memory_.reset();
@@ -2250,7 +2258,7 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         // anything is released. At the swap boundary the frame's own
         // EndFrameEncoderAndWait has already done this, so this is a no-op
         // there; it is what makes the routine safe from any other boundary.
-        EndFrameEncoderAndWait();
+        EndFrameEncoderAndWait(metal::SeamBoundaryReason::kCacheClear);
         continue;
       case metal::CacheClearAdmission::kPublishPendingFirst: {
         // Step 4: completing a submission makes a drain POSSIBLE without
@@ -2565,7 +2573,7 @@ void MetalCommandProcessor::ResetDerivedReplayState() {
   // submission, and pumped completion actions; the first playback starts
   // from process-initial state with nothing open). Kept so the seam is safe
   // from any future call site at zero cost when already quiesced.
-  EndFrameEncoderAndWait();
+  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kReplayReset);
   PumpCompletedActions();
 
   // Quiescence assert (task 2.1): the SAME inputs the deferred cache-clear
@@ -2748,7 +2756,7 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
     case ZPDQueryAdmission::kDefer:
       return QueryOpenResult::kDeferred;
     case ZPDQueryAdmission::kDeferAfterClosingSubmission:
-      EndFrameEncoder();
+      EndFrameEncoder(metal::SeamBoundaryReason::kQueryAdmission);
       return QueryOpenResult::kDeferred;
     case ZPDQueryAdmission::kPoolExhausted:
       return QueryOpenResult::kPoolExhausted;
@@ -2888,7 +2896,7 @@ bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
     }
     // The segment is in the command buffer still open; commit it so it can
     // complete. Strict mode's stall backstops bound how often this happens.
-    EndFrameEncoder();
+    EndFrameEncoder(metal::SeamBoundaryReason::kQueryAwait);
   }
   if (wait_for_submission >
           completed_submission_.load(std::memory_order_acquire) &&
@@ -2921,11 +2929,70 @@ void MetalCommandProcessor::EndRenderEncoder() {
   [encoder endEncoding];
 }
 
-void MetalCommandProcessor::EndFrameEncoder() {
-  EndRenderEncoder();
-  if (!frame_command_buffer_) {
+bool MetalCommandProcessor::SeamTimingEnabled() {
+  // Exact-1 opt-in, warn-once fail-closed, per the house flag contract. An
+  // enabled run is an ATTRIBUTION condition (clock reads per boundary), never
+  // comparable to the pinned performance baselines.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SEAM_TIMING");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_SEAM_TIMING='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
+namespace {
+// Monotonic clock for seam timing. Production-only; the accumulator itself is
+// clock-free so the device-free tests feed synthetic deltas instead.
+inline uint64_t SeamNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+}  // namespace
+
+void MetalCommandProcessor::EmitSeamTimingReport(const char* site) {
+  if (!SeamTimingEnabled() || !seam_timing_.AnyActivity()) {
     return;
   }
+  char reasons_buf[1536];
+  char consumers_buf[2048];
+  seam_timing_.FormatReasons(reasons_buf, sizeof(reasons_buf));
+  seam_timing_.FormatConsumers(consumers_buf, sizeof(consumers_buf));
+  XELOGI("MetalSeamTiming[{}]: reasons{} | consumers{}", site, reasons_buf,
+         consumers_buf);
+  seam_timing_.Reset();
+}
+
+void MetalCommandProcessor::EmitLifecycleReports(const char* site) {
+  EmitSeamTimingReport(site);
+}
+
+void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
+  const bool seam_on = SeamTimingEnabled();
+  EndRenderEncoder();
+  if (!frame_command_buffer_) {
+    if (seam_on) {
+      // Free call: no buffer to close. Counted apart so boundary frequency is
+      // never inflated by no-ops.
+      ++seam_timing_.reason[uint32_t(reason)].noop_calls;
+    }
+    return;
+  }
+  const uint64_t seam_t0 = seam_on ? SeamNowNs() : 0;
+  uint64_t seam_close_ns = 0;   // encoder end + commit, excluding the wait
+  uint64_t seam_wait_ns = 0;    // the actual GPU stall (see header)
   id<MTLCommandBuffer> command_buffer =
       (__bridge_transfer id<MTLCommandBuffer>)frame_command_buffer_;
   frame_command_buffer_ = nullptr;
@@ -3000,14 +3067,29 @@ void MetalCommandProcessor::EndFrameEncoder() {
     // commit that returns and a commit that waits for the GPU are different
     // costs, and only the taken branch is evidence of which one happened.
     zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kSyncCommitWaits);
+    // Seam timing: THIS is the principal GPU wait on the default path. It is
+    // recorded as its own stage precisely so it cannot be mislabeled as
+    // "encoder close" wrapper time (and so the AndWait wrapper's pre-satisfied
+    // WaitForSubmission cannot masquerade as the stall being free).
+    const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
     [command_buffer waitUntilCompleted];
+    if (seam_on) {
+      seam_wait_ns = SeamNowNs() - seam_w0;
+    }
     PublishCompletedSubmission(submission);
   } else {
     // Bound the pipeline depth: cap in-flight submissions so a fast CPU
     // can't queue unbounded GPU work (memory + latency + ring pressure).
     constexpr uint64_t kMaxInFlightSubmissions = 8;
     if (submission > kMaxInFlightSubmissions) {
+      // Under XE_METAL_ASYNC the depth-cap wait is this boundary's only
+      // GPU-side stall; it lands in the same gpu_wait stage, disclosed by the
+      // run's environment.
+      const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
       WaitForSubmission(submission - kMaxInFlightSubmissions);
+      if (seam_on) {
+        seam_wait_ns = SeamNowNs() - seam_w0;
+      }
     }
   }
   // Reclamation runs once THIS submission has completed: snapshot textures
@@ -3034,16 +3116,45 @@ void MetalCommandProcessor::EndFrameEncoder() {
     }
   });
   PumpCompletedActions();
+  if (seam_on) {
+    // Inclusive minus the separately-recorded wait = CPU-side close + commit
+    // (+ completion-action bookkeeping). Nested stages are never summed back
+    // into each other.
+    seam_close_ns = (SeamNowNs() - seam_t0) - seam_wait_ns;
+    auto& r = seam_timing_.reason[uint32_t(reason)];
+    ++r.boundaries;
+    r.close.Record(seam_close_ns);
+    r.gpu_wait.Record(seam_wait_ns);
+  }
 }
 
-void MetalCommandProcessor::EndFrameEncoderAndWait() {
+void MetalCommandProcessor::EndFrameEncoderAndWait(
+    metal::SeamBoundaryReason reason) {
   // For sites that read GPU results on the CPU right after the commit
   // (writeback drains, guest fence waits, EDRAM/RT readbacks, shutdown):
   // full synchronous semantics.
+  const bool seam_on = SeamTimingEnabled();
   bool had_buffer = frame_command_buffer_ != nullptr;
-  EndFrameEncoder();
-  if (had_buffer && WaitForSubmission(submission_counter_)) {
-    PumpCompletedActions();
+  EndFrameEncoder(reason);
+  if (had_buffer) {
+    // Normally pre-satisfied on the default path (the sync commit already
+    // waited and published); recorded separately so a genuinely blocking
+    // post-wait is visible and a satisfied one reads as ~0, not as "free
+    // stall".
+    const bool blocked =
+        seam_on && completed_submission_.load(std::memory_order_acquire) <
+                       submission_counter_;
+    const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
+    if (WaitForSubmission(submission_counter_)) {
+      PumpCompletedActions();
+    }
+    if (seam_on) {
+      auto& r = seam_timing_.reason[uint32_t(reason)];
+      r.post_wait.Record(SeamNowNs() - seam_w0);
+      if (blocked) {
+        ++r.post_wait_blocked;
+      }
+    }
   }
 }
 
@@ -3149,6 +3260,16 @@ static MetalAutoTraceConfig ParseAutoTraceConfigFromEnv() {
 // swap_count_ does not advance on suppressed frames.
 void MetalCommandProcessor::FinalizeSwapFrame() {
   uint64_t finalize_index = ++swap_finalize_index_;
+  // Seam-timing per-frame emission FROM THE LIFECYCLE BOUNDARY: this runs for
+  // suppressed and early-return swaps too, so boundary attribution can never
+  // silently skip a frame that did work but presented nothing. Reset after
+  // emission; ShutdownContext / the headless-tool hook emit the remainder.
+  {
+    char site_buf[32];
+    std::snprintf(site_buf, sizeof(site_buf), "swap %llu",
+                  (unsigned long long)finalize_index);
+    EmitSeamTimingReport(site_buf);
+  }
   if (!auto_trace_trigger_) {
     auto_trace_trigger_ =
         std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
@@ -4312,7 +4433,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }();
   if (s_preclear_rt_at >= 0 &&
       int64_t(trace_draw_index_) - 1 == s_preclear_rt_at && have_color) {
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
     if (rt_ptr) {
       id<MTLCommandQueue> pq = (__bridge id<MTLCommandQueue>)
@@ -6374,7 +6495,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return v ? strtoll(v, nullptr, 10) : -1ll;
   }();
   if (s_dump_depth_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_depth_at) {
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     void* dt_ptr = render_target_cache_->current_depth_texture();
     if (dt_ptr) {
       id<MTLTexture> dt = (__bridge id<MTLTexture>)dt_ptr;
@@ -6428,7 +6549,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return v ? strtoll(v, nullptr, 10) : -1ll;
   }();
   if (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at) {
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
     if (rt_ptr) {
       id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
@@ -6732,7 +6853,7 @@ bool MetalCommandProcessor::IssueCopy() {
   constexpr uint32_t kResolveCommitMinBytes = 1024 * 1024;
   if (!s_no_resolve_commit && draws_since_commit_ > 0 &&
       resolve_info.copy_dest_extent_length >= kResolveCommitMinBytes) {
-    EndFrameEncoder();
+    EndFrameEncoder(metal::SeamBoundaryReason::kResolveSizeSplit);
   }
   // CRITICAL: the resolve paths below all guard on frame_command_buffer_. If
   // the frame was committed (just above, or by a mid-frame hazard flush,
@@ -6789,7 +6910,7 @@ bool MetalCommandProcessor::IssueCopy() {
         if (probe && s_probe_resolve &&
             uint32_t(strtoul(s_probe_resolve, nullptr, 16)) ==
                 resolve_info.copy_dest_base) {
-          EndFrameEncoderAndWait();
+          EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
           PrepareTransferCommandBuffer();
           id<MTLTexture> owner_tex = (__bridge id<MTLTexture>)probe;
           uint32_t pw = std::min<uint32_t>(uint32_t(owner_tex.width), 64);
@@ -7538,7 +7659,7 @@ bool MetalCommandProcessor::IssueCopy() {
   static const bool s_serialize_resolves =
       std::getenv("XE_METAL_SERIALIZE_RESOLVES") != nullptr;
   if (s_serialize_resolves) {
-    EndFrameEncoderAndWait();
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
   }
   return true;
 }
@@ -8526,11 +8647,35 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
 MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision) {
+  // Consumer attribution layer (metal_seam_timing.h). `inclusive` covers the
+  // whole request and CONTAINS the nested stages; they are recorded separately
+  // and never summed together.
+  const bool seam_on = SeamTimingEnabled();
+  metal::SeamTimingAccumulator::PerConsumer* seam_c = nullptr;
+  uint64_t seam_incl0 = 0;
+  if (seam_on) {
+    seam_c = &seam_timing_.consumer[uint32_t(decision.consumer)];
+    ++seam_c->consultations;
+    seam_incl0 = SeamNowNs();
+  }
   ProducerDependencyOutcome outcome;
   if (decision.selected.empty()) {
     // Early no-op: a disjoint (or no-pending) consumer adds no commit, wait, or
     // drain.
+    if (seam_c) {
+      ++seam_c->empty_early_outs;
+    }
     return outcome;
+  }
+  if (seam_c) {
+    ++seam_c->non_empty;
+    for (const auto& p : decision.selected) {
+      if (p.state == metal::TransitState::kPendingResolve) {
+        ++seam_c->selected_resolve;
+      } else {
+        ++seam_c->selected_memexport;
+      }
+    }
   }
 
   // One completion boundary for the whole consumer request. A producer in the
@@ -8542,15 +8687,48 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   // prove it completed independently of the record.
   uint64_t boundary_submission =
       frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
-  EndFrameEncoderAndWait();
+  if (seam_c && boundary_submission) {
+    // A live buffer at the boundary means exactly one commit below (the
+    // AndWait closes at most one buffer): present == commit here.
+    ++seam_c->cb_present_commits;
+  }
+  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);
   uint64_t required_submission =
       std::max(boundary_submission, decision.max_wait_submission);
+  if (seam_c) {
+    // Which term of max() dominated -- current boundary, an older selected
+    // producer, or a tie. A zero required_submission cannot occur here (the
+    // non-empty selection guarantees at least one term).
+    uint32_t term =
+        boundary_submission > decision.max_wait_submission
+            ? uint32_t(metal::SeamBindingTerm::kBoundary)
+            : (decision.max_wait_submission > boundary_submission
+                   ? uint32_t(metal::SeamBindingTerm::kProducer)
+                   : uint32_t(metal::SeamBindingTerm::kTie));
+    ++seam_c->binding[term];
+  }
   uint64_t completed_high_water =
       completed_submission_.load(std::memory_order_acquire);
   if (required_submission > completed_high_water) {
+    // Requested AND (by this same pre-check) actually behind the high-water
+    // mark -- a wait the fast path can still satisfy races to "requested",
+    // never to "blocked" (mirrors WaitForSubmission's own counting rule).
+    if (seam_c) {
+      ++seam_c->wait_requested;
+      ++seam_c->wait_blocked;
+    }
+    const uint64_t seam_rw0 = seam_on ? SeamNowNs() : 0;
     bool waited = WaitForSubmission(required_submission);
+    if (seam_c) {
+      seam_c->required_wait.Record(SeamNowNs() - seam_rw0);
+    }
     if (!waited) {
       // Failed-wait path: the commit already happened but the drain did not.
+      if (seam_c) {
+        ++seam_c->wait_timeout;
+        ++seam_c->failed;
+        seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
+      }
       outcome.complete = false;
       return outcome;
     }
@@ -8572,9 +8750,22 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
           ? metal::MemexportBoundaryEvidence::kSynchronousBoundaryCompleted
           : metal::MemexportBoundaryEvidence::kNone;
 
+  const uint64_t seam_d0 = seam_on ? SeamNowNs() : 0;
   outcome.drain = DrainSelectedPendingProducers(decision, boundary_evidence);
   outcome.complete =
       metal::ConsumerPublicationComplete(decision, outcome.drain);
+  if (seam_c) {
+    seam_c->drain.Record(SeamNowNs() - seam_d0);
+    seam_c->drained_records += outcome.drain.drained_records;
+    seam_c->copied_bytes += outcome.drain.memexport_bytes_copied;
+    seam_c->invalidated_entries += outcome.drain.invalidated_entries;
+    if (outcome.complete) {
+      ++seam_c->completed;
+    } else {
+      ++seam_c->failed;
+    }
+    seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
+  }
   return outcome;
 }
 
@@ -8726,7 +8917,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // silently discarded the whole frame (uniform magenta present).
   // The swap is the frame's ONE synchronous point (S8): the writeback drain
   // below reads staging buffers, and the wait doubles as frame pacing.
-  EndFrameEncoderAndWait();
+  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kSwapPacing);
 
   // Black-flicker forensics: a swap with no draws since the previous one
   // presents stale/black content — log which swaps do that (throttled).

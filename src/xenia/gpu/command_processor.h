@@ -283,6 +283,12 @@ class CommandProcessor {
   }
   // DumpEdramToBuffer, written to a file.
   bool DumpEdramToFile(const std::filesystem::path& path);
+  // Backend hook for headless tools (trace-dump): emit any env-gated lifecycle
+  // evidence reports NOW, while logging is still alive. Plain trace replay
+  // never reaches the swap-finalize or teardown emission points with a live
+  // log sink, so a run that did work would otherwise be indistinguishable
+  // from a run that did none. `site` labels the emission. Default no-op.
+  virtual void EmitLifecycleReports(const char* site) {}
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);

@@ -1322,7 +1322,8 @@ void MetalRenderTargetCache::PerformTransfers(
           "commit+wait",
           canonical_full_sync_count_, command_processor_.trace_draw_index());
     }
-    command_processor_.EndFrameEncoderAndWait();
+    command_processor_.EndFrameEncoderAndWait(
+        metal::SeamBoundaryReason::kDebugProbe);
   }
 }
 

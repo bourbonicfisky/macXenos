@@ -417,6 +417,13 @@ int TraceDump::Run() {
   }
   EndHostCapture();
 
+  // Backend lifecycle evidence (env-gated seam timing etc.): emitted HERE,
+  // after every replay loop and before capture/teardown, because plain replay
+  // reaches neither the swap-finalize emission nor a live-logging
+  // ShutdownContext -- without this call, an attribution run's report would
+  // be silently lost and indistinguishable from "no boundaries occurred".
+  graphics_system_->command_processor()->EmitLifecycleReports("trace-final");
+
   // A determinism failure must make the process exit nonzero (exit code 2) so
   // a CI/shell gate actually fails; a cache-clear engagement failure uses 3 so
   // "the clear never ran" is distinguishable from "the output diverged"; other
