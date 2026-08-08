@@ -501,6 +501,25 @@ class Memory {
   // RegisterPhysicalMemoryInvalidationCallback.
   void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle);
 
+  // Acquires the lock that serializes the callbacks above: PhysicalHeap::
+  // TriggerCallbacks already holds it while it walks the callback list, so a
+  // callback body never has to take it and two callbacks never run at once.
+  //
+  // Exposed narrowly so a callback's PRODUCER can join that same serialization
+  // and get a real happens-before edge. State a callback reads is typically
+  // published from another thread (the GPU thread, here); atomics on the state
+  // alone order nothing unless the reader is guaranteed to read the release,
+  // and a callback that begins after the write may still legally observe the
+  // pre-write value. Writing under this lock makes the order causal: a callback
+  // already holding it ran before the write, and one acquiring it afterwards
+  // must see the write.
+  //
+  // Nothing slow, blocking, reentrant into memory management, or capable of
+  // taking another lock may run inside it -- see the global critical region
+  // contract in base/mutex.h. It is NOT for guarding a callback body.
+  [[nodiscard]] global_unique_lock_type
+  LockPhysicalMemoryInvalidationCallbacks();
+
   // Enables physical memory access callbacks for the specified memory range,
   // snapped to system page boundaries.
   void EnablePhysicalMemoryAccessCallbacks(

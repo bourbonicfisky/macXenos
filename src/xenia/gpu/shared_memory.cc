@@ -545,6 +545,11 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
   SharedMemory* self = reinterpret_cast<SharedMemory*>(context_ptr);
+  // Observation runs FIRST and cannot change the invalidation: this is the one
+  // entry the guest's access-violation path reaches, so an override sees the
+  // physical write before the pages it touched lose their validity/GPU-written
+  // bits. Default is a no-op; see ObservePhysicalCpuWrite.
+  self->ObservePhysicalCpuWrite(physical_address_start, length);
   return self->MemoryInvalidationCallback(physical_address_start, length,
                                           exact_range);
 }

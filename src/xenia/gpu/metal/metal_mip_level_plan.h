@@ -42,7 +42,13 @@ struct MipLevelPlan {
   uint32_t height = 0;
   uint32_t px = 0;              // packed sub-tile block origin
   uint32_t py = 0;
-  uint32_t consumed_begin = 0;  // exact read range, absolute, inclusive
+  // CONSERVATIVE ENVELOPE, absolute: min/max over the tiled source offsets,
+  // widened to the last group's end. It is what RequestConsumedRange and the
+  // planner need -- a surplus consumed range can only cause an extra hazard
+  // flush, never a missed one -- and it is NOT the exact set of bytes the load
+  // reads. A tiled walk leaves holes inside these bounds; anything needing an
+  // exact set must preserve the per-group union rather than reuse these fields.
+  uint32_t consumed_begin = 0;  // inclusive
   uint32_t consumed_end = 0;    // exclusive
 };
 

@@ -22,6 +22,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
@@ -628,18 +632,44 @@ class RecordingMemexportConvergenceTarget
     : public MemexportConvergenceTarget {
  public:
   bool CopyBufferToRam(uint32_t base, uint32_t length,
-                       uint32_t* invalidated_entries) override {
+                       uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
     ++calls;
     copied_base = base;
     copied_length = length;
     *invalidated_entries = invalidated_entries_to_report;
+    // A recorder reports what it was configured to move, not what the range
+    // implies: the seam must carry an aliased target's zero as faithfully as a
+    // mirror target's `length`. `bytes_copied_to_report` therefore has NO
+    // range-derived default -- every case sets it explicitly (see
+    // ReportMirrorCopy / ReportAliasSkip / ReportFailure below), so a case that
+    // forgot to would assert against an unstated zero rather than silently
+    // agreeing with whichever behaviour the seam happened to have.
+    *bytes_copied = bytes_copied_to_report;
     return result;
+  }
+
+  // A mirror backing physically moves the whole range.
+  void ReportMirrorCopy(uint32_t length) {
+    bytes_copied_to_report = uint64_t(length);
+    result = true;
+  }
+  // An aliased backing publishes the same bytes having moved none.
+  void ReportAliasSkip() {
+    bytes_copied_to_report = 0;
+    result = true;
+  }
+  // A failure publishes nothing, so it reports nothing moved.
+  void ReportFailure() {
+    bytes_copied_to_report = 0;
+    result = false;
   }
 
   uint32_t calls = 0;
   uint32_t copied_base = 0;
   uint32_t copied_length = 0;
   uint32_t invalidated_entries_to_report = 0;
+  uint64_t bytes_copied_to_report = 0;
   bool result = true;
 };
 
@@ -690,6 +720,316 @@ TEST_CASE("Authority: memexport destination preparation reports a factual "
   target.result = false;
   REQUIRE_FALSE(PrepareMemexportDestination(*preparation, target));
   REQUIRE(target.calls == 1u);
+}
+
+// --- Writer-before-writer ordering of a memexport destination --------------
+
+namespace {
+
+// Records EVERY request, in order, so a case can assert not only how many pages
+// were requested but that none were requested before the ordering barrier ran.
+class OrderedPreparationRecorder : public MemexportPreparationTarget {
+ public:
+  bool RequestDestinationRange(uint32_t base, uint32_t length) override {
+    requests.push_back({base, length});
+    return result;
+  }
+
+  struct Request {
+    uint32_t base;
+    uint32_t length;
+  };
+  std::vector<Request> requests;
+  bool result = true;
+};
+
+// A retire callback that reports draining `drained` of the selected records and
+// counts its own invocations, so "the seam never asked" and "the seam asked and
+// got nothing" stay distinguishable.
+struct RecordingRetire {
+  uint32_t calls = 0;
+  uint32_t drained = 0;
+  std::vector<size_t> selected_sizes;
+  // Requests already issued at the moment the retire ran. Must be empty: the
+  // pages of a destination whose predecessors are still pending must not be
+  // uploaded ahead of them.
+  size_t requests_before = 0;
+  const OrderedPreparationRecorder* watch = nullptr;
+
+  ProducerDrainOutcome operator()(const ConsumerDecision& decision) {
+    ++calls;
+    selected_sizes.push_back(decision.selected.size());
+    if (watch) {
+      requests_before = watch->requests.size();
+    }
+    ProducerDrainOutcome outcome;
+    outcome.drained_records = drained;
+    outcome.resolve_records = drained;
+    return outcome;
+  }
+};
+
+std::vector<MemexportDestinationPreparation> Destinations(
+    std::initializer_list<std::pair<uint32_t, uint32_t>> ranges) {
+  std::vector<MemexportDestinationPreparation> out;
+  for (const auto& range : ranges) {
+    auto preparation =
+        DecideMemexportDestinationPreparation(range.first, range.second);
+    REQUIRE(preparation.has_value());
+    out.push_back(*preparation);
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST_CASE("Authority: the memexport destination ordering vocabulary is "
+          "complete and only the two established verdicts license a store",
+          "[l0][authority][memexport][ordering]") {
+  // Every declared value is named, in range, and classified exactly once.
+  uint32_t satisfied = 0;
+  for (MemexportDestinationOrdering value : kMemexportDestinationOrderings) {
+    REQUIRE(IsMemexportDestinationOrderingValue(value));
+    REQUIRE(std::string(MemexportDestinationOrderingName(value)) != "unknown");
+    if (MemexportDestinationOrderingSatisfied(value)) {
+      ++satisfied;
+    }
+  }
+  REQUIRE(satisfied == 2u);
+  REQUIRE_FALSE(IsMemexportDestinationOrderingValue(
+      MemexportDestinationOrdering::kCount));
+  REQUIRE_FALSE(MemexportDestinationOrderingSatisfied(
+      MemexportDestinationOrdering::kCount));
+  // The default is not a licence: a destination nobody ordered is not prepared.
+  MemexportDestinationPreparationOutcome fresh;
+  REQUIRE(fresh.ordering == MemexportDestinationOrdering::kNotEvaluated);
+  REQUIRE_FALSE(fresh.ordered());
+  REQUIRE_FALSE(fresh.prepared());
+}
+
+TEST_CASE("Authority: a memexport destination with no pending producer is "
+          "ordered by measurement, not by default",
+          "[l0][authority][memexport][ordering]") {
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), {}, /*completed_submission=*/7u,
+      target, std::ref(retire));
+  // The empty snapshot WAS consulted, so the verdict names that fact rather
+  // than sharing kNotEvaluated with a run that never looked.
+  REQUIRE(outcome.ordering == MemexportDestinationOrdering::kNoOlderProducer);
+  REQUIRE(outcome.prepared());
+  REQUIRE(retire.calls == 0u);  // nothing selected: no commit, no wait, no drain
+  REQUIRE(target.requests.size() == 1u);
+  REQUIRE(target.requests[0].base == 0x5000u);
+  REQUIRE(target.requests[0].length == 0x800u);
+  REQUIRE(outcome.requested_ranges == 1u);
+  REQUIRE(outcome.range_count == 1u);
+}
+
+TEST_CASE("Authority: a disjoint or merely adjacent pending producer is not "
+          "drained by a memexport destination",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      // A real gap below the destination.
+      MakeProducer(0x1000u, 0x1000u, TransitState::kPendingResolve, 1u, 1u),
+      // Touching the destination's end -- shares zero bytes.
+      MakeProducer(0x5800u, 0x1000u, TransitState::kPendingResolve, 1u, 2u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/1u,
+      target, std::ref(retire));
+  REQUIRE(outcome.ordering == MemexportDestinationOrdering::kNoOlderProducer);
+  REQUIRE(outcome.decision.selected.empty());
+  REQUIRE(retire.calls == 0u);
+  REQUIRE(outcome.prepared());
+  REQUIRE(target.requests.size() == 1u);
+}
+
+TEST_CASE("Authority: an older overlapping producer is retired BEFORE the "
+          "destination pages are requested",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5400u, 0x400u, TransitState::kPendingResolve, 3u, 1u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  retire.drained = 1;
+  retire.watch = &target;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target, std::ref(retire));
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersRetired);
+  REQUIRE(retire.calls == 1u);
+  REQUIRE(retire.selected_sizes.size() == 1u);
+  REQUIRE(retire.selected_sizes[0] == 1u);
+  // The ordering really preceded the upload: nothing had been requested yet.
+  REQUIRE(retire.requests_before == 0u);
+  REQUIRE(target.requests.size() == 1u);
+  REQUIRE(outcome.prepared());
+}
+
+TEST_CASE("Authority: a short drain retains the memexport destination and "
+          "requests no pages",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5400u, 0x400u, TransitState::kPendingResolve, 3u, 1u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  retire.drained = 0;  // the older writer is still pending
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target, std::ref(retire));
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersRetained);
+  REQUIRE(retire.calls == 1u);
+  REQUIRE_FALSE(outcome.ordered());
+  REQUIRE_FALSE(outcome.prepared());
+  REQUIRE_FALSE(outcome.requested);
+  // No pages: a destination whose predecessor may still be drained later must
+  // not be uploaded into, and the caller must fail the draw closed.
+  REQUIRE(target.requests.empty());
+  REQUIRE(outcome.requested_ranges == 0u);
+}
+
+TEST_CASE("Authority: a partially retired selection retains the memexport "
+          "destination",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5000u, 0x400u, TransitState::kPendingResolve, 3u, 1u),
+      MakeProducer(0x5400u, 0x400u, TransitState::kPendingResolve, 3u, 2u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  retire.drained = 1;  // one of two
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target, std::ref(retire));
+  REQUIRE(outcome.decision.selected.size() == 2u);
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersRetained);
+  REQUIRE_FALSE(outcome.prepared());
+  REQUIRE(target.requests.empty());
+}
+
+TEST_CASE("Authority: several memexport destinations are ordered at ONE "
+          "barrier over their union",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5000u, 0x100u, TransitState::kPendingResolve, 3u, 1u),
+      MakeProducer(0x9000u, 0x100u, TransitState::kPendingResolve, 3u, 2u),
+      // Disjoint from both destinations; must stay pending.
+      MakeProducer(0x20000u, 0x100u, TransitState::kPendingResolve, 3u, 3u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  retire.drained = 2;
+  retire.watch = &target;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}, {0x9000u, 0x400u}}), producers,
+      /*completed_submission=*/3u, target, std::ref(retire));
+  // ONE barrier, both overlapping producers in it, the disjoint one untouched.
+  REQUIRE(retire.calls == 1u);
+  REQUIRE(outcome.decision.selected.size() == 2u);
+  REQUIRE(outcome.decision.selected[0].sequence == 1u);
+  REQUIRE(outcome.decision.selected[1].sequence == 2u);
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersRetired);
+  // Neither range was requested before the drain, so a drain-side invalidation
+  // cannot land on pages another range had already uploaded.
+  REQUIRE(retire.requests_before == 0u);
+  REQUIRE(target.requests.size() == 2u);
+  REQUIRE(outcome.requested_ranges == 2u);
+  REQUIRE(outcome.prepared());
+}
+
+TEST_CASE("Authority: an incomplete older producer is selected and awaited "
+          "rather than skipped",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5000u, 0x800u, TransitState::kPendingMemexport, 9u, 1u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  retire.drained = 1;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers,
+      /*completed_submission=*/4u, target, std::ref(retire));
+  REQUIRE(outcome.decision.await);
+  REQUIRE(outcome.decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(outcome.decision.max_wait_submission == 9u);
+  REQUIRE(retire.calls == 1u);
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersRetired);
+}
+
+TEST_CASE("Authority: a satisfied ordering still reports a factual page-request "
+          "failure",
+          "[l0][authority][memexport][ordering]") {
+  OrderedPreparationRecorder target;
+  target.result = false;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x9000u, 0x400u}}), {}, /*completed_submission=*/0u,
+      target, std::ref(retire));
+  REQUIRE(outcome.ordering == MemexportDestinationOrdering::kNoOlderProducer);
+  REQUIRE(outcome.ordered());
+  REQUIRE_FALSE(outcome.requested);
+  REQUIRE_FALSE(outcome.prepared());
+  REQUIRE(outcome.requested_ranges == 0u);
+  REQUIRE(target.requests.size() == 1u);
+}
+
+TEST_CASE("Authority: an empty memexport destination set is NOT EVALUATED and "
+          "never reads as prepared",
+          "[l0][authority][memexport][ordering]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5000u, 0x800u, TransitState::kPendingResolve, 1u, 1u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      {}, producers, /*completed_submission=*/1u, target, std::ref(retire));
+  REQUIRE(outcome.range_count == 0u);
+  // The absence of destinations is not permission. No range was compared
+  // against the snapshot, so nothing was established: the verdict is the one
+  // value that never licenses a store, NOT kNoOlderProducer, which would claim
+  // a real destination had been measured as last.
+  REQUIRE(outcome.ordering == MemexportDestinationOrdering::kNotEvaluated);
+  REQUIRE_FALSE(outcome.ordered());
+  REQUIRE_FALSE(outcome.requested);
+  REQUIRE_FALSE(outcome.prepared());
+  REQUIRE(outcome.requested_ranges == 0u);
+  // Nothing was selected, nothing was drained, and the whole outcome is
+  // byte-identical to the default one nobody evaluated.
+  REQUIRE(outcome.decision.selected.empty());
+  REQUIRE(outcome.decision.requested.empty());
+  REQUIRE(outcome.decision.action == AuthorityAction::kNoDependency);
+  REQUIRE_FALSE(outcome.decision.await);
+  REQUIRE(outcome.drain.drained_records == 0u);
+  REQUIRE(outcome.drain.resolve_records == 0u);
+  // Neither callback ran: no commit/wait/drain was spent, and no page of the
+  // overlapping pending producer's range was requested behind it.
+  REQUIRE(retire.calls == 0u);
+  REQUIRE(target.requests.empty());
+}
+
+TEST_CASE("Authority: the memexport destination consumer kind reads the shared "
+          "buffer and names itself",
+          "[l0][authority][memexport][ordering]") {
+  REQUIRE(ConsumerReadsSharedBuffer(ConsumerKind::kMemexportDestination));
+  REQUIRE(std::string(ConsumerKindName(ConsumerKind::kMemexportDestination)) ==
+          "memexport_destination");
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), {}, 0u, target, std::ref(retire));
+  REQUIRE(outcome.decision.consumer == ConsumerKind::kMemexportDestination);
+  REQUIRE(outcome.decision.revalidate_gpu_bytes);
 }
 
 TEST_CASE("Authority: memexport publication marks GPU-written for the exact "
@@ -775,10 +1115,14 @@ TEST_CASE("Authority: memexport RAM convergence copies exact bytes and "
       MakeProducer(0x10000u, 0x1000u, TransitState::kPendingMemexport, 5u, 1u);
   RecordingMemexportConvergenceTarget target;
   target.invalidated_entries_to_report = 2u;
+  // A MIRROR backing: two allocations, so publication is a real copy of the
+  // record's whole length, and the target says so explicitly.
+  target.ReportMirrorCopy(0x1000u);
   MemexportConvergenceResult result = ConvergeMemexportRam(producer, target);
   REQUIRE(result.converged);
   REQUIRE(result.action == AuthorityAction::kConvergeRamFromBuffer);
   REQUIRE(result.invalidated_entries == 2u);
+  REQUIRE(result.bytes_copied == 0x1000u);
   REQUIRE(target.calls == 1u);
   REQUIRE(target.copied_base == 0x10000u);
   REQUIRE(target.copied_length == 0x1000u);
@@ -787,17 +1131,42 @@ TEST_CASE("Authority: memexport RAM convergence copies exact bytes and "
   // convergence call structurally cannot clobber the buffer it read from.
 }
 
+TEST_CASE("Authority: an aliased target publishes the same record having "
+          "copied zero bytes",
+          "[l0][authority][memexport][zerocopy]") {
+  // The seam must carry a factual zero as a SUCCESS. If any consumer of this
+  // port inferred "converged implies length bytes moved", an aliased backing
+  // would be indistinguishable from a mirror one and the pre-gate could not
+  // measure the thing it exists to measure.
+  PendingProducer producer =
+      MakeProducer(0x40000u, 0x2000u, TransitState::kPendingMemexport, 6u, 3u);
+  RecordingMemexportConvergenceTarget target;
+  target.invalidated_entries_to_report = 1u;
+  target.ReportAliasSkip();
+  MemexportConvergenceResult result = ConvergeMemexportRam(producer, target);
+  REQUIRE(result.converged);
+  REQUIRE(result.action == AuthorityAction::kConvergeRamFromBuffer);
+  REQUIRE(result.invalidated_entries == 1u);
+  REQUIRE(result.bytes_copied == 0u);
+  // The range the target was asked for is unchanged -- only what MOVED differs.
+  REQUIRE(target.copied_base == 0x40000u);
+  REQUIRE(target.copied_length == 0x2000u);
+}
+
 TEST_CASE("Authority: memexport RAM convergence failure reports a factual "
           "disagreement so the caller retains the pending record",
           "[l0][authority][memexport]") {
   PendingProducer producer =
       MakeProducer(0x20000u, 0x800u, TransitState::kPendingMemexport, 9u, 2u);
   RecordingMemexportConvergenceTarget target;
-  target.result = false;  // missing RAM mapping or shared-buffer contents.
+  // Missing RAM mapping or shared-buffer contents: nothing published, so
+  // nothing moved. Stated explicitly rather than left to a default.
+  target.ReportFailure();
   MemexportConvergenceResult result = ConvergeMemexportRam(producer, target);
   REQUIRE_FALSE(result.converged);
   REQUIRE(result.action == AuthorityAction::kNoDependency);
   REQUIRE(result.invalidated_entries == 0u);
+  REQUIRE(result.bytes_copied == 0u);
 
   // The caller's retention policy: a failed convergence must retain the
   // record for retry rather than drop it or retire it.
@@ -820,8 +1189,9 @@ TEST_CASE("Authority: memexport convergence drain counters increment only "
       MakeProducer(0x31000u, 0x100u, TransitState::kPendingMemexport, 1u, 2u),
   };
   RecordingMemexportConvergenceTarget ok_target;
+  ok_target.ReportMirrorCopy(0x100u);
   RecordingMemexportConvergenceTarget failing_target;
-  failing_target.result = false;
+  failing_target.ReportFailure();
 
   uint32_t drained = 0;
   std::vector<PendingProducer> retained;
@@ -842,6 +1212,182 @@ TEST_CASE("Authority: memexport convergence drain counters increment only "
   REQUIRE(drained == 1u);
   REQUIRE(retained.size() == 1u);
   REQUIRE(retained.front().range == producers[1].range);
+}
+
+TEST_CASE("Authority: the drain outcome sums factual copy bytes independently "
+          "of retirement",
+          "[l0][authority][memexport][zerocopy]") {
+  // Two records retire; only one of them moved bytes. If retirement and byte
+  // accounting shared a source, an aliased backing's zero would either suppress
+  // a retirement or invent a copy.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x50000u, 0x400u, TransitState::kPendingMemexport, 3u, 1u),
+      MakeProducer(0x51000u, 0x400u, TransitState::kPendingMemexport, 3u, 2u),
+  };
+  ConsumerDecision decision =
+      DecideConsumer(ConsumerKind::kVertex, SingleRange(0x50000u, 0x2000u),
+                     producers, /*completed_submission=*/3u);
+  REQUIRE(decision.selected.size() == 2u);
+  REQUIRE_FALSE(decision.await);
+
+  RecordingMemexportConvergenceTarget mirror_target;
+  mirror_target.ReportMirrorCopy(0x400u);
+  RecordingMemexportConvergenceTarget alias_target;
+  alias_target.ReportAliasSkip();
+
+  ProducerDrainOutcome drain = DrainSelectedProducers(
+      decision, [&](const PendingProducer& selected) {
+        ProducerDrainOutcome one;
+        RecordingMemexportConvergenceTarget& target =
+            selected.sequence == 1u ? mirror_target : alias_target;
+        MemexportConvergenceResult result =
+            ConvergeMemexportRam(selected, target);
+        if (!result.converged) {
+          return one;
+        }
+        one.drained_records = 1;
+        one.memexport_records = 1;
+        one.memexport_bytes_copied = result.bytes_copied;
+        return one;
+      });
+
+  REQUIRE(drain.drained_records == 2u);
+  REQUIRE(drain.memexport_records == 2u);
+  // Exactly the mirror record's bytes. Not zero (that would lose the mirror
+  // copy) and not 0x800 (that would invent the alias record's).
+  REQUIRE(drain.memexport_bytes_copied == 0x400u);
+  REQUIRE(ConsumerPublicationComplete(decision, drain));
+}
+
+// --- The shared completed-submission gate (task 4.2/4.3) -------------------
+//
+// ConvergeCompletedMemexportRam is the SAME function the command-processor
+// memexport drain calls. These cases count target CALLS, not just results, so
+// "the gate ran" is distinguishable from "the target happened to fail".
+
+TEST_CASE("Authority: an incomplete submission never reaches the convergence "
+          "target and retains its record",
+          "[l0][authority][memexport][zerocopy]") {
+  PendingProducer producer =
+      MakeProducer(0x60000u, 0x800u, TransitState::kPendingMemexport,
+                   /*submission=*/9u, /*sequence=*/1u);
+  RecordingMemexportConvergenceTarget target;
+  target.ReportMirrorCopy(0x800u);  // would succeed loudly if ever called.
+
+  GatedMemexportConvergence gated =
+      ConvergeCompletedMemexportRam(producer, /*completed_submission=*/8u,
+                                    target);
+  REQUIRE(target.calls == 0u);
+  REQUIRE_FALSE(gated.attempted());
+  REQUIRE_FALSE(gated.retires());
+  REQUIRE(gated.gate ==
+          MemexportConvergenceGate::kNotAttemptedIncompleteSubmission);
+  REQUIRE_FALSE(gated.result.converged);
+  REQUIRE(gated.result.bytes_copied == 0u);
+}
+
+TEST_CASE("Authority: a submission-zero record is not publishable and never "
+          "reaches the convergence target",
+          "[l0][authority][memexport][zerocopy]") {
+  // Submission 0 is the not-yet-owned sentinel. Treating 0 <= completed as
+  // completion would publish an export the GPU may still be writing -- and an
+  // aliased backing makes that MORE dangerous, not less, because the shader is
+  // writing straight into the bytes the guest would read.
+  PendingProducer producer =
+      MakeProducer(0x61000u, 0x800u, TransitState::kPendingMemexport,
+                   /*submission=*/0u, /*sequence=*/1u);
+  RecordingMemexportConvergenceTarget target;
+  target.ReportMirrorCopy(0x800u);
+
+  for (uint64_t completed : {uint64_t(0), uint64_t(1), uint64_t(1000)}) {
+    GatedMemexportConvergence gated =
+        ConvergeCompletedMemexportRam(producer, completed, target);
+    REQUIRE_FALSE(gated.attempted());
+    REQUIRE_FALSE(gated.retires());
+  }
+  REQUIRE(target.calls == 0u);
+}
+
+TEST_CASE("Authority: a completed record converges exactly once and retires "
+          "only on success",
+          "[l0][authority][memexport][zerocopy]") {
+  PendingProducer producer =
+      MakeProducer(0x62000u, 0x800u, TransitState::kPendingMemexport,
+                   /*submission=*/4u, /*sequence=*/1u);
+
+  SECTION("completed success retires exactly once") {
+    RecordingMemexportConvergenceTarget target;
+    target.ReportMirrorCopy(0x800u);
+    GatedMemexportConvergence gated =
+        ConvergeCompletedMemexportRam(producer, 4u, target);
+    REQUIRE(target.calls == 1u);
+    REQUIRE(gated.attempted());
+    REQUIRE(gated.retires());
+    REQUIRE(gated.result.bytes_copied == 0x800u);
+  }
+
+  SECTION("completed alias publication retires having moved nothing") {
+    RecordingMemexportConvergenceTarget target;
+    target.ReportAliasSkip();
+    GatedMemexportConvergence gated =
+        ConvergeCompletedMemexportRam(producer, 4u, target);
+    REQUIRE(target.calls == 1u);
+    REQUIRE(gated.retires());
+    REQUIRE(gated.result.bytes_copied == 0u);
+  }
+
+  SECTION("completed but failed convergence is attempted and does not retire") {
+    RecordingMemexportConvergenceTarget target;
+    target.ReportFailure();
+    GatedMemexportConvergence gated =
+        ConvergeCompletedMemexportRam(producer, 4u, target);
+    REQUIRE(target.calls == 1u);
+    REQUIRE(gated.attempted());
+    REQUIRE_FALSE(gated.retires());
+    REQUIRE(gated.result.bytes_copied == 0u);
+  }
+}
+
+TEST_CASE("Authority: the gated drain retires a record once and only after its "
+          "submission completes",
+          "[l0][authority][memexport][zerocopy]") {
+  // The full production shape: a pending queue, the shared gate, and the
+  // retirement the drain performs. Retries are counted, so an "exactly once"
+  // claim is about the whole retry sequence rather than a single call.
+  std::vector<PendingProducer> pending = {
+      MakeProducer(0x63000u, 0x800u, TransitState::kPendingMemexport,
+                   /*submission=*/7u, /*sequence=*/1u)};
+  RecordingMemexportConvergenceTarget target;
+  target.ReportMirrorCopy(0x800u);
+
+  uint32_t retirements = 0;
+  auto attempt_drain = [&](uint64_t completed) {
+    std::vector<PendingProducer> retained;
+    for (const PendingProducer& producer : pending) {
+      GatedMemexportConvergence gated =
+          ConvergeCompletedMemexportRam(producer, completed, target);
+      if (gated.retires()) {
+        ++retirements;
+        continue;
+      }
+      retained.push_back(producer);
+    }
+    pending = std::move(retained);
+  };
+
+  attempt_drain(/*completed=*/6u);  // not finished yet
+  REQUIRE(target.calls == 0u);
+  REQUIRE(pending.size() == 1u);
+  REQUIRE(retirements == 0u);
+
+  attempt_drain(/*completed=*/7u);  // finished
+  REQUIRE(target.calls == 1u);
+  REQUIRE(pending.empty());
+  REQUIRE(retirements == 1u);
+
+  attempt_drain(/*completed=*/8u);  // nothing left to publish
+  REQUIRE(target.calls == 1u);
+  REQUIRE(retirements == 1u);
 }
 
 // --- Task 4.5: same-frame byte-level consumption matrix -------------------
@@ -905,8 +1451,10 @@ class ByteStoreConvergenceTarget : public MemexportConvergenceTarget {
       : ram_(ram), ram_base_(ram_base), producer_(producer) {}
 
   bool CopyBufferToRam(uint32_t base, uint32_t length,
-                       uint32_t* invalidated_entries) override {
+                       uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
     *invalidated_entries = 0;
+    *bytes_copied = 0;
     // Model a missing RAM mapping / shared-buffer contents pointer: report the
     // failure the convergence contract expects instead of moving bytes, so the
     // caller retains the pending record.
@@ -925,6 +1473,8 @@ class ByteStoreConvergenceTarget : public MemexportConvergenceTarget {
     for (uint32_t i = 0; i < length; ++i) {
       ram_[base - ram_base_ + i] = producer_.payload[base - payload_base + i];
     }
+    // Counted at the byte movement itself, matching the production port.
+    *bytes_copied = length;
     return true;
   }
 

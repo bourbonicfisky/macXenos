@@ -131,6 +131,38 @@ if(APPLE)
     # cvar definitions + trace writer (referenced by MetalSharedMemory) —
     # kept minimal so the target stays a fast isolated contract check.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_memory_coherence_test.mm
+    # Zero-copy shared-memory pre-gate task 3.4: the device-backed
+    # INITIALIZATION probe (accepted aliasing, forced fallback, and the
+    # hostile-input rejection classes) over the same real Memory +
+    # MetalSharedMemory closure as the coherence surface above. The pure
+    # contract is L0 and lives in metal_zero_copy_contract_test.cc, picked up
+    # by the glob.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_zero_copy_initialization_test.mm
+    # Zero-copy pre-gate tasks 4.1-4.3: alias-aware uploads and memexport
+    # convergence, run on both backings over the same real Memory +
+    # MetalSharedMemory + the real typed convergence seam. Same closure as the
+    # initialization probe plus the trace writer (already linked), which the
+    # upload arm opens to compare the two backings' trace output byte for byte.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_zero_copy_convergence_test.mm
+    # Zero-copy pre-gate tasks 5.1-5.3: the in-flight CPU rewrite evidence
+    # WIRING -- the real RequestConsumedRange enrollment seam and the real
+    # physical-invalidation thunk, over the same real Memory +
+    # MetalSharedMemory closure. The model itself is L0 and lives in
+    # metal_zero_copy_overlap_test.cc, picked up by the glob.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_zero_copy_overlap_device_test.mm
+    # Zero-copy pre-gate task 6.2: the DEVICE PROBES. The gap they close is an
+    # INTERSECTION, not a first use of the GPU: the coherence suite above does
+    # encode real GPU work against the real shared buffer (a compute-kernel read
+    # and a blit write), but only on the MIRROR backing and only in those two
+    # shapes; the three zero-copy suites above run BOTH backings but encode no
+    # GPU commands at all, standing in for the export store and the shader read
+    # with a memcpy through the buffer's `contents`. Neither half can say what
+    # the GPU does with an ALIASED allocation. This suite is the intersection --
+    # both backings AND real GPU work -- and it is also the first to exercise a
+    # vertex stage, a buffer-backed texture, and a real guest fault through the
+    # installed access-violation handler against an alias. Same real Memory +
+    # MetalSharedMemory closure as the arms above.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_zero_copy_device_probe_test.mm
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_memory.mm
     # Cross-writer memory-authority task 5.2: alias / cache-invalidation tests.
     # Executes the REAL legacy MetalTextureCache (multi-key alias, base+mip

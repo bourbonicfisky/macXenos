@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_MEMORY_AUTHORITY_H_
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -61,6 +62,14 @@ enum class ConsumerKind {
   kVertex,       // vertex/index fetch (reads the shared-memory buffer).
   kWait,         // WAIT_REG_MEM and memory-predicate polls (reads guest RAM).
   kHostCpuRead,  // any other audited host CPU read of guest RAM.
+  // Memexport destination preparation. It is listed here, with the readers,
+  // because that is literally what it does: RequestRange uploads guest RAM into
+  // the shared buffer for the destination pages, so the same "an older producer
+  // still owes these bytes" question applies to it verbatim. What makes it its
+  // own kind rather than a reuse of kVertex is the second half -- the pages it
+  // requests are about to be overwritten by a GPU store that must be the NEWEST
+  // writer of them. See DecideMemexportDestinationOrdering.
+  kMemexportDestination,
 };
 
 // The bounded authority state of a range. RAM-current is the steady state; the
@@ -105,10 +114,14 @@ struct PendingProducer {
 // same completed-submission high-water mark the command processor tracks.
 inline bool ProducerComplete(const PendingProducer& producer,
                              uint64_t completed_submission) {
-  // Submission 0 is the S7-tags-off / not-yet-owned sentinel. The producer is
-  // still pending and must cross the synchronous commit+wait boundary before
-  // RAM
-  // convergence; treating 0 <= 0 as completion would under-predict that wait.
+  // Submission 0 means "no owning submission tag", which is the DEFAULT on this
+  // backend, not a diagnostic: MetalCommandProcessor::S7TagsOff() is true
+  // unless XE_METAL_ASYNC is set, so the memexport publication seam registers
+  // records with 0. Such a record is not decidable from its tag and must cross
+  // the synchronous commit+wait boundary before RAM convergence; treating
+  // 0 <= 0 as completion here would under-predict that wait for EVERY default
+  // record. The boundary proof is supplied separately, as
+  // MemexportBoundaryEvidence, and never inferred inside this predicate.
   return producer.submission != 0 &&
          producer.submission <= completed_submission;
 }
@@ -117,7 +130,9 @@ inline bool ProducerComplete(const PendingProducer& producer,
 // revalidate its exact bytes from RAM after any dependency resolves). Wait and
 // host-CPU reads read guest RAM directly and never revalidate GPU bytes.
 inline bool ConsumerReadsSharedBuffer(ConsumerKind consumer) {
-  return consumer == ConsumerKind::kTexture || consumer == ConsumerKind::kVertex;
+  return consumer == ConsumerKind::kTexture ||
+         consumer == ConsumerKind::kVertex ||
+         consumer == ConsumerKind::kMemexportDestination;
 }
 
 // The full decision for one consumer preparing one requested range set against
@@ -297,6 +312,7 @@ inline const char* ConsumerKindName(ConsumerKind c) {
     case ConsumerKind::kVertex: return "vertex";
     case ConsumerKind::kWait: return "wait";
     case ConsumerKind::kHostCpuRead: return "host_cpu_read";
+    case ConsumerKind::kMemexportDestination: return "memexport_destination";
     default: return "?";
   }
 }
@@ -318,6 +334,11 @@ struct ProducerDrainOutcome {
   uint32_t resolve_records = 0;
   uint32_t memexport_records = 0;
   uint32_t invalidated_entries = 0;
+  // Bytes memexport convergence physically copied while draining, summed from
+  // each MemexportConvergenceResult. Retirement is counted by `memexport_records`
+  // and is deliberately NOT a function of this: an aliased backing retires the
+  // same records having moved zero bytes.
+  uint64_t memexport_bytes_copied = 0;
 };
 
 // The one publication-convergence predicate shared by production and the
@@ -365,6 +386,7 @@ inline ProducerDrainOutcome DrainSelectedProducers(
     combined.resolve_records += one.resolve_records;
     combined.memexport_records += one.memexport_records;
     combined.invalidated_entries += one.invalidated_entries;
+    combined.memexport_bytes_copied += one.memexport_bytes_copied;
     if (one.drained_records != 1) {
       break;
     }
@@ -439,8 +461,10 @@ inline RamWritePublicationPolicy RamWritePolicyFor(WriterKind writer) {
 // Memexport is the one writer whose bytes exist in the shared buffer before
 // they exist in guest RAM (design.md Decision 2's "pending memexport" transit
 // state). Three distinct typed steps route through this seam:
-//   1. Destination preparation: request the destination pages BEFORE the GPU
-//      write so a stale CPU-RAM upload cannot race ahead of the export.
+//   1. Destination preparation: retire every OLDER overlapping pending producer
+//      and then request the destination pages, both BEFORE the GPU write, so
+//      neither a stale CPU-RAM upload nor a later drain of an older writer can
+//      land after the export.
 //   2. Publication: after preflighting the marker, the seam registers the
 //      submission-scoped pending record first and then calls RangeWrittenByGpu
 //      in the SAME ordered step. No interval is marked GPU-newer before it has
@@ -470,15 +494,227 @@ DecideMemexportDestinationPreparation(uint32_t base, uint32_t length) {
   return MemexportDestinationPreparation{*range};
 }
 
-// Executes the destination-preparation decision through the existing
-// SharedMemory::RequestRange operation. Returns the factual RequestRange
-// result -- false means the exports have nowhere to land and the caller must
-// treat the draw the same as today (skip it), never invent success.
+// Executes the PAGE-REQUEST STEP of destination preparation through the
+// existing SharedMemory::RequestRange operation. Returns the factual
+// RequestRange result -- false means the exports have nowhere to land and the
+// caller must treat the draw the same as today (skip it), never invent success.
+//
+// This is a step, not the whole preparation. A producer path must reach it
+// through PrepareOrderedMemexportDestinations below, which runs the
+// writer-before-writer ordering FIRST and never issues the request when that
+// ordering is unsatisfied. Calling this on its own requests pages for a store
+// whose predecessors may still be pending.
 inline bool PrepareMemexportDestination(
     const MemexportDestinationPreparation& preparation,
     MemexportPreparationTarget& target) {
   return target.RequestDestinationRange(preparation.range.start(),
                                         preparation.range.length());
+}
+
+// --- Writer-before-writer ordering for a memexport destination --------------
+//
+// A memexport store is the NEWEST writer of the bytes it exports. Every pending
+// producer that already owns overlapping bytes is therefore OLDER, and must be
+// converged and retired BEFORE the store is encoded and registered -- otherwise
+// that older record is drained afterwards and writes ITS bytes over the export,
+// inverting writer chronology.
+//
+// The inversion is not hypothetical, and it is not symmetric across backings.
+// A pending RESOLVE owns bytes that live in host staging, OUTSIDE the shared
+// buffer, and are owed to guest RAM. When the shared buffer is a separate
+// mirror, a late resolve drain writes RAM and the export's own convergence then
+// copies buffer -> RAM over it, so the newest writer still wins by accident.
+// When the shared buffer ALIASES guest RAM the accident stops working: the
+// export already IS in RAM, the late resolve overwrites it there, and memexport
+// convergence is a self-copy that has nothing left to restore. The bytes are
+// gone. Ordering the writers at the destination seam is what makes the outcome
+// a property of the model instead of a property of the backing.
+//
+// Selection reuses DecideConsumer verbatim -- the same intersection test and
+// the same transitive closure over older overlapping predecessors that every
+// other barrier in this backend uses. Two consequences are load-bearing:
+//   * a DISJOINT (or merely adjacent) producer is never selected, so this seam
+//     cannot become a global drain of unrelated writers; and
+//   * an empty selection is a MEASURED absence -- the snapshot was consulted
+//     and contained no overlapping producer -- which is why it gets its own
+//     verdict below instead of sharing "not evaluated" with the case where no
+//     snapshot was ever read.
+
+// Whether the ordering precondition was established, and how.
+enum class MemexportDestinationOrdering : uint32_t {
+  // No ordering decision was made. The DEFAULT, and never a licence: a
+  // default-constructed outcome must not read as a prepared destination. Also
+  // the verdict for an EMPTY destination set -- no range was compared against
+  // the snapshot, so nothing was established and the absence of destinations
+  // grants nothing.
+  kNotEvaluated,
+  // The pending-producer snapshot was consulted and selected nothing. Nothing
+  // older overlaps the destination, so the store is already last.
+  kNoOlderProducer,
+  // Older overlapping producers existed and every one of them retired.
+  kOlderProducersRetired,
+  // Older overlapping producers existed and at least one is STILL PENDING. The
+  // destination is not prepared, the pages are not requested, and the caller
+  // must fail the draw closed -- encoding the store anyway would leave the
+  // retained record free to overwrite it later.
+  kOlderProducersRetained,
+  // Not a value: one past the last real enumerator.
+  kCount,
+};
+inline constexpr uint32_t kMemexportDestinationOrderingCount =
+    static_cast<uint32_t>(MemexportDestinationOrdering::kCount);
+
+inline constexpr std::array kMemexportDestinationOrderings = {
+    MemexportDestinationOrdering::kNotEvaluated,
+    MemexportDestinationOrdering::kNoOlderProducer,
+    MemexportDestinationOrdering::kOlderProducersRetired,
+    MemexportDestinationOrdering::kOlderProducersRetained,
+};
+static_assert(kMemexportDestinationOrderings.size() ==
+                  kMemexportDestinationOrderingCount,
+              "kMemexportDestinationOrderings must enumerate every real "
+              "MemexportDestinationOrdering value exactly once");
+
+constexpr bool IsMemexportDestinationOrderingValue(
+    MemexportDestinationOrdering value) {
+  return static_cast<uint32_t>(value) < kMemexportDestinationOrderingCount;
+}
+
+// The one place that decides whether a verdict licenses the store. Exhaustive
+// with NO `default:`, so a new enumerator is a compiler warning here rather
+// than silently inheriting someone's notion of "ordered"; kCount and any
+// out-of-range value fall through to false, because a value the vocabulary does
+// not define can never license a write.
+constexpr bool MemexportDestinationOrderingSatisfied(
+    MemexportDestinationOrdering value) {
+  switch (value) {
+    case MemexportDestinationOrdering::kNotEvaluated:
+    case MemexportDestinationOrdering::kOlderProducersRetained:
+      return false;
+    case MemexportDestinationOrdering::kNoOlderProducer:
+    case MemexportDestinationOrdering::kOlderProducersRetired:
+      return true;
+    case MemexportDestinationOrdering::kCount:
+      break;  // not a value
+  }
+  return false;
+}
+
+constexpr const char* MemexportDestinationOrderingName(
+    MemexportDestinationOrdering value) {
+  switch (value) {
+    case MemexportDestinationOrdering::kNotEvaluated:
+      return "not_evaluated";
+    case MemexportDestinationOrdering::kNoOlderProducer:
+      return "no_older_producer";
+    case MemexportDestinationOrdering::kOlderProducersRetired:
+      return "older_producers_retired";
+    case MemexportDestinationOrdering::kOlderProducersRetained:
+      return "older_producers_retained";
+    case MemexportDestinationOrdering::kCount:
+      break;  // not a value
+  }
+  return "unknown";
+}
+
+// The pure ordering decision for ONE draw's whole destination set. The union is
+// taken first so a draw exporting several ranges resolves its predecessors at a
+// single barrier: preparing the ranges one at a time would let the drain of a
+// later range invalidate pages an earlier range had already requested.
+inline ConsumerDecision DecideMemexportDestinationOrdering(
+    const std::vector<MemexportDestinationPreparation>& preparations,
+    const std::vector<PendingProducer>& producers,
+    uint64_t completed_submission) {
+  GuestRangeSet destinations;
+  for (const MemexportDestinationPreparation& preparation : preparations) {
+    destinations.Add(preparation.range);
+  }
+  destinations.Normalize();
+  return DecideConsumer(ConsumerKind::kMemexportDestination, destinations,
+                        producers, completed_submission);
+}
+
+// Everything the ordered preparation established, as facts rather than as a
+// bool the caller has to interpret.
+struct MemexportDestinationPreparationOutcome {
+  MemexportDestinationOrdering ordering =
+      MemexportDestinationOrdering::kNotEvaluated;
+  // What the snapshot actually selected, retained so a caller (and a test) can
+  // report WHICH older producers blocked the store rather than only that some
+  // did.
+  ConsumerDecision decision;
+  // What retiring them actually achieved. Zeroed when nothing was selected.
+  ProducerDrainOutcome drain;
+  uint32_t range_count = 0;
+  uint32_t requested_ranges = 0;
+  // Every destination range was requested successfully. False whenever the
+  // ordering blocked the requests, so it can never read as "the pages are
+  // ready" for a store that was not licensed.
+  bool requested = false;
+
+  bool ordered() const {
+    return MemexportDestinationOrderingSatisfied(ordering);
+  }
+  // The single predicate the producer path gates on.
+  bool prepared() const { return ordered() && requested; }
+};
+
+// The whole destination preparation: order the writers, THEN request the pages.
+//
+// `retire_older` is handed the selection and must converge and retire exactly
+// those records, returning the factual drain. It is invoked ONLY when something
+// was selected, which is what keeps a disjoint or empty snapshot from costing a
+// commit/wait. Completeness is judged by ConsumerPublicationComplete -- the
+// same predicate every other consumer barrier fails closed on -- so a short
+// drain retains the destination rather than being rounded up to success.
+template <typename RetireOlderProducers>
+inline MemexportDestinationPreparationOutcome
+PrepareOrderedMemexportDestinations(
+    const std::vector<MemexportDestinationPreparation>& preparations,
+    const std::vector<PendingProducer>& producers,
+    uint64_t completed_submission, MemexportPreparationTarget& target,
+    RetireOlderProducers&& retire_older) {
+  MemexportDestinationPreparationOutcome outcome;
+  outcome.range_count = static_cast<uint32_t>(preparations.size());
+  if (preparations.empty()) {
+    // No destination was ever evaluated, so there is nothing this seam can
+    // certify. The absence of ranges is not permission to export: the verdict
+    // stays kNotEvaluated -- the one value that is never a licence -- rather
+    // than borrowing kNoOlderProducer, which asserts the stronger fact that a
+    // real destination was compared against the snapshot and found last. A
+    // caller reaching here produced no ranges (or normalized none of them
+    // successfully) and must fail its draw closed exactly as it does for an
+    // unordered destination.
+    return outcome;
+  }
+  outcome.decision = DecideMemexportDestinationOrdering(
+      preparations, producers, completed_submission);
+  if (outcome.decision.selected.empty()) {
+    outcome.ordering = MemexportDestinationOrdering::kNoOlderProducer;
+  } else {
+    outcome.drain = retire_older(outcome.decision);
+    outcome.ordering =
+        ConsumerPublicationComplete(outcome.decision, outcome.drain)
+            ? MemexportDestinationOrdering::kOlderProducersRetired
+            : MemexportDestinationOrdering::kOlderProducersRetained;
+  }
+  if (!outcome.ordered()) {
+    // Deliberately before the first RequestRange: a destination whose
+    // predecessors are still pending gets no pages, so a caller that ignored
+    // the verdict would still find nothing uploaded to export into.
+    return outcome;
+  }
+  // Requests are issued only now, after every older overlapping producer has
+  // published its bytes to RAM, so the upload reads the converged content.
+  outcome.requested = true;
+  for (const MemexportDestinationPreparation& preparation : preparations) {
+    if (PrepareMemexportDestination(preparation, target)) {
+      ++outcome.requested_ranges;
+    } else {
+      outcome.requested = false;
+    }
+  }
+  return outcome;
 }
 
 // Marks a memexport range GPU-written.
@@ -540,8 +776,14 @@ inline MemexportPublicationResult PublishMemexportWrite(
 // retains the pending record for retry instead of losing GPU-newer bytes.
 struct MemexportConvergenceTarget {
   virtual ~MemexportConvergenceTarget() = default;
+  // `bytes_copied` reports what the implementation PHYSICALLY moved, which is
+  // not derivable from the range: a backing where the shared buffer aliases
+  // guest RAM publishes the same bytes while moving none. It is an out
+  // parameter rather than a caller-side inference precisely so no consumer of
+  // this seam can compute "we must have copied length bytes" from a mode.
   virtual bool CopyBufferToRam(uint32_t base, uint32_t length,
-                               uint32_t* invalidated_entries) = 0;
+                               uint32_t* invalidated_entries,
+                               uint64_t* bytes_copied) = 0;
 };
 
 // Factual result of one convergence attempt. `converged` gates record
@@ -551,6 +793,9 @@ struct MemexportConvergenceResult {
   bool converged = false;
   AuthorityAction action = AuthorityAction::kNoDependency;
   uint32_t invalidated_entries = 0;
+  // Bytes the target actually copied. Zero is a legitimate success on an
+  // aliased backing; it is never evidence that nothing was published.
+  uint64_t bytes_copied = 0;
 };
 
 inline MemexportConvergenceResult ConvergeMemexportRam(
@@ -558,10 +803,256 @@ inline MemexportConvergenceResult ConvergeMemexportRam(
   MemexportConvergenceResult result;
   result.converged = target.CopyBufferToRam(
       producer.range.start(), producer.range.length(),
-      &result.invalidated_entries);
+      &result.invalidated_entries, &result.bytes_copied);
   result.action = result.converged ? AuthorityAction::kConvergeRamFromBuffer
                                    : AuthorityAction::kNoDependency;
   return result;
+}
+
+// Whether the CALLER has independently proven that a record carrying no owning
+// submission tag was nevertheless made final by a synchronous GPU boundary.
+//
+// This vocabulary exists because untagged records are the DEFAULT, not a
+// diagnostic. MetalCommandProcessor::S7LifetimeOff() is true unless
+// XE_METAL_ASYNC is set, S7TagsOff() includes it, and the memexport publication
+// seam registers `S7TagsOff() ? 0 : CurrentEncodingSubmission()` -- so on a
+// normal launch every pending memexport carries submission 0. Their finality
+// comes from the synchronous commit-and-wait the consumer path performs, which
+// the record itself cannot describe.
+//
+// The proof is therefore supplied from outside rather than inferred here, and
+// ProducerComplete is deliberately left alone: teaching the generic tagged
+// predicate to read 0 as completed would make every untagged record
+// unconditionally publishable, including one whose boundary never ran. Passing
+// the evidence as a value means the convergence site cannot fabricate it
+// locally -- only a caller that actually executed the boundary can hand it in.
+enum class MemexportBoundaryEvidence : uint32_t {
+  // Nothing beyond the record's own submission tag. An untagged record is
+  // unproven under this value and is not publishable.
+  kNone,
+  // The caller committed the frame command buffer, waited, and proved the
+  // required submission is at or below the acquired completed high-water mark.
+  kSynchronousBoundaryCompleted,
+  // Not a value; one past the last enumerator. Every real enumerator must be
+  // declared ABOVE this line so the count below follows the enum automatically.
+  kCount,
+};
+inline constexpr uint32_t kMemexportBoundaryEvidenceCount =
+    static_cast<uint32_t>(MemexportBoundaryEvidence::kCount);
+
+inline constexpr std::array kMemexportBoundaryEvidences = {
+    MemexportBoundaryEvidence::kNone,
+    MemexportBoundaryEvidence::kSynchronousBoundaryCompleted,
+};
+static_assert(kMemexportBoundaryEvidences.size() ==
+                  kMemexportBoundaryEvidenceCount,
+              "kMemexportBoundaryEvidences must enumerate every real "
+              "MemexportBoundaryEvidence value exactly once");
+
+constexpr bool IsMemexportBoundaryEvidenceValue(
+    MemexportBoundaryEvidence value) {
+  return static_cast<uint32_t>(value) < kMemexportBoundaryEvidenceCount;
+}
+
+constexpr const char* MemexportBoundaryEvidenceName(
+    MemexportBoundaryEvidence value) {
+  switch (value) {
+    case MemexportBoundaryEvidence::kNone:
+      return "none";
+    case MemexportBoundaryEvidence::kSynchronousBoundaryCompleted:
+      return "synchronous_boundary_completed";
+    case MemexportBoundaryEvidence::kCount:
+      break;  // not a value
+  }
+  return "unknown";
+}
+
+// Why a record's convergence was or was not attempted, naming BOTH the reason
+// and which of the two valid completion proofs licensed it. Two attempt values
+// rather than one because "the record's own submission completed" and "the
+// caller crossed a synchronous boundary on its behalf" are different claims
+// with different failure modes, and a report that collapsed them could not say
+// which one a run actually relied on.
+enum class MemexportConvergenceGate : uint32_t {
+  // Tagged (submission != 0) but the owning submission has not completed on the
+  // GPU. The target is NOT called.
+  kNotAttemptedIncompleteSubmission,
+  // Untagged (submission 0 -- the default lifecycle) and the caller supplied no
+  // synchronous-boundary proof. The target is NOT called: nothing here can tell
+  // a finished export from one whose commit never happened.
+  kNotAttemptedUntaggedWithoutBoundary,
+  // Tagged and complete against the high-water mark.
+  kAttemptedCompletedSubmission,
+  // Untagged, but the caller proved a completed synchronous boundary.
+  kAttemptedSynchronousBoundary,
+  // Not a value; one past the last enumerator. Every real enumerator must be
+  // declared ABOVE this line so the count below follows the enum automatically.
+  kCount,
+};
+inline constexpr uint32_t kMemexportConvergenceGateCount =
+    static_cast<uint32_t>(MemexportConvergenceGate::kCount);
+
+// Every REAL gate value, in declaration order. The size is DEDUCED from the
+// initializer (class template argument deduction), so nothing here is a
+// hand-maintained count that could drift: adding an enumerator without adding
+// it to this list fails the static_assert below, and the conformance cases
+// pinned to this array then have to name and classify the new value. That is
+// what makes "the vocabulary is complete" a checked claim rather than a comment.
+inline constexpr std::array kMemexportConvergenceGates = {
+    MemexportConvergenceGate::kNotAttemptedIncompleteSubmission,
+    MemexportConvergenceGate::kNotAttemptedUntaggedWithoutBoundary,
+    MemexportConvergenceGate::kAttemptedCompletedSubmission,
+    MemexportConvergenceGate::kAttemptedSynchronousBoundary,
+};
+static_assert(kMemexportConvergenceGates.size() ==
+                  kMemexportConvergenceGateCount,
+              "kMemexportConvergenceGates must enumerate every real "
+              "MemexportConvergenceGate value exactly once");
+
+// kCount is a bound, never an observation. Anything at or past it is a value
+// the vocabulary does not define, and no derivation may treat it as one.
+constexpr bool IsMemexportConvergenceGateValue(MemexportConvergenceGate value) {
+  return static_cast<uint32_t>(value) < kMemexportConvergenceGateCount;
+}
+
+constexpr const char* MemexportConvergenceGateName(
+    MemexportConvergenceGate value) {
+  switch (value) {
+    case MemexportConvergenceGate::kNotAttemptedIncompleteSubmission:
+      return "not_attempted_incomplete_submission";
+    case MemexportConvergenceGate::kNotAttemptedUntaggedWithoutBoundary:
+      return "not_attempted_untagged_without_boundary";
+    case MemexportConvergenceGate::kAttemptedCompletedSubmission:
+      return "attempted_completed_submission";
+    case MemexportConvergenceGate::kAttemptedSynchronousBoundary:
+      return "attempted_synchronous_boundary";
+    case MemexportConvergenceGate::kCount:
+      break;  // not a value
+  }
+  return "unknown";
+}
+
+// The one place that decides whether a gate value means the target was called.
+// Exhaustive, with NO `default:`, so a new enumerator is a compiler warning
+// here rather than silently inheriting someone's notion of "attempted"; kCount
+// and any out-of-range value fall through to false, because a value the
+// vocabulary does not define can never license a publication.
+constexpr bool MemexportConvergenceGateAttempts(MemexportConvergenceGate value) {
+  switch (value) {
+    case MemexportConvergenceGate::kNotAttemptedIncompleteSubmission:
+    case MemexportConvergenceGate::kNotAttemptedUntaggedWithoutBoundary:
+      return false;
+    case MemexportConvergenceGate::kAttemptedCompletedSubmission:
+    case MemexportConvergenceGate::kAttemptedSynchronousBoundary:
+      return true;
+    case MemexportConvergenceGate::kCount:
+      break;  // not a value
+  }
+  return false;
+}
+
+// The whole gate decision as a pure value transform, so the rule can be
+// enumerated exhaustively instead of being reachable only through a device.
+//
+// The two halves are kept strictly apart. A TAGGED record is decided by its own
+// tag alone: boundary evidence is not consulted, so no caller can talk a
+// genuinely unfinished submission past its own high-water mark. An UNTAGGED
+// record has no tag to decide with, so it is decided by the caller's evidence
+// alone.
+constexpr MemexportConvergenceGate DecideMemexportConvergenceGate(
+    const PendingProducer& producer, uint64_t completed_submission,
+    MemexportBoundaryEvidence boundary_evidence) {
+  if (producer.submission != 0) {
+    return ProducerComplete(producer, completed_submission)
+               ? MemexportConvergenceGate::kAttemptedCompletedSubmission
+               : MemexportConvergenceGate::kNotAttemptedIncompleteSubmission;
+  }
+  return boundary_evidence ==
+                 MemexportBoundaryEvidence::kSynchronousBoundaryCompleted
+             ? MemexportConvergenceGate::kAttemptedSynchronousBoundary
+             : MemexportConvergenceGate::kNotAttemptedUntaggedWithoutBoundary;
+}
+
+// The gate + the attempt as ONE value. `result` is meaningful only when
+// `attempted()`; on a non-attempt it is the default (not converged, zero
+// bytes), which is exactly what a caller must fall back to.
+struct GatedMemexportConvergence {
+  // Defaults to a NON-attempt so a default-constructed value can never be read
+  // as a licensed publication.
+  MemexportConvergenceGate gate =
+      MemexportConvergenceGate::kNotAttemptedUntaggedWithoutBoundary;
+  MemexportConvergenceResult result;
+
+  bool attempted() const { return MemexportConvergenceGateAttempts(gate); }
+  // The one predicate that licenses retiring the pending record. Both halves
+  // are required: a non-attempt publishes nothing, and an attempted-but-failed
+  // convergence must be retried.
+  bool retires() const { return attempted() && result.converged; }
+};
+
+// Default pre-attempt observation: nothing. Named rather than an empty lambda
+// so the convenience overloads visibly mean "no observation" instead of looking
+// like a forgotten argument.
+struct NoMemexportPreAttempt {
+  void operator()() const {}
+};
+
+// The single completion gate for memexport RAM convergence, shared by the
+// production command-processor drain and conformance. It exists as one
+// device-free function precisely so the rule "an unproven GPU write is not
+// publishable" cannot drift between the code that runs and the code that is
+// tested: a test-only replica would prove only that the replica holds.
+//
+// Aliasing changes nothing here. A shared buffer that IS guest RAM still holds
+// whatever the shader has written SO FAR; the completion boundary is what makes
+// those bytes final, and skipping it because "no copy is needed" would publish
+// a partially written export.
+//
+// `before_convergence` runs EXACTLY ONCE, after a completion proof is
+// established and immediately before the target publishes. It is the only
+// licensed place to read the GPU-written bytes: any sampling ahead of the gate
+// would be reading an export that may still be in flight, and any sampling
+// after the target would be reading post-publication bytes while claiming to
+// describe the pre-publication state.
+template <typename PreAttemptFn>
+inline GatedMemexportConvergence ConvergeCompletedMemexportRam(
+    const PendingProducer& producer, uint64_t completed_submission,
+    MemexportBoundaryEvidence boundary_evidence,
+    MemexportConvergenceTarget& target, PreAttemptFn&& before_convergence) {
+  GatedMemexportConvergence gated;
+  gated.gate = DecideMemexportConvergenceGate(producer, completed_submission,
+                                              boundary_evidence);
+  if (!gated.attempted()) {
+    // Deliberately before BOTH the observation and any target call: an unproven
+    // producer must not reach the convergence port, and its bytes must not be
+    // read even diagnostically. A target that counts calls, and an observer
+    // that counts invocations, therefore prove the gate directly rather than
+    // inferring it from a result.
+    return gated;
+  }
+  before_convergence();
+  gated.result = ConvergeMemexportRam(producer, target);
+  return gated;
+}
+
+inline GatedMemexportConvergence ConvergeCompletedMemexportRam(
+    const PendingProducer& producer, uint64_t completed_submission,
+    MemexportBoundaryEvidence boundary_evidence,
+    MemexportConvergenceTarget& target) {
+  return ConvergeCompletedMemexportRam(producer, completed_submission,
+                                       boundary_evidence, target,
+                                       NoMemexportPreAttempt{});
+}
+
+// Three-argument convenience. It supplies kNone, which is the SAFE default: a
+// caller that has proven no boundary cannot accidentally publish an untagged
+// record through it.
+inline GatedMemexportConvergence ConvergeCompletedMemexportRam(
+    const PendingProducer& producer, uint64_t completed_submission,
+    MemexportConvergenceTarget& target) {
+  return ConvergeCompletedMemexportRam(producer, completed_submission,
+                                       MemexportBoundaryEvidence::kNone, target,
+                                       NoMemexportPreAttempt{});
 }
 
 // One normalized RAM-writer publication decision. It is a transient value, not

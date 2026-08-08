@@ -294,16 +294,16 @@ class RealMemexportConvergenceTarget final : public MemexportConvergenceTarget {
  public:
   explicit RealMemexportConvergenceTarget(CoherenceHarness* harness) : harness_(harness) {}
 
-  bool CopyBufferToRam(uint32_t base, uint32_t length, uint32_t* invalidated_entries) override {
-    uint8_t* ram = harness_->memory->TranslatePhysical<uint8_t*>(base);
-    const uint8_t* contents = static_cast<const uint8_t*>(
-        [(__bridge id<MTLBuffer>)harness_->shared->GetBuffer() contents]);
-    if (!ram || !contents) {
-      return false;
-    }
-    std::memcpy(ram, contents + base, length);
+  bool CopyBufferToRam(uint32_t base, uint32_t length, uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
+    // The real MetalSharedMemory publication, exactly as the production target
+    // calls it: it owns the backing and therefore the copy-or-alias decision,
+    // and reports the bytes it physically moved.
+    SharedBufferConvergenceOutcome published =
+        harness_->shared->ConvergeRangeToRam(base, length);
+    *bytes_copied = published.bytes_copied;
     *invalidated_entries = 0;
-    return true;
+    return published.converged;
   }
 
  private:
@@ -1412,9 +1412,12 @@ class BoundaryConvergenceTarget final : public MemexportConvergenceTarget {
  public:
   explicit BoundaryConvergenceTarget(BoundaryByteWorld* world) : world_(world) {}
   bool CopyBufferToRam(uint32_t base, uint32_t length,
-                       uint32_t* invalidated_entries) override {
+                       uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
     *invalidated_entries = 0;
-    return world_->CopyBufferToRam(base, length);
+    bool copied = world_->CopyBufferToRam(base, length);
+    *bytes_copied = copied ? length : 0u;
+    return copied;
   }
 
  private:

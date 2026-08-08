@@ -28,6 +28,7 @@
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/metal/metal_zero_copy_report.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
 #include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
 #include "xenia/gpu/xenos.h"
@@ -162,6 +163,35 @@ class MetalCommandProcessor : public CommandProcessor {
   // see docs/metal_pwl_gamma_audit.md.
   void CensusGammaState();
 
+  // Zero-copy lifecycle evidence, emitted from GPU-thread LIFECYCLE sites only
+  // -- never from the faulting guest thread that records part of it, which may
+  // not log. Takes the overlap snapshot ONCE (it is read under the physical
+  // invalidation callback's lock) and hands the same one to both reporters
+  // below, so enabling the cost line adds no second lock acquisition.
+  void ReportZeroCopyLifecycle(const char* site);
+  // Pre-gate task 5.4. Silent unless alias mode installed the observer, so
+  // exact-off and every fallback arm produce no overlap line.
+  void ReportZeroCopyOverlap(const char* site,
+                             const metal::ZeroCopyOverlapSnapshot& snapshot);
+  // Pre-gate tasks 6.3/6.4 runtime cost evidence (XE_METAL_ZERO_COPY_REPORT=1,
+  // exact-off). Emitted on EVERY backing -- exact-off mirror, forced-fallback
+  // mirror and alias -- because the alias arm's cost claim is only meaningful
+  // against a measured control, and the control arms are exactly the runs where
+  // the overlap reporter above is required to stay silent. Reads existing
+  // sources (the meter, the shared memory's upload accounting, the overlap
+  // snapshot, the startup observation); it computes no fact of its own and
+  // gates nothing.
+  void ReportZeroCopyRuntimeCost(
+      const char* site, const metal::ZeroCopyOverlapSnapshot& snapshot);
+  // Cadence for the reports above, applied by metal::ZeroCopyOverlapReportDue
+  // to the monotonic SWAP FINALIZATION index -- every IssueSwap return path,
+  // not only the ones that published. Finalization 1 is the first frame
+  // boundary, so one rule covers "report immediately" and "report
+  // periodically". Finalization and swap counts are carried in the lines
+  // SEPARATELY from the observation counters: how often the evidence was
+  // printed is not evidence.
+  static constexpr uint32_t kZeroCopyOverlapSwapReportInterval = 512;
+
   void InitializeTrace() override;
   std::string GetCaptureDeviceInfoJson() const override;
 
@@ -178,11 +208,24 @@ class MetalCommandProcessor : public CommandProcessor {
   // ordered lookup and exact retirement without rebuilding either full pending
   // vector for every selected record. The broad range form remains available
   // for behavior-preserving internal use and never drains a disjoint record.
+  //
+  // `boundary_evidence` is the caller's PROOF that a record carrying no owning
+  // submission tag has nevertheless been made final. Untagged records are the
+  // default here (S7TagsOff() is true unless XE_METAL_ASYNC is set, so the
+  // publication seam registers submission 0), and their finality comes from the
+  // synchronous commit-and-wait the consumer path performs, not from the
+  // record. It is a leading parameter with NO default precisely so it cannot be
+  // omitted: only ResolvePendingProducerDependencies can establish it, and it
+  // is threaded through DrainSelectedPendingProducers to here so the
+  // convergence site cannot fabricate it locally. There is exactly one caller
+  // today, and that is the structure, not an accident.
   metal::ProducerDrainOutcome DrainPendingWritebacks(
+      metal::MemexportBoundaryEvidence boundary_evidence,
       uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu,
       uint64_t filter_authority_sequence = 0);
   metal::ProducerDrainOutcome DrainSelectedPendingProducers(
-      const metal::ConsumerDecision& decision);
+      const metal::ConsumerDecision& decision,
+      metal::MemexportBoundaryEvidence boundary_evidence);
   struct ProducerDependencyOutcome {
     metal::ProducerDrainOutcome drain;
     bool complete = true;
@@ -388,6 +431,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // is unsuitable because it does not advance on suppressed frames.
   uint64_t swap_finalize_index_ = 0;
 
+  // Zero-copy runtime cost counters (XE_METAL_ZERO_COPY_REPORT=1, default off
+  // and inert until enabled in SetupContext). Advanced at the production
+  // operations themselves -- the commit, the wait that blocked, the barrier
+  // that drained, the retirement -- so the evidence line reports what happened
+  // rather than what was configured. Nothing in the rendering or authority path
+  // reads it.
+  metal::ZeroCopyCostMeter zero_copy_cost_;
+
   // Bounded, deduplicated reporting of memexport producer classes this backend
   // does not route. Reset at the title/session boundary; holds no guest state
   // and takes no part in cache clearing.
@@ -435,6 +486,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // (removing the hot-path waits) — arenas/slots/textures must not be
   // reclaimed while a submission that references them is in flight.
   uint64_t submission_counter_ = 0;
+  // Read lock-free (acquire) from everywhere; ADVANCED only by
+  // PublishCompletedSubmission, and only while holding completion_mutex_. That
+  // mutex is the truth boundary WaitForSubmission's locked re-check reads
+  // across — see PublishCompletedSubmission for why the advance may not sit
+  // beside the lock instead of inside it.
   std::atomic<uint64_t> completed_submission_{0};
 
   // Deferred cache clearing. The request is latched by ClearCaches() and
@@ -515,6 +571,11 @@ class MetalCommandProcessor : public CommandProcessor {
   bool ArenaAllocate(uint32_t size, uint32_t alignment,
                      MetalUploadAllocation* out);
   void DrainFaultedCommandBuffers();
+  // Guards the completed_submission_ ADVANCE as well as the waiters' re-check,
+  // so "did this submission complete" has one answer inside it. Held only
+  // across atomic loads/stores and the meter's lock-free count — never across
+  // GPU work, a callback, or a log — so the Metal completion handler that
+  // takes it cannot be delayed by a waiter.
   std::mutex completion_mutex_;
   std::condition_variable completion_cv_;
   std::mutex fault_mutex_;

@@ -142,29 +142,32 @@ inline uint32_t ComputeWatchedBaseBytes(uint32_t pitch_blocks_aligned,
   return uint32_t(std::min<uint64_t>(bytes, max_bytes));
 }
 
-// ---- Exact source range ----
+// ---- Conservative source envelope ----
 
 // The 32bpb load shader reads 16-byte groups at Tiled2D(4g, y) byte offsets
 // (each 4 consecutive x blocks are byte-contiguous; the second uint4 of a
 // thread is the g+1 group via the local-XOR step), for x groups covering the
 // grid padded to the shader's 8-blocks-per-thread stride, and every y row
-// (the y bounds guard is exact). The exact read set is therefore
+// (the y bounds guard is exact). The exact read set is
 //   { [base + Tiled2D(4g, y), +16) : 4g < round_up(blocks_w, 8),
 //                                    y < blocks_h }
+// but TextureLoadSourceRange stores only the minimum/maximum ENVELOPE around
+// that set. Tiled addressing may leave holes inside it. The envelope is still
 // computed with the SAME shared tiled-address helper the CPU untile uses —
-// never a pitch*height*bpb approximation.
+// never a pitch*height*bpb approximation — and is conservatively safe for
+// RequestConsumedRange and hazard planning.
 struct TextureLoadSourceRange {
   uint32_t begin = 0;  // Absolute guest byte address, inclusive.
   uint32_t end = 0;    // Absolute guest byte address, exclusive.
   bool valid = false;
 };
 
-// ONE exact-range authority, origin-aware. The 32bpb direct shader dispatches
+// Origin-aware envelope calculation. The 32bpb direct shader dispatches
 // ceil(w/8) threads along x, each covering 8 blocks as two 4-block groups, and
 // reads Tiled2D(px + 4k, py + y) -- so for a packed sub-mip the read set starts
-// AT the sub-tile origin, not at (0,0). Scanning from the origin is what makes
-// this exact: an origin-to-end rectangle would also claim the bytes of every
-// larger level sharing the tail.
+// AT the sub-tile origin, not at (0,0). Scanning from the origin avoids claiming
+// the bytes of every larger level sharing the tail, though the returned min/max
+// pair remains a conservative envelope rather than the exact group union.
 //
 // All intermediates are 64-bit and every value that reaches Tiled2D is proven
 // to fit in int32, so a hostile or corrupt fetch cannot wrap into a bogus
@@ -212,9 +215,9 @@ inline TextureLoadSourceRange ComputeStrictRgba8SourceRangeAtOrigin(
   return r;
 }
 
-// The single-mip form: exactly the origin-aware authority at origin (0,0). Kept
-// as a named entry point because the promoted route and its pinned conformance
-// test call it, but it is NOT a second implementation.
+// The single-mip form: the origin-aware envelope at origin (0,0). Kept as a
+// named entry point because the promoted route and its pinned conformance test
+// call it, but it is NOT a second implementation.
 inline TextureLoadSourceRange ComputeStrictRgba8SourceRange(
     uint32_t base, uint32_t blocks_w, uint32_t blocks_h,
     uint32_t pitch_blocks_aligned, uint32_t physical_size) {

@@ -629,14 +629,17 @@ class MatrixMemexportConvergenceTarget final : public MemexportConvergenceTarget
   MatrixMemexportConvergenceTarget(Memory& memory, MetalTextureCache* legacy)
       : memory_(memory), legacy_(legacy) {}
 
-  bool CopyBufferToRam(uint32_t base, uint32_t length, uint32_t* invalidated_entries) override {
+  bool CopyBufferToRam(uint32_t base, uint32_t length, uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
     uint8_t* dest = memory_.TranslatePhysical<uint8_t*>(base);
+    *bytes_copied = 0;
     if (!dest) {
       return false;
     }
     for (uint32_t i = 0; i < length; ++i) {
       dest[i] = uint8_t(0xC0u + i);
     }
+    *bytes_copied = length;
     *invalidated_entries = legacy_ ? legacy_->InvalidateRange(base, length) : 0;
     return true;
   }

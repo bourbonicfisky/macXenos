@@ -800,6 +800,14 @@ void Memory::UnregisterPhysicalMemoryInvalidationCallback(
   delete entry;
 }
 
+global_unique_lock_type Memory::LockPhysicalMemoryInvalidationCallbacks() {
+  // The SAME region PhysicalHeap::TriggerCallbacks holds while it dispatches,
+  // and the same one Register/Unregister above take: one lock, so a producer
+  // that acquires it here is ordered against every callback, not merely against
+  // the list.
+  return global_critical_region_.Acquire();
+}
+
 void Memory::EnablePhysicalMemoryAccessCallbacks(
     uint32_t physical_address, uint32_t length,
     bool enable_invalidation_notifications, bool enable_data_providers) {

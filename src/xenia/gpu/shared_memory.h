@@ -132,6 +132,30 @@ class SharedMemory {
       void* context_ptr, uint32_t physical_address_start, uint32_t length,
       bool exact_range);
 
+  // The PHYSICAL guest-CPU write observation point, invoked by the thunk above
+  // before the invalidation itself runs. Default no-op.
+  //
+  // It hangs off the THUNK and not off MemoryInvalidationCallback deliberately.
+  // The thunk is the only entry the guest's access-violation path reaches, so
+  // this sees exactly the writes the guest CPU performed. Backends also call
+  // MemoryInvalidationCallback DIRECTLY to publish their own GPU writes
+  // (resolves, memexports, trace restore); those are the emulator's work
+  // wearing the invalidation call's name, and counting them as guest CPU writes
+  // would make any CPU/GPU overlap evidence describe the backend observing
+  // itself.
+  //
+  // Runs on the FAULTING GUEST THREAD with the global critical region ALREADY
+  // HELD by the access-violation path (PhysicalHeap::TriggerCallbacks walks the
+  // callback list under the lock it was handed). So this sits on the critical
+  // path of every guest fault: an override may do bounded, lock-free work only
+  // -- no waiting, no logging, no allocation, no new lock, and no call into
+  // command-processor state beyond an atomic read. That the lock is held is
+  // also what publishes an override's setup: an owner that installs state
+  // before registering the callback, and releases it after unregistering,
+  // synchronizes with this thread through the same region.
+  virtual void ObservePhysicalCpuWrite(uint32_t physical_address_start,
+                                       uint32_t length) {}
+
  public:
   Memory& guest_memory() const { return memory_; }
 

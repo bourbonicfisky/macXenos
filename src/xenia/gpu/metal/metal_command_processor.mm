@@ -57,8 +57,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/kernel/xthread.h"
 #include "xenia/gpu/metal/metal_memexport_raster_flags.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
-#include "xenia/gpu/metal/metal_memexport_census.h"
-#include "xenia/gpu/metal/metal_memexport_census_verify.h"
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -394,24 +392,25 @@ class MetalMemexportPublicationTarget
 
   void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
     shared_memory_->RangeWrittenByGpu(base, length);
-    // Task 1.4 §4 source 1: fires at producer publication, BEFORE any RAM
-    // convergence, and is the source that may already have made a direct
-    // texture load fresh. Entry count is unknown here (the watch queues), so
-    // the event is recorded with zero entries rather than a guess.
-    metal::GetMetalMemexportCensus().NoteInvalidation(
-        metal::InvalidationOrigin::kPublicationWatch, 0);
   }
 
  private:
   SharedMemory* shared_memory_;
 };
 
-// Concrete task-3.3 memexport RAM-convergence target: copies the completed
+// Concrete task-3.3 memexport RAM-convergence target: publishes the completed
 // export's exact bytes from the shared buffer to guest RAM and invalidates
 // overlapping legacy texture-cache entries (the same direct call the drain
 // used before). It never touches shared-memory page validity -- the shared
 // buffer is the authoritative source of the converged bytes and is left
 // exactly as-is.
+//
+// The byte movement itself is delegated to MetalSharedMemory, which owns the
+// backing and is therefore the only place that can prove whether destination
+// and source are one allocation (zero-copy pre-gate task 4.2). This target
+// keeps the invalidation and reports the shared memory's FACTUAL byte count --
+// zero on a proven alias, `length` on a real mirror copy -- so nothing
+// downstream has to infer copying from the backing mode.
 class MetalMemexportConvergenceTarget
     : public metal::MemexportConvergenceTarget {
  public:
@@ -423,35 +422,23 @@ class MetalMemexportConvergenceTarget
         texture_cache_(texture_cache) {}
 
   bool CopyBufferToRam(uint32_t base, uint32_t length,
-                       uint32_t* invalidated_entries) override {
+                       uint32_t* invalidated_entries,
+                       uint64_t* bytes_copied) override {
+    // Every out parameter is defined on EVERY exit, including the early
+    // failures below. A caller that read an untouched `bytes_copied` would be
+    // reporting stack garbage as evidence of a publication.
+    *invalidated_entries = 0;
+    *bytes_copied = 0;
     if (!memory_ || !shared_memory_) {
       return false;
     }
-    uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(base);
-    id<MTLBuffer> shared_buffer =
-        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
-    const uint8_t* contents =
-        static_cast<const uint8_t*>(shared_buffer.contents);
-    if (!dest || !contents) {
+    metal::SharedBufferConvergenceOutcome published =
+        shared_memory_->ConvergeRangeToRam(base, length);
+    *bytes_copied = published.bytes_copied;
+    if (!published.converged) {
+      // Missing backing, missing RAM mapping, or an alias claim the addresses
+      // do not support: publish nothing and let the caller retain the record.
       return false;
-    }
-    std::memcpy(dest, contents + base, length);
-    // Task 2.4 gap 4: recorded HERE, at the copy, so `copied` is evidence
-    // rather than an unwritten counter — copied=0 beside nonzero retirements
-    // previously meant only that nobody wrote the field. Attributed to the seam
-    // that forced the convergence; an unattributed copy counts as unknown
-    // rather than being assigned to a corridor that did not cause it.
-    if (MetalMemexportCensus::Enabled()) {
-      if (const PhysicalConsumerClass* copy_class =
-              MetalMemexportCensusSeam::Current()) {
-        GetMetalMemexportCensus()
-            .Corridor(*copy_class)
-            .bytes_copied.fetch_add(length, std::memory_order_relaxed);
-      } else {
-        GetMetalMemexportCensus()
-            .Corridor(PhysicalConsumerClass::kHostRead)
-            .unknown_attributions.fetch_add(1, std::memory_order_relaxed);
-      }
     }
     if (texture_cache_) {
       // Task 5.3 proved the earlier RangeWrittenByGpu watch is equivalent in
@@ -459,23 +446,6 @@ class MetalMemexportConvergenceTarget
       // skips queue draining. Keep this direct retirement globally so replayed
       // memexports cannot leave aliases or resolved bridges stale.
       *invalidated_entries = texture_cache_->InvalidateRange(base, length);
-      // Origin tagging (task 1.4 §4): a consumer-forced drain is mid-frame; the
-      // boundary-triggered ones are named by their own seams.
-      const metal::PhysicalConsumerClass* origin_class =
-          metal::MetalMemexportCensusSeam::Current();
-      metal::InvalidationOrigin origin =
-          metal::InvalidationOrigin::kMidFrameConvergence;
-      if (origin_class) {
-        if (*origin_class ==
-            metal::PhysicalConsumerClass::kFrameEndPublication) {
-          origin = metal::InvalidationOrigin::kFrameEndConvergence;
-        } else if (*origin_class ==
-                   metal::PhysicalConsumerClass::kLifecyclePublication) {
-          origin = metal::InvalidationOrigin::kCacheClearConvergence;
-        }
-      }
-      metal::GetMetalMemexportCensus().NoteInvalidation(origin,
-                                                       *invalidated_entries);
     }
     return true;
   }
@@ -1179,10 +1149,34 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: render target cache init failed");
     return false;
   }
+  // Zero-copy runtime cost evidence (pre-gate tasks 6.3/6.4), parsed ONCE with
+  // the same exact-"1" rule the alias gate uses. Enabled before the shared
+  // memory exists so no production operation can run un-metered in an enabled
+  // run, and left disabled -- hence structurally inert -- for every other value.
+  zero_copy_cost_.SetEnabled(
+      metal::IsZeroCopyReportEnabled(std::getenv(metal::kZeroCopyReportEnvVar)));
   shared_memory_ = std::make_unique<MetalSharedMemory>(*memory_, device);
   shared_memory_->SetTraceWriter(&trace_writer_);
   shared_memory_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
+  });
+  // Zero-copy overlap evidence (pre-gate tasks 5.1/5.2). Installed before
+  // Initialize so the observer is armed before the physical invalidation
+  // callback exists, and never reassigned afterwards -- the faulting guest
+  // thread reads one of them.
+  //
+  // The execution provider is NOT the S7-governed one above. That one returns 0
+  // whenever S7TagsOff() is true, which is every default launch, and zero is
+  // the observer's idle sentinel: reusing it would stamp every page "unclaimed"
+  // and make the overlap counter permanently zero for a reason unrelated to
+  // whether an overlap occurred. This one always reports the real encoding
+  // submission.
+  shared_memory_->SetOverlapSubmissionProvider(
+      [this]() { return CurrentEncodingSubmission(); });
+  // The completion source, independent of the stamps: one acquire load of the
+  // high-water mark the submission-completion handler publishes.
+  shared_memory_->SetOverlapCompletedSubmissionProvider([this]() {
+    return completed_submission_.load(std::memory_order_acquire);
   });
   if (!shared_memory_->Initialize()) {
     XELOGE("MetalCommandProcessor: shared memory init failed");
@@ -1419,18 +1413,173 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   upload_arena_.reset();
 }
 
+void MetalCommandProcessor::ReportZeroCopyLifecycle(const char* site) {
+  if (!shared_memory_) {
+    return;
+  }
+  // ONE snapshot for both reporters. It is taken under the physical
+  // invalidation callback's lock, so reading it twice would double that
+  // acquisition purely because a diagnostic was enabled -- and would also let
+  // the two lines describe two different moments.
+  metal::ZeroCopyOverlapSnapshot snapshot =
+      shared_memory_->zero_copy_overlap_snapshot();
+  ReportZeroCopyOverlap(site, snapshot);
+  ReportZeroCopyRuntimeCost(site, snapshot);
+}
+
+void MetalCommandProcessor::ReportZeroCopyOverlap(
+    const char* site, const metal::ZeroCopyOverlapSnapshot& snapshot) {
+  if (metal::ZeroCopyOverlapSnapshotIsSilent(snapshot)) {
+    // The required silence: exact-off and every fallback arm never installed
+    // the observer and never advanced anything, so the run emits no zero-copy
+    // observation at all.
+    return;
+  }
+  if (!snapshot.active) {
+    // Nothing installed, yet something was counted. That is a defect in the
+    // observation model itself, and staying silent about it would hide exactly
+    // the case the installed-versus-advanced split exists to catch.
+    XELOGE(
+        "MetalZeroCopyOverlap[{}]: INCONSISTENT -- no observer installed but "
+        "{} stamps / {} CPU-write callbacks were recorded",
+        site, snapshot.stamp_calls, snapshot.cpu_write_callbacks);
+    return;
+  }
+  // Finalizations and successful swaps are reported SEPARATELY: they are equal
+  // only when every frame published, and a run where they diverge is one where
+  // presents were suppressed -- a fact worth reading off this line rather than
+  // hiding behind a single "frames" number. Neither is evidence of an overlap;
+  // both are the denominator for one.
+  XELOGI(
+      "MetalZeroCopyOverlap[{}]: finalizations={} swaps={} pages={}({}B) "
+      "stamps={}/{}p "
+      "zero_submission={}p writes={}cb/{}p clamped={}cb idle={}p "
+      "completed_reader={}p in_flight_cpu_write_overlap={}p samples={}",
+      site, swap_finalize_index_, swap_count_, snapshot.page_count,
+      1u << snapshot.page_size_log2,
+      snapshot.stamp_calls, snapshot.stamped_pages,
+      snapshot.zero_submission_stamp_pages, snapshot.cpu_write_callbacks,
+      snapshot.cpu_write_pages, snapshot.clamped_cpu_writes,
+      snapshot.idle_pages, snapshot.completed_reader_pages,
+      snapshot.in_flight_cpu_write_overlap, snapshot.sample_count);
+  if (snapshot.zero_submission_stamp_pages) {
+    // A zero-stamp enrolls nothing, so an overlap count taken while this is
+    // nonzero cannot be read as "no overlap happened".
+    XELOGW(
+        "MetalZeroCopyOverlap[{}]: {} pages were enrolled with the idle "
+        "sentinel -- the execution source is not reporting real submissions, "
+        "so this run's overlap count is NOT evidence of safety",
+        site, snapshot.zero_submission_stamp_pages);
+  }
+  // Bounded: at most kZeroCopyOverlapSampleSlots lines, deduplicated by page.
+  for (uint32_t i = 0; i < snapshot.sample_count; ++i) {
+    const metal::ZeroCopyOverlapSample& sample = snapshot.samples[i];
+    XELOGW(
+        "MetalZeroCopyOverlap[{}]: sample {} -- guest page {:08X} claimed by "
+        "submission {} while completed was {}",
+        site, i, uint64_t(sample.page_index) << snapshot.page_size_log2,
+        sample.consumer_submission, sample.completed_submission);
+  }
+}
+
+void MetalCommandProcessor::ReportZeroCopyRuntimeCost(
+    const char* site, const metal::ZeroCopyOverlapSnapshot& snapshot) {
+  metal::ZeroCopyCostSnapshot cost = zero_copy_cost_.Snapshot();
+  if (metal::ZeroCopyCostSnapshotIsSilent(cost)) {
+    // Unset, "0", or anything malformed: the meter never armed and nothing
+    // advanced, so the run emits no cost line at all.
+    return;
+  }
+  if (!cost.enabled) {
+    // Something was counted by a meter that is not enabled. That is a defect in
+    // the metering itself, and printing the numbers as if they were a measured
+    // run would launder it.
+    XELOGE(
+        "MetalZeroCopyCost[{}]: INCONSISTENT -- reporting is disabled but "
+        "counters advanced",
+        site);
+    return;
+  }
+  if (!shared_memory_) {
+    // The backing verdict and the upload accounting are both properties of the
+    // shared memory. Without it there is no honest line to print.
+    XELOGW("MetalZeroCopyCost[{}]: no shared memory; no cost line", site);
+    return;
+  }
+  // The startup verdict is DERIVED from the recorded observation, exactly as
+  // the startup line derives it, rather than restated from is_zero_copy(). Both
+  // are printed: a disagreement between the derivation and the installed
+  // backing is the one thing this pair exists to expose.
+  metal::ZeroCopyStartupReport startup =
+      metal::DeriveZeroCopyStartupReport(shared_memory_->zero_copy_observation());
+  // One bounded line. Every number is read from a source that recorded it at
+  // its own production operation; nothing here is inferred from the backing.
+  XELOGI(
+      "MetalZeroCopyCost[{}]: startup={} alias={} finalizations={} swaps={} "
+      "upload_copied={}B upload_alias_skipped={}B "
+      "{}={}B {}={} "
+      "{}={} {}={} {}={} {}={} {}={} {}={} "
+      "{}={} {}={} "
+      "{}={} {}={} {}={} "
+      "observer_active={} zero_submission={}p write_callbacks={} "
+      "write_pages={}p in_flight_overlap={}p",
+      site, metal::ZeroCopyStartupReportName(startup),
+      shared_memory_->is_zero_copy(), swap_finalize_index_, swap_count_,
+      shared_memory_->upload_bytes_copied(),
+      shared_memory_->upload_bytes_aliased(),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportConvergenceBytesCopied),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportConvergenceBytesCopied),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportRetirements),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportRetirements),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportDestinationPreparations),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportDestinationPreparations),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportNoOlderFastPaths),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportNoOlderFastPaths),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportOrderingBarriers),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportOrderingBarriers),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportSelectedPredecessors),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportSelectedPredecessors),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportOrderingRetained),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportOrderingRetained),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kMemexportPreparationFailures),
+      cost.Get(metal::ZeroCopyCostCounter::kMemexportPreparationFailures),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kSubmissionCommits),
+      cost.Get(metal::ZeroCopyCostCounter::kSubmissionCommits),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kSyncCommitWaits),
+      cost.Get(metal::ZeroCopyCostCounter::kSyncCommitWaits),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kWaitForSubmissionCalls),
+      cost.Get(metal::ZeroCopyCostCounter::kWaitForSubmissionCalls),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kWaitForSubmissionBlocked),
+      cost.Get(metal::ZeroCopyCostCounter::kWaitForSubmissionBlocked),
+      metal::ZeroCopyCostCounterName(
+          metal::ZeroCopyCostCounter::kWaitForSubmissionTimeouts),
+      cost.Get(metal::ZeroCopyCostCounter::kWaitForSubmissionTimeouts),
+      // The overlap half is REUSED from the snapshot the lifecycle emitter
+      // already took, not re-read. `observer_active` is false on every control
+      // arm by construction, which is what makes the zero counts beside it
+      // readable as "nobody was watching" rather than "nothing happened".
+      snapshot.active, snapshot.zero_submission_stamp_pages,
+      snapshot.cpu_write_callbacks, snapshot.cpu_write_pages,
+      snapshot.in_flight_cpu_write_overlap);
+}
+
 void MetalCommandProcessor::ShutdownContext() {
   // Task 1.1: the run's final build totals, emitted BEFORE the caches are torn
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
-  // Task 2.3: the FINAL memexport census. Emitted here and not only on the swap
-  // cadence because trace replay performs ZERO swaps — a swap-hooked report is
-  // silent under exactly the harness the census is most often run in, which
-  // reads identically to "nothing engaged".
-  if (metal::MetalMemexportCensus::Enabled()) {
-    XELOGI("{}", metal::GetMetalMemexportCensus().Report("final"));
-  }
   if (frame_open_) {
     EndFrameEncoderAndWait();
   }
@@ -1439,6 +1588,13 @@ void MetalCommandProcessor::ShutdownContext() {
   // reports they belonged to are abandoned by the shared reset path.
   ShutdownZPDQueryResources();
   ShutdownDrawResources();
+  // Task 5.4: the run's FINAL zero-copy evidence -- overlap AND runtime cost --
+  // while shared_memory_ still holds both (its own Shutdown releases the
+  // observer, and the upload accounting goes with it). Mandatory rather than
+  // swap-cadence-only: a trace replay can end without ever reaching a swap, and
+  // a missing line there would be indistinguishable from "nothing overlapped"
+  // and from "no work was done".
+  ReportZeroCopyLifecycle("final");
   // PrimitiveProcessor: destroy before shared_memory_ (it holds a reference).
   primitive_processor_.reset();
   shared_memory_.reset();
@@ -1792,30 +1948,76 @@ bool MetalCommandProcessor::S7TagsOff() {
 }
 
 void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
-  uint64_t prev = completed_submission_.load(std::memory_order_relaxed);
-  while (prev < submission &&
-         !completed_submission_.compare_exchange_weak(
-             prev, submission, std::memory_order_release,
-             std::memory_order_relaxed)) {
+  {
+    // The high-water advance happens INSIDE completion_mutex_, not beside it.
+    // The mutex is the truth boundary the waiter's locked re-check reads
+    // across: publishing outside it left a window where a waiter could hold
+    // the lock, observe "not yet completed", and be overtaken by this advance
+    // before it reached the condition variable — the waiter would then be
+    // counted as blocked and never wait. WaitForSubmission's kWait...Blocked
+    // counter is evidence, and an attempted wait reported as a stall is
+    // exactly the misreport the cost vocabulary forbids.
+    //
+    // Monotonic CAS retained even though the mutex now serializes publishers:
+    // the value is still read LOCK-FREE by acquire loads all over this file
+    // (GetCompletedSubmission, PumpCompletedActions, the fast path below), so
+    // the release store is what publishes this submission's work to them, and
+    // the compare keeps a late/out-of-order completion callback from moving
+    // the high-water backwards.
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    uint64_t prev = completed_submission_.load(std::memory_order_relaxed);
+    while (prev < submission &&
+           !completed_submission_.compare_exchange_weak(
+               prev, submission, std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
   }
-  // Wake WaitForSubmission (S8). The empty lock pairs with the waiter's
-  // predicate re-check so a wake between check and wait isn't lost.
-  { std::lock_guard<std::mutex> lock(completion_mutex_); }
+  // Wake WaitForSubmission (S8) AFTER unlocking: a waiter woken here would
+  // otherwise immediately re-block on the mutex we still held. No wakeup is
+  // lost, because a waiter either (a) already holds the mutex, in which case
+  // this store could not have happened until it entered the wait, or (b) takes
+  // the mutex after this store and its predicate sees the new value without
+  // waiting at all.
   completion_cv_.notify_all();
 }
 
 bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
                                               uint32_t timeout_ms) {
+  // Three separate facts, because collapsing them would misreport the cost: how
+  // often the path was taken at all, how often it actually blocked, and how
+  // often it gave up. The call is counted before the fast path so a wait
+  // satisfied immediately is still visible as a wait that was requested.
+  zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kWaitForSubmissionCalls);
   if (completed_submission_.load(std::memory_order_acquire) >= submission) {
     return true;
   }
   std::unique_lock<std::mutex> lock(completion_mutex_);
+  // Counted here, not at the fast-path miss above: the submission can complete
+  // between that unlocked check and this one, and a wait the condition variable
+  // satisfies without sleeping is not a stall. Counting the miss would report
+  // every completion race as a block.
+  //
+  // This re-check is EXACT, not merely likelier to be right, because
+  // PublishCompletedSubmission advances the high-water under this same mutex,
+  // which we hold continuously from here through wait_for's first predicate
+  // evaluation. So a false re-check cannot be overtaken before the wait: the
+  // count means the caller really did enter the condition-variable wait. It
+  // does NOT claim the wait was long — a publisher already queued on this
+  // mutex will wake it almost at once — only that the wait was entered, which
+  // is the strongest fact this seam can state and the one the counter's name
+  // is held to.
+  if (completed_submission_.load(std::memory_order_acquire) < submission) {
+    zero_copy_cost_.Count(
+        metal::ZeroCopyCostCounter::kWaitForSubmissionBlocked);
+  }
   bool ok = completion_cv_.wait_for(
       lock, std::chrono::milliseconds(timeout_ms), [&] {
         return completed_submission_.load(std::memory_order_acquire) >=
                submission;
       });
   if (!ok) {
+    zero_copy_cost_.Count(
+        metal::ZeroCopyCostCounter::kWaitForSubmissionTimeouts);
     XELOGE(
         "MetalCommandProcessor: TIMEOUT waiting for submission {} "
         "(completed {}) — GPU wedged?",
@@ -2061,8 +2263,6 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         metal::GuestRangeSet publication_domain;
         publication_domain.Add(metal::GuestRange::FromBaseLength(
             0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
-        metal::MetalMemexportCensusSeam census_seam(
-            metal::PhysicalConsumerClass::kLifecyclePublication);
         if (!ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                             publication_domain)) {
           // Fail closed: keep the pending set intact and the request latched.
@@ -2787,12 +2987,19 @@ void MetalCommandProcessor::EndFrameEncoder() {
     upload_arena_->MarkSubmission(submission);
   }
   [command_buffer commit];
+  // Zero-copy cost evidence, counted AT the commit: this is the submission
+  // cadence, not an inference from frames or swaps.
+  zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kSubmissionCommits);
   // S8: NO synchronous wait — the GPU pipelines behind CPU encoding.
   // XE_METAL_SYNC_WAIT=1 restores the pre-S8 commit+wait for A/B.
   static const bool s_sync_wait =
       std::getenv("XE_METAL_SYNC_WAIT") != nullptr ||
       std::getenv("XE_METAL_ASYNC") == nullptr;
   if (s_sync_wait) {
+    // Counted on the branch that actually stalls, not from the mode flag: a
+    // commit that returns and a commit that waits for the GPU are different
+    // costs, and only the taken branch is evidence of which one happened.
+    zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kSyncCommitWaits);
     [command_buffer waitUntilCompleted];
     PublishCompletedSubmission(submission);
   } else {
@@ -2973,6 +3180,22 @@ void MetalCommandProcessor::FinalizeSwapFrame() {
           xe::path_to_utf8(cvars::trace_gpu_prefix));
       RequestFrameTrace(cvars::trace_gpu_prefix);
     }
+  }
+  // Task 5.4: bounded overlap evidence on a documented cadence, from the GPU
+  // thread's frame boundary rather than from the fault callback that records
+  // it. Here rather than in the successful-present body because THIS is the
+  // site every IssueSwap return path reaches: a title stuck in persistent
+  // publication failure never advances swap_count_, and that is exactly the run
+  // whose in-flight CPU rewrite evidence matters most. The schedule itself is a
+  // pure predicate over the monotonic finalization index (conformance-pinned in
+  // metal_zero_copy_overlap.h); ShutdownContext emits the final line
+  // independently of it.
+  // The runtime cost line (tasks 6.3/6.4) rides the SAME cadence and the same
+  // snapshot: a second schedule would be a second thing to keep honest, and the
+  // cost question is asked about the same frame boundaries.
+  if (metal::ZeroCopyOverlapReportDue(finalize_index,
+                                      kZeroCopyOverlapSwapReportInterval)) {
+    ReportZeroCopyLifecycle("swap");
   }
   frame_gpu_fault_count_ = 0;
   draw_skip_accounting_.EndFrame();
@@ -3354,27 +3577,98 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
-  // Destination-page preparation, shared by BOTH memexport producer routes
+  // Destination preparation, shared by BOTH memexport producer routes
   // (task 1.2 reuse audit: the VS-only route's call shape generalizes
   // untouched -- normalized range through DecideMemexportDestinationPreparation
   // + PrepareMemexportDestination, i.e. the same SharedMemory::RequestRange the
   // direct call site used before). MUST run before the frame encoder opens,
   // because RequestRange uploads guest RAM into the shared buffer.
+  //
+  // It also runs the WRITER-BEFORE-WRITER ordering the export depends on. The
+  // store this draw is about to encode is the NEWEST writer of its destination
+  // bytes, so every older pending producer overlapping them is converged and
+  // retired here, at the same barrier every consumer already uses. Without it
+  // the older record is drained later and writes its bytes over the export --
+  // survivable on the mirror backing only because memexport convergence copies
+  // buffer -> RAM afterwards, and NOT survivable once the shared buffer aliases
+  // guest RAM, where that convergence is a self-copy with nothing to restore.
+  // Selection is the ordinary intersecting-producer closure, so disjoint
+  // writers are never drained and an empty selection costs no commit or wait.
   auto prepare_memexport_destinations = [&]() -> bool {
     bool ranges_ok = true;
-    MetalMemexportPreparationTarget preparation_target(shared_memory_.get());
+    // Normalize every destination FIRST. The ordering barrier is then taken
+    // once over their union, so a drain triggered by one range cannot
+    // invalidate pages another range already requested.
+    std::vector<metal::MemexportDestinationPreparation> preparations;
+    preparations.reserve(memexport_ranges.size());
     for (const auto& range : memexport_ranges) {
       uint32_t range_base = range.base_address_dwords << 2;
       auto preparation = metal::DecideMemexportDestinationPreparation(
           range_base, range.size_bytes);
-      bool requested =
-          preparation && metal::PrepareMemexportDestination(
-                              *preparation, preparation_target);
-      if (!requested) {
-        XELOGE("MetalMemexport: failed to request range {:08X}(+{})",
+      if (!preparation) {
+        XELOGE("MetalMemexport: failed to normalize range {:08X}(+{})",
                range_base, range.size_bytes);
         ranges_ok = false;
+        continue;
       }
+      preparations.push_back(*preparation);
+    }
+    MetalMemexportPreparationTarget preparation_target(shared_memory_.get());
+    metal::MemexportDestinationPreparationOutcome outcome =
+        metal::PrepareOrderedMemexportDestinations(
+            preparations, SnapshotPendingProducers(),
+            completed_submission_.load(std::memory_order_acquire),
+            preparation_target,
+            [&](const metal::ConsumerDecision& selected) {
+              // The one boundary/commit/wait/selective-drain implementation.
+              // Nothing here mints completion evidence of its own.
+              //
+              // The ordering barrier is counted HERE, inside the callback that
+              // performs it, rather than beside the outcome: the seam invokes
+              // this only when the snapshot selected older overlapping
+              // producers, so reaching this line IS the barrier. Counting it
+              // from the outcome would count consultations, and counting it
+              // from the backing mode would count configuration.
+              zero_copy_cost_.Count(
+                  metal::ZeroCopyCostCounter::kMemexportOrderingBarriers);
+              zero_copy_cost_.Add(
+                  metal::ZeroCopyCostCounter::kMemexportSelectedPredecessors,
+                  uint64_t(selected.selected.size()));
+              return ResolvePendingProducerDependencies(selected).drain;
+            });
+    // Preparation cost, from the outcome's own facts. The no-older fast path is
+    // separated from the barrier above because it is the case that costs
+    // nothing, and folding the two together would hide exactly the difference
+    // this evidence is collected to measure.
+    zero_copy_cost_.Count(
+        metal::ZeroCopyCostCounter::kMemexportDestinationPreparations);
+    if (outcome.ordering ==
+        metal::MemexportDestinationOrdering::kNoOlderProducer) {
+      zero_copy_cost_.Count(
+          metal::ZeroCopyCostCounter::kMemexportNoOlderFastPaths);
+    } else if (outcome.ordering ==
+               metal::MemexportDestinationOrdering::kOlderProducersRetained) {
+      // A short drain: the destination is NOT prepared and at least one older
+      // producer is still pending.
+      zero_copy_cost_.Count(
+          metal::ZeroCopyCostCounter::kMemexportOrderingRetained);
+    }
+    if (!outcome.prepared()) {
+      zero_copy_cost_.Count(
+          metal::ZeroCopyCostCounter::kMemexportPreparationFailures);
+      XELOGE(
+          "MetalMemexport: destination preparation failed draw={} ordering={} "
+          "selected={} retired={} requested={}/{}",
+          trace_draw_index_,
+          metal::MemexportDestinationOrderingName(outcome.ordering),
+          uint32_t(outcome.decision.selected.size()),
+          outcome.drain.drained_records, outcome.requested_ranges,
+          outcome.range_count);
+      for (const auto& preparation : preparations) {
+        XELOGE("MetalMemexport: unprepared destination {:08X}(+{})",
+               preparation.range.start(), preparation.range.length());
+      }
+      ranges_ok = false;
     }
     return ranges_ok;
   };
@@ -3837,11 +4131,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   if (!vertex_dependency_ranges.empty() &&
       (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
-    // The kVertex label spans shared vfetch AND CPU index/factor staging
-    // (task 1.3). The census names the shared-buffer half here; the CPU-staged
-    // streams are attributed at their own seams.
-    metal::MetalMemexportCensusSeam census_seam(
-        metal::PhysicalConsumerClass::kSharedVfetch);
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(
             metal::ConsumerKind::kVertex,
@@ -4338,11 +4627,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerRequest texture_request;
     collect_texture_ranges(pixel_shader, texture_request);
     collect_texture_ranges(vertex_shader, texture_request);
-    // The drain runs BEFORE route selection (task 1.4 §3), so this seam is
-    // named for the shared-texture route it may feed; the legacy CPU fallback
-    // and cache-hit branches are distinguished below the prepass seam.
-    metal::MetalMemexportCensusSeam census_seam(
-        metal::PhysicalConsumerClass::kSharedTextureLoad);
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
@@ -5699,8 +5983,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               "skipping rather than tessellating from stale RAM",
               trace_draw_index_, staged_extent.base, staged_extent.size,
               pending.base_address, pending.size_bytes);
-          metal::GetMetalMemexportCensus().NoteMetadataGuardConsult(
-              /*skipped_draw=*/true);
           RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                          "memexport-raster-stale-factor-stream");
           return true;
@@ -7617,50 +7899,14 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
   // from the two existing producer queues and owns no authority state. The
   // caller executes the promoted one-boundary commit/wait and selective
   // drain policy for the returned decision.
-  const std::vector<metal::PendingProducer> producers =
-      SnapshotPendingProducers();
-  // Task 2.3 census (exact-off): classify the request against the SAME producer
-  // snapshot the decision is about to be built from, so the observation and the
-  // production decision cannot disagree about the input. Records only — the
-  // decision below is unchanged, and this function stays const.
-  if (metal::MetalMemexportCensus::Enabled()) {
-    if (const metal::PhysicalConsumerClass* census_class =
-            metal::MetalMemexportCensusSeam::Current()) {
-      const metal::GuestRangeSet combined = request.Combined();
-      const metal::IntervalClassification classification =
-          metal::ClassifyLatestWriterIntervals(combined, producers);
-      metal::MemexportCensusCorridor& corridor =
-          metal::GetMetalMemexportCensus().Corridor(*census_class);
-      corridor.requested_bytes.fetch_add(classification.requested_bytes,
-                                         std::memory_order_relaxed);
-      corridor.classified_bytes.fetch_add(classification.classified_bytes,
-                                          std::memory_order_relaxed);
-      corridor.eligible_bytes.fetch_add(
-          metal::GpuDirectEligibleBytes(classification, *census_class),
-          std::memory_order_relaxed);
-      if (!classification.requested_bytes) {
-        corridor.zero_byte_consultations.fetch_add(1,
-                                                   std::memory_order_relaxed);
-      }
-      // TRUE union equality — RANGES, not a byte sum. This previously called
-      // IsExactPartition(), which compares two totals, under a comment claiming
-      // otherwise: the exact weakness task 2.2 demonstrated, reproduced in the
-      // live path and made to look correct by its own comment.
-      if (!metal::CensusUnionEqualsRequest(classification.intervals,
-                                           combined) ||
-          !classification.IsExactPartition()) {
-        corridor.union_mismatches.fetch_add(1, std::memory_order_relaxed);
-      }
-    }
-  }
   return metal::DecideConsumer(
-      consumer, request, producers,
+      consumer, request, SnapshotPendingProducers(),
       completed_submission_.load(std::memory_order_acquire));
 }
 
 metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
-    uint32_t filter_base, uint32_t filter_size,
-    uint64_t filter_authority_sequence) {
+    metal::MemexportBoundaryEvidence boundary_evidence, uint32_t filter_base,
+    uint32_t filter_size, uint64_t filter_authority_sequence) {
   metal::ProducerDrainOutcome outcome;
   auto filter_range =
       metal::GuestRange::FromBaseLength(filter_base, filter_size);
@@ -7715,9 +7961,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         memory_, shared_memory_.get(), texture_cache_.get());
     for (auto export_it = export_begin; export_it != export_end; ++export_it) {
       const PendingMemexport& me = *export_it;
-      if (me.submission > completed ||
-          !in_filter(me.base_address, me.size_bytes,
-                     me.authority_sequence)) {
+      // The completed-submission half of this test now lives in the shared
+      // production gate (metal::ConvergeCompletedMemexportRam) so it is the
+      // same code conformance runs. Only the queue-filter half is local.
+      if (!in_filter(me.base_address, me.size_bytes, me.authority_sequence)) {
         if (!exact_sequence) {
           still_pending_exports.push_back(me);
         }
@@ -7736,39 +7983,80 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         }
         continue;
       }
-      static uint32_t s_me_drains = 0;
-      // First 8, then a 3-drain sample every 512 (~once per 170 frames at 3
-      // exports/frame) — steady-state gameplay content stays observable.
-      bool me_log = s_me_drains < 8 || (s_me_drains & 511) < 3;
-      ++s_me_drains;
+      bool me_log = false;
       uint32_t old_hash = 0, new_hash = 0;
-      if (me_log && me_contents) {
-        // Store-landing oracle: if the buffer content equals the RAM it was
-        // primed from, the shader's UAV stores never landed (silent
-        // RAM->buffer->RAM round-trip) — a binding problem, not a content
-        // problem. Read before the seam's copy so this never races the
-        // convergence write into the same guest bytes.
-        uint8_t* me_dest_peek =
-            memory_->TranslatePhysical<uint8_t*>(me.base_address);
-        if (me_dest_peek) {
-          old_hash = xe_lineage_stridehash(me_dest_peek, me.size_bytes);
-        }
-        new_hash = xe_lineage_stridehash(me_contents + me.base_address,
-                                         me.size_bytes);
-      }
+      // The store-landing oracle below compares guest RAM against the shared
+      // buffer. That comparison only carries information while the two are
+      // DISTINCT allocations: when the buffer aliases guest RAM they are the
+      // same bytes by construction, so equality says nothing about whether the
+      // shader's stores landed and must not be reported as a failed store.
+      const bool me_store_oracle_meaningful =
+          shared_memory_ && !shared_memory_->is_zero_copy();
       // Routed through the typed task-3.3 convergence seam: exact
       // shared-buffer bytes -> RAM, no shared-buffer invalidation, and the
       // record is retired only when the copy itself reports success.
       metal::PendingProducer producer{*range,
                                       metal::TransitState::kPendingMemexport,
                                       me.submission, me.authority_sequence};
-      metal::MemexportConvergenceResult result =
-          metal::ConvergeMemexportRam(producer, convergence_target);
-      if (!result.converged) {
-        // Missing RAM mapping or shared-buffer contents: a factual
-        // disagreement, not a silent drop -- retain the record for retry.
+      // ONE gate, shared with conformance. A tagged record is decided by its
+      // own submission; an untagged one (submission 0, the default lifecycle)
+      // is publishable only under the caller's synchronous-boundary evidence,
+      // which arrives as a parameter and is never derived here.
+      metal::GatedMemexportConvergence gated =
+          metal::ConvergeCompletedMemexportRam(
+              producer, completed, boundary_evidence, convergence_target,
+              [&]() {
+                // Pre-attempt observation. It runs INSIDE the gate, after a
+                // completion proof and immediately before publication, because
+                // it READS the GPU-written export bytes: sampling them for a
+                // record that has not been proven final would report an
+                // in-flight export as a failed store. The sampling counter
+                // lives here too, so the sample rate counts publications rather
+                // than gate consultations.
+                static uint32_t s_me_drains = 0;
+                // First 8, then a 3-drain sample every 512 (~once per 170
+                // frames at 3 exports/frame) — steady-state gameplay content
+                // stays observable.
+                me_log = s_me_drains < 8 || (s_me_drains & 511) < 3;
+                ++s_me_drains;
+                if (!me_log || !me_contents || !me_store_oracle_meaningful) {
+                  return;
+                }
+                // Store-landing oracle: if the buffer content equals the RAM it
+                // was primed from, the shader's UAV stores never landed (silent
+                // RAM->buffer->RAM round-trip) — a binding problem, not a
+                // content problem. Read before the seam's copy so this never
+                // races the convergence write into the same guest bytes.
+                uint8_t* me_dest_peek =
+                    memory_->TranslatePhysical<uint8_t*>(me.base_address);
+                if (me_dest_peek) {
+                  old_hash = xe_lineage_stridehash(me_dest_peek, me.size_bytes);
+                }
+                new_hash = xe_lineage_stridehash(me_contents + me.base_address,
+                                                 me.size_bytes);
+              });
+      const metal::MemexportConvergenceResult& result = gated.result;
+      if (!gated.retires()) {
+        // Not published: a factual disagreement (or a producer whose finality
+        // is not proven), not a silent drop -- retain the record for retry.
         if (!exact_sequence) {
           still_pending_exports.push_back(me);
+        }
+        if (!gated.attempted()) {
+          // Bounded, and named. Reaching this from the normal consumer path
+          // would mean the boundary evidence did not survive the threading, so
+          // it is a warning rather than an expected state.
+          static uint32_t s_ungated_exports = 0;
+          if (s_ungated_exports++ < 8) {
+            XELOGW(
+                "MetalMemexport: {:08X}(+{}) not converged ({}, submission={} "
+                "completed={} evidence={}); retained",
+                me.base_address, me.size_bytes,
+                metal::MemexportConvergenceGateName(gated.gate), me.submission,
+                completed,
+                metal::MemexportBoundaryEvidenceName(boundary_evidence));
+          }
+          continue;
         }
         static uint32_t s_failed_convergences = 0;
         if (s_failed_convergences++ < 8) {
@@ -7782,6 +8070,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
+      // Factual, from the shared memory's physical operation: zero on an
+      // aliased backing, the record's length on a mirror copy. Retirement above
+      // is counted independently, so a zero-byte publication still retires.
+      outcome.memexport_bytes_copied += result.bytes_copied;
+      // Same split for the session-long cost evidence, at the same site: the
+      // retirement is counted as an event and the bytes as bytes. A record that
+      // was retained (unproven finality, failed copy, or a drain stopped short)
+      // never reaches this line, so retentions can never be read as retirements
+      // -- and an alias run that moved zero bytes still shows its retirements.
+      zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kMemexportRetirements);
+      zero_copy_cost_.Add(
+          metal::ZeroCopyCostCounter::kMemexportConvergenceBytesCopied,
+          result.bytes_copied);
       // Census the PUBLICATION SIDE EFFECT, not just the value transfer:
       // convergence invalidates overlapping texture-cache entries, which can
       // retire a resolve-backed bridge and change what a later fetch is served
@@ -7819,12 +8120,20 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         for (uint32_t w = 0; w < word_count; ++w) {
           nonzero += buf_words[w] != 0;
         }
+        // The RAM-vs-buffer verdict is only printed where the two are distinct
+        // allocations; on an aliased backing the hashes are trivially equal and
+        // calling that a failed store would be a false diagnostic.
+        const char* store_verdict =
+            !me_store_oracle_meaningful
+                ? " (aliased backing — RAM/buffer hashes are the same bytes, "
+                  "no store verdict)"
+                : (old_hash == new_hash
+                       ? " (UNCHANGED — stores did not land?)"
+                       : " (exported content differs)");
         XELOGI("MetalMemexport: drained {:08X}(+{}) ramHash {:08x} -> "
                "bufHash {:08x} nonzero {}/{} w0={:08X} w1={:08X}{}",
                me.base_address, me.size_bytes, old_hash, new_hash, nonzero,
-               word_count, buf_words[0], buf_words[1],
-               old_hash == new_hash ? " (UNCHANGED — stores did not land?)"
-                                    : " (exported content differs)");
+               word_count, buf_words[0], buf_words[1], store_verdict);
       }
     }
     if (retire_exact_export) {
@@ -8194,7 +8503,8 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
 
 metal::ProducerDrainOutcome
 MetalCommandProcessor::DrainSelectedPendingProducers(
-    const metal::ConsumerDecision& decision) {
+    const metal::ConsumerDecision& decision,
+    metal::MemexportBoundaryEvidence boundary_evidence) {
   // DecideConsumer returns selected records in their cross-kind registration
   // order. Delegate the loop/merge/stop-on-failure policy to the shared
   // selective-drain executor and, per selected record, match it back to the
@@ -8203,9 +8513,11 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
   // transient value, successful convergence still retires the original pending
   // record, and a failed convergence keeps this record and the untouched suffix
   // pending so a later retry cannot invert authority order.
+  // The boundary evidence is only forwarded, never produced or upgraded here:
+  // this function performs no commit and no wait, so it has nothing to prove.
   return metal::DrainSelectedProducers(
       decision, [&](const metal::PendingProducer& producer) {
-        return DrainPendingWritebacks(producer.range.start(),
+        return DrainPendingWritebacks(boundary_evidence, producer.range.start(),
                                       producer.range.length(),
                                       producer.sequence);
       });
@@ -8215,28 +8527,6 @@ MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision) {
   ProducerDependencyOutcome outcome;
-  // Task 2.3 census (exact-off). Observational only: it records what this
-  // function is about to do and never alters the decision, the boundary, or
-  // the drain.
-  const metal::PhysicalConsumerClass* census_class =
-      metal::MetalMemexportCensusSeam::Current();
-  const bool census_on = metal::MetalMemexportCensus::Enabled();
-  if (census_on && !census_class) {
-    // An executor entry no seam claimed. Recorded as UNKNOWN rather than
-    // guessed into a corridor — a partition with an unattributed entry is not
-    // exact, and the pre-gate forbids drawing a verdict from one.
-    metal::NoteUnattributedExecutorEntry();
-  }
-  if (census_on && census_class) {
-    metal::MemexportCensusCorridor& corridor =
-        metal::GetMetalMemexportCensus().Corridor(*census_class);
-    corridor.consultations.fetch_add(1, std::memory_order_relaxed);
-    corridor.selected_records.fetch_add(decision.selected.size(),
-                                        std::memory_order_relaxed);
-    if (decision.selected.empty()) {
-      corridor.selected_empty.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
   if (decision.selected.empty()) {
     // Early no-op: a disjoint (or no-pending) consumer adds no commit, wait, or
     // drain.
@@ -8244,44 +8534,20 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   }
 
   // One completion boundary for the whole consumer request. A producer in the
-  // current command buffer is tagged with CurrentEncodingSubmission (or zero
-  // in the diagnostic tags-off mode), so capture the real boundary before the
-  // commit and prove it completed independently of the record tag.
+  // current command buffer carries zero on a DEFAULT launch -- S7TagsOff() is
+  // true unless XE_METAL_ASYNC is set, so the publication seam registers
+  // `S7TagsOff() ? 0 : CurrentEncodingSubmission()` and untagged is the normal
+  // record shape, not a diagnostic mode. The tag therefore cannot describe
+  // finality on its own, so capture the real boundary before the commit and
+  // prove it completed independently of the record.
   uint64_t boundary_submission =
       frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
-  // Measured, never inferred: EndFrameEncoderAndWait commits AND waits only
-  // when a frame command buffer exists, so "selected was non-empty" does not
-  // imply either.
-  const bool census_had_buffer = frame_command_buffer_ != nullptr;
-  const uint64_t census_submissions_before = submission_counter_;
   EndFrameEncoderAndWait();
-  if (census_on && census_class) {
-    metal::MemexportCensusCorridor& corridor =
-        metal::GetMetalMemexportCensus().Corridor(*census_class);
-    if (census_had_buffer) {
-      corridor.had_frame_command_buffer.fetch_add(1, std::memory_order_relaxed);
-      corridor.boundary_wait_attempted.fetch_add(1, std::memory_order_relaxed);
-      corridor.boundary_wait_blocked.fetch_add(1, std::memory_order_relaxed);
-    }
-    corridor.commits.fetch_add(submission_counter_ - census_submissions_before,
-                               std::memory_order_relaxed);
-  }
   uint64_t required_submission =
       std::max(boundary_submission, decision.max_wait_submission);
-  const bool census_required_wait_blocked =
-      required_submission > completed_submission_.load(std::memory_order_acquire);
-  if (census_on && census_class) {
-    metal::MemexportCensusCorridor& corridor =
-        metal::GetMetalMemexportCensus().Corridor(*census_class);
-    // Attempted every time the branch is evaluated; blocked only when taken.
-    // A wait that did not block is not a stall.
-    corridor.required_wait_attempted.fetch_add(1, std::memory_order_relaxed);
-    if (census_required_wait_blocked) {
-      corridor.required_wait_blocked.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-  if (required_submission >
-      completed_submission_.load(std::memory_order_acquire)) {
+  uint64_t completed_high_water =
+      completed_submission_.load(std::memory_order_acquire);
+  if (required_submission > completed_high_water) {
     bool waited = WaitForSubmission(required_submission);
     if (!waited) {
       // Failed-wait path: the commit already happened but the drain did not.
@@ -8289,22 +8555,26 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
       return outcome;
     }
     PumpCompletedActions();
+    completed_high_water =
+        completed_submission_.load(std::memory_order_acquire);
   }
 
-  outcome.drain = DrainSelectedPendingProducers(decision);
+  // This is the ONLY place in the backend that can mint synchronous-boundary
+  // evidence, and it does so from a measurement rather than from the fact that
+  // it reached this line: EndFrameEncoderAndWait ran above, and the boundary it
+  // established is proven to be at or below the high-water mark acquired after
+  // the wait. A record carrying no owning submission (the default lifecycle) is
+  // publishable only under this proof, which is why it is threaded down through
+  // DrainSelectedPendingProducers into DrainPendingWritebacks instead of being
+  // re-derived at the convergence site.
+  metal::MemexportBoundaryEvidence boundary_evidence =
+      required_submission <= completed_high_water
+          ? metal::MemexportBoundaryEvidence::kSynchronousBoundaryCompleted
+          : metal::MemexportBoundaryEvidence::kNone;
+
+  outcome.drain = DrainSelectedPendingProducers(decision, boundary_evidence);
   outcome.complete =
       metal::ConsumerPublicationComplete(decision, outcome.drain);
-  if (census_on && census_class) {
-    metal::MemexportCensusCorridor& corridor =
-        metal::GetMetalMemexportCensus().Corridor(*census_class);
-    if (outcome.complete) {
-      corridor.drains_succeeded.fetch_add(1, std::memory_order_relaxed);
-    } else {
-      corridor.drains_failed.fetch_add(1, std::memory_order_relaxed);
-    }
-    corridor.retirements.fetch_add(outcome.drain.drained_records,
-                                   std::memory_order_relaxed);
-  }
   return outcome;
 }
 
@@ -8346,8 +8616,6 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
   }
   metal::GuestRangeSet requested;
   requested.Add(exact_range);
-  metal::MetalMemexportCensusSeam census_seam(
-      metal::PhysicalConsumerClass::kHostRead);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                         requested);
 }
@@ -8359,8 +8627,6 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
-  metal::MetalMemexportCensusSeam census_seam(
-      metal::PhysicalConsumerClass::kHostRead);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                         requested);
 }
@@ -8372,8 +8638,6 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
   // records; disjoint resolve/memexport traffic keeps its normal swap cadence.
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(guest_address, 4));
-  metal::MetalMemexportCensusSeam census_seam(
-      metal::PhysicalConsumerClass::kWaitPredicate);
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kWait,
                                         requested);
 }
@@ -8495,8 +8759,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   metal::GuestRangeSet swap_publication_domain;
   swap_publication_domain.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
-  metal::MetalMemexportCensusSeam census_seam(
-      metal::PhysicalConsumerClass::kFrameEndPublication);
   XE_UNLIKELY_IF(!ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, swap_publication_domain)) {
     // Fail closed: full-domain publication did not converge every selected
@@ -8555,14 +8817,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     build_census.NoteSwap();
     if ((count & 127) == 0 && count) {
       XELOGI("{}", build_census.Report("periodic"));
-    }
-    // Task 2.3 memexport census: heartbeat every swap so a run that produced no
-    // rows is distinguishable from one that never ran, and a periodic report.
-    if (metal::MetalMemexportCensus::Enabled()) {
-      metal::GetMetalMemexportCensus().NoteHeartbeat();
-      if ((count & 127) == 0 && count) {
-        XELOGI("{}", metal::GetMetalMemexportCensus().Report("periodic"));
-      }
     }
   }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
