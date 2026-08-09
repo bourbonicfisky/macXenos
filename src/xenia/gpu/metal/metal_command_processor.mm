@@ -8673,9 +8673,11 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   metal::SeamTimingAccumulator::PerConsumer* seam_c = nullptr;
   uint64_t seam_incl0 = 0;
   if (seam_on) {
-    seam_c = &seam_timing_.ConsumerSlot(decision.consumer);
-    ++seam_c->consultations;
-    seam_incl0 = SeamNowNs();
+    seam_c = seam_timing_.ConsumerSlot(decision.consumer);
+    if (seam_c) {
+      ++seam_c->consultations;
+      seam_incl0 = SeamNowNs();
+    }
   }
   ProducerDependencyOutcome outcome;
   if (decision.selected.empty()) {

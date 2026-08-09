@@ -61,17 +61,30 @@ TEST_CASE("seam timing: consumer-kind count matches named kinds",
   CHECK(std::string(ConsumerKindName(ConsumerKind::kCount)) == "?");
 }
 
-TEST_CASE("seam timing: checked consumer indexing clamps out-of-range kinds",
+TEST_CASE("seam timing: invalid consumer kinds never enter a real corridor",
           "[seamtiming]") {
   SeamTimingAccumulator acc;
-  // The kCount sentinel (and anything past it) must clamp to the last real
-  // slot rather than write past the array.
-  auto& sentinel_slot = acc.ConsumerSlot(ConsumerKind::kCount);
-  auto& last_real_slot =
-      acc.consumer[SeamTimingAccumulator::kConsumerCount - 1];
-  CHECK(&sentinel_slot == &last_real_slot);
-  auto& real_slot = acc.ConsumerSlot(ConsumerKind::kTexture);
-  CHECK(&real_slot == &acc.consumer[uint32_t(ConsumerKind::kTexture)]);
+  // Both the sentinel and an arbitrary out-of-range value are explicit
+  // invalid evidence. Neither may be folded into memexport_destination (the
+  // last real slot) or any other valid corridor.
+  CHECK(acc.ConsumerSlot(ConsumerKind::kCount) == nullptr);
+  CHECK(acc.ConsumerSlot(static_cast<ConsumerKind>(99)) == nullptr);
+  REQUIRE(acc.ConsumerSlot(ConsumerKind::kTexture) != nullptr);
+  CHECK(acc.ConsumerSlot(ConsumerKind::kTexture) ==
+        &acc.consumer[uint32_t(ConsumerKind::kTexture)]);
+  CHECK(acc.invalid_consumers == 2);
+  for (const auto& consumer : acc.consumer) {
+    CHECK(consumer.consultations == 0);
+  }
+
+  CHECK(acc.AnyActivity());
+  char buf[128];
+  REQUIRE(acc.FormatConsumers(buf, sizeof(buf)) > 0);
+  CHECK(std::string(buf) == " invalid-consumer=2");
+
+  acc.Reset();
+  CHECK(acc.invalid_consumers == 0);
+  CHECK_FALSE(acc.AnyActivity());
 }
 
 TEST_CASE("seam timing: stage totals record count, sum, and max",

@@ -187,18 +187,25 @@ struct SeamTimingAccumulator {
     }
   };
   PerConsumer consumer[kConsumerCount];
+  uint64_t invalid_consumers = 0;
 
   void Reset() {
     for (auto& r : reason) r.Reset();
     for (auto& c : consumer) c.Reset();
+    invalid_consumers = 0;
   }
 
   // Checked consumer indexing: an out-of-range kind (including the kCount
-  // sentinel) must never write past the array; it clamps to the last real
-  // kind, which the formatter names honestly and the completeness test pins.
-  PerConsumer& ConsumerSlot(ConsumerKind kind) {
+  // sentinel) is explicit invalid evidence, never evidence for a real
+  // corridor. The nullable result also prevents a caller from writing through
+  // an invalid index after the observation has been counted.
+  PerConsumer* ConsumerSlot(ConsumerKind kind) {
     uint32_t i = uint32_t(kind);
-    return consumer[i < kConsumerCount ? i : kConsumerCount - 1];
+    if (i >= kConsumerCount) {
+      ++invalid_consumers;
+      return nullptr;
+    }
+    return &consumer[i];
   }
 
   bool AnyActivity() const {
@@ -208,7 +215,7 @@ struct SeamTimingAccumulator {
     for (const auto& c : consumer) {
       if (c.consultations) return true;
     }
-    return false;
+    return invalid_consumers != 0;
   }
 
   // Formats the non-zero entries into `buf`. Two lines' worth of content in
@@ -258,6 +265,9 @@ struct SeamTimingAccumulator {
         if (w > 0) n += size_t(w) < cap - n ? size_t(w) : cap - n;
       }
     };
+    if (invalid_consumers) {
+      put(" invalid-consumer=%llu", (unsigned long long)invalid_consumers);
+    }
     for (uint32_t i = 0; i < kConsumerCount; ++i) {
       const PerConsumer& c = consumer[i];
       if (!c.consultations) continue;
