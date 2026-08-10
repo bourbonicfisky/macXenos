@@ -1098,7 +1098,7 @@ bool MetalCommandProcessor::SetupContext() {
   // misidentified from fps profiles alone — the log states the truth.
   XELOGI(
       "MetalCommandProcessor: MODE submission={} arena={} ({} MB) retire-tags={}",
-      (std::getenv("XE_METAL_SYNC_WAIT") || !std::getenv("XE_METAL_ASYNC"))
+      (std::getenv("XE_METAL_SYNC_WAIT") || !AsyncSubmissionEnabled())
           ? "SYNC-WAIT"
           : "async",
       S7ArenaResetOff() ? "reset-per-buffer" : "ring",
@@ -1933,13 +1933,40 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
 // old bump arena). Only sound combined with XE_METAL_SYNC_WAIT=1.
 // Split variants for narrowing: XE_METAL_S7_OFF_ARENA (ring reset only),
 // XE_METAL_S7_OFF_TAGS (zero retire tags only).
+bool MetalCommandProcessor::AsyncSubmissionEnabled() {
+  // PROMOTED 2026-08-09 (promote-metal-async-submission, GO at gate binary
+  // feadfe8f…): unset = ON. The historical ~1/500-swap fault did not occur in
+  // 48,640 engaged async swaps (95% UB 1/16,236 swaps — a BOUND, monitored,
+  // not "fixed"; see docs/metal_async_submission_promotion_gate.md). Exact
+  // "0" restores full pre-promotion sync semantics bit-identically; malformed
+  // warns once and fails closed to that same pre-promotion default — a
+  // promotion never widens what counts as enabled beyond unset/exact-1.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_ASYNC");
+    if (!value || !value[0]) {
+      return true;  // promoted default
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_ASYNC='{}' is malformed; failing closed to the "
+          "pre-promotion synchronous default (use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::S7LifetimeOff() {
-  // DEFAULT ON (pre-S7 semantics) until the async lifetime race is found:
-  // the S7/S8 fast path (28.5 vs 21 fps live) faults ~1/500 swaps in
-  // gameplay — a timing race that hides under shader validation and hasn't
-  // reproduced in replay (even 16x ring stress / loop stress). XE_METAL_ASYNC=1
-  // opts back into the full async+ring+tags path for the hunt.
-  static const bool s_async = std::getenv("XE_METAL_ASYNC") != nullptr;
+  // Pre-promotion note (historical): the S7/S8 fast path faulted ~1/500
+  // swaps in gameplay and hid under shader validation. The promotion gate
+  // measured zero episodes over 48,640 engaged swaps; fault-free exposure is
+  // a MONITORED property (standing metal-async-submission spec), and any
+  // async fault episode is triaged against these lifetime seams first.
+  static const bool s_async = AsyncSubmissionEnabled();
   static const bool s_off =
       std::getenv("XE_METAL_S7_OFF") != nullptr || !s_async;
   return s_off;
@@ -3075,10 +3102,12 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   // cadence, not an inference from frames or swaps.
   zero_copy_cost_.Count(metal::ZeroCopyCostCounter::kSubmissionCommits);
   // S8: NO synchronous wait — the GPU pipelines behind CPU encoding.
-  // XE_METAL_SYNC_WAIT=1 restores the pre-S8 commit+wait for A/B.
+  // PROMOTED default (async). XE_METAL_SYNC_WAIT restores the commit+wait on
+  // the ring/tags lifetime (arm-B diagnostic); XE_METAL_ASYNC=0 restores the
+  // full pre-promotion sync semantics via AsyncSubmissionEnabled().
   static const bool s_sync_wait =
       std::getenv("XE_METAL_SYNC_WAIT") != nullptr ||
-      std::getenv("XE_METAL_ASYNC") == nullptr;
+      !AsyncSubmissionEnabled();
   if (s_sync_wait) {
     // Counted on the branch that actually stalls, not from the mode flag: a
     // commit that returns and a commit that waits for the GPU are different

@@ -138,6 +138,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // reclamation frees exactly what completed submissions can no longer read.
   uint64_t CurrentEncodingSubmission() const { return submission_counter_ + 1; }
   // XE_METAL_S7_OFF=1 live-bisect kill switch (pre-S7 lifetime semantics).
+  // PROMOTED default (promote-metal-async-submission, GO 2026-08-09):
+  // unset = async submission + ring arena + retirement tags; exact
+  // XE_METAL_ASYNC=0 = full pre-promotion sync semantics (bit-identical
+  // rollback); exact 1 = async (explicit); anything else warns once and
+  // fails closed to the pre-promotion sync default. XE_METAL_SYNC_WAIT
+  // retains its independent meaning (sync submission on the ring/tags
+  // lifetime -- the lifetime-isolation diagnostic).
+  static bool AsyncSubmissionEnabled();
   static bool S7LifetimeOff();
   static bool S7ArenaResetOff();  // XE_METAL_S7_OFF_ARENA
   static bool S7TagsOff();        // XE_METAL_S7_OFF_TAGS
