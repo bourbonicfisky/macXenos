@@ -2229,7 +2229,8 @@ bool MetalCommandProcessor::ArenaAllocate(uint32_t size, uint32_t alignment,
   // frees the ring tail.)
   uint64_t completed = completed_submission_.load(std::memory_order_acquire);
   if (completed < submission_counter_) {
-    if (WaitForSubmission(completed + 1)) {
+    if (SeamTimedDirectWait(metal::SeamDirectWait::kArenaReclaim,
+                            completed + 1)) {
       upload_arena_->Reclaim(
           completed_submission_.load(std::memory_order_acquire));
       PumpCompletedActions();
@@ -2800,7 +2801,8 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
     case ZPDQueryAdmission::kFailed:
       return QueryOpenResult::kFailed;
     case ZPDQueryAdmission::kWaitForOldestResolve:
-      if (!WaitForSubmission(admission.oldest_pending_submission)) {
+      if (!SeamTimedDirectWait(metal::SeamDirectWait::kZpdAdmission,
+                               admission.oldest_pending_submission)) {
         return QueryOpenResult::kFailed;
       }
       PumpQueryResolves();
@@ -2937,7 +2939,8 @@ bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
   }
   if (wait_for_submission >
           completed_submission_.load(std::memory_order_acquire) &&
-      !WaitForSubmission(wait_for_submission)) {
+      !SeamTimedDirectWait(metal::SeamDirectWait::kQueryResolve,
+                           wait_for_submission)) {
     return false;
   }
   PumpQueryResolves();
@@ -2999,16 +3002,38 @@ inline uint64_t SeamNowNs() {
 }
 }  // namespace
 
+bool MetalCommandProcessor::SeamTimedDirectWait(metal::SeamDirectWait site,
+                                                uint64_t submission) {
+  if (!SeamTimingEnabled()) {
+    return WaitForSubmission(submission);
+  }
+  auto& d = seam_timing_.direct[uint32_t(site)];
+  ++d.calls;
+  const uint64_t t0 = SeamNowNs();
+  bool did_block = false;
+  bool ok = WaitForSubmission(submission, 4000, &did_block);
+  d.wait.Record(SeamNowNs() - t0);
+  if (did_block) {
+    ++d.blocked;
+  }
+  if (!ok) {
+    ++d.timeouts;
+  }
+  return ok;
+}
+
 void MetalCommandProcessor::EmitSeamTimingReport(const char* site) {
   if (!SeamTimingEnabled() || !seam_timing_.AnyActivity()) {
     return;
   }
   char reasons_buf[1536];
   char consumers_buf[2048];
+  char direct_buf[512];
   seam_timing_.FormatReasons(reasons_buf, sizeof(reasons_buf));
   seam_timing_.FormatConsumers(consumers_buf, sizeof(consumers_buf));
-  XELOGI("MetalSeamTiming[{}]: reasons{} | consumers{}", site, reasons_buf,
-         consumers_buf);
+  seam_timing_.FormatDirect(direct_buf, sizeof(direct_buf));
+  XELOGI("MetalSeamTiming[{}]: reasons{} | consumers{} | direct{}", site,
+         reasons_buf, consumers_buf, direct_buf);
   seam_timing_.Reset();
 }
 

@@ -87,6 +87,50 @@ TEST_CASE("seam timing: invalid consumer kinds never enter a real corridor",
   CHECK_FALSE(acc.AnyActivity());
 }
 
+TEST_CASE("seam timing: direct-wait sites are exhaustive, named, and unique",
+          "[seamtiming]") {
+  std::set<std::string> names;
+  for (uint32_t i = 0; i < uint32_t(SeamDirectWait::kCount); ++i) {
+    const char* name = SeamDirectWaitName(SeamDirectWait(i));
+    REQUIRE(name != nullptr);
+    REQUIRE(name[0] != '\0');
+    CAPTURE(i, name);
+    REQUIRE(names.insert(name).second);
+  }
+  REQUIRE(SeamDirectWaitName(SeamDirectWait::kCount) == nullptr);
+}
+
+TEST_CASE("seam timing: direct-wait accounting and formatting",
+          "[seamtiming]") {
+  SeamTimingAccumulator acc;
+  char buf[256];
+  // Inactive layer formats to a valid empty string (poisoned buffer).
+  std::memset(buf, 0x7f, sizeof(buf));
+  CHECK(acc.FormatDirect(buf, sizeof(buf)) == 0);
+  REQUIRE(buf[0] == '\0');
+
+  auto& d = acc.direct[uint32_t(SeamDirectWait::kArenaReclaim)];
+  d.calls = 3;
+  d.blocked = 2;
+  d.timeouts = 1;
+  d.wait.Record(5'000'000);
+  d.wait.Record(2'000'000);
+  CHECK(acc.AnyActivity());
+  size_t n = acc.FormatDirect(buf, sizeof(buf));
+  REQUIRE(n > 0);
+  std::string s(buf);
+  CHECK(s.find("arena-reclaim=3(blk 2, to 1, wait 7000us/max5000)") !=
+        std::string::npos);
+  // Untouched sites are absent.
+  CHECK(s.find("zpd-admission") == std::string::npos);
+  CHECK(s.find("query-resolve") == std::string::npos);
+
+  acc.Reset();
+  CHECK_FALSE(acc.AnyActivity());
+  CHECK(d.calls == 0);
+  CHECK(d.wait.total_ns == 0);
+}
+
 TEST_CASE("seam timing: stage totals record count, sum, and max",
           "[seamtiming]") {
   SeamStageTotals t;

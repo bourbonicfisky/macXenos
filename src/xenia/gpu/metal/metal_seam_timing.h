@@ -93,6 +93,32 @@ inline const char* SeamBoundaryReasonName(SeamBoundaryReason reason) {
   return nullptr;
 }
 
+// DIRECT waits (frametime task 3.1 completion): WaitForSubmission call sites
+// that are neither submission boundaries nor consumer requests. Under the
+// promoted async default these are live stall candidates; before this layer
+// they sat in the census RESIDUAL. No default -- a new direct-wait site must
+// name itself.
+enum class SeamDirectWait : uint32_t {
+  kArenaReclaim,   // upload-ring full: wait for oldest in-flight, reclaim
+  kZpdAdmission,   // ZPD admission kWaitForOldestResolve
+  kQueryResolve,   // AwaitQueryResolve completion wait
+  kCount,
+};
+
+inline const char* SeamDirectWaitName(SeamDirectWait w) {
+  switch (w) {
+    case SeamDirectWait::kArenaReclaim:
+      return "arena-reclaim";
+    case SeamDirectWait::kZpdAdmission:
+      return "zpd-admission";
+    case SeamDirectWait::kQueryResolve:
+      return "query-resolve";
+    case SeamDirectWait::kCount:
+      break;
+  }
+  return nullptr;
+}
+
 // Which term of required_submission = max(boundary, max_wait) dominated.
 enum class SeamBindingTerm : uint32_t {
   kBoundary,  // the request's own just-committed boundary
@@ -189,9 +215,24 @@ struct SeamTimingAccumulator {
   PerConsumer consumer[kConsumerCount];
   uint64_t invalid_consumers = 0;
 
+  // DIRECT layer, indexed by SeamDirectWait (task 3.1 completion): direct
+  // WaitForSubmission sites outside boundaries and consumer requests.
+  struct PerDirect {
+    uint64_t calls = 0;      // times the site reached its wait
+    uint64_t blocked = 0;    // LOCKED re-check proved the CV wait was entered
+    uint64_t timeouts = 0;   // WaitForSubmission returned false
+    SeamStageTotals wait;    // wall time of the WaitForSubmission call
+    void Reset() {
+      calls = blocked = timeouts = 0;
+      wait.Reset();
+    }
+  };
+  PerDirect direct[uint32_t(SeamDirectWait::kCount)];
+
   void Reset() {
     for (auto& r : reason) r.Reset();
     for (auto& c : consumer) c.Reset();
+    for (auto& d : direct) d.Reset();
     invalid_consumers = 0;
   }
 
@@ -214,6 +255,9 @@ struct SeamTimingAccumulator {
     }
     for (const auto& c : consumer) {
       if (c.consultations) return true;
+    }
+    for (const auto& d : direct) {
+      if (d.calls) return true;
     }
     return invalid_consumers != 0;
   }
@@ -251,6 +295,28 @@ struct SeamTimingAccumulator {
           (unsigned long long)(r.post_wait.total_ns / 1000),
           (unsigned long long)(r.post_wait.max_ns / 1000),
           (unsigned long long)r.post_wait_blocked);
+    }
+    return n;
+  }
+
+  size_t FormatDirect(char* buf, size_t cap) const {
+    if (!cap) return 0;
+    buf[0] = '\0';  // see FormatReasons: never an uninitialized C string
+    size_t n = 0;
+    auto put = [&](const char* fmt, auto... args) {
+      if (n < cap) {
+        int w = std::snprintf(buf + n, cap - n, fmt, args...);
+        if (w > 0) n += size_t(w) < cap - n ? size_t(w) : cap - n;
+      }
+    };
+    for (uint32_t i = 0; i < uint32_t(SeamDirectWait::kCount); ++i) {
+      const PerDirect& d = direct[i];
+      if (!d.calls) continue;
+      put(" %s=%llu(blk %llu, to %llu, wait %lluus/max%llu)",
+          SeamDirectWaitName(SeamDirectWait(i)), (unsigned long long)d.calls,
+          (unsigned long long)d.blocked, (unsigned long long)d.timeouts,
+          (unsigned long long)(d.wait.total_ns / 1000),
+          (unsigned long long)(d.wait.max_ns / 1000));
     }
     return n;
   }

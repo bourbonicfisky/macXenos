@@ -600,6 +600,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // attribution. A timing-enabled run is an ATTRIBUTION condition, not
   // comparable to the pinned performance baselines.
   static bool SeamTimingEnabled();
+  // WaitForSubmission wrapped with direct-wait attribution (seam timing's
+  // third layer, frametime 3.1): times the call and records factual
+  // blocked-ness under the given site tag. Behavior-identical to a bare
+  // WaitForSubmission when the gate is off.
+  bool SeamTimedDirectWait(metal::SeamDirectWait site, uint64_t submission);
   // Formats + logs the seam accumulator under `site`, then resets it. No-op
   // when the gate is off or nothing accumulated.
   void EmitSeamTimingReport(const char* site);
