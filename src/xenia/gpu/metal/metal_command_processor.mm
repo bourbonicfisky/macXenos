@@ -1603,6 +1603,9 @@ void MetalCommandProcessor::ShutdownContext() {
   // EmitLifecycleReports explicitly while logging is alive. This emission
   // still covers live-run teardown remainders.
   EmitSeamTimingReport("final");
+  // Need-based-waits engagement, on the same teardown path and with the same
+  // headless caveat: a trace-dump run gets its line from EmitLifecycleReports.
+  EmitNeedBasedWaitReport("final");
   // PrimitiveProcessor: destroy before shared_memory_ (it holds a reference).
   primitive_processor_.reset();
   shared_memory_.reset();
@@ -1980,6 +1983,32 @@ bool MetalCommandProcessor::S7ArenaResetOff() {
 bool MetalCommandProcessor::S7TagsOff() {
   static const bool s_off = std::getenv("XE_METAL_S7_OFF_TAGS") != nullptr;
   return s_off || S7LifetimeOff();
+}
+
+bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
+  // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF, per the house flag
+  // contract (SeamTimingEnabled is the same shape). This is NOT a promotion:
+  // unset stays on the unconditional synchronous consumer boundary, and only
+  // the frozen D5 gate may change that. Malformed fails closed to OFF rather
+  // than to "probably meant on" -- a diagnostic that widened what counts as
+  // enabled would put an unmeasured path into a control arm.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv(metal::kNeedBasedWaitsEnvVar);
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_NEED_BASED_WAITS='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
 }
 
 void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
@@ -3037,8 +3066,30 @@ void MetalCommandProcessor::EmitSeamTimingReport(const char* site) {
   seam_timing_.Reset();
 }
 
+void MetalCommandProcessor::EmitNeedBasedWaitReport(const char* site) {
+  const bool enabled = NeedBasedWaitsEnabled();
+  if (!enabled && !need_wait_meter_.AnyActivity()) {
+    // Flag off AND nothing ever reached the corridor: no honest line to print.
+    // A flag-off run that DID serve consumer requests still prints, because the
+    // request denominator is what the ON arm's shares are read against.
+    return;
+  }
+  char buf[512];
+  need_wait_meter_.Format(buf, sizeof(buf), enabled);
+  // The meter is NOT reset here. Seam timing resets per emission because it
+  // reports rates within a window; this reports the session's engagement, which
+  // a gate arm reads once from the final line -- resetting would make the last
+  // line describe only the tail of the run.
+  XELOGI("MetalNeedBasedWaits[{}]: {}{}", site, buf,
+         enabled && !need_wait_meter_.Engaged()
+             ? " ENGAGEMENT=NONE (an enabled arm that never published "
+               "immediately and never took a narrow wait is invalid, not data)"
+             : "");
+}
+
 void MetalCommandProcessor::EmitLifecycleReports(const char* site) {
   EmitSeamTimingReport(site);
+  EmitNeedBasedWaitReport(site);
 }
 
 void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
@@ -3390,6 +3441,11 @@ void MetalCommandProcessor::FinalizeSwapFrame() {
   if (metal::ZeroCopyOverlapReportDue(finalize_index,
                                       kZeroCopyOverlapSwapReportInterval)) {
     ReportZeroCopyLifecycle("swap");
+    // Need-based-waits engagement rides this BOUNDED cadence, not the per-swap
+    // seam cadence: the meter reports session totals rather than a window, so a
+    // per-swap line would restate a growing number ~30x/second while the seam
+    // report legitimately prints a fresh window each time.
+    EmitNeedBasedWaitReport("swap");
   }
   frame_gpu_fault_count_ = 0;
   draw_skip_accounting_.EndFrame();
@@ -8193,9 +8249,11 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
                                       metal::TransitState::kPendingMemexport,
                                       me.submission, me.authority_sequence};
       // ONE gate, shared with conformance. A tagged record is decided by its
-      // own submission; an untagged one (submission 0, the default lifecycle)
-      // is publishable only under the caller's synchronous-boundary evidence,
-      // which arrives as a parameter and is never derived here.
+      // own submission -- the ordinary shape since the async promotion -- while
+      // an untagged one (submission 0: the XE_METAL_ASYNC=0 rollback, an S7
+      // kill switch, or a pre-submission registration) is publishable only
+      // under the caller's synchronous-boundary evidence, which arrives as a
+      // parameter and is never derived here.
       metal::GatedMemexportConvergence gated =
           metal::ConvergeCompletedMemexportRam(
               producer, completed, boundary_evidence, convergence_target,
@@ -8359,11 +8417,67 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   for (auto writeback_it = writeback_begin; writeback_it != writeback_end;
        ++writeback_it) {
     PendingWriteback& wb = *writeback_it;
-    if (wb.submission > completed ||
-        !in_filter(wb.guest_addr, wb.range_bytes(),
-                   wb.authority_sequence)) {
+    if (!in_filter(wb.guest_addr, wb.range_bytes(), wb.authority_sequence)) {
       if (!exact_sequence) {
         still_pending.push_back(wb);
+      }
+      continue;
+    }
+    std::optional<metal::GuestRange> wb_range =
+        metal::GuestRange::FromBaseLength(wb.guest_addr, wb.range_bytes());
+    if (!wb_range) {
+      // No in-bounds byte. Unreachable behind in_filter (which builds the same
+      // range and requires it), but retained rather than dropped so a record
+      // never leaves the queue outside the explicit success path -- the same
+      // rule the memexport half above applies.
+      if (!exact_sequence) {
+        still_pending.push_back(wb);
+      }
+      continue;
+    }
+    // ONE gate for BOTH producer kinds. This half historically tested only
+    // `wb.submission > completed`, which reads 0 <= completed as completion and
+    // therefore admitted an UNTAGGED resolve record with no proof at all --
+    // exactly the publication the memexport half refuses. Route it through the
+    // same shared authority predicate (`DecideMemexportConvergenceGate`, named
+    // for the seam it was written at, but a rule about tags and evidence that
+    // never looks at TransitState): a tagged record is decided by its own tag
+    // alone, an untagged one only by the caller's synchronous-boundary proof,
+    // and untagged-without-evidence is refused and RETAINED.
+    //
+    // Behaviour is unchanged for every shape production actually produces. The
+    // boundary path mints kSynchronousBoundaryCompleted before draining, so
+    // untagged records (the XE_METAL_ASYNC=0 rollback shape) publish as before;
+    // the need-based path passes kNone but classifies any untagged record as a
+    // fallback, so every record it drains is tagged and retired. What changes
+    // is that a future caller pairing kNone with an untagged record now fails
+    // CLOSED here instead of publishing bytes the GPU may still be writing.
+    metal::PendingProducer wb_producer{*wb_range,
+                                       metal::TransitState::kPendingResolve,
+                                       wb.submission, wb.authority_sequence};
+    const metal::MemexportConvergenceGate wb_gate =
+        metal::DecideMemexportConvergenceGate(wb_producer, completed,
+                                              boundary_evidence);
+    if (!metal::MemexportConvergenceGateAttempts(wb_gate)) {
+      if (!exact_sequence) {
+        still_pending.push_back(wb);
+      }
+      if (wb_gate == metal::MemexportConvergenceGate::
+                         kNotAttemptedUntaggedWithoutBoundary) {
+        // Bounded and named: an in-flight submission is the ordinary "not yet"
+        // and stays silent, but reaching this from a consumer corridor would
+        // mean the boundary evidence did not survive the threading.
+        static uint32_t s_ungated_writebacks = 0;
+        if (s_ungated_writebacks++ < 8) {
+          XELOGW(
+              "MetalCommandProcessor: resolve writeback {:08X}(+{}) not "
+              "published ({}, submission={} completed={} evidence={}); "
+              "retained",
+              wb.guest_addr, wb.range_bytes(),
+              metal::MemexportConvergenceGateName(wb_gate), wb.submission,
+              completed,
+              metal::MemexportBoundaryEvidenceName(boundary_evidence));
+        }
       }
       continue;
     }
@@ -8752,88 +8866,174 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
       }
     }
   }
+  // Factual denominator, counted in BOTH flag states so an ON arm's shares are
+  // read against a comparable OFF arm rather than against itself.
+  need_wait_meter_.CountRequest();
 
-  // One completion boundary for the whole consumer request. A producer in the
-  // current command buffer carries zero on a DEFAULT launch -- S7TagsOff() is
-  // true unless XE_METAL_ASYNC is set, so the publication seam registers
-  // `S7TagsOff() ? 0 : CurrentEncodingSubmission()` and untagged is the normal
-  // record shape, not a diagnostic mode. The tag therefore cannot describe
-  // finality on its own, so capture the real boundary before the commit and
-  // prove it completed independently of the record.
-  uint64_t boundary_submission =
+  // The submission the OPEN frame command buffer will get, or 0 when no buffer
+  // is open. ONE guarded read, shared by both paths below: the existing
+  // `frame_command_buffer_` guard is what makes CurrentEncodingSubmission()
+  // meaningful, and nothing between here and its uses can open or close a
+  // buffer.
+  //
+  // For the boundary path this is `boundary_submission`, the real boundary
+  // captured BEFORE the commit so the proof does not depend on the record. That
+  // proof exists because an UNTAGGED record cannot describe its own finality;
+  // since the async promotion untagged is the ROLLBACK shape rather than the
+  // default (S7TagsOff() is false unless XE_METAL_ASYNC=0 or an S7 kill switch
+  // is set), which is exactly what makes the need-based classification below
+  // decidable for the ordinary record.
+  const uint64_t boundary_submission =
       frame_command_buffer_ ? CurrentEncodingSubmission() : 0;
-  if (seam_c && boundary_submission) {
-    // A live buffer at the boundary means exactly one commit below (the
-    // AndWait closes at most one buffer): present == commit here.
-    ++seam_c->cb_present_commits;
-  }
-  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);
-  uint64_t required_submission =
-      std::max(boundary_submission, decision.max_wait_submission);
-  if (seam_c) {
-    // Which term of max() dominated -- current boundary, an older selected
-    // producer, an equal-and-nonzero tie, or BOTH ZERO. The zero case is
-    // representable (untagged producers under the default S7TagsOff lifecycle
-    // with no open buffer, e.g. right after a prior boundary) and is not a
-    // meaningful "tie", so it gets its own bucket.
-    uint32_t term;
-    if (!boundary_submission && !decision.max_wait_submission) {
-      term = uint32_t(metal::SeamBindingTerm::kZero);
-    } else if (boundary_submission > decision.max_wait_submission) {
-      term = uint32_t(metal::SeamBindingTerm::kBoundary);
-    } else if (decision.max_wait_submission > boundary_submission) {
-      term = uint32_t(metal::SeamBindingTerm::kProducer);
-    } else {
-      term = uint32_t(metal::SeamBindingTerm::kTie);
-    }
-    ++seam_c->binding[term];
-  }
-  uint64_t completed_high_water =
-      completed_submission_.load(std::memory_order_acquire);
-  if (required_submission > completed_high_water) {
-    // "Requested" from this pre-check; "blocked" ONLY from WaitForSubmission's
-    // locked re-check (out_did_block) -- the pre-check races with completion
-    // and must never claim a stall (the function's own counting rule).
-    if (seam_c) {
-      ++seam_c->wait_requested;
-    }
-    const uint64_t seam_rw0 = seam_on ? SeamNowNs() : 0;
-    bool did_block = false;
-    bool waited = WaitForSubmission(required_submission, 4000,
-                                    seam_c ? &did_block : nullptr);
-    if (seam_c) {
-      seam_c->required_wait.Record(SeamNowNs() - seam_rw0);
-      if (did_block) {
-        ++seam_c->wait_blocked;
-      }
-    }
-    if (!waited) {
-      // Failed-wait path: the commit already happened but the drain did not.
-      if (seam_c) {
-        ++seam_c->wait_timeout;
-        ++seam_c->failed;
-        seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
-      }
-      outcome.complete = false;
-      return outcome;
-    }
-    PumpCompletedActions();
-    completed_high_water =
-        completed_submission_.load(std::memory_order_acquire);
+
+  // Route A classification (OpenSpec optimize-need-based-consumer-waits, D1),
+  // behind XE_METAL_NEED_BASED_WAITS (exact-1, default OFF). The corridor has
+  // no classification logic of its own: the whole rule is the device-free
+  // helper, and everything it cannot decide falls through to the unchanged
+  // boundary path below.
+  metal::NeedBasedWaitClassification need_class;
+  const bool need_based_enabled = NeedBasedWaitsEnabled();
+  if (need_based_enabled) {
+    need_class = metal::ClassifyNeedBasedWait(
+        decision.selected, completed_submission_.load(std::memory_order_acquire),
+        boundary_submission);
+    need_wait_meter_.RecordClassification(need_class);
   }
 
-  // This is the ONLY place in the backend that can mint synchronous-boundary
-  // evidence, and it does so from a measurement rather than from the fact that
-  // it reached this line: EndFrameEncoderAndWait ran above, and the boundary it
-  // established is proven to be at or below the high-water mark acquired after
-  // the wait. A record carrying no owning submission (the default lifecycle) is
-  // publishable only under this proof, which is why it is threaded down through
-  // DrainSelectedPendingProducers into DrainPendingWritebacks instead of being
-  // re-derived at the convergence site.
   metal::MemexportBoundaryEvidence boundary_evidence =
-      required_submission <= completed_high_water
-          ? metal::MemexportBoundaryEvidence::kSynchronousBoundaryCompleted
-          : metal::MemexportBoundaryEvidence::kNone;
+      metal::MemexportBoundaryEvidence::kNone;
+  if (need_based_enabled && need_class.takes_need_path()) {
+    // NEED-BASED PATH. Publication stays licensed by the SAME shared authority
+    // gate the boundary path uses; the only thing that changed is how little
+    // the corridor waits before consulting it. Evidence is deliberately kNone
+    // (design D1a): every selected record here is tagged, the gate decides a
+    // tagged record by its tag alone, and minting boundary evidence we did not
+    // earn is precisely the failure this vocabulary exists to prevent.
+    if (need_class.decision == metal::NeedBasedWaitDecision::kNarrowWait) {
+      if (need_class.must_commit_open_buffer) {
+        // A selected producer is still being encoded in the open buffer, so it
+        // must be committed or the wait could never be satisfied. This is the
+        // ASYNC commit -- no full wait -- which is the whole difference from
+        // EndFrameEncoderAndWait.
+        if (seam_c) {
+          ++seam_c->cb_present_commits;
+        }
+        EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+      }
+      if (seam_c) {
+        ++seam_c->wait_requested;
+      }
+      const uint64_t wait_t0 = SeamNowNs();
+      bool did_block = false;
+      const bool waited =
+          WaitForSubmission(need_class.wait_submission, 4000, &did_block);
+      const uint64_t wait_ns = SeamNowNs() - wait_t0;
+      need_wait_meter_.RecordWait(wait_ns, did_block, /*timed_out=*/!waited);
+      if (seam_c) {
+        seam_c->required_wait.Record(wait_ns);
+        if (did_block) {
+          ++seam_c->wait_blocked;
+        }
+      }
+      if (!waited) {
+        // Fail closed exactly as the boundary path does: incomplete outcome, no
+        // partial publication, no evidence minted. ONE side effect is NEW and
+        // intended (design D1): when no selected tag lived in the open buffer
+        // we did not commit it, so unrelated open-buffer work is still
+        // uncommitted here, where the historical path had always committed
+        // before waiting. The corridor no longer commits work it does not need,
+        // and a later boundary commits that work normally.
+        if (seam_c) {
+          ++seam_c->wait_timeout;
+          ++seam_c->failed;
+          seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
+        }
+        outcome.complete = false;
+        return outcome;
+      }
+      PumpCompletedActions();
+    }
+    // kPublishImmediate falls straight through: no commit, no wait. The drain
+    // re-acquires the completed high-water itself and re-runs the gate per
+    // record, so a producer that somehow is not complete retires nothing and
+    // the consumer fails closed rather than publishing.
+  } else {
+    // BOUNDARY PATH -- unchanged. One completion boundary for the whole
+    // consumer request; the boundary was captured above, before the commit.
+    if (seam_c && boundary_submission) {
+      // A live buffer at the boundary means exactly one commit below (the
+      // AndWait closes at most one buffer): present == commit here.
+      ++seam_c->cb_present_commits;
+    }
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);
+    uint64_t required_submission =
+        std::max(boundary_submission, decision.max_wait_submission);
+    if (seam_c) {
+      // Which term of max() dominated -- current boundary, an older selected
+      // producer, an equal-and-nonzero tie, or BOTH ZERO. The zero case is
+      // representable (untagged producers with no open buffer -- the
+      // XE_METAL_ASYNC=0 rollback shape, or a record registered before any
+      // submission existed) and is not a meaningful "tie", so it gets its own
+      // bucket.
+      uint32_t term;
+      if (!boundary_submission && !decision.max_wait_submission) {
+        term = uint32_t(metal::SeamBindingTerm::kZero);
+      } else if (boundary_submission > decision.max_wait_submission) {
+        term = uint32_t(metal::SeamBindingTerm::kBoundary);
+      } else if (decision.max_wait_submission > boundary_submission) {
+        term = uint32_t(metal::SeamBindingTerm::kProducer);
+      } else {
+        term = uint32_t(metal::SeamBindingTerm::kTie);
+      }
+      ++seam_c->binding[term];
+    }
+    uint64_t completed_high_water =
+        completed_submission_.load(std::memory_order_acquire);
+    if (required_submission > completed_high_water) {
+      // "Requested" from this pre-check; "blocked" ONLY from WaitForSubmission's
+      // locked re-check (out_did_block) -- the pre-check races with completion
+      // and must never claim a stall (the function's own counting rule).
+      if (seam_c) {
+        ++seam_c->wait_requested;
+      }
+      const uint64_t seam_rw0 = seam_on ? SeamNowNs() : 0;
+      bool did_block = false;
+      bool waited = WaitForSubmission(required_submission, 4000,
+                                      seam_c ? &did_block : nullptr);
+      if (seam_c) {
+        seam_c->required_wait.Record(SeamNowNs() - seam_rw0);
+        if (did_block) {
+          ++seam_c->wait_blocked;
+        }
+      }
+      if (!waited) {
+        // Failed-wait path: the commit already happened but the drain did not.
+        if (seam_c) {
+          ++seam_c->wait_timeout;
+          ++seam_c->failed;
+          seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
+        }
+        outcome.complete = false;
+        return outcome;
+      }
+      PumpCompletedActions();
+      completed_high_water =
+          completed_submission_.load(std::memory_order_acquire);
+    }
+
+    // This is the ONLY place in the backend that can mint synchronous-boundary
+    // evidence, and it does so from a measurement rather than from the fact that
+    // it reached this line: EndFrameEncoderAndWait ran above, and the boundary it
+    // established is proven to be at or below the high-water mark acquired after
+    // the wait. A record carrying no owning submission is publishable only under
+    // this proof, which is why it is threaded down through
+    // DrainSelectedPendingProducers into DrainPendingWritebacks instead of being
+    // re-derived at the convergence site.
+    boundary_evidence =
+        required_submission <= completed_high_water
+            ? metal::MemexportBoundaryEvidence::kSynchronousBoundaryCompleted
+            : metal::MemexportBoundaryEvidence::kNone;
+  }
 
   const uint64_t seam_d0 = seam_on ? SeamNowNs() : 0;
   outcome.drain = DrainSelectedPendingProducers(decision, boundary_evidence);

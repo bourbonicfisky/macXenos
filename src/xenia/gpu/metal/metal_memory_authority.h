@@ -117,13 +117,19 @@ struct PendingProducer {
 // same completed-submission high-water mark the command processor tracks.
 inline bool ProducerComplete(const PendingProducer& producer,
                              uint64_t completed_submission) {
-  // Submission 0 means "no owning submission tag", which is the DEFAULT on this
-  // backend, not a diagnostic: MetalCommandProcessor::S7TagsOff() is true
-  // unless XE_METAL_ASYNC is set, so the memexport publication seam registers
-  // records with 0. Such a record is not decidable from its tag and must cross
-  // the synchronous commit+wait boundary before RAM convergence; treating
-  // 0 <= 0 as completion here would under-predict that wait for EVERY default
-  // record. The boundary proof is supplied separately, as
+  // Submission 0 means "no owning submission tag". Since the async promotion
+  // (2026-08-09) that is NO LONGER the default shape: MetalCommandProcessor::
+  // S7TagsOff() is false unless XE_METAL_ASYNC=0 or an explicit S7 kill switch
+  // is set, so the publication seams register real submission ids and the
+  // ordinary record IS decidable from its own tag. Untagged is now the rollback
+  // and pre-submission shape.
+  //
+  // The rule below is unchanged BY DESIGN, and the inversion is exactly why it
+  // must stay unchanged: an untagged record is still not decidable from its tag
+  // and must still cross the synchronous commit+wait boundary before RAM
+  // convergence. Treating 0 <= 0 as completion here would make every untagged
+  // record unconditionally publishable, including one whose commit never
+  // happened. The boundary proof is supplied separately, as
   // MemexportBoundaryEvidence, and never inferred inside this predicate.
   return producer.submission != 0 &&
          producer.submission <= completed_submission;
@@ -815,13 +821,18 @@ inline MemexportConvergenceResult ConvergeMemexportRam(
 // Whether the CALLER has independently proven that a record carrying no owning
 // submission tag was nevertheless made final by a synchronous GPU boundary.
 //
-// This vocabulary exists because untagged records are the DEFAULT, not a
-// diagnostic. MetalCommandProcessor::S7LifetimeOff() is true unless
-// XE_METAL_ASYNC is set, S7TagsOff() includes it, and the memexport publication
-// seam registers `S7TagsOff() ? 0 : CurrentEncodingSubmission()` -- so on a
-// normal launch every pending memexport carries submission 0. Their finality
-// comes from the synchronous commit-and-wait the consumer path performs, which
-// the record itself cannot describe.
+// This vocabulary exists because an untagged record's finality comes from the
+// synchronous commit-and-wait the consumer path performs, which the record
+// itself cannot describe.
+//
+// It was written when untagged was the DEFAULT. The async promotion
+// (2026-08-09) inverted that: S7LifetimeOff() is false unless XE_METAL_ASYNC=0
+// or an explicit S7 kill switch is set, S7TagsOff() includes it, and the
+// publication seam registers `S7TagsOff() ? 0 : CurrentEncodingSubmission()` --
+// so on a normal launch every pending memexport carries a REAL submission id.
+// Untagged records remain reachable (the XE_METAL_ASYNC=0 rollback, the S7
+// kill switches, and anything registered before a submission exists), which is
+// why this proof is still required rather than retired.
 //
 // The proof is therefore supplied from outside rather than inferred here, and
 // ProducerComplete is deliberately left alone: teaching the generic tagged
@@ -880,7 +891,8 @@ enum class MemexportConvergenceGate : uint32_t {
   // Tagged (submission != 0) but the owning submission has not completed on the
   // GPU. The target is NOT called.
   kNotAttemptedIncompleteSubmission,
-  // Untagged (submission 0 -- the default lifecycle) and the caller supplied no
+  // Untagged (submission 0 -- the rollback/pre-submission shape since the async
+  // promotion, not the default one) and the caller supplied no
   // synchronous-boundary proof. The target is NOT called: nothing here can tell
   // a finished export from one whose commit never happened.
   kNotAttemptedUntaggedWithoutBoundary,

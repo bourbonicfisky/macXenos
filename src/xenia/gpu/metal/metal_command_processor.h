@@ -28,6 +28,7 @@
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
+#include "xenia/gpu/metal/metal_need_wait_classify.h"
 #include "xenia/gpu/metal/metal_seam_timing.h"
 #include "xenia/gpu/metal/metal_zero_copy_report.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -149,6 +150,14 @@ class MetalCommandProcessor : public CommandProcessor {
   static bool S7LifetimeOff();
   static bool S7ArenaResetOff();  // XE_METAL_S7_OFF_ARENA
   static bool S7TagsOff();        // XE_METAL_S7_OFF_TAGS
+  // XE_METAL_NEED_BASED_WAITS=1 (exact-1 opt-in, warn-once fail-closed,
+  // DEFAULT OFF): the consumer corridor waits for the producers a request
+  // actually selected instead of taking an unconditional synchronous boundary
+  // (OpenSpec optimize-need-based-consumer-waits, Route A). Not a promoted
+  // default and not delivered capability -- the D5 gate decides that. Under
+  // XE_METAL_ASYNC=0 every record is untagged, so the feature classifies every
+  // request as a fallback and is structurally inert regardless of this flag.
+  static bool NeedBasedWaitsEnabled();
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.
@@ -225,15 +234,28 @@ class MetalCommandProcessor : public CommandProcessor {
   // for behavior-preserving internal use and never drains a disjoint record.
   //
   // `boundary_evidence` is the caller's PROOF that a record carrying no owning
-  // submission tag has nevertheless been made final. Untagged records are the
-  // default here (S7TagsOff() is true unless XE_METAL_ASYNC is set, so the
-  // publication seam registers submission 0), and their finality comes from the
-  // synchronous commit-and-wait the consumer path performs, not from the
+  // submission tag has nevertheless been made final. Since the async promotion
+  // (2026-08-09) TAGGED records are the default -- S7TagsOff() is false unless
+  // XE_METAL_ASYNC=0 or an explicit S7 kill switch is set -- so the untagged
+  // case this parameter exists for is now the ROLLBACK/diagnostic shape plus
+  // whatever registers before a submission exists, not the ordinary one. It
+  // still cannot be dropped: an untagged record's finality comes from the
+  // synchronous commit-and-wait the consumer path performs, never from the
   // record. It is a leading parameter with NO default precisely so it cannot be
   // omitted: only ResolvePendingProducerDependencies can establish it, and it
   // is threaded through DrainSelectedPendingProducers to here so the
   // convergence site cannot fabricate it locally. There is exactly one caller
-  // today, and that is the structure, not an accident.
+  // today, and that is the structure, not an accident. Under need-based waits
+  // that caller passes kNone on its tagged paths by design (D1a): the shared
+  // gate decides a tagged record by its tag alone, so no evidence is owed and
+  // none may be invented.
+  //
+  // BOTH halves of this drain consult that one gate
+  // (metal::DecideMemexportConvergenceGate): memexport records via
+  // ConvergeCompletedMemexportRam, resolve writebacks directly. The rule is
+  // about tags and evidence and never reads TransitState, so the two producer
+  // kinds cannot drift apart -- an untagged record of EITHER kind is refused
+  // and retained unless the caller proved a synchronous boundary.
   metal::ProducerDrainOutcome DrainPendingWritebacks(
       metal::MemexportBoundaryEvidence boundary_evidence,
       uint32_t filter_base = 0, uint32_t filter_size = 0xFFFFFFFFu,
@@ -463,6 +485,20 @@ class MetalCommandProcessor : public CommandProcessor {
   // trace runs), reset after each emission. Pure accounting -- nothing in the
   // rendering or authority path reads it.
   metal::SeamTimingAccumulator seam_timing_;
+
+  // Need-based consumer waits engagement meter (design D3). UNCONDITIONAL --
+  // unlike seam timing and the zero-copy cost meter it has no enable switch,
+  // because the D5 gate reads engagement from it and a counter that only counts
+  // when armed cannot tell "the feature never engaged" from "the meter was
+  // off". Advanced only from the GPU thread's consumer corridor, emitted from
+  // the same lifecycle points as the seam report, and NOT reset there: it is a
+  // session total, and it is also the flag's banner for a gate arm. Nothing in
+  // the rendering or authority path reads it.
+  metal::NeedBasedWaitMeter need_wait_meter_;
+  // Formats + logs the meter under `site`. Emitted whenever the flag is on
+  // (an all-zero ON line is the arm-invalidity evidence D5 asks for) or the
+  // meter saw any request at all.
+  void EmitNeedBasedWaitReport(const char* site);
 
   // Bounded, deduplicated reporting of memexport producer classes this backend
   // does not route. Reset at the title/session boundary; holds no guest state
