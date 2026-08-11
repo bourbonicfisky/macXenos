@@ -9,19 +9,55 @@
 
 #include "xenia/hid/scripted/scripted_input_driver.h"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
+#include <variant>
 
 #include "xenia/base/logging.h"
 
 namespace xe::hid::scripted {
 
+namespace {
+
+// Expanded active plus neutral transitions the script will produce. Waits,
+// markers, and completion are not transitions and are excluded.
+uint32_t CountExpandedTransitions(const InputScript& script) {
+  uint64_t count = 0;
+  for (const ScriptStep& step : script.steps()) {
+    if (const auto* input = std::get_if<InputStep>(&step)) {
+      count += static_cast<uint64_t>(input->repeat) * 2;
+    }
+  }
+  return static_cast<uint32_t>(
+      std::min<uint64_t>(count, kMaximumExpandedTransitions));
+}
+
+const char* TransitionKindName(TransitionKind kind) {
+  switch (kind) {
+    case TransitionKind::kActive:
+      return "active";
+    case TransitionKind::kNeutral:
+      return "neutral";
+    default:
+      return "none";
+  }
+}
+
+}  // namespace
+
 ScriptedInputDriver::ScriptedInputDriver(
     xe::ui::Window* window, size_t window_z_order,
     std::shared_ptr<const InputScript> script,
     ScriptedInputTimeline::NowFunction now_function,
-    ScriptedInputTimeline::EventCallback event_callback)
-    : InputDriver(window, window_z_order), script_(std::move(script)) {
+    ScriptedInputTimeline::EventCallback event_callback,
+    bool transition_telemetry)
+    : InputDriver(window, window_z_order),
+      script_(std::move(script)),
+      transition_telemetry_(transition_telemetry) {
+  if (transition_telemetry_ && script_) {
+    expected_transitions_ = CountExpandedTransitions(*script_);
+  }
   if (!now_function) {
     now_function = &ScriptedInputDriver::SteadyNow;
   }
@@ -101,8 +137,17 @@ X_RESULT ScriptedInputDriver::GetState(uint32_t user_index,
     return X_ERROR_INVALID_PARAMETER;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (transition_telemetry_) {
+    ++poll_ordinal_;
+  }
   if (!timeline_->completed()) {
     CacheState(timeline_->Poll());
+  }
+  if (transition_telemetry_) {
+    LogTransitionObservation();
+    if (timeline_->completed()) {
+      LogTransitionSummary();
+    }
   }
   *out_state = cached_state_;
   return X_ERROR_SUCCESS;
@@ -155,6 +200,54 @@ bool ScriptedInputDriver::GetControllerIdentity(
 bool ScriptedInputDriver::completed() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return timeline_->completed();
+}
+
+uint32_t ScriptedInputDriver::transition_records_emitted() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return logged_transitions_;
+}
+
+uint32_t ScriptedInputDriver::completion_records_emitted() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return logged_summaries_;
+}
+
+void ScriptedInputDriver::LogTransitionObservation() {
+  const uint32_t ordinal = timeline_->transition_ordinal();
+  if (ordinal == last_transition_ordinal_) {
+    return;
+  }
+  last_transition_ordinal_ = ordinal;
+  ++observed_transitions_;
+  // Fail closed: never emit more records than the script can produce.
+  if (observed_transitions_ > expected_transitions_) {
+    return;
+  }
+  ++logged_transitions_;
+  XELOGI(
+      "scripted_input_transition script_digest={:016X} ordinal={} "
+      "expected_state_transitions={} "
+      "kind={} state=B{:04X}:LT{:02X}:RT{:02X}:LX{}:LY{}:RX{}:RY{} poll={} "
+      "packet={} elapsed_ms={}",
+      script_->content_digest(), ordinal, expected_transitions_,
+      TransitionKindName(timeline_->transition_kind()), gamepad_state_.buttons,
+      gamepad_state_.left_trigger, gamepad_state_.right_trigger,
+      gamepad_state_.left_stick_x, gamepad_state_.left_stick_y,
+      gamepad_state_.right_stick_x, gamepad_state_.right_stick_y, poll_ordinal_,
+      packet_number_, timeline_->elapsed().count());
+}
+
+void ScriptedInputDriver::LogTransitionSummary() {
+  if (logged_summaries_ != 0) {
+    return;
+  }
+  ++logged_summaries_;
+  XELOGI(
+      "scripted_input_transition_summary script_digest={:016X} "
+      "expected_state_transitions={} observed_state_transitions={} poll={} "
+      "packet={} elapsed_ms={}",
+      script_->content_digest(), expected_transitions_, observed_transitions_,
+      poll_ordinal_, packet_number_, timeline_->elapsed().count());
 }
 
 void ScriptedInputDriver::HandleTimelineEvent(const TimelineEvent& event) {

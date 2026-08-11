@@ -21,6 +21,10 @@ namespace xe::hid::scripted {
 
 enum class TimelineEventType { kMarker, kCompletion };
 
+// Kind of the most recently begun expanded timeline transition. Purely
+// descriptive metadata; it never affects timeline advancement.
+enum class TransitionKind { kNone, kActive, kNeutral };
+
 struct TimelineEvent {
   TimelineEventType type;
   std::string marker;
@@ -42,11 +46,18 @@ class ScriptedInputTimeline final {
   bool completed() const { return completed_; }
   std::chrono::milliseconds elapsed() const;
 
+  // One-based ordinal of the expanded active/neutral transition most recently
+  // begun by Poll(); zero before the first one. Waits, markers, and completion
+  // do not advance it, and a single Poll() begins at most one transition.
+  uint32_t transition_ordinal() const { return transition_ordinal_; }
+  TransitionKind transition_kind() const { return transition_kind_; }
+
  private:
   enum class Phase { kNone, kWait, kActive, kRelease };
 
   void EmitEvent(TimelineEventType type, std::string marker,
                  Clock::time_point now);
+  void BeginTransition(TransitionKind kind);
 
   const std::shared_ptr<const InputScript> script_;
   const NowFunction now_function_;
@@ -60,6 +71,8 @@ class ScriptedInputTimeline final {
   size_t step_index_ = 0;
   Phase phase_ = Phase::kNone;
   uint32_t repetitions_remaining_ = 0;
+  uint32_t transition_ordinal_ = 0;
+  TransitionKind transition_kind_ = TransitionKind::kNone;
 };
 
 }  // namespace xe::hid::scripted

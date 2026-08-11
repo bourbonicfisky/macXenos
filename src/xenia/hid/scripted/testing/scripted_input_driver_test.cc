@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <memory>
+#include <vector>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/hid/input_system.h"
@@ -53,6 +54,91 @@ release_ms = 250
   INFO(result.error);
   REQUIRE(result);
   return result.script;
+}
+
+// Marker, wait, a repeated button step, and a step whose active state is
+// itself neutral, so active/neutral transitions cannot be inferred from the
+// returned state or packet number alone.
+std::shared_ptr<const InputScript> ParseTelemetryScript() {
+  const std::string document = R"(version = 1
+name = "transition telemetry"
+expected_title_id = "1234ABCD"
+player = 1
+
+[[step]]
+marker = "begin"
+
+[[step]]
+wait_ms = 40
+
+[[step]]
+buttons = ["a"]
+hold_ms = 30
+release_ms = 20
+repeat = 2
+
+[[step]]
+hold_ms = 10
+release_ms = 10
+
+[[step]]
+marker = "gameplay_expected"
+)";
+  ScriptLoadResult result = ParseInputScript(document);
+  INFO(result.error);
+  REQUIRE(result);
+  return result.script;
+}
+
+constexpr uint32_t kTelemetryScriptTransitions = 6;
+
+struct PollRecord {
+  uint32_t packet_number;
+  uint16_t buttons;
+  uint8_t left_trigger;
+  uint8_t right_trigger;
+  int16_t thumb_lx;
+  int16_t thumb_ly;
+  int16_t thumb_rx;
+  int16_t thumb_ry;
+
+  bool operator==(const PollRecord&) const = default;
+};
+
+PollRecord Record(const X_INPUT_STATE& state) {
+  return {state.packet_number,        state.gamepad.buttons,
+          state.gamepad.left_trigger, state.gamepad.right_trigger,
+          state.gamepad.thumb_lx,     state.gamepad.thumb_ly,
+          state.gamepad.thumb_rx,     state.gamepad.thumb_ry};
+}
+
+struct TelemetryRun {
+  std::vector<PollRecord> polls;
+  uint32_t transition_records = 0;
+  uint32_t completion_records = 0;
+  bool completed = false;
+};
+
+// Polls the telemetry script on a fixed fake-clock schedule that is long
+// enough to run it to completion and then keep polling afterwards.
+TelemetryRun RunTelemetryScript(bool transition_telemetry,
+                                size_t poll_count = 40) {
+  FakeClock clock;
+  ScriptedInputDriver driver(
+      nullptr, 0, ParseTelemetryScript(), [&clock] { return clock.Now(); },
+      ScriptedInputTimeline::EventCallback{}, transition_telemetry);
+  TelemetryRun run;
+  run.polls.reserve(poll_count);
+  for (size_t i = 0; i < poll_count; ++i) {
+    X_INPUT_STATE state = {};
+    REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
+    run.polls.push_back(Record(state));
+    clock.Advance(5ms);
+  }
+  run.transition_records = driver.transition_records_emitted();
+  run.completion_records = driver.completion_records_emitted();
+  run.completed = driver.completed();
+  return run;
 }
 
 class PhysicalStateProbe final : public InputDriver {
@@ -337,6 +423,58 @@ TEST_CASE("real InputSystem reports non-scripted slots disconnected",
   REQUIRE(input_system.GetKeystroke(2, InputType::Controller, &keystroke) ==
           X_ERROR_EMPTY);
   REQUIRE(keystroke.user_index == 2);
+}
+
+TEST_CASE("scripted transition telemetry is silent unless it is selected",
+          "[hid][scripted][driver][telemetry]") {
+  const TelemetryRun off = RunTelemetryScript(false);
+  REQUIRE(off.completed);
+  REQUIRE(off.transition_records == 0);
+  REQUIRE(off.completion_records == 0);
+}
+
+TEST_CASE("scripted transition telemetry preserves states and packets",
+          "[hid][scripted][driver][telemetry]") {
+  const TelemetryRun off = RunTelemetryScript(false);
+  const TelemetryRun on = RunTelemetryScript(true);
+
+  REQUIRE(on.polls.size() == off.polls.size());
+  REQUIRE(on.polls == off.polls);
+  REQUIRE(on.completed);
+  REQUIRE(off.completed);
+
+  // The script really did drive an active state and a packet sequence.
+  REQUIRE(on.polls.front().packet_number == 0);
+  REQUIRE(on.polls.back().packet_number == 4);
+  bool saw_active = false;
+  for (const PollRecord& poll : on.polls) {
+    saw_active = saw_active || poll.buttons == X_INPUT_GAMEPAD_A;
+  }
+  REQUIRE(saw_active);
+
+  // Every expanded active and neutral transition is reported exactly once,
+  // including the pair whose active state is indistinguishable from neutral,
+  // and the completion summary is reported exactly once.
+  REQUIRE(on.transition_records == kTelemetryScriptTransitions);
+  REQUIRE(on.completion_records == 1);
+}
+
+TEST_CASE("scripted transition telemetry stays bounded after completion",
+          "[hid][scripted][driver][telemetry]") {
+  const TelemetryRun on = RunTelemetryScript(true, 400);
+  REQUIRE(on.completed);
+  REQUIRE(on.transition_records == kTelemetryScriptTransitions);
+  REQUIRE(on.completion_records == 1);
+}
+
+TEST_CASE("scripted transition telemetry reports partial observation",
+          "[hid][scripted][driver][telemetry]") {
+  // A guest that stops polling before the script ends observes fewer
+  // transitions and never reaches the completion summary.
+  const TelemetryRun on = RunTelemetryScript(true, 16);
+  REQUIRE_FALSE(on.completed);
+  REQUIRE(on.transition_records < kTelemetryScriptTransitions);
+  REQUIRE(on.completion_records == 0);
 }
 
 }  // namespace xe::hid::scripted::test

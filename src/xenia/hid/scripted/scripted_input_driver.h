@@ -23,7 +23,8 @@ class ScriptedInputDriver final : public InputDriver {
   ScriptedInputDriver(xe::ui::Window* window, size_t window_z_order,
                       std::shared_ptr<const InputScript> script,
                       ScriptedInputTimeline::NowFunction now_function = {},
-                      ScriptedInputTimeline::EventCallback event_callback = {});
+                      ScriptedInputTimeline::EventCallback event_callback = {},
+                      bool transition_telemetry = false);
   ~ScriptedInputDriver() override;
 
   X_STATUS Setup() override;
@@ -42,17 +43,32 @@ class ScriptedInputDriver final : public InputDriver {
 
   bool completed() const;
 
+  // Diagnostic-only accounting of emitted transition-telemetry records. Always
+  // zero while the telemetry option is off.
+  uint32_t transition_records_emitted() const;
+  uint32_t completion_records_emitted() const;
+
  private:
   static ScriptedInputTimeline::Clock::time_point SteadyNow();
   void HandleTimelineEvent(const TimelineEvent& event);
   void CacheState(const GamepadState& state);
+  // Both require mutex_ to be held by the caller.
+  void LogTransitionObservation();
+  void LogTransitionSummary();
 
   const std::shared_ptr<const InputScript> script_;
+  const bool transition_telemetry_;
   std::unique_ptr<ScriptedInputTimeline> timeline_;
   mutable std::mutex mutex_;
   GamepadState gamepad_state_ = {};
   X_INPUT_STATE cached_state_ = {};
   uint32_t packet_number_ = 0;
+  uint64_t poll_ordinal_ = 0;
+  uint32_t expected_transitions_ = 0;
+  uint32_t observed_transitions_ = 0;
+  uint32_t logged_transitions_ = 0;
+  uint32_t logged_summaries_ = 0;
+  uint32_t last_transition_ordinal_ = 0;
 };
 
 }  // namespace xe::hid::scripted

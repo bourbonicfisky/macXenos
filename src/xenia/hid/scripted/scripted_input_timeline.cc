@@ -43,6 +43,11 @@ void ScriptedInputTimeline::EmitEvent(TimelineEventType type,
                        now - start_time_)});
 }
 
+void ScriptedInputTimeline::BeginTransition(TransitionKind kind) {
+  transition_kind_ = kind;
+  ++transition_ordinal_;
+}
+
 GamepadState ScriptedInputTimeline::Poll() {
   if (completed_) {
     return {};
@@ -90,6 +95,7 @@ GamepadState ScriptedInputTimeline::Poll() {
       repetitions_remaining_ = input.repeat;
       phase_ = Phase::kActive;
       deadline_ = now + input.hold_duration;
+      BeginTransition(TransitionKind::kActive);
       return input.state;
     }
     if (phase_ == Phase::kActive) {
@@ -98,6 +104,7 @@ GamepadState ScriptedInputTimeline::Poll() {
       }
       phase_ = Phase::kRelease;
       deadline_ = now + input.release_duration;
+      BeginTransition(TransitionKind::kNeutral);
       return {};
     }
     if (phase_ == Phase::kRelease) {
@@ -109,6 +116,7 @@ GamepadState ScriptedInputTimeline::Poll() {
       if (repetitions_remaining_ != 0) {
         phase_ = Phase::kActive;
         deadline_ = now + input.hold_duration;
+        BeginTransition(TransitionKind::kActive);
         return input.state;
       }
       ++step_index_;
