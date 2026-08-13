@@ -224,14 +224,16 @@ bool MetalRenderTargetCache::Initialize() {
   // Stage A float24 PS conversion is engaged (both-gates arms self-disable).
   host_depth_gate_enabled_ =
       IsMetalEnvironmentFlagEnabled("XE_METAL_HOST_DEPTH", true);
-  f24_ps_engaged_ =
-      MetalF24PsEngaged(ParseMetalF24PsMode(std::getenv("XE_METAL_F24_PS")));
+  f24_ps_engaged_ = MetalF24PsEngaged(EffectiveMetalF24PsMode(
+      std::getenv("XE_METAL_F24_PS"),
+      cvars::depth_float24_convert_in_pixel_shader));
   if (host_depth_gate_enabled_ && f24_ps_engaged_) {
     XELOGW(
-        "MetalRenderTargetCache: XE_METAL_HOST_DEPTH=1 with XE_METAL_F24_PS "
-        "engaged — host-depth ownership self-disables (PS-converted depth "
-        "carries no extra host precision); run Stage B arms with "
-        "XE_METAL_F24_PS=0");
+        "MetalRenderTargetCache: host-depth ownership self-disables while "
+        "float24 pixel-shader conversion is engaged (PS-converted depth "
+        "carries no extra host precision); set "
+        "depth_float24_convert_in_pixel_shader=false or use "
+        "XE_METAL_F24_PS=0 to run Stage B arms");
   } else if (host_depth_gate_enabled_) {
     XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B)");
   }
