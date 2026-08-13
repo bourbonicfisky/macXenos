@@ -14,11 +14,15 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/metal/metal_edram_msl.h"
+#include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
@@ -44,6 +48,11 @@ vertex VertexOutput gamma_blend_feature_vs(uint vertex_id [[vertex_id]]) {
 fragment float4 gamma_blend_feature_fs() {
   return float4(0.75, 0.25, 0.625, 0.5);
 }
+
+fragment float4 gamma_blend_integrated_fs(
+    constant float4& source [[buffer(0)]]) {
+  return source;
+}
 )";
 
 constexpr std::array<uint16_t, 4> kDestination = {10000, 30000, 50000,
@@ -52,6 +61,14 @@ constexpr std::array<double, 4> kSource = {0.75, 0.25, 0.625, 0.5};
 
 uint16_t QuantizeUnorm16(double value) {
   return uint16_t(std::lround(value * 65535.0));
+}
+
+uint8_t QuantizeUnorm8(float value) {
+  return uint8_t(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+uint8_t ColorByte(uint32_t word, uint32_t channel) {
+  return uint8_t(word >> (channel * 8u));
 }
 
 }  // namespace
@@ -169,6 +186,204 @@ TEST_CASE("RGBA16Unorm render targets support fixed-function blending",
     CAPTURE(actual[3], expected_alpha);
     CHECK(std::abs(int32_t(actual[3]) - int32_t(expected_alpha)) <=
           kRoundingTolerance);
+  }
+}
+
+TEST_CASE(
+    "production gamma materialize and pack bracket linear-domain blending",
+    "[metal][gamma][blend][device][integration]") {
+  @autoreleasepool {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device) {
+      WARN("No Metal device is available; skipping the integrated gamma test");
+      return;
+    }
+    INFO("Metal device: " << [[device name] UTF8String]);
+
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+
+    // Compile the exact production EDRAM conversion source, adding only the
+    // constant-source draw used between its materialize and pack kernels.
+    std::string combined_source(kEdramMsl);
+    combined_source += kGammaBlendFeatureShader;
+    NSError* error = nil;
+    id<MTLLibrary> library = [device
+        newLibraryWithSource:[NSString
+                                 stringWithUTF8String:combined_source.c_str()]
+                      options:nil
+                        error:&error];
+    INFO("Metal shader error: "
+         << (error ? [[error localizedDescription] UTF8String] : "none"));
+    REQUIRE(library != nil);
+
+    id<MTLFunction> materialize_function =
+        [library newFunctionWithName:@"materialize_color"];
+    id<MTLFunction> pack_function =
+        [library newFunctionWithName:@"pack_color"];
+    REQUIRE(materialize_function != nil);
+    REQUIRE(pack_function != nil);
+    error = nil;
+    id<MTLComputePipelineState> materialize_pipeline =
+        [device newComputePipelineStateWithFunction:materialize_function
+                                              error:&error];
+    INFO("Metal materialize pipeline error: "
+         << (error ? [[error localizedDescription] UTF8String] : "none"));
+    REQUIRE(materialize_pipeline != nil);
+    error = nil;
+    id<MTLComputePipelineState> pack_pipeline =
+        [device newComputePipelineStateWithFunction:pack_function
+                                              error:&error];
+    INFO("Metal pack pipeline error: "
+         << (error ? [[error localizedDescription] UTF8String] : "none"));
+    REQUIRE(pack_pipeline != nil);
+
+    auto make_draw_pipeline = [&](bool blending_enabled) {
+      MTLRenderPipelineDescriptor* descriptor =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      descriptor.vertexFunction =
+          [library newFunctionWithName:@"gamma_blend_feature_vs"];
+      descriptor.fragmentFunction =
+          [library newFunctionWithName:@"gamma_blend_integrated_fs"];
+      MTLRenderPipelineColorAttachmentDescriptor* attachment =
+          descriptor.colorAttachments[0];
+      attachment.pixelFormat = MTLPixelFormatRGBA16Unorm;
+      attachment.blendingEnabled = blending_enabled ? YES : NO;
+      attachment.rgbBlendOperation = MTLBlendOperationAdd;
+      attachment.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+      attachment.destinationRGBBlendFactor =
+          MTLBlendFactorOneMinusSourceAlpha;
+      attachment.alphaBlendOperation = MTLBlendOperationAdd;
+      attachment.sourceAlphaBlendFactor = MTLBlendFactorOne;
+      attachment.destinationAlphaBlendFactor = MTLBlendFactorZero;
+      NSError* pipeline_error = nil;
+      id<MTLRenderPipelineState> pipeline =
+          [device newRenderPipelineStateWithDescriptor:descriptor
+                                                 error:&pipeline_error];
+      INFO("Metal integrated draw pipeline error: "
+           << (pipeline_error
+                   ? [[pipeline_error localizedDescription] UTF8String]
+                   : "none"));
+      REQUIRE(pipeline != nil);
+      return pipeline;
+    };
+    id<MTLRenderPipelineState> blend_pipeline = make_draw_pipeline(true);
+    id<MTLRenderPipelineState> replace_pipeline = make_draw_pipeline(false);
+
+    MTLTextureDescriptor* texture_descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Unorm
+                                     width:1
+                                    height:1
+                                 mipmapped:NO];
+    texture_descriptor.usage = MTLTextureUsageShaderRead |
+                               MTLTextureUsageShaderWrite |
+                               MTLTextureUsageRenderTarget;
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture =
+        [device newTextureWithDescriptor:texture_descriptor];
+    REQUIRE(texture != nil);
+
+    id<MTLBuffer> canonical =
+        [device newBufferWithLength:sizeof(uint32_t)
+                           options:MTLResourceStorageModeShared];
+    REQUIRE(canonical != nil);
+    struct SurfaceParamsHost {
+      uint32_t base, pitch, msaa, is_depth, fmt_log2, words;
+    } surface = {0u, 1u, 0u, 0u, 0u, 1u};
+    static_assert(sizeof(SurfaceParamsHost) == 6u * sizeof(uint32_t));
+    const uint32_t gamma_format =
+        uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA);
+    const std::array<float, 4> source = {0.42f, 0.18f, 0.73f, 0.35f};
+
+    auto run_case = [&](uint32_t destination,
+                        id<MTLRenderPipelineState> draw_pipeline) {
+      *static_cast<uint32_t*>(canonical.contents) = destination;
+      id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+      REQUIRE(command_buffer != nil);
+      {
+        id<MTLComputeCommandEncoder> encoder =
+            [command_buffer computeCommandEncoder];
+        REQUIRE(encoder != nil);
+        [encoder setComputePipelineState:materialize_pipeline];
+        [encoder setBuffer:canonical offset:0 atIndex:0];
+        [encoder setTexture:texture atIndex:0];
+        [encoder setBytes:&surface length:sizeof(surface) atIndex:1];
+        [encoder setBytes:&gamma_format
+                   length:sizeof(gamma_format)
+                  atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [encoder endEncoding];
+      }
+      {
+        MTLRenderPassDescriptor* render_pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        render_pass.colorAttachments[0].texture = texture;
+        render_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> encoder =
+            [command_buffer renderCommandEncoderWithDescriptor:render_pass];
+        REQUIRE(encoder != nil);
+        [encoder setRenderPipelineState:draw_pipeline];
+        [encoder setFragmentBytes:source.data()
+                           length:sizeof(source)
+                          atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:3];
+        [encoder endEncoding];
+      }
+      {
+        id<MTLComputeCommandEncoder> encoder =
+            [command_buffer computeCommandEncoder];
+        REQUIRE(encoder != nil);
+        [encoder setComputePipelineState:pack_pipeline];
+        [encoder setTexture:texture atIndex:0];
+        [encoder setBuffer:canonical offset:0 atIndex:0];
+        [encoder setBytes:&surface length:sizeof(surface) atIndex:1];
+        [encoder setBytes:&gamma_format
+                   length:sizeof(gamma_format)
+                  atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [encoder endEncoding];
+      }
+      [command_buffer commit];
+      [command_buffer waitUntilCompleted];
+      INFO("Metal command-buffer error: "
+           << (command_buffer.error
+                   ? [[command_buffer.error localizedDescription] UTF8String]
+                   : "none"));
+      REQUIRE(command_buffer.status == MTLCommandBufferStatusCompleted);
+      return *static_cast<const uint32_t*>(canonical.contents);
+    };
+
+    // Guest bytes are R=120, G=80, B=200, A=160 in the canonical dword.
+    constexpr uint32_t kDestinationWord = 0xA0C85078u;
+    const uint32_t blended = run_case(kDestinationWord, blend_pipeline);
+    for (uint32_t channel = 0; channel < 3; ++channel) {
+      const float destination_linear = xenos::PWLGammaToLinear(
+          float(ColorByte(kDestinationWord, channel)) * (1.0f / 255.0f));
+      const float blended_linear =
+          source[channel] * source[3] + destination_linear * (1.0f - source[3]);
+      const uint8_t expected =
+          QuantizeUnorm8(xenos::LinearToPWLGamma(blended_linear));
+      const uint8_t actual = ColorByte(blended, channel);
+      CAPTURE(channel, actual, expected);
+      CHECK(std::abs(int(actual) - int(expected)) <= 1);
+    }
+    const uint8_t expected_alpha = QuantizeUnorm8(source[3]);
+    CHECK(int(ColorByte(blended, 3)) == int(expected_alpha));
+
+    const uint32_t replaced = run_case(kDestinationWord, replace_pipeline);
+    for (uint32_t channel = 0; channel < 3; ++channel) {
+      const uint8_t expected =
+          QuantizeUnorm8(xenos::LinearToPWLGamma(source[channel]));
+      const uint8_t actual = ColorByte(replaced, channel);
+      CAPTURE(channel, actual, expected);
+      CHECK(int(actual) == int(expected));
+    }
+    CHECK(int(ColorByte(replaced, 3)) == int(expected_alpha));
   }
 }
 

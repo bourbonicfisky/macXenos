@@ -85,7 +85,7 @@ bool MetalPipelineCache::Initialize() {
       ui::GraphicsProvider::GpuVendorID::kApple,
       MetalTranslatorConfig::kBindlessResourcesUsed,
       MetalTranslatorConfig::kEdramRovUsed,
-      MetalTranslatorConfig::kGammaRenderTargetAsUnorm8);
+      MetalTranslatorConfig::GammaRenderTargetAsUnorm8());
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {

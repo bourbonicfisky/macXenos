@@ -188,6 +188,58 @@ inline uint xe_pack_color32(float4 color, uint format) {
       return as_type<uint>(color.r);
   }
 }
+// k_8_8_8_8_GAMMA (format 1) working-view helpers. GAMMA render targets store
+// piecewise-linear (PWL) gamma-encoded bytes in EDRAM; xe_unpack_color32 /
+// xe_pack_color32 stay raw-byte for canonical resolves, so the gamma
+// decode/encode used by the generic color working-view kernels lives here,
+// dispatched only for format == 1u.
+inline float xe_gamma_byte_to_linear(float b) {
+  if (b < 64.0) return (b + 0.5) / 1023.0;
+  if (b < 96.0) return (b - 31.5) / 511.5;
+  if (b < 192.0) return (b - 63.5) / 255.75;
+  return (b - 127.5) / 127.875;
+}
+inline float4 xe_unpack_color32_working_gamma(uint word) {
+  float4 bytes = float4(word & 0xFFu, (word >> 8u) & 0xFFu,
+                        (word >> 16u) & 0xFFu, (word >> 24u) & 0xFFu);
+  return float4(xe_gamma_byte_to_linear(bytes.x),
+               xe_gamma_byte_to_linear(bytes.y),
+               xe_gamma_byte_to_linear(bytes.z), bytes.w / 255.0);
+}
+inline float xe_linear_to_gamma_byte(float linear) {
+  float scale, offset;
+  if (linear < 64.0 / 1023.0) {
+    scale = 1023.0;
+    offset = 0.0;
+  } else if (linear < 128.0 / 1023.0) {
+    scale = 1023.0 / 2.0;
+    offset = 32.0 / 255.0;
+  } else if (linear < 512.0 / 1023.0) {
+    scale = 1023.0 / 4.0;
+    offset = 64.0 / 255.0;
+  } else {
+    scale = 1023.0 / 8.0;
+    offset = 128.0 / 255.0;
+  }
+  return trunc(linear * scale) / 255.0 + offset;
+}
+inline uint xe_pack_color32_working_gamma(float4 color) {
+  float3 c = saturate(color.rgb);
+  float4 encoded = float4(xe_linear_to_gamma_byte(c.r),
+                          xe_linear_to_gamma_byte(c.g),
+                          xe_linear_to_gamma_byte(c.b), saturate(color.a));
+  return xe_pack_8888(encoded);
+}
+// Dispatch to the gamma working-view helpers for format 1, raw numeric
+// helpers for everything else.
+inline float4 xe_unpack_color32_working(uint word, uint format) {
+  return format == 1u ? xe_unpack_color32_working_gamma(word)
+                      : xe_unpack_color32(word, format);
+}
+inline uint xe_pack_color32_working(float4 color, uint format) {
+  return format == 1u ? xe_pack_color32_working_gamma(color)
+                      : xe_pack_color32(color, format);
+}
 inline float4 xe_unpack_color64(uint2 words, uint format) {
   switch (format) {
     default:
@@ -318,8 +370,9 @@ kernel void materialize_color(
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
-  tex.write(xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format),
-            gid);
+  tex.write(
+      xe_unpack_color32_working(idx < sp.words ? canonical[idx] : 0u, format),
+      gid);
 }
 kernel void pack_color(
     texture2d<float, access::read> tex [[texture(0)]],
@@ -331,7 +384,9 @@ kernel void pack_color(
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
-  if (idx < sp.words) canonical[idx] = xe_pack_color32(tex.read(gid), format);
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32_working(tex.read(gid), format);
+  }
 }
 kernel void materialize_color_range(
     device const uint* canonical [[buffer(0)]],
@@ -345,8 +400,9 @@ kernel void materialize_color_range(
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
-  tex.write(xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format),
-            gid);
+  tex.write(
+      xe_unpack_color32_working(idx < sp.words ? canonical[idx] : 0u, format),
+      gid);
 }
 kernel void pack_color_range(
     texture2d<float, access::read> tex [[texture(0)]],
@@ -360,7 +416,9 @@ kernel void pack_color_range(
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
                                    0u, 0u, 0u);
   uint idx = off >> 2u;
-  if (idx < sp.words) canonical[idx] = xe_pack_color32(tex.read(gid), format);
+  if (idx < sp.words) {
+    canonical[idx] = xe_pack_color32_working(tex.read(gid), format);
+  }
 }
 kernel void materialize_color64_range(
     device const uint* canonical [[buffer(0)]],
@@ -539,7 +597,8 @@ fragment float4 materialize_color_ms_fs(
   uint off = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
                                    sp.msaa, 0u, 0u, guest_sample);
   uint idx = off >> 2u;
-  return xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format);
+  return xe_unpack_color32_working(idx < sp.words ? canonical[idx] : 0u,
+                                   format);
 }
 kernel void pack_color_ms(
     texture2d_ms<float, access::read> tex [[texture(0)]],
@@ -554,8 +613,8 @@ kernel void pack_color_ms(
                                    0u, 0u, guest_sample);
   uint idx = off >> 2u;
   if (idx < sp.words) {
-    canonical[idx] =
-        xe_pack_color32(tex.read(uint2(gid.x, gid.y), gid.z), format);
+    canonical[idx] = xe_pack_color32_working(
+        tex.read(uint2(gid.x, gid.y), gid.z), format);
   }
 }
 fragment float4 materialize_color_ms_range_fs(
@@ -573,7 +632,8 @@ fragment float4 materialize_color_ms_range_fs(
   uint off = xe_edram_offset_bytes(pixel.x, pixel.y, sp.base, sp.pitch,
                                    sp.msaa, 0u, 0u, guest_sample);
   uint idx = off >> 2u;
-  return xe_unpack_color32(idx < sp.words ? canonical[idx] : 0u, format);
+  return xe_unpack_color32_working(idx < sp.words ? canonical[idx] : 0u,
+                                   format);
 }
 kernel void pack_color_ms_range(
     texture2d_ms<float, access::read> tex [[texture(0)]],
@@ -590,8 +650,8 @@ kernel void pack_color_ms_range(
                                    0u, 0u, guest_sample);
   uint idx = off >> 2u;
   if (idx < sp.words) {
-    canonical[idx] =
-        xe_pack_color32(tex.read(uint2(gid.x, gid.y), gid.z), format);
+    canonical[idx] = xe_pack_color32_working(
+        tex.read(uint2(gid.x, gid.y), gid.z), format);
   }
 }
 fragment float4 materialize_color64_ms_range_fs(

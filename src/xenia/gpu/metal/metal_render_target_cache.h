@@ -18,6 +18,7 @@
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_host_depth_reconcile.h"
+#include "xenia/gpu/metal/metal_pipeline_storage.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
@@ -41,7 +42,8 @@ class MetalCommandProcessor;
 // transfer tail verified word-level with bounded residual reporting (64bpp
 // classes unengaged/unclaimed, residual-report tripwire); resolve does
 // snapshot registration AND guest-RAM writeback. 1x resolution scale;
-// gamma collapsed to 8888 storage (blend-domain is a tracked P0).
+// gamma uses separate linear RGBA16Unorm host storage when the exact rollout
+// gate is enabled; the legacy collapsed RGBA8 path remains the rollback.
 // Metal objects held as opaque void* (retained) so the header stays C++.
 class MetalRenderTargetCache final : public RenderTargetCache {
  public:
@@ -348,7 +350,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                            f24_ps_engaged_);
   }
 
-  bool IsGammaFormatHostStorageSeparate() const override { return false; }
+  bool IsGammaFormatHostStorageSeparate() const override {
+    return MetalGammaRenderTargetLinearEnabled();
+  }
 
   bool host_depth_enabled() const { return host_depth_gate_enabled_; }
 
@@ -690,6 +694,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* resolve_c2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* resolve_d2f_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* clear_color_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
+  void* clear_gamma_color_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* clear_depth_pipeline_ = nullptr;      // id<MTLRenderPipelineState>.
   void* clear_depth_state_ = nullptr;         // id<MTLDepthStencilState>.
 

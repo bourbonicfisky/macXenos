@@ -3114,6 +3114,7 @@ TEST_CASE("Canonical corpus color formats round-trip through lossless views",
     uint32_t format;
     MTLPixelFormat pixel_format;
   } cfgs[] = {
+      {"8_8_8_8_GAMMA", 1u, MTLPixelFormatRGBA16Unorm},
       {"2_10_10_10_FLOAT", 3u, MTLPixelFormatRGBA16Float},
       {"16_16", 4u, MTLPixelFormatRG32Float},
       {"32_FLOAT", 14u, MTLPixelFormatR32Float},
@@ -3125,7 +3126,15 @@ TEST_CASE("Canonical corpus color formats round-trip through lossless views",
   for (const Cfg& cfg : cfgs) {
     std::vector<uint32_t> words(size_t(w) * h);
     for (size_t i = 0; i < words.size(); ++i) {
-      if (cfg.format == 3u) {
+      if (cfg.format == 1u) {
+        // Odd multipliers cover every byte value in every lane. The RGB
+        // midpoint materialization must survive RGBA16Unorm quantization and
+        // PWL re-encoding exactly; alpha remains ordinary linear UNORM.
+        uint32_t byte = uint32_t(i) & 0xFFu;
+        words[i] = byte | (((byte * 73u) & 0xFFu) << 8u) |
+                   (((byte * 151u) & 0xFFu) << 16u) |
+                   (((byte * 199u) & 0xFFu) << 24u);
+      } else if (cfg.format == 3u) {
         uint32_t r = uint32_t(i * 17u) & 0x3FFu;
         uint32_t g = uint32_t(i * 37u + 1u) & 0x3FFu;
         uint32_t b = uint32_t(i * 73u + 127u) & 0x3FFu;
@@ -3225,6 +3234,7 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
     MTLPixelFormat pixel_format;
   } format_cfgs[] = {
       {"8_8_8_8", 0u, MTLPixelFormatRGBA8Unorm},
+      {"8_8_8_8_GAMMA", 1u, MTLPixelFormatRGBA16Unorm},
       {"2_10_10_10_FLOAT", 3u, MTLPixelFormatRGBA16Float},
       {"16_16", 4u, MTLPixelFormatRG32Float},
       {"32_FLOAT", 14u, MTLPixelFormatR32Float},
@@ -3239,6 +3249,11 @@ TEST_CASE("Real MSAA attachment per-sample render->pack round-trips",
       for (size_t i = 0; i < values.size(); ++i) {
         if (format.format == 0u) {
           values[i] = uint32_t(i * 2246822519u) ^ 0x1234ABCDu;
+        } else if (format.format == 1u) {
+          uint32_t byte = uint32_t(i) & 0xFFu;
+          values[i] = byte | (((byte * 73u) & 0xFFu) << 8u) |
+                      (((byte * 151u) & 0xFFu) << 16u) |
+                      (((byte * 199u) & 0xFFu) << 24u);
         } else if (format.format == 3u) {
           uint32_t r = uint32_t(i * 17u) & 0x3FFu;
           uint32_t g = uint32_t(i * 37u + 1u) & 0x3FFu;

@@ -44,6 +44,7 @@ namespace {
 
 using metal::MetalPipelineStorage;
 using metal::MetalPipelineStorageIdentity;
+using metal::MetalGammaRenderTargetLinearSetting;
 using metal::MetalTranslatorConfig;
 
 // The identity the running build computes, minus the device/OS hashes (which
@@ -57,7 +58,10 @@ using metal::MetalTranslatorConfig;
 // other mirror values. A mirror can only catch drift by being compared to the
 // thing it mirrors — see "The identity mirror matches the production packing".
 MetalPipelineStorageIdentity IdentityWithSchema(uint32_t fetch_abi_revision,
-                                                uint32_t dxilconv_generation) {
+                                                uint32_t dxilconv_generation,
+                                                bool gamma_as_unorm8 =
+                                                    MetalTranslatorConfig::
+                                                        GammaRenderTargetAsUnorm8()) {
   struct SchemaBits {
     uint32_t vendor_apple : 1;
     uint32_t bindless_resources_used : 1;
@@ -71,8 +75,7 @@ MetalPipelineStorageIdentity IdentityWithSchema(uint32_t fetch_abi_revision,
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
   schema.edram_rov_used = MetalTranslatorConfig::kEdramRovUsed;
-  schema.gamma_render_target_as_unorm8 =
-      MetalTranslatorConfig::kGammaRenderTargetAsUnorm8;
+  schema.gamma_render_target_as_unorm8 = gamma_as_unorm8;
   schema.msc_bindless_resources_used =
       MetalTranslatorConfig::kMscBindlessResourcesUsed;
   schema.fetch_abi_revision = fetch_abi_revision;
@@ -116,6 +119,44 @@ const std::vector<uint8_t>& SampleMetallib() {
 }
 
 }  // namespace
+
+TEST_CASE("The gamma render-target rollout switch is exact and fails closed",
+          "[gamma_blend][cache_identity]") {
+  using metal::ParseMetalGammaRenderTargetLinearSetting;
+
+  CHECK(ParseMetalGammaRenderTargetLinearSetting(nullptr) ==
+        MetalGammaRenderTargetLinearSetting::kDisabled);
+  CHECK(ParseMetalGammaRenderTargetLinearSetting("") ==
+        MetalGammaRenderTargetLinearSetting::kDisabled);
+  CHECK(ParseMetalGammaRenderTargetLinearSetting("0") ==
+        MetalGammaRenderTargetLinearSetting::kDisabled);
+  CHECK(ParseMetalGammaRenderTargetLinearSetting("1") ==
+        MetalGammaRenderTargetLinearSetting::kEnabled);
+  for (const char* malformed : {"00", "01", "2", "true", " 1", "1 "}) {
+    CHECK(ParseMetalGammaRenderTargetLinearSetting(malformed) ==
+          MetalGammaRenderTargetLinearSetting::kMalformed);
+  }
+
+  CHECK(MetalTranslatorConfig::GammaRenderTargetAsUnorm8(
+      MetalGammaRenderTargetLinearSetting::kDisabled));
+  CHECK_FALSE(MetalTranslatorConfig::GammaRenderTargetAsUnorm8(
+      MetalGammaRenderTargetLinearSetting::kEnabled));
+  CHECK(MetalTranslatorConfig::GammaRenderTargetAsUnorm8(
+      MetalGammaRenderTargetLinearSetting::kMalformed));
+}
+
+TEST_CASE("The gamma host-storage selection changes durable shader identity",
+          "[gamma_blend][cache_identity]") {
+  const MetalPipelineStorageIdentity legacy = IdentityWithSchema(
+      MetalTranslatorConfig::kFetchAbiRevision,
+      MetalTranslatorConfig::kDxilconvGeneration, true);
+  const MetalPipelineStorageIdentity linear = IdentityWithSchema(
+      MetalTranslatorConfig::kFetchAbiRevision,
+      MetalTranslatorConfig::kDxilconvGeneration, false);
+
+  CHECK(legacy.translator_schema != linear.translator_schema);
+  CHECK((legacy.translator_schema ^ linear.translator_schema) == (1u << 3));
+}
 
 TEST_CASE("The production fetch ABI revision is the current one",
           "[integer_scale][cache_identity]") {

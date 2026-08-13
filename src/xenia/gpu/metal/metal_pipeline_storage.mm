@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -63,6 +64,33 @@ DEFINE_uint64(metal_pipeline_cache_global_cap_mib, 4096,
 namespace xe {
 namespace gpu {
 namespace metal {
+
+MetalGammaRenderTargetLinearSetting ParseMetalGammaRenderTargetLinearSetting(
+    const char* value) {
+  if (!value || !value[0] || !std::strcmp(value, "0")) {
+    return MetalGammaRenderTargetLinearSetting::kDisabled;
+  }
+  if (!std::strcmp(value, "1")) {
+    return MetalGammaRenderTargetLinearSetting::kEnabled;
+  }
+  return MetalGammaRenderTargetLinearSetting::kMalformed;
+}
+
+bool MetalGammaRenderTargetLinearEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("XE_METAL_GAMMA_RT_LINEAR");
+    const MetalGammaRenderTargetLinearSetting setting =
+        ParseMetalGammaRenderTargetLinearSetting(value);
+    if (setting == MetalGammaRenderTargetLinearSetting::kMalformed) {
+      XELOGW(
+          "XE_METAL_GAMMA_RT_LINEAR='{}' is malformed; expected exact 0 or "
+          "1. Keeping legacy gamma render-target storage enabled.",
+          value);
+    }
+    return setting == MetalGammaRenderTargetLinearSetting::kEnabled;
+  }();
+  return enabled;
+}
 
 namespace {
 
@@ -216,7 +244,7 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
   schema.edram_rov_used = MetalTranslatorConfig::kEdramRovUsed;
   schema.gamma_render_target_as_unorm8 =
-      MetalTranslatorConfig::kGammaRenderTargetAsUnorm8;
+      MetalTranslatorConfig::GammaRenderTargetAsUnorm8();
   schema.msc_bindless_resources_used =
       MetalTranslatorConfig::kMscBindlessResourcesUsed;
   // 3.3b-2 — the fetch ABI revision. The five booleans above describe the

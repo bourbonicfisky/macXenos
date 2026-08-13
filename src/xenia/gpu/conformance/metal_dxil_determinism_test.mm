@@ -159,7 +159,7 @@ std::vector<Payload> BuildCorpus() {
     DxbcShaderTranslator translator(ui::GraphicsProvider::GpuVendorID::kApple,
                                     MetalTranslatorConfig::kBindlessResourcesUsed,
                                     MetalTranslatorConfig::kEdramRovUsed,
-                                    MetalTranslatorConfig::kGammaRenderTargetAsUnorm8);
+                                    MetalTranslatorConfig::GammaRenderTargetAsUnorm8());
     Shader::Translation* translation =
         shader.GetOrCreateTranslation(modification.value);
     if (!translation) {
@@ -191,7 +191,7 @@ std::vector<Payload> BuildCorpus() {
   DxbcShaderTranslator probe(ui::GraphicsProvider::GpuVendorID::kApple,
                              MetalTranslatorConfig::kBindlessResourcesUsed,
                              MetalTranslatorConfig::kEdramRovUsed,
-                             MetalTranslatorConfig::kGammaRenderTargetAsUnorm8);
+                             MetalTranslatorConfig::GammaRenderTargetAsUnorm8());
 
   DxbcShaderTranslator::Modification vm(
       probe.GetDefaultVertexShaderModification(

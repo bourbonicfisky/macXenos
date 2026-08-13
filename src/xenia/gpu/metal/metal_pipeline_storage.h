@@ -45,17 +45,38 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+// Exact process-level rollout switch for separate linear host storage of
+// k_8_8_8_8_GAMMA render targets. Keep the parser pure so rollback semantics
+// can be pinned without a Metal device or process-environment mutation.
+enum class MetalGammaRenderTargetLinearSetting : uint8_t {
+  kDisabled,
+  kEnabled,
+  kMalformed,
+};
+
+MetalGammaRenderTargetLinearSetting ParseMetalGammaRenderTargetLinearSetting(
+    const char* value);
+bool MetalGammaRenderTargetLinearEnabled();
+
 // The single source of truth for the translator configuration.
 // MetalPipelineCache::Initialize constructs the translators from these, and the
 // storage identity below fingerprints them, so the two cannot drift. Before
 // this existed the values were duplicated, and a change to one without the
 // other would have served a provably wrong shader under an unchanged cache key
-// — flipping kGammaRenderTargetAsUnorm8 alone is the difference behind the JC2
+// — flipping GammaRenderTargetAsUnorm8 alone is the difference behind the JC2
 // black-gameplay bug.
 struct MetalTranslatorConfig {
   static constexpr bool kBindlessResourcesUsed = true;
   static constexpr bool kEdramRovUsed = false;
-  static constexpr bool kGammaRenderTargetAsUnorm8 = true;
+  static constexpr bool GammaRenderTargetAsUnorm8(
+      MetalGammaRenderTargetLinearSetting setting) {
+    // Disabled and malformed both select the proven legacy path. This is the
+    // fail-closed half of the exact XE_METAL_GAMMA_RT_LINEAR contract.
+    return setting != MetalGammaRenderTargetLinearSetting::kEnabled;
+  }
+  static bool GammaRenderTargetAsUnorm8() {
+    return !MetalGammaRenderTargetLinearEnabled();
+  }
   static constexpr bool kMscBindlessResourcesUsed = true;
   // Revision of the emitted shader ABI — the system-constant layout, the
   // fetch-path codegen, and the geometry-emulation stage signatures. Unlike the

@@ -46,14 +46,15 @@ bool IsMetalEnvironmentFlagEnabled(const char* name,
   return ParseMetalEnvironmentFlag(std::getenv(name), default_enabled);
 }
 
-// Guest color RESOURCE format (gamma already collapsed by the base class since
-// IsGammaFormatHostStorageSeparate()==false) -> host MTLPixelFormat.
+// Guest color resource format -> host working attachment. With the gamma gate
+// off, the base class collapses gamma to plain 8888 before reaching here.
 MTLPixelFormat ColorResourceFormatToMetal(
     xenos::ColorRenderTargetFormat format) {
   switch (format) {
     case xenos::ColorRenderTargetFormat::k_8_8_8_8:
-    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
       return MTLPixelFormatRGBA8Unorm;
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+      return MTLPixelFormatRGBA16Unorm;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
       return MTLPixelFormatRGB10A2Unorm;
@@ -99,6 +100,7 @@ NSUInteger GetCanonicalRangeTextureHeight(
 bool IsCanonicalColorFormatSupported(xenos::ColorRenderTargetFormat format) {
   switch (format) {
     case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
     case xenos::ColorRenderTargetFormat::k_16_16:
@@ -419,6 +421,10 @@ void MetalRenderTargetCache::Shutdown() {
   release_compute_pipeline(canonical_color64_msaa_pack_pipeline_);
   release_compute_pipeline(canonical_color_raw_msaa_pack_pipeline_);
   release_compute_pipeline(canonical_color64_raw_msaa_pack_pipeline_);
+  release_render_pipeline(clear_color_pipeline_);
+  release_render_pipeline(clear_gamma_color_pipeline_);
+  release_render_pipeline(clear_depth_pipeline_);
+  release_depth_state(clear_depth_state_);
   if (canonical_materialize_library_) {
     id<MTLLibrary> released =
         (__bridge_transfer id<MTLLibrary>)canonical_materialize_library_;
@@ -2816,6 +2822,8 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
     switch ((MTLPixelFormat)pf) {
       case MTLPixelFormatRGBA8Unorm:
         return uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8);
+      case MTLPixelFormatRGBA16Unorm:
+        return uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA);
       case MTLPixelFormatR32Float:
         return uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT);
       case MTLPixelFormatRGBA16Float:
@@ -2871,7 +2879,8 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
         uint2 sp = uint2(ss.x >> ((p.shifts >> 8) & 15u),
                          ss.y >> ((p.shifts >> 12) & 15u));
         float4 c = src.read(sp, 0);
-        return xe_unpack_color32(xe_pack_color32(c, p.src_fmt), dst_fmt);
+        return xe_unpack_color32_working(
+            xe_pack_color32_working(c, p.src_fmt), dst_fmt);
       }
     )METAL"];
     NSError* err = nil;
@@ -4337,6 +4346,19 @@ void MetalRenderTargetCache::PerformResolveClear(
       MTLRenderPipelineDescriptor* d =
           [[MTLRenderPipelineDescriptor alloc] init];
       d.vertexFunction = [lib newFunctionWithName:@"xe_clear_vs"];
+      d.fragmentFunction = [lib newFunctionWithName:@"xe_clear_color_fs"];
+      d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Unorm;
+      NSError* perr = nil;
+      id<MTLRenderPipelineState> ps =
+          [device newRenderPipelineStateWithDescriptor:d error:&perr];
+      if (ps) {
+        clear_gamma_color_pipeline_ = (__bridge_retained void*)ps;
+      }
+    }
+    {
+      MTLRenderPipelineDescriptor* d =
+          [[MTLRenderPipelineDescriptor alloc] init];
+      d.vertexFunction = [lib newFunctionWithName:@"xe_clear_vs"];
       d.fragmentFunction = [lib newFunctionWithName:@"xe_clear_depth_fs"];
       d.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
       d.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
@@ -4416,7 +4438,14 @@ void MetalRenderTargetCache::PerformResolveClear(
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
       [enc endEncoding];
     } else {
-      if (!clear_color_pipeline_ || owner->pixel_format() != kColorFormat) {
+      const bool gamma_owner =
+          owner->pixel_format() == uint64_t(MTLPixelFormatRGBA16Unorm) &&
+          owner->key().GetColorFormat() ==
+              xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+      void* clear_pipeline = gamma_owner ? clear_gamma_color_pipeline_
+                                         : clear_color_pipeline_;
+      if (!clear_pipeline ||
+          (!gamma_owner && owner->pixel_format() != kColorFormat)) {
         continue;
       }
       // Raw 8888 EDRAM word -> canonical logical channels (guest byte0 = .r,
@@ -4425,6 +4454,19 @@ void MetalRenderTargetCache::PerformResolveClear(
       params.color[1] = float((clear_value >> 8) & 0xFF) / 255.0f;   // G
       params.color[2] = float((clear_value >> 16) & 0xFF) / 255.0f;  // B
       params.color[3] = float(clear_value >> 24) / 255.0f;           // A
+      if (gamma_owner) {
+        // Match canonical materialization's byte-bin midpoint so RGBA16Unorm
+        // quantization followed by canonical PWL packing reproduces the clear
+        // dword bit-exactly.
+        for (uint32_t channel = 0; channel < 3; ++channel) {
+          const float byte = float((clear_value >> (channel * 8u)) & 0xFFu);
+          params.color[channel] =
+              byte < 64.0f    ? (byte + 0.5f) / 1023.0f
+              : byte < 96.0f  ? (byte - 31.5f) / 511.5f
+              : byte < 192.0f ? (byte - 63.5f) / 255.75f
+                               : (byte - 127.5f) / 127.875f;
+        }
+      }
       MTLRenderPassDescriptor* pass =
           [MTLRenderPassDescriptor renderPassDescriptor];
       pass.colorAttachments[0].texture =
@@ -4434,7 +4476,7 @@ void MetalRenderTargetCache::PerformResolveClear(
       id<MTLRenderCommandEncoder> enc =
           [cb renderCommandEncoderWithDescriptor:pass];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                      clear_color_pipeline_];
+                                      clear_pipeline];
       enc.label = @"rtcache:resolve-clear-color";
       [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
       [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
