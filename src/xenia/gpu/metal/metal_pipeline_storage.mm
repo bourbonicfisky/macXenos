@@ -67,11 +67,11 @@ namespace metal {
 
 MetalGammaRenderTargetLinearSetting ParseMetalGammaRenderTargetLinearSetting(
     const char* value) {
-  if (!value || !value[0] || !std::strcmp(value, "0")) {
-    return MetalGammaRenderTargetLinearSetting::kDisabled;
-  }
-  if (!std::strcmp(value, "1")) {
+  if (!value || !std::strcmp(value, "1")) {
     return MetalGammaRenderTargetLinearSetting::kEnabled;
+  }
+  if (!std::strcmp(value, "0")) {
+    return MetalGammaRenderTargetLinearSetting::kDisabled;
   }
   return MetalGammaRenderTargetLinearSetting::kMalformed;
 }
@@ -84,7 +84,7 @@ bool MetalGammaRenderTargetLinearEnabled() {
     if (setting == MetalGammaRenderTargetLinearSetting::kMalformed) {
       XELOGW(
           "XE_METAL_GAMMA_RT_LINEAR='{}' is malformed; expected exact 0 or "
-          "1. Keeping legacy gamma render-target storage enabled.",
+          "1. Rolling back to legacy gamma render-target storage.",
           value);
     }
     return setting == MetalGammaRenderTargetLinearSetting::kEnabled;

@@ -3382,6 +3382,65 @@ TEST_CASE("Canonical 64bpp range transfers preserve both words per sample",
   }
 }
 
+TEST_CASE("Canonical gamma range transfers preserve PWL words per sample",
+          "[l1][metal][gamma][materialize][color32][range][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  struct SurfaceCfg {
+    uint32_t msaa, samples;
+    const char* name;
+  } surface_cfgs[] = {
+      {0u, 1u, "1x"}, {1u, 2u, "2x"}, {2u, 4u, "4x"}};
+  constexpr uint32_t w = 88u, h = 20u, base = 9u;
+  constexpr uint32_t range_start = base, range_end = base + 1u;
+  constexpr uint32_t sentinel = 0xA11A51A5u;
+  constexpr uint32_t tile_bytes = 80u * 16u * sizeof(uint32_t);
+  for (const SurfaceCfg& surface : surface_cfgs) {
+    const uint32_t pitch = PitchFor(w, surface.msaa, 0u);
+    SurfaceParams sp{base, pitch, surface.msaa, 0u, 0u,
+                     uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t))};
+    const size_t sample_count = size_t(w) * h * surface.samples;
+    std::vector<uint32_t> values(sample_count);
+    for (size_t i = 0; i < sample_count; ++i) {
+      const uint32_t byte = uint32_t(i) & 0xFFu;
+      values[i] = byte | (((byte * 73u) & 0xFFu) << 8u) |
+                  (((byte * 151u) & 0xFFu) << 16u) |
+                  (((byte * 199u) & 0xFFu) << 24u);
+    }
+    auto out = mc.RoundTripColorRange(
+        w, h, surface.samples, sp, values, xenos::kEdramSizeBytes,
+        MTLPixelFormatRGBA16Unorm, 1u, range_start, range_end, sentinel);
+    uint32_t bad = 0u;
+    uint32_t outside_bad = 0u;
+    for (uint32_t y = 0; y < h; ++y) {
+      for (uint32_t x = 0; x < w; ++x) {
+        for (uint32_t s = 0; s < surface.samples; ++s) {
+          const size_t index = (size_t(y) * w + x) * surface.samples + s;
+          const uint32_t offset = XeEdramSnapshotOffsetBytes(
+              x, y, base, pitch, surface.msaa, false, 0u, s);
+          const uint32_t tile = offset / tile_bytes;
+          const bool in_range = tile >= range_start && tile < range_end;
+          const uint32_t expected = in_range ? values[index] : sentinel;
+          if (out[index] != expected) {
+            if (bad < 8u) {
+              WARN(surface.name << " pixel " << x << "," << y << " sample "
+                                << s << " tile " << tile << " expected "
+                                << expected << " got " << out[index]);
+            }
+            ++bad;
+            if (!in_range) {
+              ++outside_bad;
+            }
+          }
+        }
+      }
+    }
+    INFO(surface.name);
+    CHECK(outside_bad == 0u);
+    REQUIRE(bad == 0u);
+  }
+}
+
 TEST_CASE("Canonical float-storage range transfers preserve raw 32-bit words",
           "[l1][metal][materialize][color32][raw][range][msaa]") {
   MetalCompute mc;

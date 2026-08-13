@@ -45,9 +45,10 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
-// Exact process-level rollout switch for separate linear host storage of
-// k_8_8_8_8_GAMMA render targets. Keep the parser pure so rollback semantics
-// can be pinned without a Metal device or process-environment mutation.
+// Exact process-level rollback switch for the default-on separate linear host
+// storage of k_8_8_8_8_GAMMA render targets. Keep the parser pure so the
+// unset/default and rollback semantics can be pinned without a Metal device or
+// process-environment mutation.
 enum class MetalGammaRenderTargetLinearSetting : uint8_t {
   kDisabled,
   kEnabled,
@@ -70,8 +71,8 @@ struct MetalTranslatorConfig {
   static constexpr bool kEdramRovUsed = false;
   static constexpr bool GammaRenderTargetAsUnorm8(
       MetalGammaRenderTargetLinearSetting setting) {
-    // Disabled and malformed both select the proven legacy path. This is the
-    // fail-closed half of the exact XE_METAL_GAMMA_RT_LINEAR contract.
+    // Exact 0 and malformed values select the proven legacy path. This is the
+    // fail-closed half of the default-on XE_METAL_GAMMA_RT_LINEAR contract.
     return setting != MetalGammaRenderTargetLinearSetting::kEnabled;
   }
   static bool GammaRenderTargetAsUnorm8() {

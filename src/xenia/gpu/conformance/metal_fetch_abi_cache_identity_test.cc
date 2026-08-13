@@ -120,14 +120,14 @@ const std::vector<uint8_t>& SampleMetallib() {
 
 }  // namespace
 
-TEST_CASE("The gamma render-target rollout switch is exact and fails closed",
+TEST_CASE("The gamma render-target switch defaults on and rolls back closed",
           "[gamma_blend][cache_identity]") {
   using metal::ParseMetalGammaRenderTargetLinearSetting;
 
   CHECK(ParseMetalGammaRenderTargetLinearSetting(nullptr) ==
-        MetalGammaRenderTargetLinearSetting::kDisabled);
+        MetalGammaRenderTargetLinearSetting::kEnabled);
   CHECK(ParseMetalGammaRenderTargetLinearSetting("") ==
-        MetalGammaRenderTargetLinearSetting::kDisabled);
+        MetalGammaRenderTargetLinearSetting::kMalformed);
   CHECK(ParseMetalGammaRenderTargetLinearSetting("0") ==
         MetalGammaRenderTargetLinearSetting::kDisabled);
   CHECK(ParseMetalGammaRenderTargetLinearSetting("1") ==
