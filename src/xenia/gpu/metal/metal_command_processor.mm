@@ -4710,8 +4710,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
         xenos::BlendFactor::kOne;
     // Stage A (implement-metal-depth-semantics): float24 depth invariance.
-    // XE_METAL_F24_PS=1 honors the shared depth_float24_round cvar;
-    // =trunc / =round force a mode; anything else fails closed to off with a
+    // Without XE_METAL_F24_PS, the shared depth_float24_convert_in_pixel_shader
+    // cvar drives it directly (kCvarDriven honors depth_float24_round too).
+    // XE_METAL_F24_PS, when set, is authoritative over the shared cvars: 0
+    // force-disables even a true cvar; 1 re-enables cvar-driven behavior;
+    // trunc / round force a mode; anything else fails closed to off with a
     // one-shot warning. Engaged only when a 20e4 (kD24FS8) depth target is
     // actually bound, so kD24S8 titles get zero new pipeline permutations.
     // MSC acceptance of both modes proven by task 1.1
@@ -4719,7 +4722,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // truncating form is measured, not assumed (task 2.4).
     static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
-      MetalF24PsMode mode = ParseMetalF24PsMode(value);
+      MetalF24PsMode mode = EffectiveMetalF24PsMode(
+          value, cvars::depth_float24_convert_in_pixel_shader);
       if (mode == MetalF24PsMode::kMalformed) {
         XELOGW("XE_METAL_F24_PS='{}' is malformed; failing closed to off "
                "(use 1, trunc, or round)",

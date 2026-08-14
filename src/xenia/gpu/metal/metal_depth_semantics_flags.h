@@ -52,6 +52,24 @@ inline bool MetalF24PsEngaged(MetalF24PsMode mode) {
          mode == MetalF24PsMode::kRounding;
 }
 
+// Combines the XE_METAL_F24_PS env override with the shared
+// depth_float24_convert_in_pixel_shader cvar into the single effective mode
+// both MetalCommandProcessor and MetalRenderTargetCache must agree on.
+//
+// - env absent (nullptr): the shared cvars drive it — kCvarDriven when
+//   depth_float24_convert_in_pixel_shader is true, kOff otherwise.
+// - env present: it is authoritative exactly as ParseMetalF24PsMode says,
+//   including an explicit "0" rolling back even a true cvar.
+inline MetalF24PsMode EffectiveMetalF24PsMode(
+    const char* env_value, bool cvar_depth_float24_convert_in_pixel_shader) {
+  if (!env_value) {
+    return cvar_depth_float24_convert_in_pixel_shader
+               ? MetalF24PsMode::kCvarDriven
+               : MetalF24PsMode::kOff;
+  }
+  return ParseMetalF24PsMode(env_value);
+}
+
 // The canary-accurate host-depth ownership predicate (design decision 1):
 // true exactly for 20e4 (kD24FS8) when float24 conversion is NOT performed in
 // the pixel shader, and only while the Stage B gate is on. Never true for

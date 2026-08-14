@@ -64,6 +64,31 @@ TEST_CASE("F24 mode parse feeds the interlock correctly",
   CHECK_FALSE(MetalF24PsEngaged(ParseMetalF24PsMode("bogus")));
 }
 
+TEST_CASE("Effective F24 mode: env absent lets the shared cvar drive",
+          "[depth_semantics][host_depth]") {
+  CHECK(EffectiveMetalF24PsMode(nullptr, true) == MetalF24PsMode::kCvarDriven);
+  CHECK(EffectiveMetalF24PsMode(nullptr, false) == MetalF24PsMode::kOff);
+}
+
+TEST_CASE("Effective F24 mode: env present overrides the shared cvar",
+          "[depth_semantics][host_depth]") {
+  // Explicit "0" force-disables even when the shared cvar is true.
+  CHECK(EffectiveMetalF24PsMode("0", true) == MetalF24PsMode::kOff);
+  CHECK(EffectiveMetalF24PsMode("", true) == MetalF24PsMode::kOff);
+  // "1" is cvar-driven regardless of the cvar's value (mirrors
+  // ParseMetalF24PsMode; the cvar itself is read later for round-vs-trunc).
+  CHECK(EffectiveMetalF24PsMode("1", true) == MetalF24PsMode::kCvarDriven);
+  CHECK(EffectiveMetalF24PsMode("1", false) == MetalF24PsMode::kCvarDriven);
+  // trunc / round force a mode independent of the shared cvar.
+  CHECK(EffectiveMetalF24PsMode("trunc", false) ==
+        MetalF24PsMode::kTruncating);
+  CHECK(EffectiveMetalF24PsMode("round", false) == MetalF24PsMode::kRounding);
+  // Malformed is unaffected by the cvar value.
+  CHECK(EffectiveMetalF24PsMode("bogus", true) == MetalF24PsMode::kMalformed);
+  CHECK(EffectiveMetalF24PsMode("bogus", false) ==
+        MetalF24PsMode::kMalformed);
+}
+
 }  // namespace
 }  // namespace metal
 }  // namespace gpu
