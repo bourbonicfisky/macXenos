@@ -167,6 +167,12 @@ class MetalCommandProcessor : public CommandProcessor {
   // (OpenSpec optimize-native-metal-frametime); an arm run under this flag is
   // performance evidence only and must never be read as a correctness arm.
   static bool SkipConsumerWaitEnabled();
+  // XE_METAL_SERVING_CENSUS=1 (exact-1, default OFF): OBSERVATIONAL census of
+  // the disagreement between the consumer-dependency declaration
+  // (`BridgeServes`) and the serve chain's classification
+  // (`ClassifyResolvedFetch`). Counts only; it never changes what is declared
+  // or served. Task 1.1 of implement-metal-gpu-visible-resolve-authority.
+  static bool ServingCensusEnabled();
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.

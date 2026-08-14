@@ -60,6 +60,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_serving_census.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
@@ -1582,6 +1583,34 @@ void MetalCommandProcessor::ShutdownContext() {
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
+  if (ServingCensusEnabled()) {
+    // The headless trace-dump tool DOES exit cleanly, so this is the only
+    // emission a single-frame trace run ever reaches (the swap-tick dump needs
+    // 128 swaps). The live app is SIGKILLed and relies on the periodic tick.
+    using metal::ServingCensus;
+    XELOGI(
+        "MetalServingCensus final: gpu_served_declared_dependency={} "
+        "(exact_cover={} bridge={}) | agreed_gpu_served={} agreed_ram={} "
+        "not_resolve_backed={} unsafe_skips={}",
+        ServingCensus::SpuriousDependencies(),
+        ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot, false),
+        ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, false),
+        ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, true) +
+            ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot, true),
+        ServingCensus::Get(ResolvedFetchService::kRamContent, false),
+        ServingCensus::Get(ResolvedFetchService::kNotResolveBacked, false),
+        ServingCensus::UnsafeSkips());
+    XELOGI(
+        "MetalServingCensus final requests: total={} boundary_avoided={} "
+        "boundary_retained={} corrected_stricter={}",
+        ServingCensus::Requests::Total().load(std::memory_order_relaxed),
+        ServingCensus::Requests::BoundaryAvoided().load(
+            std::memory_order_relaxed),
+        ServingCensus::Requests::BoundaryRetained().load(
+            std::memory_order_relaxed),
+        ServingCensus::Requests::CorrectedStricter().load(
+            std::memory_order_relaxed));
+  }
   if (frame_open_) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kShutdown);
   }
@@ -2007,6 +2036,18 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
           value);
     }
     return false;
+  }();
+  return s_enabled;
+}
+
+bool MetalCommandProcessor::ServingCensusEnabled() {
+  // Exact-1 opt-in, default OFF, same house shape as the flags above. No
+  // banner: this census changes nothing about the run, so a run carrying it is
+  // still an ordinary run — only the extra classification work is added, which
+  // is why it is not enabled during counted performance arms.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SERVING_CENSUS");
+    return value && value[0] == '1' && !value[1];
   }();
   return s_enabled;
 }
@@ -4876,6 +4917,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
   if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
+    // CENSUS ONLY: the same request with GPU-served fetches omitting their
+    // resolve range, so the decision the repair WOULD take can be compared
+    // against the one taken. Never passed to the production path.
+    metal::ConsumerRequest census_corrected_request;
     auto collect_texture_ranges = [&](MetalShader* shader,
                                       metal::ConsumerRequest& request) {
       if (!shader) return;
@@ -4901,6 +4946,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             texture_cache_ &&
             texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
                                           f.size_2d.height + 1);
+        // CENSUS ONLY (XE_METAL_SERVING_CENSUS=1, task 1.1 of
+        // implement-metal-gpu-visible-resolve-authority): count how often this
+        // dependency declaration disagrees with the serve chain's own
+        // classification. Observational: it does not change the declaration.
+        // Analytically the only default-config divergence is the exact-cover
+        // class (kBridgeSnapshot's condition is equivalent to BridgeServes when
+        // color_bridge is off, and covered_r32f implies !ram_backed); the
+        // census measures how often that class actually fires on real content.
+        if (ServingCensusEnabled() && texture_cache_) {
+          ResolvedFetchService service =
+              texture_cache_->ClassifyFetchService(f, binding.is_signed);
+          metal::ServingCensus::Record(service, bridge_served);
+          // Mirror of the declaration below, but keyed on the serve chain's
+          // classification instead of the narrower duplicate predicate.
+          census_corrected_request.memexport_ranges.Add(base_range);
+          if (rng.mip_end > rng.mip_begin) {
+            census_corrected_request.memexport_ranges.Add(mip_range);
+          }
+          if (!metal::ServingCensus::IsGpuServed(service)) {
+            census_corrected_request.resolve_ranges.Add(base_range);
+            if (rng.mip_end > rng.mip_begin) {
+              census_corrected_request.resolve_ranges.Add(mip_range);
+            }
+          }
+        }
         if (!bridge_served) {
           request.resolve_ranges.Add(base_range);
           if (rng.mip_end > rng.mip_begin) {
@@ -4915,6 +4985,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    if (ServingCensusEnabled()) {
+      // BOUNDARY-LEVEL census: the same query against the corrected request.
+      // `QueryPendingProducerDependencies` is const and owns no authority
+      // state, so this second evaluation cannot perturb the run; the decision
+      // is discarded. A request whose dependency disappears is the only cell
+      // that maps to recovered frame time.
+      metal::ConsumerDecision corrected = QueryPendingProducerDependencies(
+          metal::ConsumerKind::kTexture, census_corrected_request);
+      auto has_dependency = [](const metal::ConsumerDecision& d) {
+        return d.action != metal::AuthorityAction::kNoDependency;
+      };
+      using Requests = metal::ServingCensus::Requests;
+      Requests::Total().fetch_add(1, std::memory_order_relaxed);
+      if (has_dependency(authority_decision) && !has_dependency(corrected)) {
+        Requests::BoundaryAvoided().fetch_add(1, std::memory_order_relaxed);
+      } else if (has_dependency(authority_decision) &&
+                 has_dependency(corrected)) {
+        Requests::BoundaryRetained().fetch_add(1, std::memory_order_relaxed);
+      } else if (!has_dependency(authority_decision) &&
+                 has_dependency(corrected)) {
+        Requests::CorrectedStricter().fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     // Same consumer-attribution diagnostic as the vertex seam (log only).
     if (s_memexport_log) {
       for (const metal::PendingProducer& producer : authority_decision.selected) {
@@ -9387,6 +9480,37 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (ServingCensusEnabled()) {
+        // Periodic by necessity: the emulator is killed, never shut down
+        // cleanly, so an atexit dump would never run. Cumulative totals, so
+        // any single tick is a complete reading of the run so far.
+        using metal::ServingCensus;
+        XELOGI(
+            "MetalServingCensus swap#{}: gpu_served_declared_dependency={} "
+            "(exact_cover={} bridge={}) | agreed_gpu_served={} "
+            "agreed_ram={} not_resolve_backed={} unsafe_skips={}",
+            count, ServingCensus::SpuriousDependencies(),
+            ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot,
+                               false),
+            ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, false),
+            ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, true) +
+                ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot,
+                                   true),
+            ServingCensus::Get(ResolvedFetchService::kRamContent, false),
+            ServingCensus::Get(ResolvedFetchService::kNotResolveBacked, false),
+            ServingCensus::UnsafeSkips());
+        XELOGI(
+            "MetalServingCensus swap#{} requests: total={} boundary_avoided={} "
+            "boundary_retained={} corrected_stricter={}",
+            count, ServingCensus::Requests::Total().load(
+                       std::memory_order_relaxed),
+            ServingCensus::Requests::BoundaryAvoided().load(
+                std::memory_order_relaxed),
+            ServingCensus::Requests::BoundaryRetained().load(
+                std::memory_order_relaxed),
+            ServingCensus::Requests::CorrectedStricter().load(
+                std::memory_order_relaxed));
+      }
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
