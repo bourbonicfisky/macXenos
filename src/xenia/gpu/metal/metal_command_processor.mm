@@ -1610,6 +1610,25 @@ void MetalCommandProcessor::ShutdownContext() {
             std::memory_order_relaxed),
         ServingCensus::Requests::CorrectedStricter().load(
             std::memory_order_relaxed));
+        for (uint32_t k = 0; k < uint32_t(metal::ConsumerKind::kCount); ++k) {
+          uint64_t ro = ServingCensus::Boundary(
+                            k, ServingCensus::HeldBy::kResolveOnly)
+                            .load(std::memory_order_relaxed);
+          uint64_t mo = ServingCensus::Boundary(
+                            k, ServingCensus::HeldBy::kMemexportOnly)
+                            .load(std::memory_order_relaxed);
+          uint64_t mx =
+              ServingCensus::Boundary(k, ServingCensus::HeldBy::kMixed)
+                  .load(std::memory_order_relaxed);
+          if (!(ro || mo || mx)) {
+            continue;
+          }
+          XELOGI(
+              "MetalServingCensus boundary consumer={} resolve_only={} "
+              "memexport_only={} mixed={} total={}",
+              metal::ConsumerKindName(metal::ConsumerKind(k)), ro, mo, mx,
+              ro + mo + mx);
+        }
   }
   if (frame_open_) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kShutdown);
@@ -9008,6 +9027,27 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   // read against a comparable OFF arm rather than against itself.
   need_wait_meter_.CountRequest();
 
+  // TASK 2.1 boundary attribution (census only). This is the point every
+  // consumer kind passes through with a non-empty selection, i.e. every
+  // boundary actually taken. Bucketing by the producer states SELECTED (not
+  // by the ranges requested) answers the question Stage B turns on: a
+  // boundary held only by memexport records is untouched by a resolve-side
+  // mechanism, and one held only by resolve records is untouched by a
+  // memexport-side one.
+  if (ServingCensusEnabled()) {
+    bool has_resolve = false;
+    bool has_memexport = false;
+    for (const metal::PendingProducer& p : decision.selected) {
+      if (p.state == metal::TransitState::kPendingMemexport) {
+        has_memexport = true;
+      } else {
+        has_resolve = true;
+      }
+    }
+    metal::ServingCensus::RecordBoundary(uint32_t(decision.consumer),
+                                         has_resolve, has_memexport);
+  }
+
   // The submission the OPEN frame command buffer will get, or 0 when no buffer
   // is open. ONE guarded read, shared by both paths below: the existing
   // `frame_command_buffer_` guard is what makes CurrentEncodingSubmission()
@@ -9510,6 +9550,25 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 std::memory_order_relaxed),
             ServingCensus::Requests::CorrectedStricter().load(
                 std::memory_order_relaxed));
+            for (uint32_t k = 0; k < uint32_t(metal::ConsumerKind::kCount); ++k) {
+              uint64_t ro = ServingCensus::Boundary(
+                                k, ServingCensus::HeldBy::kResolveOnly)
+                                .load(std::memory_order_relaxed);
+              uint64_t mo = ServingCensus::Boundary(
+                                k, ServingCensus::HeldBy::kMemexportOnly)
+                                .load(std::memory_order_relaxed);
+              uint64_t mx =
+                  ServingCensus::Boundary(k, ServingCensus::HeldBy::kMixed)
+                      .load(std::memory_order_relaxed);
+              if (!(ro || mo || mx)) {
+                continue;
+              }
+              XELOGI(
+                  "MetalServingCensus boundary consumer={} resolve_only={} "
+                  "memexport_only={} mixed={} total={}",
+                  metal::ConsumerKindName(metal::ConsumerKind(k)), ro, mo, mx,
+                  ro + mo + mx);
+            }
       }
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;

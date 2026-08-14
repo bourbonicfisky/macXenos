@@ -106,6 +106,46 @@ struct ServingCensus {
       return v;
     }
   };
+
+  // TASK 2.1 — BOUNDARY ATTRIBUTION. Task 1.1 proved a boundary survives
+  // unless a draw's WHOLE dependency set becomes GPU-satisfiable, so the
+  // question Stage B turns on is: what actually holds each taken boundary
+  // open? Bucketed per consumer kind by the producer states actually selected
+  // (a boundary held only by memexport is untouched by a resolve-side
+  // mechanism, and vice versa).
+  enum class HeldBy : uint32_t {
+    kResolveOnly = 0,
+    kMemexportOnly = 1,
+    kMixed = 2,
+    kCount = 3,
+  };
+
+  static const char* HeldByName(HeldBy held) {
+    switch (held) {
+      case HeldBy::kResolveOnly:
+        return "resolve_only";
+      case HeldBy::kMemexportOnly:
+        return "memexport_only";
+      case HeldBy::kMixed:
+        return "mixed";
+      default:
+        return "?";
+    }
+  }
+
+  // [consumer kind][held-by]
+  static std::atomic<uint64_t>& Boundary(uint32_t consumer_kind, HeldBy held) {
+    static std::atomic<uint64_t> s_boundaries[8][uint32_t(HeldBy::kCount)];
+    return s_boundaries[consumer_kind & 7][uint32_t(held)];
+  }
+
+  static void RecordBoundary(uint32_t consumer_kind, bool has_resolve,
+                             bool has_memexport) {
+    HeldBy held = has_resolve && has_memexport ? HeldBy::kMixed
+                  : has_memexport              ? HeldBy::kMemexportOnly
+                                               : HeldBy::kResolveOnly;
+    Boundary(consumer_kind, held).fetch_add(1, std::memory_order_relaxed);
+  }
 };
 
 }  // namespace metal
