@@ -32,6 +32,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/edram_layout.h"
+#include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_host_depth_reconcile.h"
 #include "xenia/gpu/metal/metal_edram_msl.h"
@@ -245,6 +246,20 @@ kernel void k_edram_offset(device const EdramIn* in [[buffer(0)]],
                                  e.is_depth, e.fmt_log2, e.sample);
 }
 
+// Stage B guest-texture tiling. The CPU writeback scatter addresses every
+// resolve destination texel with texture_address::Tiled2D, so the GPU scatter
+// is only correct if this port agrees for every input the resolve path can
+// produce. One disagreeing bit scrambles the destination.
+struct Tiled2DIn {
+  uint x, y, pitch_aligned, bpp_log2;
+};
+kernel void k_tiled2d_offset(device const Tiled2DIn* in [[buffer(0)]],
+                             device uint* out [[buffer(1)]],
+                             uint i [[thread_position_in_grid]]) {
+  Tiled2DIn t = in[i];
+  out[i] = xe_tiled2d_offset(t.x, t.y, t.pitch_aligned, t.bpp_log2);
+}
+
 // The SHIPPING resolve-copy tile walk, transcribed from
 // MetalRenderTargetCache xe_rcp_fs (.mm:1745-1753) at y_offset=0. It runs in
 // the collapsed single-sample model (no per-sample, no depth swap), but it
@@ -331,8 +346,18 @@ struct CanonicalResolveParamsHost {
   float exp_bias_scale;
   uint32_t width, height;
   uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+  // Stage B tiled scatter (metal_edram_msl.h CanonicalResolveParams). These
+  // MUST be mirrored here even though no conformance case enables the scatter:
+  // the struct is a constant-buffer layout, so a host mirror shorter than the
+  // MSL struct makes the kernel read `scatter_enable` from whatever follows the
+  // upload. That is not hypothetical — it is exactly how this mirror broke the
+  // packed-resolve case when the fields were added (garbage 0xcdcdcdcd read as
+  // a nonzero enable, sending every write to a wrong address).
+  uint32_t scatter_enable;
+  uint32_t dest_base, dest_pitch_aligned;
+  uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
 };
-static_assert(sizeof(CanonicalResolveParamsHost) == 20u * sizeof(uint32_t));
+static_assert(sizeof(CanonicalResolveParamsHost) == 26u * sizeof(uint32_t));
 
 // Host mirror of the shared MSL CanonicalClearParams (metal_edram_msl.h). The
 // clear scatter writes one clear word (two for 64bpp) at each declared
@@ -1798,6 +1823,9 @@ struct MetalCompute {
 };
 
 // Mirror of the MSL EdramIn struct (std layout, 8 x uint32).
+struct Tiled2DIn {
+  uint32_t x, y, pitch_aligned, bpp_log2;
+};
 struct EdramIn {
   uint32_t px, py, base, pitch, msaa, is_depth, fmt_log2, sample;
 };
@@ -2387,6 +2415,55 @@ TEST_CASE("Metal GpuSwap matches CPU oracle bit-for-bit", "[l1][metal][endian]")
 // 1x/2x/4x, color/depth, 32/64bpp. This is the CPU<->GPU convention guarantee
 // the canonical per-sample EDRAM buffer's correctness rests on (task 2.2): if
 // the two disagree on where a sample lives, materialize/pack corrupts it.
+// Stage B (implement-metal-gpu-visible-resolve-authority, task 2.3): the GPU
+// scatter addresses guest memory with the MSL port of texture_address::Tiled2D.
+// The CPU writeback scatter is the shipping oracle, so the port must agree
+// EXACTLY -- a single wrong bit in the bank/pipe interleave scrambles every
+// tiled fetch of the resolve destination, and the failure looks like corrupted
+// textures rather than a wrong address.
+TEST_CASE("Metal tiled2D offset matches the CPU scatter oracle",
+          "[l1][metal][scatter]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  std::vector<Tiled2DIn> in;
+  // Every bpp the resolve destination path can produce (1,2,4,8,16 bytes ->
+  // log2 0..4), several 32-aligned pitches, and enough of the x/y space to
+  // cross macro tiles and exercise every bank/pipe/y_lsb combination.
+  // 32-block aligned, as the CPU addresser requires (it asserts on this).
+  const uint32_t pitches[] = {32u, 64u, 320u, 1280u, 2048u};
+  for (uint32_t bpp_log2 = 0; bpp_log2 <= 4u; ++bpp_log2) {
+    for (uint32_t pitch : pitches) {
+      for (uint32_t y = 0; y < 80u; ++y) {
+        for (uint32_t x = 0; x < 80u; ++x) {
+          in.push_back({x, y, pitch, bpp_log2});
+        }
+      }
+    }
+  }
+  std::vector<uint32_t> cpu(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    const Tiled2DIn& t = in[i];
+    cpu[i] = uint32_t(texture_address::Tiled2D(int32_t(t.x), int32_t(t.y),
+                                               t.pitch_aligned, t.bpp_log2));
+  }
+  auto gpu = mc.RunRaw("k_tiled2d_offset", in.data(),
+                       in.size() * sizeof(Tiled2DIn), in.size());
+  REQUIRE(gpu.size() == cpu.size());
+  uint32_t bad = 0;
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (gpu[i] != cpu[i]) {
+      if (bad < 8) {
+        const Tiled2DIn& t = in[i];
+        WARN("x=" << t.x << " y=" << t.y << " pitch=" << t.pitch_aligned
+                  << " bpp_log2=" << t.bpp_log2 << " gpu=" << gpu[i]
+                  << " cpu=" << cpu[i]);
+      }
+      ++bad;
+    }
+  }
+  REQUIRE(bad == 0u);
+}
+
 TEST_CASE("Metal EDRAM offset matches CPU oracle over the parameter space",
           "[l1][metal][edram]") {
   MetalCompute mc;
