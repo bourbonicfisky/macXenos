@@ -2011,6 +2011,37 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::SkipConsumerWaitEnabled() {
+  // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF -- the house flag shape
+  // (NeedBasedWaitsEnabled above). The banner is a WARNING and prints exactly
+  // once, from the first consultation: any log containing it names a run whose
+  // guest-visible output is untrusted, which is what makes the arm disclosure
+  // checkable after the fact.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SKIP_CONSUMER_WAIT");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      XELOGW(
+          "XE_METAL_SKIP_CONSUMER_WAIT=1: consumer-dependency completion "
+          "waits are ELIDED and pending producer records publish without "
+          "finality proof. Guest reads may see STALE data. Diagnostic "
+          "ceiling probe -- performance evidence only, correctness "
+          "intentionally broken.");
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_SKIP_CONSUMER_WAIT='{}' is malformed; failing closed to "
+          "off (use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
 void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
   {
     // The high-water advance happens INSIDE completion_mutex_, not beside it.
@@ -8176,6 +8207,16 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   // synchronous EndFrameEncoder wait every entry is completed by the time
   // any drain site runs, so this is behavior-neutral until S8).
   uint64_t completed = completed_submission_.load(std::memory_order_acquire);
+  if (SkipConsumerWaitEnabled()) {
+    // CEILING PROBE (see ResolvePendingProducerDependencies): every tagged
+    // record is treated as complete so publication proceeds with whatever
+    // bytes the staging/shared buffers hold RIGHT NOW -- possibly mid-write.
+    // Memory-safe (shared-storage reads of live allocations) but data-stale by
+    // design. This lie is scoped to the publication gates in this function;
+    // completion actions, arena retirement, and PublishCompletedSubmission
+    // still run on real completion facts.
+    completed = UINT64_MAX;
+  }
   // Memexport drains first: exports are linear and already guest-endian in
   // the shared-memory buffer (MTLStorageModeShared), so RAM coherence is a
   // plain memcpy once the exporting submission has completed. Invalidate
@@ -8957,6 +8998,25 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
     // re-acquires the completed high-water itself and re-runs the gate per
     // record, so a producer that somehow is not complete retires nothing and
     // the consumer fails closed rather than publishing.
+  } else if (SkipConsumerWaitEnabled()) {
+    // CEILING-PROBE PATH (XE_METAL_SKIP_CONSUMER_WAIT=1, diagnostic only).
+    // Same async commit the need-based narrow-wait path takes, then NO wait of
+    // any kind, and boundary evidence minted WITHOUT the proof the boundary
+    // path earns. The drain below then publishes stale bytes instead of
+    // failing closed, so callers see the identical complete=true control flow
+    // with only the waiting removed -- which is the entire point: the fps
+    // delta between this arm and default bounds what ANY coherence redesign of
+    // this corridor could recover. Correctness is intentionally broken here;
+    // this branch must never influence a shipping configuration.
+    if (seam_c && boundary_submission) {
+      ++seam_c->cb_present_commits;
+    }
+    if (frame_command_buffer_) {
+      EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+    }
+    PumpCompletedActions();
+    boundary_evidence =
+        metal::MemexportBoundaryEvidence::kSynchronousBoundaryCompleted;
   } else {
     // BOUNDARY PATH -- unchanged. One completion boundary for the whole
     // consumer request; the boundary was captured above, before the commit.

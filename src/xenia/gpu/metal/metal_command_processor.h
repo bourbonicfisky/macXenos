@@ -158,6 +158,15 @@ class MetalCommandProcessor : public CommandProcessor {
   // XE_METAL_ASYNC=0 every record is untagged, so the feature classifies every
   // request as a fallback and is structurally inert regardless of this flag.
   static bool NeedBasedWaitsEnabled();
+  // XE_METAL_SKIP_CONSUMER_WAIT=1 (exact-1 opt-in, warn-once fail-closed,
+  // DEFAULT OFF): DIAGNOSTIC CEILING PROBE, never shippable. The consumer
+  // corridor commits asynchronously, takes NO completion wait, and publishes
+  // pending producer records without proof of finality -- consumers may read
+  // STALE guest RAM by design. Exists solely to bound the fps recoverable by
+  // any coherence redesign of the consumer-dependency post-wait corridor
+  // (OpenSpec optimize-native-metal-frametime); an arm run under this flag is
+  // performance evidence only and must never be read as a correctness arm.
+  static bool SkipConsumerWaitEnabled();
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.
