@@ -2097,9 +2097,22 @@ bool MetalCommandProcessor::SharedResolveShadersEnabled() {
 // its existing path; nothing here is a fallback of its own.
 bool MetalCommandProcessor::DispatchSharedResolveCopy(
     const draw_util::ResolveInfo& resolve_info) {
-  if (!resolve_shader_pipelines_.initialized() || !shared_memory_ ||
-      !render_target_cache_ || !frame_command_buffer_) {
+  // Bounded decline reporting. A route that silently declines looks exactly
+  // like a route that ran and changed nothing -- which is precisely how the
+  // first live run read (0 dispatches, identical fps, zero faults).
+  static uint32_t s_decline_logs = 0;
+  auto decline = [&](const char* reason) {
+    if (s_decline_logs++ < 16) {
+      XELOGW("MetalSharedResolve: declined ({}) dest={:08X}", reason,
+             resolve_info.copy_dest_base);
+    }
     return false;
+  };
+  if (!resolve_shader_pipelines_.initialized()) {
+    return decline("pipelines-uninitialized");
+  }
+  if (!shared_memory_ || !render_target_cache_ || !frame_command_buffer_) {
+    return decline("no-shared-memory-or-cache-or-cb");
   }
   draw_util::ResolveCopyShaderConstants constants;
   uint32_t group_count_x = 0;
@@ -2109,13 +2122,15 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   // scale is fixed at (1,1) and only unscaled variants can be selected.
   draw_util::ResolveCopyShaderIndex shader_index = resolve_info.GetCopyShader(
       1, 1, constants, group_count_x, group_count_y);
-  if (shader_index == draw_util::ResolveCopyShaderIndex::kUnknown ||
-      !group_count_x || !group_count_y) {
-    return false;
+  if (shader_index == draw_util::ResolveCopyShaderIndex::kUnknown) {
+    return decline("shader-index-unknown");
+  }
+  if (!group_count_x || !group_count_y) {
+    return decline("empty-dispatch");
   }
   void* pipeline_ptr = resolve_shader_pipelines_.PipelineFor(shader_index);
   if (!pipeline_ptr) {
-    return false;
+    return decline("no-pipeline-for-index");
   }
   // Commit the destination pages before the GPU writes them, exactly as the
   // other backends do. Without this the buffer's content for the destination
@@ -2123,14 +2138,14 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   // not write (tiled alignment padding) would not hold guest content.
   if (!shared_memory_->RequestRange(resolve_info.copy_dest_extent_start,
                                     resolve_info.copy_dest_extent_length)) {
-    return false;
+    return decline("dest-request-range-failed");
   }
   id<MTLBuffer> dest_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   id<MTLBuffer> edram_buffer =
       (__bridge id<MTLBuffer>)render_target_cache_->canonical_edram_buffer();
   if (!dest_buffer || !edram_buffer) {
-    return false;
+    return decline("null-dest-or-edram-buffer");
   }
   id<MTLCommandBuffer> command_buffer =
       (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -7635,8 +7650,19 @@ bool MetalCommandProcessor::IssueCopy() {
           // uncommitted destination, pipelines unavailable) the existing paths
           // below run unchanged.
           bool shared_resolve_dispatched = false;
-          if (SharedResolveShadersEnabled() && canonical_prepared) {
-            shared_resolve_dispatched = DispatchSharedResolveCopy(resolve_info);
+          if (SharedResolveShadersEnabled()) {
+            if (canonical_prepared) {
+              shared_resolve_dispatched =
+                  DispatchSharedResolveCopy(resolve_info);
+            } else {
+              static uint32_t s_gate_logs = 0;
+              if (s_gate_logs++ < 8) {
+                XELOGW(
+                    "MetalSharedResolve: gate closed (canonical_prepared=0, "
+                    "canonical_resolve={}) dest={:08X}",
+                    canonical_resolve ? 1 : 0, resolve_info.copy_dest_base);
+              }
+            }
           }
           // STAGE B eligibility (XE_METAL_GPU_RESOLVE, default OFF). Every
           // condition is a proof obligation; anything unproven falls back to
