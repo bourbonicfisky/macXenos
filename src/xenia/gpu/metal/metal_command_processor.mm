@@ -2059,6 +2059,31 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::GpuResolveScatterEnabled() {
+  // XE_METAL_GPU_RESOLVE=1 (exact-1, warn-once fail-closed, DEFAULT OFF):
+  // Stage B of implement-metal-gpu-visible-resolve-authority. The canonical
+  // packed resolve writes GUEST-TILED straight into the shared buffer, the
+  // record becomes GPU-current, and shared-buffer consumers stop waiting for
+  // it. Unset is byte-identical to the staging + CPU-scatter path.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_GPU_RESOLVE");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_GPU_RESOLVE='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::ServingCensusEnabled() {
   // Exact-1 opt-in, default OFF, same house shape as the flags above. No
   // banner: this census changes nothing about the run, so a run carrying it is
@@ -7487,10 +7512,91 @@ bool MetalCommandProcessor::IssueCopy() {
               static_cast<xe::ui::metal::MetalProvider*>(
                   graphics_system_->provider())
                   ->device();
+          // STAGE B eligibility (XE_METAL_GPU_RESOLVE, default OFF). Every
+          // condition is a proof obligation; anything unproven falls back to
+          // the staging + CPU-scatter path, which is always correct.
+          const auto& dc_pre = resolve_info.copy_dest_coordinate_info;
+          uint32_t scatter_extent_bytes =
+              resolve_info.copy_dest_extent_start -
+              resolve_info.copy_dest_base +
+              resolve_info.copy_dest_extent_length;
+          bool scatter_eligible = false;
+          id<MTLBuffer> shared_scatter_buffer = nil;
+          if (GpuResolveScatterEnabled() && canonical_packed && shared_memory_ &&
+              scatter_extent_bytes &&
+              // 2D only: the kernel ports Tiled2D, not Tiled3D.
+              !resolve_info.copy_dest_info.copy_dest_array &&
+              !resolve_info.copy_dest_info.copy_dest_slice) {
+            shared_scatter_buffer =
+                (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+            auto dest_range = metal::GuestRange::FromBaseLength(
+                resolve_info.copy_dest_base, scatter_extent_bytes);
+            if (shared_scatter_buffer && dest_range &&
+                uint64_t(resolve_info.copy_dest_base) + scatter_extent_bytes <=
+                    shared_scatter_buffer.length) {
+              // WRITER ORDERING, the same precondition a memexport store must
+              // satisfy: this scatter writes the shared buffer, so an older
+              // overlapping producer whose drain lands afterwards would
+              // overwrite it (unrecoverably when the buffer aliases RAM).
+              // Conservative: ANY overlapping pending producer disqualifies
+              // the scatter rather than trying to order against it here.
+              bool overlapping_pending = false;
+              for (const metal::PendingProducer& p :
+                   SnapshotPendingProducers()) {
+                if (p.range.Overlaps(*dest_range)) {
+                  overlapping_pending = true;
+                  break;
+                }
+              }
+              // DIAGNOSTIC BISECT (XE_METAL_GPU_RESOLVE_FULLRECT=1): restrict
+              // the scatter to full-rect, offset-zero destinations to test
+              // whether offset/strip destinations are the divergence source.
+              static const bool s_fullrect_only =
+                  std::getenv("XE_METAL_GPU_RESOLVE_FULLRECT") != nullptr;
+              const bool full_rect_dest =
+                  dc_pre.offset_x_div_8 == 0 && dc_pre.offset_y_div_8 == 0 &&
+                  (uint32_t(dc_pre.pitch_aligned_div_32) << 5) == rw;
+              scatter_eligible =
+                  !overlapping_pending && (!s_fullrect_only || full_rect_dest);
+              if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+                XELOGW(
+                    "MetalGpuScatter draw={} base={:08X} {}x{} bpp={} "
+                    "bpp_log2={} pitch_aligned={} off=({},{}) extent={} "
+                    "endian={} swap={} fmt={} raw={} 64bpp={} msaa={} "
+                    "sample_select={} eligible={} full_rect={}",
+                    trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                    wb_bpp, wb_bpp_log2,
+                    uint32_t(dc_pre.pitch_aligned_div_32) << 5,
+                    uint32_t(dc_pre.offset_x_div_8) << 3,
+                    uint32_t(dc_pre.offset_y_div_8) << 3, scatter_extent_bytes,
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+                    dest_format, canonical_raw_copy ? 1 : 0,
+                    resolve_info.color_edram_info.format_is_64bpp ? 1 : 0,
+                    uint32_t(resolve_info.color_edram_info.msaa_samples),
+                    uint32_t(dc_pre.copy_sample_select),
+                    scatter_eligible ? 1 : 0, full_rect_dest ? 1 : 0);
+              }
+            }
+          }
           id<MTLBuffer> staging =
-              [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
-                                     options:MTLResourceStorageModeShared];
-          if (staging) {
+              scatter_eligible
+                  ? nil
+                  : [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
+                                           options:MTLResourceStorageModeShared];
+          MetalRenderTargetCache::CanonicalScatterDest scatter_dest{
+              resolve_info.copy_dest_base,
+              // SAME fallback the CPU scatter applies: a zero aligned pitch
+              // means "derive it from the width". Passing the raw zero through
+              // makes every outer-tile term vanish and scatters the whole
+              // surface to wrong addresses.
+              (uint32_t(dc_pre.pitch_aligned_div_32) << 5)
+                  ? (uint32_t(dc_pre.pitch_aligned_div_32) << 5)
+                  : ((rw + 31u) & ~31u),
+              uint32_t(dc_pre.offset_x_div_8) << 3,
+              uint32_t(dc_pre.offset_y_div_8) << 3,
+              scatter_extent_bytes};
+          if (staging || scatter_eligible) {
             bool writeback_encoded = false;
             if (canonical_packed) {
               writeback_encoded =
@@ -7512,7 +7618,11 @@ bool MetalCommandProcessor::IssueCopy() {
                       resolve_info.copy_dest_info.copy_dest_swap != 0,
                       exp_bias_scale, dest_format, wb_bpp_log2,
                       uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      canonical_raw_copy, (__bridge void*)staging, rw, rh);
+                      canonical_raw_copy,
+                      scatter_eligible ? (__bridge void*)shared_scatter_buffer
+                                       : (__bridge void*)staging,
+                      rw, rh,
+                      scatter_eligible ? &scatter_dest : nullptr);
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -7568,6 +7678,28 @@ bool MetalCommandProcessor::IssueCopy() {
                   swap_count_,
                   /*depth_encode=*/0u,
                   ++memory_authority_sequence_});
+              if (scatter_eligible) {
+                // The record's bytes are in the shared buffer, not staging.
+                pending_writebacks_.back().gpu_current = 1u;
+                // Mark the destination GPU-written so the shared-memory
+                // validity model does not upload guest RAM over the freshly
+                // scattered bytes -- the same publication memexport performs
+                // for its stores.
+                MetalMemexportPublicationTarget publication_target(
+                    shared_memory_.get());
+                auto publication = metal::DecideMemexportPublication(
+                    resolve_info.copy_dest_base, scatter_extent_bytes,
+                    pending_writebacks_.back().submission);
+                if (publication) {
+                  // The pending record was installed immediately above, which
+                  // is the ownership this helper requires to exist BEFORE the
+                  // GPU-written marker; the callback attests to that rather
+                  // than registering a second record.
+                  metal::PublishMemexportWrite(
+                      *publication, publication_target,
+                      [](const metal::MemexportPublication&) { return true; });
+                }
+              }
             }
             if (writeback_encoded &&
                 dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
@@ -8706,6 +8838,25 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             "{}x{} ({} bytes{})",
             wb.guest_addr, wb.width, wb.height, published_bytes,
             aliased ? ", aliased self-copy" : "");
+      }
+      // The SAME post-copy publication the staging path performs. Skipping it
+      // is why the first wiring retained every record and the corridor
+      // reported "failed to publish deferred guest-memory producers": guest
+      // RAM had the bytes, but nothing declared them published, so no record
+      // ever retired.
+      if (texture_cache_) {
+        invalidated_entries = texture_cache_->InvalidateRange(
+            wb.guest_addr, wb.range_bytes(),
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+        outcome.invalidated_entries += invalidated_entries;
+      }
+      auto gpu_publication = metal::DecideRamWritePublication(
+          metal::WriterKind::kResolve, wb.guest_addr, wb.dest_extent_bytes);
+      if (gpu_publication) {
+        MetalRamWritePublicationTarget target(
+            shared_memory_.get(), texture_cache_.get(),
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+        publish_outcome = metal::PublishRamWrite(*gpu_publication, target);
       }
     } else if (dest && staging) {
       const uint32_t* src_words =

@@ -173,6 +173,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // (`ClassifyResolvedFetch`). Counts only; it never changes what is declared
   // or served. Task 1.1 of implement-metal-gpu-visible-resolve-authority.
   static bool ServingCensusEnabled();
+  // XE_METAL_GPU_RESOLVE=1 (exact-1, default OFF): Stage B — canonical packed
+  // resolves scatter guest-tiled into the shared buffer and become
+  // GPU-current, so shared-buffer consumers need ordering rather than a
+  // completion wait. Unset keeps the staging + CPU-scatter path byte-identical.
+  static bool GpuResolveScatterEnabled();
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.
