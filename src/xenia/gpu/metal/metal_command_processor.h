@@ -29,6 +29,7 @@
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_need_wait_classify.h"
+#include "xenia/gpu/metal/metal_resolve_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_seam_timing.h"
 #include "xenia/gpu/metal/metal_zero_copy_report.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -178,6 +179,20 @@ class MetalCommandProcessor : public CommandProcessor {
   // GPU-current, so shared-buffer consumers need ordering rather than a
   // completion wait. Unset keeps the staging + CPU-scatter path byte-identical.
   static bool GpuResolveScatterEnabled();
+  // XE_METAL_SHARED_RESOLVE=1 (exact-1, default OFF): dispatch the SHARED
+  // cross-backend resolve-copy compute shaders instead of the Metal-specific
+  // pack kernel, resolving EDRAM straight into the shared-memory buffer at
+  // guest tiled addresses exactly as D3D12 and Vulkan do
+  // (docs/metal_shared_resolve_port_assessment.md).
+  static bool SharedResolveShadersEnabled();
+
+ private:
+  // Shared cross-backend resolve-copy dispatch (task 4.2). Returns false when
+  // unavailable; the caller keeps its existing path.
+  bool DispatchSharedResolveCopy(const draw_util::ResolveInfo& resolve_info);
+  MetalResolveShaderPipelines resolve_shader_pipelines_;
+
+ public:
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.

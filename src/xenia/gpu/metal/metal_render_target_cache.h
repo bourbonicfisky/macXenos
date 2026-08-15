@@ -173,6 +173,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // physical address) instead of linearly into a staging buffer, removing both
   // the staging allocation and the CPU tiled scatter. 2D destinations only.
   // Omitting it is byte-identical to the pre-Stage-B dispatch.
+  // Canonical per-sample EDRAM buffer (id<MTLBuffer>), for dispatchers that
+  // bind it as the resolve SOURCE. Non-owning; may be null before the
+  // canonical path initializes.
+  void* canonical_edram_buffer() const { return canonical_edram_; }
+
   struct CanonicalScatterDest {
     uint32_t dest_base;
     uint32_t dest_pitch_aligned;

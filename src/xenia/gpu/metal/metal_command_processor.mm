@@ -1361,6 +1361,16 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // PrepareTransferCommandBuffer, lifetime keys off the same submission ids,
   // and faulted submissions are queried from the existing GPU-thread fault
   // recording.
+  // Shared cross-backend resolve-copy pipelines (task 4.2). Built only when
+  // the route is enabled: it is default OFF, and 9 pipeline creations are not
+  // free at startup. A failure here is logged and non-fatal -- the dispatcher
+  // checks `initialized()` and the existing resolve path continues.
+  if (SharedResolveShadersEnabled() &&
+      !resolve_shader_pipelines_.Initialize(device_ptr)) {
+    XELOGE(
+        "MetalCommandProcessor: shared resolve-copy pipelines failed to "
+        "build; XE_METAL_SHARED_RESOLVE will not engage");
+  }
   shared_texture_cache_ = std::make_unique<MetalSharedTextureCache>(
       *register_file_, *shared_memory_, device_ptr, texture_cache_.get());
   shared_texture_cache_->SetPrepareTransferCallback(
@@ -2057,6 +2067,100 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
     return false;
   }();
   return s_enabled;
+}
+
+bool MetalCommandProcessor::SharedResolveShadersEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SHARED_RESOLVE");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_SHARED_RESOLVE='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
+// Dispatch the SHARED resolve-copy shader for `resolve_info`, writing EDRAM
+// output straight into the shared-memory buffer at guest tiled addresses.
+// Mirrors the D3D12/Vulkan sequence exactly (d3d12_render_target_cache.cc
+// ~1385-1412): shared selector -> commit destination -> bind -> dispatch ->
+// invalidate. Returns false if anything is unavailable, and the caller keeps
+// its existing path; nothing here is a fallback of its own.
+bool MetalCommandProcessor::DispatchSharedResolveCopy(
+    const draw_util::ResolveInfo& resolve_info) {
+  if (!resolve_shader_pipelines_.initialized() || !shared_memory_ ||
+      !render_target_cache_ || !frame_command_buffer_) {
+    return false;
+  }
+  draw_util::ResolveCopyShaderConstants constants;
+  uint32_t group_count_x = 0;
+  uint32_t group_count_y = 0;
+  // ONE selector, shared with D3D12/Vulkan: it decides the shader, fills the
+  // constants and returns the dispatch shape. Metal is 1x, so the resolution
+  // scale is fixed at (1,1) and only unscaled variants can be selected.
+  draw_util::ResolveCopyShaderIndex shader_index = resolve_info.GetCopyShader(
+      1, 1, constants, group_count_x, group_count_y);
+  if (shader_index == draw_util::ResolveCopyShaderIndex::kUnknown ||
+      !group_count_x || !group_count_y) {
+    return false;
+  }
+  void* pipeline_ptr = resolve_shader_pipelines_.PipelineFor(shader_index);
+  if (!pipeline_ptr) {
+    return false;
+  }
+  // Commit the destination pages before the GPU writes them, exactly as the
+  // other backends do. Without this the buffer's content for the destination
+  // extent is not established, and the parts of the extent the resolve does
+  // not write (tiled alignment padding) would not hold guest content.
+  if (!shared_memory_->RequestRange(resolve_info.copy_dest_extent_start,
+                                    resolve_info.copy_dest_extent_length)) {
+    return false;
+  }
+  id<MTLBuffer> dest_buffer =
+      (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> edram_buffer =
+      (__bridge id<MTLBuffer>)render_target_cache_->canonical_edram_buffer();
+  if (!dest_buffer || !edram_buffer) {
+    return false;
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+  id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+  encoder.label = @"cp:shared-resolve-copy";
+  [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
+                                       pipeline_ptr];
+  MetalResolveShaderPipelines::ResolveConstants push{
+      constants.dest_relative.edram_info.packed,
+      constants.dest_relative.coordinate_info.packed,
+      constants.dest_relative.dest_info.value,
+      constants.dest_relative.dest_coordinate_info.packed,
+      constants.dest_base};
+  [encoder setBytes:&push
+             length:sizeof(push)
+            atIndex:MetalResolveShaderPipelines::kBufferIndexPushConstants];
+  [encoder setBuffer:dest_buffer
+              offset:0
+             atIndex:MetalResolveShaderPipelines::kBufferIndexDest];
+  [encoder setBuffer:edram_buffer
+              offset:0
+             atIndex:MetalResolveShaderPipelines::kBufferIndexEdram];
+  const draw_util::ResolveCopyShaderInfo& shader_info =
+      draw_util::resolve_copy_shader_info[size_t(shader_index)];
+  MTLSize threads = MTLSizeMake(1ull << shader_info.group_size_x_log2,
+                                1ull << shader_info.group_size_y_log2, 1);
+  [encoder dispatchThreadgroups:MTLSizeMake(group_count_x, group_count_y, 1)
+          threadsPerThreadgroup:threads];
+  [encoder endEncoding];
+  return true;
 }
 
 bool MetalCommandProcessor::GpuResolveScatterEnabled() {
@@ -7512,6 +7616,17 @@ bool MetalCommandProcessor::IssueCopy() {
               static_cast<xe::ui::metal::MetalProvider*>(
                   graphics_system_->provider())
                   ->device();
+          // SHARED RESOLVE ROUTE (XE_METAL_SHARED_RESOLVE, default OFF): the
+          // cross-backend copy shader writes EDRAM straight to the guest tiled
+          // destination in the shared buffer, exactly as D3D12/Vulkan do. When
+          // it dispatches, the record is GPU-current and no staging buffer or
+          // CPU scatter is created; when it declines (unsupported shader index,
+          // uncommitted destination, pipelines unavailable) the existing paths
+          // below run unchanged.
+          bool shared_resolve_dispatched = false;
+          if (SharedResolveShadersEnabled() && canonical_prepared) {
+            shared_resolve_dispatched = DispatchSharedResolveCopy(resolve_info);
+          }
           // STAGE B eligibility (XE_METAL_GPU_RESOLVE, default OFF). Every
           // condition is a proof obligation; anything unproven falls back to
           // the staging + CPU-scatter path, which is always correct.
@@ -7522,7 +7637,10 @@ bool MetalCommandProcessor::IssueCopy() {
               resolve_info.copy_dest_extent_length;
           bool scatter_eligible = false;
           id<MTLBuffer> shared_scatter_buffer = nil;
-          if (GpuResolveScatterEnabled() && canonical_packed && shared_memory_ &&
+          // The shared route already wrote the destination; the bespoke
+          // scatter must not also run for the same resolve.
+          if (!shared_resolve_dispatched && GpuResolveScatterEnabled() &&
+              canonical_packed && shared_memory_ &&
               scatter_extent_bytes &&
               // 2D only: the kernel ports Tiled2D, not Tiled3D.
               !resolve_info.copy_dest_info.copy_dest_array &&
