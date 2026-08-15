@@ -51,6 +51,7 @@ add_library(xenia-gpu-metal-backend STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/ir_runtime_impl.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_shader.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_pipelines.mm
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_resolve_shader_pipelines.mm
 )
 # Generated texture-load metallib headers (bytecode/metal/*.h) consumed by
 # metal_load_shader_pipelines.mm.
