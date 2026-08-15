@@ -8268,7 +8268,14 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
     auto range = metal::GuestRange::FromBaseLength(wb.guest_addr,
                                                    wb.range_bytes());
     if (range) {
-      producers.push_back({*range, metal::TransitState::kPendingResolve,
+      // Stage B: a record whose bytes the GPU scatter already placed in the
+      // shared buffer is GPU-current, not merely pending. It still owes RAM
+      // its bytes -- only its publication method and who may skip waiting for
+      // it differ.
+      producers.push_back({*range,
+                           wb.gpu_current
+                               ? metal::TransitState::kGpuCurrentShared
+                               : metal::TransitState::kPendingResolve,
                            wb.submission, wb.authority_sequence});
     }
   }
@@ -8646,7 +8653,61 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     // GPU-newer data.
     id<MTLBuffer> staging = (__bridge id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
-    if (dest && staging) {
+    if (wb.gpu_current) {
+      // STAGE B PUBLICATION. The bytes are already at their guest tiled
+      // addresses inside the shared buffer, so publishing to RAM repeats the
+      // SAME tiled walk and copies only the offsets the scatter wrote.
+      //
+      // A whole-extent linear copy would be cheaper and is WRONG: the
+      // destination extent includes 32-alignment padding rows/columns the
+      // scatter never touches (a 1280x720 dest has height_aligned 736), and
+      // copying the buffer over them would publish bytes no producer ever
+      // wrote. Copying exactly the written offsets is the only publication
+      // that is correct without first uploading the destination from RAM.
+      id<MTLBuffer> shared_buffer =
+          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+                         : nil;
+      const uint8_t* shared_contents =
+          static_cast<const uint8_t*>(shared_buffer.contents);
+      if (!dest || !shared_contents) {
+        if (!exact_sequence) {
+          still_pending.push_back(wb);
+        }
+        continue;
+      }
+      uint32_t pitch_aligned = wb.dest_pitch_aligned
+                                   ? wb.dest_pitch_aligned
+                                   : ((wb.width + 31u) & ~31u);
+      const uint32_t block_log2 = xe::log2_floor(wb.bpp);
+      const uint8_t* src_base = shared_contents + wb.guest_addr;
+      // Aliased backing: RAM and the buffer are the same bytes, so the copy is
+      // a proven self-copy and moves nothing. Publication still succeeds --
+      // the bytes ARE in RAM -- which is what retires the record.
+      const bool aliased = shared_memory_ && shared_memory_->is_zero_copy();
+      uint64_t published_bytes = 0;
+      if (!aliased) {
+        for (uint32_t y = 0; y < wb.height; ++y) {
+          for (uint32_t x = 0; x < wb.width; ++x) {
+            uint32_t off = uint32_t(texture_address::Tiled2D(
+                int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
+                pitch_aligned, int32_t(block_log2)));
+            if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
+              continue;
+            }
+            std::memcpy(dest + off, src_base + off, wb.bpp);
+            published_bytes += wb.bpp;
+          }
+        }
+      }
+      static uint32_t s_gpu_current_logs = 0;
+      if (s_gpu_current_logs++ < 8) {
+        XELOGI(
+            "MetalCommandProcessor: published GPU-current resolve {:08X} "
+            "{}x{} ({} bytes{})",
+            wb.guest_addr, wb.width, wb.height, published_bytes,
+            aliased ? ", aliased self-copy" : "");
+      }
+    } else if (dest && staging) {
       const uint32_t* src_words =
           static_cast<const uint32_t*>(staging.contents);
       const uint8_t* src_bytes =

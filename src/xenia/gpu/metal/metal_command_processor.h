@@ -851,6 +851,18 @@ class MetalCommandProcessor : public CommandProcessor {
     // This lives on the existing pending record; it is not a second queue.
     uint64_t authority_sequence;
 
+    // Stage B (implement-metal-gpu-visible-resolve-authority): the GPU scatter
+    // already wrote this record's bytes into the SHARED BUFFER at their guest
+    // tiled addresses, so `staging` is null and the record is GPU-current. It
+    // still owes guest RAM its bytes; publication copies them buffer->RAM by
+    // repeating the same tiled walk, and only that publication retires it.
+    //
+    // DEFAULTED and declared LAST on purpose: every existing construction site
+    // uses a positional aggregate initializer, so a field inserted mid-struct
+    // silently shifts `submission` into a uint32 slot (it does not even
+    // compile cleanly -- it narrows). Keep new fields here.
+    uint32_t gpu_current = 0;
+
     // Guest-memory extent this writeback touches, for overlap / wait / drain-
     // filter tests. Tiled pitch, offsets, and row padding make the real extent
     // larger than a packed width*height*bpp span, so prefer the addresser-

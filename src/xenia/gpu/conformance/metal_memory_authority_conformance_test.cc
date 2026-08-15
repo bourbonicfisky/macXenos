@@ -2273,6 +2273,55 @@ TEST_CASE("Authority: completed GPU-current record still needs no drain",
   REQUIRE(decision.max_order_submission == 4u);
 }
 
+TEST_CASE("Authority: a GPU-current scatter destination needs writer ordering",
+          "[l0][authority][gpucurrent]") {
+  // Stage B's scatter is a GPU STORE into the shared buffer at guest offsets —
+  // structurally the same act as a memexport store — so it inherits the same
+  // precondition: no older overlapping producer may still be pending, because
+  // that producer's later drain would overwrite the freshly scattered bytes.
+  // Under a mirrored buffer the newest writer still wins by accident (the
+  // resolve writes RAM, the buffer keeps the new bytes); under an ALIASED
+  // buffer the accident stops working and the bytes are gone. Ordering makes
+  // the outcome a property of the model rather than of the backing.
+  std::vector<MemexportDestinationPreparation> destinations = {
+      MemexportDestinationPreparation{
+          *GuestRange::FromBaseLength(0x1000u, 0x1000u)},
+  };
+  std::vector<PendingProducer> older_pending = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kPendingResolve,
+                   /*submission=*/9, /*sequence=*/1),
+  };
+  auto pending_decision = DecideMemexportDestinationOrdering(
+      destinations, older_pending, /*completed=*/8);
+  REQUIRE_FALSE(pending_decision.selected.empty());
+  REQUIRE(pending_decision.await);
+
+  // Retired predecessor: ordering is established and the store may proceed.
+  auto retired_decision = DecideMemexportDestinationOrdering(
+      destinations, older_pending, /*completed=*/9);
+  REQUIRE_FALSE(retired_decision.await);
+}
+
+TEST_CASE("Authority: an ordered GPU-current record is not selected as its own predecessor",
+          "[l0][authority][gpucurrent]") {
+  // Once scattered, the record itself is GPU-current. A LATER scatter into an
+  // overlapping range must still see it as an older overlapping producer (so
+  // chronology holds), which is what keeps two resolves to the same
+  // destination in order.
+  std::vector<MemexportDestinationPreparation> destinations = {
+      MemexportDestinationPreparation{
+          *GuestRange::FromBaseLength(0x1000u, 0x1000u)},
+  };
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared,
+                   /*submission=*/9, /*sequence=*/1),
+  };
+  auto decision = DecideMemexportDestinationOrdering(destinations, producers,
+                                                     /*completed=*/8);
+  REQUIRE(decision.selected.size() == 1u);
+  REQUIRE(decision.await);  // still in flight: the later store must not race it
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace metal
