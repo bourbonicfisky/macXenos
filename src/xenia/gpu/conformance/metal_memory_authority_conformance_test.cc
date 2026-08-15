@@ -2136,7 +2136,145 @@ TEST_CASE(
   REQUIRE(SwapPresentationGatePermitsPresent(permitted));  // present permitted.
 }
 
+// ---------------------------------------------------------------------------
+// Stage B: GPU-current producers (implement-metal-gpu-visible-resolve-authority
+// task 2.4). A record whose bytes a GPU scatter already placed in the shared
+// buffer is readable by a shared-buffer consumer under ORDERING, while a
+// guest-RAM consumer of the same range must still await and drain it. The
+// matrix below is the whole contract, including the mixed cases the design
+// names as stop conditions.
+// ---------------------------------------------------------------------------
+
+namespace {
+ConsumerRequest GpuRequest(uint32_t base, uint32_t size,
+                           ConsumerAccess access) {
+  ConsumerRequest request = ConsumerRequest::Uniform(SingleRange(base, size));
+  request.access = access;
+  return request;
+}
+}  // namespace
+
+TEST_CASE("Authority: shared-buffer consumer orders against GPU-current bytes",
+          "[l0][authority][gpucurrent]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared, 9),
+  };
+  // Submission 9 has NOT completed (completed = 8): the whole point is that a
+  // shared-buffer consumer does not have to wait for it.
+  auto decision = DecideConsumer(ConsumerKind::kTexture,
+                                 GpuRequest(0x1800u, 0x400u,
+                                            ConsumerAccess::kSharedBuffer),
+                                 producers, /*completed=*/8);
+  REQUIRE(decision.action == AuthorityAction::kOrderAgainstGpuProducers);
+  REQUIRE(decision.selected.size() == 1u);
+  REQUIRE(decision.requires_gpu_ordering);
+  REQUIRE(decision.max_order_submission == 9u);
+  // No CPU wait, and crucially no drain: draining would retire a record guest
+  // RAM has not received.
+  REQUIRE_FALSE(decision.await);
+  REQUIRE_FALSE(decision.drain);
+  REQUIRE(decision.max_wait_submission == 0u);
+}
+
+TEST_CASE("Authority: guest-RAM consumer still awaits GPU-current bytes",
+          "[l0][authority][gpucurrent]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared, 9),
+  };
+  // Same producer, same range — only the access domain differs. This is demand
+  // CPU visibility: RAM does not hold these bytes yet.
+  auto decision = DecideConsumer(ConsumerKind::kHostCpuRead,
+                                 GpuRequest(0x1800u, 0x400u,
+                                            ConsumerAccess::kGuestRam),
+                                 producers, /*completed=*/8);
+  REQUIRE(decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(decision.await);
+  REQUIRE(decision.drain);
+  REQUIRE(decision.max_wait_submission == 9u);
+  REQUIRE_FALSE(decision.requires_gpu_ordering);
+}
+
+TEST_CASE("Authority: default access is the conservative guest-RAM domain",
+          "[l0][authority][gpucurrent]") {
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared, 9),
+  };
+  // A caller that never sets `access` (every pre-Stage-B call site) must get
+  // the historical decision, never the ordering shortcut.
+  auto decision = DecideConsumer(ConsumerKind::kTexture,
+                                 SingleRange(0x1800u, 0x400u), producers,
+                                 /*completed=*/8);
+  REQUIRE(decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(decision.drain);
+  REQUIRE_FALSE(decision.requires_gpu_ordering);
+}
+
+TEST_CASE("Authority: a mixed selection keeps await/drain for every record",
+          "[l0][authority][gpucurrent]") {
+  // GPU-current and RAM-owed records overlapping the same consumer. Splitting
+  // policies per record would drain the GPU-current one without waiting for
+  // it, copying bytes the GPU may still be writing — so the whole selection
+  // falls back to await/drain.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared, 9,
+                   /*sequence=*/1),
+      MakeProducer(0x1000u, 0x2000u, TransitState::kPendingResolve, 9,
+                   /*sequence=*/2),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kTexture,
+                                 GpuRequest(0x1800u, 0x400u,
+                                            ConsumerAccess::kSharedBuffer),
+                                 producers, /*completed=*/8);
+  REQUIRE(decision.action == AuthorityAction::kAwaitProducer);
+  REQUIRE(decision.selected.size() == 2u);
+  REQUIRE(decision.await);
+  REQUIRE(decision.drain);
+  REQUIRE_FALSE(decision.requires_gpu_ordering);
+}
+
+TEST_CASE("Authority: closure over an older RAM-owed record blocks ordering",
+          "[l0][authority][gpucurrent]") {
+  // The consumer requests only the GPU-current record's range, but an OLDER
+  // overlapping RAM-owed record is pulled in by the transitive closure. That
+  // closure is the writer-chronology invariant and must survive Stage B: the
+  // decision has to fall back rather than order past an unpublished older
+  // writer.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kPendingResolve, 7,
+                   /*sequence=*/1),
+      MakeProducer(0x1800u, 0x400u, TransitState::kGpuCurrentShared, 9,
+                   /*sequence=*/2),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kTexture,
+                                 GpuRequest(0x1900u, 0x100u,
+                                            ConsumerAccess::kSharedBuffer),
+                                 producers, /*completed=*/9);
+  REQUIRE(decision.selected.size() == 2u);
+  REQUIRE(decision.action == AuthorityAction::kDrainMatchingRecords);
+  REQUIRE(decision.drain);
+  REQUIRE_FALSE(decision.requires_gpu_ordering);
+}
+
+TEST_CASE("Authority: completed GPU-current record still needs no drain",
+          "[l0][authority][gpucurrent]") {
+  // Completion does not change the rule: the bytes live in the shared buffer
+  // either way, and RAM still has not received them, so the record stays
+  // pending rather than being retired by a shared-buffer consumer.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x1000u, 0x2000u, TransitState::kGpuCurrentShared, 4),
+  };
+  auto decision = DecideConsumer(ConsumerKind::kVertex,
+                                 GpuRequest(0x1800u, 0x400u,
+                                            ConsumerAccess::kSharedBuffer),
+                                 producers, /*completed=*/4);
+  REQUIRE(decision.action == AuthorityAction::kOrderAgainstGpuProducers);
+  REQUIRE_FALSE(decision.drain);
+  REQUIRE(decision.requires_gpu_ordering);
+  REQUIRE(decision.max_order_submission == 4u);
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace metal
 }  // namespace xe
+
