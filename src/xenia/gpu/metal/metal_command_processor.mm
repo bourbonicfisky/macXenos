@@ -2160,6 +2160,17 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   [encoder dispatchThreadgroups:MTLSizeMake(group_count_x, group_count_y, 1)
           threadsPerThreadgroup:threads];
   [encoder endEncoding];
+  // Engagement evidence. "Identical output" is only meaningful if the route
+  // actually ran: a dispatcher that declined every resolve would produce a
+  // byte-identical corpus for the trivial reason that nothing changed.
+  ++shared_resolve_dispatches_;
+  static uint32_t s_logs = 0;
+  if (s_logs++ < 8) {
+    XELOGI(
+        "MetalSharedResolve: dispatched shader={} groups={}x{} dest={:08X}",
+        size_t(shader_index), group_count_x, group_count_y,
+        resolve_info.copy_dest_base);
+  }
   return true;
 }
 

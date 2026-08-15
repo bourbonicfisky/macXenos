@@ -191,6 +191,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // unavailable; the caller keeps its existing path.
   bool DispatchSharedResolveCopy(const draw_util::ResolveInfo& resolve_info);
   MetalResolveShaderPipelines resolve_shader_pipelines_;
+  uint64_t shared_resolve_dispatches_ = 0;
 
  public:
 
