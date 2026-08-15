@@ -2132,6 +2132,22 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   if (!pipeline_ptr) {
     return decline("no-pipeline-for-index");
   }
+  // BISECT (task 6.1). The failing SF4 resolves differ from the working JC2
+  // ones almost only in EDRAM source placement: base_tiles 48 vs 0 and
+  // pitch_tiles 7 vs 4. Metal materializes its canonical EDRAM PER RESOLVE
+  // (PrepareCanonicalEdramForResolve over the resolve's span), so a shared
+  // shader reading a source region Metal never prepared would read garbage.
+  // These gates isolate that without changing any default.
+  static const bool s_base0_only =
+      std::getenv("XE_METAL_SHARED_RESOLVE_BASE0") != nullptr;
+  static const bool s_pitch4_only =
+      std::getenv("XE_METAL_SHARED_RESOLVE_PITCH4") != nullptr;
+  if (s_base0_only && resolve_info.color_edram_info.base_tiles != 0) {
+    return decline("bisect-nonzero-edram-base");
+  }
+  if (s_pitch4_only && resolve_info.color_edram_info.pitch_tiles != 4) {
+    return decline("bisect-pitch-not-4");
+  }
   // Commit the destination pages before the GPU writes them, exactly as the
   // other backends do. Without this the buffer's content for the destination
   // extent is not established, and the parts of the extent the resolve does
@@ -2182,9 +2198,21 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   static uint32_t s_logs = 0;
   if (s_logs++ < 8) {
     XELOGI(
-        "MetalSharedResolve: dispatched shader={} groups={}x{} dest={:08X}",
+        "MetalSharedResolve: dispatched shader={} groups={}x{} dest={:08X} "
+        "msaa={} sample_select={} edram_fmt={} 64bpp={} dest_fmt={} "
+        "endian={} swap={} exp_bias={} edram_base={} edram_pitch={}",
         size_t(shader_index), group_count_x, group_count_y,
-        resolve_info.copy_dest_base);
+        resolve_info.copy_dest_base,
+        uint32_t(resolve_info.color_edram_info.msaa_samples),
+        uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
+        uint32_t(resolve_info.color_edram_info.format),
+        uint32_t(resolve_info.color_edram_info.format_is_64bpp),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+        int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
+        uint32_t(resolve_info.color_edram_info.base_tiles),
+        uint32_t(resolve_info.color_edram_info.pitch_tiles));
   }
   return true;
 }
