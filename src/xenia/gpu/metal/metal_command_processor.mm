@@ -7734,8 +7734,15 @@ bool MetalCommandProcessor::IssueCopy() {
               }
             }
           }
+          // The shared route already wrote the destination; like the bespoke
+          // scatter it needs NO staging buffer and NO CPU scatter. Without
+          // this the route is ADDITIVE -- both paths run, guest RAM is still
+          // written by the CPU scatter, and any "identical output" result is
+          // trivially true because the OLD path produced it.
+          const bool gpu_resident_resolve =
+              shared_resolve_dispatched || scatter_eligible;
           id<MTLBuffer> staging =
-              scatter_eligible
+              gpu_resident_resolve
                   ? nil
                   : [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
                                            options:MTLResourceStorageModeShared];
@@ -7753,7 +7760,12 @@ bool MetalCommandProcessor::IssueCopy() {
               scatter_extent_bytes};
           if (staging || scatter_eligible) {
             bool writeback_encoded = false;
-            if (canonical_packed) {
+            if (shared_resolve_dispatched) {
+              // Already resolved by the shared cross-backend shader straight
+              // into the shared buffer at guest tiled addresses: no second
+              // kernel, no staging, no CPU scatter.
+              writeback_encoded = true;
+            } else if (canonical_packed) {
               writeback_encoded =
                   render_target_cache_->ResolveCanonicalColorToBuffer(
                       frame_command_buffer_,
@@ -7833,7 +7845,7 @@ bool MetalCommandProcessor::IssueCopy() {
                   swap_count_,
                   /*depth_encode=*/0u,
                   ++memory_authority_sequence_});
-              if (scatter_eligible) {
+              if (gpu_resident_resolve) {
                 // The record's bytes are in the shared buffer, not staging.
                 pending_writebacks_.back().gpu_current = 1u;
                 // Mark the destination GPU-written so the shared-memory
