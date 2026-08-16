@@ -2163,6 +2163,21 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   if (!dest_buffer || !edram_buffer) {
     return decline("null-dest-or-edram-buffer");
   }
+  // SENTINEL DIAGNOSTIC (XE_METAL_SHARED_RESOLVE_SENTINEL=1): stamp the
+  // destination extent in the shared buffer with a known pattern BEFORE the
+  // dispatch. Whatever survives to publication tells us, unambiguously,
+  // whether the shared shader wrote these bytes at all -- the question the
+  // grid-shrink null raised. The buffer is MTLStorageModeShared, so the CPU
+  // fill lands before the GPU executes the dispatch encoded below.
+  static const bool s_sentinel =
+      std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL") != nullptr;
+  if (s_sentinel) {
+    uint8_t* contents = static_cast<uint8_t*>(dest_buffer.contents);
+    if (contents) {
+      std::memset(contents + resolve_info.copy_dest_extent_start, 0xA5,
+                  resolve_info.copy_dest_extent_length);
+    }
+  }
   id<MTLCommandBuffer> command_buffer =
       (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
   id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
@@ -9062,6 +9077,13 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // the bytes ARE in RAM -- which is what retires the record.
       const bool aliased = shared_memory_ && shared_memory_->is_zero_copy();
       uint64_t published_bytes = 0;
+      // Sentinel accounting: how many of the texels this publication copies
+      // still hold the pre-dispatch pattern, i.e. were never written by the
+      // shared shader.
+      const bool sentinel_check =
+          std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL") != nullptr;
+      uint64_t sentinel_survivors = 0;
+      uint64_t sentinel_examined = 0;
       if (!aliased) {
         for (uint32_t y = 0; y < wb.height; ++y) {
           for (uint32_t x = 0; x < wb.width; ++x) {
@@ -9073,6 +9095,14 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             }
             std::memcpy(dest + off, src_base + off, wb.bpp);
             published_bytes += wb.bpp;
+            if (sentinel_check && wb.bpp >= 4u) {
+              uint32_t word;
+              std::memcpy(&word, src_base + off, sizeof(word));
+              if (word == 0xA5A5A5A5u) {
+                ++sentinel_survivors;
+              }
+              ++sentinel_examined;
+            }
           }
         }
       }
@@ -9083,6 +9113,12 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             "{}x{} ({} bytes{})",
             wb.guest_addr, wb.width, wb.height, published_bytes,
             aliased ? ", aliased self-copy" : "");
+      }
+      if (sentinel_check && sentinel_examined) {
+        XELOGW(
+            "MetalSharedResolveSentinel dest={:08X} unwritten={}/{} ({:.1f}%)",
+            wb.guest_addr, sentinel_survivors, sentinel_examined,
+            100.0 * double(sentinel_survivors) / double(sentinel_examined));
       }
       // The SAME post-copy publication the staging path performs. Skipping it
       // is why the first wiring retained every record and the corridor
