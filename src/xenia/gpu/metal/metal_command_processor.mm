@@ -2169,14 +2169,16 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   encoder.label = @"cp:shared-resolve-copy";
   [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
                                        pipeline_ptr];
-  MetalResolveShaderPipelines::ResolveConstants push{
-      constants.dest_relative.edram_info.packed,
-      constants.dest_relative.coordinate_info.packed,
-      constants.dest_relative.dest_info.value,
-      constants.dest_relative.dest_coordinate_info.packed,
-      constants.dest_base};
-  [encoder setBytes:&push
-             length:sizeof(push)
+  // Pass the SHARED struct verbatim, exactly as D3D12 does
+  // (SetComputeRoot32BitConstants over &copy_shader_constants). Rebuilding it
+  // field-by-field from accessors would put this backend's transcription
+  // between the shared producer and the shared shader -- the same duplicated
+  // contract this whole redirection exists to remove.
+  static_assert(sizeof(draw_util::ResolveCopyShaderConstants) ==
+                    sizeof(MetalResolveShaderPipelines::ResolveConstants),
+                "Metal push-constant mirror must match the shared struct");
+  [encoder setBytes:&constants
+             length:sizeof(constants)
             atIndex:MetalResolveShaderPipelines::kBufferIndexPushConstants];
   [encoder setBuffer:dest_buffer
               offset:0
@@ -7663,6 +7665,45 @@ bool MetalCommandProcessor::IssueCopy() {
             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float);
         const bool writeback_source_available =
             canonical_packed || (resolved && snap && legacy_blit_format);
+        // TASK 6.3: which gate decides whether the INCUMBENT writes this
+        // destination. The byte comparison showed Metal leaves the implicated
+        // wide-pitch dest ~98.7% zero, so "baseline" there may be UNWRITTEN
+        // memory rather than correct output -- in which case the shared route
+        // is not producing wrong pixels, it is producing pixels where the
+        // incumbent produces none.
+        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+          // Materialization coverage: what Metal PREPARED for this resolve
+          // versus the source rect the shared shader will read. If the shader
+          // reads tiles outside the prepared span, it reads whatever the
+          // canonical buffer happens to hold.
+          XELOGW(
+              "MetalWbSpan dest={:08X} prepared_span(base={} row_len={} "
+              "rows={} pitch={}) edram(base={} pitch={}) src_off=({},{}) "
+              "rect={}x{}",
+              resolve_info.copy_dest_base, span_base, span_row_length,
+              span_rows, span_pitch,
+              uint32_t(resolve_info.color_edram_info.base_tiles),
+              uint32_t(resolve_info.color_edram_info.pitch_tiles),
+              uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3,
+              uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
+              rw, rh);
+        }
+        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+          const uint64_t wb_bytes = uint64_t(rw) * rh * wb_bpp;
+          XELOGW(
+              "MetalWbGate dest={:08X} {}x{} bpp={} bytes={} cap={} "
+              "src_avail={} canonical_packed={} resolved={} snap={} "
+              "legacy_fmt={} no_wb={} size_ok={} => encodes={}",
+              resolve_info.copy_dest_base, rw, rh, wb_bpp, wb_bytes, wb_cap,
+              writeback_source_available ? 1 : 0, canonical_packed ? 1 : 0,
+              resolved ? 1 : 0, snap ? 1 : 0, legacy_blit_format ? 1 : 0,
+              s_no_writeback ? 1 : 0, wb_bytes <= wb_cap ? 1 : 0,
+              (writeback_source_available && !s_no_writeback &&
+               wb_bytes <= wb_cap &&
+               (canonical_packed || legacy_blit_format))
+                  ? 1
+                  : 0);
+        }
         if (writeback_source_available && !s_no_writeback &&
             uint64_t(rw) * rh * wb_bpp <= wb_cap &&
             (canonical_packed || legacy_blit_format)) {
