@@ -7851,7 +7851,7 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(dc_pre.offset_x_div_8) << 3,
               uint32_t(dc_pre.offset_y_div_8) << 3,
               scatter_extent_bytes};
-          if (staging || scatter_eligible) {
+          if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {
               // Already resolved by the shared cross-backend shader straight
@@ -9046,6 +9046,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     id<MTLBuffer> staging = (__bridge id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
     if (wb.gpu_current) {
+    if (std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL")) {
+      XELOGW("MetalGpuCurrentPublish ENTER dest={:08X} {}x{} submission={}",
+             wb.guest_addr, wb.width, wb.height, wb.submission);
+    }
       // STAGE B PUBLICATION. The bytes are already at their guest tiled
       // addresses inside the shared buffer, so publishing to RAM repeats the
       // SAME tiled walk and copies only the offsets the scatter wrote.
