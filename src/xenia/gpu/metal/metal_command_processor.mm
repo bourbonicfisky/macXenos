@@ -2186,10 +2186,19 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   [encoder setBuffer:edram_buffer
               offset:0
              atIndex:MetalResolveShaderPipelines::kBufferIndexEdram];
-  const draw_util::ResolveCopyShaderInfo& shader_info =
-      draw_util::resolve_copy_shader_info[size_t(shader_index)];
-  MTLSize threads = MTLSizeMake(1ull << shader_info.group_size_x_log2,
-                                1ull << shader_info.group_size_y_log2, 1);
+  // THREADGROUP SIZE IS NOT THE GROUP'S PIXEL FOOTPRINT.
+  // `resolve_copy_shader_info[].group_size_{x,y}_log2` is the number of PIXELS
+  // a group covers (64x8 for the fast 32bpp shader), and the shared host
+  // contract already used it to derive `group_count_{x,y}`. The MSL
+  // threadgroup is the shader's own LOCAL_SIZE, which is 8x8 for EVERY
+  // resolve copy shader in the family. Passing the pixel footprint here
+  // dispatched 512 threads per group against a shader indexing by
+  // `thread_position_in_grid`, so every thread resolved a correctly-addressed
+  // but WRONG pixel -- dense content where the incumbent reads an empty
+  // surface.
+  static constexpr uint32_t kResolveLocalSizeX = 8;
+  static constexpr uint32_t kResolveLocalSizeY = 8;
+  MTLSize threads = MTLSizeMake(kResolveLocalSizeX, kResolveLocalSizeY, 1);
   [encoder dispatchThreadgroups:MTLSizeMake(group_count_x, group_count_y, 1)
           threadsPerThreadgroup:threads];
   [encoder endEncoding];
