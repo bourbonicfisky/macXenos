@@ -4105,7 +4105,8 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     uint32_t source_x, uint32_t source_y, uint32_t sample_select,
     bool dest_swap, float exp_bias_scale, uint32_t dest_format,
     uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
-    void* destination_buffer, uint32_t width, uint32_t height) {
+    void* destination_buffer, uint32_t width, uint32_t height,
+    const CanonicalScatterDest* scatter) {
   xenos::ColorRenderTargetFormat storage_format =
       xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
   if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
@@ -4148,6 +4149,12 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     float exp_bias_scale;
     uint32_t width, height;
     uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+    // Stage B tiled scatter; all zero unless the caller opts in, in which case
+    // the dispatch writes guest-tiled into the shared buffer instead of
+    // linearly into a staging buffer.
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
   } params{surface,
            source_x,
            source_y,
@@ -4162,8 +4169,14 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
            dest_format,
            dest_bpp_log2,
            dest_endian,
-           uint32_t(raw_copy)};
-  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+           uint32_t(raw_copy),
+           uint32_t(scatter ? 1u : 0u),
+           scatter ? scatter->dest_base : 0u,
+           scatter ? scatter->dest_pitch_aligned : 0u,
+           scatter ? scatter->dest_offset_x : 0u,
+           scatter ? scatter->dest_offset_y : 0u,
+           scatter ? scatter->dest_extent_bytes : 0u};
+  static_assert(sizeof(ResolveParams) == 26u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];

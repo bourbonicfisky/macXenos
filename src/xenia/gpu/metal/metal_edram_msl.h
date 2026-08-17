@@ -1077,6 +1077,18 @@ struct CanonicalResolveParams {
   uint dest_bpp_log2;
   uint dest_endian;
   uint raw_copy;
+  // Stage B tiled scatter. When scatter_enable is 0 every field below is
+  // ignored and the kernel writes the linear staging layout it always has, so
+  // the flag-off path is byte-identical. When 1, `destination` is the shared
+  // memory buffer (offset == guest physical address) and the kernel writes at
+  // the guest tiled address instead, removing both the staging buffer and the
+  // CPU scatter. 2D only: 3D/stacked destinations keep the CPU path.
+  uint scatter_enable;
+  uint dest_base;
+  uint dest_pitch_aligned;
+  uint dest_offset_x;
+  uint dest_offset_y;
+  uint dest_extent_bytes;
 };
 inline float4 xe_resolve_read_color(device const uint* canonical,
                                     constant CanonicalResolveParams& p,
@@ -1257,6 +1269,34 @@ inline uint4 xe_resolve_endian128(uint4 v, uint endian) {
   uint2 hi = xe_resolve_endian64(v.zw, endian);
   return uint4(lo, hi);
 }
+// GUEST TEXTURE TILING (Stage B of implement-metal-gpu-visible-resolve-authority).
+// Direct port of texture_address::TiledCombine / Tiled2D / Tiled3D. The CPU
+// writeback scatter is the byte-exact oracle: these must agree with it for
+// every (x, y, z, pitch_aligned, height_aligned, bpp) the resolve path can
+// produce, which the [l1][metal][scatter] conformance cases assert.
+//
+// Ported verbatim rather than re-derived: the bank/pipe/y_lsb bit interleave
+// is not reconstructible from the shape of the data, and a "cleaner" version
+// that disagrees in one bit scrambles every tiled fetch of the destination.
+inline uint xe_tiled_combine(uint outer_inner_bytes, uint bank, uint pipe,
+                             uint y_lsb) {
+  return ((y_lsb << 4u) | (pipe << 6u) | (bank << 11u)) |
+         (outer_inner_bytes & 0xFu) |
+         (((outer_inner_bytes >> 4u) & 0x1u) << 5u) |
+         (((outer_inner_bytes >> 5u) & 0x7u) << 8u) |
+         ((outer_inner_bytes >> 8u) << 12u);
+}
+inline uint xe_tiled2d_offset(uint x, uint y, uint pitch_aligned,
+                              uint bytes_per_block_log2) {
+  uint outer_blocks = (((y >> 5u) * (pitch_aligned >> 5u)) + (x >> 5u)) << 6u;
+  uint inner_blocks = (((y >> 1u) & 0x7u) << 3u) | (x & 0x7u);
+  uint outer_inner_bytes = (outer_blocks | inner_blocks)
+                           << bytes_per_block_log2;
+  uint bank = (y >> 4u) & 0x1u;
+  uint pipe = ((x >> 3u) & 0x3u) ^ (((y >> 3u) & 0x1u) << 1u);
+  return xe_tiled_combine(outer_inner_bytes, bank, pipe, y & 1u);
+}
+
 inline uint4 xe_resolve_read_raw(device const uint* canonical,
                                  constant CanonicalResolveParams& p,
                                  uint2 source) {
@@ -1296,6 +1336,20 @@ kernel void resolve_canonical_color_packed(
   if (gid.x >= p.width || gid.y >= p.height) return;
   uint2 source = uint2(p.source_x + gid.x, p.source_y + gid.y);
   uint byte_offset = (gid.y * p.width + gid.x) << p.dest_bpp_log2;
+  if (p.scatter_enable != 0u) {
+    // Same texel, guest tiled address. Mirrors the CPU scatter exactly: the
+    // destination offsets are added before tiling, the bpp comes from
+    // dest_bpp_log2, and an out-of-extent texel is DROPPED rather than
+    // clamped (writing it would corrupt a neighbouring guest allocation).
+    uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,
+                                 p.dest_offset_y + gid.y,
+                                 p.dest_pitch_aligned, p.dest_bpp_log2);
+    uint bpp = 1u << p.dest_bpp_log2;
+    if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {
+      return;
+    }
+    byte_offset = p.dest_base + off;
+  }
   if (p.raw_copy != 0u) {
     uint4 raw = xe_resolve_read_raw(canonical, p, source);
     if (p.dest_bpp_log2 == 2u) {

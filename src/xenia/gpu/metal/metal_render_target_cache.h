@@ -167,13 +167,32 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
       uint32_t source_y, uint32_t sample_select, void* destination_buffer,
       uint32_t width, uint32_t height);
+  // Stage B (implement-metal-gpu-visible-resolve-authority): when supplied,
+  // the packed resolve dispatch writes GUEST-TILED into `destination_buffer`
+  // (which must then be the shared-memory buffer, whose offset is the guest
+  // physical address) instead of linearly into a staging buffer, removing both
+  // the staging allocation and the CPU tiled scatter. 2D destinations only.
+  // Omitting it is byte-identical to the pre-Stage-B dispatch.
+  // Canonical per-sample EDRAM buffer (id<MTLBuffer>), for dispatchers that
+  // bind it as the resolve SOURCE. Non-owning; may be null before the
+  // canonical path initializes.
+  void* canonical_edram_buffer() const { return canonical_edram_; }
+
+  struct CanonicalScatterDest {
+    uint32_t dest_base;
+    uint32_t dest_pitch_aligned;
+    uint32_t dest_offset_x;
+    uint32_t dest_offset_y;
+    uint32_t dest_extent_bytes;
+  };
   bool ResolveCanonicalColorToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, bool is_64bpp,
       uint32_t source_x, uint32_t source_y, uint32_t sample_select,
       bool dest_swap, float exp_bias_scale, uint32_t dest_format,
       uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
-      void* destination_buffer, uint32_t width, uint32_t height);
+      void* destination_buffer, uint32_t width, uint32_t height,
+      const CanonicalScatterDest* scatter = nullptr);
   bool PerformCanonicalResolveClear(
       const void* command_buffer, uint32_t span_base,
       uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,

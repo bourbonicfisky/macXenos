@@ -82,6 +82,30 @@ enum class TransitState {
   kRamCurrent,       // guest RAM holds the guest-visible bytes.
   kPendingResolve,   // a completed/queued resolve owes RAM its scattered bytes.
   kPendingMemexport,  // the shared buffer holds newer bytes owed to RAM.
+  // Stage B (implement-metal-gpu-visible-resolve-authority): a GPU scatter
+  // already placed the newest bytes in the SHARED BUFFER at the guest physical
+  // offset. Guest RAM is stale until published, so this is still a transit
+  // state owing RAM its bytes -- the difference is WHO can be served without
+  // waiting: a consumer reading the shared buffer can read these bytes under
+  // ordering alone, while a consumer reading guest RAM must still await and
+  // drain exactly as for kPendingResolve.
+  //
+  // A record in this state is NEVER retired by a shared-buffer consumer. Only
+  // RAM publication retires it, which is what preserves demand CPU visibility.
+  kGpuCurrentShared,
+};
+
+// Which memory a particular consumer request will actually read. This is NOT
+// derivable from ConsumerKind: the legacy texture untile reads guest RAM
+// through TranslatePhysical, while the routed load-shader path reads the
+// shared buffer for the SAME kTexture kind. Keying the decision on the kind
+// would therefore serve a RAM reader from GPU-current bytes it cannot see.
+// Callers declare what they are about to do; the default is the conservative
+// one, so every pre-Stage-B call site keeps its exact behavior.
+enum class ConsumerAccess {
+  kGuestRam,      // reads guest RAM: GPU-current bytes must be published first.
+  kSharedBuffer,  // reads the shared buffer: GPU-current bytes are readable
+                  // under ordering, with no completion wait and no drain.
 };
 
 // The action the authority contract selects. These match the design's explicit
@@ -101,6 +125,11 @@ enum class AuthorityAction {
                            // its pending record as ONE ordered transition.
   kConvergeRamFromBuffer,  // a completed memexport copies buffer->RAM and
                            // retires its record without clobbering the buffer.
+  kOrderAgainstGpuProducers,  // Stage B: every selected producer is
+                              // GPU-current and this consumer reads the shared
+                              // buffer -- satisfy it by ordering the consuming
+                              // work after the producing submission, with no
+                              // completion wait and no drain.
 };
 
 // A non-owning snapshot of one pending GPU producer record as it currently
@@ -157,6 +186,13 @@ struct ConsumerDecision {
   bool drain = false;                  // at least one producer to converge.
   bool revalidate_gpu_bytes = false;   // consumer reads the shared buffer.
   uint64_t max_wait_submission = 0;    // highest submission to await (0 if none).
+  // Stage B. `requires_gpu_ordering` means at least one selected producer is
+  // GPU-current and served to this consumer without a wait: the caller MUST
+  // order its consuming work after `max_order_submission` (encoder ordering /
+  // fence), which is NOT a CPU wait. Records served this way stay pending --
+  // they are not drained and not retired here.
+  bool requires_gpu_ordering = false;
+  uint64_t max_order_submission = 0;
 };
 
 // Producer-state-specific request ranges. Most consumers read the same ranges
@@ -166,6 +202,10 @@ struct ConsumerDecision {
 struct ConsumerRequest {
   GuestRangeSet resolve_ranges;
   GuestRangeSet memexport_ranges;
+  // Which memory this request will read. Defaults to the conservative
+  // guest-RAM domain, so a caller that does not know (or predates Stage B)
+  // gets exactly the pre-Stage-B decision.
+  ConsumerAccess access = ConsumerAccess::kGuestRam;
 
   static ConsumerRequest Uniform(const GuestRangeSet& ranges) {
     return {ranges, ranges};
@@ -239,12 +279,43 @@ inline ConsumerDecision DecideConsumer(
     }
   }
 
+  // A GPU-current record is satisfiable by ordering ONLY for a consumer that
+  // reads the shared buffer, where those bytes already live. Every other
+  // combination keeps the historical await/drain semantics, which is what
+  // preserves demand CPU visibility: a guest-RAM reader of a GPU-current range
+  // still waits for it and still drains it to RAM.
+  // ALL-OR-NOTHING, deliberately. The ordering path is taken only when every
+  // selected record is GPU-current and this consumer reads the shared buffer.
+  //
+  // A per-record split is NOT safe here: `selected` is also the DRAIN set, and
+  // draining publishes a record to RAM. Mixing the two policies in one
+  // decision would publish a GPU-current record that was never waited for,
+  // copying bytes the GPU may still be writing. Falling back to the historical
+  // await/drain for the whole set is always correct, merely slower, so the
+  // mixed case keeps it.
+  bool all_gpu_current = request.access == ConsumerAccess::kSharedBuffer;
+  for (size_t i = 0; i < producers.size() && all_gpu_current; ++i) {
+    if (selected[i] &&
+        producers[i].state != TransitState::kGpuCurrentShared) {
+      all_gpu_current = false;
+    }
+  }
   for (size_t i = 0; i < producers.size(); ++i) {
     if (!selected[i]) {
       continue;
     }
     const PendingProducer& producer = producers[i];
     decision.selected.push_back(producer);
+    if (all_gpu_current) {
+      // Ordering, not waiting. The record is deliberately left pending: only
+      // RAM publication retires it, so a later guest-RAM consumer of the same
+      // range still gets correct bytes.
+      decision.requires_gpu_ordering = true;
+      if (producer.submission > decision.max_order_submission) {
+        decision.max_order_submission = producer.submission;
+      }
+      continue;
+    }
     if (!ProducerComplete(producer, completed_submission)) {
       decision.await = true;
       if (producer.submission > decision.max_wait_submission) {
@@ -259,6 +330,12 @@ inline ConsumerDecision DecideConsumer(
   if (decision.selected.empty()) {
     decision.action = AuthorityAction::kNoDependency;
     decision.drain = false;
+  } else if (all_gpu_current) {
+    // Every selected record is GPU-current and this consumer reads the shared
+    // buffer: no wait, and NO DRAIN -- draining here would retire records that
+    // guest RAM has not received yet.
+    decision.drain = false;
+    decision.action = AuthorityAction::kOrderAgainstGpuProducers;
   } else {
     decision.drain = true;
     decision.action = decision.await ? AuthorityAction::kAwaitProducer

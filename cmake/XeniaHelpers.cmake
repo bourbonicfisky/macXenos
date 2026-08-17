@@ -227,7 +227,13 @@ function(xe_shader_rules_metal target shader_dir)
   get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
   set(_globs ${ARGN})
   if(NOT _globs)
-    set(_globs "texture_load_*.cs.xesl")
+    # BOTH shared compute families the Metal backend consumes. This is the
+    # DEFAULT rather than a per-caller glob on purpose: `xenia-gpu-metal-backend`
+    # and `xenia-gpu-conformance` both register the same shader directory, and
+    # this rule's ownership model says the first registration defines that
+    # directory's source set -- so a glob added at one call site only would
+    # silently depend on configure order.
+    set(_globs "texture_load_*.cs.xesl" "resolve_*.cs.xesl")
   endif()
   string(SHA1 _dir_hash "${shader_dir}")
   string(SUBSTRING "${_dir_hash}" 0 8 _dir_hash)
