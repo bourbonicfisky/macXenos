@@ -9088,6 +9088,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
           std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL") != nullptr;
       uint64_t sentinel_survivors = 0;
       uint64_t sentinel_examined = 0;
+      uint64_t clipped_texels = 0;
       if (!aliased) {
         for (uint32_t y = 0; y < wb.height; ++y) {
           for (uint32_t x = 0; x < wb.width; ++x) {
@@ -9095,6 +9096,13 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
                 int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
                 pitch_aligned, int32_t(block_log2)));
             if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
+              // DIAGNOSTIC: count texels the extent clip drops. The CPU
+              // scatter applies the same clip to a LINEAR staging source,
+              // where a dropped texel simply is not written; here the source
+              // and destination share the tiled address space, so a clipped
+              // texel means the publication never copies a texel the producer
+              // DID write.
+              ++clipped_texels;
               continue;
             }
             std::memcpy(dest + off, src_base + off, wb.bpp);
@@ -9117,6 +9125,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             "{}x{} ({} bytes{})",
             wb.guest_addr, wb.width, wb.height, published_bytes,
             aliased ? ", aliased self-copy" : "");
+      }
+      if (clipped_texels) {
+        static uint32_t s_clip_logs = 0;
+        if (s_clip_logs++ < 8) {
+          XELOGW(
+              "MetalGpuCurrentPublish CLIPPED dest={:08X} {}x{} clipped={} "
+              "extent={} pitch_aligned={} off=({},{})",
+              wb.guest_addr, wb.width, wb.height, clipped_texels,
+              wb.dest_extent_bytes,
+              wb.dest_pitch_aligned ? wb.dest_pitch_aligned
+                                    : ((wb.width + 31u) & ~31u),
+              wb.dest_offset_x, wb.dest_offset_y);
+        }
       }
       if (sentinel_check && sentinel_examined) {
         XELOGW(
