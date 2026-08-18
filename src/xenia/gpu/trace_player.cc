@@ -161,11 +161,18 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
   // writes (resolve writeback, memexport convergence, ZPD reports, readback
   // resolve) capture their pre-frame bytes at first write. A backend that
   // reports no writes never notifies, so this is structurally inert there.
-  if (!ram_journal_) {
+  // XE_GPU_RAM_ROLLBACK=0 is the exact rollback: the journal is never
+  // installed, restoring pre-change replay behavior byte-for-byte (also the
+  // identity arm of the 3.1 gate).
+  static const bool s_ram_rollback_enabled = [] {
+    const char* v = std::getenv("XE_GPU_RAM_ROLLBACK");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!ram_journal_ && s_ram_rollback_enabled) {
     ram_journal_ = std::make_unique<TracePlayerRamJournalBinding>(memory);
     command_processor->SetGuestRamWriteJournal(ram_journal_.get());
   }
-  if (ram_journal_frame_index_ != current_frame_index_) {
+  if (ram_journal_ && ram_journal_frame_index_ != current_frame_index_) {
     // Stepping to a different frame is live continuation (see SeekFrame): the
     // captured pre-images belong to the old frame and must not be replayed
     // into the new one.
@@ -186,7 +193,8 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
     // the trace's own kMemoryRead/kEdramSnapshot restores re-deliver
     // authoritative content. No-op on the first frame-initial playback (the
     // journal is empty until the frame's first GPU-derived write).
-    size_t restored_ranges = ram_journal_->journal.RestoreAll();
+    size_t restored_ranges =
+        ram_journal_ ? ram_journal_->journal.RestoreAll() : 0;
     if (restored_ranges) {
       XELOGI(
           "TracePlayer: guest-RAM rollback restored {} ranges / {} bytes "
