@@ -485,6 +485,48 @@ uint32_t xe_lineage_stridehash(const void* p, size_t n) {
   return h;
 }
 
+// Origin experiment (reopen-metal-gpu-visible-resolve-authority 2.1,
+// XE_METAL_ORIGIN_DUMP=<dir>): dump a resolve destination's whole extent with
+// its record fields, from BOTH publication arms — "cpu" = guest RAM after the
+// default CPU scatter (ground truth), "gpu" = the shared-buffer source region
+// the GPU-current publication reads. Offline correlation of the two names the
+// producer's effective write origin without pre-guessing candidates.
+// Diagnostic-only, bounded, default off.
+static void MetalOriginDumpExtent(const char* arm, uint32_t guest_addr,
+                                  uint32_t width, uint32_t height,
+                                  uint32_t bpp, uint32_t pitch_field,
+                                  uint32_t height_aligned, uint32_t offset_x,
+                                  uint32_t offset_y, uint32_t extent_bytes,
+                                  uint32_t packed_bytes, uint32_t swap_rb,
+                                  uint32_t endian, uint32_t draw_index,
+                                  const uint8_t* bytes) {
+  static const char* s_dir = std::getenv("XE_METAL_ORIGIN_DUMP");
+  if (!s_dir || !bytes || !extent_bytes) {
+    return;
+  }
+  static uint32_t s_dumps = 0;
+  if (s_dumps >= 256) {
+    return;
+  }
+  ++s_dumps;
+  char path[1024];
+  std::snprintf(path, sizeof(path), "%s/%s-%08X-d%u.bin", s_dir, arm,
+                guest_addr, draw_index);
+  FILE* f = std::fopen(path, "wb");
+  if (!f) {
+    return;
+  }
+  std::fwrite(bytes, 1, extent_bytes, f);
+  std::fclose(f);
+  XELOGW(
+      "MetalOriginDump arm={} dest={:08X} {}x{} bpp={} pitch_field={} "
+      "height_aligned={} off=({},{}) extent={} packed={} swap_rb={} endian={} "
+      "draw={} -> {}",
+      arm, guest_addr, width, height, bpp, pitch_field, height_aligned,
+      offset_x, offset_y, extent_bytes, packed_bytes, swap_rb, endian,
+      draw_index, path);
+}
+
 // Precise guest storage ranges of a texture fetch: base level(s) and mip chain
 // as two DISJOINT ranges (mip_address is a separate pointer). Derived from the
 // shared GetGuestTextureLayout, so compressed/tiled/linear/packed-mip/dimension
@@ -7950,6 +7992,21 @@ bool MetalCommandProcessor::IssueCopy() {
                   /*depth_encode=*/0u,
                   ++memory_authority_sequence_});
               if (gpu_resident_resolve) {
+                // Origin experiment (reopen 2.2): guest RAM at ENCODE time —
+                // in a single-frame trace this is the frame-start content of
+                // the destination, the candidate source of a page-granular
+                // consumer re-upload clobber.
+                MetalOriginDumpExtent(
+                    "enc", resolve_info.copy_dest_base, rw, rh, wb_bpp,
+                    uint32_t(dc.pitch_aligned_div_32) << 5,
+                    uint32_t(dc.height_aligned_div_32) << 5,
+                    uint32_t(dc.offset_x_div_8) << 3,
+                    uint32_t(dc.offset_y_div_8) << 3, extent_bytes,
+                    uint32_t(canonical_packed), wb_swap_rb,
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                    trace_draw_index_,
+                    memory_->TranslatePhysical<const uint8_t*>(
+                        resolve_info.copy_dest_base));
                 // The record's bytes are in the shared buffer, not staging.
                 pending_writebacks_.back().gpu_current = 1u;
                 // Mark the destination GPU-written so the shared-memory
@@ -9102,6 +9159,13 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // a proven self-copy and moves nothing. Publication still succeeds --
       // the bytes ARE in RAM -- which is what retires the record.
       const bool aliased = shared_memory_ && shared_memory_->is_zero_copy();
+      // Origin experiment (reopen 2.1): the GPU arm's source region, before
+      // the publication walk copies from it.
+      MetalOriginDumpExtent("gpu", wb.guest_addr, wb.width, wb.height, wb.bpp,
+                            wb.dest_pitch_aligned, wb.dest_height_aligned,
+                            wb.dest_offset_x, wb.dest_offset_y,
+                            wb.dest_extent_bytes, wb.packed_bytes, wb.swap_rb,
+                            wb.endian, wb.draw_index, src_base);
       uint64_t published_bytes = 0;
       // Sentinel accounting: how many of the texels this publication copies
       // still hold the pre-dispatch pattern, i.e. were never written by the
@@ -9290,7 +9354,21 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // the tiled scatter (and any zero-hold re-scatter or tip refresh, which
       // write inside the same range) overwrites guest RAM.
       NotifyGuestRamWrite(wb.guest_addr, wb.range_bytes());
+      // Origin experiment (reopen 2.2): the kernel's LINEAR staging output
+      // before the CPU scatter — the producer's raw values, pre-placement.
+      MetalOriginDumpExtent("stg", wb.guest_addr, wb.width, wb.height, wb.bpp,
+                            wb.dest_pitch_aligned, wb.dest_height_aligned,
+                            wb.dest_offset_x, wb.dest_offset_y,
+                            count * wb.bpp, wb.packed_bytes, wb.swap_rb,
+                            wb.endian, wb.draw_index, src_bytes);
       scatter_bytes(src_bytes);
+      // Origin experiment (reopen 2.1): ground truth — guest RAM right after
+      // the default CPU scatter for this record.
+      MetalOriginDumpExtent("cpu", wb.guest_addr, wb.width, wb.height, wb.bpp,
+                            wb.dest_pitch_aligned, wb.dest_height_aligned,
+                            wb.dest_offset_x, wb.dest_offset_y,
+                            wb.dest_extent_bytes, wb.packed_bytes, wb.swap_rb,
+                            wb.endian, wb.draw_index, dest);
       // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): one line
       // per publication, by writer kind, so the replay-rollback design knows
       // exactly which ranges a replayed frame writes. Diagnostic-only.
