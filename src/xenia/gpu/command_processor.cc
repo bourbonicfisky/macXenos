@@ -2088,6 +2088,17 @@ void CommandProcessor::WriteZPDReport(uint32_t begin_record,
 
   XenosZPDReport::WriteReportDelta(begin, end, begin_value, delta_value,
                                    write_begin_record);
+  // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): ZPD report
+  // records are GPU-derived sample counts written into guest RAM. This is the
+  // funnel for both the resolved-commit and the orphaned-END cached-delta
+  // paths. Diagnostic-only, default off.
+  static const bool s_ram_write_census =
+      std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+  if (s_ram_write_census) {
+    XELOGI("RamWriteCensus writer=zpd_report begin={:08X} end={:08X} len={}",
+           write_begin_record ? begin_record : 0u, end_record,
+           uint32_t(sizeof(xenos::xe_gpu_depth_sample_counts)));
+  }
 }
 
 void CommandProcessor::CommitZPDReport(ZPDReport& report,

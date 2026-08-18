@@ -1088,6 +1088,16 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
       // stale sentinel data from a prior query lifetime doesn't persist.
       if (report) {
         std::memset(report, 0, sizeof(xe_gpu_depth_sample_counts));
+        // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): the
+        // BEGIN clear writes the same record range the later report commit
+        // writes. Diagnostic-only, default off.
+        static const bool s_ram_write_census =
+            std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+        if (s_ram_write_census) {
+          XELOGI("RamWriteCensus writer=zpd_begin_clear base={:08X} len={}",
+                 report_physical,
+                 uint32_t(sizeof(xe_gpu_depth_sample_counts)));
+        }
       }
       COMMAND_PROCESSOR::BeginZPDReport(report_address);
       return true;

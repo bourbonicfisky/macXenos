@@ -8367,6 +8367,17 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       ++outcome.drained_records;
       ++outcome.memexport_records;
       outcome.invalidated_entries += result.invalidated_entries;
+      // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1). `copied`
+      // is the factual byte count: 0 on an aliased backing (where the GPU
+      // already wrote guest RAM directly), length on a mirror copy.
+      static const bool s_ram_write_census =
+          std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+      if (s_ram_write_census) {
+        XELOGI(
+            "RamWriteCensus writer=memexport base={:08X} len={} copied={} "
+            "swap={}",
+            me.base_address, me.size_bytes, result.bytes_copied, swap_count_);
+      }
       // Factual, from the shared memory's physical operation: zero on an
       // aliased backing, the record's length on a mirror copy. Retirement above
       // is counted independently, so a zero-byte publication still retires.
@@ -8635,6 +8646,16 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         }
       };
       scatter_bytes(src_bytes);
+      // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): one line
+      // per publication, by writer kind, so the replay-rollback design knows
+      // exactly which ranges a replayed frame writes. Diagnostic-only.
+      static const bool s_ram_write_census =
+          std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+      if (s_ram_write_census) {
+        XELOGI("RamWriteCensus writer=resolve{} base={:08X} len={} swap={}",
+               wb.depth_encode ? "_depth" : "", wb.guest_addr,
+               wb.range_bytes(), swap_count_);
+      }
       static uint32_t s_wb_logs = 0;
       if (s_wb_logs++ < 8) {
         XELOGI("MetalCommandProcessor: wrote back {}x{} resolve to {:08X}",

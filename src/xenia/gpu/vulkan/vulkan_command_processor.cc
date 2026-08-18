@@ -3262,6 +3262,18 @@ bool VulkanCommandProcessor::IssueCopy() {
           uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
           memory::vastcpy(dest_ptr, static_cast<uint8_t*>(mapped_data),
                           written_length);
+          // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1):
+          // Vulkan's readback resolve also writes guest RAM during a frame
+          // (age=1 in fast mode: the PREVIOUS buffered copy).
+          static const bool s_ram_write_census =
+              std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+          if (s_ram_write_census) {
+            XELOGI(
+                "RamWriteCensus writer=vulkan_readback_resolve base={:08X} "
+                "len={} age={}",
+                written_address, written_length,
+                read_index == write_index ? 0 : 1);
+          }
           // Backend-neutral resolve-writeback record (stabilize task 6.2),
           // emitted now that guest RAM holds the readback. Diagnostic-only;
           // no sync, no control flow. The resolve info is re-derived purely
