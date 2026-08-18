@@ -29,6 +29,7 @@
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_need_wait_classify.h"
+#include "xenia/gpu/metal/metal_resolve_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_seam_timing.h"
 #include "xenia/gpu/metal/metal_zero_copy_report.h"
 #include "xenia/gpu/metal/metal_zpd_query_admission.h"
@@ -167,6 +168,32 @@ class MetalCommandProcessor : public CommandProcessor {
   // (OpenSpec optimize-native-metal-frametime); an arm run under this flag is
   // performance evidence only and must never be read as a correctness arm.
   static bool SkipConsumerWaitEnabled();
+  // XE_METAL_SERVING_CENSUS=1 (exact-1, default OFF): OBSERVATIONAL census of
+  // the disagreement between the consumer-dependency declaration
+  // (`BridgeServes`) and the serve chain's classification
+  // (`ClassifyResolvedFetch`). Counts only; it never changes what is declared
+  // or served. Task 1.1 of implement-metal-gpu-visible-resolve-authority.
+  static bool ServingCensusEnabled();
+  // XE_METAL_GPU_RESOLVE=1 (exact-1, default OFF): Stage B — canonical packed
+  // resolves scatter guest-tiled into the shared buffer and become
+  // GPU-current, so shared-buffer consumers need ordering rather than a
+  // completion wait. Unset keeps the staging + CPU-scatter path byte-identical.
+  static bool GpuResolveScatterEnabled();
+  // XE_METAL_SHARED_RESOLVE=1 (exact-1, default OFF): dispatch the SHARED
+  // cross-backend resolve-copy compute shaders instead of the Metal-specific
+  // pack kernel, resolving EDRAM straight into the shared-memory buffer at
+  // guest tiled addresses exactly as D3D12 and Vulkan do
+  // (docs/metal_shared_resolve_port_assessment.md).
+  static bool SharedResolveShadersEnabled();
+
+ private:
+  // Shared cross-backend resolve-copy dispatch (task 4.2). Returns false when
+  // unavailable; the caller keeps its existing path.
+  bool DispatchSharedResolveCopy(const draw_util::ResolveInfo& resolve_info);
+  MetalResolveShaderPipelines resolve_shader_pipelines_;
+  uint64_t shared_resolve_dispatches_ = 0;
+
+ public:
 
  private:
   // Debug probes in the RT cache flush the frame CB directly.
@@ -844,6 +871,18 @@ class MetalCommandProcessor : public CommandProcessor {
     // Monotonic cross-kind registration order for authority-seam chronology.
     // This lives on the existing pending record; it is not a second queue.
     uint64_t authority_sequence;
+
+    // Stage B (implement-metal-gpu-visible-resolve-authority): the GPU scatter
+    // already wrote this record's bytes into the SHARED BUFFER at their guest
+    // tiled addresses, so `staging` is null and the record is GPU-current. It
+    // still owes guest RAM its bytes; publication copies them buffer->RAM by
+    // repeating the same tiled walk, and only that publication retires it.
+    //
+    // DEFAULTED and declared LAST on purpose: every existing construction site
+    // uses a positional aggregate initializer, so a field inserted mid-struct
+    // silently shifts `submission` into a uint32 slot (it does not even
+    // compile cleanly -- it narrows). Keep new fields here.
+    uint32_t gpu_current = 0;
 
     // Guest-memory extent this writeback touches, for overlap / wait / drain-
     // filter tests. Tiled pitch, offsets, and row padding make the real extent

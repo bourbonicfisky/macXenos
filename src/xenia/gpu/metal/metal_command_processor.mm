@@ -60,6 +60,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_serving_census.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
@@ -1371,6 +1372,16 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // PrepareTransferCommandBuffer, lifetime keys off the same submission ids,
   // and faulted submissions are queried from the existing GPU-thread fault
   // recording.
+  // Shared cross-backend resolve-copy pipelines (task 4.2). Built only when
+  // the route is enabled: it is default OFF, and 9 pipeline creations are not
+  // free at startup. A failure here is logged and non-fatal -- the dispatcher
+  // checks `initialized()` and the existing resolve path continues.
+  if (SharedResolveShadersEnabled() &&
+      !resolve_shader_pipelines_.Initialize(device_ptr)) {
+    XELOGE(
+        "MetalCommandProcessor: shared resolve-copy pipelines failed to "
+        "build; XE_METAL_SHARED_RESOLVE will not engage");
+  }
   shared_texture_cache_ = std::make_unique<MetalSharedTextureCache>(
       *register_file_, *shared_memory_, device_ptr, texture_cache_.get());
   shared_texture_cache_->SetPrepareTransferCallback(
@@ -1593,6 +1604,53 @@ void MetalCommandProcessor::ShutdownContext() {
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
+  if (ServingCensusEnabled()) {
+    // The headless trace-dump tool DOES exit cleanly, so this is the only
+    // emission a single-frame trace run ever reaches (the swap-tick dump needs
+    // 128 swaps). The live app is SIGKILLed and relies on the periodic tick.
+    using metal::ServingCensus;
+    XELOGI(
+        "MetalServingCensus final: gpu_served_declared_dependency={} "
+        "(exact_cover={} bridge={}) | agreed_gpu_served={} agreed_ram={} "
+        "not_resolve_backed={} unsafe_skips={}",
+        ServingCensus::SpuriousDependencies(),
+        ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot, false),
+        ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, false),
+        ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, true) +
+            ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot, true),
+        ServingCensus::Get(ResolvedFetchService::kRamContent, false),
+        ServingCensus::Get(ResolvedFetchService::kNotResolveBacked, false),
+        ServingCensus::UnsafeSkips());
+    XELOGI(
+        "MetalServingCensus final requests: total={} boundary_avoided={} "
+        "boundary_retained={} corrected_stricter={}",
+        ServingCensus::Requests::Total().load(std::memory_order_relaxed),
+        ServingCensus::Requests::BoundaryAvoided().load(
+            std::memory_order_relaxed),
+        ServingCensus::Requests::BoundaryRetained().load(
+            std::memory_order_relaxed),
+        ServingCensus::Requests::CorrectedStricter().load(
+            std::memory_order_relaxed));
+        for (uint32_t k = 0; k < uint32_t(metal::ConsumerKind::kCount); ++k) {
+          uint64_t ro = ServingCensus::Boundary(
+                            k, ServingCensus::HeldBy::kResolveOnly)
+                            .load(std::memory_order_relaxed);
+          uint64_t mo = ServingCensus::Boundary(
+                            k, ServingCensus::HeldBy::kMemexportOnly)
+                            .load(std::memory_order_relaxed);
+          uint64_t mx =
+              ServingCensus::Boundary(k, ServingCensus::HeldBy::kMixed)
+                  .load(std::memory_order_relaxed);
+          if (!(ro || mo || mx)) {
+            continue;
+          }
+          XELOGI(
+              "MetalServingCensus boundary consumer={} resolve_only={} "
+              "memexport_only={} mixed={} total={}",
+              metal::ConsumerKindName(metal::ConsumerKind(k)), ro, mo, mx,
+              ro + mo + mx);
+        }
+  }
   if (frame_open_) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kShutdown);
   }
@@ -2018,6 +2076,217 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
           value);
     }
     return false;
+  }();
+  return s_enabled;
+}
+
+bool MetalCommandProcessor::SharedResolveShadersEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SHARED_RESOLVE");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_SHARED_RESOLVE='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
+// Dispatch the SHARED resolve-copy shader for `resolve_info`, writing EDRAM
+// output straight into the shared-memory buffer at guest tiled addresses.
+// Mirrors the D3D12/Vulkan sequence exactly (d3d12_render_target_cache.cc
+// ~1385-1412): shared selector -> commit destination -> bind -> dispatch ->
+// invalidate. Returns false if anything is unavailable, and the caller keeps
+// its existing path; nothing here is a fallback of its own.
+bool MetalCommandProcessor::DispatchSharedResolveCopy(
+    const draw_util::ResolveInfo& resolve_info) {
+  // Bounded decline reporting. A route that silently declines looks exactly
+  // like a route that ran and changed nothing -- which is precisely how the
+  // first live run read (0 dispatches, identical fps, zero faults).
+  static uint32_t s_decline_logs = 0;
+  auto decline = [&](const char* reason) {
+    if (s_decline_logs++ < 16) {
+      XELOGW("MetalSharedResolve: declined ({}) dest={:08X}", reason,
+             resolve_info.copy_dest_base);
+    }
+    return false;
+  };
+  if (!resolve_shader_pipelines_.initialized()) {
+    return decline("pipelines-uninitialized");
+  }
+  if (!shared_memory_ || !render_target_cache_ || !frame_command_buffer_) {
+    return decline("no-shared-memory-or-cache-or-cb");
+  }
+  draw_util::ResolveCopyShaderConstants constants;
+  uint32_t group_count_x = 0;
+  uint32_t group_count_y = 0;
+  // ONE selector, shared with D3D12/Vulkan: it decides the shader, fills the
+  // constants and returns the dispatch shape. Metal is 1x, so the resolution
+  // scale is fixed at (1,1) and only unscaled variants can be selected.
+  draw_util::ResolveCopyShaderIndex shader_index = resolve_info.GetCopyShader(
+      1, 1, constants, group_count_x, group_count_y);
+  if (shader_index == draw_util::ResolveCopyShaderIndex::kUnknown) {
+    return decline("shader-index-unknown");
+  }
+  if (!group_count_x || !group_count_y) {
+    return decline("empty-dispatch");
+  }
+  void* pipeline_ptr = resolve_shader_pipelines_.PipelineFor(shader_index);
+  if (!pipeline_ptr) {
+    return decline("no-pipeline-for-index");
+  }
+  // BISECT (task 6.1). The failing SF4 resolves differ from the working JC2
+  // ones almost only in EDRAM source placement: base_tiles 48 vs 0 and
+  // pitch_tiles 7 vs 4. Metal materializes its canonical EDRAM PER RESOLVE
+  // (PrepareCanonicalEdramForResolve over the resolve's span), so a shared
+  // shader reading a source region Metal never prepared would read garbage.
+  // These gates isolate that without changing any default.
+  static const bool s_base0_only =
+      std::getenv("XE_METAL_SHARED_RESOLVE_BASE0") != nullptr;
+  static const bool s_pitch4_only =
+      std::getenv("XE_METAL_SHARED_RESOLVE_PITCH4") != nullptr;
+  if (s_base0_only && resolve_info.color_edram_info.base_tiles != 0) {
+    return decline("bisect-nonzero-edram-base");
+  }
+  if (s_pitch4_only && resolve_info.color_edram_info.pitch_tiles != 4) {
+    return decline("bisect-pitch-not-4");
+  }
+  // Commit the destination pages before the GPU writes them, exactly as the
+  // other backends do. Without this the buffer's content for the destination
+  // extent is not established, and the parts of the extent the resolve does
+  // not write (tiled alignment padding) would not hold guest content.
+  if (!shared_memory_->RequestRange(resolve_info.copy_dest_extent_start,
+                                    resolve_info.copy_dest_extent_length)) {
+    return decline("dest-request-range-failed");
+  }
+  id<MTLBuffer> dest_buffer =
+      (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> edram_buffer =
+      (__bridge id<MTLBuffer>)render_target_cache_->canonical_edram_buffer();
+  if (!dest_buffer || !edram_buffer) {
+    return decline("null-dest-or-edram-buffer");
+  }
+  // SENTINEL DIAGNOSTIC (XE_METAL_SHARED_RESOLVE_SENTINEL=1): stamp the
+  // destination extent in the shared buffer with a known pattern BEFORE the
+  // dispatch. Whatever survives to publication tells us, unambiguously,
+  // whether the shared shader wrote these bytes at all -- the question the
+  // grid-shrink null raised. The buffer is MTLStorageModeShared, so the CPU
+  // fill lands before the GPU executes the dispatch encoded below.
+  static const bool s_sentinel =
+      std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL") != nullptr;
+  if (s_sentinel) {
+    uint8_t* contents = static_cast<uint8_t*>(dest_buffer.contents);
+    if (contents) {
+      std::memset(contents + resolve_info.copy_dest_extent_start, 0xA5,
+                  resolve_info.copy_dest_extent_length);
+    }
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
+  id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+  encoder.label = @"cp:shared-resolve-copy";
+  [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
+                                       pipeline_ptr];
+  // Pass the SHARED struct verbatim, exactly as D3D12 does
+  // (SetComputeRoot32BitConstants over &copy_shader_constants). Rebuilding it
+  // field-by-field from accessors would put this backend's transcription
+  // between the shared producer and the shared shader -- the same duplicated
+  // contract this whole redirection exists to remove.
+  static_assert(sizeof(draw_util::ResolveCopyShaderConstants) ==
+                    sizeof(MetalResolveShaderPipelines::ResolveConstants),
+                "Metal push-constant mirror must match the shared struct");
+  [encoder setBytes:&constants
+             length:sizeof(constants)
+            atIndex:MetalResolveShaderPipelines::kBufferIndexPushConstants];
+  [encoder setBuffer:dest_buffer
+              offset:0
+             atIndex:MetalResolveShaderPipelines::kBufferIndexDest];
+  [encoder setBuffer:edram_buffer
+              offset:0
+             atIndex:MetalResolveShaderPipelines::kBufferIndexEdram];
+  // THREADGROUP SIZE IS NOT THE GROUP'S PIXEL FOOTPRINT.
+  // `resolve_copy_shader_info[].group_size_{x,y}_log2` is the number of PIXELS
+  // a group covers (64x8 for the fast 32bpp shader), and the shared host
+  // contract already used it to derive `group_count_{x,y}`. The MSL
+  // threadgroup is the shader's own LOCAL_SIZE, which is 8x8 for EVERY
+  // resolve copy shader in the family. Passing the pixel footprint here
+  // dispatched 512 threads per group against a shader indexing by
+  // `thread_position_in_grid`, so every thread resolved a correctly-addressed
+  // but WRONG pixel -- dense content where the incumbent reads an empty
+  // surface.
+  static constexpr uint32_t kResolveLocalSizeX = 8;
+  static constexpr uint32_t kResolveLocalSizeY = 8;
+  MTLSize threads = MTLSizeMake(kResolveLocalSizeX, kResolveLocalSizeY, 1);
+  [encoder dispatchThreadgroups:MTLSizeMake(group_count_x, group_count_y, 1)
+          threadsPerThreadgroup:threads];
+  [encoder endEncoding];
+  // Engagement evidence. "Identical output" is only meaningful if the route
+  // actually ran: a dispatcher that declined every resolve would produce a
+  // byte-identical corpus for the trivial reason that nothing changed.
+  ++shared_resolve_dispatches_;
+  static uint32_t s_logs = 0;
+  if (s_logs++ < 8) {
+    XELOGI(
+        "MetalSharedResolve: dispatched shader={} groups={}x{} dest={:08X} "
+        "msaa={} sample_select={} edram_fmt={} 64bpp={} dest_fmt={} "
+        "endian={} swap={} exp_bias={} edram_base={} edram_pitch={}",
+        size_t(shader_index), group_count_x, group_count_y,
+        resolve_info.copy_dest_base,
+        uint32_t(resolve_info.color_edram_info.msaa_samples),
+        uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
+        uint32_t(resolve_info.color_edram_info.format),
+        uint32_t(resolve_info.color_edram_info.format_is_64bpp),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+        int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
+        uint32_t(resolve_info.color_edram_info.base_tiles),
+        uint32_t(resolve_info.color_edram_info.pitch_tiles));
+  }
+  return true;
+}
+
+bool MetalCommandProcessor::GpuResolveScatterEnabled() {
+  // XE_METAL_GPU_RESOLVE=1 (exact-1, warn-once fail-closed, DEFAULT OFF):
+  // Stage B of implement-metal-gpu-visible-resolve-authority. The canonical
+  // packed resolve writes GUEST-TILED straight into the shared buffer, the
+  // record becomes GPU-current, and shared-buffer consumers stop waiting for
+  // it. Unset is byte-identical to the staging + CPU-scatter path.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_GPU_RESOLVE");
+    if (!value || !value[0]) {
+      return false;
+    }
+    if (value[0] == '1' && !value[1]) {
+      return true;
+    }
+    if (!(value[0] == '0' && !value[1])) {
+      XELOGW(
+          "XE_METAL_GPU_RESOLVE='{}' is malformed; failing closed to off "
+          "(use 0 or 1)",
+          value);
+    }
+    return false;
+  }();
+  return s_enabled;
+}
+
+bool MetalCommandProcessor::ServingCensusEnabled() {
+  // Exact-1 opt-in, default OFF, same house shape as the flags above. No
+  // banner: this census changes nothing about the run, so a run carrying it is
+  // still an ordinary run — only the extra classification work is added, which
+  // is why it is not enabled during counted performance arms.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SERVING_CENSUS");
+    return value && value[0] == '1' && !value[1];
   }();
   return s_enabled;
 }
@@ -4887,6 +5156,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
   if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
+    // CENSUS ONLY: the same request with GPU-served fetches omitting their
+    // resolve range, so the decision the repair WOULD take can be compared
+    // against the one taken. Never passed to the production path.
+    metal::ConsumerRequest census_corrected_request;
     auto collect_texture_ranges = [&](MetalShader* shader,
                                       metal::ConsumerRequest& request) {
       if (!shader) return;
@@ -4912,6 +5185,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             texture_cache_ &&
             texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
                                           f.size_2d.height + 1);
+        // CENSUS ONLY (XE_METAL_SERVING_CENSUS=1, task 1.1 of
+        // implement-metal-gpu-visible-resolve-authority): count how often this
+        // dependency declaration disagrees with the serve chain's own
+        // classification. Observational: it does not change the declaration.
+        // Analytically the only default-config divergence is the exact-cover
+        // class (kBridgeSnapshot's condition is equivalent to BridgeServes when
+        // color_bridge is off, and covered_r32f implies !ram_backed); the
+        // census measures how often that class actually fires on real content.
+        if (ServingCensusEnabled() && texture_cache_) {
+          ResolvedFetchService service =
+              texture_cache_->ClassifyFetchService(f, binding.is_signed);
+          metal::ServingCensus::Record(service, bridge_served);
+          // Mirror of the declaration below, but keyed on the serve chain's
+          // classification instead of the narrower duplicate predicate.
+          census_corrected_request.memexport_ranges.Add(base_range);
+          if (rng.mip_end > rng.mip_begin) {
+            census_corrected_request.memexport_ranges.Add(mip_range);
+          }
+          if (!metal::ServingCensus::IsGpuServed(service)) {
+            census_corrected_request.resolve_ranges.Add(base_range);
+            if (rng.mip_end > rng.mip_begin) {
+              census_corrected_request.resolve_ranges.Add(mip_range);
+            }
+          }
+        }
         if (!bridge_served) {
           request.resolve_ranges.Add(base_range);
           if (rng.mip_end > rng.mip_begin) {
@@ -4926,6 +5224,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    if (ServingCensusEnabled()) {
+      // BOUNDARY-LEVEL census: the same query against the corrected request.
+      // `QueryPendingProducerDependencies` is const and owns no authority
+      // state, so this second evaluation cannot perturb the run; the decision
+      // is discarded. A request whose dependency disappears is the only cell
+      // that maps to recovered frame time.
+      metal::ConsumerDecision corrected = QueryPendingProducerDependencies(
+          metal::ConsumerKind::kTexture, census_corrected_request);
+      auto has_dependency = [](const metal::ConsumerDecision& d) {
+        return d.action != metal::AuthorityAction::kNoDependency;
+      };
+      using Requests = metal::ServingCensus::Requests;
+      Requests::Total().fetch_add(1, std::memory_order_relaxed);
+      if (has_dependency(authority_decision) && !has_dependency(corrected)) {
+        Requests::BoundaryAvoided().fetch_add(1, std::memory_order_relaxed);
+      } else if (has_dependency(authority_decision) &&
+                 has_dependency(corrected)) {
+        Requests::BoundaryRetained().fetch_add(1, std::memory_order_relaxed);
+      } else if (!has_dependency(authority_decision) &&
+                 has_dependency(corrected)) {
+        Requests::CorrectedStricter().fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     // Same consumer-attribution diagnostic as the vertex seam (log only).
     if (s_memexport_log) {
       for (const metal::PendingProducer& producer : authority_decision.selected) {
@@ -7379,6 +7700,45 @@ bool MetalCommandProcessor::IssueCopy() {
             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float);
         const bool writeback_source_available =
             canonical_packed || (resolved && snap && legacy_blit_format);
+        // TASK 6.3: which gate decides whether the INCUMBENT writes this
+        // destination. The byte comparison showed Metal leaves the implicated
+        // wide-pitch dest ~98.7% zero, so "baseline" there may be UNWRITTEN
+        // memory rather than correct output -- in which case the shared route
+        // is not producing wrong pixels, it is producing pixels where the
+        // incumbent produces none.
+        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+          // Materialization coverage: what Metal PREPARED for this resolve
+          // versus the source rect the shared shader will read. If the shader
+          // reads tiles outside the prepared span, it reads whatever the
+          // canonical buffer happens to hold.
+          XELOGW(
+              "MetalWbSpan dest={:08X} prepared_span(base={} row_len={} "
+              "rows={} pitch={}) edram(base={} pitch={}) src_off=({},{}) "
+              "rect={}x{}",
+              resolve_info.copy_dest_base, span_base, span_row_length,
+              span_rows, span_pitch,
+              uint32_t(resolve_info.color_edram_info.base_tiles),
+              uint32_t(resolve_info.color_edram_info.pitch_tiles),
+              uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3,
+              uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
+              rw, rh);
+        }
+        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+          const uint64_t wb_bytes = uint64_t(rw) * rh * wb_bpp;
+          XELOGW(
+              "MetalWbGate dest={:08X} {}x{} bpp={} bytes={} cap={} "
+              "src_avail={} canonical_packed={} resolved={} snap={} "
+              "legacy_fmt={} no_wb={} size_ok={} => encodes={}",
+              resolve_info.copy_dest_base, rw, rh, wb_bpp, wb_bytes, wb_cap,
+              writeback_source_available ? 1 : 0, canonical_packed ? 1 : 0,
+              resolved ? 1 : 0, snap ? 1 : 0, legacy_blit_format ? 1 : 0,
+              s_no_writeback ? 1 : 0, wb_bytes <= wb_cap ? 1 : 0,
+              (writeback_source_available && !s_no_writeback &&
+               wb_bytes <= wb_cap &&
+               (canonical_packed || legacy_blit_format))
+                  ? 1
+                  : 0);
+        }
         if (writeback_source_available && !s_no_writeback &&
             uint64_t(rw) * rh * wb_bpp <= wb_cap &&
             (canonical_packed || legacy_blit_format)) {
@@ -7386,12 +7746,130 @@ bool MetalCommandProcessor::IssueCopy() {
               static_cast<xe::ui::metal::MetalProvider*>(
                   graphics_system_->provider())
                   ->device();
+          // SHARED RESOLVE ROUTE (XE_METAL_SHARED_RESOLVE, default OFF): the
+          // cross-backend copy shader writes EDRAM straight to the guest tiled
+          // destination in the shared buffer, exactly as D3D12/Vulkan do. When
+          // it dispatches, the record is GPU-current and no staging buffer or
+          // CPU scatter is created; when it declines (unsupported shader index,
+          // uncommitted destination, pipelines unavailable) the existing paths
+          // below run unchanged.
+          bool shared_resolve_dispatched = false;
+          if (SharedResolveShadersEnabled()) {
+            if (canonical_prepared) {
+              shared_resolve_dispatched =
+                  DispatchSharedResolveCopy(resolve_info);
+            } else {
+              static uint32_t s_gate_logs = 0;
+              if (s_gate_logs++ < 8) {
+                XELOGW(
+                    "MetalSharedResolve: gate closed (canonical_prepared=0, "
+                    "canonical_resolve={}) dest={:08X}",
+                    canonical_resolve ? 1 : 0, resolve_info.copy_dest_base);
+              }
+            }
+          }
+          // STAGE B eligibility (XE_METAL_GPU_RESOLVE, default OFF). Every
+          // condition is a proof obligation; anything unproven falls back to
+          // the staging + CPU-scatter path, which is always correct.
+          const auto& dc_pre = resolve_info.copy_dest_coordinate_info;
+          uint32_t scatter_extent_bytes =
+              resolve_info.copy_dest_extent_start -
+              resolve_info.copy_dest_base +
+              resolve_info.copy_dest_extent_length;
+          bool scatter_eligible = false;
+          id<MTLBuffer> shared_scatter_buffer = nil;
+          // The shared route already wrote the destination; the bespoke
+          // scatter must not also run for the same resolve.
+          if (!shared_resolve_dispatched && GpuResolveScatterEnabled() &&
+              canonical_packed && shared_memory_ &&
+              scatter_extent_bytes &&
+              // 2D only: the kernel ports Tiled2D, not Tiled3D.
+              !resolve_info.copy_dest_info.copy_dest_array &&
+              !resolve_info.copy_dest_info.copy_dest_slice) {
+            shared_scatter_buffer =
+                (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+            auto dest_range = metal::GuestRange::FromBaseLength(
+                resolve_info.copy_dest_base, scatter_extent_bytes);
+            if (shared_scatter_buffer && dest_range &&
+                uint64_t(resolve_info.copy_dest_base) + scatter_extent_bytes <=
+                    shared_scatter_buffer.length) {
+              // WRITER ORDERING, the same precondition a memexport store must
+              // satisfy: this scatter writes the shared buffer, so an older
+              // overlapping producer whose drain lands afterwards would
+              // overwrite it (unrecoverably when the buffer aliases RAM).
+              // Conservative: ANY overlapping pending producer disqualifies
+              // the scatter rather than trying to order against it here.
+              bool overlapping_pending = false;
+              for (const metal::PendingProducer& p :
+                   SnapshotPendingProducers()) {
+                if (p.range.Overlaps(*dest_range)) {
+                  overlapping_pending = true;
+                  break;
+                }
+              }
+              // DIAGNOSTIC BISECT (XE_METAL_GPU_RESOLVE_FULLRECT=1): restrict
+              // the scatter to full-rect, offset-zero destinations to test
+              // whether offset/strip destinations are the divergence source.
+              static const bool s_fullrect_only =
+                  std::getenv("XE_METAL_GPU_RESOLVE_FULLRECT") != nullptr;
+              const bool full_rect_dest =
+                  dc_pre.offset_x_div_8 == 0 && dc_pre.offset_y_div_8 == 0 &&
+                  (uint32_t(dc_pre.pitch_aligned_div_32) << 5) == rw;
+              scatter_eligible =
+                  !overlapping_pending && (!s_fullrect_only || full_rect_dest);
+              if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+                XELOGW(
+                    "MetalGpuScatter draw={} base={:08X} {}x{} bpp={} "
+                    "bpp_log2={} pitch_aligned={} off=({},{}) extent={} "
+                    "endian={} swap={} fmt={} raw={} 64bpp={} msaa={} "
+                    "sample_select={} eligible={} full_rect={}",
+                    trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                    wb_bpp, wb_bpp_log2,
+                    uint32_t(dc_pre.pitch_aligned_div_32) << 5,
+                    uint32_t(dc_pre.offset_x_div_8) << 3,
+                    uint32_t(dc_pre.offset_y_div_8) << 3, scatter_extent_bytes,
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+                    dest_format, canonical_raw_copy ? 1 : 0,
+                    resolve_info.color_edram_info.format_is_64bpp ? 1 : 0,
+                    uint32_t(resolve_info.color_edram_info.msaa_samples),
+                    uint32_t(dc_pre.copy_sample_select),
+                    scatter_eligible ? 1 : 0, full_rect_dest ? 1 : 0);
+              }
+            }
+          }
+          // The shared route already wrote the destination; like the bespoke
+          // scatter it needs NO staging buffer and NO CPU scatter. Without
+          // this the route is ADDITIVE -- both paths run, guest RAM is still
+          // written by the CPU scatter, and any "identical output" result is
+          // trivially true because the OLD path produced it.
+          const bool gpu_resident_resolve =
+              shared_resolve_dispatched || scatter_eligible;
           id<MTLBuffer> staging =
-              [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
-                                     options:MTLResourceStorageModeShared];
-          if (staging) {
+              gpu_resident_resolve
+                  ? nil
+                  : [wb_device newBufferWithLength:size_t(rw) * rh * wb_bpp
+                                           options:MTLResourceStorageModeShared];
+          MetalRenderTargetCache::CanonicalScatterDest scatter_dest{
+              resolve_info.copy_dest_base,
+              // SAME fallback the CPU scatter applies: a zero aligned pitch
+              // means "derive it from the width". Passing the raw zero through
+              // makes every outer-tile term vanish and scatters the whole
+              // surface to wrong addresses.
+              (uint32_t(dc_pre.pitch_aligned_div_32) << 5)
+                  ? (uint32_t(dc_pre.pitch_aligned_div_32) << 5)
+                  : ((rw + 31u) & ~31u),
+              uint32_t(dc_pre.offset_x_div_8) << 3,
+              uint32_t(dc_pre.offset_y_div_8) << 3,
+              scatter_extent_bytes};
+          if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
-            if (canonical_packed) {
+            if (shared_resolve_dispatched) {
+              // Already resolved by the shared cross-backend shader straight
+              // into the shared buffer at guest tiled addresses: no second
+              // kernel, no staging, no CPU scatter.
+              writeback_encoded = true;
+            } else if (canonical_packed) {
               writeback_encoded =
                   render_target_cache_->ResolveCanonicalColorToBuffer(
                       frame_command_buffer_,
@@ -7411,7 +7889,11 @@ bool MetalCommandProcessor::IssueCopy() {
                       resolve_info.copy_dest_info.copy_dest_swap != 0,
                       exp_bias_scale, dest_format, wb_bpp_log2,
                       uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      canonical_raw_copy, (__bridge void*)staging, rw, rh);
+                      canonical_raw_copy,
+                      scatter_eligible ? (__bridge void*)shared_scatter_buffer
+                                       : (__bridge void*)staging,
+                      rw, rh,
+                      scatter_eligible ? &scatter_dest : nullptr);
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -7467,6 +7949,28 @@ bool MetalCommandProcessor::IssueCopy() {
                   swap_count_,
                   /*depth_encode=*/0u,
                   ++memory_authority_sequence_});
+              if (gpu_resident_resolve) {
+                // The record's bytes are in the shared buffer, not staging.
+                pending_writebacks_.back().gpu_current = 1u;
+                // Mark the destination GPU-written so the shared-memory
+                // validity model does not upload guest RAM over the freshly
+                // scattered bytes -- the same publication memexport performs
+                // for its stores.
+                MetalMemexportPublicationTarget publication_target(
+                    shared_memory_.get());
+                auto publication = metal::DecideMemexportPublication(
+                    resolve_info.copy_dest_base, scatter_extent_bytes,
+                    pending_writebacks_.back().submission);
+                if (publication) {
+                  // The pending record was installed immediately above, which
+                  // is the ownership this helper requires to exist BEFORE the
+                  // GPU-written marker; the callback attests to that rather
+                  // than registering a second record.
+                  metal::PublishMemexportWrite(
+                      *publication, publication_target,
+                      [](const metal::MemexportPublication&) { return true; });
+                }
+              }
             }
             if (writeback_encoded &&
                 dest_pixel_format == MetalRenderTargetCache::kColorFormat) {
@@ -8167,7 +8671,14 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
     auto range = metal::GuestRange::FromBaseLength(wb.guest_addr,
                                                    wb.range_bytes());
     if (range) {
-      producers.push_back({*range, metal::TransitState::kPendingResolve,
+      // Stage B: a record whose bytes the GPU scatter already placed in the
+      // shared buffer is GPU-current, not merely pending. It still owes RAM
+      // its bytes -- only its publication method and who may skip waiting for
+      // it differ.
+      producers.push_back({*range,
+                           wb.gpu_current
+                               ? metal::TransitState::kGpuCurrentShared
+                               : metal::TransitState::kPendingResolve,
                            wb.submission, wb.authority_sequence});
     }
   }
@@ -8556,7 +9067,126 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     // GPU-newer data.
     id<MTLBuffer> staging = (__bridge id<MTLBuffer>)wb.staging;
     uint8_t* dest = memory_->TranslatePhysical<uint8_t*>(wb.guest_addr);
-    if (dest && staging) {
+    if (wb.gpu_current) {
+    if (std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL")) {
+      XELOGW("MetalGpuCurrentPublish ENTER dest={:08X} {}x{} submission={}",
+             wb.guest_addr, wb.width, wb.height, wb.submission);
+    }
+      // STAGE B PUBLICATION. The bytes are already at their guest tiled
+      // addresses inside the shared buffer, so publishing to RAM repeats the
+      // SAME tiled walk and copies only the offsets the scatter wrote.
+      //
+      // A whole-extent linear copy would be cheaper and is WRONG: the
+      // destination extent includes 32-alignment padding rows/columns the
+      // scatter never touches (a 1280x720 dest has height_aligned 736), and
+      // copying the buffer over them would publish bytes no producer ever
+      // wrote. Copying exactly the written offsets is the only publication
+      // that is correct without first uploading the destination from RAM.
+      id<MTLBuffer> shared_buffer =
+          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+                         : nil;
+      const uint8_t* shared_contents =
+          static_cast<const uint8_t*>(shared_buffer.contents);
+      if (!dest || !shared_contents) {
+        if (!exact_sequence) {
+          still_pending.push_back(wb);
+        }
+        continue;
+      }
+      uint32_t pitch_aligned = wb.dest_pitch_aligned
+                                   ? wb.dest_pitch_aligned
+                                   : ((wb.width + 31u) & ~31u);
+      const uint32_t block_log2 = xe::log2_floor(wb.bpp);
+      const uint8_t* src_base = shared_contents + wb.guest_addr;
+      // Aliased backing: RAM and the buffer are the same bytes, so the copy is
+      // a proven self-copy and moves nothing. Publication still succeeds --
+      // the bytes ARE in RAM -- which is what retires the record.
+      const bool aliased = shared_memory_ && shared_memory_->is_zero_copy();
+      uint64_t published_bytes = 0;
+      // Sentinel accounting: how many of the texels this publication copies
+      // still hold the pre-dispatch pattern, i.e. were never written by the
+      // shared shader.
+      const bool sentinel_check =
+          std::getenv("XE_METAL_SHARED_RESOLVE_SENTINEL") != nullptr;
+      uint64_t sentinel_survivors = 0;
+      uint64_t sentinel_examined = 0;
+      uint64_t clipped_texels = 0;
+      if (!aliased) {
+        for (uint32_t y = 0; y < wb.height; ++y) {
+          for (uint32_t x = 0; x < wb.width; ++x) {
+            uint32_t off = uint32_t(texture_address::Tiled2D(
+                int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
+                pitch_aligned, int32_t(block_log2)));
+            if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
+              // DIAGNOSTIC: count texels the extent clip drops. The CPU
+              // scatter applies the same clip to a LINEAR staging source,
+              // where a dropped texel simply is not written; here the source
+              // and destination share the tiled address space, so a clipped
+              // texel means the publication never copies a texel the producer
+              // DID write.
+              ++clipped_texels;
+              continue;
+            }
+            std::memcpy(dest + off, src_base + off, wb.bpp);
+            published_bytes += wb.bpp;
+            if (sentinel_check && wb.bpp >= 4u) {
+              uint32_t word;
+              std::memcpy(&word, src_base + off, sizeof(word));
+              if (word == 0xA5A5A5A5u) {
+                ++sentinel_survivors;
+              }
+              ++sentinel_examined;
+            }
+          }
+        }
+      }
+      static uint32_t s_gpu_current_logs = 0;
+      if (s_gpu_current_logs++ < 8) {
+        XELOGI(
+            "MetalCommandProcessor: published GPU-current resolve {:08X} "
+            "{}x{} ({} bytes{})",
+            wb.guest_addr, wb.width, wb.height, published_bytes,
+            aliased ? ", aliased self-copy" : "");
+      }
+      if (clipped_texels) {
+        static uint32_t s_clip_logs = 0;
+        if (s_clip_logs++ < 8) {
+          XELOGW(
+              "MetalGpuCurrentPublish CLIPPED dest={:08X} {}x{} clipped={} "
+              "extent={} pitch_aligned={} off=({},{})",
+              wb.guest_addr, wb.width, wb.height, clipped_texels,
+              wb.dest_extent_bytes,
+              wb.dest_pitch_aligned ? wb.dest_pitch_aligned
+                                    : ((wb.width + 31u) & ~31u),
+              wb.dest_offset_x, wb.dest_offset_y);
+        }
+      }
+      if (sentinel_check && sentinel_examined) {
+        XELOGW(
+            "MetalSharedResolveSentinel dest={:08X} unwritten={}/{} ({:.1f}%)",
+            wb.guest_addr, sentinel_survivors, sentinel_examined,
+            100.0 * double(sentinel_survivors) / double(sentinel_examined));
+      }
+      // The SAME post-copy publication the staging path performs. Skipping it
+      // is why the first wiring retained every record and the corridor
+      // reported "failed to publish deferred guest-memory producers": guest
+      // RAM had the bytes, but nothing declared them published, so no record
+      // ever retired.
+      if (texture_cache_) {
+        invalidated_entries = texture_cache_->InvalidateRange(
+            wb.guest_addr, wb.range_bytes(),
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+        outcome.invalidated_entries += invalidated_entries;
+      }
+      auto gpu_publication = metal::DecideRamWritePublication(
+          metal::WriterKind::kResolve, wb.guest_addr, wb.dest_extent_bytes);
+      if (gpu_publication) {
+        MetalRamWritePublicationTarget target(
+            shared_memory_.get(), texture_cache_.get(),
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+        publish_outcome = metal::PublishRamWrite(*gpu_publication, target);
+      }
+    } else if (dest && staging) {
       const uint32_t* src_words =
           static_cast<const uint32_t*>(staging.contents);
       const uint8_t* src_bytes =
@@ -8950,6 +9580,27 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
   // Factual denominator, counted in BOTH flag states so an ON arm's shares are
   // read against a comparable OFF arm rather than against itself.
   need_wait_meter_.CountRequest();
+
+  // TASK 2.1 boundary attribution (census only). This is the point every
+  // consumer kind passes through with a non-empty selection, i.e. every
+  // boundary actually taken. Bucketing by the producer states SELECTED (not
+  // by the ranges requested) answers the question Stage B turns on: a
+  // boundary held only by memexport records is untouched by a resolve-side
+  // mechanism, and one held only by resolve records is untouched by a
+  // memexport-side one.
+  if (ServingCensusEnabled()) {
+    bool has_resolve = false;
+    bool has_memexport = false;
+    for (const metal::PendingProducer& p : decision.selected) {
+      if (p.state == metal::TransitState::kPendingMemexport) {
+        has_memexport = true;
+      } else {
+        has_resolve = true;
+      }
+    }
+    metal::ServingCensus::RecordBoundary(uint32_t(decision.consumer),
+                                         has_resolve, has_memexport);
+  }
 
   // The submission the OPEN frame command buffer will get, or 0 when no buffer
   // is open. ONE guarded read, shared by both paths below: the existing
@@ -9423,6 +10074,56 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (ServingCensusEnabled()) {
+        // Periodic by necessity: the emulator is killed, never shut down
+        // cleanly, so an atexit dump would never run. Cumulative totals, so
+        // any single tick is a complete reading of the run so far.
+        using metal::ServingCensus;
+        XELOGI(
+            "MetalServingCensus swap#{}: gpu_served_declared_dependency={} "
+            "(exact_cover={} bridge={}) | agreed_gpu_served={} "
+            "agreed_ram={} not_resolve_backed={} unsafe_skips={}",
+            count, ServingCensus::SpuriousDependencies(),
+            ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot,
+                               false),
+            ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, false),
+            ServingCensus::Get(ResolvedFetchService::kBridgeSnapshot, true) +
+                ServingCensus::Get(ResolvedFetchService::kExactCoverSnapshot,
+                                   true),
+            ServingCensus::Get(ResolvedFetchService::kRamContent, false),
+            ServingCensus::Get(ResolvedFetchService::kNotResolveBacked, false),
+            ServingCensus::UnsafeSkips());
+        XELOGI(
+            "MetalServingCensus swap#{} requests: total={} boundary_avoided={} "
+            "boundary_retained={} corrected_stricter={}",
+            count, ServingCensus::Requests::Total().load(
+                       std::memory_order_relaxed),
+            ServingCensus::Requests::BoundaryAvoided().load(
+                std::memory_order_relaxed),
+            ServingCensus::Requests::BoundaryRetained().load(
+                std::memory_order_relaxed),
+            ServingCensus::Requests::CorrectedStricter().load(
+                std::memory_order_relaxed));
+            for (uint32_t k = 0; k < uint32_t(metal::ConsumerKind::kCount); ++k) {
+              uint64_t ro = ServingCensus::Boundary(
+                                k, ServingCensus::HeldBy::kResolveOnly)
+                                .load(std::memory_order_relaxed);
+              uint64_t mo = ServingCensus::Boundary(
+                                k, ServingCensus::HeldBy::kMemexportOnly)
+                                .load(std::memory_order_relaxed);
+              uint64_t mx =
+                  ServingCensus::Boundary(k, ServingCensus::HeldBy::kMixed)
+                      .load(std::memory_order_relaxed);
+              if (!(ro || mo || mx)) {
+                continue;
+              }
+              XELOGI(
+                  "MetalServingCensus boundary consumer={} resolve_only={} "
+                  "memexport_only={} mixed={} total={}",
+                  metal::ConsumerKindName(metal::ConsumerKind(k)), ro, mo, mx,
+                  ro + mo + mx);
+            }
+      }
       s_last_commits = frame_commit_count_;
       s_last_draws = draw_count_;
       s_last_time = now;
