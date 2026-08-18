@@ -5321,8 +5321,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // sole authority: it takes the ordering path only when ALL selected
     // producers are GPU-current; any legacy-served fetch, memexport
     // producer, or predecessor-chain record falls back to the boundary.
-    static const bool s_gpu_ordering =
-        std::getenv("XE_METAL_GPU_ORDERING") != nullptr;
+    static const bool s_gpu_ordering = [] {
+      const char* v = std::getenv("XE_METAL_GPU_ORDERING");
+      return v && v[0] == '1' && !v[1];  // exact-1, like XE_METAL_GPU_RESOLVE
+    }();
     if (s_gpu_ordering && !texture_request.resolve_ranges.ranges().empty()) {
       static uint32_t s_ord_eligible = 0, s_ord_blocked = 0;
       if (texture_resolve_consumers_buffer_read) {
