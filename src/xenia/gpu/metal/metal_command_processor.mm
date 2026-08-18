@@ -5220,6 +5220,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // resolve range, so the decision the repair WOULD take can be compared
     // against the one taken. Never passed to the production path.
     metal::ConsumerRequest census_corrected_request;
+    // Stage B endgame (reopen 4.1): true while every fetch that contributed
+    // a resolve range is provably served by the shared-cache load route
+    // (reads the shared buffer). Any legacy-served or ineligible fetch
+    // clears it, and the request then keeps guest-RAM access semantics.
+    bool texture_resolve_consumers_buffer_read = true;
     auto collect_texture_ranges = [&](MetalShader* shader,
                                       metal::ConsumerRequest& request) {
       if (!shader) return;
@@ -5275,12 +5280,63 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           if (rng.mip_end > rng.mip_begin) {
             request.resolve_ranges.Add(mip_range);
           }
+          // Stage B endgame (reopen 4.1): decide whether THIS fetch reads
+          // the shared buffer — the exact predicate the C1T-R mask uses
+          // below (M2: prep and serve cannot disagree), re-derived here
+          // because the dependency decision precedes the mask computation.
+          bool fetch_buffer_read =
+              shared_texture_cache_ && !trace_writer_.is_open() &&
+              !binding.is_signed &&
+              binding.fetch_constant < xenos::kTextureFetchConstantCount &&
+              f.type == xenos::FetchConstantType::kTexture;
+          if (fetch_buffer_read) {
+            uint32_t fw = f.size_2d.width + 1;
+            uint32_t fh = f.size_2d.height + 1;
+            uint32_t fp =
+                f.pitch ? (uint32_t(f.pitch) << 5) : ((fw + 31u) & ~31u);
+            fetch_buffer_read =
+                (metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
+                 metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh,
+                                                      fp)) &&
+                texture_cache_->ClassifyFetchService(f, binding.is_signed) ==
+                    ResolvedFetchService::kRamContent;
+          }
+          if (!fetch_buffer_read) {
+            texture_resolve_consumers_buffer_read = false;
+          }
         }
       }
     };
     metal::ConsumerRequest texture_request;
     collect_texture_ranges(pixel_shader, texture_request);
     collect_texture_ranges(vertex_shader, texture_request);
+    // Stage B endgame (reopen 4.1, XE_METAL_GPU_ORDERING=1, default OFF):
+    // declare shared-buffer access when EVERY fetch that contributed a
+    // resolve range will actually be served by the shared-cache load route,
+    // which reads the shared buffer on the GPU timeline. With the
+    // straddling-page fix the pages of a pending GPU-current record stay
+    // valid+gpu_written, so the route's PrepareEligible uploads nothing and
+    // the load shader reads the producing dispatch's bytes under command-
+    // buffer ordering — no completion wait needed. DecideConsumer stays the
+    // sole authority: it takes the ordering path only when ALL selected
+    // producers are GPU-current; any legacy-served fetch, memexport
+    // producer, or predecessor-chain record falls back to the boundary.
+    static const bool s_gpu_ordering =
+        std::getenv("XE_METAL_GPU_ORDERING") != nullptr;
+    if (s_gpu_ordering && !texture_request.resolve_ranges.ranges().empty()) {
+      static uint32_t s_ord_eligible = 0, s_ord_blocked = 0;
+      if (texture_resolve_consumers_buffer_read) {
+        texture_request.access = metal::ConsumerAccess::kSharedBuffer;
+        ++s_ord_eligible;
+      } else {
+        ++s_ord_blocked;
+      }
+      const uint32_t total = s_ord_eligible + s_ord_blocked;
+      if ((total & 2047) == 1) {
+        XELOGI("MetalGpuOrdering: buffer-read declared={} blocked={}",
+               s_ord_eligible, s_ord_blocked);
+      }
+    }
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
@@ -9691,6 +9747,29 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
         ++seam_c->selected_memexport;
       }
     }
+  }
+  if (decision.action ==
+      metal::AuthorityAction::kOrderAgainstGpuProducers) {
+    // Stage B ordering path (reopen 4.1): every selected producer is
+    // GPU-current and this consumer reads the shared buffer. The producing
+    // dispatch encoded into the frame command buffer before the consuming
+    // draw (or into an already-committed submission ahead in the queue),
+    // and the shared MTLBuffer is hazard-tracked, so ordering is satisfied
+    // by construction — no commit, no wait, no drain. The records stay
+    // pending; only an ordinary boundary's RAM publication retires them,
+    // preserving demand CPU visibility.
+    static uint32_t s_gpu_ordering_serves = 0;
+    if (s_gpu_ordering_serves++ < 8 || (s_gpu_ordering_serves & 1023) == 0) {
+      XELOGI(
+          "MetalCommandProcessor: GPU-ordered consumer serve #{} ({} "
+          "producers, max_order_submission={})",
+          s_gpu_ordering_serves, decision.selected.size(),
+          decision.max_order_submission);
+    }
+    if (seam_c) {
+      seam_c->inclusive.Record(SeamNowNs() - seam_incl0);
+    }
+    return outcome;
   }
   // Factual denominator, counted in BOTH flag states so an ON arm's shares are
   // read against a comparable OFF arm rather than against itself.
