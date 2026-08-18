@@ -342,6 +342,15 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
         texture_invalidation_scope_ == metal::MetalTextureCache::
                                            InvalidationScope::
                                                kAllRepresentations;
+    // Clobber hunt (reopen 3.1): see MarkRangeWrittenByGpu.
+    static const uint64_t s_watch = [] {
+      const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
+      return v ? strtoull(v, nullptr, 16) : 0ull;
+    }();
+    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+      XELOGW("MetalUploadWatch INVALIDATE {:08X}+{:X} exact={}", base, length,
+             exact_range);
+    }
     shared_memory_->MemoryInvalidationCallback(base, length, exact_range,
                                                fire_global_watches);
     return true;
@@ -392,6 +401,15 @@ class MetalMemexportPublicationTarget
   }
 
   void MarkRangeWrittenByGpu(uint32_t base, uint32_t length) override {
+    // Clobber hunt (reopen 3.1): timeline of validity transitions on the
+    // watched range, same env as the upload watch.
+    static const uint64_t s_watch = [] {
+      const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
+      return v ? strtoull(v, nullptr, 16) : 0ull;
+    }();
+    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+      XELOGW("MetalUploadWatch MARK-GPU-WRITTEN {:08X}+{:X}", base, length);
+    }
     shared_memory_->RangeWrittenByGpu(base, length);
   }
 
@@ -9594,6 +9612,25 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     pending_writebacks_.erase(writeback_begin);
   } else if (!exact_sequence) {
     pending_writebacks_ = std::move(still_pending);
+  }
+  // Reopen 3.1 FIX (the confirmed d730 clobber): a publication's
+  // page-granular invalidation (16 KiB host pages) over-clears the page a
+  // still-pending GPU-current record's base straddles — adjacent resolve
+  // destinations are only 4 KiB-aligned — and the next consumer fetch then
+  // re-uploads stale guest RAM over unpublished GPU-resolve content in the
+  // shared buffer (SF4 10581: the 96x32 = first-12-KiB rects on d730/d752/
+  // d754, byte-equal to frame-start RAM). After the drain's publications,
+  // re-assert GPU-written validity for every still-pending GPU-current
+  // range; the claim is true by construction (the producing dispatch wrote
+  // those bytes into the buffer). The default path has no gpu_current
+  // records, so this is structurally inert there.
+  if (shared_memory_) {
+    for (const PendingWriteback& pending : pending_writebacks_) {
+      if (pending.gpu_current) {
+        shared_memory_->RangeWrittenByGpu(pending.guest_addr,
+                                          pending.range_bytes());
+      }
+    }
   }
   return outcome;
 }

@@ -122,6 +122,18 @@ class SharedMemory {
   // regions in those pages.
   void RangeWrittenByGpu(uint32_t start, uint32_t length);
 
+  // Diagnostic-only page-state peek (reopen-metal-gpu-visible-resolve-
+  // authority 3.1 clobber hunt); not synchronized — callers hold the CP
+  // thread like every other validity user.
+  bool IsPageValid(uint32_t page) const {
+    return (system_page_flags_valid_[page >> 6] >> (page & 63)) & 1;
+  }
+  bool IsPageGpuWritten(uint32_t page) const {
+    return (system_page_flags_valid_and_gpu_written_[page >> 6] >>
+            (page & 63)) &
+           1;
+  }
+
  protected:
   SharedMemory(Memory& memory);
 

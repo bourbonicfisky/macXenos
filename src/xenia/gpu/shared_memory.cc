@@ -557,6 +557,18 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range,
     bool fire_global_watches) {
+  // Clobber hunt (reopen-metal-gpu-visible-resolve-authority 3.1,
+  // XE_METAL_UPLOAD_WATCH=<hex>): catches EVERY invalidation path, including
+  // the CPU write-watch thunk. Diagnostic-only, default off.
+  static const uint64_t s_watch = [] {
+    const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
+    return v ? strtoull(v, nullptr, 16) : 0ull;
+  }();
+  if (s_watch && physical_address_start < s_watch + 0x40000 &&
+      uint64_t(physical_address_start) + length > s_watch) {
+    XELOGW("SharedMemUploadWatch BASE-INVALIDATE {:08X}+{:X} exact={}",
+           physical_address_start, length, exact_range);
+  }
   if (length == 0 || physical_address_start >= kBufferSize) {
     return std::make_pair(uint32_t(0), UINT32_MAX);
   }

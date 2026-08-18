@@ -506,8 +506,12 @@ bool MetalSharedMemory::UploadRanges(
       if (s_upload_watch &&
           upload_start < s_upload_watch + 0x40000 &&
           upload_start + upload_length > s_upload_watch) {
-        XELOGW("MetalUploadWatch CLOBBER upload {:08X}+{:X} overlaps watch {:08X}",
-               upload_start, upload_length, uint64_t(s_upload_watch));
+        uint32_t wpage = uint32_t(s_upload_watch) >> page_size_log2();
+        XELOGW(
+            "MetalUploadWatch CLOBBER upload {:08X}+{:X} overlaps watch "
+            "{:08X} (watch page {:X}: valid={} gpu_written={})",
+            upload_start, upload_length, uint64_t(s_upload_watch), wpage,
+            IsPageValid(wpage), IsPageGpuWritten(wpage));
       }
       std::memcpy(buffer_contents_ + upload_start,
                   memory().TranslatePhysical(upload_start), upload_length);
