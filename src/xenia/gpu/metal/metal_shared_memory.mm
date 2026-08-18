@@ -496,6 +496,19 @@ bool MetalSharedMemory::UploadRanges(
       upload_bytes_aliased_ =
           SaturatingAdd(upload_bytes_aliased_, upload_length);
     } else {
+      // Clobber hunt (reopen 3.1, XE_METAL_UPLOAD_WATCH=<hex base>): name
+      // every upload that copies guest RAM over a watched buffer range —
+      // the confirmed mechanism that destroys GPU-current resolve content.
+      static const uint64_t s_upload_watch = [] {
+        const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
+        return v ? strtoull(v, nullptr, 16) : 0ull;
+      }();
+      if (s_upload_watch &&
+          upload_start < s_upload_watch + 0x40000 &&
+          upload_start + upload_length > s_upload_watch) {
+        XELOGW("MetalUploadWatch CLOBBER upload {:08X}+{:X} overlaps watch {:08X}",
+               upload_start, upload_length, uint64_t(s_upload_watch));
+      }
       std::memcpy(buffer_contents_ + upload_start,
                   memory().TranslatePhysical(upload_start), upload_length);
       // Counted AT the copy, so the number is what moved, not what the mode
