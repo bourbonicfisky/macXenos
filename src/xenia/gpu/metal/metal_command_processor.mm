@@ -414,10 +414,12 @@ class MetalMemexportPublicationTarget
 class MetalMemexportConvergenceTarget
     : public metal::MemexportConvergenceTarget {
  public:
-  MetalMemexportConvergenceTarget(Memory* memory,
+  MetalMemexportConvergenceTarget(CommandProcessor* command_processor,
+                                  Memory* memory,
                                   MetalSharedMemory* shared_memory,
                                   metal::MetalTextureCache* texture_cache)
-      : memory_(memory),
+      : command_processor_(command_processor),
+        memory_(memory),
         shared_memory_(shared_memory),
         texture_cache_(texture_cache) {}
 
@@ -431,6 +433,14 @@ class MetalMemexportConvergenceTarget
     *bytes_copied = 0;
     if (!memory_ || !shared_memory_) {
       return false;
+    }
+    // Pre-write journal notify (fix-replay-guest-ram-rollback 1.2). Under the
+    // diagnostic zero-copy alias the GPU already wrote these bytes at draw
+    // execution, so the captured pre-image is unsound there — an accepted
+    // limitation of two diagnostic-only modes coinciding; production mirror
+    // mode captures before the only RAM write, this copy.
+    if (command_processor_) {
+      command_processor_->NotifyGuestRamWrite(base, length);
     }
     metal::SharedBufferConvergenceOutcome published =
         shared_memory_->ConvergeRangeToRam(base, length);
@@ -451,6 +461,7 @@ class MetalMemexportConvergenceTarget
   }
 
  private:
+  CommandProcessor* command_processor_;
   Memory* memory_;
   MetalSharedMemory* shared_memory_;
   metal::MetalTextureCache* texture_cache_;
@@ -8253,7 +8264,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     const uint8_t* me_contents =
         static_cast<const uint8_t*>(me_shared_buffer.contents);
     MetalMemexportConvergenceTarget convergence_target(
-        memory_, shared_memory_.get(), texture_cache_.get());
+        this, memory_, shared_memory_.get(), texture_cache_.get());
     for (auto export_it = export_begin; export_it != export_end; ++export_it) {
       const PendingMemexport& me = *export_it;
       // The completed-submission half of this test now lives in the shared
@@ -8645,6 +8656,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
           }
         }
       };
+      // Pre-write journal notify (fix-replay-guest-ram-rollback 1.2) — before
+      // the tiled scatter (and any zero-hold re-scatter or tip refresh, which
+      // write inside the same range) overwrites guest RAM.
+      NotifyGuestRamWrite(wb.guest_addr, wb.range_bytes());
       scatter_bytes(src_bytes);
       // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): one line
       // per publication, by writer kind, so the replay-rollback design knows

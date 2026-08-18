@@ -12,12 +12,34 @@
 #include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/guest_ram_write_journal.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 
 namespace xe {
 namespace gpu {
+
+// Adapter from the command processor's pre-write notify surface to the
+// journal's capture (fix-replay-guest-ram-rollback 1.2/2.1). The translate
+// hook clamps to the 512 MiB guest physical space; an out-of-space range is
+// skipped (and counted) rather than faulting.
+struct TracePlayerRamJournalBinding final
+    : public CommandProcessor::GuestRamWriteJournal {
+  explicit TracePlayerRamJournalBinding(Memory* memory)
+      : journal([memory](uint32_t base, uint32_t length) -> uint8_t* {
+          if (uint64_t(base) + length > 0x20000000ull) {
+            return nullptr;
+          }
+          return memory->TranslatePhysical(base);
+        }) {}
+
+  void OnBeforeGuestRamWrite(uint32_t base, uint32_t length) override {
+    journal.CaptureBeforeWrite(base, length);
+  }
+
+  gpu::GuestRamWriteJournal journal;
+};
 
 TracePlayer::TracePlayer(GraphicsSystem* graphics_system)
     : graphics_system_(graphics_system),
@@ -33,6 +55,16 @@ TracePlayer::TracePlayer(GraphicsSystem* graphics_system)
 
   playback_event_ = xe::threading::Event::CreateAutoResetEvent(false);
   assert_not_null(playback_event_);
+}
+
+TracePlayer::~TracePlayer() {
+  // Best-effort uninstall so a command processor outliving this player never
+  // notifies a dangling journal. (Notifications only fire during playback,
+  // which this player drives, so this is belt-and-suspenders.)
+  if (ram_journal_ && graphics_system_ &&
+      graphics_system_->command_processor()) {
+    graphics_system_->command_processor()->SetGuestRamWriteJournal(nullptr);
+  }
 }
 
 const TraceReader::Frame* TracePlayer::current_frame() const {
@@ -124,6 +156,23 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
   // never reached from a live title path.
   command_processor->SetTracePlaybackContext();
 
+  // Guest-RAM rollback journal (fix-replay-guest-ram-rollback D2): installed
+  // before ANY playback command so the first playback's GPU-derived RAM
+  // writes (resolve writeback, memexport convergence, ZPD reports, readback
+  // resolve) capture their pre-frame bytes at first write. A backend that
+  // reports no writes never notifies, so this is structurally inert there.
+  if (!ram_journal_) {
+    ram_journal_ = std::make_unique<TracePlayerRamJournalBinding>(memory);
+    command_processor->SetGuestRamWriteJournal(ram_journal_.get());
+  }
+  if (ram_journal_frame_index_ != current_frame_index_) {
+    // Stepping to a different frame is live continuation (see SeekFrame): the
+    // captured pre-images belong to the old frame and must not be replayed
+    // into the new one.
+    ram_journal_->journal.Clear();
+    ram_journal_frame_index_ = current_frame_index_;
+  }
+
   if (frame_initial) {
     // Quiescent replay-boundary retirement, BEFORE the frame's restore
     // commands re-deliver authoritative RAM + EDRAM: nothing GPU-derived
@@ -132,6 +181,20 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
     // Unconditional -- unlike clear_caches, which is a scripted-gate request
     // for the DEFERRED live-semantics cache clear.
     command_processor->ResetDerivedReplayState();
+    // Restore the guest-RAM ranges earlier playbacks of this frame wrote
+    // (design D3): same replay boundary as the derived-state reset, before
+    // the trace's own kMemoryRead/kEdramSnapshot restores re-deliver
+    // authoritative content. No-op on the first frame-initial playback (the
+    // journal is empty until the frame's first GPU-derived write).
+    size_t restored_ranges = ram_journal_->journal.RestoreAll();
+    if (restored_ranges) {
+      XELOGI(
+          "TracePlayer: guest-RAM rollback restored {} ranges / {} bytes "
+          "(failed captures {}, failed restores {})",
+          restored_ranges, ram_journal_->journal.captured_bytes(),
+          ram_journal_->journal.failed_captures(),
+          ram_journal_->journal.failed_restores());
+    }
   }
   if (clear_caches) {
     command_processor->ClearCaches();

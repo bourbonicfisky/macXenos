@@ -1073,6 +1073,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
         XenosZPDReport::QueryBatchFakeSamples(querybatch_zpd_sample_count_);
     if (report) {
       // Both QueryBatch and conventional fake samples skip elective saturation.
+      COMMAND_PROCESSOR::NotifyGuestRamWrite(
+          report_physical, sizeof(xe_gpu_depth_sample_counts));
       XenosZPDReport::WriteSampleCount(report, sample_count, false);
     }
     return true;
@@ -1087,6 +1089,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
       // Clear the record so the game knows the BEGIN was processed and
       // stale sentinel data from a prior query lifetime doesn't persist.
       if (report) {
+        COMMAND_PROCESSOR::NotifyGuestRamWrite(
+            report_physical, sizeof(xe_gpu_depth_sample_counts));
         std::memset(report, 0, sizeof(xe_gpu_depth_sample_counts));
         // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): the
         // BEGIN clear writes the same record range the later report commit
@@ -1137,6 +1141,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
           ? static_cast<uint32_t>(cvars::occlusion_query_fake_upper_threshold)
           : fake_zpd_sample_count_ - 1;
 
+  COMMAND_PROCESSOR::NotifyGuestRamWrite(report_physical,
+                                         sizeof(xe_gpu_depth_sample_counts));
   XenosZPDReport::WriteSampleCount(report, fake_zpd_sample_count_, false);
   return true;
 }

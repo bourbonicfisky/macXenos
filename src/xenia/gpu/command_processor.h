@@ -222,6 +222,34 @@ class CommandProcessor {
   void SetTracePlaybackContext() { trace_playback_context_ = true; }
   bool trace_playback_context() const { return trace_playback_context_; }
 
+  // Backend-reported guest-RAM write surface (fix-replay-guest-ram-rollback
+  // design D1/D4). Every site where a frame's execution writes guest RAM
+  // through the host mapping (Metal resolve writeback scatter and memexport
+  // convergence, the shared ZPD report record writes, Vulkan readback
+  // resolve) calls NotifyGuestRamWrite immediately BEFORE overwriting the
+  // bytes, so an installed journal can capture the pre-write contents
+  // (copy-on-first-write, design D2). Inertness is structural: with no
+  // journal installed (every live run) the notify is a null-pointer check,
+  // and a backend that writes no guest RAM never calls it at all.
+  //
+  // Threading: writer sites and TracePlayer's install/restore both run on
+  // the command-processor thread; no synchronization is needed or provided.
+  class GuestRamWriteJournal {
+   public:
+    virtual ~GuestRamWriteJournal() = default;
+    // `base` is a guest physical address; `length` bytes at it are about to
+    // be overwritten by a GPU-derived writer.
+    virtual void OnBeforeGuestRamWrite(uint32_t base, uint32_t length) = 0;
+  };
+  void SetGuestRamWriteJournal(GuestRamWriteJournal* journal) {
+    guest_ram_write_journal_ = journal;
+  }
+  void NotifyGuestRamWrite(uint32_t base, uint32_t length) {
+    if (guest_ram_write_journal_) {
+      guest_ram_write_journal_->OnBeforeGuestRamWrite(base, length);
+    }
+  }
+
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const {
     return swap_post_effect_desired_;
@@ -676,6 +704,10 @@ class CommandProcessor {
   // See SetTracePlaybackContext(). GPU-thread written (TracePlayer call-in /
   // harness setup) and GPU-thread read (backend ResetDerivedReplayState).
   bool trace_playback_context_ = false;
+
+  // See SetGuestRamWriteJournal(). Null in every live run; installed only by
+  // TracePlayer for replay-loop rollback. CP-thread written and read.
+  GuestRamWriteJournal* guest_ram_write_journal_ = nullptr;
 
   // Headless trace-analysis capture (--capture_dir). manifest.jsonl is
   // lazily opened on the first captured draw; capture_meta.json (run/build/

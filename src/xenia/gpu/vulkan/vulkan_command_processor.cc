@@ -3260,6 +3260,8 @@ bool VulkanCommandProcessor::IssueCopy() {
         if (mapped_data) {
           // Memory accessibility already checked at the start of this function
           uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
+          // Pre-write journal notify (fix-replay-guest-ram-rollback 1.2).
+          NotifyGuestRamWrite(written_address, written_length);
           memory::vastcpy(dest_ptr, static_cast<uint8_t*>(mapped_data),
                           written_length);
           // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1):

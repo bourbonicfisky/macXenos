@@ -11,6 +11,7 @@
 #define XENIA_GPU_TRACE_PLAYER_H_
 
 #include <atomic>
+#include <memory>
 #include <string>
 
 #include "xenia/base/threading.h"
@@ -22,6 +23,10 @@ namespace gpu {
 
 class GraphicsSystem;
 
+// Binds the guest-RAM rollback journal to the command processor's pre-write
+// notify surface; defined in trace_player.cc (fix-replay-guest-ram-rollback).
+struct TracePlayerRamJournalBinding;
+
 enum class TracePlaybackMode {
   kUntilEnd,
   kBreakOnSwap,
@@ -30,6 +35,7 @@ enum class TracePlaybackMode {
 class TracePlayer : public TraceReader {
  public:
   TracePlayer(GraphicsSystem* graphics_system);
+  ~TracePlayer();
 
   GraphicsSystem* graphics_system() const { return graphics_system_; }
   int current_frame_index() const { return current_frame_index_; }
@@ -77,6 +83,12 @@ class TracePlayer : public TraceReader {
   bool playing_trace_ = false;
   std::atomic<uint32_t> playback_percent_ = {0};
   std::unique_ptr<xe::threading::Event> playback_event_;
+  // Guest-RAM rollback for replay loops (fix-replay-guest-ram-rollback):
+  // installed on the command processor at the first playback so loop 0's
+  // GPU-derived RAM writes capture their pre-frame bytes; restored at every
+  // frame-initial playback boundary. Created and used on the CP thread only.
+  std::unique_ptr<TracePlayerRamJournalBinding> ram_journal_;
+  int ram_journal_frame_index_ = -1;
 };
 
 }  // namespace gpu

@@ -2086,6 +2086,14 @@ void CommandProcessor::WriteZPDReport(uint32_t begin_record,
       memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(
           end_record);
 
+  // Pre-write journal notify (fix-replay-guest-ram-rollback 1.2) — before the
+  // record bytes are overwritten.
+  if (begin && write_begin_record) {
+    NotifyGuestRamWrite(begin_record,
+                        sizeof(xenos::xe_gpu_depth_sample_counts));
+  }
+  NotifyGuestRamWrite(end_record, sizeof(xenos::xe_gpu_depth_sample_counts));
+
   XenosZPDReport::WriteReportDelta(begin, end, begin_value, delta_value,
                                    write_begin_record);
   // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): ZPD report
