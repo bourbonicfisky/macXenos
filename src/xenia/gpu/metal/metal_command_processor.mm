@@ -9233,6 +9233,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // a proven self-copy and moves nothing. Publication still succeeds --
       // the bytes ARE in RAM -- which is what retires the record.
       const bool aliased = shared_memory_ && shared_memory_->is_zero_copy();
+      // Pre-write journal notify + census (fix-replay-guest-ram-rollback):
+      // the GPU-current publication is a guest-RAM writer like the CPU
+      // scatter — without this, replay rollback misses these ranges and the
+      // cross-loop carrier returns with the route ON (Sonic 1762/2090).
+      NotifyGuestRamWrite(wb.guest_addr, wb.range_bytes());
+      static const bool s_ram_write_census_gc =
+          std::getenv("XE_GPU_RAM_WRITE_CENSUS") != nullptr;
+      if (s_ram_write_census_gc) {
+        XELOGI(
+            "RamWriteCensus writer=resolve_gpu_current base={:08X} len={} "
+            "swap={}",
+            wb.guest_addr, wb.range_bytes(), swap_count_);
+      }
       // Origin experiment (reopen 2.1): the GPU arm's source region, before
       // the publication walk copies from it.
       MetalOriginDumpExtent("gpu", wb.guest_addr, wb.width, wb.height, wb.bpp,
