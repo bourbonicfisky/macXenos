@@ -5376,6 +5376,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
           if (!fetch_buffer_read) {
             texture_resolve_consumers_buffer_read = false;
+            // Name the precise failing condition, bounded (reopen census).
+            static uint32_t s_blocker_detail_logs = 0;
+            if (s_gpu_ordering && s_blocker_detail_logs < 24) {
+              ++s_blocker_detail_logs;
+              XELOGI(
+                  "MetalGpuOrderingBlockDetail draw={} base={:08X} fmt={} "
+                  "signed={} type={} cache={} writer={} strict={} svc={}",
+                  trace_draw_index_, f.base_address << 12,
+                  uint32_t(f.format), binding.is_signed ? 1 : 0,
+                  uint32_t(f.type), shared_texture_cache_ != nullptr,
+                  trace_writer_.is_open() ? 1 : 0, strict_eligible,
+                  uint32_t(fetch_service));
+            }
             // Blocker census (reopen 4.2 probe follow-up): WHAT blocks the
             // ordering path on real corridors. Key = guest format, the serve
             // classification, and the strict-eligibility verdict. Only under
@@ -5492,9 +5505,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                     : ResolvedFetchService::kRamContent;
             fetches += fmt::format(
                 " [base={:08X} fmt={} {}x{} gc={} me={} bridge={} strict={} "
-                "svc={}]",
+                "svc={} signed={} type={}]",
                 f.base_address << 12, uint32_t(f.format), fw, fh, gc, me,
-                bridge, strict, uint32_t(svc));
+                bridge, strict, uint32_t(svc), binding.is_signed ? 1 : 0,
+                uint32_t(f.type));
           }
         };
         census_fetches(pixel_shader);
