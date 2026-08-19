@@ -5451,6 +5451,69 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    // Boundary-taker census (attribution follow-up): the seam data shows the
+    // corridor's texture boundaries are memexport-only selections on draws
+    // whose access was NEVER declared (resolve ranges empty or blocked).
+    // Name those draws' fetches: for each boundary-taking decision at
+    // guest-RAM access, log the pending-overlapping fetches' format/serve/
+    // eligibility so the widening step is data-named.
+    if (s_gpu_ordering &&
+        texture_request.access == metal::ConsumerAccess::kGuestRam &&
+        !authority_decision.selected.empty()) {
+      static uint32_t s_taker_logs = 0;
+      if (s_taker_logs < 32) {
+        std::string fetches;
+        auto census_fetches = [&](MetalShader* shader) {
+          if (!shader) return;
+          for (const auto& binding :
+               shader->GetTextureBindingsAfterTranslation()) {
+            auto f = regs.GetTextureFetch(binding.fetch_constant);
+            if (!(f.base_address << 12)) continue;
+            metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
+            auto br = metal::GuestRange::FromBounds(rng.base_begin,
+                                                    rng.base_end);
+            bool gc = overlaps_pending_gpu_current(br);
+            bool me = overlaps_pending_memexport(br);
+            if (!gc && !me) continue;
+            bool bridge = texture_cache_ &&
+                          texture_cache_->BridgeServes(f.base_address << 12,
+                                                       f.size_2d.width + 1,
+                                                       f.size_2d.height + 1);
+            uint32_t fw = f.size_2d.width + 1, fh = f.size_2d.height + 1;
+            uint32_t fp = f.pitch ? (uint32_t(f.pitch) << 5)
+                                  : ((fw + 31u) & ~31u);
+            bool strict =
+                metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
+                metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh, fp);
+            ResolvedFetchService svc =
+                texture_cache_
+                    ? texture_cache_->ClassifyFetchService(f,
+                                                           binding.is_signed)
+                    : ResolvedFetchService::kRamContent;
+            fetches += fmt::format(
+                " [base={:08X} fmt={} {}x{} gc={} me={} bridge={} strict={} "
+                "svc={}]",
+                f.base_address << 12, uint32_t(f.format), fw, fh, gc, me,
+                bridge, strict, uint32_t(svc));
+          }
+        };
+        census_fetches(pixel_shader);
+        census_fetches(vertex_shader);
+        if (!fetches.empty()) {
+          ++s_taker_logs;
+          uint32_t sel_r = 0, sel_m = 0;
+          for (const auto& p : authority_decision.selected) {
+            if (p.state == metal::TransitState::kPendingMemexport) {
+              ++sel_m;
+            } else {
+              ++sel_r;
+            }
+          }
+          XELOGI("MetalGpuOrderingTaker draw={} sel_r={} sel_m={}:{}",
+                 trace_draw_index_, sel_r, sel_m, fetches);
+        }
+      }
+    }
     // Mixed-break census (probe #7 follow-up): access was declared but the
     // ordering action did not fire — count which producer STATES broke the
     // all-gpu-current set, so the next widening step is named by data.
