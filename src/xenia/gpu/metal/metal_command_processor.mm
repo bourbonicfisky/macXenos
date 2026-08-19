@@ -9824,8 +9824,12 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       for (const auto& published : published_ranges) {
         if (page_span_overlap(pending.guest_addr, pending.range_bytes(),
                               published.first, published.second)) {
-          shared_memory_->RangeWrittenByGpu(pending.guest_addr,
-                                            pending.range_bytes());
+          // Lean re-assert: validity bits only, NO FireWatches — the watches
+          // for this record already fired at its creation-time marking, and
+          // re-firing per drain tore down resolved-target bridges every
+          // frame (probe #4: 143,725 vs 13,219 slot registrations).
+          shared_memory_->ReassertGpuWritten(pending.guest_addr,
+                                             pending.range_bytes());
           break;
         }
       }

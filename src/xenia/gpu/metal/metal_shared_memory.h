@@ -120,6 +120,15 @@ class MetalSharedMemory : public SharedMemory {
     MakeRangeValid(start, length, /*written_by_gpu=*/false);
   }
 
+  // Restore valid+gpu_written bits WITHOUT firing watches. For the straddler
+  // re-assert only: the range's watches already fired at the original
+  // RangeWrittenByGpu when the record was created, and the content has not
+  // changed since — but RangeWrittenByGpu's FireWatches on every drain tore
+  // down resolved-target bridges each frame (probe #4's 10.9x slot churn).
+  void ReassertGpuWritten(uint32_t start, uint32_t length) {
+    MakeRangeValid(start, length, /*written_by_gpu=*/true);
+  }
+
   // S8: the submission the currently-open command buffer will get — consumed
   // ranges are tagged with it so ReleaseConsumedRanges frees exactly the
   // ranges whose reader has completed (a blanket clear would drop hazard
