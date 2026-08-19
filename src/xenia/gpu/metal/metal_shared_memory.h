@@ -108,6 +108,18 @@ class MetalSharedMemory : public SharedMemory {
   // current frame for the hazard detection above.
   bool RequestConsumedRange(uint32_t start, uint32_t length);
 
+  // After a GPU-current publication the walked bytes are IDENTICAL in the
+  // buffer and RAM (the publication just copied buffer -> RAM, and the
+  // extent's padding was committed from RAM at dispatch). Mark the pages
+  // valid-not-gpu-written so consumers stop re-uploading bytes the buffer
+  // already holds (the 4.2 probes measured +45% tex uploads/frame from the
+  // publication's blanket invalidation). Watches for the content CHANGE were
+  // already fired by the publication's invalidate; this only restores page
+  // validity.
+  void MarkRangeRamEqual(uint32_t start, uint32_t length) {
+    MakeRangeValid(start, length, /*written_by_gpu=*/false);
+  }
+
   // S8: the submission the currently-open command buffer will get — consumed
   // ranges are tagged with it so ReleaseConsumedRanges frees exactly the
   // ranges whose reader has completed (a blanket clear would drop hazard

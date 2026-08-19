@@ -9433,6 +9433,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             shared_memory_.get(), texture_cache_.get(),
             metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
         publish_outcome = metal::PublishRamWrite(*gpu_publication, target);
+        if (publish_outcome.action ==
+                metal::AuthorityAction::kInvalidateRamWrite &&
+            shared_memory_) {
+          // GPU-current publication: buffer and RAM are byte-identical for
+          // this extent now (the copy above went buffer -> RAM; padding was
+          // committed FROM RAM at dispatch). Restore page validity so the
+          // next consumer does not re-upload identical bytes — the probes
+          // measured +45% tex uploads/frame from the blanket invalidation.
+          // The publication's watches already fired for the content change,
+          // and the scoped straddler re-assert below still runs after this.
+          shared_memory_->MarkRangeRamEqual(wb.guest_addr,
+                                            wb.dest_extent_bytes);
+        }
       }
     } else if (dest && staging) {
       const uint32_t* src_words =
