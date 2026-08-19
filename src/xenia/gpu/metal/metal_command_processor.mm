@@ -5289,20 +5289,60 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               !binding.is_signed &&
               binding.fetch_constant < xenos::kTextureFetchConstantCount &&
               f.type == xenos::FetchConstantType::kTexture;
+          bool strict_eligible = false;
+          ResolvedFetchService fetch_service =
+              ResolvedFetchService::kRamContent;
           if (fetch_buffer_read) {
             uint32_t fw = f.size_2d.width + 1;
             uint32_t fh = f.size_2d.height + 1;
             uint32_t fp =
                 f.pitch ? (uint32_t(f.pitch) << 5) : ((fw + 31u) & ~31u);
+            strict_eligible =
+                metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
+                metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh, fp);
+            fetch_service =
+                texture_cache_->ClassifyFetchService(f, binding.is_signed);
             fetch_buffer_read =
-                (metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
-                 metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh,
-                                                      fp)) &&
-                texture_cache_->ClassifyFetchService(f, binding.is_signed) ==
-                    ResolvedFetchService::kRamContent;
+                strict_eligible &&
+                fetch_service == ResolvedFetchService::kRamContent;
           }
           if (!fetch_buffer_read) {
             texture_resolve_consumers_buffer_read = false;
+            // Blocker census (reopen 4.2 probe follow-up): WHAT blocks the
+            // ordering path on real corridors. Key = guest format, the serve
+            // classification, and the strict-eligibility verdict. Only under
+            // the diagnostic flag; bounded map, periodic dump.
+            static const bool s_ord_census = [] {
+              const char* v = std::getenv("XE_METAL_GPU_ORDERING");
+              return v && v[0] == '1' && !v[1];
+            }();
+            if (s_ord_census) {
+              static std::map<uint32_t, uint64_t> s_blockers;
+              static uint64_t s_blocked_fetches = 0;
+              uint32_t key = (uint32_t(f.format) << 8) |
+                             (uint32_t(fetch_service) << 1) |
+                             uint32_t(strict_eligible);
+              if (s_blockers.size() < 256) {
+                ++s_blockers[key];
+              }
+              if ((++s_blocked_fetches & 0xFFFFF) == 1 &&
+                  s_blocked_fetches > 1) {
+                std::string top;
+                std::vector<std::pair<uint64_t, uint32_t>> ranked;
+                for (const auto& kv : s_blockers) {
+                  ranked.emplace_back(kv.second, kv.first);
+                }
+                std::sort(ranked.rbegin(), ranked.rend());
+                for (size_t r = 0; r < ranked.size() && r < 6; ++r) {
+                  top += fmt::format(" fmt={} svc={} strict={} n={}",
+                                     ranked[r].second >> 8,
+                                     (ranked[r].second >> 1) & 0x7F,
+                                     ranked[r].second & 1, ranked[r].first);
+                }
+                XELOGI("MetalGpuOrderingBlockers total={}:{}",
+                       s_blocked_fetches, top);
+              }
+            }
           }
         }
       }
@@ -8848,6 +8888,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     metal::MemexportBoundaryEvidence boundary_evidence, uint32_t filter_base,
     uint32_t filter_size, uint64_t filter_authority_sequence) {
   metal::ProducerDrainOutcome outcome;
+  // Ranges whose publication this drain executed (and whose page-granular
+  // invalidation may have over-cleared a straddling neighbor). Used by the
+  // scoped re-assert at the end of the function.
+  std::vector<std::pair<uint32_t, uint32_t>> published_ranges;
   auto filter_range =
       metal::GuestRange::FromBaseLength(filter_base, filter_size);
   auto in_filter = [&](uint32_t base, uint32_t size,
@@ -9021,6 +9065,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       }
       ++outcome.drained_records;
       ++outcome.memexport_records;
+      published_ranges.emplace_back(me.base_address, me.size_bytes);
       outcome.invalidated_entries += result.invalidated_entries;
       // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1). `copied`
       // is the factual byte count: 0 on an aliased backing (where the GPU
@@ -9673,6 +9718,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     }
     ++outcome.drained_records;
     ++outcome.resolve_records;
+    published_ranges.emplace_back(wb.guest_addr, wb.range_bytes());
     id<MTLBuffer> released_staging =
         (__bridge_transfer id<MTLBuffer>)wb.staging;
     (void)released_staging;
@@ -9690,16 +9736,35 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
   // destinations are only 4 KiB-aligned — and the next consumer fetch then
   // re-uploads stale guest RAM over unpublished GPU-resolve content in the
   // shared buffer (SF4 10581: the 96x32 = first-12-KiB rects on d730/d752/
-  // d754, byte-equal to frame-start RAM). After the drain's publications,
-  // re-assert GPU-written validity for every still-pending GPU-current
-  // range; the claim is true by construction (the producing dispatch wrote
-  // those bytes into the buffer). The default path has no gpu_current
-  // records, so this is structurally inert there.
-  if (shared_memory_) {
+  // d754, byte-equal to frame-start RAM). Re-assert GPU-written validity for
+  // still-pending GPU-current records — but SCOPED to records whose page
+  // span this drain's publications actually touched: the 4.2 probe measured
+  // the unscoped form at -54% fps (every drain re-fired global watches for
+  // every pending record, +43% texture uploads/frame). Page granule is a
+  // conservative 64 KiB so any host page size is covered; a false-positive
+  // overlap merely re-asserts a truth. The default path publishes no
+  // gpu_current records and keeps zero extra work.
+  if (shared_memory_ && !published_ranges.empty()) {
+    auto page_span_overlap = [](uint32_t a_base, uint32_t a_len,
+                                uint32_t b_base, uint32_t b_len) {
+      constexpr uint64_t kGranuleMask = 0xFFFFull;  // 64 KiB
+      uint64_t a0 = uint64_t(a_base) & ~kGranuleMask;
+      uint64_t a1 = (uint64_t(a_base) + a_len + kGranuleMask) & ~kGranuleMask;
+      uint64_t b0 = uint64_t(b_base) & ~kGranuleMask;
+      uint64_t b1 = (uint64_t(b_base) + b_len + kGranuleMask) & ~kGranuleMask;
+      return a0 < b1 && b0 < a1;
+    };
     for (const PendingWriteback& pending : pending_writebacks_) {
-      if (pending.gpu_current) {
-        shared_memory_->RangeWrittenByGpu(pending.guest_addr,
-                                          pending.range_bytes());
+      if (!pending.gpu_current) {
+        continue;
+      }
+      for (const auto& published : published_ranges) {
+        if (page_span_overlap(pending.guest_addr, pending.range_bytes(),
+                              published.first, published.second)) {
+          shared_memory_->RangeWrittenByGpu(pending.guest_addr,
+                                            pending.range_bytes());
+          break;
+        }
       }
     }
   }
