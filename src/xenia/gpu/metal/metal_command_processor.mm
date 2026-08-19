@@ -8127,21 +8127,20 @@ bool MetalCommandProcessor::IssueCopy() {
                 pending_writebacks_.back().gpu_current = 1u;
                 // Mark the destination GPU-written so the shared-memory
                 // validity model does not upload guest RAM over the freshly
-                // scattered bytes -- the same publication memexport performs
-                // for its stores.
-                MetalMemexportPublicationTarget publication_target(
-                    shared_memory_.get());
-                auto publication = metal::DecideMemexportPublication(
-                    resolve_info.copy_dest_base, scatter_extent_bytes,
-                    pending_writebacks_.back().submission);
-                if (publication) {
-                  // The pending record was installed immediately above, which
-                  // is the ownership this helper requires to exist BEFORE the
-                  // GPU-written marker; the callback attests to that rather
-                  // than registering a second record.
-                  metal::PublishMemexportWrite(
-                      *publication, publication_target,
-                      [](const metal::MemexportPublication&) { return true; });
+                // scattered bytes. LEAN marking (validity bits only), NOT the
+                // memexport-style RangeWrittenByGpu: that fires the global
+                // watch, whose queued invalidation applies the DEFAULT
+                // kAllRepresentations scope and ERASES the resolve's own
+                // just-registered bridge — probe #5 measured 143k vs 13.5k
+                // slot re-registrations per arm from exactly this. The CPU
+                // path's publication deliberately suppresses the same global
+                // fan-out for self-publications; cached-texture refresh is
+                // owed (and delivered) by the drain-side invalidation, and
+                // mid-frame consumers reach it through the corridor exactly
+                // as on the default path.
+                if (shared_memory_) {
+                  shared_memory_->ReassertGpuWritten(
+                      resolve_info.copy_dest_base, scatter_extent_bytes);
                 }
               }
             }
