@@ -5225,6 +5225,34 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // (reads the shared buffer). Any legacy-served or ineligible fetch
     // clears it, and the request then keeps guest-RAM access semantics.
     bool texture_resolve_consumers_buffer_read = true;
+    static const bool s_gpu_ordering = [] {
+      const char* v = std::getenv("XE_METAL_GPU_ORDERING");
+      return v && v[0] == '1' && !v[1];  // exact-1, like XE_METAL_GPU_RESOLVE
+    }();
+    // Per-fetch overlap gate (probe #2's lesson): only a fetch whose ranges
+    // actually overlap a pending GPU-current record constrains the access
+    // declaration. Innocent co-bound material textures (the 65M blocked DXT
+    // fetches) read ranges no GPU-current producer owns; the ordering path's
+    // safety only needs RAM readers kept off GPU-current ranges, which
+    // DecideConsumer's all-selected-gpu-current rule composes with this
+    // per-fetch check to guarantee.
+    auto overlaps_pending_gpu_current =
+        [&](const std::optional<metal::GuestRange>& r) {
+          if (!r) {
+            return false;
+          }
+          for (const PendingWriteback& p : pending_writebacks_) {
+            if (!p.gpu_current) {
+              continue;
+            }
+            auto pr = metal::GuestRange::FromBaseLength(p.guest_addr,
+                                                        p.range_bytes());
+            if (pr && pr->Overlaps(*r)) {
+              return true;
+            }
+          }
+          return false;
+        };
     auto collect_texture_ranges = [&](MetalShader* shader,
                                       metal::ConsumerRequest& request) {
       if (!shader) return;
@@ -5284,6 +5312,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // the shared buffer — the exact predicate the C1T-R mask uses
           // below (M2: prep and serve cannot disagree), re-derived here
           // because the dependency decision precedes the mask computation.
+          // A fetch that overlaps NO pending GPU-current record is innocent
+          // and constrains nothing.
+          if (s_gpu_ordering && !overlaps_pending_gpu_current(base_range) &&
+              !(rng.mip_end > rng.mip_begin &&
+                overlaps_pending_gpu_current(mip_range))) {
+            continue;
+          }
           bool fetch_buffer_read =
               shared_texture_cache_ && !trace_writer_.is_open() &&
               !binding.is_signed &&
@@ -5361,10 +5396,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // sole authority: it takes the ordering path only when ALL selected
     // producers are GPU-current; any legacy-served fetch, memexport
     // producer, or predecessor-chain record falls back to the boundary.
-    static const bool s_gpu_ordering = [] {
-      const char* v = std::getenv("XE_METAL_GPU_ORDERING");
-      return v && v[0] == '1' && !v[1];  // exact-1, like XE_METAL_GPU_RESOLVE
-    }();
     if (s_gpu_ordering && !texture_request.resolve_ranges.ranges().empty()) {
       static uint32_t s_ord_eligible = 0, s_ord_blocked = 0;
       if (texture_resolve_consumers_buffer_read) {
