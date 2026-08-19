@@ -9310,31 +9310,81 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       uint64_t sentinel_examined = 0;
       uint64_t clipped_texels = 0;
       if (!aliased) {
-        for (uint32_t y = 0; y < wb.height; ++y) {
-          for (uint32_t x = 0; x < wb.width; ++x) {
+        // Per-row copy, parallelized exactly like the CPU scatter (rows
+        // publish disjoint tiled addresses). The 4.2 probes measured the
+        // original single-threaded per-texel loop as the route's dominant
+        // live cost (48.3 -> 18.0 fps in 4-draw menu frames, ~26 MiB/frame
+        // walked serially on the GPU thread). Within a row, tiled addresses
+        // are contiguous in 16-BYTE granules (TiledCombine passes oib bits
+        // 0-3 through; the next bit maps to address bit 5), so copy
+        // 16-byte-aligned runs of 16/bpp texels, aligned on the TILED x
+        // (destination offset included).
+        const uint32_t run_texels = std::max(1u, 16u / wb.bpp);
+        auto publish_row = [&](size_t y, uint64_t& row_bytes,
+                               uint64_t& row_clipped, uint64_t& row_sent,
+                               uint64_t& row_seen) {
+          for (uint32_t x = 0; x < wb.width;) {
+            uint32_t tiled_x = wb.dest_offset_x + x;
+            uint32_t run = std::min(
+                run_texels - (tiled_x & (run_texels - 1)), wb.width - x);
             uint32_t off = uint32_t(texture_address::Tiled2D(
-                int32_t(wb.dest_offset_x + x), int32_t(wb.dest_offset_y + y),
-                pitch_aligned, int32_t(block_log2)));
-            if (wb.dest_extent_bytes && off + wb.bpp > wb.dest_extent_bytes) {
-              // DIAGNOSTIC: count texels the extent clip drops. The CPU
-              // scatter applies the same clip to a LINEAR staging source,
-              // where a dropped texel simply is not written; here the source
-              // and destination share the tiled address space, so a clipped
-              // texel means the publication never copies a texel the producer
-              // DID write.
-              ++clipped_texels;
-              continue;
+                int32_t(wb.dest_offset_x + x),
+                int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned,
+                int32_t(block_log2)));
+            uint32_t run_bytes = run * wb.bpp;
+            if (wb.dest_extent_bytes &&
+                off + run_bytes > wb.dest_extent_bytes) {
+              // Tail-clip the run at the extent, texel-granular like the
+              // original loop.
+              uint32_t fit = wb.dest_extent_bytes > off
+                                 ? (wb.dest_extent_bytes - off) / wb.bpp
+                                 : 0u;
+              row_clipped += run - fit;
+              run_bytes = fit * wb.bpp;
             }
-            std::memcpy(dest + off, src_base + off, wb.bpp);
-            published_bytes += wb.bpp;
-            if (sentinel_check && wb.bpp >= 4u) {
-              uint32_t word;
-              std::memcpy(&word, src_base + off, sizeof(word));
-              if (word == 0xA5A5A5A5u) {
-                ++sentinel_survivors;
+            if (run_bytes) {
+              std::memcpy(dest + off, src_base + off, run_bytes);
+              row_bytes += run_bytes;
+              if (sentinel_check && wb.bpp >= 4u) {
+                for (uint32_t w = 0; w < run_bytes / 4u; ++w) {
+                  uint32_t word;
+                  std::memcpy(&word, src_base + off + w * 4u, sizeof(word));
+                  if (word == 0xA5A5A5A5u) {
+                    ++row_sent;
+                  }
+                  ++row_seen;
+                }
               }
-              ++sentinel_examined;
             }
+            x += run;
+          }
+        };
+        if (size_t(wb.width) * wb.height >= 128 * 1024) {
+          std::vector<uint64_t> rb(wb.height), rc(wb.height), rs(wb.height),
+              rn(wb.height);
+          // Raw pointers: an Objective-C block captures C++ objects as const
+          // copies, so index through data() instead.
+          uint64_t* rbp = rb.data();
+          uint64_t* rcp = rc.data();
+          uint64_t* rsp = rs.data();
+          uint64_t* rnp = rn.data();
+          dispatch_apply(wb.height, DISPATCH_APPLY_AUTO, ^(size_t y) {
+            publish_row(y, rbp[y], rcp[y], rsp[y], rnp[y]);
+          });
+          for (uint32_t y = 0; y < wb.height; ++y) {
+            published_bytes += rb[y];
+            clipped_texels += rc[y];
+            sentinel_survivors += rs[y];
+            sentinel_examined += rn[y];
+          }
+        } else {
+          for (uint32_t y = 0; y < wb.height; ++y) {
+            uint64_t b = 0, c = 0, s = 0, n = 0;
+            publish_row(y, b, c, s, n);
+            published_bytes += b;
+            clipped_texels += c;
+            sentinel_survivors += s;
+            sentinel_examined += n;
           }
         }
       }
