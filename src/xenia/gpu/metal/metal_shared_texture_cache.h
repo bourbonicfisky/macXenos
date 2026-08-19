@@ -85,7 +85,14 @@ class MetalSharedTextureCache : public TextureCache {
   // fetch-constant index, or 0 when unserved (caller falls back to the
   // legacy path). On success marks the texture used and registers encoder
   // residency through the legacy adapter.
-  uint32_t GetServedSlot(uint32_t fetch_constant_index);
+  //
+  // is_signed: serve the RGBA8Snorm view of the SAME loaded bytes (Xenos
+  // 8-bit signed texels are two's-complement, i.e. exactly host snorm
+  // bytes — the same equivalence the legacy plan's host_format_signed
+  // uses). The view + its slot are created lazily on first signed serve of
+  // a binding and retired with the binding slot.
+  uint32_t GetServedSlot(uint32_t fetch_constant_index,
+                         bool is_signed = false);
 
   // M4 (mandatory): called by the command processor when fault publication
   // records lost submissions. Every texture whose last load rode one of
@@ -159,6 +166,9 @@ class MetalSharedTextureCache : public TextureCache {
     uint32_t host_swizzle = 0;
     void* sampled_view = nullptr;  // id<MTLTexture> (2DArray view), retained.
     uint32_t slot = 0;             // 0 = unbound.
+    // Lazy RGBA8Snorm view of the same texture for SIGNED bindings.
+    void* signed_view = nullptr;   // retained id<MTLTexture>, or null.
+    uint32_t signed_slot = 0;      // 0 = not yet created.
   };
   void ReleaseBindingSlot(BindingSlot& binding_slot);
 

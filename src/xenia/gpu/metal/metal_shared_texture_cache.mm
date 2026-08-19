@@ -495,10 +495,23 @@ void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
     if (binding_slot.sampled_view) {
       legacy_->RetireExternalTexture(binding_slot.sampled_view);
     }
-  } else if (binding_slot.sampled_view) {
-    id<MTLTexture> released =
-        (__bridge_transfer id<MTLTexture>)binding_slot.sampled_view;
-    (void)released;
+    if (binding_slot.signed_slot) {
+      legacy_->RetireExternalSlot(binding_slot.signed_slot);
+    }
+    if (binding_slot.signed_view) {
+      legacy_->RetireExternalTexture(binding_slot.signed_view);
+    }
+  } else {
+    if (binding_slot.sampled_view) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)binding_slot.sampled_view;
+      (void)released;
+    }
+    if (binding_slot.signed_view) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)binding_slot.signed_view;
+      (void)released;
+    }
   }
   binding_slot = BindingSlot{};
 }
@@ -524,7 +537,8 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask) {
   RequestTextures(eligible_mask);
 }
 
-uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index) {
+uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
+                                                bool is_signed) {
   if (fetch_constant_index >= xenos::kTextureFetchConstantCount) {
     return 0;
   }
@@ -556,6 +570,44 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index) {
     if (base_faulted || mip_faulted) {
       return 0;
     }
+  }
+  if (is_signed) {
+    // Lazy signed serve: an RGBA8Snorm view of the SAME loaded bytes, with
+    // the SAME swizzle/type/levels as the unsigned view. Created on first
+    // signed use; retired with the binding slot.
+    if (!binding_slot.signed_slot) {
+      const MetalTexture* mt = static_cast<const MetalTexture*>(texture);
+      id<MTLTexture> base_texture = (__bridge id<MTLTexture>)mt->mtl_texture();
+      uint32_t swizzle = binding_slot.host_swizzle;
+      MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
+          HostSwizzleComponentToMetal((swizzle >> 0) & 0b111),
+          HostSwizzleComponentToMetal((swizzle >> 3) & 0b111),
+          HostSwizzleComponentToMetal((swizzle >> 6) & 0b111),
+          HostSwizzleComponentToMetal((swizzle >> 9) & 0b111));
+      id<MTLTexture> view = [base_texture
+          newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Snorm
+                            textureType:MTLTextureType2DArray
+                                 levels:NSMakeRange(
+                                            0, base_texture.mipmapLevelCount)
+                                 slices:NSMakeRange(0, 1)
+                                swizzle:channels];
+      if (!view || !legacy_) {
+        return 0;  // Unserved; legacy path handles the signed binding.
+      }
+      uint32_t slot = legacy_->AllocateExternalSlot();
+      if (!slot) {
+        return 0;
+      }
+      void* view_ptr = (__bridge_retained void*)view;
+      legacy_->BindExternalSlot(slot, view_ptr);
+      binding_slot.signed_view = view_ptr;
+      binding_slot.signed_slot = slot;
+    }
+    texture->MarkAsUsed();
+    if (legacy_) {
+      legacy_->AddActiveTexture(binding_slot.signed_view);
+    }
+    return binding_slot.signed_slot;
   }
   texture->MarkAsUsed();
   if (legacy_) {

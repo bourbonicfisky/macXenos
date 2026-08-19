@@ -310,6 +310,19 @@ bool SharedMemory::AllocateSparseHostGpuMemoryRange(
   return false;
 }
 
+void SharedMemory::FireRangeWatchesOnly(uint32_t start, uint32_t length,
+                                        bool invalidated_by_gpu) {
+  if (length == 0 || start >= kBufferSize) {
+    return;
+  }
+  length = std::min(length, kBufferSize - start);
+  uint32_t page_first = start >> page_size_log2_;
+  uint32_t page_last = (start + length - 1) >> page_size_log2_;
+  auto global_lock = global_critical_region_.Acquire();
+  FireWatches(page_first, page_last, invalidated_by_gpu,
+              /*fire_global_watches=*/false);
+}
+
 void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
                                   bool written_by_gpu) {
   if (length == 0 || start >= kBufferSize) {

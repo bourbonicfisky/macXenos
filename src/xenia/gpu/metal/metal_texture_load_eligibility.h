@@ -94,6 +94,46 @@ inline bool IsStrictRgba8RouteEligible(
          fetch.pitch != 0;
 }
 
+// ---- SIGNED-binding sibling (reopen-metal-gpu-visible-resolve-authority) ----
+//
+// A SIGNED k_8_8_8_8 binding samples the SAME guest bytes through an
+// RGBA8Snorm VIEW (Xenos 8-bit signed texels are two's-complement — exactly
+// host snorm bytes; the legacy plan's host_format_signed encodes the same
+// equivalence). Deliberately a separate predicate so the strict class above
+// is not weakened: every structural condition is identical, the differences
+// are that the binding is signed and per-component signs may additionally be
+// kSigned. kUnsignedBiased stays excluded everywhere — it is a value
+// transform, not a reinterpreting view.
+inline bool IsStrictRgba8SignedRouteEligible(
+    const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
+    uint32_t height, uint32_t pitch_texels) {
+  if (fetch.format != xenos::TextureFormat::k_8_8_8_8) {
+    return false;
+  }
+  auto sign_ok = [](xenos::TextureSign s) {
+    return s != xenos::TextureSign::kUnsignedBiased;
+  };
+  if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
+      !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
+    return false;
+  }
+  if (!fetch.tiled || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+      fetch.stacked) {
+    return false;
+  }
+  // Single-mip shape ONLY (exactly the strict class's mip condition). A
+  // mipped signed fetch served through a view of a single-level entry would
+  // clamp every minified sample to level 0 — measured as a 125k-px SF4
+  // regression when this predicate briefly admitted mipped shapes.
+  if (fetch.mip_min_level != 0 || fetch.mip_max_level != 0) {
+    return false;
+  }
+  if (!fetch.base_address || !width || !height || !pitch_texels) {
+    return false;
+  }
+  return fetch.pitch != 0;
+}
+
 // ---- Mipped sibling class (OpenSpec 6.1) ----
 
 // The MIPPED sibling of the strict class. Deliberately a separate predicate:

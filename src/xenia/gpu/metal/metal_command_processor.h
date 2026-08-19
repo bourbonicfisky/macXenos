@@ -378,6 +378,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // prepass; descriptor marshalling serves exactly these indices from the
   // shared subclass (seam audit M2 — prep and serve share one decision).
   uint32_t draw_shared_route_mask_ = 0;
+  // True while the current draw's consumer dependencies were satisfied by
+  // GPU ordering (kOrderAgainstGpuProducers) instead of a wait+drain; the
+  // serve site fails a routed fetch's legacy fallback closed under it.
+  bool draw_gpu_ordering_active_ = false;
   std::unique_ptr<MetalUploadArena> upload_arena_;
   // PP1: shared xe::gpu::PrimitiveProcessor subclass, the single normalization
   // authority for routed native non-expanded restart-disabled line/triangle

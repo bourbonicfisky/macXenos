@@ -5215,6 +5215,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // encoder opens (a flush here would kill an open encoder — the
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
+  draw_gpu_ordering_active_ = false;
   if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
     // CENSUS ONLY: the same request with GPU-served fetches omitting their
     // resolve range, so the decision the repair WOULD take can be compared
@@ -5354,7 +5355,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
           bool fetch_buffer_read =
               shared_texture_cache_ && !trace_writer_.is_open() &&
-              !binding.is_signed &&
               binding.fetch_constant < xenos::kTextureFetchConstantCount &&
               f.type == xenos::FetchConstantType::kTexture;
           bool strict_eligible = false;
@@ -5366,8 +5366,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             uint32_t fp =
                 f.pitch ? (uint32_t(f.pitch) << 5) : ((fw + 31u) & ~31u);
             strict_eligible =
-                metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
-                metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh, fp);
+                binding.is_signed
+                    ? metal::IsStrictRgba8SignedRouteEligible(f, fw, fh, fp)
+                    : (metal::IsStrictRgba8RouteEligible(f, false, fw, fh,
+                                                         fp) ||
+                       metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh,
+                                                            fp));
             fetch_service =
                 texture_cache_->ClassifyFetchService(f, binding.is_signed);
             fetch_buffer_read =
@@ -5591,6 +5595,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Task 4.3 routes both texture-cache implementations through the common
     // selected-record executor: one boundary, selective drain, before either
     // cache consumes the RAM-derived bytes below.
+    // Fail-closed marker for the serve site: while an ordering-served draw
+    // is being marshalled, a routed fetch that falls back to the legacy RAM
+    // path would read bytes the elided wait was supposed to converge — such
+    // a draw must be skipped (counted), never silently mis-served.
+    draw_gpu_ordering_active_ =
+        authority_decision.action ==
+        metal::AuthorityAction::kOrderAgainstGpuProducers;
     ProducerDependencyOutcome dependency_outcome =
         ResolvePendingProducerDependencies(authority_decision);
     if (!dependency_outcome.complete) {
@@ -5625,8 +5636,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return;
       }
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
-        if (binding.is_signed ||
-            binding.fetch_constant >= xenos::kTextureFetchConstantCount ||
+        if (binding.fetch_constant >= xenos::kTextureFetchConstantCount ||
             (draw_shared_route_mask_ & (1u << binding.fetch_constant))) {
           continue;
         }
@@ -5641,16 +5651,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                           : ((fetch_width + 31u) & ~31u);
         // Two mutually exclusive strict classes: the single-mip predicate keeps
         // deciding its own class unchanged, and the mipped sibling decides the
-        // chain-bearing one.
-        if (!metal::IsStrictRgba8RouteEligible(fetch, false, fetch_width,
-                                               fetch_height,
-                                               fetch_pitch_texels) &&
-            !metal::IsStrictRgba8MipRouteEligible(fetch, false, fetch_width,
-                                                  fetch_height,
-                                                  fetch_pitch_texels)) {
+        // chain-bearing one. A SIGNED binding routes through its own sibling
+        // predicate and is served as an RGBA8Snorm view of the same bytes.
+        if (binding.is_signed) {
+          if (!metal::IsStrictRgba8SignedRouteEligible(
+                  fetch, fetch_width, fetch_height, fetch_pitch_texels)) {
+            continue;
+          }
+        } else if (!metal::IsStrictRgba8RouteEligible(fetch, false, fetch_width,
+                                                      fetch_height,
+                                                      fetch_pitch_texels) &&
+                   !metal::IsStrictRgba8MipRouteEligible(fetch, false,
+                                                         fetch_width,
+                                                         fetch_height,
+                                                         fetch_pitch_texels)) {
           continue;
         }
-        if (texture_cache_->ClassifyFetchService(fetch, false) !=
+        if (texture_cache_->ClassifyFetchService(fetch, binding.is_signed) !=
             ResolvedFetchService::kRamContent) {
           continue;
         }
@@ -6506,10 +6523,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // prep and serve, faulted load) falls to the legacy path
           // unchanged.
           uint32_t routed_slot = 0;
-          if (!binding.is_signed && shared_texture_cache_ &&
-              (draw_shared_route_mask_ & (1u << binding.fetch_constant))) {
-            routed_slot =
-                shared_texture_cache_->GetServedSlot(binding.fetch_constant);
+          const bool route_masked =
+              shared_texture_cache_ &&
+              (draw_shared_route_mask_ & (1u << binding.fetch_constant));
+          if (route_masked) {
+            routed_slot = shared_texture_cache_->GetServedSlot(
+                binding.fetch_constant, binding.is_signed);
+          }
+          if (route_masked && !routed_slot && draw_gpu_ordering_active_) {
+            // Ordering elided this draw's consumer wait on the strength of
+            // buffer serving; a legacy fallback here would read unconverged
+            // RAM. Fail closed, counted.
+            RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                           "ordering-route-fallback");
+            return false;
           }
           uint32_t texture_slot = routed_slot;
           if (!texture_slot) {
@@ -8145,6 +8172,18 @@ bool MetalCommandProcessor::IssueCopy() {
                   (uint32_t(dc_pre.pitch_aligned_div_32) << 5) == rw;
               scatter_eligible =
                   !overlapping_pending && (!s_fullrect_only || full_rect_dest);
+              if (scatter_eligible &&
+                  !shared_memory_->RequestRange(
+                      resolve_info.copy_dest_extent_start,
+                      resolve_info.copy_dest_extent_length)) {
+                // Commit the destination pages from RAM BEFORE the kernel,
+                // exactly as the shared route does: the extent's tiled
+                // ALIGNMENT PADDING is never written by the scatter, and an
+                // uncommitted buffer leaves stale bytes there that
+                // edge-sampling consumers read (SF4 10581: a deterministic
+                // 74-px route-only residual).
+                scatter_eligible = false;
+              }
               if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
                 XELOGW(
                     "MetalGpuScatter draw={} base={:08X} {}x{} bpp={} "
@@ -8311,6 +8350,17 @@ bool MetalCommandProcessor::IssueCopy() {
                 if (shared_memory_) {
                   shared_memory_->ReassertGpuWritten(
                       resolve_info.copy_dest_base, scatter_extent_bytes);
+                  // The content-change signal for WATCHING textures (the
+                  // shared-route entries reload from the buffer, GPU-ordered)
+                  // — per-range only, so the global fan-out's default-scope
+                  // invalidation cannot retire this resolve's own bridge
+                  // (the probe #5/#6 churn). Without this, an
+                  // ordering-served consumer reads the PREVIOUS generation's
+                  // route entry (SF4 10581: 125k px when ordering first
+                  // fired in replay).
+                  shared_memory_->FireRangeWatches(
+                      resolve_info.copy_dest_base, scatter_extent_bytes,
+                      /*invalidated_by_gpu=*/true);
                 }
               }
             }

@@ -204,6 +204,17 @@ class SharedMemory {
   // Mark the memory range as updated and protect it.
   void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu);
 
+  // Fires ONLY the per-range watches for [start, start+length) — texture
+  // entries watching these pages go outdated and reload — without the global
+  // watch fan-out (whose default-scope invalidation retires resolve bridges)
+  // and without touching page validity. For backends publishing GPU-written
+  // ranges whose consumers are served under GPU ordering
+  // (reopen-metal-gpu-visible-resolve-authority): the content-change signal
+  // must reach the watching textures even though no drain runs before the
+  // consuming draw.
+  void FireRangeWatchesOnly(uint32_t start, uint32_t length,
+                            bool invalidated_by_gpu);
+
   // Uploads a range of host pages - only called if host GPU sparse memory
   // allocation succeeded if needed. While uploading, MakeRangeValid must be
   // called for each successfully uploaded range as early as possible, before

@@ -129,6 +129,14 @@ class MetalSharedMemory : public SharedMemory {
     MakeRangeValid(start, length, /*written_by_gpu=*/true);
   }
 
+  // Public forwarder of the base per-range watch fire (no global fan-out, no
+  // validity change) — the content-change signal for watching textures when
+  // a GPU-current producer registers; see the base declaration.
+  void FireRangeWatches(uint32_t start, uint32_t length,
+                        bool invalidated_by_gpu) {
+    FireRangeWatchesOnly(start, length, invalidated_by_gpu);
+  }
+
   // S8: the submission the currently-open command buffer will get — consumed
   // ranges are tagged with it so ReleaseConsumedRanges frees exactly the
   // ranges whose reader has completed (a blanket clear would drop hazard
