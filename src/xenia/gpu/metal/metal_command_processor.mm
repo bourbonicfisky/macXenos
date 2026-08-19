@@ -5253,6 +5253,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
           return false;
         };
+    auto overlaps_pending_memexport =
+        [&](const std::optional<metal::GuestRange>& r) {
+          if (!r) {
+            return false;
+          }
+          for (const PendingMemexport& p : pending_memexports_) {
+            auto pr = metal::GuestRange::FromBaseLength(p.base_address,
+                                                        p.size_bytes);
+            if (pr && pr->Overlaps(*r)) {
+              return true;
+            }
+          }
+          return false;
+        };
+    // Memexport ordering is safe only while every consumer of a pending
+    // memexport range reads the shared buffer. A bridge-served fetch reads a
+    // SNAPSHOT the memexport bytes never reach, and a legacy RAM fetch reads
+    // guest RAM the export has not converged to — either one forces the
+    // historical wait-and-drain for this draw.
+    bool memexport_order_safe = true;
     auto collect_texture_ranges = [&](MetalShader* shader,
                                       metal::ConsumerRequest& request) {
       if (!shader) return;
@@ -5303,6 +5323,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             }
           }
         }
+        if (bridge_served && s_gpu_ordering &&
+            (overlaps_pending_memexport(base_range) ||
+             (rng.mip_end > rng.mip_begin &&
+              overlaps_pending_memexport(mip_range)))) {
+          // Snapshot serving cannot observe buffer-resident memexport bytes.
+          memexport_order_safe = false;
+        }
         if (!bridge_served) {
           request.resolve_ranges.Add(base_range);
           if (rng.mip_end > rng.mip_begin) {
@@ -5312,11 +5339,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // the shared buffer — the exact predicate the C1T-R mask uses
           // below (M2: prep and serve cannot disagree), re-derived here
           // because the dependency decision precedes the mask computation.
-          // A fetch that overlaps NO pending GPU-current record is innocent
-          // and constrains nothing.
-          if (s_gpu_ordering && !overlaps_pending_gpu_current(base_range) &&
-              !(rng.mip_end > rng.mip_begin &&
-                overlaps_pending_gpu_current(mip_range))) {
+          // A fetch that overlaps NO pending GPU-current record AND no
+          // pending memexport is innocent and constrains nothing.
+          bool touches_gc =
+              overlaps_pending_gpu_current(base_range) ||
+              (rng.mip_end > rng.mip_begin &&
+               overlaps_pending_gpu_current(mip_range));
+          bool touches_me =
+              overlaps_pending_memexport(base_range) ||
+              (rng.mip_end > rng.mip_begin &&
+               overlaps_pending_memexport(mip_range));
+          if (s_gpu_ordering && !touches_gc && !touches_me) {
             continue;
           }
           bool fetch_buffer_read =
@@ -5400,6 +5433,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       static uint32_t s_ord_eligible = 0, s_ord_blocked = 0;
       if (texture_resolve_consumers_buffer_read) {
         texture_request.access = metal::ConsumerAccess::kSharedBuffer;
+        // Memexport products are buffer-resident at execution time exactly
+        // like GPU-current resolves (see ConsumerRequest); a shared-buffer
+        // reader orders against them instead of waiting — but only while no
+        // snapshot-served fetch in this draw overlaps a pending export.
+        texture_request.order_memexport_producers = memexport_order_safe;
         ++s_ord_eligible;
       } else {
         ++s_ord_blocked;
@@ -5413,6 +5451,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    // Mixed-break census (probe #7 follow-up): access was declared but the
+    // ordering action did not fire — count which producer STATES broke the
+    // all-gpu-current set, so the next widening step is named by data.
+    if (s_gpu_ordering &&
+        texture_request.access == metal::ConsumerAccess::kSharedBuffer &&
+        !authority_decision.selected.empty() &&
+        authority_decision.action !=
+            metal::AuthorityAction::kOrderAgainstGpuProducers) {
+      static uint64_t s_break_resolve = 0, s_break_memexport = 0,
+                      s_break_total = 0;
+      for (const auto& p : authority_decision.selected) {
+        if (p.state == metal::TransitState::kPendingResolve) {
+          ++s_break_resolve;
+        } else if (p.state == metal::TransitState::kPendingMemexport) {
+          ++s_break_memexport;
+        }
+      }
+      if ((++s_break_total & 4095) == 1) {
+        XELOGI(
+            "MetalGpuOrderingMixedBreak decisions={} plain_resolve={} "
+            "memexport={}",
+            s_break_total, s_break_resolve, s_break_memexport);
+      }
+    }
     if (ServingCensusEnabled()) {
       // BOUNDARY-LEVEL census: the same query against the corrected request.
       // `QueryPendingProducerDependencies` is const and owns no authority

@@ -206,6 +206,14 @@ struct ConsumerRequest {
   // guest-RAM domain, so a caller that does not know (or predates Stage B)
   // gets exactly the pre-Stage-B decision.
   ConsumerAccess access = ConsumerAccess::kGuestRam;
+  // Stage B endgame opt-in: treat kPendingMemexport producers as
+  // ordering-servable for a shared-buffer consumer. Memexport output lands
+  // in the shared buffer at the guest physical offset at EXECUTION time —
+  // the same residency as kGpuCurrentShared (its RAM convergence is a plain
+  // memcpy precisely because of that) — so a shared-buffer reader needs
+  // ordering, not completion. Default false: every pre-existing call site
+  // and conformance case keeps the historical mixed-set fallback.
+  bool order_memexport_producers = false;
 
   static ConsumerRequest Uniform(const GuestRangeSet& ranges) {
     return {ranges, ranges};
@@ -295,10 +303,17 @@ inline ConsumerDecision DecideConsumer(
   // mixed case keeps it.
   bool all_gpu_current = request.access == ConsumerAccess::kSharedBuffer;
   for (size_t i = 0; i < producers.size() && all_gpu_current; ++i) {
-    if (selected[i] &&
-        producers[i].state != TransitState::kGpuCurrentShared) {
-      all_gpu_current = false;
+    if (!selected[i]) {
+      continue;
     }
+    if (producers[i].state == TransitState::kGpuCurrentShared) {
+      continue;
+    }
+    if (producers[i].state == TransitState::kPendingMemexport &&
+        request.order_memexport_producers) {
+      continue;  // opt-in: buffer-resident like kGpuCurrentShared.
+    }
+    all_gpu_current = false;
   }
   for (size_t i = 0; i < producers.size(); ++i) {
     if (!selected[i]) {
