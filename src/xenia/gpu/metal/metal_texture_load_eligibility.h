@@ -40,8 +40,12 @@ namespace metal {
 inline bool IsStrictRgba8Eligible(const xenos::xe_gpu_texture_fetch_t& fetch,
                                   bool is_signed, uint32_t width,
                                   uint32_t height, uint32_t pitch_texels) {
-  // k_8_8_8_8 exactly — no aliases (k_8_8_8_8_A/AS_8_8_8_8 etc. differ).
-  if (fetch.format != xenos::TextureFormat::k_8_8_8_8) {
+  // k_8_8_8_8 and its byte-identical alias k_8_8_8_8_AS_16_16_16_16 (fmt 50:
+  // same bytes, same decode — the legacy FormatPlan maps both to one plan,
+  // and JC2's temporal composite fetches its history buffer with the alias).
+  // Value-changing aliases (k_8_8_8_8_A/AS_8_8_8_8 etc.) stay excluded.
+  if (fetch.format != xenos::TextureFormat::k_8_8_8_8 &&
+      fetch.format != xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) {
     return false;
   }
   // Unsigned binding only (signed fetches are a separate SNORM-view
@@ -107,7 +111,8 @@ inline bool IsStrictRgba8RouteEligible(
 inline bool IsStrictRgba8SignedRouteEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
-  if (fetch.format != xenos::TextureFormat::k_8_8_8_8) {
+  if (fetch.format != xenos::TextureFormat::k_8_8_8_8 &&
+      fetch.format != xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) {
     return false;
   }
   auto sign_ok = [](xenos::TextureSign s) {

@@ -143,8 +143,10 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   // legacy align32(width) default is not representable) and the mip_page
   // agreement checked below.
   if (key.dimension != xenos::DataDimension::k2DOrStacked ||
-      key.format != xenos::TextureFormat::k_8_8_8_8 || !key.tiled ||
-      key.signed_separate || key.scaled_resolve ||
+      (key.format != xenos::TextureFormat::k_8_8_8_8 &&
+       key.format !=
+           xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) ||  // byte alias
+      !key.tiled || key.signed_separate || key.scaled_resolve ||
       key.depth_or_array_size_minus_1 != 0 || key.base_page == 0 ||
       key.pitch == 0) {
     return nullptr;

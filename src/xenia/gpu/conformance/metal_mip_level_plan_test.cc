@@ -118,8 +118,14 @@ TEST_CASE("Mipped eligibility inherits every strict condition", "[mipplan]") {
   auto untiled = f;
   untiled.tiled = 0;
   CHECK_FALSE(IsStrictRgba8MipRouteEligible(untiled, false, 256, 256, 256));
+  // k_8_8_8_8_AS_16_16_16_16 is a BYTE alias of k_8_8_8_8 (same bytes, same
+  // decode — the legacy FormatPlan maps both to one plan) and is admitted
+  // since the reopen widening; a genuinely value-changing format stays out.
+  auto alias_format = f;
+  alias_format.format = xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
+  CHECK(IsStrictRgba8MipRouteEligible(alias_format, false, 256, 256, 256));
   auto wrong_format = f;
-  wrong_format.format = xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
+  wrong_format.format = xenos::TextureFormat::k_2_10_10_10;
   CHECK_FALSE(IsStrictRgba8MipRouteEligible(wrong_format, false, 256, 256, 256));
   auto stacked = f;
   stacked.stacked = 1;
