@@ -5624,13 +5624,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // disagree), and classification/eligibility are the single existing
   // contracts (ClassifyFetchService + metal_texture_load_eligibility.h).
   draw_shared_route_mask_ = 0;
+  // XE_METAL_TEX_ROUTE=0: exact rollback for the shared-cache GPU load
+  // route (the C1T-R mask never populates; every fetch serves legacy).
+  // Default ON. Also the micro-drift bisect lever: a legacy-only arm
+  // isolates whether the SF4 ±1-3 field originates in route serving.
+  static const bool s_tex_route_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  // SIGNED bindings route ONLY for corridor fetches — see
+  // FetchOverlapsPendingGpuCurrent (SF4 bisect: the ±1-LSB drift is
+  // entirely the signed class on ordinary content; the corridor is where
+  // routing pays).
   // Capture disengage: while a frame trace is being recorded the CPU path
   // serves everything, so the capture records exactly the CPU-oracle
   // read-set — recorded ranges are IDENTICAL to route-off by construction
   // (a routed prep during capture would add page-granular shared-memory
   // upload records the CPU path never emits). Replays re-engage the route
   // from restored RAM.
-  if (shared_texture_cache_ && texture_cache_ && !trace_writer_.is_open()) {
+  if (s_tex_route_enabled && shared_texture_cache_ && texture_cache_ &&
+      !trace_writer_.is_open()) {
     auto accumulate_eligible = [&](MetalShader* shader) {
       if (!shader) {
         return;
@@ -5653,9 +5666,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // deciding its own class unchanged, and the mipped sibling decides the
         // chain-bearing one. A SIGNED binding routes through its own sibling
         // predicate and is served as an RGBA8Snorm view of the same bytes.
+        // XE_METAL_TEX_ROUTE_SIGNED=0: micro-drift bisect lever — signed
+        // bindings stay on the legacy path.
+        static const bool s_route_signed = [] {
+          const char* v = std::getenv("XE_METAL_TEX_ROUTE_SIGNED");
+          return !(v && v[0] == '0' && !v[1]);
+        }();
         if (binding.is_signed) {
-          if (!metal::IsStrictRgba8SignedRouteEligible(
-                  fetch, fetch_width, fetch_height, fetch_pitch_texels)) {
+          if (!s_route_signed ||
+              !metal::IsStrictRgba8SignedRouteEligible(
+                  fetch, fetch_width, fetch_height, fetch_pitch_texels) ||
+              !FetchOverlapsPendingGpuCurrent(fetch)) {
             continue;
           }
         } else if (!metal::IsStrictRgba8RouteEligible(fetch, false, fetch_width,
@@ -5670,6 +5691,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         if (texture_cache_->ClassifyFetchService(fetch, binding.is_signed) !=
             ResolvedFetchService::kRamContent) {
           continue;
+        }
+        // Alias-class census (micro-drift bisect, XE_METAL_TEX_ROUTE_LOG=1):
+        // the fields of every masked fmt-50 fetch, bounded.
+        static const bool s_route_log =
+            std::getenv("XE_METAL_TEX_ROUTE_LOG") != nullptr;
+        if (s_route_log &&
+            fetch.format == xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) {
+          static uint32_t s_alias_logs = 0;
+          if (s_alias_logs++ < 16) {
+            XELOGI(
+                "MetalTexRouteAlias base={:08X} {}x{} pitch={} endian={} "
+                "signs={}{}{}{} signed={} mips={}-{} mip_addr={:08X} "
+                "packed={} swizzle={:03X}",
+                fetch.base_address << 12, fetch_width, fetch_height,
+                fetch_pitch_texels, uint32_t(fetch.endianness),
+                uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
+                uint32_t(fetch.sign_z), uint32_t(fetch.sign_w),
+                binding.is_signed ? 1 : 0, fetch.mip_min_level,
+                fetch.mip_max_level, fetch.mip_address << 12,
+                uint32_t(fetch.packed_mips), uint32_t(fetch.swizzle));
+          }
         }
         draw_shared_route_mask_ |= 1u << binding.fetch_constant;
       }
@@ -6523,8 +6565,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // prep and serve, faulted load) falls to the legacy path
           // unchanged.
           uint32_t routed_slot = 0;
+          static const bool s_serve_signed = [] {
+            const char* v = std::getenv("XE_METAL_TEX_ROUTE_SIGNED");
+            return !(v && v[0] == '0' && !v[1]);
+          }();
+          // A signed binding may share a mask bit with its unsigned twin;
+          // the corridor test at serve keeps ordinary signed content on the
+          // byte-exact legacy path (see FetchOverlapsPendingGpuCurrent).
           const bool route_masked =
               shared_texture_cache_ &&
+              (!binding.is_signed ||
+               (s_serve_signed && FetchOverlapsPendingGpuCurrent(fetch))) &&
               (draw_shared_route_mask_ & (1u << binding.fetch_constant));
           if (route_masked) {
             routed_slot = shared_texture_cache_->GetServedSlot(
@@ -9047,6 +9098,32 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
            width, height, base);
   }
   return fb_ram_texture_;
+}
+
+bool MetalCommandProcessor::FetchOverlapsPendingGpuCurrent(
+    const xenos::xe_gpu_texture_fetch_t& fetch) {
+  if (pending_writebacks_.empty()) {
+    return false;
+  }
+  metal::FetchGuestRanges rng = ComputeFetchGuestRanges(fetch);
+  auto base_range = metal::GuestRange::FromBounds(rng.base_begin,
+                                                  rng.base_end);
+  auto mip_range = metal::GuestRange::FromBounds(rng.mip_begin, rng.mip_end);
+  for (const PendingWriteback& pending : pending_writebacks_) {
+    if (!pending.gpu_current) {
+      continue;
+    }
+    auto pr = metal::GuestRange::FromBaseLength(pending.guest_addr,
+                                                pending.range_bytes());
+    if (!pr) {
+      continue;
+    }
+    if ((base_range && pr->Overlaps(*base_range)) ||
+        (mip_range && pr->Overlaps(*mip_range))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::vector<metal::PendingProducer>

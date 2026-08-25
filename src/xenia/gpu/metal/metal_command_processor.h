@@ -382,6 +382,12 @@ class MetalCommandProcessor : public CommandProcessor {
   // GPU ordering (kOrderAgainstGpuProducers) instead of a wait+drain; the
   // serve site fails a routed fetch's legacy fallback closed under it.
   bool draw_gpu_ordering_active_ = false;
+  // Corridor test shared by the route mask and the serve site: does this
+  // fetch's guest range overlap a pending GPU-current record? Signed
+  // bindings route only in that case (the snorm-view serve carries a
+  // ±1-LSB drift on ordinary content; the corridor is where routing pays).
+  bool FetchOverlapsPendingGpuCurrent(
+      const xenos::xe_gpu_texture_fetch_t& fetch);
   std::unique_ptr<MetalUploadArena> upload_arena_;
   // PP1: shared xe::gpu::PrimitiveProcessor subclass, the single normalization
   // authority for routed native non-expanded restart-disabled line/triangle
