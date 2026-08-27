@@ -60,28 +60,28 @@
 #endif  // XE_GPU_METAL
 
 // Available input drivers:
+#include "xenia/hid/keyboard/keyboard_hid.h"
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/hid/scripted/scripted_hid.h"
 #if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
 #endif  // !XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
-#include "xenia/hid/winkey/winkey_hid.h"
 #include "xenia/hid/xinput/xinput_hid.h"
 #endif  // XE_PLATFORM_WIN32
 
 #if XE_PLATFORM_WIN32
 #define APU_OPTIONS "[any, nop, sdl, xaudio2]"
 #define GPU_OPTIONS "[any, d3d12, vulkan, null]"
-#define HID_OPTIONS "[any, nop, scripted, sdl, winkey, xinput]"
+#define HID_OPTIONS "[any, nop, scripted, sdl, keyboard, xinput]"
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[any, alsa, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, scripted, sdl]"
+#define HID_OPTIONS "[any, nop, scripted, sdl, keyboard]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, scripted, sdl]"
+#define HID_OPTIONS "[any, nop, scripted, sdl, keyboard]"
 #endif
 
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
@@ -252,7 +252,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
       }
 
       // "Specified" path. Winkey is always added on windows.
-      if (name != "winkey") {
+      if (name != "keyboard") {
         auto it = std::find_if(
             creators_.cbegin(), creators_.cend(),
             [&name](const auto& f) { return name.compare(f.name) == 0; });
@@ -268,7 +268,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
       // Always add winkey for passthrough.
       auto it = std::find_if(
           creators_.cbegin(), creators_.cend(),
-          [&name](const auto& f) { return f.name.compare("winkey") == 0; });
+          [&name](const auto& f) { return f.name.compare("keyboard") == 0; });
       if (it != creators_.cend() && (*it).is_available()) {
         auto instance = (*it).instantiate(std::forward<Args>(args)...);
         if (instance) {
@@ -487,10 +487,10 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
 #if !XE_PLATFORM_ANDROID
     factory.Add("sdl", xe::hid::sdl::Create);
 #endif  // !XE_PLATFORM_ANDROID
-#if XE_PLATFORM_WIN32
-    // WinKey input driver should always be the last input driver added!
-    factory.Add("winkey", xe::hid::winkey::Create);
-#endif  // XE_PLATFORM_WIN32
+#if !XE_PLATFORM_ANDROID
+    // The keyboard input driver should always be the last input driver added!
+    factory.Add("keyboard", xe::hid::keyboard::Create);
+#endif  // !XE_PLATFORM_ANDROID
     for (auto& driver : factory.CreateAll(cvars::hid, window,
                                           EmulatorWindow::kZOrderHidInput)) {
       if (XSUCCEEDED(driver->Setup())) {

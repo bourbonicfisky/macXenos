@@ -127,6 +127,7 @@ target_link_libraries(xenia-app PRIVATE
   xenia-apu-sdl
   xenia-helper-sdl
   xenia-hid-sdl
+  xenia-hid-keyboard
 )
 
 # Architecture-specific backend
@@ -141,7 +142,6 @@ if(WIN32)
   target_link_libraries(xenia-app PRIVATE
     xenia-apu-xaudio2
     xenia-gpu-d3d12
-    xenia-hid-winkey
     xenia-hid-xinput
     xenia-ui-d3d12
   )

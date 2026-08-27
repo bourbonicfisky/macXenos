@@ -756,6 +756,7 @@ void MacWindow::HandleKeyEvent(void* ns_event, bool is_down) {
   const bool ctrl_pressed = (flags & NSEventModifierFlagControl) != 0;
   const bool alt_pressed = (flags & NSEventModifierFlagOption) != 0;
   const bool super_pressed = (flags & NSEventModifierFlagCommand) != 0;
+  const bool capital_pressed = (flags & NSEventModifierFlagCapsLock) != 0;
 
   // Resolve a Windows-style virtual key for the navigation/editing keys, and
   // fall back to deriving one from the (modifier-independent) character for
@@ -776,7 +777,7 @@ void MacWindow::HandleKeyEvent(void* ns_event, bool is_down) {
 
   WindowDestructionReceiver destruction_receiver(this);
   KeyEvent e(this, virtual_key, [event isARepeat] ? 1 : 0, !is_down,
-             shift_pressed, ctrl_pressed, alt_pressed, super_pressed);
+             shift_pressed, ctrl_pressed, alt_pressed, capital_pressed);
 
   if (is_down) {
     OnKeyDown(e, destruction_receiver);
@@ -796,7 +797,8 @@ void MacWindow::HandleKeyEvent(void* ns_event, bool is_down) {
           continue;
         }
         KeyEvent char_event(this, VirtualKey(ch), 1, false, shift_pressed,
-                            ctrl_pressed, alt_pressed, super_pressed);
+                            ctrl_pressed, alt_pressed, capital_pressed);
+        char_event.set_unicode(ch);
         OnKeyChar(char_event, destruction_receiver);
         if (destruction_receiver.IsWindowDestroyedOrClosed()) {
           return;
