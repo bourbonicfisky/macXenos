@@ -9102,24 +9102,33 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
 
 bool MetalCommandProcessor::FetchOverlapsPendingGpuCurrent(
     const xenos::xe_gpu_texture_fetch_t& fetch) {
-  if (pending_writebacks_.empty()) {
+  if (pending_writebacks_.empty() && pending_memexports_.empty()) {
     return false;
   }
   metal::FetchGuestRanges rng = ComputeFetchGuestRanges(fetch);
   auto base_range = metal::GuestRange::FromBounds(rng.base_begin,
                                                   rng.base_end);
   auto mip_range = metal::GuestRange::FromBounds(rng.mip_begin, rng.mip_end);
-  for (const PendingWriteback& pending : pending_writebacks_) {
-    if (!pending.gpu_current) {
-      continue;
-    }
-    auto pr = metal::GuestRange::FromBaseLength(pending.guest_addr,
-                                                pending.range_bytes());
+  auto overlaps = [&](uint32_t base, uint32_t length) {
+    auto pr = metal::GuestRange::FromBaseLength(base, length);
     if (!pr) {
-      continue;
+      return false;
     }
-    if ((base_range && pr->Overlaps(*base_range)) ||
-        (mip_range && pr->Overlaps(*mip_range))) {
+    return (base_range && pr->Overlaps(*base_range)) ||
+           (mip_range && pr->Overlaps(*mip_range));
+  };
+  for (const PendingWriteback& pending : pending_writebacks_) {
+    if (pending.gpu_current &&
+        overlaps(pending.guest_addr, pending.range_bytes())) {
+      return true;
+    }
+  }
+  // Memexport records are buffer-resident like GPU-current resolves and are
+  // ordering-servable (order_memexport_producers): a signed fetch covered by
+  // MEMEXPORT ordering that dropped to the legacy RAM path here would read
+  // unconverged bytes with the wait elided.
+  for (const PendingMemexport& pending : pending_memexports_) {
+    if (overlaps(pending.base_address, pending.size_bytes)) {
       return true;
     }
   }

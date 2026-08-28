@@ -11,6 +11,7 @@
 
 #import <Metal/Metal.h>
 
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -604,6 +605,16 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
       legacy_->BindExternalSlot(slot, view_ptr);
       binding_slot.signed_view = view_ptr;
       binding_slot.signed_slot = slot;
+      static uint32_t s_signed_serve_logs = 0;
+      if (s_signed_serve_logs++ < 16) {
+        TextureKey key = texture->key();
+        XELOGI(
+            "MetalSharedTex SIGNED-SERVE fc={} base={:08X} {}x{} pitch={} "
+            "mips={} fmt={}",
+            fetch_constant_index, key.base_page << 12, key.GetWidth(),
+            key.GetHeight(), uint32_t(key.pitch) << 5, key.mip_max_level,
+            uint32_t(key.format));
+      }
     }
     texture->MarkAsUsed();
     if (legacy_) {
