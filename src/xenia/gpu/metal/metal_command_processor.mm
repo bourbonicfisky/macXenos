@@ -2315,26 +2315,29 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
 }
 
 bool MetalCommandProcessor::GpuResolveScatterEnabled() {
-  // XE_METAL_GPU_RESOLVE=1 (exact-1, warn-once fail-closed, DEFAULT OFF):
+  // XE_METAL_GPU_RESOLVE (exact-0 rollback, DEFAULT ON since the 2026-08-29
+  // counted gate: JC2 +12.0% / VP +4.9% across 24 ordinals, zero faults,
+  // 12k-swap soaks green — see
+  // xenia-mac-evidence/stage-b-reopen-20260818/gate/).
   // Stage B of implement-metal-gpu-visible-resolve-authority. The canonical
   // packed resolve writes GUEST-TILED straight into the shared buffer, the
   // record becomes GPU-current, and shared-buffer consumers stop waiting for
-  // it. Unset is byte-identical to the staging + CPU-scatter path.
+  // it. =0 is byte-identical to the staging + CPU-scatter path.
   static const bool s_enabled = [] {
     const char* value = std::getenv("XE_METAL_GPU_RESOLVE");
     if (!value || !value[0]) {
-      return false;
-    }
-    if (value[0] == '1' && !value[1]) {
       return true;
     }
-    if (!(value[0] == '0' && !value[1])) {
+    if (value[0] == '0' && !value[1]) {
+      return false;
+    }
+    if (!(value[0] == '1' && !value[1])) {
       XELOGW(
-          "XE_METAL_GPU_RESOLVE='{}' is malformed; failing closed to off "
-          "(use 0 or 1)",
+          "XE_METAL_GPU_RESOLVE='{}' is malformed; failing open to the "
+          "default (on; use 0 or 1)",
           value);
     }
-    return false;
+    return true;
   }();
   return s_enabled;
 }
@@ -5227,8 +5230,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // clears it, and the request then keeps guest-RAM access semantics.
     bool texture_resolve_consumers_buffer_read = true;
     static const bool s_gpu_ordering = [] {
+      // DEFAULT ON since the 2026-08-29 counted gate (with
+      // XE_METAL_GPU_RESOLVE); exact-0 rollback, like the other promoted
+      // flags. The blocker census below stays an explicit =1 opt-in.
       const char* v = std::getenv("XE_METAL_GPU_ORDERING");
-      return v && v[0] == '1' && !v[1];  // exact-1, like XE_METAL_GPU_RESOLVE
+      return !(v && v[0] == '0' && !v[1]);
     }();
     // Per-fetch overlap gate (probe #2's lesson): only a fetch whose ranges
     // actually overlap a pending GPU-current record constrains the access
