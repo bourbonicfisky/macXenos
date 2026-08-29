@@ -129,6 +129,10 @@ class MetalSharedMemory : public SharedMemory {
     MakeRangeValid(start, length, /*written_by_gpu=*/true);
   }
 
+  // Validity page size for the straddler re-assert's fragment math (the base
+  // accessor is protected).
+  uint32_t validity_page_size_log2() const { return page_size_log2(); }
+
   // Public forwarder of the base per-range watch fire (no global fan-out, no
   // validity change) — the content-change signal for watching textures when
   // a GPU-current producer registers; see the base declaration.

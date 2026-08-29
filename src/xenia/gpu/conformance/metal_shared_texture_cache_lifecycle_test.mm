@@ -937,7 +937,9 @@ TEST_CASE("The promoted single-mip path is exact with the sibling present",
     CHECK(base_texture.mipmapLevelCount == 1u);
     CHECK(view.mipmapLevelCount == 1u);
     CHECK(view.textureType == MTLTextureType2DArray);
-    CHECK((base_texture.usage & MTLTextureUsagePixelFormatView) == 0u);
+    // The signed serve casts this texture to RGBA8Snorm via a format view,
+    // which Metal only defines when the base declares PixelFormatView usage.
+    CHECK((base_texture.usage & MTLTextureUsagePixelFormatView) != 0u);
 
     f.EndFrame();
 

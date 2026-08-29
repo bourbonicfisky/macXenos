@@ -5599,9 +5599,47 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // is being marshalled, a routed fetch that falls back to the legacy RAM
     // path would read bytes the elided wait was supposed to converge — such
     // a draw must be skipped (counted), never silently mis-served.
+    // Bisect lever (10395 corner artifact): comma-separated trace draw
+    // indices whose ordered execution is demoted to the await+drain boundary.
+    static const char* s_order_skip_env =
+        std::getenv("XE_METAL_ORDER_SKIP_DRAWS");
+    if (s_order_skip_env &&
+        authority_decision.action ==
+            metal::AuthorityAction::kOrderAgainstGpuProducers) {
+      for (const char* p = s_order_skip_env; *p;) {
+        char* end;
+        uint32_t v = uint32_t(strtoul(p, &end, 10));
+        if (end == p) {
+          break;
+        }
+        if (v == trace_draw_index_) {
+          authority_decision.action = metal::AuthorityAction::kAwaitProducer;
+          break;
+        }
+        p = (*end == ',') ? end + 1 : end;
+      }
+    }
     draw_gpu_ordering_active_ =
         authority_decision.action ==
         metal::AuthorityAction::kOrderAgainstGpuProducers;
+    // Bounded ordered-execution log (10395 corner artifact): name every draw
+    // whose wait was elided and the producer ranges it was ordered against.
+    static const bool s_order_log = std::getenv("XE_METAL_ORDER_LOG") != nullptr;
+    if (s_order_log && draw_gpu_ordering_active_) {
+      static uint32_t s_order_logs = 0;
+      if (s_order_logs++ < 512) {
+        std::string sel;
+        for (const auto& p : authority_decision.selected) {
+          sel += fmt::format(" {:08X}(+{}){}", p.range.start(),
+                             p.range.length(),
+                             p.state == metal::TransitState::kPendingMemexport
+                                 ? "M"
+                                 : "R");
+        }
+        XELOGI("MetalOrderedDraw draw={} producers={}:{}", trace_draw_index_,
+               authority_decision.selected.size(), sel);
+      }
+    }
     ProducerDependencyOutcome dependency_outcome =
         ResolvePendingProducerDependencies(authority_decision);
     if (!dependency_outcome.complete) {
@@ -9105,6 +9143,27 @@ bool MetalCommandProcessor::FetchOverlapsPendingGpuCurrent(
   if (pending_writebacks_.empty() && pending_memexports_.empty()) {
     return false;
   }
+  // Bisect lever (10395 corner artifact): comma-separated hex guest bases
+  // whose fetches are treated as non-corridor. This is the single authority
+  // both the mask-time and serve-time signed gates consult, so the fetch
+  // consistently drops to the legacy drain path — no admitted-then-starved
+  // fail-closed draw skip.
+  static const char* s_signed_skip_env =
+      std::getenv("XE_METAL_SIGNED_SKIP_BASE");
+  if (s_signed_skip_env) {
+    uint32_t fetch_base = fetch.base_address << 12;
+    for (const char* p = s_signed_skip_env; *p;) {
+      char* end;
+      uint32_t v = uint32_t(strtoul(p, &end, 16));
+      if (end == p) {
+        break;
+      }
+      if (v == fetch_base) {
+        return false;
+      }
+      p = (*end == ',') ? end + 1 : end;
+    }
+  }
   metal::FetchGuestRanges rng = ComputeFetchGuestRanges(fetch);
   auto base_range = metal::GuestRange::FromBounds(rng.base_begin,
                                                   rng.base_end);
@@ -10122,6 +10181,69 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       uint64_t b1 = (uint64_t(b_base) + b_len + kGranuleMask) & ~kGranuleMask;
       return a0 < b1 && b0 < a1;
     };
+    // 10395 corner fix: ReassertGpuWritten rounds OUTWARD to host pages, so
+    // it also flips the straddling page's FOREIGN fragments (the neighbor
+    // resolve dest's bytes sharing the page — bloom pyramid dests are
+    // contiguous non-page-multiple ranges) back to buffer authority. If a
+    // later CPU-path writeback superseded the neighbor in RAM (its GPU
+    // scatter was disqualified by this very pending record), the buffer
+    // still holds the neighbor's PREVIOUS generation there, and consumers
+    // read a stale 8 KiB tail fragment (SF4 10395: 167-px ±1-LSB corner,
+    // the last macro-tiles of a 320x184 pyramid level). Refresh the foreign
+    // head/tail fragments buffer<-RAM first — skipping spans owned by
+    // another pending GPU producer, whose buffer bytes ARE current — so the
+    // page-granular re-assert only ever asserts a truth.
+    uint8_t* reassert_buffer_contents = nullptr;
+    if (!shared_memory_->is_zero_copy()) {
+      id<MTLBuffer> reassert_buffer =
+          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      reassert_buffer_contents = static_cast<uint8_t*>(reassert_buffer.contents);
+    }
+    const uint32_t page_size = 1u << shared_memory_->validity_page_size_log2();
+    auto refresh_foreign_fragment = [&](uint32_t frag_start,
+                                        uint32_t frag_end) {
+      if (!reassert_buffer_contents || frag_end <= frag_start) {
+        return;
+      }
+      // Collect spans of the fragment owned by OTHER pending GPU producers.
+      std::vector<std::pair<uint32_t, uint32_t>> owned;
+      for (const PendingWriteback& other : pending_writebacks_) {
+        if (!other.gpu_current) {
+          continue;
+        }
+        uint32_t o0 = std::max(frag_start, other.guest_addr);
+        uint32_t o1 = std::min(frag_end, other.guest_addr +
+                                             other.range_bytes());
+        if (o0 < o1) {
+          owned.emplace_back(o0, o1);
+        }
+      }
+      for (const PendingMemexport& other : pending_memexports_) {
+        uint32_t o0 = std::max(frag_start, other.base_address);
+        uint32_t o1 = std::min(frag_end, other.base_address +
+                                             other.size_bytes);
+        if (o0 < o1) {
+          owned.emplace_back(o0, o1);
+        }
+      }
+      std::sort(owned.begin(), owned.end());
+      uint32_t cursor = frag_start;
+      auto copy_gap = [&](uint32_t g0, uint32_t g1) {
+        if (g1 <= g0) {
+          return;
+        }
+        const uint8_t* ram =
+            memory_->TranslatePhysical<const uint8_t*>(g0);
+        if (ram) {
+          std::memcpy(reassert_buffer_contents + g0, ram, g1 - g0);
+        }
+      };
+      for (const auto& span : owned) {
+        copy_gap(cursor, span.first);
+        cursor = std::max(cursor, span.second);
+      }
+      copy_gap(cursor, frag_end);
+    };
     for (const PendingWriteback& pending : pending_writebacks_) {
       if (!pending.gpu_current) {
         continue;
@@ -10129,6 +10251,13 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       for (const auto& published : published_ranges) {
         if (page_span_overlap(pending.guest_addr, pending.range_bytes(),
                               published.first, published.second)) {
+          uint32_t span_start = pending.guest_addr & ~(page_size - 1);
+          uint32_t span_end =
+              (pending.guest_addr + pending.range_bytes() + page_size - 1) &
+              ~(page_size - 1);
+          refresh_foreign_fragment(span_start, pending.guest_addr);
+          refresh_foreign_fragment(pending.guest_addr + pending.range_bytes(),
+                                   span_end);
           // Lean re-assert: validity bits only, NO FireWatches — the watches
           // for this record already fired at its creation-time marking, and
           // re-firing per drain tore down resolved-target bridges every

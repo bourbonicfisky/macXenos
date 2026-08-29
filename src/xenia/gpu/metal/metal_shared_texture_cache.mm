@@ -172,7 +172,12 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
                                   height:height
                                mipmapped:mipped ? YES : NO];
   desc.storageMode = MTLStorageModePrivate;
-  desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+  // PixelFormatView: the signed serve creates an RGBA8Snorm view of this
+  // Unorm texture — a FORMAT-CASTING view, which Metal only defines when the
+  // base texture declares this usage. Without it the cast view's sampling is
+  // formally undefined (descriptor A/B for the 10395 corner artifact).
+  desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
+               MTLTextureUsagePixelFormatView;
   if (mipped) {
     // Level count from the shared layout's CLAMPED max_level, and the key must
     // agree with it -- the planner cross-checks the same pair, so a descriptor
