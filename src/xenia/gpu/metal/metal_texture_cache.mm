@@ -1056,6 +1056,33 @@ uint32_t MetalTextureCache::GetTextureSlot(
       XELOGW("MetalFetchPNG: wrote {} ({}x{})", path, blocks_w, blocks_h);
     }
   }
+  // XE_METAL_DUMP_FETCH_RAW=<hex base>[,<hex base>...]: write the
+  // untiled+endian-swapped upload BLOCK bytes (any format, compressed
+  // included) to /tmp/xe_fetch_<base>.bin for offline decode — the
+  // DUMP_FETCH_PNG lever above is 32bpp-only. Sonic black-sky task 3.2.
+  static const char* s_dump_fetch_raw = std::getenv("XE_METAL_DUMP_FETCH_RAW");
+  if (s_dump_fetch_raw) {
+    bool wanted = false;
+    for (const char* p = s_dump_fetch_raw; *p;) {
+      char* end;
+      uint32_t v = uint32_t(strtoul(p, &end, 16));
+      if (end == p) break;
+      if (v == base) { wanted = true; break; }
+      p = (*end == ',') ? end + 1 : end;
+    }
+    if (wanted) {
+      std::string path = fmt::format("/tmp/xe_fetch_{:08X}.bin", base);
+      FILE* f = fopen(path.c_str(), "wb");
+      if (f) {
+        fwrite(linear.data(), 1, linear.size(), f);
+        fclose(f);
+        XELOGW(
+            "MetalFetchRaw: wrote {} ({} bytes, blocks {}x{}, bpb={}, fmt={})",
+            path, linear.size(), blocks_w, blocks_h, bpb,
+            uint32_t(fetch.format));
+      }
+    }
+  }
   std::vector<uint8_t> decoded;
   if (plan.decode_4444 || plan.decode_r16) {
     decoded.resize(size_t(width) * height * 4);

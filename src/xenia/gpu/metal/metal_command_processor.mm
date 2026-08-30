@@ -6118,6 +6118,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       fill_texture_signs(vertex_shader);
       fill_texture_signs(pixel_shader);
     }
+    // Sonic black-sky task 3.2 (diagnostic, replay-scale): one line per
+    // texture binding per draw, so a captured frame's sampled-source
+    // inventory can be walked offline. Bounded hard for live safety.
+    static const bool s_draw_tex_log =
+        std::getenv("XE_METAL_DRAW_TEX_LOG") != nullptr;
+    if (s_draw_tex_log) {
+      static uint32_t s_draw_tex_lines = 0;
+      auto log_bindings = [&](MetalShader* shader, const char* stage) {
+        if (!shader) return;
+        for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+          if (s_draw_tex_lines >= 8192) return;
+          ++s_draw_tex_lines;
+          auto fetch = regs.GetTextureFetch(binding.fetch_constant);
+          XELOGI(
+              "DrawTex draw={} {} fc={} base={:08X} fmt={} {}x{} pitch={} "
+              "endian={} signed={} type={}",
+              trace_draw_index_, stage, binding.fetch_constant,
+              fetch.base_address << 12, uint32_t(fetch.format),
+              fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+              uint32_t(fetch.pitch) << 5, uint32_t(fetch.endianness),
+              binding.is_signed ? 1 : 0, uint32_t(fetch.type));
+        }
+      };
+      log_bindings(vertex_shader, "vs");
+      log_bindings(pixel_shader, "ps");
+    }
     // Color exponent bias multiplies the pixel output. Metal stores the fixed
     // 16-bit formats in SNORM host targets, which truncate to -1..1, so unlike
     // a backend configured for full-range fixed16 storage we must not apply
