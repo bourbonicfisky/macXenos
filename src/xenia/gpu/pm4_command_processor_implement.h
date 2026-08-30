@@ -569,12 +569,27 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
 #if XE_ENABLE_TRACE_WRITER_INSTRUMENTATION == 1
 
     if (opcode == PM4_XE_SWAP) {
+      // XE_GPU_SWAP_COUNTER_LOG=1: bounded XE_SWAP counter progression log so
+      // unattended captures (trace_gpu_frame_at_swap consults THIS counter,
+      // which runs on a different clock than the present/swap stats) can be
+      // calibrated to wall time and scene from a single measurement run.
+      static const bool s_swap_counter_log =
+          std::getenv("XE_GPU_SWAP_COUNTER_LOG") != nullptr;
+      if (s_swap_counter_log && (counter_ & 63u) == 0u) {
+        XELOGI("Pm4SwapCounter counter={}", counter_);
+      }
       // Unattended single-frame capture: arm the same state the Trace Frame
-      // hotkey sets when the swap counter hits the requested value (0 = off).
-      // counter_ increments once per XE_SWAP, so this fires exactly once.
-      if (cvars::trace_gpu_frame_at_swap > 0 &&
-          counter_ == uint32_t(cvars::trace_gpu_frame_at_swap) &&
+      // hotkey sets when the swap counter REACHES the requested value (0 =
+      // off). >= not ==: the counter advances in jumps for titles that issue
+      // multiple XE_SWAP-counted packets per presented frame (Sonic
+      // Generations measured ~6x the present rate with visible skips), so an
+      // exact match can never fire. The one-shot latch keeps this to a
+      // single capture.
+      static bool s_at_swap_fired = false;
+      if (cvars::trace_gpu_frame_at_swap > 0 && !s_at_swap_fired &&
+          counter_ >= uint32_t(cvars::trace_gpu_frame_at_swap) &&
           trace_state_ == TraceState::kDisabled && !trace_writer_.is_open()) {
+        s_at_swap_fired = true;
         trace_state_ = TraceState::kSingleFrame;
         trace_frame_path_ = cvars::trace_gpu_prefix;
       }
