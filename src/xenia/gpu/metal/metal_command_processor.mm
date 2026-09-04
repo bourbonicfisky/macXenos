@@ -1067,6 +1067,10 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
 //   XE_METAL_PRESENT_BASE=hex  present that resolved snapshot + exact readback
 //   XE_METAL_PEEK=hex,hex,...  log guest-RAM words at addresses (ground truth)
 //   XE_METAL_DUMP_PS=hexhash   dump that PS + paired VS ucode disasm to /tmp
+//   XE_METAL_NO_CULL=1         force MTLCullModeNone on every draw (coverage A/B)
+//   XE_METAL_NO_DEPTH_TEST=1   force depth compare ALWAYS (coverage vs depth A/B)
+//   XE_CAPTURE_CONSTS=N        with --capture_dir: dump shader constant banks
+//                              at draw N to consts_N.bin (shared CP path)
 // Diagnostics logged: MetalRTConfig (unique RT configs), MetalZCfg (depth
 // configs), MetalLightProducer (small-pitch draw inputs), MetalRTConsumer
 // (snapshot-sampling passes), MetalB1 (packed-vs-direct constants),
@@ -6335,6 +6339,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       } else if (face_state.cull_mode == MetalCullMode::kBack) {
         cull_mode = MTLCullModeBack;
       }
+      // Diagnostic (Sonic black-sky task 3.4): XE_METAL_NO_CULL=1 forces
+      // MTLCullModeNone for every draw, to test whether missing coverage
+      // is host face-culling of well-formed guest triangles.
+      static const bool s_no_cull = std::getenv("XE_METAL_NO_CULL") != nullptr;
+      if (s_no_cull) {
+        cull_mode = MTLCullModeNone;
+      }
       [encoder setCullMode:cull_mode];
       [encoder
           setFrontFacingWinding:face_state.front_face_clockwise
@@ -7652,6 +7663,14 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(
   desc.depthCompareFunction = dc.z_enable
                                   ? ToMetalCompareFunction(dc.zfunc)
                                   : MTLCompareFunctionAlways;
+  // Diagnostic (Sonic black-sky task 3.4): XE_METAL_NO_DEPTH_TEST=1 forces
+  // the depth compare to ALWAYS (writes unchanged) so missing coverage can
+  // be attributed to a depth-test failure against the host attachment.
+  static const bool s_no_depth_test =
+      std::getenv("XE_METAL_NO_DEPTH_TEST") != nullptr;
+  if (s_no_depth_test) {
+    desc.depthCompareFunction = MTLCompareFunctionAlways;
+  }
   desc.depthWriteEnabled = dc.z_enable && dc.z_write_enable;
   if (dc.stencil_enable) {
     MTLStencilDescriptor* front = [[MTLStencilDescriptor alloc] init];

@@ -1454,6 +1454,35 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
         row += fmt::format(",\"vs\":\"{:016X}\",\"ps\":\"{:016X}\"",
                            vs ? vs->ucode_data_hash() : 0,
                            ps ? ps->ucode_data_hash() : 0);
+        // Primitive-reset and cull state: a strip whose 16-bit indices carry
+        // 0xFFFF renders differently depending on whether the guest enabled
+        // reset (restart) or expects a degenerate out-of-range vertex; on hosts
+        // that cannot disable restart the post-marker winding parity flips and
+        // backface culling drops the flipped primitives.
+        row += fmt::format(
+            ",\"reset\":{{\"en\":{},\"indx\":\"{:08X}\"}}"
+            ",\"cull\":{{\"front\":{},\"back\":{},\"face\":{}}}",
+            uint32_t(pa_su_sc_mode_cntl.multi_prim_ib_ena),
+            fbits(XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX),
+            uint32_t(pa_su_sc_mode_cntl.cull_front),
+            uint32_t(pa_su_sc_mode_cntl.cull_back),
+            uint32_t(pa_su_sc_mode_cntl.face));
+        // Blend / alpha-test / scissor / viewport raw words, so a draw that
+        // changes no destination pixel can be classified offline (blended to
+        // zero, alpha-tested away, scissored out, or off-viewport) without
+        // re-running the trace under a debugger.
+        row += fmt::format(
+            ",\"blend0\":\"{:08X}\",\"colorcontrol\":\"{:08X}\","
+            "\"scissor\":[\"{:08X}\",\"{:08X}\"],\"vport\":[\"{:08X}\","
+            "\"{:08X}\",\"{:08X}\",\"{:08X}\",\"{:08X}\",\"{:08X}\"],"
+            "\"vte\":\"{:08X}\",\"clip\":\"{:08X}\"",
+            fbits(XE_GPU_REG_RB_BLENDCONTROL0), fbits(XE_GPU_REG_RB_COLORCONTROL),
+            fbits(XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL),
+            fbits(XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR),
+            fbits(XE_GPU_REG_PA_CL_VPORT_XSCALE), fbits(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+            fbits(XE_GPU_REG_PA_CL_VPORT_YSCALE), fbits(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+            fbits(XE_GPU_REG_PA_CL_VPORT_ZSCALE), fbits(XE_GPU_REG_PA_CL_VPORT_ZOFFSET),
+            fbits(XE_GPU_REG_PA_CL_VTE_CNTL), fbits(XE_GPU_REG_PA_CL_CLIP_CNTL));
         row += fmt::format(
             ",\"depth\":{{\"z_en\":{},\"z_wr\":{},\"zfunc\":{},\"base\":{},"
             "\"fmt\":{}}}",
@@ -1491,6 +1520,25 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE),
             fbits(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET),
             uint32_t(pa_su_sc_mode_cntl.vtx_window_offset_enable));
+        // XE_CAPTURE_CONSTS=<draw>: raw shader constant banks at that draw
+        // (vertex float c0-c255, pixel float c256-c511, bool, loop) to
+        // <capture_dir>/consts_<draw>.bin, so skinning / dynamic-index inputs
+        // can be inspected offline (NaN / zero bone matrices etc.).
+        static const char* s_consts_draw = std::getenv("XE_CAPTURE_CONSTS");
+        if (s_consts_draw && draw_index == uint32_t(atoi(s_consts_draw))) {
+          std::filesystem::path consts_path =
+              std::filesystem::path(cvars::capture_dir) /
+              fmt::format("consts_{:06d}.bin", draw_index);
+          if (FILE* cf = xe::filesystem::OpenFile(consts_path, "wb")) {
+            fwrite(&register_file_->values[XE_GPU_REG_SHADER_CONSTANT_000_X], 4,
+                   512 * 4, cf);
+            fwrite(&register_file_->values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+                   4, 8, cf);
+            fwrite(&register_file_->values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00], 4,
+                   32, cf);
+            fclose(cf);
+          }
+        }
         if (is_indexed) {
           row += fmt::format(
               ",\"index\":{{\"base\":\"{:08X}\",\"len\":{},\"count\":{},"

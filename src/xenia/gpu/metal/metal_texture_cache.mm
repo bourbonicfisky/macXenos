@@ -23,6 +23,7 @@
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/metal/metal_texture_key.h"
+#include "xenia/gpu/metal/metal_packed_base.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
@@ -469,10 +470,20 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
   inputs.width = width;
   inputs.height = height;
   inputs.pitch_texels = pitch_texels;
+  // A packed base level is read at a different block offset than an unpacked
+  // one of the same base/size (metal_packed_base.h), so the two must not
+  // share an entry. Only the effective decision reaches the key: a packed_mips
+  // flag on a texture too large to pack changes nothing and stays excluded.
+  uint32_t base_packed =
+      ComputeMetalPackedBaseOffset(fetch.packed_mips != 0, fetch.dimension,
+                                   width, height, fetch.format)
+          .packed
+          ? 1u
+          : 0u;
   inputs.format_tiled_endian =
       (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
-      (uint32_t(fetch.dimension) << 12) | (uint32_t(fetch.tiled) << 8) |
-      uint32_t(fetch.endianness);
+      (uint32_t(fetch.dimension) << 12) | (base_packed << 9) |
+      (uint32_t(fetch.tiled) << 8) | uint32_t(fetch.endianness);
   // FinalizeTexture bakes the 12-bit guest fetch swizzle into the sampled
   // view, so two fetches identical in every other field but differing in
   // swizzle must NOT share a cache entry (the second would reuse the first's
@@ -939,7 +950,18 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t pitch_blocks = pitch_texels / block_texels;
   uint32_t pitch_blocks_aligned = (pitch_blocks + 31u) & ~31u;
 
-  uint32_t blocks_h_aligned = (blocks_h + 31u) & ~31u;
+  // Packed base level: the base's blocks start at (base_xb, base_yb) inside
+  // the base tail, not at (0, 0) — see metal_packed_base.h. Every base read
+  // below (2D and cube faces, tiled and linear) and the watched/recorded
+  // base extent use the same offsets.
+  const MetalPackedBaseOffset packed_base = ComputeMetalPackedBaseOffset(
+      fetch.packed_mips != 0, fetch.dimension, width, height, fetch.format);
+  const uint32_t base_xb = packed_base.x_blocks;
+  const uint32_t base_yb = packed_base.y_blocks;
+  // Rows of blocks the base read actually touches (offset rows included).
+  const uint32_t blocks_h_read = blocks_h + base_yb;
+
+  uint32_t blocks_h_aligned = (blocks_h_read + 31u) & ~31u;
   // Non-cube extent shared with the routed serve's trace records
   // (metal_texture_load_eligibility.h) — recorded ranges must be identical
   // by construction across producers.
@@ -947,8 +969,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
       is_cube ? uint32_t(std::min<size_t>(
                     size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6,
                     size_t(kPhysicalSize - base)))
-              : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h, bpb,
-                                        base, kPhysicalSize);
+              : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h_read,
+                                        bpb, base, kPhysicalSize);
   // WATCH-ONLY admission for the pages this untile is about to read directly.
   // This cache still does NOT call SharedMemory::RequestRange: that path
   // uploads into the shared buffer and marks pages valid, which this cache
@@ -981,9 +1003,10 @@ uint32_t MetalTextureCache::GetTextureSlot(
       uint32_t src_off;
       if (tiled) {
         src_off = uint32_t(texture_address::Tiled2D(
-            int32_t(bx), int32_t(by), pitch_blocks_aligned, plan.block_log2));
+            int32_t(bx + base_xb), int32_t(by + base_yb), pitch_blocks_aligned,
+            plan.block_log2));
       } else {
-        src_off = uint32_t(by * pitch_blocks + bx) * bpb;
+        src_off = uint32_t((by + base_yb) * pitch_blocks + bx + base_xb) * bpb;
       }
       uint8_t* dst = &linear[(by * blocks_w + bx) * bpb];
       if (src_off + bpb <= max_src_bytes) {
@@ -1228,10 +1251,12 @@ uint32_t MetalTextureCache::GetTextureSlot(
           uint32_t src_off;
           if (tiled) {
             src_off = face_base + uint32_t(texture_address::Tiled2D(
-                                      int32_t(bx), int32_t(by),
+                                      int32_t(bx + base_xb),
+                                      int32_t(by + base_yb),
                                       pitch_blocks_aligned, plan.block_log2));
           } else {
-            src_off = face_base + (by * pitch_blocks + bx) * bpb;
+            src_off = face_base +
+                      ((by + base_yb) * pitch_blocks + bx + base_xb) * bpb;
           }
           uint8_t* dst = &linear[(size_t(by) * blocks_w + bx) * bpb];
           if (src_off + bpb <= max_src_bytes) {
