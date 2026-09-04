@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
 #include "xenia/gpu/metal/metal_present_convert_shader.h"
 
@@ -9730,11 +9731,14 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         // original single-threaded per-texel loop as the route's dominant
         // live cost (48.3 -> 18.0 fps in 4-draw menu frames, ~26 MiB/frame
         // walked serially on the GPU thread). Within a row, tiled addresses
-        // are contiguous in 16-BYTE granules (TiledCombine passes oib bits
-        // 0-3 through; the next bit maps to address bit 5), so copy
-        // 16-byte-aligned runs of 16/bpp texels, aligned on the TILED x
-        // (destination offset included).
-        const uint32_t run_texels = std::max(1u, 16u / wb.bpp);
+        // are contiguous in runs of TiledPublishRunTexels(bpp) texels: 16
+        // bytes for 16bpp and wider (TiledCombine passes oib bits 0-3
+        // through; the next bit maps to address bit 5), but only 8 BYTES for
+        // 8bpp, where address bit 3 is y bit 1 and x bits 3-4 are the pipe
+        // bits. The former flat 16/bpp rule left every 8bpp texel with x
+        // bit 3 set unpublished (metal_tiled_publish_run.h). Runs are aligned
+        // on the TILED x (destination offset included).
+        const uint32_t run_texels = metal::TiledPublishRunTexels(wb.bpp);
         auto publish_row = [&](size_t y, uint64_t& row_bytes,
                                uint64_t& row_clipped, uint64_t& row_sent,
                                uint64_t& row_seen) {
