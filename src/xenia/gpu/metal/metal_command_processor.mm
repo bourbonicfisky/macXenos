@@ -666,7 +666,7 @@ MetalCommandProcessor::MetalCommandProcessor(
     : CommandProcessor(graphics_system, kernel_state) {}
 MetalCommandProcessor::~MetalCommandProcessor() = default;
 
-bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_slot) {
+bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_slot) {
   *out_slot = 0;
   auto it = sampler_slot_cache_.find(key);
   if (it != sampler_slot_cache_.end()) {
@@ -681,20 +681,61 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_s
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
           ->device();
   MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
+  const uint32_t aniso = uint32_t((key >> 15) & 7);
+  const uint32_t border = uint32_t((key >> 18) & 3);
+  const uint32_t mip_min_level = uint32_t((key >> 20) & 15);
+  const bool base_map = ((key >> 24) & 1) != 0;
+  const bool legacy = ((key >> 25) & 1) != 0;
   auto minmag = [](uint32_t f) {
     // TextureFilter: 0=point, 1=linear, 2=base-map (no mip; min/mag linear
     // gives the least-surprising look), 3 resolved before packing.
     return f == 0 ? MTLSamplerMinMagFilterNearest
                   : MTLSamplerMinMagFilterLinear;
   };
-  d.magFilter = minmag(key & 3);
-  d.minFilter = minmag((key >> 2) & 3);
-  uint32_t mip = (key >> 4) & 3;
-  // Textures are single-mip for now; point/linear only matter once mip
-  // chains upload. kBaseMap (2) = not mipmapped.
-  d.mipFilter = mip == 1 ? MTLSamplerMipFilterLinear
-                         : (mip == 0 ? MTLSamplerMipFilterNearest
-                                     : MTLSamplerMipFilterNotMipmapped);
+  uint32_t mip = uint32_t((key >> 4) & 3);
+  if (legacy) {
+    d.magFilter = minmag(uint32_t(key & 3));
+    d.minFilter = minmag(uint32_t((key >> 2) & 3));
+    d.mipFilter = mip == 1 ? MTLSamplerMipFilterLinear
+                           : (mip == 0 ? MTLSamplerMipFilterNearest
+                                       : MTLSamplerMipFilterNotMipmapped);
+    if (aniso) {
+      d.maxAnisotropy = std::min(16u, 1u << (aniso - 1));
+    }
+  } else if (aniso) {
+    // Shared contract: anisotropic filtering is always linear min/mag/mip.
+    d.magFilter = MTLSamplerMinMagFilterLinear;
+    d.minFilter = MTLSamplerMinMagFilterLinear;
+    d.mipFilter = MTLSamplerMipFilterLinear;
+    d.maxAnisotropy = std::min(16u, 1u << (aniso - 1));
+  } else {
+    d.magFilter = minmag(uint32_t(key & 3));
+    d.minFilter = minmag(uint32_t((key >> 2) & 3));
+    d.mipFilter = mip == 1 ? MTLSamplerMipFilterLinear
+                           : MTLSamplerMipFilterNearest;
+  }
+  // LOD range: the host texture holds levels 0..max, so the guest's minimum
+  // level is a sampler clamp (D3D12 MinLOD). Base-map pins sampling to that
+  // level (D3D12 MaxLOD = MinLOD, +0.25 with point mip filtering so
+  // magnification vs minification is preserved).
+  d.lodMinClamp = legacy ? 0.0f : float(mip_min_level);
+  if (base_map && !legacy) {
+    d.lodMaxClamp = float(mip_min_level) + (aniso ? 0.0f : 0.25f);
+    if (!aniso) {
+      d.mipFilter = MTLSamplerMipFilterNearest;
+    }
+  }
+  switch (xenos::BorderColor(border)) {
+    case xenos::BorderColor::k_ABGR_White:
+      d.borderColor = MTLSamplerBorderColorOpaqueWhite;
+      break;
+    default:
+      // k_ABGR_Black is (0,0,0,0) in the shared contract; the YCbCr borders
+      // (0.5,0,0.5,0)/(0,0.5,0.5,0) have no Metal border color -- they fall to
+      // transparent black (unengaged in the census).
+      d.borderColor = MTLSamplerBorderColorTransparentBlack;
+      break;
+  }
   auto addr = [](uint32_t c) {
     switch (xenos::ClampMode(c)) {
       case xenos::ClampMode::kRepeat:
@@ -713,16 +754,38 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_s
         return MTLSamplerAddressModeClampToEdge;
     }
   };
-  d.sAddressMode = addr((key >> 6) & 7);
-  d.tAddressMode = addr((key >> 9) & 7);
-  d.rAddressMode = addr((key >> 12) & 7);
-  uint32_t aniso = (key >> 15) & 7;
-  if (aniso) {
-    d.maxAnisotropy = std::min(16u, 1u << (aniso - 1));
+  d.sAddressMode = addr(uint32_t((key >> 6) & 7));
+  d.tAddressMode = addr(uint32_t((key >> 9) & 7));
+  d.rAddressMode = addr(uint32_t((key >> 12) & 7));
+  // Diagnostic A/B (XE_METAL_SAMPLER_FORCE_BORDER=1): every clamp-to-border
+  // sampler gets an opaque-white border regardless of the fetch, to prove
+  // the sampler state reaches the shader (a byte-identical output under this
+  // arm means the border is never sampled in the frame, or the state is
+  // ignored).
+  static const bool s_force_border =
+      std::getenv("XE_METAL_SAMPLER_FORCE_BORDER") != nullptr;
+  if (s_force_border) {
+    d.borderColor = MTLSamplerBorderColorOpaqueWhite;
+    d.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
+    d.tAddressMode = MTLSamplerAddressModeClampToBorderColor;
   }
+  // Samplers live in the bindless argument-buffer heap.
+  d.supportArgumentBuffers = YES;
   id<MTLSamplerState> state = [device newSamplerStateWithDescriptor:d];
   if (!state) {
     return false;
+  }
+  static const bool s_sampler_census_log =
+      std::getenv("XE_METAL_SAMPLER_CENSUS") != nullptr;
+  if (s_sampler_census_log) {
+    XELOGI(
+        "MetalSamplerCreate key={:016X} mag={} min={} mip={} aniso={} "
+        "addr=({},{},{}) border={} lod=[{},{}] base_map={}",
+        key, uint32_t(d.magFilter), uint32_t(d.minFilter),
+        uint32_t(d.mipFilter), uint32_t(d.maxAnisotropy),
+        uint32_t(d.sAddressMode), uint32_t(d.tAddressMode),
+        uint32_t(d.rAddressMode), uint32_t(d.borderColor), d.lodMinClamp,
+        d.lodMaxClamp, base_map ? 1 : 0);
   }
   uint32_t slot = next_sampler_slot_++;
   auto* entries = static_cast<IRDescriptorTableEntry*>(
@@ -1665,6 +1728,13 @@ void MetalCommandProcessor::ReportZeroCopyRuntimeCost(
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  if (!sampler_census_.empty()) {
+    for (const auto& kv : sampler_census_) {
+      XELOGI("MetalSamplerCensus final key={:016X} count={}", kv.first,
+             kv.second);
+    }
+    XELOGI("MetalSamplerCensus final unique={}", sampler_census_.size());
+  }
   // Task 1.1: the run's final build totals, emitted BEFORE the caches are torn
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
@@ -6723,10 +6793,101 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t an = sb.aniso_filter == xenos::AnisoFilter::kUseFetchConst
                           ? uint32_t(f.aniso_filter)
                           : uint32_t(sb.aniso_filter);
-        uint32_t skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
-                        ((uint32_t(f.clamp_x) & 7) << 6) |
-                        ((uint32_t(f.clamp_y) & 7) << 9) |
-                        ((uint32_t(f.clamp_z) & 7) << 12) | ((an & 7) << 15);
+        // Sampler parameters follow the shared D3D12/Vulkan contract
+        // (D3D12TextureCache::GetSamplerParameters / WriteSampler):
+        //  - clamp modes normalized per dimension (unused axes and every cube
+        //    axis are clamp-to-edge);
+        //  - border color from the fetch only when a clamp uses the border;
+        //  - LOD clamped to the normalized mip minimum; base-map pins the LOD
+        //    to that level;
+        //  - any anisotropy setting forces linear min/mag/mip and sets the
+        //    max anisotropy.
+        // The 2026-09-04 sampler census ranked what the previous raw key
+        // dropped: JC2/Sonic/LEGO/RDR shadow maps are clamp-to-border with a
+        // WHITE border (20k/9k bindings per frame; the default transparent
+        // black border put everything outside the map in shadow), SF4/JC2/RDR
+        // use anisotropy with point filters, RDR fetches with mip_min > 0.
+        xenos::ClampMode ncx, ncy, ncz;
+        texture_util::GetClampModesForDimension(f, ncx, ncy, ncz);
+        uint32_t nmin_level = 0, nmax_level = 0;
+        texture_util::GetSubresourcesFromFetchConstant(
+            f, nullptr, nullptr, nullptr, nullptr, nullptr, &nmin_level,
+            &nmax_level);
+        const bool border_used = xenos::ClampModeUsesBorder(ncx) ||
+                                 xenos::ClampModeUsesBorder(ncy) ||
+                                 xenos::ClampModeUsesBorder(ncz);
+        const uint32_t border = border_used ? uint32_t(f.border_color) : 0u;
+        const uint32_t base_map = mip == uint32_t(xenos::TextureFilter::kBaseMap)
+                                      ? 1u
+                                      : 0u;
+        // XE_METAL_SAMPLER_LEGACY=1 is the exact rollback: raw clamp modes,
+        // no border color, no LOD clamp, anisotropy without the linear
+        // forcing (the pre-2026-09-04 sampler).
+        static const bool s_sampler_legacy =
+            std::getenv("XE_METAL_SAMPLER_LEGACY") != nullptr;
+        uint64_t skey;
+        if (s_sampler_legacy) {
+          skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
+                 ((uint32_t(f.clamp_x) & 7) << 6) |
+                 ((uint32_t(f.clamp_y) & 7) << 9) |
+                 ((uint32_t(f.clamp_z) & 7) << 12) | ((an & 7) << 15) |
+                 (uint64_t(1) << 25);
+        } else {
+          skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
+                 ((uint32_t(ncx) & 7) << 6) | ((uint32_t(ncy) & 7) << 9) |
+                 ((uint32_t(ncz) & 7) << 12) | ((an & 7) << 15) |
+                 (uint64_t(border & 3) << 18) |
+                 (uint64_t(nmin_level & 15) << 20) |
+                 (uint64_t(base_map) << 24);
+        }
+        // Sampler-semantics census (XE_METAL_SAMPLER_CENSUS=1): every guest
+        // sampler field, raw and as the shared D3D12/Vulkan contract
+        // normalizes it, per unique combination, so the ledger's "sampler
+        // semantics" gap row can be ranked by real engagement instead of
+        // listed as a family. First sight logs the fields; ShutdownContext
+        // logs the counts. Bounded, default off.
+        static const bool s_sampler_census =
+            std::getenv("XE_METAL_SAMPLER_CENSUS") != nullptr;
+        if (s_sampler_census) {
+          xenos::ClampMode ncx, ncy, ncz;
+          texture_util::GetClampModesForDimension(f, ncx, ncy, ncz);
+          uint32_t nmin = 0, nmax = 0;
+          texture_util::GetSubresourcesFromFetchConstant(
+              f, nullptr, nullptr, nullptr, nullptr, nullptr, &nmin, &nmax);
+          uint64_t ckey =
+              (uint64_t(skey) & 0x3FFFFu) | (uint64_t(f.dimension) << 18) |
+              (uint64_t(f.border_color) << 20) |
+              (uint64_t(uint32_t(f.lod_bias) & 0x3FF) << 22) |
+              (uint64_t(f.tri_clamp) << 32) | (uint64_t(nmin) << 34) |
+              (uint64_t(nmax) << 38) | (uint64_t(f.vol_mag_filter) << 42) |
+              (uint64_t(f.vol_min_filter) << 43) |
+              (uint64_t(uint32_t(ncx)) << 44) | (uint64_t(uint32_t(ncy)) << 47) |
+              (uint64_t(uint32_t(ncz)) << 50);
+          auto& count = sampler_census_[ckey];
+          if (count++ == 0 && sampler_census_.size() <= 4096) {
+            bool border_used = xenos::ClampModeUsesBorder(ncx) ||
+                               xenos::ClampModeUsesBorder(ncy) ||
+                               xenos::ClampModeUsesBorder(ncz);
+            XELOGI(
+                "MetalSamplerCensus new key={:016X} dim={} clamp=({},{},{}) "
+                "norm=({},{},{}) border_used={} border_color={} lod_bias={} "
+                "tri_clamp={} mag={} min={} mip={} aniso={} mip_range={}-{} "
+                "vol=({},{}) shader_ovr=(mag={} min={} mip={} aniso={}) "
+                "fmt={} {}x{} fc={} draw={}",
+                ckey, uint32_t(f.dimension), uint32_t(f.clamp_x),
+                uint32_t(f.clamp_y), uint32_t(f.clamp_z), uint32_t(ncx),
+                uint32_t(ncy), uint32_t(ncz), border_used ? 1 : 0,
+                uint32_t(f.border_color), int32_t(f.lod_bias),
+                uint32_t(f.tri_clamp), mag, mn, mip, an, nmin, nmax,
+                uint32_t(f.vol_mag_filter), uint32_t(f.vol_min_filter),
+                sb.mag_filter != xenos::TextureFilter::kUseFetchConst ? 1 : 0,
+                sb.min_filter != xenos::TextureFilter::kUseFetchConst ? 1 : 0,
+                sb.mip_filter != xenos::TextureFilter::kUseFetchConst ? 1 : 0,
+                sb.aniso_filter != xenos::AnisoFilter::kUseFetchConst ? 1 : 0,
+                uint32_t(f.format), f.size_2d.width + 1,
+                f.size_2d.height + 1, sb.fetch_constant, trace_draw_index_);
+          }
+        }
         uint32_t sampler_slot;
         if (!GetOrCreateSamplerSlot(skey, &sampler_slot)) {
           XELOGW("MetalCommandProcessor: skipping draw after sampler binding "

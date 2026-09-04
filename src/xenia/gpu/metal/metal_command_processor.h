@@ -406,9 +406,11 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Real guest samplers: filters/clamps/aniso packed into a key ->
   // sampler-heap slot, created on first use (states retained until shutdown).
-  bool GetOrCreateSamplerSlot(uint32_t key, uint32_t* out_slot);
-  std::unordered_map<uint32_t, uint32_t> sampler_slot_cache_;
+  bool GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_slot);
+  std::unordered_map<uint64_t, uint32_t> sampler_slot_cache_;
   uint32_t next_sampler_slot_ = 1;     // 0 == null sampler.
+  // XE_METAL_SAMPLER_CENSUS: unique guest sampler tuple -> binding count.
+  std::unordered_map<uint64_t, uint32_t> sampler_census_;
   std::vector<void*> sampler_states_;  // id<MTLSamplerState>, retained.
 
   // Cache of id<MTLDepthStencilState> keyed by RB_DEPTHCONTROL's depth+stencil
