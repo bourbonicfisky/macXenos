@@ -334,7 +334,8 @@ class MetalTextureCache {
   uint32_t FinalizeTexture(uint64_t key,
                            const xenos::xe_gpu_texture_fetch_t& fetch,
                            void* texture_bridge, uint64_t host_format,
-                           bool is_cube, uint32_t host_levels, uint32_t base,
+                           uint32_t host_swizzle, bool is_cube,
+                           uint32_t host_levels, uint32_t base,
                            uint32_t guest_bytes, uint32_t mip_base,
                            uint32_t mip_bytes);
   uint64_t RetireSubmission() const {

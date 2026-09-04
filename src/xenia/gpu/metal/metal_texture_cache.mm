@@ -24,6 +24,7 @@
 #include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/metal/metal_texture_key.h"
 #include "xenia/gpu/metal/metal_packed_base.h"
+#include "xenia/gpu/metal/metal_texture_format_decode.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
@@ -61,6 +62,15 @@ struct FormatPlan {
   // signed fetches a SEPARATE binding expecting -1..1 values; guest signed
   // 8-bit texels are two's-complement, i.e. exactly host snorm bytes).
   MTLPixelFormat host_format_signed = MTLPixelFormatInvalid;
+  // Host channel swizzle of the shared D3D12/Vulkan tables (RRRR for depth,
+  // RGGG for two-channel formats): which host channel each Xenos component
+  // X/Y/Z/W reads. Composed with the guest fetch swizzle in FinalizeTexture.
+  uint32_t host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+  // If true, each 32-bit guest word is a k_24_8 / k_24_8_FLOAT depth texel
+  // and is CPU-converted to R32Float (host_format) with the shared
+  // unorm24 / float20e4 rule (metal_texture_format_decode.h).
+  bool decode_depth_unorm = false;
+  bool decode_depth_float = false;
 };
 
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
@@ -118,6 +128,43 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
     case xenos::TextureFormat::k_DXT4_5:
     case xenos::TextureFormat::k_DXT4_5_AS_16_16_16_16:
       return {bc_supported, true, 16, 4, 4, MTLPixelFormatBC3_RGBA};
+    // --- 2026-09-04 engagement census additions (openspec
+    // implement-metal-texture-formats). Host formats and host swizzles are
+    // the shared D3D12/Vulkan table entries. ---
+    case xenos::TextureFormat::k_DXN: {
+      // Two-channel BC5 normal maps (Dead or Alive 5, F.E.A.R.).
+      FormatPlan plan = {bc_supported, true, 16, 4, 4, MTLPixelFormatBC5_RGUnorm,
+                         false, false, MTLPixelFormatBC5_RGSnorm};
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
+      return plan;
+    }
+    case xenos::TextureFormat::k_16_16: {
+      FormatPlan plan = {true, false, 4, 2, 1, MTLPixelFormatRG16Unorm,
+                         false, false, MTLPixelFormatRG16Snorm};
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
+      return plan;
+    }
+    case xenos::TextureFormat::k_16_16_16_16:
+      return {true, false, 8, 3, 1, MTLPixelFormatRGBA16Unorm,
+              false, false, MTLPixelFormatRGBA16Snorm};
+    case xenos::TextureFormat::k_2_10_10_10:
+    case xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16:
+      // Same bit layout as RGB10A2 (R in the low bits). Metal has no snorm
+      // sibling; a signed fetch keeps the unorm view (Vulkan's optional-format
+      // fallback).
+      return {true, false, 4, 2, 1, MTLPixelFormatRGB10A2Unorm};
+    case xenos::TextureFormat::k_24_8: {
+      FormatPlan plan = {true, false, 4, 2, 1, MTLPixelFormatR32Float};
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
+      plan.decode_depth_unorm = true;
+      return plan;
+    }
+    case xenos::TextureFormat::k_24_8_FLOAT: {
+      FormatPlan plan = {true, false, 4, 2, 1, MTLPixelFormatR32Float};
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
+      plan.decode_depth_float = true;
+      return plan;
+    }
     default:
       return {false, false, 0, 0, 0, MTLPixelFormatInvalid};
   }
@@ -1107,7 +1154,22 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
   std::vector<uint8_t> decoded;
-  if (plan.decode_4444 || plan.decode_r16) {
+  if (plan.decode_depth_unorm || plan.decode_depth_float) {
+    // k_24_8 / k_24_8_FLOAT: one float per texel, the shared load-shader rule.
+    decoded.resize(size_t(width) * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        size_t si = (size_t(y) * blocks_w + x) * bpb;
+        uint32_t word;
+        std::memcpy(&word, &linear[si], sizeof(word));
+        float f = plan.decode_depth_unorm ? DecodeDepthUnormTexel(word)
+                                          : DecodeDepthFloatTexel(word);
+        std::memcpy(&decoded[(size_t(y) * width + x) * 4], &f, sizeof(f));
+      }
+    }
+    upload_data = decoded.data();
+    upload_bytes_per_row = width * 4;
+  } else if (plan.decode_4444 || plan.decode_r16) {
     decoded.resize(size_t(width) * height * 4);
     for (uint32_t y = 0; y < height; ++y) {
       for (uint32_t x = 0; x < width; ++x) {
@@ -1157,7 +1219,10 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // and MSC is compiled with IRCompatibilityFlagForceTextureArray, so a plain
   // 2D texture sampled through an array read returns garbage (flat sampling).
   // Cubes likewise must be CUBE ARRAYS (texturecube_array in the MSL).
-  if (is_cube && (width != height || plan.decode_4444 || plan.decode_r16)) {
+  const bool plan_cpu_decoded = plan.decode_4444 || plan.decode_r16 ||
+                                plan.decode_depth_unorm ||
+                                plan.decode_depth_float;
+  if (is_cube && (width != height || plan_cpu_decoded)) {
     log_null("cube-shape");
     return 0;
   }
@@ -1180,7 +1245,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
                             !(s_mips_uncomp_only && plan.compressed);
   if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && mip_addr &&
       mip_addr < kPhysicalSize && normalized_mip_max > 0 &&
-      !plan.decode_4444 && !plan.decode_r16) {
+      !plan_cpu_decoded) {
     // Same normalized value the key was built from — see the normalization
     // above. The size-derived clamp is retained; normalization already applies
     // an equivalent bound, so this is belt-and-braces rather than a second
@@ -1371,8 +1436,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
   }
 
   return FinalizeTexture(key, fetch, (__bridge void*)texture,
-                         uint64_t(plan.host_format), is_cube, host_levels,
-                         base, watched_base_bytes,
+                         uint64_t(plan.host_format), plan.host_swizzle,
+                         is_cube, host_levels, base, watched_base_bytes,
                          entry_mip_bytes ? mip_addr : 0, entry_mip_bytes);
 }
 
@@ -1385,8 +1450,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
 // through the call).
 uint32_t MetalTextureCache::FinalizeTexture(
     uint64_t key, const xenos::xe_gpu_texture_fetch_t& fetch,
-    void* texture_bridge, uint64_t host_format, bool is_cube,
-    uint32_t host_levels, uint32_t base, uint32_t guest_bytes,
+    void* texture_bridge, uint64_t host_format, uint32_t host_swizzle,
+    bool is_cube, uint32_t host_levels, uint32_t base, uint32_t guest_bytes,
     uint32_t mip_base, uint32_t mip_bytes) {
   id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_bridge;
   // The texture unit applies the fetch-constant swizzle (X/Y/Z/W/0/1 per output
@@ -1394,7 +1459,11 @@ uint32_t MetalTextureCache::FinalizeTexture(
   // reads the correct channels (matches the Vulkan backend's host_swizzle). A
   // wrong swizzle here reads alpha from the wrong channel, and alpha-test then
   // discards the whole draw.
-  uint32_t guest_swizzle = fetch.swizzle & 0xFFF;
+  // The host format's own channel mapping (RRRR depth, RGGG two-channel)
+  // composes underneath the guest swizzle; identity host swizzle leaves the
+  // historical behaviour bit-for-bit.
+  uint32_t guest_swizzle = ComposeGuestHostSwizzle(fetch.swizzle & 0xFFF,
+                                                   host_swizzle & 0xFFF);
   id<MTLTexture> sampled = texture;
   if (!GuestSwizzleIsIdentity(guest_swizzle)) {
     MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
