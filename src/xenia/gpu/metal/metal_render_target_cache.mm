@@ -237,6 +237,19 @@ bool MetalRenderTargetCache::Initialize() {
   } else if (host_depth_gate_enabled_) {
     XELOGI("MetalRenderTargetCache: host-depth ownership ENGAGED (stage B)");
   }
+  // Depth-to-depth host precision (RDR speckle, 2026-09-17): a float24 depth
+  // target re-bound at another MSAA count (or another key of the same
+  // encoding) is planned as a depth->depth transfer WITHOUT a separate
+  // host-depth source (the planner drops it when it equals the transfer
+  // source). The reference performs that transfer as a direct host-float
+  // copy; our canonical round trip packs the source to 20e4 words and
+  // materializes the destination from them, so every EQUAL test of the
+  // following pass fails against the quantized value. Treat the transfer
+  // source as the host-precision source: same in-plan lane refresh and the
+  // same pointwise pack(host)==guest predicate. Exact rollback:
+  // XE_METAL_HOST_DEPTH_D2D=0.
+  host_depth_d2d_enabled_ =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_HOST_DEPTH_D2D", true);
   const bool canonical_depth_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_CANONICAL_DEPTH");
   canonical_depth_enabled_ = sample_edram_enabled_ && canonical_depth_requested;
@@ -1540,6 +1553,21 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
     two_source_class = src_key.is_depth ? "depth_and_host_depth_to_depth"
                                         : "color_and_host_depth_to_depth";
     two_source_records_.push_back({dst_key.key, transfer.host_depth_source,
+                                   transfer.start_tiles, transfer.end_tiles});
+  } else if (transfer.source &&
+             MetalDepthToDepthCarriesHostPrecision(
+                 host_depth_d2d_enabled_ && host_depth_gate_enabled_ &&
+                     !f24_ps_engaged_,
+                 /*has_planner_host_source=*/false, src_key.is_depth != 0,
+                 dst_key.is_depth != 0, src_key.GetDepthFormat(),
+                 dst_key.GetDepthFormat())) {
+    // The source depth attachment still holds the host-precision floats the
+    // canonical words were packed from (see the constructor note). A lane
+    // refresh from it before the destination materialize lets the pointwise
+    // predicate restore that precision exactly where the words are its
+    // rounded shadow — and nowhere else.
+    two_source_class = "depth_to_depth_host_precision";
+    two_source_records_.push_back({dst_key.key, transfer.source,
                                    transfer.start_tiles, transfer.end_tiles});
   }
   static const bool s_manifest = std::getenv("XE_METAL_TRANSITION_MANIFEST");

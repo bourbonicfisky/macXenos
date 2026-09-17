@@ -50,6 +50,28 @@ inline uint32_t MetalHostDepthPack(float host_depth,
   return xenos::Float32To20e4(host_depth * 2.0f, round_to_nearest_even);
 }
 
+// Depth-to-depth host precision (2026-09-17, Red Dead speckle). The shared
+// planner attaches a separate host-depth source to a transfer only when it
+// differs from the transfer source; a float24 depth target re-bound at another
+// MSAA count (or another key of the same encoding) therefore arrives as a bare
+// depth->depth transfer. The reference performs that transfer as a direct
+// host-float copy. Our canonical path packs the source to 20e4 words and
+// materializes the destination from them, so the destination would hold the
+// quantized value and every EQUAL/GEQUAL test of the following pass against
+// the exact value would fail. Pure decision: such a transfer carries the
+// transfer source itself as the host-precision source (same in-plan lane
+// refresh, same pointwise predicate). unorm24 round-trips exactly and is
+// excluded; a planner-provided source always takes precedence.
+inline bool MetalDepthToDepthCarriesHostPrecision(
+    bool lane_enabled, bool has_planner_host_source, bool src_is_depth,
+    bool dst_is_depth, xenos::DepthRenderTargetFormat src_format,
+    xenos::DepthRenderTargetFormat dst_format) {
+  return lane_enabled && !has_planner_host_source && src_is_depth &&
+         dst_is_depth &&
+         src_format == xenos::DepthRenderTargetFormat::kD24FS8 &&
+         dst_format == xenos::DepthRenderTargetFormat::kD24FS8;
+}
+
 // The provenance-complete two-source join record: the shared plan's FULL
 // identity — destination attachment, SELECTED host source, exact tile range.
 // Reducing this to bare ranges was the 8551 regression's shape (a different

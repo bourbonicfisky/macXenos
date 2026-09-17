@@ -380,6 +380,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // mirrors the Stage A env so the predicate can fail closed when both gates
   // are set (the misconfigured-arm guard reviewers required).
   bool host_depth_gate_enabled_ = false;
+  bool host_depth_d2d_enabled_ = true;
   bool f24_ps_engaged_ = false;
   // Host-precision depth lane parallel to the canonical words (10 MiB of
   // float, private) — allocated lazily only when the gate is on. The dummy

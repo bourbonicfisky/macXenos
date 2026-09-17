@@ -136,6 +136,47 @@ TEST_CASE("two-source selection is dest-keyed and intersection-clipped",
   }
 }
 
+TEST_CASE("depth-to-depth float24 transfers carry the source as host precision",
+          "[depth_semantics][host_depth][d2d]") {
+  using xenos::DepthRenderTargetFormat;
+  // The Red Dead shape: a kD24FS8 target re-bound at another MSAA count
+  // arrives as a bare depth->depth transfer (the planner drops a host source
+  // equal to the transfer source). The lane must engage on it.
+  CHECK(MetalDepthToDepthCarriesHostPrecision(
+      true, false, true, true, DepthRenderTargetFormat::kD24FS8,
+      DepthRenderTargetFormat::kD24FS8));
+
+  SECTION("a planner-provided host source takes precedence") {
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, true, true, true, DepthRenderTargetFormat::kD24FS8,
+        DepthRenderTargetFormat::kD24FS8));
+  }
+  SECTION("the lane gate (rollback, float24 PS conversion) fails closed") {
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        false, false, true, true, DepthRenderTargetFormat::kD24FS8,
+        DepthRenderTargetFormat::kD24FS8));
+  }
+  SECTION("unorm24 round-trips exactly and never engages") {
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, false, true, true, DepthRenderTargetFormat::kD24S8,
+        DepthRenderTargetFormat::kD24S8));
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, false, true, true, DepthRenderTargetFormat::kD24FS8,
+        DepthRenderTargetFormat::kD24S8));
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, false, true, true, DepthRenderTargetFormat::kD24S8,
+        DepthRenderTargetFormat::kD24FS8));
+  }
+  SECTION("color on either side is the planner's two-source domain") {
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, false, false, true, DepthRenderTargetFormat::kD24FS8,
+        DepthRenderTargetFormat::kD24FS8));
+    CHECK_FALSE(MetalDepthToDepthCarriesHostPrecision(
+        true, false, true, false, DepthRenderTargetFormat::kD24FS8,
+        DepthRenderTargetFormat::kD24FS8));
+  }
+}
+
 TEST_CASE("overlapping same-destination selections are dropped fail-closed",
           "[depth_semantics][host_depth][join]") {
   // The executor refreshes ALL lanes before ALL reconcile draws; overlapping
