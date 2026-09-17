@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <cstdlib>
+
 #include "xenia/kernel/xboxkrnl/xboxkrnl_modules.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
@@ -26,6 +28,21 @@ dword_result_t XexCheckExecutablePrivilege_entry(dword_t privilege) {
   // Privilege is bit position in xe_xex2_system_flags enum - so:
   // Privilege=6 -> 0x00000040 -> XEX_SYSTEM_INSECURE_SOCKETS
   uint32_t mask = 1 << privilege;
+
+  // XEX_SYSTEM_INSECURE_UTILITY_DRIVE (bit 11): answering true makes the
+  // cache-partition code statically linked into titles skip its STFC device
+  // registration and use the cache symlinks directly — the 2020 canary trick
+  // that let Halo 3 use cache0/cache1 with the null raw-partition device
+  // (commit d47f2a6ef), later dropped upstream. Halo 3 otherwise formats the
+  // raw partitions and reports a disc error. XE_INSECURE_UTILITY_DRIVE=0
+  // restores the pure header answer.
+  static const bool s_insecure_utility_drive = [] {
+    const char* v = std::getenv("XE_INSECURE_UTILITY_DRIVE");
+    return !v || v[0] != '0';
+  }();
+  if (s_insecure_utility_drive && privilege == 11) {
+    return 1;
+  }
 
   auto module = kernel_state()->GetExecutableModule();
   if (!module) {
