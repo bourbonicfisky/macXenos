@@ -80,4 +80,51 @@ TEST_CASE("Metal swizzle composition: RGGG and RRRR redirect channel reads",
 
 }  // namespace test
 }  // namespace gpu
+
+TEST_CASE("CTX1 blocks decode like the shared load shader",
+          "[texture_format][ctx1]") {
+  using xe::gpu::metal::DecodeCtx1Block;
+  // Endpoints (after the fetch-endian swap): bytes [g0, r0, g1, r1].
+  const uint8_t block[8] = {/*g0*/ 0x00, /*r0*/ 0x30, /*g1*/ 0x90, /*r1*/ 0xF0,
+                            // codes: texel 0 -> 0, texel 1 -> 1, texel 2 -> 2,
+                            // texel 3 -> 3 in row 0; rows 1-3 all code 1.
+                            0xE4, 0x55, 0x55, 0x55};
+  uint8_t rg[32];
+  DecodeCtx1Block(block, rg);
+  // Row 0: code 0 = endpoint 0, code 1 = endpoint 1, code 2 = 2/3 e0 + 1/3
+  // e1, code 3 = 1/3 e0 + 2/3 e1 (integer thirds, as the shader computes).
+  CHECK(rg[0] == 0x30);
+  CHECK(rg[1] == 0x00);
+  CHECK(rg[2] == 0xF0);
+  CHECK(rg[3] == 0x90);
+  CHECK(rg[4] == uint8_t((2 * 0x30 + 0xF0) / 3));
+  CHECK(rg[5] == uint8_t((2 * 0x00 + 0x90) / 3));
+  CHECK(rg[6] == uint8_t((0x30 + 2 * 0xF0) / 3));
+  CHECK(rg[7] == uint8_t((0x00 + 2 * 0x90) / 3));
+  // Rows 1-3: all endpoint 1.
+  for (int i = 4; i < 16; ++i) {
+    CHECK(rg[i * 2] == 0xF0);
+    CHECK(rg[i * 2 + 1] == 0x90);
+  }
+}
+
+TEST_CASE("DXT3A blocks expand 4-bit alpha to 8 bits",
+          "[texture_format][dxt3a]") {
+  using xe::gpu::metal::DecodeDxt3aBlock;
+  // Row 0 = 0x3210 (texel c = c), row 1 = 0xFFFF, row 2 = 0x0000,
+  // row 3 = 0x8888 (little-endian rows inside little-endian words).
+  const uint8_t block[8] = {0x10, 0x32, 0xFF, 0xFF, 0x00, 0x00, 0x88, 0x88};
+  uint8_t a[16];
+  DecodeDxt3aBlock(block, a);
+  CHECK(a[0] == 0);
+  CHECK(a[1] == 17);
+  CHECK(a[2] == 34);
+  CHECK(a[3] == 51);
+  for (int c = 0; c < 4; ++c) {
+    CHECK(a[4 + c] == 255);
+    CHECK(a[8 + c] == 0);
+    CHECK(a[12 + c] == 8 * 17);
+  }
+}
+
 }  // namespace xe

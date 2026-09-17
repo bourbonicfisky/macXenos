@@ -71,6 +71,14 @@ struct FormatPlan {
   // unorm24 / float20e4 rule (metal_texture_format_decode.h).
   bool decode_depth_unorm = false;
   bool decode_depth_float = false;
+  // If true, each 8-byte guest block is a CTX1 (Xenos two-channel normal-map
+  // compression) 4x4 block, CPU-decoded to RG8 (host_format RG8Unorm) with
+  // the shared load shader's interpolation (texture_load_ctx1.cs.xesl).
+  bool decode_ctx1 = false;
+  // If true, each 8-byte guest block is a DXT3A (4-bit alpha per texel, the
+  // DXT3 alpha block alone) 4x4 block, CPU-expanded to R8 (host_format
+  // R8Unorm), as Vulkan's texture_load_dxt3a.cs.xesl does.
+  bool decode_dxt3a = false;
 };
 
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
@@ -131,6 +139,28 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
     // --- 2026-09-04 engagement census additions (openspec
     // implement-metal-texture-formats). Host formats and host swizzles are
     // the shared D3D12/Vulkan table entries. ---
+    // --- 2026-09-17 Halo 3 census additions: k_DXT5A (alpha-only DXT5
+    // block == BC4 block layout) and k_CTX1 (Xenos normal-map compression,
+    // CPU-decoded to RG8 like Vulkan's load shader). Halo 3 fetches both
+    // hundreds of times per frame; unserved they left materials flat
+    // (neon weapon, blue skin). ---
+    case xenos::TextureFormat::k_DXT3A: {
+      FormatPlan plan = {true, true, 8, 3, 4, MTLPixelFormatR8Unorm};
+      plan.decode_dxt3a = true;
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
+      return plan;
+    }
+    case xenos::TextureFormat::k_DXT5A: {
+      FormatPlan plan = {bc_supported, true, 8, 3, 4, MTLPixelFormatBC4_RUnorm};
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR;
+      return plan;
+    }
+    case xenos::TextureFormat::k_CTX1: {
+      FormatPlan plan = {true, true, 8, 3, 4, MTLPixelFormatRG8Unorm};
+      plan.decode_ctx1 = true;
+      plan.host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG;
+      return plan;
+    }
     case xenos::TextureFormat::k_DXN: {
       // Two-channel BC5 normal maps (Dead or Alive 5, F.E.A.R.).
       FormatPlan plan = {bc_supported, true, 16, 4, 4, MTLPixelFormatBC5_RGUnorm,
@@ -939,7 +969,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   }
   if ((is_3d || depth > 1) &&
       (plan.decode_4444 || plan.decode_r16 || plan.decode_depth_unorm ||
-       plan.decode_depth_float)) {
+       plan.decode_depth_float || plan.decode_ctx1 || plan.decode_dxt3a)) {
     // The CPU-decoded plans are written per 2D level; no 3D/stacked consumer
     // of them has been measured. Fail closed to the null slot, observably.
     log_null("volume-decoded");
@@ -1267,6 +1297,45 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
     upload_data = decoded.data();
     upload_bytes_per_row = width * 4;
+  } else if (plan.decode_ctx1) {
+    // Mirrors texture_load_ctx1.cs.xesl / XeCTX1TwoBlocksRowToR8G8: after the
+    // fetch-endian swap, block word 0 holds the endpoints as bytes
+    // [g0, r0, g1, r1] and word 1 the 2-bit codes (texel (row r, col c) at
+    // bit 8*r + 2*c). Code -> weight of endpoint 1: 0->0, 1->3, 2->1, 3->2;
+    // endpoint 0 takes the remaining thirds. Result = sum / 3.
+    decoded.resize(size_t(width) * height * 2);
+    for (uint32_t by = 0; by < blocks_h; ++by) {
+      for (uint32_t bx = 0; bx < blocks_w; ++bx) {
+        uint8_t texels[16 * 2];
+        DecodeCtx1Block(&linear[(size_t(by) * blocks_w + bx) * 8], texels);
+        for (uint32_t r = 0; r < 4 && by * 4 + r < height; ++r) {
+          for (uint32_t c = 0; c < 4 && bx * 4 + c < width; ++c) {
+            std::memcpy(&decoded[(size_t(by * 4 + r) * width + bx * 4 + c) * 2],
+                        &texels[(r * 4 + c) * 2], 2);
+          }
+        }
+      }
+    }
+    upload_data = decoded.data();
+    upload_bytes_per_row = width * 2;
+  } else if (plan.decode_dxt3a) {
+    // After the fetch-endian swap, block word 0 holds rows 0-1 and word 1
+    // rows 2-3; a row is 16 bits with texel c's 4-bit alpha at bit 4*c.
+    // Expanded to 8 bits as a*17 (XeDXT3FourBlocksRowToA8).
+    decoded.resize(size_t(width) * height);
+    for (uint32_t by = 0; by < blocks_h; ++by) {
+      for (uint32_t bx = 0; bx < blocks_w; ++bx) {
+        uint8_t texels[16];
+        DecodeDxt3aBlock(&linear[(size_t(by) * blocks_w + bx) * 8], texels);
+        for (uint32_t r = 0; r < 4 && by * 4 + r < height; ++r) {
+          for (uint32_t c = 0; c < 4 && bx * 4 + c < width; ++c) {
+            decoded[size_t(by * 4 + r) * width + bx * 4 + c] = texels[r * 4 + c];
+          }
+        }
+      }
+    }
+    upload_data = decoded.data();
+    upload_bytes_per_row = width;
   }
 
   // Bring-up diagnostic: a texture that decodes to all-zero bytes renders pure
@@ -1298,7 +1367,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // Cubes likewise must be CUBE ARRAYS (texturecube_array in the MSL).
   const bool plan_cpu_decoded = plan.decode_4444 || plan.decode_r16 ||
                                 plan.decode_depth_unorm ||
-                                plan.decode_depth_float;
+                                plan.decode_depth_float || plan.decode_ctx1 ||
+                                plan.decode_dxt3a;
   if (is_cube && (width != height || plan_cpu_decoded)) {
     log_null("cube-shape");
     return 0;
