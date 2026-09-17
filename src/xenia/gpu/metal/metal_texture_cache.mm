@@ -502,7 +502,8 @@ static uint32_t xe_lineage_fnv(const void* p, size_t n) {
 // levels because it never supplies levels at all.
 static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
                                bool is_signed, uint32_t base, uint32_t width,
-                               uint32_t height, uint32_t pitch_texels,
+                               uint32_t height, uint32_t depth,
+                               uint32_t pitch_texels,
                                uint32_t* normalized_mip_min_out,
                                uint32_t* normalized_mip_max_out) {
   uint32_t mip_min_level = 0;
@@ -527,10 +528,15 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
           .packed
           ? 1u
           : 0u;
+  // A 3D texture's depth / a stacked texture's layer count is storage
+  // identity (bits 22-31; the format occupies 16-21). Single-layer fetches
+  // contribute 0 here, so their keys are unchanged.
+  uint32_t depth_bits = (depth - 1) & 0x3FFu;
   inputs.format_tiled_endian =
-      (uint32_t(fetch.format) << 16) | (uint32_t(is_signed) << 15) |
-      (uint32_t(fetch.dimension) << 12) | (base_packed << 9) |
-      (uint32_t(fetch.tiled) << 8) | uint32_t(fetch.endianness);
+      (depth_bits << 22) | (uint32_t(fetch.format) << 16) |
+      (uint32_t(is_signed) << 15) | (uint32_t(fetch.dimension) << 12) |
+      (base_packed << 9) | (uint32_t(fetch.tiled) << 8) |
+      uint32_t(fetch.endianness);
   // FinalizeTexture bakes the 12-bit guest fetch swizzle into the sampled
   // view, so two fetches identical in every other field but differing in
   // swizzle must NOT share a cache entry (the second would reuse the first's
@@ -888,13 +894,36 @@ uint32_t MetalTextureCache::GetTextureSlot(
       // path below.
     }
   }
-  // 2D (or stacked), 3D and CUBE are handled; 3D is sampled as its slice 0 as
-  // a 2D texture (the guest gpu_3d_to_2d_texture behavior). Cubes upload all
-  // 6 faces (guest layout: faces sequential, each a 32x32-block-aligned tiled
-  // slice) into an MTLTextureTypeCubeArray — MSC's ForceTextureArray turns
-  // the translated TextureCube SRV into texturecube_array. 1D is skipped.
+  // 2D (or stacked), 3D and CUBE are handled. 3D uploads every depth slice
+  // from the guest 32x32x4-block tiled layout (texture_address::Tiled3D) into
+  // an MTLTextureType3D — the translated shader samples a texture3d, and
+  // serving slice 0 as a 2D texture (the pre-2026-09-17 behavior) fed DOA5's
+  // 24x24x24 color-grading LUT garbage: every composite came out blue. Cubes
+  // upload all 6 faces (guest layout: faces sequential, each a
+  // 32x32-block-aligned tiled slice) into an MTLTextureTypeCubeArray — MSC's
+  // ForceTextureArray turns the translated TextureCube SRV into
+  // texturecube_array. 1D is skipped.
+  // Stacked 2D textures (fetch.stacked: a 2D array of stack_depth+1 layers,
+  // sampled by tfetch3D through the shader's 2D-array binding with an
+  // integer layer) upload every layer at its array-slice stride. DOA5's
+  // 24-layer color-grading LUT was served as layer 0 only, so every lookup
+  // clamped to one layer (blue 255 across the whole composite).
+  // XE_METAL_VOLUME_TEXTURES=0 restores the single-layer behavior for both
+  // 3D and stacked textures (exact rollback).
+  static const bool s_volume_textures = [] {
+    const char* v = std::getenv("XE_METAL_VOLUME_TEXTURES");
+    return !v || v[0] != '0';
+  }();
   bool is_3d = fetch.dimension == xenos::DataDimension::k3D;
   bool is_cube = fetch.dimension == xenos::DataDimension::kCube;
+  const bool is_stacked =
+      fetch.dimension == xenos::DataDimension::k2DOrStacked &&
+      fetch.stacked != 0;
+  const uint32_t depth =
+      !s_volume_textures ? 1u
+      : is_3d            ? uint32_t(fetch.size_3d.depth) + 1u
+      : is_stacked       ? uint32_t(fetch.size_2d.stack_depth) + 1u
+                         : 1u;
   if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d &&
       !is_cube) {
     log_null("dim");
@@ -907,6 +936,14 @@ uint32_t MetalTextureCache::GetTextureSlot(
   }
   if (is_signed && plan.host_format_signed != MTLPixelFormatInvalid) {
     plan.host_format = plan.host_format_signed;
+  }
+  if ((is_3d || depth > 1) &&
+      (plan.decode_4444 || plan.decode_r16 || plan.decode_depth_unorm ||
+       plan.decode_depth_float)) {
+    // The CPU-decoded plans are written per 2D level; no 3D/stacked consumer
+    // of them has been measured. Fail closed to the null slot, observably.
+    log_null("volume-decoded");
+    return 0;
   }
 
   uint32_t width = (is_3d ? fetch.size_3d.width : fetch.size_2d.width) + 1;
@@ -931,8 +968,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t normalized_mip_min = 0;
   uint32_t normalized_mip_max = 0;
   uint64_t key =
-      MakeTextureKey(fetch, is_signed, base, width, height, pitch_texels,
-                     &normalized_mip_min, &normalized_mip_max);
+      MakeTextureKey(fetch, is_signed, base, width, height, depth,
+                     pitch_texels, &normalized_mip_min, &normalized_mip_max);
   auto it = cache_.find(key);
 
   // Lineage probe: this fetch of the watched base is the composite's temporal
@@ -1009,6 +1046,25 @@ uint32_t MetalTextureCache::GetTextureSlot(
   const uint32_t blocks_h_read = blocks_h + base_yb;
 
   uint32_t blocks_h_aligned = (blocks_h_read + 31u) & ~31u;
+  // 3D: the guest layout's per-slice stride (32-aligned block rows; the
+  // tiled addresser's height_aligned) and the base level's full extent —
+  // the same rules the shared layout computes for every backend.
+  uint32_t z_slice_stride_block_rows = blocks_h_aligned;
+  uint32_t z_slice_stride_bytes_linear = 0;
+  uint32_t array_slice_stride_bytes = 0;
+  uint32_t volume_extent_bytes = 0;
+  if (is_3d || depth > 1) {
+    texture_util::TextureGuestLayout layout_v =
+        texture_util::GetGuestTextureLayout(
+            fetch.dimension, fetch.pitch, width, height, depth, tiled,
+            fetch.format, fetch.packed_mips != 0, /*has_base=*/true,
+            normalized_mip_max);
+    z_slice_stride_block_rows = layout_v.base.z_slice_stride_block_rows;
+    z_slice_stride_bytes_linear =
+        layout_v.base.row_pitch_bytes * z_slice_stride_block_rows;
+    array_slice_stride_bytes = layout_v.base.array_slice_stride_bytes;
+    volume_extent_bytes = layout_v.base.level_data_extent_bytes;
+  }
   // Non-cube extent shared with the routed serve's trace records
   // (metal_texture_load_eligibility.h) — recorded ranges must be identical
   // by construction across producers.
@@ -1016,6 +1072,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
       is_cube ? uint32_t(std::min<size_t>(
                     size_t(pitch_blocks_aligned) * blocks_h_aligned * bpb * 6,
                     size_t(kPhysicalSize - base)))
+      : (is_3d || depth > 1)
+          ? uint32_t(std::min<size_t>(volume_extent_bytes,
+                                      size_t(kPhysicalSize - base)))
               : ComputeWatchedBaseBytes(pitch_blocks_aligned, blocks_h_read,
                                         bpb, base, kPhysicalSize);
   // WATCH-ONLY admission for the pages this untile is about to read directly.
@@ -1044,30 +1103,48 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // resolve dests every frame (SF4: 1280x720 each frame on the GPU thread),
   // and the single-threaded per-block loop was a measurable slice of the
   // live frame.
-  std::vector<uint8_t> linear(size_t(blocks_w) * blocks_h * bpb);
-  auto untile_row = [&](size_t by) {
+  // Slice-major staging: slice z occupies [z * blocks_h * blocks_w * bpb, ...)
+  // (Metal's bytesPerImage for the 3D upload); depth is 1 for everything
+  // but 3D, so 2D and cube keep their exact bytes.
+  const size_t slice_bytes = size_t(blocks_w) * blocks_h * bpb;
+  std::vector<uint8_t> linear(slice_bytes * depth);
+  auto untile_row = [&](size_t row) {
+    const uint32_t z = uint32_t(row / blocks_h);
+    const uint32_t by = uint32_t(row % blocks_h);
     for (uint32_t bx = 0; bx < blocks_w; ++bx) {
       uint32_t src_off;
-      if (tiled) {
-        src_off = uint32_t(texture_address::Tiled2D(
-            int32_t(bx + base_xb), int32_t(by + base_yb), pitch_blocks_aligned,
-            plan.block_log2));
+      if (is_3d) {
+        if (tiled) {
+          src_off = uint32_t(texture_address::Tiled3D(
+              int32_t(bx), int32_t(by), int32_t(z), pitch_blocks_aligned,
+              z_slice_stride_block_rows, plan.block_log2));
+        } else {
+          src_off = z * z_slice_stride_bytes_linear +
+                    uint32_t(by * pitch_blocks + bx) * bpb;
+        }
+      } else if (tiled) {
+        src_off = z * array_slice_stride_bytes +
+                  uint32_t(texture_address::Tiled2D(
+                      int32_t(bx + base_xb), int32_t(by + base_yb),
+                      pitch_blocks_aligned, plan.block_log2));
       } else {
-        src_off = uint32_t((by + base_yb) * pitch_blocks + bx + base_xb) * bpb;
+        src_off = z * array_slice_stride_bytes +
+                  uint32_t((by + base_yb) * pitch_blocks + bx + base_xb) * bpb;
       }
-      uint8_t* dst = &linear[(by * blocks_w + bx) * bpb];
+      uint8_t* dst = &linear[(row * blocks_w + bx) * bpb];
       if (src_off + bpb <= max_src_bytes) {
         std::memcpy(dst, guest + src_off, bpb);
         SwapEndian(dst, bpb, endian);
       }
     }
   };
-  if (size_t(blocks_w) * blocks_h * bpb >= 512 * 1024) {
-    dispatch_apply(blocks_h, DISPATCH_APPLY_AUTO,
-                   ^(size_t by) { untile_row(by); });
+  const size_t total_rows = size_t(blocks_h) * depth;
+  if (linear.size() >= 512 * 1024) {
+    dispatch_apply(total_rows, DISPATCH_APPLY_AUTO,
+                   ^(size_t row) { untile_row(row); });
   } else {
-    for (uint32_t by = 0; by < blocks_h; ++by) {
-      untile_row(by);
+    for (size_t row = 0; row < total_rows; ++row) {
+      untile_row(row);
     }
   }
 
@@ -1207,9 +1284,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (s_tex_log < 24) {
     ++s_tex_log;
     XELOGI(
-        "MetalTex: fmt={} {}x{} base={:08X} pitch_t={} tiled={} endian={} "
+        "MetalTex: fmt={} {}x{}x{} base={:08X} pitch_t={} tiled={} endian={} "
         "swz={:03X} slot={} {}",
-        uint32_t(fetch.format), width, height, base, pitch_texels, tiled,
+        uint32_t(fetch.format), width, height, depth, base, pitch_texels, tiled,
         uint32_t(endian), fetch.swizzle & 0xFFF, next_slot_,
         all_zero ? "ALL-ZERO(black)" : "hasdata");
   }
@@ -1243,7 +1320,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
       std::getenv("XE_METAL_MIPS_UNCOMP_ONLY") != nullptr;
   bool mip_format_allowed = !(s_mips_dxt_only && !plan.compressed) &&
                             !(s_mips_uncomp_only && plan.compressed);
-  if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && mip_addr &&
+  if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && depth == 1 &&
+      mip_addr &&
       mip_addr < kPhysicalSize && normalized_mip_max > 0 &&
       !plan_cpu_decoded) {
     // Same normalized value the key was built from — see the normalization
@@ -1282,11 +1360,16 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-  desc.textureType = is_cube ? MTLTextureTypeCubeArray : MTLTextureType2DArray;
+  desc.textureType = is_3d     ? MTLTextureType3D
+                     : is_cube ? MTLTextureTypeCubeArray
+                               : MTLTextureType2DArray;
   desc.pixelFormat = plan.host_format;
   desc.width = width;
   desc.height = height;
-  desc.arrayLength = 1;  // For cube arrays this is the CUBE count (6 slices).
+  desc.depth = is_3d ? depth : 1;
+  // For cube arrays this is the CUBE count (6 slices); stacked textures are
+  // an array of their layers.
+  desc.arrayLength = (!is_3d && !is_cube) ? depth : 1;
   desc.mipmapLevelCount = host_levels;
   desc.usage = MTLTextureUsageShaderRead;
   desc.storageMode = MTLStorageModeShared;
@@ -1296,13 +1379,33 @@ uint32_t MetalTextureCache::GetTextureSlot(
     return 0;
   }
   // For BC formats bytesPerRow is a row of blocks; MTLRegion is still in texels
-  // and Metal handles partial edge blocks. Slice 0 of the single array layer.
-  [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
-             mipmapLevel:0
-                   slice:0
-               withBytes:upload_data
-             bytesPerRow:upload_bytes_per_row
-           bytesPerImage:0];
+  // and Metal handles partial edge blocks. Slice 0 of the single array layer;
+  // a 3D texture takes the whole slice-major volume in one region.
+  if (is_3d) {
+    [texture replaceRegion:MTLRegionMake3D(0, 0, 0, width, height, depth)
+               mipmapLevel:0
+                     slice:0
+                 withBytes:upload_data
+               bytesPerRow:upload_bytes_per_row
+             bytesPerImage:size_t(upload_bytes_per_row) * blocks_h];
+  } else {
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+               mipmapLevel:0
+                     slice:0
+                 withBytes:upload_data
+               bytesPerRow:upload_bytes_per_row
+             bytesPerImage:0];
+    // Stacked layers 1..depth-1 (slice-major in the staging buffer; the
+    // decoded plans are excluded above, so upload_data is `linear`).
+    for (uint32_t z = 1; z < depth; ++z) {
+      [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                 mipmapLevel:0
+                       slice:z
+                   withBytes:linear.data() + size_t(z) * slice_bytes
+                 bytesPerRow:upload_bytes_per_row
+               bytesPerImage:0];
+    }
+  }
   // Cube faces 1..5: guest layout is face-major — each face is a full tiled
   // (or linear) slice whose block grid is padded to 32x32 blocks
   // (texture_extent.cc guest rules); re-untile each face at its offset.
@@ -1471,12 +1574,14 @@ uint32_t MetalTextureCache::FinalizeTexture(
         GuestSwizzleComponentToMetal((guest_swizzle >> 3) & 0b111),
         GuestSwizzleComponentToMetal((guest_swizzle >> 6) & 0b111),
         GuestSwizzleComponentToMetal((guest_swizzle >> 9) & 0b111));
+    // The view keeps the base texture's type (2D array, cube array or 3D):
+    // the translated shader's resource type must match what it samples.
     id<MTLTexture> view = [texture
         newTextureViewWithPixelFormat:MTLPixelFormat(host_format)
-                          textureType:is_cube ? MTLTextureTypeCubeArray
-                                              : MTLTextureType2DArray
+                          textureType:texture.textureType
                                levels:NSMakeRange(0, host_levels)
-                               slices:NSMakeRange(0, is_cube ? 6 : 1)
+                               slices:NSMakeRange(0, is_cube ? 6
+                                                              : texture.arrayLength)
                               swizzle:channels];
     if (!view) {
       binding_allocation_failed_ = true;
