@@ -511,6 +511,18 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
       ledger_bytes = bytes_read;
+      if (cvars::io_ledger_diag && bytes_read >= 16) {
+        // First 16 bytes of what the guest received (content check).
+        const uint8_t* hb = kernel_memory()->TranslateVirtual(buffer.guest_address());
+        XELOGI("IoLedger DATA {} off={:X} len={:X} -> {:02X}{:02X}{:02X}{:02X} "
+               "{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X} "
+               "{:02X}{:02X}{:02X}{:02X}",
+               file->entry() ? file->entry()->name() : "?",
+               byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : ~0ull,
+               uint32_t(buffer_length), hb[0], hb[1], hb[2], hb[3], hb[4], hb[5],
+               hb[6], hb[7], hb[8], hb[9], hb[10], hb[11], hb[12], hb[13],
+               hb[14], hb[15]);
+      }
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;
@@ -766,6 +778,12 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
     ev->Set(0, false);
   }
 
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger WRITE {} off={:X} len={:X} -> {:08X}",
+           file && file->entry() ? file->entry()->name() : "?",
+           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : ~0ull,
+           uint32_t(buffer_length), uint32_t(result));
+  }
   return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtWriteFile, kFileSystem, kImplemented);
@@ -888,9 +906,15 @@ dword_result_t NtQueryFullAttributesFile_entry(
     file_info->end_of_file = entry->size();
     file_info->attributes = entry->attributes();
 
+    if (cvars::io_ledger_diag) {
+      XELOGI("IoLedger ATTR '{}' -> 00000000", target_path);
+    }
     return X_STATUS_SUCCESS;
   }
 
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger ATTR '{}' -> C0000034 (no such file)", target_path);
+  }
   return X_STATUS_NO_SUCH_FILE;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtQueryFullAttributesFile, kFileSystem, kImplemented);
@@ -924,6 +948,11 @@ dword_result_t NtQueryDirectoryFile_entry(
     }
   } else {
     result = X_STATUS_NO_SUCH_FILE;
+  }
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger QDIR {} pattern='{}' restart={} -> {:08X}",
+           file && file->entry() ? file->entry()->absolute_path() : "?", name,
+           uint32_t(restart_scan), uint32_t(result));
   }
 
   if (XFAILED(result)) {
@@ -1049,8 +1078,11 @@ dword_result_t NtDeviceIoControlFile_entry(
     xe::store_and_swap<uint64_t>(output_buffer, 0);
     xe::store_and_swap<uint64_t>(output_buffer + 8, cache_size);
   } else {
-    XELOGD("NtDeviceIoControlFile(0x{:X}) - unhandled IOCTL!",
-           uint32_t(io_control_code));
+    // Warning level: a Release build filters Debug, and an unhandled IOCTL is
+    // exactly the kind of failure a title turns into a "dirty disc" error.
+    XELOGW("NtDeviceIoControlFile(0x{:X}) - unhandled IOCTL! (in={} out={})",
+           uint32_t(io_control_code), uint32_t(input_buffer_len),
+           uint32_t(output_buffer_len));
     assert_always();
     return X_STATUS_INVALID_PARAMETER;
   }
@@ -1150,6 +1182,15 @@ dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle,
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem, kStub);
+
+// Same contract as the by-handle form: no per-volume mount state exists, so
+// acknowledging success is complete behavior. Halo 3's cache-partition code
+// calls this (previously an undefined extern) right before its disc check.
+dword_result_t IoDismountVolume_entry(lpvoid_t device_object,
+                                      const ppc_context_t& ctx) {
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolume, kFileSystem, kStub);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

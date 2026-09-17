@@ -19,6 +19,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_content_device.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -601,6 +602,14 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
+  {
+    // The title decided a disc read failed; name the guest call site so the
+    // I/O ledger can be read backwards from here.
+    auto* ctx = cpu::ThreadState::Get() ? cpu::ThreadState::Get()->context()
+                                        : nullptr;
+    XELOGE("XamShowDirtyDiscErrorUI called (user {}, guest lr {:08X})",
+           uint32_t(user_index), ctx ? uint32_t(ctx->lr) : 0u);
+  }
   if (cvars::headless) {
     assert_always();
     exit(1);

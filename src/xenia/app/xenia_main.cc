@@ -114,8 +114,10 @@ DEFINE_path(
 
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 
-DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
-UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
+// mount_cache is defined in emulator.cc so the launch path can honor a
+// per-title override (a game config that sets it false unmounts the cache
+// devices before the title runs).
+DECLARE_bool(mount_cache);
 
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");

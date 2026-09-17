@@ -1,0 +1,4 @@
+# macXenos per-title config: Halo 3 formats its own cache filesystem on the raw
+# HDD partitions when cache0: is mounted and rejects the emulated partitions.
+[Storage]
+mount_cache = false

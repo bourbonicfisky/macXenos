@@ -67,6 +67,9 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #endif  // XE_ARCH
 
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
+
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
               "General");
@@ -1605,6 +1608,23 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           ->PostGameConfigLoad();
     }
     game_config_load_callback_loop_next_index_ = SIZE_MAX;
+
+    // Per-title cache mount policy. The cache devices are mounted before the
+    // title is known (xenia_main), so a game config that sets
+    // mount_cache = false takes effect here by unmounting them. Halo 3
+    // (4D5307E6) formats its own STFC cache filesystem on the raw HDD
+    // partitions when cache0: exists and rejects the emulated partitions
+    // ("Disc Read Error"); with no cache mount it boots to its menus.
+    if (!cvars::mount_cache && file_system_) {
+      for (const char* device : {"\\CACHE0", "\\CACHE1", "\\CACHE"}) {
+        file_system_->UnregisterDevice(device);
+      }
+      for (const char* link : {"cache0:", "cache1:", "cache:"}) {
+        file_system_->UnregisterSymbolicLink(link);
+      }
+      XELOGI("Cache devices unmounted for title {} (mount_cache=false)",
+             title_id);
+    }
 
     const auto db = kernel_state_->module_xdbf(module);
 

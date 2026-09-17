@@ -17,6 +17,8 @@
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
 
+DECLARE_bool(io_ledger_diag);
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
@@ -144,6 +146,11 @@ dword_result_t NtQueryInformationFile_entry(
     io_status_block_ptr->information = out_length;
   }
 
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger QINFO {} class={} -> {:08X}",
+           file->entry() ? file->entry()->absolute_path() : "?",
+           uint32_t(info_class), uint32_t(status));
+  }
   return status;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtQueryInformationFile, kFileSystem, kImplemented);
@@ -392,6 +399,8 @@ dword_result_t NtQueryVolumeInformationFile_entry(
       break;
     }
     default: {
+      XELOGW("NtQuery*InformationFile: unhandled info class {}",
+             uint32_t(info_class));
       assert_always();
       out_length = 0;
       break;
@@ -403,6 +412,11 @@ dword_result_t NtQueryVolumeInformationFile_entry(
     io_status_block_ptr->information = out_length;
   }
 
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger QVOL {} class={} -> {:08X}",
+           file->entry() ? file->entry()->absolute_path() : "?",
+           uint32_t(info_class), uint32_t(status));
+  }
   return status;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtQueryVolumeInformationFile, kFileSystem,

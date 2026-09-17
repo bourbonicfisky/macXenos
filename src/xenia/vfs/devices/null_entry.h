@@ -11,6 +11,7 @@
 #define XENIA_VFS_DEVICES_NULL_ENTRY_H_
 
 #include <string>
+#include <vector>
 
 #include "xenia/base/filesystem.h"
 #include "xenia/vfs/entry.h"
@@ -32,8 +33,13 @@ class NullEntry : public Entry {
 
   bool can_map() const override { return false; }
 
+  // Backing store for raw-partition contents (see null_file.cc): what the
+  // guest writes here is what it reads back. Sparse growth on write, bounded.
+  std::vector<uint8_t>& store() { return store_; }
+
  private:
   friend class NullDevice;
+  std::vector<uint8_t> store_;
 
   bool DeleteEntryInternal(Entry* entry) override;
 };
