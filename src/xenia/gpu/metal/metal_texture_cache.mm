@@ -960,6 +960,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
     return 0;
   }
   FormatPlan plan = PlanForFormat(fetch.format, bc_supported_);
+  // Diagnostic (XE_METAL_DISABLE_FMT=<n>): serve the null texture for one
+  // guest format, to attribute a defect to that format's content.
+  static const int s_disable_fmt = [] {
+    const char* v = std::getenv("XE_METAL_DISABLE_FMT");
+    return v ? atoi(v) : -1;
+  }();
+  if (s_disable_fmt >= 0 && int(fetch.format) == s_disable_fmt) {
+    plan.supported = false;
+  }
   if (!plan.supported) {
     log_null("fmt");
     return 0;
