@@ -4567,9 +4567,25 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   uint64_t snap_key = (uint64_t(dest_base) << 1) |
                       (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0);
   auto it = resolve_snapshots_.find(snap_key);
+  // EXACT-size reuse (2026-09-17, DOA5). The snapshot is served to fetches
+  // that sample it with NORMALIZED coordinates, so its texture dimensions
+  // are part of what the consumer sees: a 1024x608 resolve reusing a
+  // 1280x720 snapshot ("large enough") placed the scene in the top-left 80%
+  // x 84% of every fetch with stale generations around it — DOA5's fight
+  // rendered inside a hard-edged box, and its 640x720 character-select
+  // panel squeezed into the left half of the panel. A size change means a
+  // new texture; the old one retires through the deferred list below.
+  // XE_METAL_SNAPSHOT_LOOSE_REUSE=1 restores the "large enough" rule (A/B).
+  static const bool s_loose_reuse = [] {
+    const char* v = std::getenv("XE_METAL_SNAPSHOT_LOOSE_REUSE");
+    return v && v[0] == '1';
+  }();
   if (it != resolve_snapshots_.end() && it->second.texture &&
-      it->second.width >= width && it->second.height >= height &&
-      it->second.pixel_format == pixel_format) {
+      it->second.pixel_format == pixel_format &&
+      (s_loose_reuse ? (it->second.width >= width &&
+                        it->second.height >= height)
+                     : (it->second.width == width &&
+                        it->second.height == height))) {
     return it->second.texture;
   }
   if (it != resolve_snapshots_.end() && it->second.texture) {
