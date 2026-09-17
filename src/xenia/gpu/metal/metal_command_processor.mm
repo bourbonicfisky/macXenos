@@ -6649,6 +6649,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                            MetalUploadAllocation* out) -> bool {
     if (!upload_arena_->Allocate(bytes, 256, out)) return false;
     std::memcpy(out->cpu_ptr, &regs[reg_base], bytes);
+    // Diagnostic (XE_METAL_FORCE_BOOL=<index>:<0|1>): override one guest
+    // boolean constant in the uploaded block, to attribute a defect to a
+    // cexec/branch it gates.
+    static const std::pair<int, int> s_force_bool = [] {
+      const char* v = std::getenv("XE_METAL_FORCE_BOOL");
+      int idx = -1, val = 0;
+      if (v && std::sscanf(v, "%d:%d", &idx, &val) == 2) return std::make_pair(idx, val);
+      return std::make_pair(-1, 0);
+    }();
+    if (s_force_bool.first >= 0 && s_force_bool.first < 256 &&
+        reg_base == XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031) {
+      uint32_t* words = static_cast<uint32_t*>(out->cpu_ptr);
+      uint32_t w = uint32_t(s_force_bool.first) >> 5;
+      uint32_t bit = 1u << (uint32_t(s_force_bool.first) & 31u);
+      words[w] = s_force_bool.second ? (words[w] | bit) : (words[w] & ~bit);
+    }
     return true;
   };
   MetalUploadAllocation bool_loop_alloc{};
