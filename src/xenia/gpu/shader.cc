@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/shader.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -33,6 +35,36 @@ Shader::Shader(xenos::ShaderType shader_type, uint64_t ucode_data_hash,
   } else {
     std::memcpy(ucode_data_.data(), ucode_dwords,
                 sizeof(uint32_t) * ucode_dword_count);
+  }
+  // Backend-agnostic diagnostic (XE_GPU_UCODE_PATCH=<hex hash>:<path>):
+  // substitute this shader's microcode (host-order dwords in the file) while
+  // keeping its hash, so a probe variant of a real shader (e.g. one exporting
+  // an intermediate register) runs through every backend's translator and
+  // the per-draw captures can be compared across backends.
+  struct UcodePatch {
+    uint64_t hash = 0;
+    std::vector<uint32_t> words;
+  };
+  static const UcodePatch s_ucode_patch = [] {
+    UcodePatch patch;
+    const char* v = std::getenv("XE_GPU_UCODE_PATCH");
+    const char* colon = v ? std::strchr(v, ':') : nullptr;
+    if (colon) {
+      patch.hash = std::strtoull(v, nullptr, 16);
+      FILE* f = std::fopen(colon + 1, "rb");
+      if (f) {
+        uint32_t word;
+        while (std::fread(&word, sizeof(word), 1, f) == 1) {
+          patch.words.push_back(word);
+        }
+        std::fclose(f);
+      }
+    }
+    return patch;
+  }();
+  if (s_ucode_patch.hash && s_ucode_patch.hash == ucode_data_hash &&
+      !s_ucode_patch.words.empty()) {
+    ucode_data_ = s_ucode_patch.words;
   }
 }
 

@@ -1639,11 +1639,113 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
         // shader has memexport.
         // TODO(Triang3l || JoelLinn): Handle this properly in the render
         // backends.
+        // Backend-agnostic diagnostic (XE_GPU_FORCE_FLOAT=<reg>:<x>,<y>,<z>,<w>
+        // with reg 0..511 = SHADER_CONSTANT_<reg>): pin one float constant
+        // for every draw, restored right after, so constant/interpolant flow
+        // can be A/B'd identically on every backend (dual-backend
+        // attribution; the Metal-only XE_METAL_FORCE_FLOAT is its sibling).
+        struct ForceFloatConstant {
+          bool set = false;
+          uint32_t reg = 0;
+          uint32_t words[4] = {};
+        };
+        static const ForceFloatConstant s_force_float = [] {
+          ForceFloatConstant f;
+          const char* v = std::getenv("XE_GPU_FORCE_FLOAT");
+          float x = 0, y = 0, z = 0, w = 0;
+          unsigned reg = 0;
+          if (v && std::sscanf(v, "%u:%f,%f,%f,%f", &reg, &x, &y, &z, &w) ==
+                       5 &&
+              reg < 512) {
+            f.set = true;
+            f.reg = XE_GPU_REG_SHADER_CONSTANT_000_X + reg * 4;
+            float values[4] = {x, y, z, w};
+            std::memcpy(f.words, values, sizeof(f.words));
+          }
+          return f;
+        }();
+        // Sibling (XE_GPU_FORCE_REG=<hex reg>:<hex value>[,...]): pin up to
+        // four raw registers for every draw (e.g. 2200:0 = RB_DEPTHCONTROL
+        // with depth and stencil tests off), restored right after.
+        struct ForceReg {
+          uint32_t count = 0;
+          uint32_t reg[4] = {};
+          uint32_t value[4] = {};
+        };
+        static const ForceReg s_force_reg = [] {
+          ForceReg f;
+          const char* v = std::getenv("XE_GPU_FORCE_REG");
+          while (v && *v && f.count < 4) {
+            unsigned reg = 0, value = 0;
+            int consumed = 0;
+            if (std::sscanf(v, "%x:%x%n", &reg, &value, &consumed) != 2 ||
+                reg >= RegisterFile::kRegisterCount) {
+              break;
+            }
+            f.reg[f.count] = reg;
+            f.value[f.count] = value;
+            ++f.count;
+            v += consumed;
+            if (*v == ',') {
+              ++v;
+            }
+          }
+          return f;
+        }();
+        uint32_t force_reg_saved[4] = {};
+        for (uint32_t i = 0; i < s_force_reg.count; ++i) {
+          force_reg_saved[i] = register_file_->values[s_force_reg.reg[i]];
+          register_file_->values[s_force_reg.reg[i]] = s_force_reg.value[i];
+        }
+        // Diagnostic (XE_GPU_DUMP_REGS_AT=<draw>): print the render-state
+        // registers a draw is issued with (backend-independent values).
+        static const int64_t s_dump_regs_at = [] {
+          const char* v = std::getenv("XE_GPU_DUMP_REGS_AT");
+          return v ? int64_t(std::atoll(v)) : int64_t(-1);
+        }();
+        if (int64_t(draw_index) == s_dump_regs_at) {
+          const uint32_t* rv = register_file_->values;
+          XELOGW(
+              "DrawRegs draw={} prim={} idx={} DEPTHCONTROL={:08X} "
+              "STENCILREFMASK={:08X} BLENDCONTROL0={:08X} COLORCONTROL={:08X} "
+              "COLOR_MASK={:08X} COLOR_INFO={:08X} DEPTH_INFO={:08X} "
+              "MODECONTROL={:08X} SURFACE_INFO={:08X} SU_SC_MODE_CNTL={:08X} "
+              "CL_VTE_CNTL={:08X} CL_CLIP_CNTL={:08X} PROGRAM_CNTL={:08X} "
+              "CONTEXT_MISC={:08X} ALPHA_REF={:08X} BLEND_RGBA={:08X},{:08X},"
+              "{:08X},{:08X} VPORT_Z={:08X},{:08X}",
+              draw_index, uint32_t(vgt_draw_initiator.prim_type),
+              vgt_draw_initiator.num_indices, rv[XE_GPU_REG_RB_DEPTHCONTROL],
+              rv[XE_GPU_REG_RB_STENCILREFMASK], rv[XE_GPU_REG_RB_BLENDCONTROL0],
+              rv[XE_GPU_REG_RB_COLORCONTROL], rv[XE_GPU_REG_RB_COLOR_MASK],
+              rv[XE_GPU_REG_RB_COLOR_INFO], rv[XE_GPU_REG_RB_DEPTH_INFO],
+              rv[XE_GPU_REG_RB_MODECONTROL], rv[XE_GPU_REG_RB_SURFACE_INFO],
+              rv[XE_GPU_REG_PA_SU_SC_MODE_CNTL], rv[XE_GPU_REG_PA_CL_VTE_CNTL],
+              rv[XE_GPU_REG_PA_CL_CLIP_CNTL], rv[XE_GPU_REG_SQ_PROGRAM_CNTL],
+              rv[XE_GPU_REG_SQ_CONTEXT_MISC], rv[XE_GPU_REG_RB_ALPHA_REF],
+              rv[XE_GPU_REG_RB_BLEND_RED], rv[XE_GPU_REG_RB_BLEND_RED + 1],
+              rv[XE_GPU_REG_RB_BLEND_RED + 2], rv[XE_GPU_REG_RB_BLEND_RED + 3],
+              rv[XE_GPU_REG_PA_CL_VPORT_ZSCALE], rv[XE_GPU_REG_PA_CL_VPORT_ZOFFSET]);
+        }
+        uint32_t force_float_saved[4] = {};
+        if (s_force_float.set) {
+          std::memcpy(force_float_saved,
+                      &register_file_->values[s_force_float.reg],
+                      sizeof(force_float_saved));
+          std::memcpy(&register_file_->values[s_force_float.reg],
+                      s_force_float.words, sizeof(force_float_saved));
+        }
         draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
             vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
             is_indexed ? &index_buffer_info : nullptr,
             xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
                                        vgt_draw_initiator.prim_type));
+        if (s_force_float.set) {
+          std::memcpy(&register_file_->values[s_force_float.reg],
+                      force_float_saved, sizeof(force_float_saved));
+        }
+        for (uint32_t i = 0; i < s_force_reg.count; ++i) {
+          register_file_->values[s_force_reg.reg[i]] = force_reg_saved[i];
+        }
         if (draw_succeeded &&
             int32_t(draw_index) == cvars::replay_duplicate_draw_stencil) {
           // Diagnostic: re-issue the identical draw with zfunc=LESS, depth

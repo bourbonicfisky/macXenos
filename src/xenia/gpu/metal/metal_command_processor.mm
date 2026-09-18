@@ -848,6 +848,52 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
   }
   id<MTLCommandQueue> queue =
       (__bridge id<MTLCommandQueue>)provider->command_queue();
+  // XE_METAL_DUMP_SNAPSHOT=<hexbase> at a --capture_edram_at draw: the GPU is
+  // idle here, so the resolve snapshot for that base is EXACTLY what the
+  // captured draw samples. Raw texels to /tmp/xe_snapat_<base>_<draw>.bin.
+  {
+    static const uint32_t s_dump_snapshot_at = [] {
+      const char* v = std::getenv("XE_METAL_DUMP_SNAPSHOT");
+      return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+    }();
+    void* snap = s_dump_snapshot_at
+                     ? render_target_cache_->GetResolveSnapshot(s_dump_snapshot_at)
+                     : nullptr;
+    if (snap) {
+      @autoreleasepool {
+        id<MTLTexture> st = (__bridge id<MTLTexture>)snap;
+        uint32_t tw = uint32_t(st.width), th = uint32_t(st.height);
+        id<MTLBuffer> rb =
+            [st.device newBufferWithLength:size_t(tw) * th * 4
+                                   options:MTLResourceStorageModeShared];
+        if (rb) {
+          id<MTLCommandBuffer> dcb = [queue commandBuffer];
+          id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+          [dbl copyFromTexture:st
+                    sourceSlice:0
+                    sourceLevel:0
+                   sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(tw, th, 1)
+                       toBuffer:rb
+              destinationOffset:0
+         destinationBytesPerRow:tw * 4
+       destinationBytesPerImage:size_t(tw) * th * 4];
+          [dbl endEncoding];
+          [dcb commit];
+          [dcb waitUntilCompleted];
+          std::string path = fmt::format("/tmp/xe_snapat_{:08X}_{}.bin",
+                                         s_dump_snapshot_at, trace_draw_index_);
+          FILE* f = fopen(path.c_str(), "wb");
+          if (f) {
+            fwrite(rb.contents, 1, size_t(tw) * th * 4, f);
+            fclose(f);
+            XELOGW("MetalSnapshotAt: draw={} wrote {} ({}x{} fmt={})",
+                   trace_draw_index_, path, tw, th, uint32_t(st.pixelFormat));
+          }
+        }
+      }
+    }
+  }
   if (render_target_cache_->sample_edram_enabled()) {
     // Canonical mode capture contract: snapshots, full dumps, and the base
     // command processor's per-tile/sample hashes all read the same private raw
@@ -6532,6 +6578,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   std::memcpy(system_alloc.cpu_ptr, &system_constants, sizeof(system_constants));
 
   // Float constants, packed per the shader's float_bitmap (b1). Vertex + pixel.
+  // Diagnostic (XE_METAL_FORCE_FLOAT=<v|p><index>:<x>,<y>,<z>,<w>): pin one
+  // guest float constant of the vertex (v) or pixel (p) bank for every draw
+  // (interpolant/constant flow attribution, e.g. Halo 3 light-volume o4).
+  struct ForceFloat {
+    bool set = false;
+    bool pixel = false;
+    uint32_t index = 0;
+    float value[4] = {};
+  };
+  static const ForceFloat s_force_float = [] {
+    ForceFloat f;
+    const char* v = std::getenv("XE_METAL_FORCE_FLOAT");
+    if (v && (v[0] == 'v' || v[0] == 'p')) {
+      f.pixel = v[0] == 'p';
+      if (std::sscanf(v + 1, "%u:%f,%f,%f,%f", &f.index, &f.value[0],
+                      &f.value[1], &f.value[2], &f.value[3]) == 5 &&
+          f.index < 256) {
+        f.set = true;
+      }
+    }
+    return f;
+  }();
   auto marshal_floats = [&](const Shader::ConstantRegisterMap& map, uint32_t reg_base,
                             MetalUploadAllocation* out) -> bool {
     uint32_t count = GetMetalPackedFloatConstantCount(map);
@@ -6539,7 +6607,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (!upload_arena_->Allocate(bytes, 256, out)) {
       return false;
     }
-    return PackMetalFloatConstants(regs, map, reg_base, out->cpu_ptr, bytes);
+    const bool force_here =
+        s_force_float.set &&
+        reg_base == (s_force_float.pixel ? XE_GPU_REG_SHADER_CONSTANT_256_X
+                                         : XE_GPU_REG_SHADER_CONSTANT_000_X);
+    uint32_t saved[4] = {};
+    uint32_t* forced_words = nullptr;
+    if (force_here) {
+      forced_words = const_cast<uint32_t*>(
+          &regs.values[reg_base + s_force_float.index * 4]);
+      std::memcpy(saved, forced_words, sizeof(saved));
+      std::memcpy(forced_words, s_force_float.value, sizeof(saved));
+    }
+    bool packed = PackMetalFloatConstants(regs, map, reg_base, out->cpu_ptr, bytes);
+    if (forced_words) {
+      std::memcpy(forced_words, saved, sizeof(saved));
+    }
+    return packed;
   };
   MetalUploadAllocation float_vertex_alloc{};
   if (!marshal_floats(vs_map, XE_GPU_REG_SHADER_CONSTANT_000_X,
@@ -6779,7 +6863,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             XELOGI(
                 "MetalTexProbe draw={} {} fc={} descidx={} -> slot={} "
                 "type={} fmt={} base={:08X} size={}x{} endian={} tiled={} "
-                "stacked={} packedmips={} miplevels={}-{}",
+                "stacked={} packedmips={} miplevels={}-{} mipaddr={:08X} "
+                "lodbias={} filters=mag{}/min{}/mip{} aniso={} clamp=({},{},{}) "
+                "swz={:03X} raw={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
                 s_tex_probe, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
                 binding.fetch_constant, binding.bindless_descriptor_index,
                 indices[binding.bindless_descriptor_index],
@@ -6788,7 +6874,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 fetch.size_2d.height + 1, uint32_t(fetch.endianness),
                 uint32_t(fetch.tiled), uint32_t(fetch.stacked),
                 uint32_t(fetch.packed_mips), fetch.mip_min_level,
-                fetch.mip_max_level);
+                fetch.mip_max_level, fetch.mip_address << 12,
+                int32_t(fetch.lod_bias), uint32_t(fetch.mag_filter),
+                uint32_t(fetch.min_filter), uint32_t(fetch.mip_filter),
+                uint32_t(fetch.aniso_filter), uint32_t(fetch.clamp_x),
+                uint32_t(fetch.clamp_y), uint32_t(fetch.clamp_z),
+                uint32_t(fetch.swizzle), fetch.dword_0, fetch.dword_1,
+                fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5);
           }
         }
       }
@@ -9031,11 +9123,12 @@ bool MetalCommandProcessor::IssueCopy() {
     gamma_parity_resolves_[resolve_info.copy_dest_base] = src_gamma;
   }
   static uint32_t s_copy_count = 0;
-  if (s_copy_count++ < 48) {
+  if (s_copy_count++ < 256) {
     XELOGI(
-        "MetalCommandProcessor::IssueCopy dest_base={:08X} extent=[{:08X}+{}] "
-        "depth={} fmt={} w_div8={} h_div8={}",
-        resolve_info.copy_dest_base, resolve_info.copy_dest_extent_start,
+        "MetalCommandProcessor::IssueCopy draw={} dest_base={:08X} "
+        "extent=[{:08X}+{}] depth={} fmt={} w_div8={} h_div8={}",
+        trace_draw_index_, resolve_info.copy_dest_base,
+        resolve_info.copy_dest_extent_start,
         resolve_info.copy_dest_extent_length, resolve_info.IsCopyingDepth(),
         uint32_t(resolve_info.copy_dest_info.copy_dest_format),
         resolve_info.coordinate_info.width_div_8, resolve_info.height_div_8);
@@ -11175,6 +11268,18 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         [dcb waitUntilCompleted];
         std::string path = fmt::format("/tmp/xe_snap_{:08X}_{}.ppm",
                                        s_dump_snapshot, s_snap_n++);
+        // Raw 4-byte texels beside the PPM (the PPM drops byte 3 and is not a
+        // value map for R32F snapshots -- decode the .bin offline).
+        {
+          std::string raw_path = path.substr(0, path.size() - 4) + ".bin";
+          FILE* rf = fopen(raw_path.c_str(), "wb");
+          if (rf) {
+            fwrite(rb.contents, 1, size_t(tw) * th * 4, rf);
+            fclose(rf);
+            XELOGW("MetalSnapshotDump: wrote {} ({}x{} fmt={})", raw_path, tw,
+                   th, uint32_t(st.pixelFormat));
+          }
+        }
         FILE* f = fopen(path.c_str(), "wb");
         if (f) {
           fprintf(f, "P6\n%u %u\n255\n", tw, th);

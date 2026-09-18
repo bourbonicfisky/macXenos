@@ -1393,6 +1393,36 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   if (XE_LIKELY(index < RegisterFile::kRegisterCount)) {
     register_file_->values[index] = value;
+    // Backend-agnostic diagnostic (XE_GPU_FORCE_BOOL=<index>:<0|1>): pin one
+    // guest bool constant at register-write time so a shader block gated by
+    // it can be A/B'd identically on every backend (dual-backend attribution
+    // of cexec/jump-gated code, e.g. the Halo 3 light PCF block b141).
+    struct ForceBool {
+      bool set = false;
+      uint32_t reg = 0;
+      uint32_t mask = 0;
+      bool one = false;
+    };
+    static const ForceBool s_force_bool = [] {
+      ForceBool f;
+      const char* v = std::getenv("XE_GPU_FORCE_BOOL");
+      if (v) {
+        int idx = -1, val = 0;
+        if (std::sscanf(v, "%d:%d", &idx, &val) == 2 && idx >= 0 &&
+            idx < 256) {
+          f.set = true;
+          f.reg = XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + (uint32_t(idx) >> 5);
+          f.mask = 1u << (uint32_t(idx) & 31);
+          f.one = val != 0;
+        }
+      }
+      return f;
+    }();
+    if (XE_UNLIKELY(s_force_bool.set && index == s_force_bool.reg)) {
+      uint32_t& word = register_file_->values[index];
+      word = s_force_bool.one ? (word | s_force_bool.mask)
+                              : (word & ~s_force_bool.mask);
+    }
 
     // quick pre-test
     // todo: figure out just how unlikely this is. if very (it ought to be,

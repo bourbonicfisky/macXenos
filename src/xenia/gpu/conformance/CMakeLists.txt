@@ -308,6 +308,11 @@ if(APPLE)
     # lean L0 binary. (The PURE gate/routing matrix is L0 and lives in
     # metal_memexport_raster_route_test.cc, picked up by the L0 glob.)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_memexport_raster_render_test.mm
+    # Halo 3 light-volume PS (FC3CCF4CD1C76640) on-device probe: the REAL
+    # pixel microcode + captured draw-991 constants under a controlled VS and
+    # synthetic textures, attributing the live-inert 16-tap PCF block
+    # (docs/metal_live_compatibility_matrix.md, Halo 3).
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_halo3_light_shadow_probe_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )

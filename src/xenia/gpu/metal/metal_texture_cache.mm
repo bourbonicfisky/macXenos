@@ -1574,6 +1574,24 @@ uint32_t MetalTextureCache::GetTextureSlot(
           }
         }
       }
+      // XE_METAL_DUMP_FETCH_RAW also dumps every uploaded mip level of the
+      // watched base as /tmp/xe_fetch_<base>_L<level>.bin (block bytes),
+      // with the layout the level was read through.
+      if (s_dump_fetch_raw && std::strstr(s_dump_fetch_raw,
+                                          fmt::format("{:08X}", base).c_str())) {
+        std::string lpath = fmt::format("/tmp/xe_fetch_{:08X}_L{}.bin", base, level);
+        FILE* lf = fopen(lpath.c_str(), "wb");
+        if (lf) {
+          fwrite(mip_linear.data(), 1, mip_linear.size(), lf);
+          fclose(lf);
+          XELOGW("MetalFetchRaw: level {} -> {} ({} bytes, blocks {}x{}, "
+                 "storage_level={} level_base={:#x} pitch_blocks={} xb={} yb={} "
+                 "mip_addr={:08X} host_levels={} packed_level={})",
+                 level, lpath, mip_linear.size(), lbw, lbh, storage_level,
+                 level_base, lpitch_blocks, xb, yb, mip_addr, host_levels,
+                 layout.packed_level);
+        }
+      }
       // XE_METAL_MIP_TRACE=1: sample the untiled level's bytes (mip
       // corruption forensics — plausible-DXT vs noise vs zeros).
       static const bool s_mip_trace = std::getenv("XE_METAL_MIP_TRACE");
