@@ -1066,6 +1066,52 @@ uint32_t MetalTextureCache::GetTextureSlot(
         uint32_t(fetch.endianness), it != cache_.end() ? "HIT" : "MISS",
         ram_backed, rh);
   }
+  // Census (XE_TEXTURE_KEY_CENSUS=1, diagnostic): shadow the fetch fields the
+  // key deliberately omits (mip address, raw packed_mips flag, stacked flag)
+  // per key and report ONLY when a cache HIT arrives carrying different ones
+  // -- an in-flight mis-serve, not a hypothetical collision. "mips" marks the
+  // cases where the entry actually holds levels sourced from mip_address.
+  static const bool s_key_census = std::getenv("XE_TEXTURE_KEY_CENSUS") != nullptr;
+  if (s_key_census) {
+    struct KeyShadow {
+      uint32_t mip_address;
+      uint8_t packed_mips;
+      uint8_t stacked;
+    };
+    static std::unordered_map<uint64_t, KeyShadow> s_shadow;
+    static uint32_t s_lines = 0;
+    KeyShadow now{uint32_t(fetch.mip_address) << 12,
+                  uint8_t(fetch.packed_mips), uint8_t(fetch.stacked)};
+    auto sh = s_shadow.find(key);
+    if (it != cache_.end() && sh != s_shadow.end()) {
+      const KeyShadow& was = sh->second;
+      bool mips_held = normalized_mip_max > 0 || normalized_mip_min > 0;
+      if ((was.mip_address != now.mip_address || was.packed_mips != now.packed_mips ||
+           was.stacked != now.stacked) && s_lines < 4000) {
+        ++s_lines;
+        XELOGW(
+            "MetalKeyCensus MISSERVE base={:08X} fmt={} {}x{} depth={} "
+            "lv={}..{} mips_held={} stored(mipaddr={:08X} packed={} stacked={}) "
+            "incoming(mipaddr={:08X} packed={} stacked={}) fields={}{}{}",
+            base, uint32_t(fetch.format), width, height, depth,
+            normalized_mip_min, normalized_mip_max, mips_held ? 1 : 0,
+            was.mip_address, was.packed_mips, was.stacked, now.mip_address,
+            now.packed_mips, now.stacked,
+            was.mip_address != now.mip_address ? "M" : "",
+            was.packed_mips != now.packed_mips ? "P" : "",
+            was.stacked != now.stacked ? "S" : "");
+      }
+    } else if (it == cache_.end()) {
+      // XE_TEXTURE_KEY_CENSUS=selftest: perturb the recorded mip address so
+      // every later hit reports "M" -- proves the report path is live.
+      static const bool s_selftest =
+          std::strcmp(std::getenv("XE_TEXTURE_KEY_CENSUS"), "selftest") == 0;
+      if (s_selftest) {
+        now.mip_address ^= 0x1000u;
+      }
+      s_shadow[key] = now;
+    }
+  }
   if (it != cache_.end()) {
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
