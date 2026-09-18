@@ -57,6 +57,9 @@ class MetalUploadArena {
   // retry.
   bool Allocate(uint32_t size, uint32_t alignment, MetalUploadAllocation* out);
 
+  // Ring capacity in bytes (diagnostic: ring-end proximity checks).
+  uint32_t size() const { return size_; }
+
  private:
   void* device_;   // id<MTLDevice>, not owned.
   uint32_t size_;

@@ -7558,11 +7558,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           tess_pp.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
       uint32_t host_count = tess_pp.host_draw_vertex_count;
       uint32_t total = host_count * index_size;
+      // EXPERIMENT (XE_METAL_TESS_SLICE_PAD=1, default off; tessellation
+      // fault attribution 2026-09-18, decision memo path B follow-up): the
+      // MSC emulation runtime dispatches ceil(indexCount / stride) object
+      // threadgroups with stride = hsMaxPatchesPerObjectThreadgroup *
+      // hsInputControlPointCount, and the generated object stage reads the
+      // index/factor stream through a raw gpuAddress. If its loads are not
+      // guarded by indexCount, the last threadgroup reads up to stride-1
+      // elements past this exactly-sized slice: junk factors inside the ring,
+      // and an out-of-buffer read when the slice ends at the ring boundary.
+      // The pad is zero-filled so any such read sees factor 0.
+      static const bool s_tess_slice_pad = [] {
+        const char* v = std::getenv("XE_METAL_TESS_SLICE_PAD");
+        return v && std::strcmp(v, "0") != 0;
+      }();
+      const uint32_t object_stride_bytes =
+          uint32_t(tess_config.hsMaxPatchesPerObjectThreadgroup) *
+          uint32_t(tess_config.hsInputControlPointCount) * index_size;
+      const uint32_t slice_pad =
+          s_tess_slice_pad ? ((object_stride_bytes + 15u) & ~15u) + 64u : 0u;
       const void* guest_indices =
           memory_->TranslatePhysical(tess_pp.guest_index_base);
       MetalUploadAllocation index_alloc{};
       if (!guest_indices ||
-          !upload_arena_->Allocate(total, 16, &index_alloc)) {
+          !upload_arena_->Allocate(total + slice_pad, 16, &index_alloc)) {
         RecordDrawSkip(!guest_indices
                            ? MetalDrawSkipReason::kInvalidGuestState
                            : MetalDrawSkipReason::kResourceFailure,
@@ -7603,6 +7622,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count,
                       tess_pp.host_index_format,
                       tess_pp.host_shader_index_endian);
+      if (slice_pad) {
+        std::memset(static_cast<uint8_t*>(index_alloc.cpu_ptr) + total, 0,
+                    slice_pad);
+      }
+      {
+        // Rare by construction: the slice's unpadded end lies within one
+        // object-threadgroup stride of the ring's physical end. Logged always
+        // so a live fault can be correlated with ring-end placement.
+        uint32_t slice_end = index_alloc.offset + total;
+        uint32_t ring_gap = upload_arena_->size() - slice_end;
+        if (ring_gap < object_stride_bytes + 64u) {
+          XELOGW(
+              "MetalTessSliceRingEnd draw={} offset={} total={} ring={} "
+              "gap={} stride_bytes={} pad={}",
+              trace_draw_index_, index_alloc.offset, total,
+              upload_arena_->size(), ring_gap, object_stride_bytes, slice_pad);
+        }
+      }
       // JOIN hash (XE_METAL_MEMEXPORT_LOG=1, log only): FNV-1a over the RAW
       // pre-swap guest bytes this consumer stages. The convergence site hashes
       // the bytes it wrote to the same RAM with the same function, so equality
