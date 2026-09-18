@@ -1487,14 +1487,24 @@ uint32_t MetalTextureCache::GetTextureSlot(
       host_levels = std::min(
           host_levels, std::max(1u, texture_util::GetPackedMipLevel(width, height)));
     }
-    // Content guard: trace replays don't carry mip memory (the capture never
-    // recorded it) — the restored pages are ZEROS, and uploading them blacks
-    // out every minified surface. If the first 4KB at mip_address is
-    // all-zero, serve the base level only (live RAM has real mips; a
-    // genuinely black mip tail just loses nothing visible).
+    // Capture-completeness guard, TRACE PLAYBACK ONLY: single-frame captures
+    // never recorded mip memory, so the restored pages are ZEROS and uploading
+    // them would black out every minified surface in a replay. If the first
+    // 4KB at mip_address is all-zero, serve the base level only.
+    //
+    // Live, guest RAM is authoritative (2026-09-18): a black mip tail is data
+    // — an explicit-LOD or minified fetch of it must read black, as it does on
+    // hardware and on D3D12/Vulkan, which upload whatever is there. The
+    // content test must not change valid texture semantics, so it is confined
+    // to playback. XE_METAL_MIP_ZERO_GUARD_LIVE=1 restores the previous
+    // content-based demotion everywhere (exact rollback).
+    static const bool s_zero_guard_live =
+        std::getenv("XE_METAL_MIP_ZERO_GUARD_LIVE") != nullptr;
     const uint32_t* probe = reinterpret_cast<const uint32_t*>(
         memory_->TranslatePhysical(mip_addr));
-    if (probe) {
+    if (!probe) {
+      host_levels = 1;
+    } else if (trace_playback_ || s_zero_guard_live) {
       uint32_t probe_words =
           std::min<uint32_t>(1024, (kPhysicalSize - mip_addr) / 4);
       bool any_nonzero = false;
@@ -1508,7 +1518,29 @@ uint32_t MetalTextureCache::GetTextureSlot(
         host_levels = 1;
       }
     } else {
-      host_levels = 1;
+      // Live census (bounded): how often the old guard WOULD have demoted a
+      // texture whose mip tail starts with 4KB of zeros.
+      static uint32_t s_zero_tail_log = 0;
+      if (s_zero_tail_log < 64) {
+        uint32_t probe_words =
+            std::min<uint32_t>(1024, (kPhysicalSize - mip_addr) / 4);
+        bool any_nonzero = false;
+        for (uint32_t i = 0; i < probe_words; ++i) {
+          if (probe[i]) {
+            any_nonzero = true;
+            break;
+          }
+        }
+        if (!any_nonzero) {
+          ++s_zero_tail_log;
+          XELOGI(
+              "MetalTexMipZeroTail: fmt={} {}x{} base={:08X} mip={:08X} "
+              "levels={} kept (live RAM authoritative; old guard would serve "
+              "base only)",
+              uint32_t(fetch.format), width, height, base, mip_addr,
+              host_levels);
+        }
+      }
     }
   }
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
