@@ -241,6 +241,41 @@ if(APPLE)
   endif()
   xe_target_defaults(xenia-gpu-integer-scale-translation-conformance)
 
+  # Vertex-fetch bounds masking (Canary 9e9d3cdd3 port, 2026-09-18): the
+  # emitted-DXBC structural gate, same shape as the integer-scale target.
+  add_executable(xenia-gpu-vertex-fetch-bounds-conformance
+    ${CMAKE_CURRENT_SOURCE_DIR}/vertex_fetch_bounds_translation_case.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/alu_scalar_swizzle_census_case.cc
+    ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
+  )
+  target_compile_definitions(xenia-gpu-vertex-fetch-bounds-conformance
+    PRIVATE
+    "XE_TEST_SUITE_NAME=\"xenia-gpu-vertex-fetch-bounds-conformance\""
+  )
+  target_include_directories(xenia-gpu-vertex-fetch-bounds-conformance
+    PRIVATE
+    ${PROJECT_SOURCE_DIR}/tools/build
+    ${PROJECT_SOURCE_DIR}/tools/build/src
+    ${PROJECT_SOURCE_DIR}/tools/build/third_party/catch/include
+  )
+  target_link_libraries(xenia-gpu-vertex-fetch-bounds-conformance PRIVATE
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-gpu-metal xenia-gpu-metal-backend
+    xenia-hid xenia-hid-nop xenia-kernel xenia-patcher
+    xenia-ui xenia-ui-metal xenia-vfs
+    aes_128 capstone fmt imgui libavcodec libavutil mspack snappy xxhash
+    "-framework Metal" "-framework Foundation"
+  )
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-vertex-fetch-bounds-conformance
+      PRIVATE xenia-cpu-backend-a64)
+  elseif(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-vertex-fetch-bounds-conformance
+      PRIVATE xenia-cpu-backend-x64)
+  endif()
+  xe_target_defaults(xenia-gpu-vertex-fetch-bounds-conformance)
+
   # implement-metal-depth-semantics task 1.1: float24 depth-mode probe. Needs
   # the monolithic GPU closure (DxbcShaderTranslator + the dxilconv/MSC back
   # half), so it follows the integer-scale target's shape rather than joining
@@ -313,6 +348,7 @@ if(APPLE)
     # synthetic textures, attributing the live-inert 16-tap PCF block
     # (docs/metal_live_compatibility_matrix.md, Halo 3).
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_halo3_light_shadow_probe_test.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_vertex_fetch_bounds_device_test.mm
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )

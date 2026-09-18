@@ -162,9 +162,13 @@ TEST_CASE("The production fetch ABI revision is the current one",
           "[integer_scale][cache_identity]") {
   // If this fails, either the revision was bumped without updating the tests
   // below, or it was reverted and the stale-cache hazard is open again.
-  // 5 = the clip-distance relabel became UNCONDITIONAL. Each boundary is
-  // pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 5);
+  // 5 = the clip-distance relabel became UNCONDITIONAL.
+  // 6 = vertex fetches mask words at or past the fetch constant's size to 0
+  //     (upstream Canary 9e9d3cdd3): identical ucode now emits different DXBC,
+  //     and the metallib/pipeline records key on ucode + this schema, so a
+  //     revision-5 cache would serve unmasked shaders.
+  // Each boundary is pinned by its own transition case below.
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 6);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",

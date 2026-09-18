@@ -114,7 +114,7 @@ struct MetalTranslatorConfig {
   //       failure shape as the dxilconv converter-reuse bug, where corrupt
   //       metallibs were served from caches keyed on hashes that could not see
   //       the fix.
-  static constexpr uint32_t kFetchAbiRevision = 5;
+  static constexpr uint32_t kFetchAbiRevision = 6;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is
