@@ -7112,6 +7112,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               s_delta_census &&
               std::strcmp(std::getenv("XE_GPU_DELTA_CENSUS"), "selftest") == 0;
           static uint32_t s_delta_census_lines = 0;
+          // Same probe family: force_bc_w_to_max (border alpha forced to 1)
+          // on a fetch whose normalized clamp modes use the border — the
+          // D3D12/Vulkan sampler contract applies it, the Metal key omits it.
+          if (s_delta_census && s_delta_census_lines < 20000) {
+            xenos::ClampMode bcx, bcy, bcz;
+            texture_util::GetClampModesForDimension(f, bcx, bcy, bcz);
+            bool bc_border = xenos::ClampModeUsesBorder(bcx) ||
+                             xenos::ClampModeUsesBorder(bcy) ||
+                             xenos::ClampModeUsesBorder(bcz);
+            if (s_delta_selftest || (f.force_bc_w_to_max && bc_border)) {
+              ++s_delta_census_lines;
+              XELOGI(
+                  "DeltaCensus bc_w_max draw={} fc={} force={} border_used={} "
+                  "border_color={} fmt={} shader={:016X}",
+                  trace_draw_index_, sb.fetch_constant,
+                  uint32_t(f.force_bc_w_to_max), bc_border ? 1 : 0,
+                  uint32_t(f.border_color), uint32_t(f.format),
+                  shader->ucode_data_hash());
+            }
+          }
           if (s_delta_census &&
               (s_delta_selftest || f.grad_exp_adjust_h != 0 ||
                f.grad_exp_adjust_v != 0) &&
