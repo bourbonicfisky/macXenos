@@ -183,7 +183,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // cross-backend resolve-copy compute shaders instead of the Metal-specific
   // pack kernel, resolving EDRAM straight into the shared-memory buffer at
   // guest tiled addresses exactly as D3D12 and Vulkan do
-  // (docs/metal_shared_resolve_port_assessment.md).
+  // (docs/archive/evidence/metal_shared_resolve_port_assessment.md).
   static bool SharedResolveShadersEnabled();
 
  private:

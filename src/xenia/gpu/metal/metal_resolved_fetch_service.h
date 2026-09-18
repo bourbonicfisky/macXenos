@@ -18,7 +18,7 @@ namespace metal {
 
 // The ONE service classification for a texture fetch whose base address may
 // be a registered resolve target (OpenSpec gpu-texture-loads slice 5R,
-// design: docs/metal_resolve_backed_texture_load_design.md). It composes
+// design: docs/archive/evidence/metal_resolve_backed_texture_load_design.md). It composes
 // the two EXISTING production predicates in GetTextureSlot's serve order —
 // exact-cover first, then the bridge condition — so every consumer (the
 // GetTextureSlot serve chain, the routed-load prepass, and any diagnostic)

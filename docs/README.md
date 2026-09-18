@@ -25,9 +25,10 @@ Agents must also follow [the documentation-specific instructions](AGENTS.md).
 
 ## Deprecated archive
 
-Closed investigations, superseded indexes, and raw chronological evidence live
-under [`archive/`](archive/README.md). Every file there is deprecated for
-current guidance. Do not ingest the archive recursively; open an exact record
+Closed decisions, pre-gates, censuses, audits, investigations, and session
+handoffs live under [`archive/`](archive/README.md), sorted by kind
+(`decisions/`, `evidence/`, `closed-investigations/`, `handoffs/`). Every file
+there is deprecated for current guidance. Do not ingest the archive recursively; open an exact record
 only when a current decision, spec, source comment, or test links to it.
 
 ## Inherited general documentation

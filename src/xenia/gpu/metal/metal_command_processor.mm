@@ -2216,7 +2216,7 @@ bool MetalCommandProcessor::AsyncSubmissionEnabled() {
   // PROMOTED 2026-08-09 (promote-metal-async-submission, GO at gate binary
   // feadfe8f…): unset = ON. The historical ~1/500-swap fault did not occur in
   // 48,640 engaged async swaps (95% UB 1/16,236 swaps — a BOUND, monitored,
-  // not "fixed"; see docs/metal_async_submission_promotion_gate.md). Exact
+  // not "fixed"; see docs/archive/decisions/metal_async_submission_promotion_gate.md). Exact
   // "0" restores full pre-promotion sync semantics bit-identically; malformed
   // warns once and fails closed to that same pre-promotion default — a
   // promotion never widens what counts as enabled beyond unset/exact-1.
