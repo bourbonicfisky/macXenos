@@ -1718,7 +1718,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
           }
           force_reg_applied[i] = true;
           force_reg_saved[i] = register_file_->values[s_force_reg.reg[i]];
-          register_file_->values[s_force_reg.reg[i]] = s_force_reg.value[i];
+          // Through the virtual write so backend dirty tracking (Vulkan's
+          // constant-buffer up-to-date bits) sees the change.
+          COMMAND_PROCESSOR::WriteRegister(s_force_reg.reg[i],
+                                           s_force_reg.value[i]);
         }
         // Diagnostic (XE_GPU_DUMP_REGS_AT=<draw>): print the render-state
         // registers a draw is issued with (backend-independent values).
@@ -1755,6 +1758,30 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
               index_buffer_info.guest_base, uint64_t(index_buffer_info.length),
               rv[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX],
               rv[XE_GPU_REG_VGT_INDX_OFFSET]);
+          // Vertex fetch constants 0..2 (raw) and the vf0 stream bytes
+          // (/tmp/xe_vb_<draw>.bin) for CPU-side transform oracles.
+          {
+            // The disassembler names vertex fetch slots from the top:
+            // "vf0" is fetch constant index 95 (group 31, slot 2).
+            const uint32_t* fc =
+                &rv[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 2 * 95];
+            XELOGW("DrawFetch draw={} vf0(idx95)={:08X},{:08X} "
+                   "vf1(idx94)={:08X},{:08X} vf2(idx93)={:08X},{:08X}",
+                   draw_index, fc[0], fc[1], fc[-2], fc[-1], fc[-4], fc[-3]);
+            const uint32_t vf0_addr = (fc[0] & ~3u);
+            const uint32_t vf0_size = fc[1] >> 2;  // size in dwords (bits 2-25)
+            if ((fc[0] & 3u) == 3u && vf0_size) {
+              const void* vb = memory_->TranslatePhysical(vf0_addr & 0x1FFFFFFF);
+              if (vb) {
+                std::string vb_path =
+                    fmt::format("/tmp/xe_vb_{}.bin", draw_index);
+                if (FILE* f = std::fopen(vb_path.c_str(), "wb")) {
+                  std::fwrite(vb, 4, vf0_size, f);
+                  std::fclose(f);
+                }
+              }
+            }
+          }
           // Raw guest index bytes beside the log (/tmp/xe_ib_<draw>.bin).
           if (is_indexed && index_buffer_info.length) {
             const void* ib = memory_->TranslatePhysical(
@@ -1774,8 +1801,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
           std::memcpy(force_float_saved,
                       &register_file_->values[s_force_float.reg],
                       sizeof(force_float_saved));
-          std::memcpy(&register_file_->values[s_force_float.reg],
-                      s_force_float.words, sizeof(force_float_saved));
+          for (uint32_t c = 0; c < 4; ++c) {
+            COMMAND_PROCESSOR::WriteRegister(s_force_float.reg + c,
+                                             s_force_float.words[c]);
+          }
         }
         draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
             vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
@@ -1783,12 +1812,15 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,
                                        vgt_draw_initiator.prim_type));
         if (s_force_float.set) {
-          std::memcpy(&register_file_->values[s_force_float.reg],
-                      force_float_saved, sizeof(force_float_saved));
+          for (uint32_t c = 0; c < 4; ++c) {
+            COMMAND_PROCESSOR::WriteRegister(s_force_float.reg + c,
+                                             force_float_saved[c]);
+          }
         }
         for (uint32_t i = 0; i < s_force_reg.count; ++i) {
           if (force_reg_applied[i]) {
-            register_file_->values[s_force_reg.reg[i]] = force_reg_saved[i];
+            COMMAND_PROCESSOR::WriteRegister(s_force_reg.reg[i],
+                                             force_reg_saved[i]);
           }
         }
         if (draw_succeeded &&

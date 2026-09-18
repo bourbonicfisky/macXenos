@@ -6535,6 +6535,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                   metal_scissor.width, metal_scissor.height};
       [encoder setScissorRect:scissor_rect];
     }
+    // Diagnostic (XE_METAL_RT_PROBE=<draw>): the attachments this draw is
+    // encoded against.
+    // Accepts a single draw or an inclusive range "a-b".
+    static const std::pair<int64_t, int64_t> s_rt_probe_range = [] {
+      const char* v = std::getenv("XE_METAL_RT_PROBE");
+      if (!v) return std::make_pair(int64_t(-1), int64_t(-1));
+      char* end = nullptr;
+      int64_t a = strtoll(v, &end, 10);
+      int64_t b = (end && *end == '-') ? strtoll(end + 1, nullptr, 10) : a;
+      return std::make_pair(a, b);
+    }();
+    const int64_t s_rt_probe = int64_t(trace_draw_index_) - 1;
+    if (s_rt_probe_range.first >= 0 && s_rt_probe >= s_rt_probe_range.first &&
+        s_rt_probe <= s_rt_probe_range.second) {
+      id<MTLTexture> dt =
+          (__bridge id<MTLTexture>)render_target_cache_->current_depth_texture();
+      XELOGW("MetalRTProbe draw={} depth_bound={} color={} depth_tex={:X} {}x{} "
+             "samples={} fmt={} attachment_key={:016X} z=({},{}) zfunc={} "
+             "zwrite={} extent=({},{})",
+             s_rt_probe, depth_bound ? 1 : 0, have_color ? 1 : 0,
+             uint64_t(uintptr_t((__bridge void*)dt)),
+             dt ? uint32_t(dt.width) : 0, dt ? uint32_t(dt.height) : 0,
+             dt ? uint32_t(dt.sampleCount) : 0,
+             dt ? uint32_t(dt.pixelFormat) : 0,
+             render_target_cache_->current_attachment_key(),
+             viewport_info.z_min, viewport_info.z_max,
+             uint32_t(norm_depth.zfunc), uint32_t(norm_depth.z_write_enable),
+             viewport_info.xy_extent[0], viewport_info.xy_extent[1]);
+    }
     // Diagnostic (scene depth stuck at clear): log each unique depth
     // configuration of depth-bound draws once — z range, func, write, target.
     if (depth_bound) {
