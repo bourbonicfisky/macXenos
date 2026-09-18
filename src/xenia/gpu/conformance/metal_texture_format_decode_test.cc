@@ -78,6 +78,27 @@ TEST_CASE("Metal swizzle composition: RGGG and RRRR redirect channel reads",
   REQUIRE(((composed >> 9) & 7u) == 1u);  // Y -> G
 }
 
+TEST_CASE("Metal swizzle composition: the 5_6_5 red/blue swap host swizzle",
+          "[metal][texture][format-decode]") {
+  // k_5_6_5 is served through MTLPixelFormatB5G6R5Unorm, whose blue field is
+  // where the guest's red lives, so the plan's host swizzle is B,G,R,R (the
+  // D3D12 contract: load-shader R/B swap, then RGBB). A guest identity fetch
+  // must therefore read host B for x and host R for z and w.
+  uint32_t host_565 = XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R);
+  uint32_t composed = ComposeGuestHostSwizzle(
+      xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, host_565);
+  REQUIRE(((composed >> 0) & 7u) == 2u);  // x -> host B
+  REQUIRE(((composed >> 3) & 7u) == 1u);  // y -> host G
+  REQUIRE(((composed >> 6) & 7u) == 0u);  // z -> host R
+  REQUIRE(((composed >> 9) & 7u) == 0u);  // w -> host R (contract alpha = B)
+  // A guest fetch that already swaps (BGRA) lands back on host R,G,B.
+  uint32_t guest_bgra = XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A);
+  composed = ComposeGuestHostSwizzle(guest_bgra, host_565);
+  REQUIRE(((composed >> 0) & 7u) == 0u);
+  REQUIRE(((composed >> 3) & 7u) == 1u);
+  REQUIRE(((composed >> 6) & 7u) == 2u);
+}
+
 }  // namespace test
 }  // namespace gpu
 

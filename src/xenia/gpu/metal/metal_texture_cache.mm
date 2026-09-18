@@ -146,6 +146,18 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       // 16bpp RGBA4, decoded to RGBA8 on the CPU (see decode_4444). block_log2 =
       // log2(2 source bytes) = 1.
       return {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm, true, false};
+    case xenos::TextureFormat::k_5_6_5:
+      // 16bpp packed RGB. After the fetch-endian swap the guest word is
+      // R5 (bits 0-4) G6 (5-10) B5 (11-15); Metal's B5G6R5Unorm, like DXGI's,
+      // stores B in the low bits. The shared D3D12 table swaps red and blue in
+      // its load shader and then applies swizzle RGBB; here the swap is the
+      // host swizzle instead (guest R <- host B, G <- G, B <- host R, and the
+      // contract's alpha reads blue, i.e. host R). Engaged by Skate 2
+      // (4541087F) boot, 2026-09-18: 300 null serves/frame of an 8x8 fmt-4
+      // texture before this plan existed.
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatB5G6R5Unorm, false, false},
+          XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R));
     case xenos::TextureFormat::k_16:
       // 16bpp single channel at FULL precision. (Was decode_r16 high-byte
       // RGBA8 expansion — 8-bit quantization banded JC2's 1024x3072 k_16
