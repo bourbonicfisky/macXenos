@@ -1529,6 +1529,12 @@ void KernelState::CompleteOverlappedDeferred(
                                result, result, 0, pre_callback, post_callback);
 }
 
+void KernelState::Dispatch(std::function<void()> fn) {
+  auto global_lock = global_critical_region_.Acquire();
+  dispatch_queue_.push_back(std::move(fn));
+  dispatch_cond_.notify_all();
+}
+
 void KernelState::CompleteOverlappedDeferredEx(
     std::function<void()> completion_callback, uint32_t overlapped_ptr,
     X_RESULT result, uint32_t extended_error, uint32_t length,
