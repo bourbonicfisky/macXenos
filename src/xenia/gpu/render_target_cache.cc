@@ -10,6 +10,7 @@
 #include "xenia/gpu/render_target_cache.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -730,6 +731,44 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     while (xe::bit_scan_forward(rts_other_remaining, &rt_other_index)) {
       rts_other_remaining &= ~(uint32_t(1) << rt_other_index);
       if (edram_bases[rt_other_index] == edram_base) {
+        // Upstream-delta census (XE_GPU_DELTA_CENSUS=1, diagnostic): a depth
+        // target dropped because a color target shares its base. `keepable`
+        // evaluates Canary 9da693480's read-only-depth preservation rule
+        // (depth test on, no depth write, no stencil, 32bpp color whose
+        // written bits stay inside the stencil byte).
+        static const bool s_delta_census =
+            std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+        static uint32_t s_delta_census_lines = 0;
+        if (s_delta_census && rt_other_index == 0 &&
+            s_delta_census_lines++ < 20000) {
+          uint32_t color_i = rt_index - 1;
+          xenos::ColorRenderTargetFormat census_format =
+              regs.Get<reg::RB_COLOR_INFO>(
+                      reg::RB_COLOR_INFO::rt_register_indices[color_i])
+                  .color_format;
+          uint32_t census_mask = (normalized_color_mask >> (4 * color_i)) & 0xF;
+          bool census_64bpp = (rts_are_64bpp >> rt_index) & 1;
+          float cl[4];
+          uint32_t keep_low = 0, keep_high = 0;
+          GetPSIColorFormatInfo(census_format, census_mask, cl[0], cl[1], cl[2],
+                                cl[3], keep_low, keep_high);
+          bool color_keeps_depth_bits =
+              !census_64bpp && !(~keep_low & 0xFFFFFF00u);
+          bool keepable = normalized_depth_control.z_enable &&
+                          !normalized_depth_control.z_write_enable &&
+                          !normalized_depth_control.stencil_enable &&
+                          color_keeps_depth_bits;
+          XELOGI(
+              "DeltaCensus rt_alias depth_dropped color_rt={} base_tiles={} "
+              "keepable={} z_en={} z_wr={} st_en={} fmt={} mask={:X} "
+              "keep_low={:08X} 64bpp={}",
+              color_i, edram_base, keepable ? 1 : 0,
+              uint32_t(normalized_depth_control.z_enable),
+              uint32_t(normalized_depth_control.z_write_enable),
+              uint32_t(normalized_depth_control.stencil_enable),
+              uint32_t(census_format), census_mask, keep_low,
+              census_64bpp ? 1 : 0);
+        }
         depth_and_color_rts_used_bits &= ~(uint32_t(1) << rt_other_index);
       }
     }

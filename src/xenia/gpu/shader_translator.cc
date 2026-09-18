@@ -10,6 +10,8 @@
 #include "xenia/gpu/shader_translator.h"
 
 #include <cstdarg>
+#include <cstdlib>
+#include <cstring>
 
 #include "xenia/base/logging.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -483,6 +485,23 @@ void Shader::GatherAluInstructionInformation(
   ParsedAluInstruction instr;
   ParseAluInstruction(op, type(), instr);
   instr.Disassemble(&ucode_disasm_buffer);
+  {
+    // Upstream-delta census (XE_GPU_DELTA_CENSUS=1, diagnostic, default off):
+    // one line per ALU instruction whose translation Canary 92ada8ebc would
+    // change. Aggregated per shader hash by tools; bounded per process.
+    static const bool s_delta_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    static uint32_t s_delta_census_lines = 0;
+    if (s_delta_census && instr.scalar_b_component_delta_92ada8ebc &&
+        s_delta_census_lines++ < 20000) {
+      XELOGI(
+          "DeltaCensus scalar_swz shader={:016X} type={} cf={} vec={} sca={} "
+          "src3_swizzle={:02X}",
+          ucode_data_hash(), type() == xenos::ShaderType::kVertex ? "vs" : "ps",
+          exec_cf_index, instr.vector_opcode_name, instr.scalar_opcode_name,
+          op.src_swizzle(3));
+    }
+  }
 
   kills_pixels_ =
       kills_pixels_ ||
@@ -1420,6 +1439,21 @@ void ParseAluInstruction(const AluInstruction& op,
       ParseAluInstructionOperand(
           op, 3, scalar_opcode_info.single_operand_is_two_component ? 2 : 1,
           instr.scalar_operands[0]);
+      // Census only (XE_GPU_DELTA_CENSUS): would Canary 92ada8ebc's
+      // scalar-b-is-Z rule select a different component here?
+      if (scalar_opcode_info.single_operand_is_two_component &&
+          vector_opcode_info.GetOperandCount() == 3) {
+        uint32_t src3_swizzle = op.src_swizzle(3);
+        // XE_GPU_DELTA_CENSUS=selftest: positive control, fire on every
+        // eligible co-issue regardless of whether X and Z differ.
+        static const bool s_selftest = [] {
+          const char* v = std::getenv("XE_GPU_DELTA_CENSUS");
+          return v && std::strcmp(v, "selftest") == 0;
+        }();
+        instr.scalar_b_component_delta_92ada8ebc =
+            s_selftest || GetSwizzledAluSourceComponent(src3_swizzle, 0) !=
+                              GetSwizzledAluSourceComponent(src3_swizzle, 2);
+      }
     } else {
       // Constant and temporary register.
 

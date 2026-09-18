@@ -586,6 +586,12 @@ struct ParsedAluInstruction {
   uint32_t scalar_operand_count = 0;
   // Describes each source operand of the scalar operation.
   InstructionOperand scalar_operands[2];
+  // Census (XE_GPU_DELTA_CENSUS): true when this is a two-component
+  // single-operand scalar op co-issued with a three-source vector op AND the
+  // src3 swizzle's X and Z selections differ, i.e. Canary 92ada8ebc (scalar
+  // `b` = Z instead of X when the vector op uses source 3) would change the
+  // translated arithmetic of this instruction. Diagnostic only.
+  bool scalar_b_component_delta_92ada8ebc = false;
 
   // Whether the vector part of the instruction is the same as if it was omitted
   // in the assembly (if compiled or assembled with the Xbox 360 shader

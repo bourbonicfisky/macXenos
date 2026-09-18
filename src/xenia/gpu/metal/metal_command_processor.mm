@@ -4079,6 +4079,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                    prim_type) &&
         tess_regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
             xenos::VGTOutputPath::kTessellationEnable;
+    {
+      // Upstream-delta census (XE_GPU_DELTA_CENSUS=1): tessellation-enabled
+      // draws whose guest topology is outside the list/patch set (Canary
+      // 3eab2b8b3 normalizes tessellated strips/fans). Logged regardless of
+      // the local tessellation gate.
+      static const bool s_delta_census =
+          std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+      static const bool s_delta_selftest =
+          s_delta_census &&
+          std::strcmp(std::getenv("XE_GPU_DELTA_CENSUS"), "selftest") == 0;
+      static uint32_t s_delta_census_lines = 0;
+      if (s_delta_census && (tessellation_enabled || s_delta_selftest) &&
+          prim_type != xenos::PrimitiveType::kTriangleList &&
+          prim_type != xenos::PrimitiveType::kQuadList &&
+          prim_type != xenos::PrimitiveType::kTrianglePatch &&
+          prim_type != xenos::PrimitiveType::kQuadPatch &&
+          s_delta_census_lines++ < 20000) {
+        XELOGI("DeltaCensus tess_topology draw={} prim={} index_count={} vs={:016X}",
+               trace_draw_index_, uint32_t(prim_type), index_count,
+               vertex_shader->ucode_data_hash());
+      }
+    }
     if (tessellation_enabled && MetalTessellationGateOn() &&
         TessDrawRangeAllows(trace_draw_index_)) {
       // Capability first (XeniOS :2726-2735's warn-once success-skip shape,
@@ -4840,6 +4862,96 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vertex_fetch_dependencies.push_back(
           {fetch_constant, fetch, *range});
       vertex_dependency_ranges.Add(*range);
+    }
+  }
+  {
+    // Upstream-delta census (XE_GPU_DELTA_CENSUS=1, diagnostic): vertex
+    // fetches whose last addressed word lies past the fetch constant's size.
+    // Canary 9e9d3cdd3 masks such words to zero; the local translator reads
+    // whatever follows in guest memory. max_index scans the DMA index buffer
+    // (reset indices 0xFFFF/0xFFFFFFFF excluded) and adds VGT_INDX_OFFSET.
+    static const bool s_delta_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    static const bool s_delta_selftest =
+        s_delta_census &&
+        std::strcmp(std::getenv("XE_GPU_DELTA_CENSUS"), "selftest") == 0;
+    static uint32_t s_delta_census_lines = 0;
+    if (s_delta_census && index_count && s_delta_census_lines < 20000) {
+      int64_t max_index = -1;
+      bool indexed = false;
+      if (index_buffer_info && index_buffer_info->guest_base) {
+        indexed = true;
+        const bool is32 =
+            index_buffer_info->format == xenos::IndexFormat::kInt32;
+        const uint8_t* ib = memory_->TranslatePhysical<const uint8_t*>(
+            index_buffer_info->guest_base);
+        for (uint32_t k = 0; k < index_count; ++k) {
+          uint32_t v;
+          if (is32) {
+            v = xenos::GpuSwap(reinterpret_cast<const uint32_t*>(ib)[k],
+                               index_buffer_info->endianness);
+            if (v == 0xFFFFFFFFu) continue;
+          } else {
+            v = xenos::GpuSwap(reinterpret_cast<const uint16_t*>(ib)[k],
+                               index_buffer_info->endianness);
+            if (v == 0xFFFFu) continue;
+          }
+          if (int64_t(v) > max_index) max_index = int64_t(v);
+        }
+      } else {
+        max_index = int64_t(index_count) - 1;
+      }
+      max_index += int64_t(regs.Get<reg::VGT_INDX_OFFSET>().indx_offset);
+      if (max_index >= 0) {
+        for (const auto& binding : vertex_shader->vertex_bindings()) {
+          xenos::xe_gpu_vertex_fetch_t vf =
+              regs.GetVertexFetch(binding.fetch_constant);
+          if (vf.type != xenos::FetchConstantType::kVertex) continue;
+          // Per attribute: the translated address is base + index*stride +
+          // offset with the INSTRUCTION's stride, and the index is whatever
+          // register the shader passes. `raw_index` records whether that
+          // operand is the untouched vertex-id register (r0.x); a shader that
+          // derives its own index (r0.x/4 etc.) makes this bound an
+          // over-approximation, so the aggregator separates the two.
+          uint64_t end_word = 0;
+          uint32_t end_stride = 0, end_attr_end = 0;
+          bool end_raw_index = false;
+          for (const auto& attr : binding.attributes) {
+            const auto& a = attr.fetch_instr.attributes;
+            uint32_t words = xenos::GetVertexFormatNeededWords(
+                a.data_format, attr.fetch_instr.result.GetUsedResultComponents());
+            if (!words) words = 1;
+            uint32_t stride = a.stride ? a.stride : binding.stride_words;
+            uint32_t attr_end = uint32_t(std::max<int32_t>(a.offset, 0)) + words;
+            uint64_t e = uint64_t(max_index) * stride + attr_end;
+            const auto& idx_op = attr.fetch_instr.operands[0];
+            bool raw =
+                attr.fetch_instr.operand_count > 0 &&
+                idx_op.storage_source == InstructionStorageSource::kRegister &&
+                idx_op.storage_index == 0 &&
+                idx_op.components[0] == SwizzleSource::kX;
+            if (e > end_word) {
+              end_word = e; end_stride = stride; end_attr_end = attr_end;
+              end_raw_index = raw;
+            }
+          }
+          if ((s_delta_selftest || end_word > vf.size) &&
+              s_delta_census_lines++ < 20000) {
+            uint64_t overshoot = end_word > vf.size ? end_word - vf.size : 0;
+            XELOGI(
+                "DeltaCensus vfetch_oob draw={} vs={:016X} fc={} indexed={} "
+                "raw_index={} index_count={} max_index={} stride_w={} "
+                "attr_end_w={} end_word={} size_words={} overshoot_w={} "
+                "elements_past={} base={:08X}",
+                trace_draw_index_, vertex_shader->ucode_data_hash(),
+                binding.fetch_constant, indexed ? 1 : 0, end_raw_index ? 1 : 0,
+                index_count, max_index, end_stride, end_attr_end, end_word,
+                uint32_t(vf.size), overshoot,
+                end_stride ? (overshoot + end_stride - 1) / end_stride : 0,
+                vf.address << 2);
+          }
+        }
+      }
     }
   }
   // FAULT INJECTION (default none): on a tessellated draw, suppress the
@@ -6990,6 +7102,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           continue;
         }
         auto f = regs.GetTextureFetch(sb.fetch_constant);
+        {
+          // Upstream-delta census (XE_GPU_DELTA_CENSUS=1): fetch constants
+          // carrying a nonzero per-axis gradient exponent bias, which the
+          // local DXBC path compiles out (#if 0) and Canary 0f2980de4 applies.
+          static const bool s_delta_census =
+              std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+          static const bool s_delta_selftest =
+              s_delta_census &&
+              std::strcmp(std::getenv("XE_GPU_DELTA_CENSUS"), "selftest") == 0;
+          static uint32_t s_delta_census_lines = 0;
+          if (s_delta_census &&
+              (s_delta_selftest || f.grad_exp_adjust_h != 0 ||
+               f.grad_exp_adjust_v != 0) &&
+              s_delta_census_lines++ < 20000) {
+            XELOGI(
+                "DeltaCensus grad_bias draw={} fc={} h={} v={} lod_bias={} "
+                "fmt={} {}x{} base={:08X} shader={:016X}",
+                trace_draw_index_, sb.fetch_constant,
+                int32_t(f.grad_exp_adjust_h), int32_t(f.grad_exp_adjust_v),
+                int32_t(f.lod_bias), uint32_t(f.format), f.size_2d.width + 1,
+                f.size_2d.height + 1, f.base_address << 12,
+                shader->ucode_data_hash());
+          }
+        }
         auto resolve_filter = [](xenos::TextureFilter binding_filter,
                                  uint32_t fetch_filter) {
           return binding_filter == xenos::TextureFilter::kUseFetchConst
