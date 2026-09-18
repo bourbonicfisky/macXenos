@@ -9126,12 +9126,32 @@ bool MetalCommandProcessor::IssueCopy() {
   if (s_copy_count++ < 256) {
     XELOGI(
         "MetalCommandProcessor::IssueCopy draw={} dest_base={:08X} "
-        "extent=[{:08X}+{}] depth={} fmt={} w_div8={} h_div8={}",
+        "extent=[{:08X}+{}] depth={} fmt={} w_div8={} h_div8={} "
+        "src(base_tiles={} pitch_tiles={} msaa={} fmt={}) "
+        "edram_off=({},{}) dest_pitch={} dest_swap={} sample_select={} "
+        "dest_endian={} dest_coord=({},{})",
         trace_draw_index_, resolve_info.copy_dest_base,
         resolve_info.copy_dest_extent_start,
         resolve_info.copy_dest_extent_length, resolve_info.IsCopyingDepth(),
         uint32_t(resolve_info.copy_dest_info.copy_dest_format),
-        resolve_info.coordinate_info.width_div_8, resolve_info.height_div_8);
+        resolve_info.coordinate_info.width_div_8, resolve_info.height_div_8,
+        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.base_tiles
+                                      : resolve_info.color_edram_info.base_tiles,
+        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.pitch_tiles
+                                      : resolve_info.color_edram_info.pitch_tiles,
+        resolve_info.IsCopyingDepth()
+            ? uint32_t(resolve_info.depth_edram_info.msaa_samples)
+            : uint32_t(resolve_info.color_edram_info.msaa_samples),
+        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.format
+                                      : resolve_info.color_edram_info.format,
+        resolve_info.coordinate_info.edram_offset_x_div_8 << 3,
+        resolve_info.coordinate_info.edram_offset_y_div_8 << 3,
+        resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 << 5,
+        uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
+        uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+        resolve_info.copy_dest_coordinate_info.offset_x_div_8 << 3,
+        resolve_info.copy_dest_coordinate_info.offset_y_div_8 << 3);
   }
   // Experiment (XE_METAL_SERIALIZE_RESOLVES): commit+wait after each resolve so
   // every snapshot blit fully completes before any later draw samples it. Far

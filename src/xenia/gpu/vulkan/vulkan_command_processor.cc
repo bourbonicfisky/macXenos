@@ -128,7 +128,18 @@ void VulkanCommandProcessor::ClearCaches() {
 
 void VulkanCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
                                                       uint32_t length) {
-  shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
+  // A trace restore must not clobber pages this replay's GPU already wrote
+  // (resolves/memexport): the captured bytes are at best the same data and at
+  // worst a stale frame (Halo 3 15990: the light passes sampled the previous
+  // frame's normal G-buffer). XE_VK_TRACE_RESTORE_CLOBBER=1 restores the
+  // former unconditional invalidation.
+  static const bool s_clobber =
+      std::getenv("XE_VK_TRACE_RESTORE_CLOBBER") != nullptr;
+  if (s_clobber) {
+    shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
+  } else {
+    shared_memory_->InvalidateRangeKeepingGpuWritten(base_ptr, length);
+  }
   primitive_processor_->MemoryInvalidationCallback(base_ptr, length, true);
 }
 

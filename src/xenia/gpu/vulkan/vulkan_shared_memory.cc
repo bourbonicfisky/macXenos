@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -404,9 +405,32 @@ bool VulkanSharedMemory::UploadRanges(
   VkBuffer upload_buffer_previous = VK_NULL_HANDLE;
 
   // for (auto upload_range : upload_page_ranges) {
+  // Diagnostic (XE_VK_UPLOAD_LOG=<hex base>,<hex length>): log every CPU->GPU
+  // shared-memory upload overlapping the watched guest range, with the trace
+  // draw index — attributes stale resolve-backed textures to a CPU upload
+  // clobbering GPU-written pages.
+  static const std::pair<uint32_t, uint32_t> s_upload_log = [] {
+    std::pair<uint32_t, uint32_t> r{0, 0};
+    const char* v = std::getenv("XE_VK_UPLOAD_LOG");
+    if (v) {
+      char* end = nullptr;
+      r.first = uint32_t(std::strtoul(v, &end, 16));
+      if (end && *end == ',') r.second = uint32_t(std::strtoul(end + 1, nullptr, 16));
+    }
+    return r;
+  }();
   for (unsigned int i = 0; i < num_upload_ranges; ++i) {
     uint32_t upload_range_start = upload_page_ranges[i].first;
     uint32_t upload_range_length = upload_page_ranges[i].second;
+    if (s_upload_log.second) {
+      uint32_t s = upload_range_start << page_size_log2();
+      uint32_t e = s + (upload_range_length << page_size_log2());
+      if (s < s_upload_log.first + s_upload_log.second && e > s_upload_log.first) {
+        XELOGW("VkUpload draw={} range=[{:08X},{:08X}) overlaps watched [{:08X},+{:X})",
+               command_processor_.trace_draw_index(), s, e, s_upload_log.first,
+               s_upload_log.second);
+      }
+    }
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
                                   upload_range_length << page_size_log2());
 

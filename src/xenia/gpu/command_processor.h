@@ -150,6 +150,7 @@ class CommandProcessor {
   // Resets the replay_draw_first/last bisection counter; called by
   // TracePlayer at the start of each playback so draw indices are stable.
   void ResetTraceDrawIndex() { trace_draw_index_ = 0; }
+  uint32_t trace_draw_index() const { return trace_draw_index_; }
 
   // Counts a guest swap and logs the frame rate every 5 seconds when
   // --log_fps is set; called from the shared PM4 XE_SWAP handler.

@@ -109,6 +109,15 @@ class SharedMemory {
   // pages directly in the range. Backend publications that already notify a
   // global cache directly may set fire_global_watches=false to avoid duplicate
   // global invalidation while still firing every per-range watch.
+  // Trace-playback restore variant: invalidates the CPU->GPU copy of the
+  // range EXCEPT pages the GPU itself wrote and that are still valid (resolve
+  // and memexport output produced earlier in this replay). A kMemoryRead
+  // restore carries what the GPU read at capture time; for pages this replay's
+  // GPU already produced, the replay's own result is at least as authoritative
+  // and re-uploading the captured bytes over it clobbers in-frame resolves
+  // (Halo 3's light passes sampled a stale normal G-buffer on Vulkan).
+  void InvalidateRangeKeepingGpuWritten(uint32_t physical_address_start,
+                                        uint32_t length);
   std::pair<uint32_t, uint32_t> MemoryInvalidationCallback(
       uint32_t physical_address_start, uint32_t length, bool exact_range,
       bool fire_global_watches = true);

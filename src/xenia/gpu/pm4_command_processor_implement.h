@@ -1667,15 +1667,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
         // Sibling (XE_GPU_FORCE_REG=<hex reg>:<hex value>[,...]): pin up to
         // four raw registers for every draw (e.g. 2200:0 = RB_DEPTHCONTROL
         // with depth and stencil tests off), restored right after.
+        // Each entry may carry its own draw scope: <hex reg>:<hex value>@<draw>
+        // (no suffix = every draw, or the XE_GPU_FORCE_REG_AT draw when set).
         struct ForceReg {
           uint32_t count = 0;
-          uint32_t reg[4] = {};
-          uint32_t value[4] = {};
+          uint32_t reg[8] = {};
+          uint32_t value[8] = {};
+          int64_t at[8] = {};
         };
         static const ForceReg s_force_reg = [] {
           ForceReg f;
           const char* v = std::getenv("XE_GPU_FORCE_REG");
-          while (v && *v && f.count < 4) {
+          while (v && *v && f.count < 8) {
             unsigned reg = 0, value = 0;
             int consumed = 0;
             if (std::sscanf(v, "%x:%x%n", &reg, &value, &consumed) != 2 ||
@@ -1684,16 +1687,36 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             }
             f.reg[f.count] = reg;
             f.value[f.count] = value;
-            ++f.count;
+            f.at[f.count] = -1;
             v += consumed;
+            if (*v == '@') {
+              f.at[f.count] = std::atoll(v + 1);
+              while (*v && *v != ',') {
+                ++v;
+              }
+            }
+            ++f.count;
             if (*v == ',') {
               ++v;
             }
           }
           return f;
         }();
-        uint32_t force_reg_saved[4] = {};
+        // XE_GPU_FORCE_REG_AT=<draw>: apply the register force at that draw
+        // only (frame-wide forcing perturbs every earlier pass).
+        static const int64_t s_force_reg_at = [] {
+          const char* v = std::getenv("XE_GPU_FORCE_REG_AT");
+          return v ? int64_t(std::atoll(v)) : int64_t(-1);
+        }();
+        bool force_reg_applied[8] = {};
+        uint32_t force_reg_saved[8] = {};
         for (uint32_t i = 0; i < s_force_reg.count; ++i) {
+          const int64_t at = s_force_reg.at[i] >= 0 ? s_force_reg.at[i]
+                                                     : s_force_reg_at;
+          if (at >= 0 && int64_t(draw_index) != at) {
+            continue;
+          }
+          force_reg_applied[i] = true;
           force_reg_saved[i] = register_file_->values[s_force_reg.reg[i]];
           register_file_->values[s_force_reg.reg[i]] = s_force_reg.value[i];
         }
@@ -1712,7 +1735,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
               "MODECONTROL={:08X} SURFACE_INFO={:08X} SU_SC_MODE_CNTL={:08X} "
               "CL_VTE_CNTL={:08X} CL_CLIP_CNTL={:08X} PROGRAM_CNTL={:08X} "
               "CONTEXT_MISC={:08X} ALPHA_REF={:08X} BLEND_RGBA={:08X},{:08X},"
-              "{:08X},{:08X} VPORT_Z={:08X},{:08X}",
+              "{:08X},{:08X} VPORT_Z={:08X},{:08X} indexed={} ib_fmt={} "
+              "ib_endian={} ib_count={} ib_base={:08X} ib_len={} "
+              "RESET_INDX={:08X} INDX_OFFSET={:08X}",
               draw_index, uint32_t(vgt_draw_initiator.prim_type),
               vgt_draw_initiator.num_indices, rv[XE_GPU_REG_RB_DEPTHCONTROL],
               rv[XE_GPU_REG_RB_STENCILREFMASK], rv[XE_GPU_REG_RB_BLENDCONTROL0],
@@ -1724,7 +1749,25 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
               rv[XE_GPU_REG_SQ_CONTEXT_MISC], rv[XE_GPU_REG_RB_ALPHA_REF],
               rv[XE_GPU_REG_RB_BLEND_RED], rv[XE_GPU_REG_RB_BLEND_RED + 1],
               rv[XE_GPU_REG_RB_BLEND_RED + 2], rv[XE_GPU_REG_RB_BLEND_RED + 3],
-              rv[XE_GPU_REG_PA_CL_VPORT_ZSCALE], rv[XE_GPU_REG_PA_CL_VPORT_ZOFFSET]);
+              rv[XE_GPU_REG_PA_CL_VPORT_ZSCALE], rv[XE_GPU_REG_PA_CL_VPORT_ZOFFSET],
+              is_indexed ? 1 : 0, uint32_t(index_buffer_info.format),
+              uint32_t(index_buffer_info.endianness), index_buffer_info.count,
+              index_buffer_info.guest_base, uint64_t(index_buffer_info.length),
+              rv[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX],
+              rv[XE_GPU_REG_VGT_INDX_OFFSET]);
+          // Raw guest index bytes beside the log (/tmp/xe_ib_<draw>.bin).
+          if (is_indexed && index_buffer_info.length) {
+            const void* ib = memory_->TranslatePhysical(
+                index_buffer_info.guest_base & 0x1FFFFFFF);
+            if (ib) {
+              std::string ib_path =
+                  fmt::format("/tmp/xe_ib_{}.bin", draw_index);
+              if (FILE* f = std::fopen(ib_path.c_str(), "wb")) {
+                std::fwrite(ib, 1, index_buffer_info.length, f);
+                std::fclose(f);
+              }
+            }
+          }
         }
         uint32_t force_float_saved[4] = {};
         if (s_force_float.set) {
@@ -1744,7 +1787,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                       force_float_saved, sizeof(force_float_saved));
         }
         for (uint32_t i = 0; i < s_force_reg.count; ++i) {
-          register_file_->values[s_force_reg.reg[i]] = force_reg_saved[i];
+          if (force_reg_applied[i]) {
+            register_file_->values[s_force_reg.reg[i]] = force_reg_saved[i];
+          }
         }
         if (draw_succeeded &&
             int32_t(draw_index) == cvars::replay_duplicate_draw_stencil) {

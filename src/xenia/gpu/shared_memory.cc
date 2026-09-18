@@ -638,6 +638,41 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
                         (page_last - page_first + 1) << page_size_log2_);
 }
 
+void SharedMemory::InvalidateRangeKeepingGpuWritten(
+    uint32_t physical_address_start, uint32_t length) {
+  if (length == 0 || physical_address_start >= kBufferSize) {
+    return;
+  }
+  length = std::min(length, kBufferSize - physical_address_start);
+  uint32_t physical_address_last = physical_address_start + (length - 1);
+  uint32_t page_first = physical_address_start >> page_size_log2_;
+  uint32_t page_last = physical_address_last >> page_size_log2_;
+  uint32_t block_first = page_first >> 6;
+  uint32_t block_last = page_last >> 6;
+  auto global_lock = global_critical_region_.Acquire();
+  uint32_t kept_pages = 0;
+  for (uint32_t i = block_first; i <= block_last; ++i) {
+    uint64_t invalidate_bits = UINT64_MAX;
+    if (i == block_first) {
+      invalidate_bits &= ~((uint64_t(1) << (page_first & 63)) - 1);
+    }
+    if (i == block_last && (page_last & 63) != 63) {
+      invalidate_bits &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+    }
+    uint64_t keep_bits = invalidate_bits & system_page_flags_valid_and_gpu_written_[i];
+    kept_pages += xe::bit_count(keep_bits);
+    invalidate_bits &= ~keep_bits;
+    system_page_flags_valid_[i] &= ~invalidate_bits;
+    system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+  }
+  static const bool s_log = std::getenv("XE_TRACE_RESTORE_LOG") != nullptr;
+  if (s_log && kept_pages) {
+    XELOGW("SharedMemory: trace restore [{:08X}+{:X}] kept {} GPU-written pages",
+           physical_address_start, length, kept_pages);
+  }
+  FireWatches(page_first, page_last, false, true);
+}
+
 void SharedMemory::PrepareForTraceDownload() {
   ReleaseTraceDownloadRanges();
   assert_true(trace_download_ranges_.empty());

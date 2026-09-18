@@ -958,6 +958,13 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
     // all textures - comparing single-level renders across GPUs also separates
     // mip CONTENT / decode divergence (e.g. vendor-specific BC decompression)
     // from LOD selection divergence.
+    // Never below the fetch's minimum level: a texture with mip_min_level > 0
+    // stores no base level (base_page is zeroed), so level 0 of the host image
+    // is never loaded and the pin would sample undefined (black) texels. Halo
+    // 3's light cookies (DXT1, mip_min_level 1, packed mips) sampled black on
+    // every Apple Vulkan render before this clamp.
+    forced_lod_level =
+        std::max(forced_lod_level, int32_t(parameters.mip_min_level));
     sampler_create_info.minLod = float(forced_lod_level);
     sampler_create_info.maxLod = float(forced_lod_level) + 0.25f;
   }
@@ -1712,7 +1719,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (!cvars::texture_host_dump.empty()) {
     uint32_t dump_base =
         uint32_t(strtoul(cvars::texture_host_dump.c_str(), nullptr, 16));
-    if ((texture_key.base_page << 12) == dump_base) {
+    if ((texture_key.base_page << 12) == dump_base ||
+        (texture_key.base_page == 0 && (texture_key.mip_page << 12) == dump_base)) {
       // The scratch buffer holds the converted host texel data and is
       // currently visible to transfer reads - copy it to a host-visible
       // readback buffer written to disk at shutdown.
@@ -1804,7 +1812,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (!cvars::texture_host_dump_image.empty() && level_first <= level_last) {
     uint32_t dump_base = uint32_t(
         strtoul(cvars::texture_host_dump_image.c_str(), nullptr, 16));
-    if ((texture_key.base_page << 12) == dump_base) {
+    if ((texture_key.base_page << 12) == dump_base ||
+        (texture_key.base_page == 0 && (texture_key.mip_page << 12) == dump_base)) {
       // Read the host image contents back immediately after the
       // buffer-to-image copy, into a buffer with the same layout as the
       // scratch buffer - a difference from the --texture_host_dump scratch
