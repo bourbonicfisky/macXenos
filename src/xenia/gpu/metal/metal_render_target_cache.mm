@@ -4036,6 +4036,14 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
                     dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
            exp_bias_scale, clipped_width, clipped_height, 0u, 0u, 0u, 0u};
   static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+  static const bool s_canonical_resolve_log =
+      std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+  if (s_canonical_resolve_log && width >= 512) {
+    XELOGW("MetalCanonicalResolve {}x{} depth={} format={} storage_format={} "
+           "raw_copy={} dest_swap={} dest_pixel_format={} msaa={} base_tiles={}",
+           width, height, is_depth, format, uint32_t(storage_format), raw_copy,
+           dest_swap, dest_pixel_format, msaa_samples, base_tiles);
+  }
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   MTLRenderPassDescriptor* pass =

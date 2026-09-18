@@ -863,8 +863,22 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
       @autoreleasepool {
         id<MTLTexture> st = (__bridge id<MTLTexture>)snap;
         uint32_t tw = uint32_t(st.width), th = uint32_t(st.height);
+        uint32_t bpp = 4;
+        switch (st.pixelFormat) {
+          case MTLPixelFormatRGBA16Float:
+          case MTLPixelFormatRGBA16Unorm:
+          case MTLPixelFormatRGBA16Snorm:
+          case MTLPixelFormatRG32Float:
+            bpp = 8;
+            break;
+          case MTLPixelFormatRGBA32Float:
+            bpp = 16;
+            break;
+          default:
+            break;
+        }
         id<MTLBuffer> rb =
-            [st.device newBufferWithLength:size_t(tw) * th * 4
+            [st.device newBufferWithLength:size_t(tw) * th * bpp
                                    options:MTLResourceStorageModeShared];
         if (rb) {
           id<MTLCommandBuffer> dcb = [queue commandBuffer];
@@ -876,8 +890,8 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
                      sourceSize:MTLSizeMake(tw, th, 1)
                        toBuffer:rb
               destinationOffset:0
-         destinationBytesPerRow:tw * 4
-       destinationBytesPerImage:size_t(tw) * th * 4];
+         destinationBytesPerRow:tw * bpp
+       destinationBytesPerImage:size_t(tw) * th * bpp];
           [dbl endEncoding];
           [dcb commit];
           [dcb waitUntilCompleted];
@@ -885,7 +899,7 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
                                          s_dump_snapshot_at, trace_draw_index_);
           FILE* f = fopen(path.c_str(), "wb");
           if (f) {
-            fwrite(rb.contents, 1, size_t(tw) * th * 4, f);
+            fwrite(rb.contents, 1, size_t(tw) * th * bpp, f);
             fclose(f);
             XELOGW("MetalSnapshotAt: draw={} wrote {} ({}x{} fmt={})",
                    trace_draw_index_, path, tw, th, uint32_t(st.pixelFormat));
@@ -1467,11 +1481,23 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   if (!null_texture) {
     return false;
   }
-  uint8_t gray_pixel[4] = {128, 128, 128, 255};
+  // The null texture samples as transparent black (0, 0, 0, 0), matching the
+  // D3D12 null shader resource view and the Vulkan null image the shared
+  // texture cache binds for invalid or unserved fetches. It used to be opaque
+  // mid-gray, a diagnostic value with no reference basis. No corpus frame
+  // changed with this (Halo 3 12514 was byte-identical either way; its grey
+  // sprite squares were the narrow-format host swizzle, see
+  // metal_texture_cache.mm). XE_METAL_NULL_GRAY=1 restores the old gray.
+  static const bool s_null_gray = std::getenv("XE_METAL_NULL_GRAY") != nullptr;
+  uint8_t null_pixel[4] = {0, 0, 0, 0};
+  if (s_null_gray) {
+    null_pixel[0] = null_pixel[1] = null_pixel[2] = 128;
+    null_pixel[3] = 255;
+  }
   [null_texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
                   mipmapLevel:0
                         slice:0
-                    withBytes:gray_pixel
+                    withBytes:null_pixel
                   bytesPerRow:4
                 bytesPerImage:0];
   null_texture_ = (__bridge_retained void*)null_texture;
@@ -3948,6 +3974,16 @@ void MetalCommandProcessor::FinalizeSwapFrame() {
 
 void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
                                            const char* site) {
+  {
+    static const int64_t s_draw_trace_skip = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_TRACE");
+      return v ? strtoll(v, nullptr, 10) : -1ll;
+    }();
+    if (s_draw_trace_skip >= 0 &&
+        int64_t(trace_draw_index_) - 1 == s_draw_trace_skip) {
+      XELOGW("MetalDrawTrace SKIP draw={} site={}", s_draw_trace_skip, site);
+    }
+  }
   ++draw_skip_count_;
   const RegisterFile& regs = *register_file_;
   uint32_t prim_type =
@@ -3980,6 +4016,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
+  // trace draw, with the primitive and index count, before any early exit.
+  {
+    static const int64_t s_draw_trace = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_TRACE");
+      return v ? strtoll(v, nullptr, 10) : -1ll;
+    }();
+    if (s_draw_trace >= 0 && int64_t(trace_draw_index_) - 1 == s_draw_trace) {
+      XELOGW("MetalDrawTrace enter draw={} prim={} index_count={} indexed={}",
+             s_draw_trace, uint32_t(prim_type), index_count,
+             index_buffer_info != nullptr);
+    }
+  }
   // An EDRAM "copy mode" draw is not geometry — it's a resolve (EDRAM ->
   // guest). The D3D12/Vulkan backends dispatch this from IssueDraw; without the
   // check our backend treated resolves as normal draws and IssueCopy never fired
@@ -3990,6 +4039,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return IssueCopy();
   }
 
+
+  auto draw_trace_milestone = [&](const char* where) {
+    static const int64_t s_draw_trace_ms = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_TRACE");
+      return v ? strtoll(v, nullptr, 10) : -1ll;
+    }();
+    if (s_draw_trace_ms >= 0 && int64_t(trace_draw_index_) - 1 == s_draw_trace_ms) {
+      XELOGW("MetalDrawTrace {} draw={}", where, s_draw_trace_ms);
+    }
+  };
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
   auto* pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
   if (!vertex_shader || !pipeline_cache_ || !upload_arena_) {
@@ -4146,6 +4205,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // tessellated quad lists would otherwise misroute into the quad-list GS
   // path). With the gate off use_tessellation_emulation is always false and
   // this is exactly the pre-existing expression.
+  draw_trace_milestone("after-shaders");
+  if (std::getenv("XE_METAL_DRAW_TRACE") &&
+      int64_t(trace_draw_index_) - 1 ==
+          strtoll(std::getenv("XE_METAL_DRAW_TRACE"), nullptr, 10)) {
+    XELOGW("MetalDrawTrace shaders draw={} vs={:016X} ps={:016X}",
+           trace_draw_index_ - 1,
+           vertex_shader ? vertex_shader->ucode_data_hash() : 0ull,
+           pixel_shader ? pixel_shader->ucode_data_hash() : 0ull);
+  }
   bool use_geometry_emulation = !use_tessellation_emulation &&
                                 geometry_type != PipelineGeometryShader::kNone &&
                                 mesh_shader_supported_ && pixel_shader != nullptr;
@@ -5292,6 +5360,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             ->device(),
         vs_translation->metal_function(), debug_solid_fragment_,
         debug_solid_pipelines_);
+  draw_trace_milestone("before-geometry-pipeline");
   } else if (use_geometry_emulation) {
     pipeline = pipeline_cache_->GetOrCreateGeometryPipelineState(
         vs_translation, ps_translation, geometry_type,
@@ -5318,7 +5387,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      "tess-pipeline-null");
       return true;
     }
-    if (use_geometry_emulation) {
+    draw_trace_milestone("before-encode-geometry");
+  if (use_geometry_emulation) {
       ++geo_pipeline_fail_count_;
     }
     static std::unordered_set<uint64_t> s_null_pipeline_ps;
@@ -5912,6 +5982,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // identical to the inline auto-fan expansion). DMA/reset fans stay inline.
   bool auto_fan_route = IsAutoFanRoutable(regs, prim_type);
   PrimitiveProcessor::ProcessingResult pp_result{};
+  draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
        auto_line_loop_route || fixed_reset_strip_route) &&
@@ -6535,6 +6606,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                   metal_scissor.width, metal_scissor.height};
       [encoder setScissorRect:scissor_rect];
     }
+  draw_trace_milestone("before-rt-probe");
     // Diagnostic (XE_METAL_RT_PROBE=<draw>): the attachments this draw is
     // encoded against.
     // Accepts a single draw or an inclusive range "a-b".
@@ -7038,6 +7110,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   };
   MetalUploadAllocation desc_idx_vertex_alloc{};
   MetalUploadAllocation desc_idx_pixel_alloc{};
+  draw_trace_milestone("before-marshal");
   if (!marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc) ||
       !marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");

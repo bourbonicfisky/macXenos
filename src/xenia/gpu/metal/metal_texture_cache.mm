@@ -81,6 +81,21 @@ struct FormatPlan {
   bool decode_dxt3a = false;
 };
 
+// Shared-table channel replication for host formats narrower than RGBA. The
+// D3D12/Vulkan texture caches map single-channel guest formats as RRRR and
+// two-channel ones as RGGG (a fetch of .w from a k_8 texture returns the
+// texel, not 1.0). Halo 3's smoke sprites read their k_8 mask through .w:
+// with the identity host swizzle every sprite went opaque (grey squares).
+// XE_METAL_HOST_SWIZZLE_LEGACY=1 restores the identity mapping (rollback).
+FormatPlan ReplicateNarrowHostChannels(FormatPlan plan, uint32_t swizzle) {
+  static const bool s_legacy =
+      std::getenv("XE_METAL_HOST_SWIZZLE_LEGACY") != nullptr;
+  if (!s_legacy) {
+    plan.host_swizzle = swizzle;
+  }
+  return plan;
+}
+
 FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
   switch (format) {
     case xenos::TextureFormat::k_8_8_8_8:
@@ -93,14 +108,20 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
     case xenos::TextureFormat::k_8_8:
       // Two-channel (bump/normal maps: swizzle typically (X,X,X,Y), the
       // shader reconstructs Z).
-      return {true,  false, 2, 1, 1, MTLPixelFormatRG8Unorm,
-              false, false, MTLPixelFormatRG8Snorm};
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatRG8Unorm, false, false,
+           MTLPixelFormatRG8Snorm},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG);
     case xenos::TextureFormat::k_8:
-      return {true,  false, 1, 0, 1, MTLPixelFormatR8Unorm,
-              false, false, MTLPixelFormatR8Snorm};
+      return ReplicateNarrowHostChannels(
+          {true, false, 1, 0, 1, MTLPixelFormatR8Unorm, false, false,
+           MTLPixelFormatR8Snorm},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR);
     case xenos::TextureFormat::k_32_FLOAT:
       // Raw f32 words (the resolve dest format of the luminance pyramid).
-      return {true, false, 4, 2, 1, MTLPixelFormatR32Float};
+      return ReplicateNarrowHostChannels(
+          {true, false, 4, 2, 1, MTLPixelFormatR32Float},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR);
     case xenos::TextureFormat::k_16_16_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_16_16_FLOAT:
       // 64bpp RGBA16F. Sonic's upscale draw reads its 1x1 EXPOSURE and a
@@ -113,10 +134,14 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       return {true, false, 8, 3, 1, MTLPixelFormatRGBA16Float};
     case xenos::TextureFormat::k_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_FLOAT:
-      return {true, false, 4, 2, 1, MTLPixelFormatRG16Float};
+      return ReplicateNarrowHostChannels(
+          {true, false, 4, 2, 1, MTLPixelFormatRG16Float},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG);
     case xenos::TextureFormat::k_16_EXPAND:
     case xenos::TextureFormat::k_16_FLOAT:
-      return {true, false, 2, 1, 1, MTLPixelFormatR16Float};
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatR16Float},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR);
     case xenos::TextureFormat::k_4_4_4_4:
       // 16bpp RGBA4, decoded to RGBA8 on the CPU (see decode_4444). block_log2 =
       // log2(2 source bytes) = 1.
@@ -125,8 +150,10 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       // 16bpp single channel at FULL precision. (Was decode_r16 high-byte
       // RGBA8 expansion — 8-bit quantization banded JC2's 1024x3072 k_16
       // shadow map into visible stripes on every shadow receiver.)
-      return {true,  false, 2, 1, 1, MTLPixelFormatR16Unorm,
-              false, false, MTLPixelFormatR16Snorm};
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatR16Unorm, false, false,
+           MTLPixelFormatR16Snorm},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR);
     case xenos::TextureFormat::k_DXT1:
     case xenos::TextureFormat::k_DXT1_AS_16_16_16_16:
       return {bc_supported, true, 8, 3, 4, MTLPixelFormatBC1_RGBA};

@@ -1768,8 +1768,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
             XELOGW("DrawFetch draw={} vf0(idx95)={:08X},{:08X} "
                    "vf1(idx94)={:08X},{:08X} vf2(idx93)={:08X},{:08X}",
                    draw_index, fc[0], fc[1], fc[-2], fc[-1], fc[-4], fc[-3]);
+            for (uint32_t tf = 0; tf < 6; ++tf) {
+              const uint32_t* t =
+                  &rv[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + tf * 6];
+              XELOGW("DrawTexFetch draw={} tf{} raw={:08X},{:08X},{:08X},{:08X},"
+                     "{:08X},{:08X} type={} base={:08X} fmt={} size={}x{} "
+                     "tiled={} endian={} swz={:03X}",
+                     draw_index, tf, t[0], t[1], t[2], t[3], t[4], t[5],
+                     t[0] & 3u, (t[1] >> 12) << 12, (t[1] & 63u),
+                     (t[2] & 0x1FFFu) + 1, ((t[2] >> 13) & 0x1FFFu) + 1,
+                     (t[0] >> 31) & 1u, (t[1] >> 6) & 3u, (t[3] >> 1) & 0xFFFu);
+            }
             const uint32_t vf0_addr = (fc[0] & ~3u);
-            const uint32_t vf0_size = fc[1] >> 2;  // size in dwords (bits 2-25)
+            const uint32_t vf0_size = (fc[1] >> 2) & 0xFFFFFFu;  // size in dwords (bits 2-25)
             if ((fc[0] & 3u) == 3u && vf0_size) {
               const void* vb = memory_->TranslatePhysical(vf0_addr & 0x1FFFFFFF);
               if (vb) {
