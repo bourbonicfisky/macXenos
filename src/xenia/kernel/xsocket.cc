@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -167,20 +168,29 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
   }
   return X_STATUS_SUCCESS;
 #else
-  int native_cmd = cmd;
-
   assert_false(!supported_controls.contains(cmd));
 
-  if (supported_controls.contains(cmd)) {
-    native_cmd = supported_controls.at(cmd);
-  }
+  // The request must stay an unsigned long: FIONBIO (0x8004667E) has the top
+  // bit set, and narrowing it through `int` sign-extends to
+  // 0xFFFFFFFF8004667E. Linux truncates the syscall argument to 32 bits so
+  // that went unnoticed there, but XNU compares the full 64-bit value and
+  // fails with ENXIO - Gears of War 2/3 then can't make their listen socket
+  // non-blocking, UE3's Listen() fails and the campaign map reloads with
+  // "?failed" (an empty persistent level: the black "void").
+  unsigned long native_cmd = supported_controls.contains(cmd)
+                                 ? supported_controls.at(cmd)
+                                 : static_cast<unsigned long>(cmd);
 
-  int ret = ioctl(native_handle_, native_cmd, arg_ptr);
+  // The guest argument is a big-endian u_long; the host ioctl reads and
+  // writes a native int, so swap on both sides (FIONBIO in, FIONREAD out).
+  uint32_t value = xe::load_and_swap<uint32_t>(arg_ptr);
+  int ret = ioctl(native_handle_, native_cmd, &value);
 
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  xe::store_and_swap<uint32_t>(arg_ptr, value);
   return X_STATUS_SUCCESS;
 #endif
 }
