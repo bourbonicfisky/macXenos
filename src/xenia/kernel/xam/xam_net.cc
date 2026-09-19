@@ -217,6 +217,15 @@ dword_result_t NetDll_XNetCleanup_entry(dword_t caller, lpvoid_t params) {
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetCleanup, kNetworking, kImplemented);
 
+// The title ID of the logged-on title (Edge's implementation). Left
+// undefined here until 2026-09-19: the ARM64 backend returns 0 for an
+// undefined extern (x64 fatal-errors), and Gears of War 3 (4D5308AB) calls it
+// while bringing up its online subsystem before starting a campaign.
+dword_result_t XNetLogonGetTitleID_entry(dword_t caller, lpvoid_t params) {
+  return kernel_state()->title_id();
+}
+DECLARE_XAM_EXPORT1(XNetLogonGetTitleID, kNetworking, kImplemented);
+
 dword_result_t NetDll_XNetGetOpt_entry(dword_t one, dword_t option_id,
                                        lpvoid_t buffer_ptr,
                                        lpdword_t buffer_size) {
