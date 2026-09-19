@@ -2209,9 +2209,26 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
 
     if (normal_routine) {
       IoLedgerOnApcDelivered(normal_routine, normal_context);
-      uint64_t normal_args[] = {normal_context, arg1, arg2};
-      ctx->processor->Execute(ctx->thread_state, normal_routine, normal_args,
-                              xe::countof(normal_args));
+      // Resolve before executing (2026-09-18): an APC whose normal routine
+      // is not guest code (odd address, freed module, data pointer) used to
+      // reach the ARM64 resolve thunk's brk(0xF000) and take the process down
+      // — CoD4 (4E4D0710), DoA4 (5454080E), and every title whose timer APCs
+      // now fire trapped this way on their "Database" thread. Hardware would
+      // fault the guest, not the host; log the routine and skip it so the
+      // title survives and the address can be attributed.
+      if (!ctx->processor->ResolveFunction(normal_routine)) {
+        XELOGE(
+            "xeProcessUserApcs: APC normal routine {:08X}(ctx {:08X}, {:08X}, "
+            "{:08X}) does not resolve to guest code on thread {}; skipped",
+            normal_routine, normal_context, arg1, arg2,
+            XThread::GetCurrentThread()
+                ? XThread::GetCurrentThread()->name()
+                : "<unknown>");
+      } else {
+        uint64_t normal_args[] = {normal_context, arg1, arg2};
+        ctx->processor->Execute(ctx->thread_state, normal_routine,
+                                normal_args, xe::countof(normal_args));
+      }
     }
 
     unlocked_irql = xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);

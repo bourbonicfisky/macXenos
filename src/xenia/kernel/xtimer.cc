@@ -9,6 +9,9 @@
 
 #include "xenia/kernel/xtimer.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xthread.h"
@@ -71,7 +74,13 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
   // timer-queue thread with a null dereference in this lambda. Neither case
   // has a thread to run the APC on, so the fire is logged and dropped.
   std::function<void()> callback = nullptr;
-  if (callback_routine_) {
+  // XE_KERNEL_TIMER_APC=0: diagnostic rollback to the pre-2026-09-18 effect
+  // (timer APCs never delivered), for A/B against titles that regress.
+  static const bool s_timer_apc_off = [] {
+    const char* v = std::getenv("XE_KERNEL_TIMER_APC");
+    return v && std::strcmp(v, "0") == 0;
+  }();
+  if (callback_routine_ && !s_timer_apc_off) {
     if (!callback_thread_) {
       XELOGW(
           "XTimer::SetTimer: routine {:08X} requested with no current guest "

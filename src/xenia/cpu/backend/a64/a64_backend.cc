@@ -497,13 +497,24 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
   if (!fn) {
-    // Unresolvable — return 0 which will fault.
+    // Unresolvable — return 0, and the thunk traps (brk 0xF000). Name the
+    // address and thread first: the crash reporter cannot walk JIT frames, so
+    // this line is the only attribution a release build leaves behind.
+    XELOGE(
+        "A64 ResolveFunction: guest address {:08X} does not resolve to a "
+        "function (thread {}, lr {:08X}); trapping",
+        uint32_t(target_address), thread_state->thread_id(),
+        uint32_t(guest_context->lr));
     return 0;
   }
 
   auto guest_fn = static_cast<GuestFunction*>(fn);
   auto code = guest_fn->machine_code();
   if (!code) {
+    XELOGE(
+        "A64 ResolveFunction: guest address {:08X} resolved but has no "
+        "machine code (thread {}); trapping",
+        uint32_t(target_address), thread_state->thread_id());
     return 0;
   }
   return reinterpret_cast<uint64_t>(code);
