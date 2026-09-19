@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/command_processor.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <ctime>
 #include <tuple>
@@ -2003,6 +2005,12 @@ void CommandProcessor::CloseQuerySegment() {
 
 void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle,
                                           uint64_t raw_samples) {
+  {
+    static const bool s_zpd_trace = std::getenv("XE_GPU_ZPD_TRACE") != nullptr;
+    if (s_zpd_trace) {
+      XELOGW("ZPDResolved handle={} samples={}", report_handle, raw_samples);
+    }
+  }
   auto it = logical_zpd_reports_.find(report_handle);
   if (it == logical_zpd_reports_.end()) {
     return;

@@ -255,6 +255,14 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   // against the previous cbuffer layout — exactly the failure this field
   // exists to prevent. Bump on ANY change to the emitted shader ABI.
   schema.fetch_abi_revision = MetalTranslatorConfig::kFetchAbiRevision;
+  // The XE_GPU_VFETCH_BOUNDS=0 diagnostic emits different DXBC; keep its
+  // records apart from the shipping revision.
+  {
+    const char* v = std::getenv("XE_GPU_VFETCH_BOUNDS");
+    if (v && v[0] == '0') {
+      schema.fetch_abi_revision += 64;
+    }
+  }
   // 3.3b-3 — the DXBC->DXIL conversion generation. Generation 1 = the
   // 2026-08-02 fresh-IDxbcConverter-per-convert fix: reused converter
   // instances carried call history and emitted CORRUPT quad-domain artifacts

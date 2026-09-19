@@ -14,6 +14,8 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+
+#include <cstdlib>
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 
@@ -156,8 +158,18 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
   // own stride read the element after the last one. Compute the exclusive end
   // of the buffer in bytes from the fetch constant and a mask of which words
   // of the element fall inside it.
+  // XE_GPU_VFETCH_BOUNDS=0: diagnostic rollback to the unmasked fetch (the
+  // Metal pipeline schema folds this in so cached shaders cannot cross over).
+  static const bool s_vfetch_bounds_off = [] {
+    const char* v = std::getenv("XE_GPU_VFETCH_BOUNDS");
+    return v && v[0] == '0';
+  }();
   uint32_t bounds_temp = PushSystemTemp(0, 2);
   uint32_t word_mask_temp = bounds_temp + 1;
+  if (s_vfetch_bounds_off) {
+    // All-ones mask: every word passes.
+    a_.OpMov(dxbc::Dest::R(word_mask_temp), dxbc::Src::LU(UINT32_MAX));
+  }
   // bounds_temp.x = buffer size in words (bits 2:25 of the second fetch
   // constant word).
   a_.OpUBFE(dxbc::Dest::R(bounds_temp, 0b0001), dxbc::Src::LU(24),
@@ -177,9 +189,11 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
                           (2 - int32_t(first_word_index)) * 4,
                           (3 - int32_t(first_word_index)) * 4));
   // word_mask_temp = whether each word is within the buffer bounds.
-  a_.OpULT(dxbc::Dest::R(word_mask_temp, needed_words),
-           dxbc::Src::R(word_mask_temp),
-           dxbc::Src::R(bounds_temp, dxbc::Src::kXXXX));
+  if (!s_vfetch_bounds_off) {
+    a_.OpULT(dxbc::Dest::R(word_mask_temp, needed_words),
+             dxbc::Src::R(word_mask_temp),
+             dxbc::Src::R(bounds_temp, dxbc::Src::kXXXX));
+  }
 
   // - Load needed words to system_temp_result_, words 0, 1, 2, 3 to X, Y, Z, W
   //   respectively.
