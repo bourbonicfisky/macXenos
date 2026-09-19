@@ -122,6 +122,24 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       return ReplicateNarrowHostChannels(
           {true, false, 4, 2, 1, MTLPixelFormatR32Float},
           xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR);
+    case xenos::TextureFormat::k_32_32_32_32_FLOAT:
+      // 128bpp RGBA32F: four raw f32 words per texel, k8in32 swapped per word
+      // by SwapEndian. Engaged by Gears of War 3 (4D5308AB), 2026-09-18: two
+      // 4096x1 linear tables (UE3 GPU float tables) were served null, 300
+      // times per run, and the whole lit world rendered black while emissive
+      // geometry and the HUD survived. k_32_32_FLOAT (fmt 37) has no
+      // observed engagement and stays unimplemented.
+      {
+        // XE_METAL_RGBA32F=0: bisect rollback (serves null as before).
+        static const bool s_rgba32f_off = [] {
+          const char* v = std::getenv("XE_METAL_RGBA32F");
+          return v && std::strcmp(v, "0") == 0;
+        }();
+        if (s_rgba32f_off) {
+          return {false, false, 16, 4, 1, MTLPixelFormatInvalid};
+        }
+      }
+      return {true, false, 16, 4, 1, MTLPixelFormatRGBA32Float};
     case xenos::TextureFormat::k_16_16_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_16_16_FLOAT:
       // 64bpp RGBA16F. Sonic's upscale draw reads its 1x1 EXPOSURE and a
