@@ -11,6 +11,7 @@
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
 #include "xenia/gpu/metal/metal_present_convert_shader.h"
+#include "xenia/gpu/metal/metal_present_swizzle_shader.h"
 
 #import <Metal/Metal.h>
 
@@ -28,6 +29,8 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <cstdlib>
 #include <set>
 #include <cstring>
+#include <string_view>
+#include <unordered_map>
 #include <chrono>
 #include <exception>
 #include <string>
@@ -11765,6 +11768,59 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       present_source_path = "ram-frontbuffer";
     }
   }
+  // Guest swap-texture swizzle to apply to the presented snapshot (fetch
+  // constant 0, the RequestSwapTexture contract); identity unless the census
+  // block below selects it.
+  constexpr uint32_t kIdentityGuestSwizzle = 0x688;  // X,Y,Z,W
+  uint32_t present_guest_swizzle = kIdentityGuestSwizzle;
+  {
+    // Present-decode census (2026-09-18): the reference backends present the
+    // frontbuffer through fetch constant 0 (RequestSwapTexture: format,
+    // endian, guest swizzle) while this path presents the resolve snapshot's
+    // render-target content directly. Log both sides whenever they change so
+    // the composition can be checked per title (Forza Horizon 2 / Halo 3 /
+    // ODST show R/B swapped).
+    const auto& regs = *register_file_;
+    const auto fetch0 = regs.GetTextureFetch(0);
+    auto layout_it = ram_color_layouts_.find(frontbuffer_ptr);
+    const bool has_layout = layout_it != ram_color_layouts_.end();
+    const uint64_t key =
+        (uint64_t(fetch0.format) << 48) | (uint64_t(fetch0.endianness) << 44) |
+        (uint64_t(fetch0.swizzle) << 32) | (uint64_t(frontbuffer_ptr >> 12) << 8) |
+        (has_layout ? (uint64_t(layout_it->second.swap_rb) << 4) |
+                          (uint64_t(layout_it->second.endian) << 1) | 1u
+                    : 0u);
+    static uint64_t s_last_swap_fetch_key = ~0ull;
+    if (key != s_last_swap_fetch_key) {
+      s_last_swap_fetch_key = key;
+      XELOGI(
+          "MetalSwapFetch: fb {:08X} {}x{} fetch0 base={:08X} fmt={} endian={} "
+          "swizzle={:03X} size={}x{} | resolve layout {} swap_rb={} endian={}",
+          frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
+          uint32_t(fetch0.base_address) << 12, uint32_t(fetch0.format),
+          uint32_t(fetch0.endianness), uint32_t(fetch0.swizzle),
+          uint32_t(fetch0.size_2d.width) + 1,
+          uint32_t(fetch0.size_2d.height) + 1, has_layout ? "recorded" : "none",
+          has_layout ? layout_it->second.swap_rb : 0u,
+          has_layout ? layout_it->second.endian : 0u);
+    }
+    // Apply the fetch swizzle only where the source is the canonical resolve
+    // snapshot (swap baked in, exactly what a texture fetch through this
+    // constant would decode). The RAM-decoded and pre-resolve fallbacks hold
+    // render-target content and keep their direct presentation.
+    // XE_METAL_PRESENT_SWIZZLE=0 is the exact rollback.
+    static const bool s_present_swizzle_off = [] {
+      const char* v = std::getenv("XE_METAL_PRESENT_SWIZZLE");
+      return v && std::strcmp(v, "0") == 0;
+    }();
+    if (!s_present_swizzle_off && render_target_cache_ &&
+        render_target_cache_->sample_edram_raster_enabled() &&
+        fetch0.type == xenos::FetchConstantType::kTexture &&
+        fetch0.dimension == xenos::DataDimension::k2DOrStacked &&
+        (uint32_t(fetch0.base_address) << 12) == frontbuffer_ptr) {
+      present_guest_swizzle = uint32_t(fetch0.swizzle) & 0xFFFu;
+    }
+  }
   if (count == 0 || (count % 60) == 0) {
     XELOGI(
         "MetalCommandProcessor: IssueSwap #{} (RT {}x{}, guest fb {}x{}, ptr "
@@ -11971,6 +12027,108 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       return false;
     }
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    const bool swizzle_source =
+        source_rt && present_guest_swizzle != kIdentityGuestSwizzle &&
+        (present_source_path == std::string_view("fb-snapshot") ||
+         present_source_path ==
+             std::string_view("fb-snapshot-ram-fallback-failed"));
+    if (swizzle_source) {
+      // Render the snapshot through the guest swap swizzle into a private
+      // copy of the same format; every path below (format conversion, gamma
+      // ramp, plain blit) then consumes the copy unchanged.
+      static std::unordered_map<uint64_t, void*> s_swz_pipelines;  // by format
+      static void* s_swz_texture = nullptr;  // id<MTLTexture>
+      id<MTLDevice> dev = mailbox.device;
+      const bool source_is_array =
+          source_rt.textureType == MTLTextureType2DArray;
+      void*& pipeline_slot =
+          s_swz_pipelines[(uint64_t(source_rt.pixelFormat) << 1) |
+                          (source_is_array ? 1u : 0u)];
+      if (!pipeline_slot) {
+        NSError* err = nil;
+        id<MTLLibrary> lib =
+            [dev newLibraryWithSource:kMetalPresentSwizzleShader
+                              options:nil
+                                error:&err];
+        if (lib) {
+          MTLRenderPipelineDescriptor* d =
+              [[MTLRenderPipelineDescriptor alloc] init];
+          d.vertexFunction = [lib newFunctionWithName:@"xe_swz_vs"];
+          d.fragmentFunction =
+              [lib newFunctionWithName:(source_is_array ? @"xe_swz_fs_array"
+                                                        : @"xe_swz_fs_2d")];
+          d.colorAttachments[0].pixelFormat = source_rt.pixelFormat;
+          id<MTLRenderPipelineState> ps =
+              [dev newRenderPipelineStateWithDescriptor:d error:&err];
+          if (ps) {
+            pipeline_slot = (__bridge_retained void*)ps;
+          }
+        }
+        if (!pipeline_slot) {
+          XELOGE("MetalPresentSwizzle: pipeline creation failed for format {}: {}",
+                 uint64_t(source_rt.pixelFormat),
+                 err ? err.localizedDescription.UTF8String : "unknown");
+        }
+      }
+      id<MTLTexture> swz_tex = (__bridge id<MTLTexture>)s_swz_texture;
+      if (swz_tex && (swz_tex.pixelFormat != source_rt.pixelFormat ||
+                      swz_tex.textureType != source_rt.textureType ||
+                      swz_tex.width != source_rt.width ||
+                      swz_tex.height != source_rt.height)) {
+        id<MTLTexture> old_tex = (__bridge_transfer id<MTLTexture>)s_swz_texture;
+        (void)old_tex;
+        s_swz_texture = nullptr;
+        swz_tex = nil;
+      }
+      if (!swz_tex && pipeline_slot) {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:source_rt.pixelFormat
+                                         width:source_rt.width
+                                        height:source_rt.height
+                                     mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModePrivate;
+        if (source_is_array) {
+          // Keep the array shape so the downstream present shaders (which
+          // read snapshots as texture2d_array) see the same type.
+          td.textureType = MTLTextureType2DArray;
+          td.arrayLength = 1;
+        }
+        swz_tex = [dev newTextureWithDescriptor:td];
+        if (swz_tex) {
+          swz_tex.label = @"cp:present-swizzle";
+          s_swz_texture = (__bridge_retained void*)swz_tex;
+        }
+      }
+      if (swz_tex && pipeline_slot) {
+        MTLRenderPassDescriptor* pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = swz_tex;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc =
+            [command_buffer renderCommandEncoderWithDescriptor:pass];
+        [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                        pipeline_slot];
+        [enc setFragmentTexture:source_rt atIndex:0];
+        uint32_t swz = present_guest_swizzle;
+        [enc setFragmentBytes:&swz length:sizeof(swz) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+        [enc endEncoding];
+        source_rt = swz_tex;
+        static uint32_t s_swz_logged = 0;
+        if (s_swz_logged < 4) {
+          ++s_swz_logged;
+          XELOGI(
+              "MetalPresentSwizzle: fb {:08X} presented through guest swizzle "
+              "{:03X} ({}x{}, format {})",
+              frontbuffer_ptr, present_guest_swizzle, uint32_t(swz_tex.width),
+              uint32_t(swz_tex.height), uint64_t(swz_tex.pixelFormat));
+        }
+      }
+    }
     if (source_rt && source_rt.pixelFormat != mailbox.pixelFormat) {
       // Debug visualization (XE_METAL_PRESENT_BASE of a non-BGRA8 snapshot,
       // e.g. an R32Float depth snapshot): a blit between different formats is
