@@ -12,6 +12,7 @@
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
 #include "xenia/gpu/metal/metal_present_convert_shader.h"
 #include "xenia/gpu/metal/metal_present_swizzle_shader.h"
+#include "xenia/gpu/metal/metal_fetch_constant_type.h"
 
 #import <Metal/Metal.h>
 
@@ -2197,6 +2198,17 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   frame_open_ = true;
   encoder_attachment_key_ = want_key;
   encoder_has_zpd_visibility_ = zpd_visibility_buffer != nil;
+  {
+    static const bool s_zpd_trace =
+        std::getenv("XE_METAL_ZPD_TRACE") != nullptr;
+    if (s_zpd_trace && zpd_active_segment_.logical_active) {
+      XELOGI("MetalZPDTrace new-encoder draw={} has_vis={} pending_begin={} "
+             "segment_active={} query_open={}",
+             trace_draw_index_, encoder_has_zpd_visibility_,
+             zpd_active_segment_.segment_pending_begin,
+             zpd_active_segment_.segment_active, zpd_query_open_);
+    }
+  }
   // A new encoder is the next valid opportunity for a report whose segment is
   // waiting to open -- either because the guest issued BEGIN with no eligible
   // encoder, or because the previous segment was closed at the last encoder
@@ -3341,7 +3353,19 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
   admission.current_encoding_submission = CurrentEncodingSubmission();
   admission.can_close_submission = can_close_submission;
 
-  switch (DecideZPDQueryAdmission(admission)) {
+  const ZPDQueryAdmission admission_decision =
+      DecideZPDQueryAdmission(admission);
+  static const bool s_zpd_trace = std::getenv("XE_METAL_ZPD_TRACE") != nullptr;
+  if (s_zpd_trace) {
+    XELOGI(
+        "MetalZPDTrace open draw={} handle={} decision={} encoder_open={} "
+        "encoder_has_vis={} free_slot={} already_open={}",
+        trace_draw_index_, report_handle, uint32_t(admission_decision),
+        frame_open_ && frame_render_encoder_ != nullptr,
+        encoder_has_zpd_visibility_, admission.has_free_slot,
+        zpd_query_open_);
+  }
+  switch (admission_decision) {
     case ZPDQueryAdmission::kAcquire:
       break;
     case ZPDQueryAdmission::kDefer:
@@ -3383,6 +3407,13 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
 
 bool MetalCommandProcessor::RetireActiveZPDQuery(ReportHandle report_handle,
                                                  uint64_t* out_submission) {
+  static const bool s_zpd_trace = std::getenv("XE_METAL_ZPD_TRACE") != nullptr;
+  if (s_zpd_trace) {
+    XELOGI("MetalZPDTrace retire draw={} handle={} query_open={} frame_open={} "
+           "encoder_has_vis={} slot={}",
+           trace_draw_index_, report_handle, zpd_query_open_, frame_open_,
+           encoder_has_zpd_visibility_, zpd_active_index_);
+  }
   if (!zpd_query_open_) {
     return false;
   }
@@ -4706,6 +4737,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
         }
       }
+      // Diagnostic (2026-09-19, Gears of War 3): a no-RT draw issued while an
+      // occlusion (ZPD) query is logically open is a sample-count query, not a
+      // no-op; skipping it reports zero visible samples. Bounded log.
+      {
+        static uint32_t s_zpd_skip_logs = 0;
+        if (zpd_active_segment_.logical_active && s_zpd_skip_logs < 16) {
+          ++s_zpd_skip_logs;
+          XELOGW(
+              "MetalZPDSkip draw={} no-RT draw skipped inside a logically "
+              "active ZPD segment (segment_active={} pending_begin={} "
+              "zfunc={} z_en={} prim={} index_count={})",
+              trace_draw_index_, zpd_active_segment_.segment_active,
+              zpd_active_segment_.segment_pending_begin,
+              uint32_t(regs.Get<reg::RB_DEPTHCONTROL>().zfunc),
+              uint32_t(regs.Get<reg::RB_DEPTHCONTROL>().z_enable),
+              uint32_t(prim_type), index_count);
+        }
+      }
       RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
                      "no-rt-no-export");
       return true;
@@ -5281,6 +5330,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(),
                           ps_param_gen_pos))
                    : 0;
+  // Diagnostic (2026-09-19): XE_METAL_IMASK_PS_ONLY=1 keeps every
+  // interpolator the pixel shader reads even when the vertex shader writes
+  // none (the VS declares and zero-fills them), so the PS variant matches
+  // the one used when a VS does write them.
+  static const bool s_imask_ps_only =
+      std::getenv("XE_METAL_IMASK_PS_ONLY") != nullptr;
+  if (s_imask_ps_only && pixel_shader) {
+    interpolator_mask = pixel_shader->GetInterpolatorInputMask(
+        sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+  }
 
   // Tessellated draws translate the guest VS as the DOMAIN shader the shared
   // processor chose (ProcessingResult::host_vertex_shader_type — task 4.1
@@ -5292,6 +5351,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           use_tessellation_emulation ? tess_pp.host_vertex_shader_type
                                      : Shader::HostVertexShaderType::kVertex));
   vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
+  {
+    static const bool s_imask_log = std::getenv("XE_METAL_IMASK_LOG") != nullptr;
+    static uint32_t s_imask_logs = 0;
+    if (s_imask_log && s_imask_logs < 64 && pixel_shader) {
+      ++s_imask_logs;
+      XELOGW("MetalInterp draw={} vs={:016X} ps={:016X} vs_writes={:X} ps_input={:X} "
+             "mask={:X} pgen={} ps_num_reg={} vs_num_reg={}",
+             trace_draw_index_, vertex_shader->ucode_data_hash(),
+             pixel_shader->ucode_data_hash(),
+             vertex_shader->writes_interpolators(),
+             pixel_shader->GetInterpolatorInputMask(
+                 sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(),
+                 ps_param_gen_pos),
+             interpolator_mask, ps_param_gen_pos,
+             uint32_t(sq_program_cntl.ps_num_reg),
+             uint32_t(sq_program_cntl.vs_num_reg));
+    }
+  }
   {
     auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
     uint32_t user_clip_planes =
@@ -5668,7 +5745,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           bool fetch_buffer_read =
               shared_texture_cache_ && !trace_writer_.is_open() &&
               binding.fetch_constant < xenos::kTextureFetchConstantCount &&
-              f.type == xenos::FetchConstantType::kTexture;
+              IsTextureFetchConstantServable(
+                  f.type, cvars::gpu_allow_invalid_fetch_constants);
           bool strict_eligible = false;
           ResolvedFetchService fetch_service =
               ResolvedFetchService::kRamContent;
@@ -6004,7 +6082,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           continue;
         }
         auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-        if (fetch.type != xenos::FetchConstantType::kTexture) {
+        if (!IsTextureFetchConstantServable(
+                fetch.type, cvars::gpu_allow_invalid_fetch_constants)) {
           continue;
         }
         uint32_t fetch_width = fetch.size_2d.width + 1;
@@ -7058,12 +7137,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             return false;
           }
           uint32_t texture_slot = routed_slot;
+          if (probe && routed_slot) {
+            XELOGI("MetalTexProbe draw={} routed slot fc={} -> {}", s_tex_probe,
+                   binding.fetch_constant, routed_slot);
+          }
           if (!texture_slot) {
             // A failed shared-cache candidate may still have a correct legacy
             // fallback. Only propagate failure if that fallback also can't
             // create the required object or heap slot.
             texture_cache_->ClearBindingAllocationFailure();
             texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
+            if (probe) {
+              XELOGI("MetalTexProbe draw={} legacy GetTextureSlot fc={} signed={} -> {}",
+                     s_tex_probe, binding.fetch_constant, binding.is_signed,
+                     texture_slot);
+            }
             if (texture_cache_->binding_allocation_failed()) {
               XELOGW("MetalCommandProcessor: skipping draw after texture "
                      "binding allocation failure");
@@ -8048,6 +8136,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_dump_depth_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_depth_at) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     void* dt_ptr = render_target_cache_->current_depth_texture();
+    XELOGW("XE_METAL_DUMP_DEPTH: probe at draw {} depth_texture={}",
+           s_dump_depth_at, dt_ptr != nullptr);
     if (dt_ptr) {
       id<MTLTexture> dt = (__bridge id<MTLTexture>)dt_ptr;
       uint32_t tw = uint32_t(dt.width), th = uint32_t(dt.height);
@@ -8072,6 +8162,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         [dbl endEncoding];
         [dcb commit];
         [dcb waitUntilCompleted];
+        {
+          // Raw float32 companion for exact-value comparisons.
+          std::string raw_path =
+              fmt::format("/tmp/xe_depth_{}.f32", s_dump_depth_at);
+          FILE* rf = fopen(raw_path.c_str(), "wb");
+          if (rf) {
+            fwrite(rb.contents, 4, size_t(tw) * th, rf);
+            fclose(rf);
+          }
+        }
         std::string path = fmt::format("/tmp/xe_depth_{}.ppm", s_dump_depth_at);
         FILE* f = fopen(path.c_str(), "wb");
         if (f) {
@@ -8239,7 +8339,39 @@ void* MetalCommandProcessor::GetOrCreateDepthStencilState(
   if (s_no_depth_test) {
     desc.depthCompareFunction = MTLCompareFunctionAlways;
   }
+  // Diagnostic (2026-09-19, Gears of War 3 occlusion): XE_METAL_ZFUNC_INVERT=1
+  // maps GEQUAL to LESS (and vice versa) so a zero-count query can be split
+  // into "fragment depth below the buffer" vs "compare never passes (NaN)".
+  static const bool s_zfunc_invert =
+      std::getenv("XE_METAL_ZFUNC_INVERT") != nullptr;
+  if (s_zfunc_invert && dc.z_enable) {
+    if (dc.zfunc == xenos::CompareFunction::kGreaterEqual) {
+      desc.depthCompareFunction = MTLCompareFunctionLess;
+    } else if (dc.zfunc == xenos::CompareFunction::kLess) {
+      desc.depthCompareFunction = MTLCompareFunctionGreaterEqual;
+    }
+  }
   desc.depthWriteEnabled = dc.z_enable && dc.z_write_enable;
+  // Diagnostic: XE_METAL_FORCE_ZWRITE=1 writes depth on every depth-enabled
+  // draw so a depth-only draw's exported values can be dumped.
+  static const bool s_force_zwrite =
+      std::getenv("XE_METAL_FORCE_ZWRITE") != nullptr;
+  if (s_force_zwrite && dc.z_enable) {
+    desc.depthWriteEnabled = true;
+  }
+  {
+    static const bool s_ds_log = std::getenv("XE_METAL_DEPTHSTATE_LOG") != nullptr;
+    static uint32_t s_ds_logs = 0;
+    if (s_ds_log && s_ds_logs < 64) {
+      ++s_ds_logs;
+      XELOGW("MetalDepthState draw={} z_enable={} zfunc={} z_write={} "
+             "stencil={} -> compare={} write={}",
+             trace_draw_index_, uint32_t(dc.z_enable), uint32_t(dc.zfunc),
+             uint32_t(dc.z_write_enable), uint32_t(dc.stencil_enable),
+             uint32_t(desc.depthCompareFunction),
+             uint32_t(desc.depthWriteEnabled));
+    }
+  }
   if (dc.stencil_enable) {
     MTLStencilDescriptor* front = [[MTLStencilDescriptor alloc] init];
     front.stencilCompareFunction = ToMetalCompareFunction(dc.stencilfunc);
@@ -11662,6 +11794,27 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           layout_gen_it->second.generation == gen_it->second;
     }
   }
+  // Canonical snapshots with a recorded RAM layout used to be presented via
+  // the CPU RAM decode (which reverses endian and copy_dest_swap). That path
+  // reads guest RAM whose writeback may not have drained for this swap:
+  // Gears of War 3 (4D5308AB, 2026-09-19) alternated luma 21 <-> 61 on
+  // consecutive swaps (MetalFlicker, source ram-frontbuffer-canonical-
+  // snapshot) — the menu background and the whole lit world pulsing. The
+  // snapshot itself is complete at swap time and, presented through the swap
+  // texture's fetch swizzle (the RequestSwapTexture contract, applied in the
+  // refresher), needs no decode. That pulsing turned out to be the title's
+  // occlusion queries (invalid-typed fetch constants), not the present, so
+  // the snapshot present for the canonical 8-bit class stays OPT-IN
+  // (XE_METAL_PRESENT_SNAPSHOT=1; headless byte-identical to the RAM decode
+  // on Gears 3 and DOA5) until a live gate covers the RAM-decode titles.
+  static const bool s_present_snapshot = [] {
+    const char* v = std::getenv("XE_METAL_PRESENT_SNAPSHOT");
+    return v && std::strcmp(v, "1") == 0;
+  }();
+  if (canonical_ram_backed_snapshot && s_present_snapshot &&
+      !partial_ram_backed_snapshot) {
+    canonical_ram_backed_snapshot = false;
+  }
   bool prefer_ram_frontbuffer =
       partial_ram_backed_snapshot || canonical_ram_backed_snapshot;
   // Diagnostic: XE_METAL_PRESENT_BASE=<hex guest base> presents that resolved
@@ -11815,7 +11968,8 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }();
     if (!s_present_swizzle_off && render_target_cache_ &&
         render_target_cache_->sample_edram_raster_enabled() &&
-        fetch0.type == xenos::FetchConstantType::kTexture &&
+        IsTextureFetchConstantServable(
+            fetch0.type, cvars::gpu_allow_invalid_fetch_constants) &&
         fetch0.dimension == xenos::DataDimension::k2DOrStacked &&
         (uint32_t(fetch0.base_address) << 12) == frontbuffer_ptr) {
       present_guest_swizzle = uint32_t(fetch0.swizzle) & 0xFFFu;

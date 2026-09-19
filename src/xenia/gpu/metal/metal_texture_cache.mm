@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
+#include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/metal/metal_fetch_constant_type.h"
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 
@@ -768,8 +770,16 @@ uint32_t MetalTextureCache::GetTextureSlot(
           uint32_t(fetch.tiled), fetch.swizzle & 0xFFF);
     }
   };
-  if (fetch.type != xenos::FetchConstantType::kTexture) {
+  if (!IsTextureFetchConstantServable(
+          fetch.type, cvars::gpu_allow_invalid_fetch_constants)) {
+    log_null("fetch-type");
     return 0;
+  }
+  if (xe_lineage_base() && (fetch.base_address << 12) == xe_lineage_base()) {
+    XELOGW("MetalLineage ENTER draw={} base={:08X} signed={} fmt={} filters={}/{} aniso={}",
+           lineage_draw_, fetch.base_address << 12, is_signed,
+           uint32_t(fetch.format), uint32_t(fetch.mag_filter),
+           uint32_t(fetch.min_filter), uint32_t(fetch.aniso_filter));
   }
   // Shader-executor harness (XE_METAL_SYNTH_FETCH=hexbase,R,G,B,A): serve a
   // constant-color texture for that base — a known input pushed through the
@@ -862,7 +872,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // XE_METAL_COLOR_BRIDGE=1 restores bridge-for-all-color for A/B.
   {
     auto rit = resolved_targets_.find(fetch.base_address << 12);
-    if (rit != resolved_targets_.end() && rit->second.texture) {
+    // XE_METAL_DEPTH_BRIDGE=0 (diagnostic, 2026-09-19): serve depth resolve
+    // destinations from guest RAM (the k_24_8 CPU decode) instead of the
+    // depth snapshot, to attribute Gears of War 3's zero occlusion counts.
+    static const bool s_depth_bridge_off = [] {
+      const char* v = std::getenv("XE_METAL_DEPTH_BRIDGE");
+      return v && v[0] == '0';
+    }();
+    if (rit != resolved_targets_.end() && rit->second.texture &&
+        !(s_depth_bridge_off && rit->second.is_depth)) {
       const ResolvedTarget& rt = rit->second;
       uint32_t fetch_w = fetch.size_2d.width + 1;
       uint32_t fetch_h = fetch.size_2d.height + 1;
