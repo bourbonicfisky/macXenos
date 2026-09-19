@@ -863,6 +863,51 @@ void EmulatorApp::EmulatorThread() {
     path = cvars::target;
   }
 
+  // Saved loader data (XamLoaderLaunchTitle from a previous run) is consumed
+  // here and only honored when it targets the same title as the command line,
+  // or when no target was given. Otherwise a stale launch_data.bin left in the
+  // working directory by one title would hijack every later launch of any
+  // other title (2026-09-18: Call of Duty 4 re-saves it on each boot).
+  std::filesystem::path relaunch_path;
+  auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
+      "xam.xex");
+  if (xam) {
+    xam->LoadLoaderData();
+    auto& loader_data = xam->loader_data();
+    if (loader_data.launch_data_present) {
+      const std::filesystem::path host_path = loader_data.host_path;
+      bool same_title = path.empty();
+      if (!same_title) {
+        std::error_code ec;
+        auto a = std::filesystem::weakly_canonical(
+            std::filesystem::absolute(path), ec);
+        auto b = std::filesystem::weakly_canonical(
+            std::filesystem::absolute(host_path), ec);
+        same_title = a == b || (a.extension() == ".xex" &&
+                                b.extension() == ".xex" &&
+                                a.parent_path() == b.parent_path());
+      }
+      if (same_title) {
+        relaunch_path = host_path;
+      } else {
+        XELOGW(
+            "Ignoring saved loader data for '{}' (launch path '{}'): command "
+            "line targets '{}'",
+            xe::path_to_utf8(host_path), loader_data.launch_path,
+            xe::path_to_utf8(path));
+        loader_data.launch_data_present = false;
+        loader_data.host_path.clear();
+        loader_data.launch_path.clear();
+        loader_data.launch_flags = 0;
+        loader_data.launch_data.clear();
+      }
+    }
+  }
+
+  if (!relaunch_path.empty()) {
+    path = relaunch_path;
+  }
+
   if (!path.empty()) {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
@@ -873,20 +918,6 @@ void EmulatorApp::EmulatorThread() {
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();
       return;
-    }
-  }
-
-  auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
-      "xam.xex");
-
-  if (xam) {
-    xam->LoadLoaderData();
-
-    if (xam->loader_data().launch_data_present) {
-      const std::filesystem::path host_path = xam->loader_data().host_path;
-      app_context().CallInUIThread([this, host_path]() {
-        return emulator_window_->RunTitle(host_path);
-      });
     }
   }
 
