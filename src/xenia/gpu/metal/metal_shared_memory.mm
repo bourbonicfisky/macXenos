@@ -24,6 +24,7 @@
 #include "xenia/memory.h"
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(protect_on_release);
 
 namespace xe {
 namespace gpu {
@@ -468,6 +469,20 @@ bool MetalSharedMemory::UploadRanges(
     if (!upload_length) {
       continue;
     }
+    // Guest-unallocated pages (2026-09-18): games draw from physical pages
+    // the guest heap has released or never allocated — the hardware just
+    // reads whatever is there, and xenia's BaseHeap::Release notes the same.
+    // The shared refusal (also in Canary's D3D12/Vulkan UploadRanges) exists
+    // to keep the host memcpy off pages that were host-protected, which only
+    // happens with --protect_on_release. So: refuse only when the host page
+    // could actually be unreadable; otherwise upload the bytes as hardware
+    // would read them. Dishonored (425307E3) dropped 4-45 draws per frame
+    // this way (polygons flashing in and out); Forza Horizon 1/2, Batman AA
+    // and Gears 2 dropped a few per frame. XE_METAL_STRICT_UPLOAD_RANGE=1
+    // restores the unconditional refusal; --gpu_allow_invalid_upload_range
+    // still forces the upload even with protect_on_release.
+    static const bool s_strict_upload_range =
+        std::getenv("XE_METAL_STRICT_UPLOAD_RANGE") != nullptr;
     if (!cvars::gpu_allow_invalid_upload_range) {
       uint32_t last_page_start =
           upload_start + upload_length - (1u << page_size_log2());
@@ -476,9 +491,19 @@ bool MetalSharedMemory::UploadRanges(
           memory().GetPhysicalHeap()->QueryRangeAccess(
               last_page_start, last_page_start) ==
               xe::memory::PageAccess::kNoAccess) {
-        XELOGE("MetalSharedMemory: invalid upload range {:08X}+{:X}",
-               upload_start, upload_length);
-        return false;
+        if (s_strict_upload_range || cvars::protect_on_release) {
+          XELOGE("MetalSharedMemory: invalid upload range {:08X}+{:X}",
+                 upload_start, upload_length);
+          return false;
+        }
+        static uint32_t s_unallocated_log = 0;
+        if (s_unallocated_log < 32) {
+          ++s_unallocated_log;
+          XELOGW(
+              "MetalSharedMemory: uploading guest-unallocated range "
+              "{:08X}+{:X} (host-readable; hardware reads freed memory)",
+              upload_start, upload_length);
+        }
       }
     }
     // Validate BEFORE the memcpy so a CPU write racing the copy re-invalidates
