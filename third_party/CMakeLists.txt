@@ -225,6 +225,19 @@ add_library(snappy STATIC
 target_include_directories(snappy PUBLIC "${_snappy_gen_dir}" snappy)
 
 # ==============================================================================
+# d3d11-tessellator (Microsoft D3D11 reference tessellator, MIT; see README.md)
+# ==============================================================================
+add_library(d3d11-tessellator STATIC
+  d3d11-tessellator/tessellator.cpp
+)
+target_include_directories(d3d11-tessellator PUBLIC d3d11-tessellator)
+if(MSVC)
+  target_compile_options(d3d11-tessellator PRIVATE /w)
+else()
+  target_compile_options(d3d11-tessellator PRIVATE -w)
+endif()
+
+# ==============================================================================
 # xxhash
 # ==============================================================================
 add_library(xxhash STATIC

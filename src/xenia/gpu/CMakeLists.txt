@@ -6,7 +6,7 @@ target_include_directories(xenia-gpu PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
   ${PROJECT_SOURCE_DIR}/third_party/glslang
 )
-target_link_libraries(xenia-gpu PUBLIC dxbc fmt glslang-spirv snappy xxhash xenia-base xenia-ui)
+target_link_libraries(xenia-gpu PUBLIC d3d11-tessellator dxbc fmt glslang-spirv snappy xxhash xenia-base xenia-ui)
 xe_target_defaults(xenia-gpu)
 
 if(XENIA_BUILD_TESTS)
