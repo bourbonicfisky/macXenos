@@ -497,8 +497,7 @@ struct Harness {
     std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
         BuildMetalTopLevelArgumentBuffer(addresses,
                                          /*pixel_shader_present=*/true,
-                                         /*memexport_draw=*/false,
-                                         /*tessellation_draw=*/false);
+                                         /*memexport_draw=*/false);
     id<MTLBuffer> ab_buffer = NewBuffer(sizeof(argument_buffer), @"AB");
     std::memcpy([ab_buffer contents], argument_buffer.data(),
                 sizeof(argument_buffer));

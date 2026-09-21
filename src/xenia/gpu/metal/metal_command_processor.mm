@@ -168,16 +168,17 @@ double ProcessFootprintMiB() {
 
 // XE_METAL_TESSELLATION (port-xenios-tessellation task 4.6). Strict parse per
 // the depth-semantics flag conventions: unset/empty/"0" off, "1" on, anything
-// else warns once and fails closed to off. Default OFF — with the gate off,
-// every tessellation-route path is unreachable and the backend is
-// bit-identical to a build without the route.
+// else warns once and takes the default. Default ON since the host
+// tessellation route's promotion (2026-09-20); exact "0" is the rollback and
+// makes every tessellation path unreachable (bit-identical to the pre-route
+// OFF arm).
 bool MetalTessellationGateOn() {
   static const bool s_gate_on = [] {
     const char* value = std::getenv("XE_METAL_TESSELLATION");
     MetalTessellationGate gate = ParseMetalTessellationGate(value);
     if (gate == MetalTessellationGate::kMalformed) {
       XELOGW(
-          "XE_METAL_TESSELLATION='{}' is malformed; failing closed to off "
+          "XE_METAL_TESSELLATION='{}' is malformed; using the default (on) "
           "(use 0 or 1)",
           value);
     }
@@ -186,23 +187,6 @@ bool MetalTessellationGateOn() {
   return s_gate_on;
 }
 
-// implement-metal-host-tessellation task 3.3: XE_METAL_TESS_ROUTE selects the
-// implementation behind the gate (default host; "mesh" keeps the retained
-// MSC object/mesh emulation reachable for this change's A/B arms only).
-bool MetalTessellationRouteHost() {
-  static const bool s_host = [] {
-    const char* value = std::getenv("XE_METAL_TESS_ROUTE");
-    MetalTessellationRoute route = ParseMetalTessellationRoute(value);
-    if (route == MetalTessellationRoute::kMalformed) {
-      XELOGW(
-          "XE_METAL_TESS_ROUTE='{}' is malformed; using the host route "
-          "(use host or mesh)",
-          value);
-    }
-    return MetalTessellationRouteIsHost(route);
-  }();
-  return s_host;
-}
 
 // extend-metal-rasterizing-memexport-producers task 2.1 (design D4):
 // XE_METAL_MEMEXPORT_RASTER, default OFF, warn-once malformed. OFF is today
@@ -1446,28 +1430,6 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
     mesh_shader_supported_ = false;
   }
 
-  // Tessellator tables (port-xenios-tessellation task 4.3, XeniOS
-  // SetupContext :1256-1268): one shared buffer, loaded once, bound to the
-  // object+mesh stages of every tessellated draw. Allocated only when the
-  // gate is on so the OFF arm's resource footprint is identical to HEAD.
-  // Allocation failure is NOT fatal: tessellated draws fail-closed skip with
-  // kTessellationResourceMissing instead of failing initialization.
-  if (mesh_shader_supported_ && MetalTessellationGateOn()) {
-    uint64_t tables_size = IRRuntimeTessellatorTablesSize();
-    id<MTLBuffer> tables =
-        [device newBufferWithLength:tables_size
-                            options:MTLResourceStorageModeShared];
-    if (tables) {
-      tables.label = @"Xenia Tessellator Tables";
-      IRRuntimeLoadTessellatorTables(tables);
-      tessellator_tables_buffer_ = (__bridge_retained void*)tables;
-    } else {
-      XELOGE(
-          "MetalCommandProcessor: failed to allocate the tessellator tables "
-          "buffer ({} bytes); every tessellated draw will fail-closed skip",
-          tables_size);
-    }
-  }
 
   upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, UploadArenaSize());
   if (!upload_arena_->Initialize()) {
@@ -1643,7 +1605,6 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   release(view_bindless_heap_);
   release(sampler_bindless_heap_);
   release(system_view_tables_);
-  release(tessellator_tables_buffer_);
   release(null_buffer_);
   release(null_texture_);
   release(null_sampler_);
@@ -4122,12 +4083,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // ProcessingResult is the sole shape/host-VS-type authority (never
   // re-derived locally), and every unsupported condition is a reason-coded
   // fail-closed skip — the packet always succeeds. ---
+  // implement-metal-host-tessellation (promoted 2026-09-20): tessellated
+  // draws take the host route - the D3D11 reference tessellator on the CPU
+  // + the ordinary vertex pipeline under the domain_as_vertex translation.
+  // The MSC object/mesh emulation route was deleted at promotion.
   bool use_tessellation_emulation = false;
-  // implement-metal-host-tessellation: with the gate on, tessellated draws
-  // take the host route (reference tessellator on the CPU + the ordinary
-  // vertex pipeline under the domain_as_vertex translation) unless
-  // XE_METAL_TESS_ROUTE=mesh selects the retained MSC emulation.
-  const bool tess_host_route = MetalTessellationRouteHost();
   PrimitiveProcessor::ProcessingResult tess_pp{};
   {
     const RegisterFile& tess_regs = *register_file_;
@@ -4161,13 +4121,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     if (tessellation_enabled && MetalTessellationGateOn() &&
         TessDrawRangeAllows(trace_draw_index_)) {
-      // Capability first (XeniOS :2726-2735's warn-once success-skip shape,
-      // through our reason-coded accounting).
-      if (!tess_host_route && !mesh_shader_supported_) {
-        RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
-                       "tess-no-mesh-shaders");
-        return true;
-      }
       // Tessellation + memexport is explicitly out of scope (proposal
       // non-goals / port notes gotcha 4): checked BEFORE engaging the route
       // so the draw takes a fail-closed skip — neither rendered nor exported.
@@ -4255,13 +4208,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (!tess_pp.host_draw_vertex_count) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
                        "tess-degenerate");
-        return true;
-      }
-      // Tessellator tables are an init invariant this backend controls;
-      // missing means fail-closed, per-draw (port notes gotcha 2).
-      if (!tess_host_route && !tessellator_tables_buffer_) {
-        RecordDrawSkip(MetalDrawSkipReason::kTessellationResourceMissing,
-                       "tess-tables-missing");
         return true;
       }
       use_tessellation_emulation = true;
@@ -5378,8 +5324,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Host tessellation route: the guest VS is translated as a VERTEX shader
   // that reads its domain registers from the host-generated record stream
   // (dxbc_shader_translator.h Modification::vertex.domain_as_vertex).
-  vs_mod_decoded.vertex.domain_as_vertex =
-      (use_tessellation_emulation && tess_host_route) ? 1 : 0;
+  vs_mod_decoded.vertex.domain_as_vertex = use_tessellation_emulation ? 1 : 0;
   {
     static const bool s_imask_log = std::getenv("XE_METAL_IMASK_LOG") != nullptr;
     static uint32_t s_imask_logs = 0;
@@ -5417,11 +5362,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
-  // The domain translation must NOT go through TranslateShader (that path
-  // compiles Stage::kVertex); GetOrCreateTessellationPipelineState performs
-  // the ucode->DXBC step itself and compiles Stage::kDomain.
-  if (!(use_tessellation_emulation && !tess_host_route) &&
-      !pipeline_cache_->TranslateShader(*vs_translation)) {
+  if (!pipeline_cache_->TranslateShader(*vs_translation)) {
     RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
     return true;
   }
@@ -5556,25 +5497,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 reg::RB_BLENDCONTROL::rt_register_indices[i])
             .value;
   }
-  // Assembled tessellation pipeline mirror; the draw call below rebuilds the
-  // IRRuntimeTessellationPipelineConfig from it verbatim (task 4.4).
-  const MetalPipelineCache::TessellationPipeline* tess_pipeline = nullptr;
   if (memexport_draw) {
     // Vertex-only, rasterization disabled, zero attachments.
     pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
-  } else if (use_tessellation_emulation && !tess_host_route) {
-    // Prebuilt tess VS + prebuilt HS + the guest VS as the domain stage +
-    // guest PS (or the depth-only fallback when null/functionless). Creation,
-    // HS/DS validation, and object->mesh link failures all surface as a null
-    // return (negative-cached) — reason-coded skip below, never a packet
-    // failure (design D7; deliberately NOT XeniOS's unguarded branch).
-    tess_pipeline = pipeline_cache_->GetOrCreateTessellationPipelineState(
-        vs_translation, ps_translation, tess_pp.host_vertex_shader_type,
-        tess_pp.tessellation_mode, tess_pp.host_primitive_type,
-        color_pixel_formats, pipeline_depth_format,
-        pipeline_raster_state.pipeline_key(), blend_controls,
-        normalized_color_mask);
-    pipeline = tess_pipeline ? tess_pipeline->pipeline : nullptr;
   } else if (kDebugSolidFragment) {
     pipeline = GetDebugSolidPipeline(
         static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
@@ -5599,15 +5524,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         normalized_color_mask);
   }
   if (!pipeline) {
-    // Task 4.7: tessellation pipeline failures (creation, HS/DS validation,
-    // link, and negative-cache repeats) are a DISTINCT log-once site so a
-    // tessellation regression never hides inside the generic pipeline-null
-    // aggregate. Repeats are quieted by the per-site accounting.
-    if (use_tessellation_emulation && !tess_host_route) {
-      RecordDrawSkip(MetalDrawSkipReason::kPipelineFailure,
-                     "tess-pipeline-null");
-      return true;
-    }
     draw_trace_milestone("before-encode-geometry");
   if (use_geometry_emulation) {
       ++geo_pipeline_fail_count_;
@@ -7422,7 +7338,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   MetalUploadAllocation tess_host_indices_alloc{};
   MetalUploadAllocation tess_host_table_alloc{};
   uint32_t tess_host_index_count = 0;
-  if (use_tessellation_emulation && tess_host_route) {
+  if (use_tessellation_emulation) {
     metal::MetalHostTessellationShape tess_shape;
     if (!metal::DescribeMetalHostTessellationShape(
             tess_pp.host_vertex_shader_type, tess_pp.tessellation_mode,
@@ -7607,9 +7523,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool memexport_uav_bound = memexport_draw || memexport_raster_routed;
   std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
       BuildMetalTopLevelArgumentBuffer(binding_addresses, pixel_shader != nullptr,
-                                       memexport_uav_bound,
-                                       use_tessellation_emulation &&
-                                           !tess_host_route);
+                                       memexport_uav_bound);
   std::memcpy(ab_alloc.cpu_ptr, argument_buffer.data(), sizeof(argument_buffer));
 
   // --- Bind. ---
@@ -7668,12 +7582,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder setFragmentBytes:debug_color length:sizeof(debug_color) atIndex:8];
   }
   id<MTLBuffer> ab_buffer = (__bridge id<MTLBuffer>)ab_alloc.buffer;
-  // Geometry and tessellation emulation run mesh-path pipelines (object +
-  // mesh stages), so the argument buffer + bindless heaps bind to
-  // object/mesh instead of vertex. The fragment stage is unchanged.
-  const bool use_mesh_path =
-      use_geometry_emulation ||
-      (use_tessellation_emulation && !tess_host_route);
+  // Geometry emulation runs mesh-path pipelines (object + mesh stages), so
+  // the argument buffer + bindless heaps bind to object/mesh instead of
+  // vertex. The fragment stage is unchanged.
+  const bool use_mesh_path = use_geometry_emulation;
   auto bind_arg_buffer = [&](id<MTLBuffer> buf, NSUInteger off, NSUInteger idx) {
     if (use_mesh_path) {
       [encoder setObjectBuffer:buf offset:off atIndex:idx];
@@ -7689,40 +7601,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (use_mesh_path) {
     // MSC manual: the object stage expects an IRRuntimeVertexBuffers table at
     // kIRVertexBufferBindPoint. Our guest VS fetches in-shader from shared memory
-    // (zero stage-in inputs) and the prebuilt tessellation VS consumes only
-    // SV_VertexID, so a zeroed table satisfies the binding without supplying
-    // any real vertex streams.
+    // (zero stage-in inputs), so a zeroed table satisfies the binding without
+    // supplying any real vertex streams.
     IRRuntimeVertexBuffers vertex_buffers = {};
     [encoder setObjectBytes:vertex_buffers
                      length:sizeof(vertex_buffers)
                     atIndex:kIRVertexBufferBindPoint];
   }
-  if (use_tessellation_emulation && !tess_host_route) {
-    // Task 4.3 (XeniOS :4695-4702, :5041-5052): tessellated draws bind the
-    // SAME top-level argument buffer again at the hull/domain bind point, and
-    // the tessellator tables at their runtime bind point, on BOTH the object
-    // and mesh stages. Residency for the tables is marked below with the
-    // other per-draw resources (this backend is per-encoder-only — port
-    // notes gotcha 6).
-    [encoder setObjectBuffer:ab_buffer
-                      offset:ab_alloc.offset
-                     atIndex:kIRArgumentBufferHullDomainBindPoint];
-    [encoder setMeshBuffer:ab_buffer
-                    offset:ab_alloc.offset
-                   atIndex:kIRArgumentBufferHullDomainBindPoint];
-    id<MTLBuffer> tessellator_tables =
-        (__bridge id<MTLBuffer>)tessellator_tables_buffer_;
-    [encoder setObjectBuffer:tessellator_tables
-                      offset:0
-                     atIndex:kIRRuntimeTessellatorTablesBindPoint];
-    [encoder setMeshBuffer:tessellator_tables
-                    offset:0
-                   atIndex:kIRRuntimeTessellatorTablesBindPoint];
-    [encoder useResource:tessellator_tables
-                   usage:MTLResourceUsageRead
-                  stages:MTLRenderStageObject | MTLRenderStageMesh];
-  }
-
   // Residency for everything the shaders reach through gpuAddresses.
   id<MTLBuffer> shared_buffer =
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
@@ -7815,7 +7700,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // record stream, through the ordinary vertex+fragment pipeline. The arena
   // transients live in the same MTLBuffer the argument buffer does, so their
   // residency is already covered; marked again for clarity.
-  if (use_tessellation_emulation && tess_host_route) {
+  if (use_tessellation_emulation) {
     id<MTLBuffer> tess_records_buffer =
         (__bridge id<MTLBuffer>)tess_host_records_alloc.buffer;
     id<MTLBuffer> tess_indices_buffer =
@@ -7838,247 +7723,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     mark_raster_targets_written();
     // Tessellated producers stay fail-closed upstream ("tess-memexport"), so
     // there is nothing to publish here.
-    frame_has_render_ = true;
-    ++draw_count_;
-    return true;
-  }
-  // Tessellation emulation (task 4.4): rebuild the IR config verbatim from
-  // the pipeline mirror and dispatch through the IR runtime's patch draws.
-  // Rides the current frame encoder exactly like every other draw — no new
-  // command-buffer commits, no waits.
-  if (use_tessellation_emulation) {
-    IRRuntimeTessellationPipelineConfig tess_config = {};
-    tess_config.outputPrimitiveType = IRRuntimeTessellatorOutputPrimitive(
-        tess_pipeline->output_primitive_type);
-    tess_config.vsOutputSizeInBytes = tess_pipeline->vs_output_size_in_bytes;
-    tess_config.gsMaxInputPrimitivesPerMeshThreadgroup =
-        tess_pipeline->gs_max_input_primitives_per_mesh_threadgroup;
-    tess_config.hsMaxPatchesPerObjectThreadgroup =
-        tess_pipeline->hs_max_patches_per_object_threadgroup;
-    tess_config.hsInputControlPointCount =
-        tess_pipeline->hs_input_control_point_count;
-    tess_config.hsMaxObjectThreadsPerThreadgroup =
-        tess_pipeline->hs_max_object_threads_per_threadgroup;
-    tess_config.hsMaxTessellationFactor =
-        tess_pipeline->hs_max_tessellation_factor;
-    tess_config.gsInstanceCount = tess_pipeline->gs_instance_count;
-    // Patch topology (XeniOS :5431-5456; probe finding for task 4.4): the
-    // adaptive HS blobs reflect an INPUT control-point count of 3/4 even for
-    // the PatchIndexed guest shapes — TrianglePatch/QuadPatch under adaptive
-    // consume 3-/4-word factor groups from the stream — while non-adaptive
-    // PatchIndexed draws are 1-CP patch lists (the DS fetches by patch
-    // index). The real patch math divides by config.hsInputControlPointCount
-    // inside the IR runtime; the topology stays the symbolic patchlist type.
-    IRRuntimePrimitiveType tess_primitive;
-    switch (tess_pp.host_primitive_type) {
-      case xenos::PrimitiveType::kTriangleList:
-        tess_primitive = IRRuntimePrimitiveType3ControlPointPatchlist;
-        break;
-      case xenos::PrimitiveType::kQuadList:
-        tess_primitive = IRRuntimePrimitiveType4ControlPointPatchlist;
-        break;
-      case xenos::PrimitiveType::kTrianglePatch:
-        tess_primitive =
-            tess_pp.tessellation_mode == xenos::TessellationMode::kAdaptive
-                ? IRRuntimePrimitiveType3ControlPointPatchlist
-                : IRRuntimePrimitiveType1ControlPointPatchlist;
-        break;
-      case xenos::PrimitiveType::kQuadPatch:
-        tess_primitive =
-            tess_pp.tessellation_mode == xenos::TessellationMode::kAdaptive
-                ? IRRuntimePrimitiveType4ControlPointPatchlist
-                : IRRuntimePrimitiveType1ControlPointPatchlist;
-        break;
-      default:
-        // Unreachable: the route validated the shape before engaging.
-        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
-                       "tess-prim-invariant");
-        return true;
-    }
-    if (tess_pp.index_buffer_type ==
-        PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
-      // Guest DMA index/factor stream (adaptive: 32-bit float edge factors).
-      // Design D5 endian decision: CPU-swap into the upload arena with the
-      // shared production staging primitive; vertex_index_endian stays kNone
-      // so the in-shader swap is the identity. The route already rejected
-      // stream endians SwapIndicesInto cannot reproduce.
-      uint32_t index_size =
-          tess_pp.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
-      uint32_t host_count = tess_pp.host_draw_vertex_count;
-      uint32_t total = host_count * index_size;
-      // EXPERIMENT (XE_METAL_TESS_SLICE_PAD=1, default off; tessellation
-      // fault attribution 2026-09-18, decision memo path B follow-up): the
-      // MSC emulation runtime dispatches ceil(indexCount / stride) object
-      // threadgroups with stride = hsMaxPatchesPerObjectThreadgroup *
-      // hsInputControlPointCount, and the generated object stage reads the
-      // index/factor stream through a raw gpuAddress. If its loads are not
-      // guarded by indexCount, the last threadgroup reads up to stride-1
-      // elements past this exactly-sized slice: junk factors inside the ring,
-      // and an out-of-buffer read when the slice ends at the ring boundary.
-      // The pad is zero-filled so any such read sees factor 0.
-      static const bool s_tess_slice_pad = [] {
-        const char* v = std::getenv("XE_METAL_TESS_SLICE_PAD");
-        return v && std::strcmp(v, "0") != 0;
-      }();
-      const uint32_t object_stride_bytes =
-          uint32_t(tess_config.hsMaxPatchesPerObjectThreadgroup) *
-          uint32_t(tess_config.hsInputControlPointCount) * index_size;
-      const uint32_t slice_pad =
-          s_tess_slice_pad ? ((object_stride_bytes + 15u) & ~15u) + 64u : 0u;
-      const void* guest_indices =
-          memory_->TranslatePhysical(tess_pp.guest_index_base);
-      MetalUploadAllocation index_alloc{};
-      if (!guest_indices ||
-          !upload_arena_->Allocate(total + slice_pad, 16, &index_alloc)) {
-        RecordDrawSkip(!guest_indices
-                           ? MetalDrawSkipReason::kInvalidGuestState
-                           : MetalDrawSkipReason::kResourceFailure,
-                       !guest_indices ? "tess-index-guest-null"
-                                      : "tess-index-alloc");
-        return true;
-      }
-      // FAIL-CLOSED STALENESS BACKSTOP (task 2.4). The consumer-range mutation
-      // above is what makes the vertex barrier converge an overlapping
-      // producer. If that mutation is wrong -- removed, under-sized, or simply
-      // not matching -- the barrier selects nothing and these bytes are older
-      // than the shared buffer. Missing convergence must never degrade into
-      // stale consumption, so re-check the invariant HERE, against the
-      // pending-record state at the moment of the read rather than against the
-      // request set assembled earlier: a request-set bug cannot hide from this.
-      {
-        metal::MetalGuestStreamExtent staged_extent =
-            metal::ComputeMetalIndexStreamExtent(
-                tess_pp.guest_index_base, host_count,
-                tess_pp.host_index_format == xenos::IndexFormat::kInt32);
-        for (const PendingMemexport& pending : pending_memexports_) {
-          if (!metal::MetalStreamReadWouldBeStale(staged_extent,
-                                                  pending.base_address,
-                                                  pending.size_bytes)) {
-            continue;
-          }
-          XELOGE(
-              "MetalMemexportRasterStale draw={} tessellation factor stream "
-              "{:08X}(+{}) still owed by pending memexport {:08X}(+{}); "
-              "skipping rather than tessellating from stale RAM",
-              trace_draw_index_, staged_extent.base, staged_extent.size,
-              pending.base_address, pending.size_bytes);
-          RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
-                         "memexport-raster-stale-factor-stream");
-          return true;
-        }
-      }
-      SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count,
-                      tess_pp.host_index_format,
-                      tess_pp.host_shader_index_endian);
-      if (slice_pad) {
-        std::memset(static_cast<uint8_t*>(index_alloc.cpu_ptr) + total, 0,
-                    slice_pad);
-      }
-      {
-        // Rare by construction: the slice's unpadded end lies within one
-        // object-threadgroup stride of the ring's physical end. Logged always
-        // so a live fault can be correlated with ring-end placement.
-        uint32_t slice_end = index_alloc.offset + total;
-        uint32_t ring_gap = upload_arena_->size() - slice_end;
-        if (ring_gap < object_stride_bytes + 64u) {
-          XELOGW(
-              "MetalTessSliceRingEnd draw={} offset={} total={} ring={} "
-              "gap={} stride_bytes={} pad={}",
-              trace_draw_index_, index_alloc.offset, total,
-              upload_arena_->size(), ring_gap, object_stride_bytes, slice_pad);
-        }
-      }
-      // JOIN hash (XE_METAL_MEMEXPORT_LOG=1, log only): FNV-1a over the RAW
-      // pre-swap guest bytes this consumer stages. The convergence site hashes
-      // the bytes it wrote to the same RAM with the same function, so equality
-      // JOINS the two ends of the chain -- proving the consumer read exactly
-      // the converged export, not merely that both sides changed.
-      if (s_memexport_log) {
-        XELOGW(
-            "MetalMemexportJoin draw={} consumer stream={:08X}(+{}) "
-            "raw_guest_hash={:016X}",
-            trace_draw_index_, tess_pp.guest_index_base, total,
-            metal::MetalMemexportJoinHash(guest_indices, total));
-      }
-      // XE_METAL_TESS_INPUT_HASH=1 (default off): fix-metal-trace-replay-
-      // state-reset D4 oracle -- hashes the exact factor/index bytes this
-      // draw hands the tessellator so run-to-run divergence can be
-      // attributed to INPUT (a stale/unconverged guest stream) vs the
-      // dispatch itself.
-      static const bool tess_input_hash_log = [] {
-        const char* value = std::getenv("XE_METAL_TESS_INPUT_HASH");
-        return value && value[0] == '1';
-      }();
-      if (tess_input_hash_log) {
-        auto fnv1a = [](const uint8_t* data, uint32_t count) {
-          uint64_t hash = 14695981039346656037ull;  // FNV-1a 64.
-          for (uint32_t i = 0; i < count; ++i) {
-            hash = (hash ^ data[i]) * 1099511628211ull;
-          }
-          return hash;
-        };
-        const uint8_t* bytes =
-            static_cast<const uint8_t*>(index_alloc.cpu_ptr);
-        uint64_t logical_hash = fnv1a(bytes, total);
-        XELOGI(
-            "MetalTessInputHash draw={} base={:08X} bytes={} hash={:016X}",
-            trace_draw_index_, tess_pp.guest_index_base, total, logical_hash);
-        // Campaign diagnostic (same env gate, log-only): the full dispatch
-        // configuration + leading stream words, so the conformance repro can
-        // mirror the exact VP draw shape.
-        char words_text[9 * 12] = {0};
-        if (index_size == 4) {
-          const uint32_t* words32 =
-              static_cast<const uint32_t*>(index_alloc.cpu_ptr);
-          size_t pos = 0;
-          for (uint32_t i = 0; i < host_count && i < 8; ++i) {
-            pos += std::snprintf(words_text + pos, sizeof(words_text) - pos,
-                                 "%08X,", words32[i]);
-          }
-        }
-        XELOGI(
-            "MetalTessDispatchCfg draw={} samples={} depth_fmt={} "
-            "color_mask={:X} range=[{},{}] host_count={} prim={} "
-            "cfg(vs_out={} gs_max={} hs_patches={} hs_cp={} hs_threads={} "
-            "max_factor={} gs_inst={}) words=[{}]",
-            trace_draw_index_, raster_sample_count,
-            uint64_t(pipeline_depth_format), normalized_color_mask,
-            regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f,
-            regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f,
-            host_count, int(tess_primitive), tess_config.vsOutputSizeInBytes,
-            tess_config.gsMaxInputPrimitivesPerMeshThreadgroup,
-            tess_config.hsMaxPatchesPerObjectThreadgroup,
-            tess_config.hsInputControlPointCount,
-            tess_config.hsMaxObjectThreadsPerThreadgroup,
-            tess_config.hsMaxTessellationFactor, tess_config.gsInstanceCount,
-            words_text);
-      }
-      id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
-      [encoder useResource:index_buffer
-                     usage:MTLResourceUsageRead
-                    stages:stages];
-      MTLIndexType index_type =
-          index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-      uint32_t start_index = uint32_t(index_alloc.offset / index_size);
-      IRRuntimeDrawIndexedPatchesTessellationEmulation(
-          encoder, tess_primitive, index_type, index_buffer, tess_config,
-          /*instanceCount=*/1, host_count, /*baseInstance=*/0,
-          /*baseVertex=*/0, start_index);
-    } else {
-      // kNone (auto-indexed discrete/continuous): non-indexed patch draw; the
-      // tess VS derives the vertex/patch index from SV_VertexID.
-      IRRuntimeDrawPatchesTessellationEmulation(
-          encoder, tess_primitive, tess_config, /*instanceCount=*/1,
-          tess_pp.host_draw_vertex_count, /*baseInstance=*/0,
-          /*baseVertex=*/0);
-    }
-    mark_raster_targets_written();
-    // OUT OF SCOPE (extend-metal-rasterizing-memexport-producers task 2.3):
-    // tessellated-draw memexport producers stay fail-closed. The tessellation
-    // route already skips such a draw upstream ("tess-memexport"), and
-    // DecideMetalMemexportRasterRoute answers kUnroutedTessellated, so
-    // memexport_raster_routed can never be true here -- deliberately NO
-    // publication call on this path.
     frame_has_render_ = true;
     ++draw_count_;
     return true;

@@ -34,23 +34,26 @@ namespace gpu {
 namespace metal {
 namespace {
 
-TEST_CASE("XE_METAL_TESSELLATION gate parse is strict and fail-closed",
+TEST_CASE("XE_METAL_TESSELLATION gate parse: default on, exact 0 is the rollback",
           "[l0][tessellation][gate]") {
-  CHECK(ParseMetalTessellationGate(nullptr) == MetalTessellationGate::kOff);
-  CHECK(ParseMetalTessellationGate("") == MetalTessellationGate::kOff);
-  CHECK(ParseMetalTessellationGate("0") == MetalTessellationGate::kOff);
+  // Promoted default-ON by implement-metal-host-tessellation (2026-09-20).
+  CHECK(ParseMetalTessellationGate(nullptr) == MetalTessellationGate::kOn);
+  CHECK(ParseMetalTessellationGate("") == MetalTessellationGate::kOn);
   CHECK(ParseMetalTessellationGate("1") == MetalTessellationGate::kOn);
-  // Everything else is malformed: warn-once at the caller, behaviorally off.
+  CHECK(ParseMetalTessellationGate("0") == MetalTessellationGate::kOff);
+  // Everything else is malformed: warn-once at the caller, behaviorally the
+  // default (on).
   CHECK(ParseMetalTessellationGate("2") == MetalTessellationGate::kMalformed);
   CHECK(ParseMetalTessellationGate("on") == MetalTessellationGate::kMalformed);
   CHECK(ParseMetalTessellationGate("true") ==
         MetalTessellationGate::kMalformed);
   CHECK(ParseMetalTessellationGate(" 1") == MetalTessellationGate::kMalformed);
   CHECK(ParseMetalTessellationGate("10") == MetalTessellationGate::kMalformed);
+  CHECK(ParseMetalTessellationGate("00") == MetalTessellationGate::kMalformed);
 
   CHECK(MetalTessellationGateEngaged(MetalTessellationGate::kOn));
   CHECK_FALSE(MetalTessellationGateEngaged(MetalTessellationGate::kOff));
-  CHECK_FALSE(MetalTessellationGateEngaged(MetalTessellationGate::kMalformed));
+  CHECK(MetalTessellationGateEngaged(MetalTessellationGate::kMalformed));
 }
 
 TEST_CASE("tessellation index stream admissibility matches the staging helper",

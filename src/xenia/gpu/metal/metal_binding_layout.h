@@ -388,19 +388,15 @@ struct MetalBindingAddresses {
   uint64_t descriptor_indices_pixel = 0;
 };
 
-// `tessellation_draw` (port-xenios-tessellation task 4.3, XeniOS
-// BuildGraphicsRootArgumentEntries :4247-4264): a tessellated draw ALSO
-// populates the hull/domain CBV slots, aliased to the vertex-stage
-// allocations — the prebuilt HS consumes the same b0/b1 guest constant state
-// (tessellation factor range and friends), and the domain stage IS the guest
-// VS translation, so its float/fetch/descriptor-indices banks are exactly the
-// vertex-stage ones. Every non-tessellated draw keeps those six slots at the
-// null buffer (pinned by the L1 binding oracle).
+// The hull/domain CBV slots (kCbvFloatHull .. kCbvDescriptorIndicesDomain)
+// stay in the root layout at the null buffer: the MSC object/mesh
+// tessellation route that aliased them was deleted on the host route's
+// promotion (implement-metal-host-tessellation, 2026-09-20), and the slot set
+// is part of the root signature every cached metallib was converted against.
 inline std::array<uint64_t, kMetalBindingSlotCount>
 BuildMetalTopLevelArgumentBuffer(const MetalBindingAddresses& addresses,
                                  bool pixel_shader_present,
-                                 bool memexport_draw,
-                                 bool tessellation_draw = false) {
+                                 bool memexport_draw) {
   std::array<uint64_t, kMetalBindingSlotCount> result;
   result.fill(addresses.null_buffer);
   result[MetalBindingSlotIndex(MetalBindingSlot::kSrvSpace0)] =
@@ -433,21 +429,6 @@ BuildMetalTopLevelArgumentBuffer(const MetalBindingAddresses& addresses,
       addresses.fetch;
   result[MetalBindingSlotIndex(MetalBindingSlot::kCbvDescriptorIndicesVertex)] =
       addresses.descriptor_indices_vertex;
-  if (tessellation_draw) {
-    result[MetalBindingSlotIndex(MetalBindingSlot::kCbvFloatHull)] =
-        addresses.float_vertex;
-    result[MetalBindingSlotIndex(MetalBindingSlot::kCbvFetchHull)] =
-        addresses.fetch;
-    result[MetalBindingSlotIndex(MetalBindingSlot::kCbvDescriptorIndicesHull)] =
-        addresses.descriptor_indices_vertex;
-    result[MetalBindingSlotIndex(MetalBindingSlot::kCbvFloatDomain)] =
-        addresses.float_vertex;
-    result[MetalBindingSlotIndex(MetalBindingSlot::kCbvFetchDomain)] =
-        addresses.fetch;
-    result[MetalBindingSlotIndex(
-        MetalBindingSlot::kCbvDescriptorIndicesDomain)] =
-        addresses.descriptor_indices_vertex;
-  }
   if (pixel_shader_present) {
     result[MetalBindingSlotIndex(MetalBindingSlot::kCbvFloatPixel)] =
         addresses.float_pixel;

@@ -562,8 +562,7 @@ struct ExportHarness {
     std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
         BuildMetalTopLevelArgumentBuffer(addresses,
                                          /*pixel_shader_present=*/true,
-                                         /*memexport_draw=*/uav_bound,
-                                         /*tessellation_draw=*/false);
+                                         /*memexport_draw=*/uav_bound);
     id<MTLBuffer> ab_buffer =
         NewBuffer(sizeof(argument_buffer), 0, @"Top-level AB");
     if (!ab_buffer) {

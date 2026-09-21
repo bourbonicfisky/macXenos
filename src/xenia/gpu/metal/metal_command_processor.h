@@ -423,20 +423,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // rectangle/point/quad lists. Set in InitializeDrawResources.
   bool mesh_shader_supported_ = false;
 
-  // IR-runtime tessellator tables (port-xenios-tessellation task 4.3):
-  // allocated once in InitializeDrawResources when mesh shaders are supported
-  // AND the XE_METAL_TESSELLATION gate is on (so the OFF arm allocates
-  // nothing), loaded with IRRuntimeLoadTessellatorTables, and bound to BOTH
-  // the object and mesh stages at kIRRuntimeTessellatorTablesBindPoint on
-  // every tessellated draw. Missing (allocation failed / gate off) makes
-  // every tessellated draw a fail-closed kTessellationResourceMissing skip.
-  // id<MTLBuffer>, retained; released in ShutdownDrawResources.
-  void* tessellator_tables_buffer_ = nullptr;
-
   // Host tessellation route (implement-metal-host-tessellation task 3.4): the
   // D3D11 reference tessellator + pattern cache, and a reusable host-order
   // staging copy of the guest control-point index / factor stream. Created
-  // lazily on the first routed draw so the OFF arm allocates nothing.
+  // lazily on the first tessellated draw so the OFF arm allocates nothing.
   std::unique_ptr<HostTessellator> host_tessellator_;
   std::vector<uint32_t> host_tessellation_stream_scratch_;
 

@@ -9,11 +9,13 @@
 
 // port-xenios-tessellation task 5.1 — the L1 synthetic RENDER family.
 //
-// Where the encode smoke (task 4.5) proved "dispatch completes", these cases
-// prove PIXELS: every draw goes through the PRODUCTION
-// MetalPipelineCache::GetOrCreateTessellationPipelineState pipeline and the
-// exact group-4 binding assembly, renders a small patch set to an offscreen
-// target, and the readback is asserted.
+// These cases prove PIXELS for the host tessellation route
+// (implement-metal-host-tessellation, promoted 2026-09-20; the MSC
+// object/mesh emulation route this file originally exercised was deleted at
+// promotion): every draw is expanded with the production
+// metal_host_tessellation.h helpers, rendered through the production plain
+// vertex+fragment pipeline under the domain_as_vertex translation with the
+// exact production binding assembly, and the readback is asserted.
 //
 //   1. All SIX mode/domain cells (discrete/continuous/adaptive x tri/quad)
 //      render non-trivial coverage, with cheap extent + symmetry checks. The
@@ -296,14 +298,6 @@ struct RenderSpec {
   bool depth_stencil8 = false;  // production Depth32Float_Stencil8 instead of
                                 // the harness default Depth32Float.
   bool depth_compare_lequal = false;  // LessEqual instead of Always.
-  // Dispatch-parameter experiments (adaptive INDEXED draws only). Any nonzero
-  // value routes the draw through a LOCAL replica of
-  // IRRuntimeDrawIndexedPatchesTessellationEmulation (the vendored header's
-  // body is IR_INLINE and its helpers are public) so single dispatch knobs
-  // can vary without touching the vendored code.
-  uint32_t tg_mem_length = 0;       // 0 = runtime default (15360 hardcoded).
-  uint32_t hs_patches_override = 0; // 0 = pipeline-reflected value.
-  uint32_t index_pad_words = 0;     // prepend N filler words, startIndex = N.
   std::vector<DrawSpec> draws;
 };
 
@@ -314,13 +308,6 @@ struct RenderResult {
   std::vector<float> depth;    // kRT*kRT (always read back).
   uint32_t covered = 0;        // Color coverage (depth coverage if depth-only).
   uint32_t depth_covered = 0;  // Rasterization proof independent of the PS.
-  // The pipeline mirror the draw consumed (diagnostic identity trace).
-  uint32_t cfg_vs_output = 0;
-  uint32_t cfg_gs_max_input = 0;
-  uint32_t cfg_hs_patches = 0;
-  uint32_t cfg_hs_cp = 0;
-  uint32_t cfg_hs_threads = 0;
-  float cfg_max_factor = 0.0f;
 
   bool CoveredAt(uint32_t x, uint32_t y) const {
     if (!rgba.empty()) {
@@ -333,81 +320,6 @@ struct RenderResult {
     return false;
   }
 };
-
-// LOCAL replica of IRRuntimeDrawIndexedPatchesTessellationEmulation (the
-// vendored header's body is IR_INLINE and every helper it calls is public in
-// the same header) with the one hardcoded dispatch parameter exposed:
-// objectThreadgroupMemoryLength (vendored: 15360). TEST-ONLY per the
-// nondeterminism-campaign rules — the vendored header is not modified, and
-// production keeps calling the vendored helper.
-void LocalDrawIndexedPatchesTessellationEmulation(
-    id<MTLRenderCommandEncoder> enc, IRRuntimePrimitiveType primitive_topology,
-    MTLIndexType index_type, id<MTLBuffer> index_buffer,
-    IRRuntimeTessellationPipelineConfig cfg, uint32_t instance_count,
-    uint32_t index_count_per_instance, uint32_t base_instance,
-    int32_t base_vertex, uint32_t start_index, uint32_t threadgroup_mem) {
-  // The vendored Calculate* helpers are `static` under
-  // IR_PRIVATE_IMPLEMENTATION (visible only to ir_runtime_impl.mm), so their
-  // pure arithmetic is mirrored here verbatim from the header bodies
-  // (IRTessellatorThreadgroupVertexOverlap :1072,
-  // IRRuntimeCalculateDrawInfoForGSTSEmulation :1084,
-  // IRRuntimeCalculateObjectTgCountForTessellationAndGeometryEmulation :905,
-  // IRRuntimeCalculateThreadgroupSizeForTessellationAndGeometry :935 —
-  // patchlists are not strips, so the strip-overlap branch never engages).
-  uint16_t vertex_overlap =
-      cfg.outputPrimitiveType == IRRuntimeTessellatorOutputPoint
-          ? 0
-          : (cfg.outputPrimitiveType == IRRuntimeTessellatorOutputLine ? 1
-                                                                       : 2);
-  IRRuntimeDrawInfo draw_info = {};
-  draw_info.meshThreadgroupPrimitiveStride =
-      (uint16_t)cfg.gsMaxInputPrimitivesPerMeshThreadgroup - vertex_overlap;
-  draw_info.objectThreadgroupVertexStride =
-      (uint16_t)(cfg.hsMaxPatchesPerObjectThreadgroup *
-                 cfg.hsInputControlPointCount);
-  draw_info.patchesPerObjectThreadgroup =
-      (uint16_t)cfg.hsMaxPatchesPerObjectThreadgroup;
-  draw_info.threadsPerPatch = (uint8_t)cfg.hsMaxObjectThreadsPerThreadgroup;
-  draw_info.inputControlPointsPerPatch =
-      (uint16_t)cfg.hsInputControlPointCount;
-  draw_info.gsInstanceCount = (uint16_t)cfg.gsInstanceCount;
-  draw_info.maxInputPrimitivesPerMeshThreadgroup =
-      (uint16_t)cfg.gsMaxInputPrimitivesPerMeshThreadgroup;
-  draw_info.indexType = (uint8_t)index_type + 1;
-  draw_info.primitiveTopology = (uint8_t)primitive_topology;
-  MTLSize object_threadgroup_count = MTLSizeMake(
-      (index_count_per_instance + draw_info.objectThreadgroupVertexStride -
-       1) /
-          draw_info.objectThreadgroupVertexStride,
-      instance_count, 1);
-  uint32_t object_threadgroup_size = cfg.hsMaxPatchesPerObjectThreadgroup *
-                                     cfg.hsMaxObjectThreadsPerThreadgroup;
-  uint32_t mesh_threadgroup_size = cfg.gsMaxInputPrimitivesPerMeshThreadgroup;
-  IRRuntimeDrawParams draw_params;
-  draw_params.drawIndexed = (IRRuntimeDrawIndexedArgument){
-      .indexCountPerInstance = index_count_per_instance,
-      .instanceCount = instance_count,
-      .startIndexLocation = start_index,
-      .baseVertexLocation = base_vertex,
-      .startInstanceLocation = base_instance};
-  draw_info.indexBuffer = index_buffer.gpuAddress;
-  [enc setObjectBytes:&draw_info
-               length:sizeof(IRRuntimeDrawInfo)
-              atIndex:kIRArgumentBufferUniformsBindPoint];
-  [enc setMeshBytes:&draw_info
-             length:sizeof(IRRuntimeDrawInfo)
-            atIndex:kIRArgumentBufferUniformsBindPoint];
-  [enc setObjectBytes:&draw_params
-               length:sizeof(IRRuntimeDrawParams)
-              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
-  [enc setMeshBytes:&draw_params
-             length:sizeof(IRRuntimeDrawParams)
-            atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
-  [enc setObjectThreadgroupMemoryLength:threadgroup_mem atIndex:0];
-  [enc drawMeshThreadgroups:object_threadgroup_count
-      threadsPerObjectThreadgroup:MTLSizeMake(object_threadgroup_size, 1, 1)
-        threadsPerMeshThreadgroup:MTLSizeMake(mesh_threadgroup_size, 1, 1)];
-}
 
 // Per-sample readback kernels (MSAA targets cannot be blitted to buffers;
 // combined depth-stencil depth planes read uniformly through depth2d).
@@ -456,13 +368,6 @@ struct RenderHarness {
   std::unique_ptr<MetalPipelineCache> cache;
   bool ok = false;
   std::string error;
-  // implement-metal-host-tessellation task 4.1: render through the HOST
-  // tessellation route (reference tessellator -> XeTessellationVertex
-  // records + triangle indices -> the production plain vertex+fragment
-  // pipeline under the domain_as_vertex translation, records exposed through
-  // the per-draw two-entry SRV space-0 table) instead of the MSC
-  // object/mesh emulation. Every assertion stays the same on both routes.
-  bool host_route = false;
   // Per-sample readback pipelines (lazy; nondeterminism campaign only).
   id<MTLComputePipelineState> expand_depth_1x = nil;
   id<MTLComputePipelineState> expand_depth_ms = nil;
@@ -626,7 +531,12 @@ struct RenderHarness {
         return result;
       }
     }
-    const MetalPipelineCache::TessellationPipeline* tess = nullptr;
+    // Every non-control spec is a tessellated draw through the HOST route
+    // (reference tessellator -> XeTessellationVertex records + triangle
+    // indices -> the production plain vertex+fragment pipeline under the
+    // domain_as_vertex translation, records exposed through the per-draw
+    // two-entry SRV space-0 table).
+    const bool host_route = !spec.plain_control && !spec.geometry_control;
     void* control_pipeline = nullptr;
     void* host_pipeline = nullptr;
     id<MTLRenderPipelineState> plain_pipeline = nil;
@@ -717,7 +627,7 @@ struct RenderHarness {
         result.error = "GetOrCreateGeometryPipelineState returned null";
         return result;
       }
-    } else if (host_route) {
+    } else {
       // Host route: the guest domain payload as a VERTEX shader through the
       // production vertex translation path and the production plain
       // vertex+fragment pipeline family (no tessellation pipeline kind).
@@ -740,44 +650,7 @@ struct RenderHarness {
         result.error = "GetOrCreateRenderPipelineState (host route) null";
         return result;
       }
-    } else {
-      MetalShader::MetalTranslation* domain =
-          MakeDomainTranslation(spec.host_vs_type);
-      if (!domain) {
-        result.error = "domain translation failed";
-        return result;
-      }
-      tess = cache->GetOrCreateTessellationPipelineState(
-          domain, pixel, spec.host_vs_type, spec.mode, spec.host_prim, colors,
-          depth_format, MetalPipelineRasterKey{spec.sample_count}, blends,
-          /*color_write_mask=*/0xF);
-      if (!tess || !tess->pipeline) {
-        result.error = "GetOrCreateTessellationPipelineState returned null";
-        return result;
-      }
-      if (tess->hs_input_control_point_count != 3 &&
-          tess->hs_input_control_point_count != 4) {
-        result.error = "unexpected hs_input_control_point_count";
-        return result;
-      }
-      result.cfg_vs_output = tess->vs_output_size_in_bytes;
-      result.cfg_gs_max_input =
-          tess->gs_max_input_primitives_per_mesh_threadgroup;
-      result.cfg_hs_patches = tess->hs_max_patches_per_object_threadgroup;
-      result.cfg_hs_cp = tess->hs_input_control_point_count;
-      result.cfg_hs_threads = tess->hs_max_object_threads_per_threadgroup;
-      result.cfg_max_factor = tess->hs_max_tessellation_factor;
     }
-
-    // --- Tessellator tables (the CP's allocate-once + load). ---
-    id<MTLBuffer> tessellator_tables =
-        [device newBufferWithLength:IRRuntimeTessellatorTablesSize()
-                            options:MTLResourceStorageModeShared];
-    if (!tessellator_tables) {
-      result.error = "tables alloc failed";
-      return result;
-    }
-    IRRuntimeLoadTessellatorTables(tessellator_tables);
 
     // --- Render targets + readback buffers. ---
     id<MTLTexture> color_rt = nil;
@@ -1026,9 +899,7 @@ struct RenderHarness {
         BuildMetalTopLevelArgumentBuffer(addresses,
                                          /*pixel_shader_present=*/
                                          spec.use_guest_ps,
-                                         /*memexport_draw=*/false,
-                                         /*tessellation_draw=*/
-                                         !spec.geometry_control && !host_route);
+                                         /*memexport_draw=*/false);
     id<MTLBuffer> ab_buffer =
         NewZeroBuffer(sizeof(argument_buffer), @"Top-level AB");
     if (!ab_buffer) {
@@ -1053,15 +924,10 @@ struct RenderHarness {
                         draw.words16.size() * sizeof(uint16_t));
           }
         } else {
-          uint32_t pad = spec.index_pad_words;
-          buffer = NewZeroBuffer(
-              (pad + draw.words32.size()) * sizeof(uint32_t), @"Indices32");
+          buffer = NewZeroBuffer(draw.words32.size() * sizeof(uint32_t),
+                                 @"Indices32");
           if (buffer) {
-            uint32_t* words = static_cast<uint32_t*>([buffer contents]);
-            for (uint32_t p = 0; p < pad; ++p) {
-              words[p] = 0x7F7F7F7Fu;  // Large-finite filler before the data.
-            }
-            std::memcpy(words + pad, draw.words32.data(),
+            std::memcpy([buffer contents], draw.words32.data(),
                         draw.words32.size() * sizeof(uint32_t));
           }
         }
@@ -1094,14 +960,12 @@ struct RenderHarness {
     }
     if (spec.plain_control) {
       [encoder setRenderPipelineState:plain_pipeline];
-    } else if (host_route) {
+    } else if (spec.geometry_control) {
+      [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                          control_pipeline];
+    } else {
       [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                           host_pipeline];
-    } else {
-      [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
-                                          spec.geometry_control
-                                              ? control_pipeline
-                                              : tess->pipeline)];
     }
     if (spec.wireframe) {
       [encoder setTriangleFillMode:MTLTriangleFillModeLines];
@@ -1130,18 +994,6 @@ struct RenderHarness {
     bind_all_stages(view_heap, kIRDescriptorHeapBindPoint);
     bind_all_stages(sampler_heap, kIRSamplerHeapBindPoint);
     if (!vertex_path) {
-      [encoder setObjectBuffer:ab_buffer
-                        offset:0
-                       atIndex:kIRArgumentBufferHullDomainBindPoint];
-      [encoder setMeshBuffer:ab_buffer
-                      offset:0
-                     atIndex:kIRArgumentBufferHullDomainBindPoint];
-      [encoder setObjectBuffer:tessellator_tables
-                        offset:0
-                       atIndex:kIRRuntimeTessellatorTablesBindPoint];
-      [encoder setMeshBuffer:tessellator_tables
-                      offset:0
-                     atIndex:kIRRuntimeTessellatorTablesBindPoint];
       IRRuntimeVertexBuffers vertex_buffers = {};
       [encoder setObjectBytes:vertex_buffers
                        length:sizeof(vertex_buffers)
@@ -1153,7 +1005,7 @@ struct RenderHarness {
             : (MTLRenderStageObject | MTLRenderStageMesh |
                MTLRenderStageFragment);
     for (id<MTLBuffer> resource :
-         {tessellator_tables, ab_buffer, view_heap, sampler_heap, system_views,
+         {ab_buffer, view_heap, sampler_heap, system_views,
           system_buffer, cbv_scratch, pixel_floats, null_buffer,
           guest_scratch}) {
       [encoder useResource:resource usage:MTLResourceUsageRead stages:stages];
@@ -1204,63 +1056,6 @@ struct RenderHarness {
             encoder, IRRuntimePrimitiveTypeTriangle, geometry_config,
             /*instanceCount=*/1, /*vertexCountPerInstance=*/draw.count,
             /*baseVertex=*/0, /*baseInstance=*/0);
-      }
-    } else {
-      // Config rebuilt VERBATIM from the pipeline mirror (group-4 contract).
-      IRRuntimeTessellationPipelineConfig config = {};
-      config.outputPrimitiveType =
-          IRRuntimeTessellatorOutputPrimitive(tess->output_primitive_type);
-      config.vsOutputSizeInBytes = tess->vs_output_size_in_bytes;
-      config.gsMaxInputPrimitivesPerMeshThreadgroup =
-          tess->gs_max_input_primitives_per_mesh_threadgroup;
-      config.hsMaxPatchesPerObjectThreadgroup =
-          tess->hs_max_patches_per_object_threadgroup;
-      config.hsInputControlPointCount = tess->hs_input_control_point_count;
-      config.hsMaxObjectThreadsPerThreadgroup =
-          tess->hs_max_object_threads_per_threadgroup;
-      config.hsMaxTessellationFactor = tess->hs_max_tessellation_factor;
-      config.gsInstanceCount = tess->gs_instance_count;
-      IRRuntimePrimitiveType patch_primitive =
-          tess->hs_input_control_point_count == 3
-              ? IRRuntimePrimitiveType3ControlPointPatchlist
-              : IRRuntimePrimitiveType4ControlPointPatchlist;
-
-      for (size_t i = 0; i < spec.draws.size(); ++i) {
-        const DrawSpec& draw = spec.draws[i];
-        if (draw.has_viewport) {
-          MTLViewport viewport = {draw.vp_x, draw.vp_y, draw.vp_w,
-                                  draw.vp_h, 0.0,     1.0};
-          [encoder setViewport:viewport];
-        }
-        const bool local_dispatch = spec.tg_mem_length != 0 ||
-                                    spec.hs_patches_override != 0 ||
-                                    spec.index_pad_words != 0;
-        if (draw.indexed && local_dispatch) {
-          IRRuntimeTessellationPipelineConfig local_config = config;
-          if (spec.hs_patches_override) {
-            local_config.hsMaxPatchesPerObjectThreadgroup =
-                spec.hs_patches_override;
-          }
-          LocalDrawIndexedPatchesTessellationEmulation(
-              encoder, patch_primitive,
-              draw.indices_16bit ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
-              index_buffers[i], local_config, /*instance_count=*/1,
-              /*index_count_per_instance=*/draw.count, /*base_instance=*/0,
-              /*base_vertex=*/0, /*start_index=*/spec.index_pad_words,
-              spec.tg_mem_length ? spec.tg_mem_length : 15360u);
-        } else if (draw.indexed) {
-          IRRuntimeDrawIndexedPatchesTessellationEmulation(
-              encoder, patch_primitive,
-              draw.indices_16bit ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
-              index_buffers[i], config, /*instanceCount=*/1,
-              /*indexCountPerInstance=*/draw.count, /*baseInstance=*/0,
-              /*baseVertex=*/0, /*startIndex=*/0);
-        } else {
-          IRRuntimeDrawPatchesTessellationEmulation(
-              encoder, patch_primitive, config, /*instanceCount=*/1,
-              /*vertexCountPerInstance=*/draw.count, /*baseInstance=*/0,
-              /*baseVertex=*/0);
-        }
       }
     }
     [encoder endEncoding];
@@ -1891,8 +1686,7 @@ PlainResult RunPlainVariant(const PlainVariant& v) {
     addresses.descriptor_indices_pixel = [null_buffer gpuAddress];
     std::array<uint64_t, kMetalBindingSlotCount> argument_buffer =
         BuildMetalTopLevelArgumentBuffer(addresses, v.guest_ps,
-                                         /*memexport_draw=*/false,
-                                         /*tessellation_draw=*/false);
+                                         /*memexport_draw=*/false);
     std::memcpy(ab_words, argument_buffer.data(),
                 kMetalBindingSlotCount * sizeof(uint64_t));
   } else {
@@ -2005,22 +1799,6 @@ TEST_CASE("plain-pipeline variant ladder locates the environment delta",
 // ---------------------------------------------------------------------------
 // 1. The six mode/domain render cells.
 
-
-// implement-metal-host-tessellation task 4.1: runs a TEST_CASE body on BOTH
-// routes (Catch GENERATE re-enters the case per value) and restores the
-// shared harness's route on every exit, including assertion failures.
-struct RouteScope {
-  RenderHarness& h;
-  RouteScope(RenderHarness& harness, bool host_route) : h(harness) {
-    h.host_route = host_route;
-  }
-  ~RouteScope() { h.host_route = false; }
-};
-#define XE_TESS_BOTH_ROUTES(h)                                       \
-  const bool host_route = GENERATE(false, true);                      \
-  RouteScope route_scope(h, host_route);                              \
-  INFO("route=" << (host_route ? "host" : "mesh"))
-
 TEST_CASE("all six tessellation mode/domain cells render coverage",
           "[tessellation][render][device]") {
   auto& h = H();
@@ -2028,7 +1806,6 @@ TEST_CASE("all six tessellation mode/domain cells render coverage",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
 
   struct Cell {
     const char* name;
@@ -2114,7 +1891,6 @@ TEST_CASE("discrete/continuous factor range renders more segments at higher max"
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
 
   struct Arm {
     const char* name;
@@ -2198,7 +1974,6 @@ TEST_CASE("adaptive factor stream values render distinctly; [2,1] clamps to hi",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
 
   // The prebuilt adaptive VS computes clamp(asfloat(word) + 1, range).
   // Reference ladder, all with valid ranges (effective factor in the name):
@@ -2278,15 +2053,11 @@ TEST_CASE("adaptive factor stream values render distinctly; [2,1] clamps to hi",
               results[kEndianB].covered, results[kF2].covered);
   CHECK(results[kEndianA].covered == results[kF6].covered);
   CHECK(SameImage(results[kEndianA], results[kF6]));
-  if (host_route) {
-    // The host route never swaps in-shader (vertex_index_endian is not
-    // consulted by the domain_as_vertex translation), so the published
-    // endian cannot change the factor: B renders exactly like A.
-    CHECK(SameImage(results[kEndianB], results[kEndianA]));
-  } else {
-    CHECK(results[kEndianB].covered != results[kEndianA].covered);
-    CHECK(results[kEndianB].covered == results[kF2].covered);
-  }
+  // The host route never swaps in-shader (vertex_index_endian is not
+  // consulted by the domain_as_vertex translation; the CPU staging is the
+  // only swap), so the published endian cannot change the factor: B renders
+  // exactly like A.
+  CHECK(SameImage(results[kEndianB], results[kEndianA]));
   std::fflush(stdout);
 }
 
@@ -2573,7 +2344,6 @@ TEST_CASE("identical tessellated wire renders are repeatable",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
   RenderResult runs[3];
   for (int i = 0; i < 3; ++i) {
     runs[i] = RenderAdaptiveQuadWire(h, 2.0f, 8.0f, FloatBits(7.0f),
@@ -2581,14 +2351,10 @@ TEST_CASE("identical tessellated wire renders are repeatable",
     INFO("run " << i << ": " << runs[i].error);
     CHECK(runs[i].ok);
   }
-  std::printf(
-      "TESSRENDER|DETERMINISM|counts=%u,%u,%u same01=%d same12=%d "
-      "cfg={vs_out=%u gs_max=%u hs_patches=%u hs_cp=%u hs_threads=%u "
-      "factor=%.1f}\n",
-      runs[0].covered, runs[1].covered, runs[2].covered,
-      int(SameImage(runs[0], runs[1])), int(SameImage(runs[1], runs[2])),
-      runs[0].cfg_vs_output, runs[0].cfg_gs_max_input, runs[0].cfg_hs_patches,
-      runs[0].cfg_hs_cp, runs[0].cfg_hs_threads, runs[0].cfg_max_factor);
+  std::printf("TESSRENDER|DETERMINISM|counts=%u,%u,%u same01=%d same12=%d\n",
+              runs[0].covered, runs[1].covered, runs[2].covered,
+              int(SameImage(runs[0], runs[1])),
+              int(SameImage(runs[1], runs[2])));
   CHECK(runs[0].covered == runs[1].covered);
   CHECK(runs[1].covered == runs[2].covered);
   CHECK(SameImage(runs[0], runs[1]));
@@ -2603,68 +2369,6 @@ TEST_CASE("identical tessellated wire renders are repeatable",
 // this isolates whether the shared kAdaptive stage memo makes the quad
 // pipeline's OUTPUT depend on which cell was built first.
 
-TEST_CASE("adaptive quad wire after adaptive triangle build (stage context)",
-          "[tessellation][render][stagectx][device]") {
-  auto& h = H();
-  {
-    INFO(h.error);
-    REQUIRE(h.ok);
-  }
-  // Sequence driven by XE_TESS_SEQ (comma list of trifill/trwire/quadfill/
-  // quadwire); default = the original tri-fill-then-quad-wire probe. Each
-  // fresh process = one sequence, so cross-arm contamination is observable.
-  const char* seq_env = std::getenv("XE_TESS_SEQ");
-  std::string seq = seq_env ? seq_env : "trifill,quadwire";
-  auto run_step = [&](const std::string& step) -> RenderResult {
-    if (step == "trifill" || step == "triwire") {
-      RenderSpec tri;
-      tri.mode = xenos::TessellationMode::kAdaptive;
-      tri.host_vs_type = HostVertexShaderType::kTriangleDomainPatchIndexed;
-      tri.host_prim = xenos::PrimitiveType::kTrianglePatch;
-      tri.wireframe = step == "triwire";
-      tri.range_min = 1.0f;
-      tri.range_max = 8.0f;
-      tri.draws.push_back(FactorStreamDraw(3, 3.0f));
-      return h.Render(tri);
-    }
-    if (step == "quadfill") {
-      RenderSpec quad;
-      quad.mode = xenos::TessellationMode::kAdaptive;
-      quad.host_vs_type = HostVertexShaderType::kQuadDomainPatchIndexed;
-      quad.host_prim = xenos::PrimitiveType::kQuadPatch;
-      quad.range_min = 1.0f;
-      quad.range_max = 8.0f;
-      quad.draws.push_back(FactorStreamDraw(4, 3.0f));
-      return h.Render(quad);
-    }
-    // quadwire.
-    return RenderAdaptiveQuadWire(h, 2.0f, 8.0f, FloatBits(7.0f),
-                                  xenos::Endian::kNone);
-  };
-  size_t start = 0;
-  while (start <= seq.size()) {
-    size_t comma = seq.find(',', start);
-    std::string step = seq.substr(
-        start, comma == std::string::npos ? std::string::npos : comma - start);
-    if (!step.empty()) {
-      RenderResult r = run_step(step);
-      std::printf("TESSRENDER|STAGECTX|%s|%s|covered=%u depth_covered=%u%s%s\n",
-                  step.c_str(), r.ok ? "OK" : "FAIL", r.covered,
-                  r.depth_covered, r.error.empty() ? "" : " err=",
-                  r.error.c_str());
-      CHECK(r.ok);
-    }
-    if (comma == std::string::npos) break;
-    start = comma + 1;
-  }
-  SUCCEED("sequence recorded");
-  std::fflush(stdout);
-}
-
-// ---------------------------------------------------------------------------
-// 3. Two tessellated draws in one submission keep their own factors (spec:
-// "Tess-factor buffers are safe across multiple tessellated draws").
-
 // RESOLVED 2026-08-02 (was KNOWN-ISSUE [!mayfail]): the earlier "cross-case
 // backend state" attribution was wrong — the full-suite disturbance was
 // converter CONVERSION ORDER: dxilconv per-instance call-history corruption
@@ -2678,7 +2382,6 @@ TEST_CASE("two tessellated draws in one submission render their own factors",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
 
   auto make_draw = [](float factor_value, double vp_x) {
     DrawSpec draw;
@@ -2792,7 +2495,6 @@ TEST_CASE("depth-only tessellated draw: fallback PS engages and depth lands",
     INFO(h.error);
     REQUIRE(h.ok);
   }
-  XE_TESS_BOTH_ROUTES(h);
 
   RenderSpec spec;
   spec.mode = xenos::TessellationMode::kDiscrete;
@@ -2870,264 +2572,6 @@ TEST_CASE("memexport predicate input: eM-writing guest VS is detected",
 // D32F_S8, fill, 256 patches = 8 FULL 32-patch object threadgroups, factor
 // words 0x00000000 clamping to range min 2, guest PS + color mask F, 13
 // adaptive quad draws in the encoder).
-
-namespace {
-
-uint64_t Fnv1a64(const uint8_t* data, size_t size) {
-  uint64_t hash = 14695981039346656037ull;
-  for (size_t i = 0; i < size; ++i) {
-    hash = (hash ^ data[i]) * 1099511628211ull;
-  }
-  return hash;
-}
-
-DrawSpec PatchDraw(uint32_t patches, float factor_value) {
-  DrawSpec draw;
-  draw.indexed = true;
-  draw.words32.assign(patches * 4, FloatBits(factor_value));
-  draw.count = patches * 4;
-  return draw;
-}
-
-RenderSpec NondetBaseSpec() {
-  RenderSpec spec;
-  spec.mode = xenos::TessellationMode::kAdaptive;
-  spec.host_vs_type = HostVertexShaderType::kQuadDomainPatchIndexed;
-  spec.host_prim = xenos::PrimitiveType::kQuadPatch;
-  spec.wireframe = true;
-  spec.range_min = 2.0f;
-  spec.range_max = 8.0f;
-  spec.draws.push_back(PatchDraw(1, 7.0f));
-  return spec;
-}
-
-// The measured VP draw-1096 shape (minus the guest content, which the input
-// hash already proved byte-stable): 13 draws x 256 zero-word patches, fill,
-// 2xMSAA, production D32F_S8, guest PS + color.
-RenderSpec NondetVpShapeSpec() {
-  RenderSpec spec = NondetBaseSpec();
-  spec.wireframe = false;
-  spec.sample_count = 2;
-  spec.depth_stencil8 = true;
-  spec.draws.clear();
-  for (int i = 0; i < 13; ++i) {
-    spec.draws.push_back(PatchDraw(256, 0.0f));
-  }
-  return spec;
-}
-
-int NondetIters() {
-  const char* value = std::getenv("XE_TESS_NONDET_ITERS");
-  int iters = value ? std::atoi(value) : 5;
-  return iters > 1 ? iters : 5;
-}
-
-// Renders the spec `iters` times and byte-compares depth + color across runs.
-void RunNondetArm(RenderHarness& h, const char* name, const RenderSpec& spec,
-                  int iters) {
-  std::vector<RenderResult> runs;
-  runs.reserve(iters);
-  for (int i = 0; i < iters; ++i) {
-    runs.push_back(h.Render(spec));
-    if (!runs.back().ok) {
-      std::printf("TESSNONDET|%s|ERROR|run=%d err=%s\n", name, i,
-                  runs.back().error.c_str());
-      CHECK(runs.back().ok);
-      return;
-    }
-  }
-  // Distinct-image census.
-  std::vector<uint64_t> hashes;
-  for (const RenderResult& r : runs) {
-    uint64_t hash = Fnv1a64(
-        reinterpret_cast<const uint8_t*>(r.depth.data()),
-        r.depth.size() * sizeof(float));
-    if (!r.rgba.empty()) {
-      hash ^= Fnv1a64(r.rgba.data(), r.rgba.size()) * 1099511628211ull;
-    }
-    hashes.push_back(hash);
-  }
-  int distinct = 0;
-  for (size_t i = 0; i < hashes.size(); ++i) {
-    bool seen = false;
-    for (size_t j = 0; j < i; ++j) {
-      if (hashes[j] == hashes[i]) {
-        seen = true;
-        break;
-      }
-    }
-    if (!seen) ++distinct;
-  }
-  bool stable = distinct == 1;
-  // Divergence anatomy vs run 0 (first diverging run): per-sample-plane depth
-  // diff counts + color byte diffs.
-  uint32_t depth_diffs_plane[4] = {};
-  uint32_t color_diffs = 0;
-  int first_diverging = -1;
-  if (!stable) {
-    for (int i = 1; i < iters; ++i) {
-      if (hashes[i] != hashes[0]) {
-        first_diverging = i;
-        const RenderResult& a = runs[0];
-        const RenderResult& b = runs[i];
-        uint32_t planes = uint32_t(a.depth.size() / (kRT * kRT));
-        for (uint32_t p = 0; p < planes && p < 4; ++p) {
-          for (uint32_t k = 0; k < kRT * kRT; ++k) {
-            if (a.depth[p * kRT * kRT + k] != b.depth[p * kRT * kRT + k]) {
-              ++depth_diffs_plane[p];
-            }
-          }
-        }
-        for (size_t k = 0; k < a.rgba.size(); ++k) {
-          if (a.rgba[k] != b.rgba[k]) ++color_diffs;
-        }
-        break;
-      }
-    }
-  }
-  std::printf(
-      "TESSNONDET|%s|%s|iters=%d distinct=%d covered0=%u depth_covered0=%u "
-      "first_div=%d depth_diffs=[%u,%u,%u,%u] color_diffs=%u "
-      "cfg(vs_out=%u gs_max=%u hs_patches=%u hs_cp=%u hs_threads=%u "
-      "factor=%.0f)\n",
-      name, stable ? "STABLE" : "DIVERGES", iters, distinct, runs[0].covered,
-      runs[0].depth_covered, first_diverging, depth_diffs_plane[0],
-      depth_diffs_plane[1], depth_diffs_plane[2], depth_diffs_plane[3],
-      color_diffs, runs[0].cfg_vs_output, runs[0].cfg_gs_max_input,
-      runs[0].cfg_hs_patches, runs[0].cfg_hs_cp, runs[0].cfg_hs_threads,
-      runs[0].cfg_max_factor);
-  std::fflush(stdout);
-}
-
-}  // namespace
-
-TEST_CASE("adaptive dispatch nondeterminism config sweep",
-          "[.][nondeterm][device]") {
-  auto& h = H();
-  {
-    INFO(h.error);
-    REQUIRE(h.ok);
-  }
-  int iters = NondetIters();
-
-  struct Arm {
-    const char* name;
-    RenderSpec spec;
-  };
-  std::vector<Arm> arms;
-  arms.push_back({"control", NondetBaseSpec()});
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.wireframe = false;
-    arms.push_back({"fill", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.draws[0] = PatchDraw(1, 0.0f);  // words 0x0 -> clamp to range min 2.
-    arms.push_back({"words0", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.draws[0] = PatchDraw(256, 7.0f);  // 8 FULL 32-patch threadgroups.
-    arms.push_back({"patches256", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.draws[0] = PatchDraw(60, 7.0f);  // 1 full + 28-of-32 tail threadgroup.
-    arms.push_back({"tail28of32", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.sample_count = 2;
-    arms.push_back({"msaa2", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.depth_stencil8 = true;
-    arms.push_back({"ds8", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.depth_compare_lequal = true;
-    arms.push_back({"lequal", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    s.depth_only = true;
-    s.use_guest_ps = false;
-    arms.push_back({"depthonly", s});
-  }
-  {
-    RenderSpec s = NondetBaseSpec();
-    for (int i = 1; i < 13; ++i) {
-      s.draws.push_back(s.draws[0]);
-    }
-    arms.push_back({"multidraw13", s});
-  }
-  arms.push_back({"vp-shape", NondetVpShapeSpec()});
-  {
-    RenderSpec s = NondetVpShapeSpec();
-    s.depth_only = true;
-    s.use_guest_ps = false;
-    arms.push_back({"vp-depthonly", s});
-  }
-
-  for (const Arm& arm : arms) {
-    RunNondetArm(h, arm.name, arm.spec, iters);
-  }
-  SUCCEED("sweep recorded");
-}
-
-// Phase 2: dispatch-parameter bisect on a reproducing config
-// (XE_TESS_NONDET2_BASE=vp-shape|<sweep arm name>; default vp-shape). Local
-// dispatch replica varies the knobs the vendored helper hardcodes.
-TEST_CASE("adaptive dispatch nondeterminism knob bisect",
-          "[.][nondeterm2][device]") {
-  auto& h = H();
-  {
-    INFO(h.error);
-    REQUIRE(h.ok);
-  }
-  int iters = NondetIters();
-  const char* base_name = std::getenv("XE_TESS_NONDET2_BASE");
-  std::string base = base_name ? base_name : "vp-shape";
-  RenderSpec spec = base == "vp-shape" ? NondetVpShapeSpec() : NondetBaseSpec();
-  if (base == "msaa2") spec.sample_count = 2;
-  if (base == "patches256") spec.draws[0] = PatchDraw(256, 7.0f);
-  if (base == "multidraw13") {
-    for (int i = 1; i < 13; ++i) spec.draws.push_back(spec.draws[0]);
-  }
-
-  struct Knob {
-    const char* name;
-    uint32_t tg_mem;
-    uint32_t hs_patches;
-    uint32_t pad_words;
-  };
-  const Knob knobs[] = {
-      {"vendored", 0, 0, 0},        // control: the vendored dispatch helper.
-      {"local15360", 15360, 0, 0},  // local replica parity control.
-      {"tg64", 64, 0, 0},   // DELIBERATE undersize: the shader-validation
-                            // engagement probe (MTL_SHADER_VALIDATION=1 must
-                            // flag threadgroup-memory OOB if it instruments
-                            // object/mesh pipelines at all).
-      {"tg16384", 16384, 0, 0},     // larger object threadgroup memory.
-      {"tg23040", 23040, 0, 0},     // 1.5x.
-      {"hs16", 15360, 16, 0},       // fewer patches per object threadgroup.
-      {"hs8", 15360, 8, 0},
-      {"hs1", 15360, 1, 0},         // one patch per threadgroup.
-      {"pad32", 15360, 0, 32},      // nonzero startIndex (arena-offset model).
-  };
-  for (const Knob& knob : knobs) {
-    RenderSpec s = spec;
-    s.tg_mem_length = knob.tg_mem;
-    s.hs_patches_override = knob.hs_patches;
-    s.index_pad_words = knob.pad_words;
-    std::string label = base + "+" + knob.name;
-    RunNondetArm(h, label.c_str(), s, iters);
-  }
-  SUCCEED("bisect recorded");
-}
 
 }  // namespace test
 }  // namespace gpu

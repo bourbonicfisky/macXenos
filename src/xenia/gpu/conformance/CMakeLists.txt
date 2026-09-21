@@ -316,27 +316,16 @@ if(APPLE)
   endif()
   xe_target_defaults(xenia-gpu-metal-float24-conformance)
 
-  # port-xenios-tessellation task 2.2: the standalone MSC tessellation probe.
-  # Same closure shape as the float24 target above (DxbcShaderTranslator +
-  # dxilconv + MetalShaderConverter + the IR runtime TU from
-  # xenia-gpu-metal-backend for IRRuntimeValidateTessellationPipeline /
-  # IRRuntimeNewGeometryTessellationEmulationPipeline). Device required.
+  # Tessellation device suite (host route, implement-metal-host-tessellation
+  # 2026-09-20). Same closure shape as the float24 target above
+  # (DxbcShaderTranslator + dxilconv + MetalShaderConverter + MetalPipelineCache
+  # from xenia-gpu-metal-backend). Device required.
   add_executable(xenia-gpu-metal-tessellation-conformance
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_translation_probe_test.mm
-    # Task 3.1/3.2 cache-level case: GetOrCreateTessellationPipelineState end
-    # to end on-device (triangle + quad, memo hit, validation-failure null,
-    # durable-record round-trip). Same closure — MetalPipelineCache comes from
-    # xenia-gpu-metal-backend.
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_pipeline_cache_test.mm
-    # Task 4.5 encode smoke: pipeline via the cache + the full group-4 binding
-    # assembly (hull/domain AB alias, tessellator tables on both stages) into
-    # a real encoder, dispatched through the IR runtime patch draws.
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_encode_smoke_test.mm
-    # Task 5.1 render family: all six mode/domain cells rendered through the
-    # production pipeline + group-4 binding assembly with pixel readback;
-    # factor-value arms (line fill mode) incl. the live Viva Pinata [2,1]
-    # min>max clamp pin and the endian double-swap arm; two-draws-one-
-    # submission factor isolation; depth-only/no-PS fallback render;
+    # Render family: all six mode/domain cells expanded with the production
+    # host tessellation helpers and rendered through the production plain
+    # pipeline under domain_as_vertex, with pixel readback; factor-value arms
+    # (line fill mode) incl. the live Viva Pinata [2,1] min>max clamp pin;
+    # two-draws-one-submission factor isolation; depth-only/no-PS render;
     # memexport route-predicate input.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_tessellation_render_conformance_test.mm
     # extend-metal-rasterizing-memexport-producers task 3.1: the L1/L2
