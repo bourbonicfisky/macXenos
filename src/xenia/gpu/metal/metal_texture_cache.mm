@@ -1352,7 +1352,10 @@ uint32_t MetalTextureCache::GetTextureSlot(
     return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
   }();
   if (s_dump_fetch_png && base == s_dump_fetch_png && bpb == 4) {
-    std::string path = fmt::format("/tmp/xe_fetch_{:08X}.ppm", base);
+    // Named by the lineage draw stamp (set when XE_METAL_LINEAGE is active)
+    // so successive fetches of the same base in one frame do not clobber.
+    std::string path =
+        fmt::format("/tmp/xe_fetch_{:08X}_d{:06}.ppm", base, lineage_draw_);
     FILE* f = fopen(path.c_str(), "wb");
     if (f) {
       fprintf(f, "P6\n%u %u\n255\n", blocks_w, blocks_h);
@@ -1378,7 +1381,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
       p = (*end == ',') ? end + 1 : end;
     }
     if (wanted) {
-      std::string path = fmt::format("/tmp/xe_fetch_{:08X}.bin", base);
+      std::string path = fmt::format("/tmp/xe_fetch_{:08X}_d{:06}.bin", base,
+                                     lineage_draw_);
       FILE* f = fopen(path.c_str(), "wb");
       if (f) {
         fwrite(linear.data(), 1, linear.size(), f);

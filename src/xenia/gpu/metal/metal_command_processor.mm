@@ -3929,6 +3929,48 @@ void MetalCommandProcessor::FinalizeSwapFrame() {
                   (unsigned long long)finalize_index);
     EmitSeamTimingReport(site_buf);
   }
+  // Diagnostic (diagnose-jc2-exposure-oscillation, default off):
+  // XE_METAL_TRACE_AT_DRAWS=<min_draws_per_frame>,<captures>[,<settle_swaps>]
+  // arms single-frame traces on the first <captures> swaps after the frame
+  // draw count has stayed >= <min_draws_per_frame> for <settle_swaps> swaps
+  // (default 30). A swap-number capture is a lottery on this title (the boot
+  // phase runs 40-100 swaps/s and its length varies per run), so the SCENE
+  // is the trigger. Traces land under --trace_gpu_prefix like the hotkey's.
+  {
+    static const std::array<uint32_t, 3> s_trace_at_draws = [] {
+      std::array<uint32_t, 3> cfg = {0, 0, 30};
+      if (const char* v = std::getenv("XE_METAL_TRACE_AT_DRAWS")) {
+        char* end = nullptr;
+        cfg[0] = uint32_t(strtoul(v, &end, 10));
+        if (end && *end == ',') cfg[1] = uint32_t(strtoul(end + 1, &end, 10));
+        if (end && *end == ',') cfg[2] = uint32_t(strtoul(end + 1, &end, 10));
+      }
+      return cfg;
+    }();
+    static uint64_t s_last_draw_count = 0;
+    static uint32_t s_settled_swaps = 0;
+    static uint32_t s_captures_left = s_trace_at_draws[1];
+    if (s_trace_at_draws[0] && s_captures_left) {
+      // draw_count_ is the cumulative encoded-draw counter (the IssueSwap
+      // log's "draws"), so its delta is this frame's draw count.
+      uint64_t frame_draws = draw_count_ - s_last_draw_count;
+      s_last_draw_count = draw_count_;
+      if (frame_draws >= s_trace_at_draws[0]) {
+        ++s_settled_swaps;
+      } else {
+        s_settled_swaps = 0;
+      }
+      if (s_settled_swaps > s_trace_at_draws[2] &&
+          trace_state_ == TraceState::kDisabled) {
+        --s_captures_left;
+        XELOGW("MetalTraceAtDraws: capturing NEXT frame at swap#{} "
+               "(frame draws {}, {} captures left) -> {}",
+               swap_count_, frame_draws, s_captures_left,
+               xe::path_to_utf8(cvars::trace_gpu_prefix));
+        RequestFrameTrace(cvars::trace_gpu_prefix);
+      }
+    }
+  }
   if (!auto_trace_trigger_) {
     auto_trace_trigger_ =
         std::make_unique<MetalAutoTraceTrigger>(ParseAutoTraceConfigFromEnv());
@@ -5165,6 +5207,62 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   bool log_vf =
       s_log_vf &&
       vertex_shader->ucode_data_hash() == strtoull(s_log_vf, nullptr, 16);
+  // DIAGNOSTIC (JC2 shadow-clear): XE_METAL_LOG_VF_DUMP=<vs hash> dumps the
+  // index stream head and every non-zero 7-dword vertex of each vertex fetch
+  // range for draws using that vertex shader (first 4 draws).
+  static const char* s_log_vf_dump = std::getenv("XE_METAL_LOG_VF_DUMP");
+  static uint32_t s_log_vf_dump_count = 0;
+  if (s_log_vf_dump && s_log_vf_dump_count < 4 &&
+      vertex_shader->ucode_data_hash() ==
+          strtoull(s_log_vf_dump, nullptr, 16)) {
+    ++s_log_vf_dump_count;
+    std::string idx;
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      const uint8_t* ib = memory_->TranslatePhysical(index_buffer_info->guest_base);
+      bool i32 = index_buffer_info->format == xenos::IndexFormat::kInt32;
+      for (uint32_t k = 0; k < std::min<uint32_t>(index_count, 8) && ib; ++k) {
+        uint32_t v = 0;
+        if (i32) {
+          std::memcpy(&v, ib + k * 4, 4);
+          v = xe::byte_swap(v);
+        } else {
+          uint16_t v16;
+          std::memcpy(&v16, ib + k * 2, 2);
+          v = xe::byte_swap(v16);
+        }
+        idx += fmt::format("{}{}", k ? "," : "", v);
+      }
+    }
+    XELOGW("MetalVfDump draw={} prim={} index_count={} ib_base={:08X} idx=[{}] "
+           "indx_offset={}",
+           trace_draw_index_, uint32_t(prim_type), index_count,
+           index_buffer_info ? index_buffer_info->guest_base : 0u, idx,
+           regs.Get<uint32_t>(XE_GPU_REG_VGT_INDX_OFFSET));
+    for (const VertexFetchDependency& dep : vertex_fetch_dependencies) {
+      const uint8_t* vb = memory_->TranslatePhysical(dep.range.start());
+      uint32_t bytes = uint32_t(dep.range.length());
+      std::string dump;
+      uint32_t shown = 0;
+      for (uint32_t v = 0; (v + 1) * 28 <= bytes && shown < 12; ++v) {
+        float fl[7];
+        bool nz = false;
+        for (uint32_t k = 0; k < 7; ++k) {
+          uint32_t raw;
+          std::memcpy(&raw, vb + v * 28 + k * 4, 4);
+          raw = xe::byte_swap(raw);
+          std::memcpy(&fl[k], &raw, 4);
+          nz |= raw != 0;
+        }
+        if (!nz) continue;
+        ++shown;
+        dump += fmt::format(" v{}=({:g},{:g},{:g},{:g},{:g},{:g},{:g})", v,
+                            fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6]);
+      }
+      XELOGW("MetalVfDump   fc={} base={:08X} bytes={} endian={}:{}",
+             dep.fetch_constant, dep.range.start(), bytes,
+             uint32_t(dep.fetch.endian), dump);
+    }
+  }
   static uint32_t s_log_vf_count = 0;
   for (const VertexFetchDependency& dependency :
        vertex_fetch_dependencies) {
@@ -6358,6 +6456,48 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       flags |= GetMetalGammaRenderTargetMask(color_infos)
                << DxbcShaderTranslator::kSysFlag_ConvertColor0ToGamma_Shift;
     }
+    // Pixel-shader coverage side effects (alpha test, alpha to mask) apply
+    // only when the RB runs the pixel shader at all: EdramMode::kColorDepth and
+    // draw_util::IsPixelShaderNeededWithRasterization -- the same rule the
+    // D3D12/Vulkan backends use to drop the pixel shader entirely. Just Cause 2
+    // clears its three shadow-cascade depth buffers with depth-only rects in
+    // EdramMode::kDepth while RB_COLORCONTROL still carries the previous
+    // draw's alpha test (GEQUAL 1/255) and the rect's vertex alpha is 0: the
+    // reference backends drop the PS and the clear lands; running the alpha
+    // test here discarded every fragment, the cascade depth stayed stale, the
+    // memexport shadow LUT copied garbage and the world rendered dark, with a
+    // correct ("flash") frame whenever the game happened to leave alpha test
+    // disabled. XE_METAL_PS_COVERAGE_LEGACY=1 restores the unconditional
+    // alpha test (rollback); XE_METAL_ALPHA_TEST_LOG=1 logs alpha-tested
+    // color-masked draws.
+    static const bool s_ps_coverage_legacy =
+        std::getenv("XE_METAL_PS_COVERAGE_LEGACY") != nullptr;
+    static const bool s_alpha_test_log =
+        std::getenv("XE_METAL_ALPHA_TEST_LOG") != nullptr;
+    const bool ps_coverage_effects =
+        regs.Get<reg::RB_MODECONTROL>().edram_mode ==
+            xenos::EdramMode::kColorDepth &&
+        pixel_shader && pixel_shader->is_ucode_analyzed() &&
+        draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs);
+    bool alpha_to_mask_effects = true;
+    if (!s_ps_coverage_legacy && !ps_coverage_effects) {
+      alpha_test_function = xenos::CompareFunction::kAlways;
+      alpha_to_mask_effects = false;
+    }
+    if (s_alpha_test_log && rb_colorcontrol.alpha_test_enable) {
+      static uint32_t s_alpha_logs = 0;
+      if (s_alpha_logs++ < 64) {
+        XELOGW(
+            "MetalAlphaTest draw={} func={} ref={} colorcontrol={:08X} "
+            "color_bound={} rb_color_mask={:08X} edram_mode={} "
+            "ps_coverage_effects={}",
+            trace_draw_index_, uint32_t(rb_colorcontrol.alpha_func),
+            regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF), rb_colorcontrol.value,
+            color_bound ? 1 : 0, regs.Get<reg::RB_COLOR_MASK>().value,
+            uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode),
+            ps_coverage_effects ? 1 : 0);
+      }
+    }
     flags |= uint32_t(alpha_test_function)
              << DxbcShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
     system_constants.flags = flags;
@@ -6372,7 +6512,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         pipeline_raster_state.sample_count_log2_x;
     system_constants.sample_count_log2[1] =
         pipeline_raster_state.sample_count_log2_y;
-    system_constants.alpha_to_mask = pipeline_raster_state.alpha_to_mask;
+    system_constants.alpha_to_mask =
+        alpha_to_mask_effects ? pipeline_raster_state.alpha_to_mask : 0u;
     // Texture signedness / gamma (8 bits per fetch constant): tells the PS/VS
     // to decode gamma-signed fetches (TextureSign::kGamma) to linear on sample
     // and handle signed formats. Left zeroed, every gamma texture (incl. the
