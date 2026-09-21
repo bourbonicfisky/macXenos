@@ -54,6 +54,9 @@ add_executable(xenia-gpu-conformance
   # EDRAM tile/sample addressing oracle (mirror of edram.xesli). Pure math +
   # fmt/base/stb — no command_processor, so it stays in the lean target.
   ${PROJECT_SOURCE_DIR}/src/xenia/gpu/trace_analysis_decode.cc
+  # Host tessellation (implement-metal-host-tessellation task 1.3): the REAL
+  # HostTessellator over the vendored D3D11 reference tessellator, device-free.
+  ${PROJECT_SOURCE_DIR}/src/xenia/gpu/host_tessellator.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/stb_image_write_impl.cc
   ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
   ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
@@ -69,7 +72,7 @@ target_include_directories(xenia-gpu-conformance PRIVATE
 )
 target_include_directories(xenia-gpu-conformance PRIVATE
   ${CMAKE_BINARY_DIR})  # version.h (trace_writer)
-target_link_libraries(xenia-gpu-conformance PRIVATE fmt xenia-base snappy)
+target_link_libraries(xenia-gpu-conformance PRIVATE d3d11-tessellator fmt xenia-base snappy)
 
 # Level 1: Metal compute kernels checked against the L0 CPU oracles. Compiled
 # only on Apple (needs a Metal device); on other platforms the executable is
@@ -247,6 +250,8 @@ if(APPLE)
   add_executable(xenia-gpu-vertex-fetch-bounds-conformance
     ${CMAKE_CURRENT_SOURCE_DIR}/vertex_fetch_bounds_translation_case.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/alu_scalar_swizzle_census_case.cc
+    # implement-metal-host-tessellation task 2.4: domain_as_vertex emission.
+    ${CMAKE_CURRENT_SOURCE_DIR}/domain_as_vertex_translation_case.cc
     ${PROJECT_SOURCE_DIR}/tools/build/src/test_suite_main.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
   )

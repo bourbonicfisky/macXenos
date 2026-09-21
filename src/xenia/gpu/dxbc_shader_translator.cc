@@ -163,6 +163,7 @@ void DxbcShaderTranslator::Reset() {
 
   srv_count_ = 0;
   srv_index_shared_memory_ = kBindingIndexUnallocated;
+  srv_index_tessellation_vertices_ = kBindingIndexUnallocated;
   srv_index_bindless_textures_2d_ = kBindingIndexUnallocated;
   srv_index_bindless_textures_3d_ = kBindingIndexUnallocated;
   srv_index_bindless_textures_cube_ = kBindingIndexUnallocated;
@@ -480,6 +481,63 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
   // temporary variable if need to do any computations!
   Shader::HostVertexShaderType host_vertex_shader_type =
       GetDxbcShaderModification().vertex.host_vertex_shader_type;
+
+  // Metal host tessellation (domain_as_vertex): the domain location and the
+  // control-point / patch indices come from the XeTessellationVertex record
+  // of this vertex (32 bytes at SV_VertexID * 32 in xe_tessellation_vertices,
+  // float4 SV_DomainLocation.xyz0 then float4 vICP[0..3].x) instead of the
+  // vDomain / vICP inputs. The per-type register writes below are shared
+  // with the domain shader path verbatim - only the operand SOURCE differs,
+  // so the guest sees the exact same r0/r1 contract on both paths.
+  bool domain_as_vertex = IsDxbcDomainAsVertexShader();
+  uint32_t domain_record_temp = UINT32_MAX;
+  uint32_t domain_index_temp = UINT32_MAX;
+  if (domain_as_vertex) {
+    // The record SRV shares its register with bindful textures.
+    assert_true(bindless_resources_used_);
+    if (srv_index_tessellation_vertices_ == kBindingIndexUnallocated) {
+      srv_index_tessellation_vertices_ = srv_count_++;
+    }
+    domain_record_temp = PushSystemTemp();
+    domain_index_temp = PushSystemTemp();
+    dxbc::Src record_srv(
+        dxbc::Src::T(srv_index_tessellation_vertices_,
+                     uint32_t(SRVMainRegister::kTessellationVertices)));
+    // W = byte offset of the record = vertex index * 32.
+    a_.OpIShL(dxbc::Dest::R(domain_record_temp, 0b1000),
+              dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+              dxbc::Src::LU(5));
+    // XYZ = SV_DomainLocation (words 0..2).
+    a_.OpLdRaw(dxbc::Dest::R(domain_record_temp, 0b0111),
+               dxbc::Src::R(domain_record_temp, dxbc::Src::kWWWW), record_srv);
+    // Words 4..7 = the control-point / patch index floats.
+    a_.OpIAdd(dxbc::Dest::R(domain_record_temp, 0b1000),
+              dxbc::Src::R(domain_record_temp, dxbc::Src::kWWWW),
+              dxbc::Src::LU(16));
+    a_.OpLdRaw(dxbc::Dest::R(domain_index_temp),
+               dxbc::Src::R(domain_record_temp, dxbc::Src::kWWWW), record_srv);
+  }
+  // Operand sources for the shared per-type prologue: the domain inputs on
+  // the domain shader path, the loaded record on the domain_as_vertex path.
+  auto domain_location_src = [&](uint32_t swizzle, uint32_t used_mask) {
+    if (domain_as_vertex) {
+      return dxbc::Src::R(domain_record_temp, swizzle);
+    }
+    in_domain_location_used_ |= used_mask;
+    return dxbc::Src::VDomain(swizzle);
+  };
+  auto control_point_index_src = [&](uint32_t control_point) {
+    if (domain_as_vertex) {
+      static const uint32_t kReplicate[4] = {
+          dxbc::Src::kXXXX, dxbc::Src::kYYYY, dxbc::Src::kZZZZ,
+          dxbc::Src::kWWWW};
+      return dxbc::Src::R(domain_index_temp, kReplicate[control_point]);
+    }
+    in_control_point_index_used_ = true;
+    return dxbc::Src::VICP(control_point, kInRegisterDSControlPointIndex,
+                           dxbc::Src::kXXXX);
+  };
+
   switch (host_vertex_shader_type) {
     case Shader::HostVertexShaderType::kVertex:
       StartVertexShader_LoadVertexIndex();
@@ -490,21 +548,18 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       if (register_count() >= 1) {
         // Copy the domain location to r0.xyz.
         // ZYX swizzle according to 415607E1 and 4D5307F2.
-        in_domain_location_used_ |= 0b0111;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0111)
                                                   : dxbc::Dest::R(0, 0b0111),
-                 dxbc::Src::VDomain(0b000110));
+                 domain_location_src(0b000110, 0b0111));
         if (register_count() >= 2) {
           // Copy the control point indices (already swapped and converted to
           // float by the host vertex and hull shaders) to r1.xyz.
           dxbc::Dest control_point_index_dest(uses_register_dynamic_addressing
                                                   ? dxbc::Dest::X(0, 1)
                                                   : dxbc::Dest::R(1));
-          in_control_point_index_used_ = true;
           for (uint32_t i = 0; i < 3; ++i) {
             a_.OpMov(control_point_index_dest.Mask(1 << i),
-                     dxbc::Src::VICP(i, kInRegisterDSControlPointIndex,
-                                     dxbc::Src::kXXXX));
+                     control_point_index_src(i));
           }
         }
       }
@@ -516,19 +571,16 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
         // Copy the domain location to r0.xyz.
         // ZYX swizzle with r1.y == 0, according to the water shader in
         // 4D5307ED.
-        in_domain_location_used_ |= 0b0111;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0111)
                                                   : dxbc::Dest::R(0, 0b0111),
-                 dxbc::Src::VDomain(0b000110));
+                 domain_location_src(0b000110, 0b0111));
         if (register_count() >= 2) {
           // Copy the patch index (already swapped and converted to float by the
           // host vertex and hull shaders) to r1.x.
-          in_control_point_index_used_ = true;
           a_.OpMov(uses_register_dynamic_addressing
                        ? dxbc::Dest::X(0, 1, 0b0001)
                        : dxbc::Dest::R(1, 0b0001),
-                   dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
-                                   dxbc::Src::kXXXX));
+                   control_point_index_src(0));
           // Write the swizzle of the barycentric coordinates to r1.y. It
           // appears that the tessellator offloads the reordering of coordinates
           // for edges to game shaders.
@@ -560,10 +612,9 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       assert_true(register_count() >= 2);
       if (register_count() >= 1) {
         // Copy the domain location to r0.xy.
-        in_domain_location_used_ |= 0b0011;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0011)
                                                   : dxbc::Dest::R(0, 0b0011),
-                 dxbc::Src::VDomain());
+                 domain_location_src(dxbc::Src::kXYZW, 0b0011));
         // Control point indices according the main menu of 58410823, with
         // `cndeq r2, c255.xxxy, r1.xyzz, r0.zzzz` in the prologue of the
         // shader, where c255.x is 0, and c255.y is 1.
@@ -571,19 +622,15 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
         // r1.x for r0.x * (1 - r0.y)
         // r1.y for r0.x * r0.y
         // r1.z for (1 - r0.x) * r0.y
-        in_control_point_index_used_ = true;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0100)
                                                   : dxbc::Dest::R(0, 0b0100),
-                 dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
-                                 dxbc::Src::kXXXX));
+                 control_point_index_src(0));
         if (register_count() >= 2) {
           dxbc::Dest r1_dest(uses_register_dynamic_addressing
                                  ? dxbc::Dest::X(0, 1)
                                  : dxbc::Dest::R(1));
           for (uint32_t i = 0; i < 3; ++i) {
-            a_.OpMov(r1_dest.Mask(1 << i),
-                     dxbc::Src::VICP(1 + i, kInRegisterDSControlPointIndex,
-                                     dxbc::Src::kXXXX));
+            a_.OpMov(r1_dest.Mask(1 << i), control_point_index_src(1 + i));
           }
         }
       }
@@ -594,17 +641,14 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       if (register_count() >= 1) {
         // Copy the domain location to r0.yz.
         // XY swizzle according to the ground shader in 4D5307F2.
-        in_domain_location_used_ |= 0b0011;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0110)
                                                   : dxbc::Dest::R(0, 0b0110),
-                 dxbc::Src::VDomain(0b010000));
+                 domain_location_src(0b010000, 0b0011));
         // Copy the patch index (already swapped and converted to float by the
         // host vertex and hull shaders) to r0.x.
-        in_control_point_index_used_ = true;
         a_.OpMov(uses_register_dynamic_addressing ? dxbc::Dest::X(0, 0, 0b0001)
                                                   : dxbc::Dest::R(0, 0b0001),
-                 dxbc::Src::VICP(0, kInRegisterDSControlPointIndex,
-                                 dxbc::Src::kXXXX));
+                 control_point_index_src(0));
         if (register_count() >= 2) {
           // Write the swizzle of the UV coordinates to r1.x. It appears that
           // the tessellator offloads the reordering of coordinates for edges to
@@ -633,6 +677,11 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
       EmitTranslationError(
           "Unsupported host vertex shader type in StartVertexOrDomainShader");
       break;
+  }
+
+  if (domain_as_vertex) {
+    // domain_index_temp, domain_record_temp.
+    PopSystemTemp(2);
   }
 }
 
@@ -2522,6 +2571,11 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
     name_ptr +=
         dxbc::AppendAlignedString(shader_object_, "xe_shared_memory_srv");
   }
+  uint32_t tessellation_vertices_srv_name_ptr = name_ptr;
+  if (srv_index_tessellation_vertices_ != kBindingIndexUnallocated) {
+    name_ptr += dxbc::AppendAlignedString(shader_object_,
+                                          "xe_tessellation_vertices");
+  }
   uint32_t bindless_textures_2d_name_ptr = name_ptr;
   uint32_t bindless_textures_3d_name_ptr = name_ptr;
   uint32_t bindless_textures_cube_name_ptr = name_ptr;
@@ -2609,6 +2663,15 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
         srv.return_type = dxbc::ResourceReturnType::kMixed;
         srv.dimension = dxbc::RdefDimension::kSRVBuffer;
         srv.bind_point = uint32_t(SRVMainRegister::kSharedMemory);
+        srv.bind_count = 1;
+        srv.bind_point_space = uint32_t(SRVSpace::kMain);
+      } else if (i == srv_index_tessellation_vertices_) {
+        // Host tessellation domain records (domain_as_vertex).
+        srv.name_ptr = tessellation_vertices_srv_name_ptr;
+        srv.type = dxbc::RdefInputType::kByteAddress;
+        srv.return_type = dxbc::ResourceReturnType::kMixed;
+        srv.dimension = dxbc::RdefDimension::kSRVBuffer;
+        srv.bind_point = uint32_t(SRVMainRegister::kTessellationVertices);
         srv.bind_count = 1;
         srv.bind_point_space = uint32_t(SRVSpace::kMain);
       } else {
@@ -3506,6 +3569,13 @@ void DxbcShaderTranslator::WriteShaderCode() {
           dxbc::Src::T(dxbc::Src::Dcl, srv_index_shared_memory_,
                        uint32_t(SRVMainRegister::kSharedMemory),
                        uint32_t(SRVMainRegister::kSharedMemory)),
+          uint32_t(SRVSpace::kMain));
+    } else if (i == srv_index_tessellation_vertices_) {
+      // Host tessellation domain records ByteAddressBuffer.
+      ao_.OpDclResourceRaw(
+          dxbc::Src::T(dxbc::Src::Dcl, srv_index_tessellation_vertices_,
+                       uint32_t(SRVMainRegister::kTessellationVertices),
+                       uint32_t(SRVMainRegister::kTessellationVertices)),
           uint32_t(SRVSpace::kMain));
     } else {
       // Texture or texture heap.

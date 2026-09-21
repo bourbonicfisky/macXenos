@@ -156,7 +156,17 @@ class DxbcShaderTranslator : public ShaderTranslator {
       uint32_t output_point_size : 1;
       // Dynamically indexable register count from SQ_PROGRAM_CNTL.
       uint32_t dynamic_addressable_register_count : 8;
-      uint32_t : 2;
+      // Metal host tessellation (OpenSpec implement-metal-host-tessellation,
+      // design D4): with a domain host_vertex_shader_type, emit a VERTEX
+      // shader whose domain location and control-point / patch indices come
+      // from the per-vertex XeTessellationVertex record at
+      // SV_VertexID * 32 in the xe_tessellation_vertices raw SRV instead of
+      // vDomain / vICP. The register conventions the guest sees are the
+      // domain shader's. Never set by the D3D12 backend; requires bindless
+      // resources. Was zero padding, so every existing value keeps its
+      // meaning (kVersion is deliberately not bumped).
+      uint32_t domain_as_vertex : 1;
+      uint32_t : 1;
       // uint32_t 1.
       // Pipeline stage and input configuration.
       Shader::HostVertexShaderType host_vertex_shader_type
@@ -543,6 +553,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
   enum class SRVMainRegister {
     kSharedMemory,
     kBindfulTexturesStart,
+    // Metal host tessellation (domain_as_vertex): the per-vertex domain record
+    // buffer (XeTessellationVertex, 32 bytes per SV_VertexID). Bindless-only,
+    // so it takes the register bindful textures would start at; asserted at
+    // emission. The Metal space-0 SRV table is heap-sized, so t1 needs no
+    // root-signature change.
+    kTessellationVertices = kBindfulTexturesStart,
   };
 
   // 192 textures at most because there are 32 fetch constants, and textures can
@@ -742,15 +758,31 @@ class DxbcShaderTranslator : public ShaderTranslator {
     return Modification(current_translation().modification());
   }
 
+  // A domain host vertex shader type translated as a Direct3D vertex shader
+  // over the host-tessellated record stream (Modification::vertex
+  // .domain_as_vertex). Everything keyed on IsDxbcVertexShader /
+  // IsDxbcDomainShader treats it as a VERTEX shader; only the register
+  // prologue (StartVertexOrDomainShader) knows it carries domain semantics.
+  bool IsDxbcDomainAsVertexShader() const {
+    if (!is_vertex_shader()) {
+      return false;
+    }
+    Modification modification = GetDxbcShaderModification();
+    return modification.vertex.domain_as_vertex &&
+           Shader::IsHostVertexShaderTypeDomain(
+               modification.vertex.host_vertex_shader_type);
+  }
   bool IsDxbcVertexShader() const {
     return is_vertex_shader() &&
-           !Shader::IsHostVertexShaderTypeDomain(
-               GetDxbcShaderModification().vertex.host_vertex_shader_type);
+           (!Shader::IsHostVertexShaderTypeDomain(
+                GetDxbcShaderModification().vertex.host_vertex_shader_type) ||
+            IsDxbcDomainAsVertexShader());
   }
   bool IsDxbcDomainShader() const {
     return is_vertex_shader() &&
            Shader::IsHostVertexShaderTypeDomain(
-               GetDxbcShaderModification().vertex.host_vertex_shader_type);
+               GetDxbcShaderModification().vertex.host_vertex_shader_type) &&
+           !IsDxbcDomainAsVertexShader();
   }
 
   bool IsForceEarlyDepthStencilGlobalFlagEnabled() const {
@@ -1268,6 +1300,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // indices of SRV resources that are optional.
   uint32_t srv_count_;
   uint32_t srv_index_shared_memory_;
+  // domain_as_vertex only: the XeTessellationVertex record buffer.
+  uint32_t srv_index_tessellation_vertices_;
   uint32_t srv_index_bindless_textures_2d_;
   uint32_t srv_index_bindless_textures_3d_;
   uint32_t srv_index_bindless_textures_cube_;
