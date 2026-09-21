@@ -70,7 +70,9 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
+#include "xenia/gpu/host_tessellator.h"
 #include "xenia/gpu/metal/metal_binding_layout.h"
+#include "xenia/gpu/metal/metal_host_tessellation.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
@@ -454,6 +456,13 @@ struct RenderHarness {
   std::unique_ptr<MetalPipelineCache> cache;
   bool ok = false;
   std::string error;
+  // implement-metal-host-tessellation task 4.1: render through the HOST
+  // tessellation route (reference tessellator -> XeTessellationVertex
+  // records + triangle indices -> the production plain vertex+fragment
+  // pipeline under the domain_as_vertex translation, records exposed through
+  // the per-draw two-entry SRV space-0 table) instead of the MSC
+  // object/mesh emulation. Every assertion stays the same on both routes.
+  bool host_route = false;
   // Per-sample readback pipelines (lazy; nondeterminism campaign only).
   id<MTLComputePipelineState> expand_depth_1x = nil;
   id<MTLComputePipelineState> expand_depth_ms = nil;
@@ -509,7 +518,8 @@ struct RenderHarness {
   // modification (never TranslateShader'd — the tessellation pipeline path
   // compiles Stage::kDomain itself).
   MetalShader::MetalTranslation* MakeDomainTranslation(
-      HostVertexShaderType host_vertex_shader_type) {
+      HostVertexShaderType host_vertex_shader_type,
+      bool domain_as_vertex = false) {
     const bool quad_patch =
         host_vertex_shader_type == HostVertexShaderType::kQuadDomainPatchIndexed;
     static const std::vector<uint32_t> identity_ucode =
@@ -529,6 +539,7 @@ struct RenderHarness {
             shader->GetDynamicAddressableRegisterCount(
                 xenos::kMaxShaderTempRegisters),
             host_vertex_shader_type));
+    modification.vertex.domain_as_vertex = domain_as_vertex ? 1 : 0;
     return static_cast<MetalShader::MetalTranslation*>(
         shader->GetOrCreateTranslation(modification.value));
   }
@@ -617,6 +628,7 @@ struct RenderHarness {
     }
     const MetalPipelineCache::TessellationPipeline* tess = nullptr;
     void* control_pipeline = nullptr;
+    void* host_pipeline = nullptr;
     id<MTLRenderPipelineState> plain_pipeline = nil;
     uint32_t control_gs_vertex_size = 0;
     uint32_t control_gs_max_input = 0;
@@ -703,6 +715,29 @@ struct RenderHarness {
           &control_gs_max_input);
       if (!control_pipeline) {
         result.error = "GetOrCreateGeometryPipelineState returned null";
+        return result;
+      }
+    } else if (host_route) {
+      // Host route: the guest domain payload as a VERTEX shader through the
+      // production vertex translation path and the production plain
+      // vertex+fragment pipeline family (no tessellation pipeline kind).
+      MetalShader::MetalTranslation* domain_vs =
+          MakeDomainTranslation(spec.host_vs_type, /*domain_as_vertex=*/true);
+      if (!domain_vs) {
+        result.error = "domain_as_vertex translation failed";
+        return result;
+      }
+      if (!domain_vs->has_metal_function() &&
+          !cache->TranslateShader(*domain_vs)) {
+        result.error = "domain_as_vertex TranslateShader failed";
+        return result;
+      }
+      host_pipeline = cache->GetOrCreateRenderPipelineState(
+          domain_vs, pixel, colors, depth_format,
+          MetalPipelineRasterKey{spec.sample_count}, blends,
+          /*color_write_mask=*/0xF);
+      if (!host_pipeline) {
+        result.error = "GetOrCreateRenderPipelineState (host route) null";
         return result;
       }
     } else {
@@ -888,12 +923,94 @@ struct RenderHarness {
     IRDescriptorTableSetBuffer(&system_view_entries[2],
                                [guest_scratch gpuAddress], 64 * 1024);
 
+    // --- Host route: expand every draw with the PURE production helpers
+    // (metal_host_tessellation.h), exactly as IssueDraw does, into one
+    // records buffer + one absolute-index buffer, and a two-entry SRV space-0
+    // table ([0] = the "shared memory" scratch, [1] = the records). ---
+    id<MTLBuffer> host_records = nil;
+    id<MTLBuffer> host_indices = nil;
+    id<MTLBuffer> host_table = nil;
+    struct HostDrawRange {
+      uint32_t index_offset_bytes;
+      uint32_t index_count;
+    };
+    std::vector<HostDrawRange> host_ranges;
+    if (host_route) {
+      metal::MetalHostTessellationShape shape;
+      if (!metal::DescribeMetalHostTessellationShape(spec.host_vs_type,
+                                                     spec.mode, &shape)) {
+        result.error = "host route: unsupported shape";
+        return result;
+      }
+      HostTessellator tessellator;
+      std::vector<metal::XeTessellationVertex> records;
+      std::vector<uint32_t> indices;
+      for (const DrawSpec& draw : spec.draws) {
+        metal::MetalHostTessellationDrawInput in{};
+        in.shape = shape;
+        in.mode = spec.mode;
+        in.factor_range_min = spec.range_min;
+        in.factor_range_max = spec.range_max;
+        in.index_offset = 0;
+        in.min_index = 0;
+        in.max_index = 0xFFFFFFu;
+        in.stream = draw.indexed
+                        ? (draw.indices_16bit
+                               ? static_cast<const void*>(draw.words16.data())
+                               : static_cast<const void*>(draw.words32.data()))
+                        : nullptr;
+        in.stream_32bit = !draw.indices_16bit;
+        in.stream_word_count = draw.count;
+        metal::MetalHostTessellationCounts counts =
+            metal::CountMetalHostTessellation(in, tessellator);
+        if (counts.over_budget || !counts.vertex_count) {
+          result.error = "host route: expansion empty or over budget";
+          return result;
+        }
+        size_t record_base = records.size();
+        size_t index_base = indices.size();
+        records.resize(record_base + counts.vertex_count);
+        indices.resize(index_base + counts.index_count);
+        metal::WriteMetalHostTessellation(in, tessellator,
+                                          records.data() + record_base,
+                                          indices.data() + index_base);
+        for (size_t i = index_base; i < indices.size(); ++i) {
+          indices[i] += uint32_t(record_base);
+        }
+        host_ranges.push_back({uint32_t(index_base * sizeof(uint32_t)),
+                               counts.index_count});
+      }
+      host_records = NewZeroBuffer(
+          records.size() * sizeof(metal::XeTessellationVertex),
+          @"Tess records");
+      host_indices =
+          NewZeroBuffer(indices.size() * sizeof(uint32_t), @"Tess indices");
+      host_table =
+          NewZeroBuffer(2 * sizeof(IRDescriptorTableEntry), @"Tess SRV table");
+      if (!host_records || !host_indices || !host_table) {
+        result.error = "host route: buffer alloc failed";
+        return result;
+      }
+      std::memcpy([host_records contents], records.data(),
+                  records.size() * sizeof(metal::XeTessellationVertex));
+      std::memcpy([host_indices contents], indices.data(),
+                  indices.size() * sizeof(uint32_t));
+      auto* table_entries =
+          static_cast<IRDescriptorTableEntry*>([host_table contents]);
+      IRDescriptorTableSetBuffer(&table_entries[0],
+                                 [guest_scratch gpuAddress], 64 * 1024);
+      IRDescriptorTableSetBuffer(
+          &table_entries[1], [host_records gpuAddress],
+          records.size() * sizeof(metal::XeTessellationVertex));
+    }
+
     // --- Top-level AB from the PURE production builder. ---
     MetalBindingAddresses addresses;
     addresses.null_buffer = [null_buffer gpuAddress];
     addresses.view_heap = [view_heap gpuAddress];
     addresses.sampler_heap = [sampler_heap gpuAddress];
-    addresses.shared_memory_srv = [system_views gpuAddress];
+    addresses.shared_memory_srv =
+        host_route ? [host_table gpuAddress] : [system_views gpuAddress];
     addresses.null_uav =
         [system_views gpuAddress] + sizeof(IRDescriptorTableEntry);
     addresses.shared_memory_uav =
@@ -911,7 +1028,7 @@ struct RenderHarness {
                                          spec.use_guest_ps,
                                          /*memexport_draw=*/false,
                                          /*tessellation_draw=*/
-                                         !spec.geometry_control);
+                                         !spec.geometry_control && !host_route);
     id<MTLBuffer> ab_buffer =
         NewZeroBuffer(sizeof(argument_buffer), @"Top-level AB");
     if (!ab_buffer) {
@@ -977,6 +1094,9 @@ struct RenderHarness {
     }
     if (spec.plain_control) {
       [encoder setRenderPipelineState:plain_pipeline];
+    } else if (host_route) {
+      [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                          host_pipeline];
     } else {
       [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                           spec.geometry_control
@@ -996,8 +1116,9 @@ struct RenderHarness {
     id<MTLDepthStencilState> dss =
         [device newDepthStencilStateWithDescriptor:dssd];
     [encoder setDepthStencilState:dss];
+    const bool vertex_path = spec.plain_control || host_route;
     auto bind_all_stages = [&](id<MTLBuffer> buffer, NSUInteger index) {
-      if (spec.plain_control) {
+      if (vertex_path) {
         [encoder setVertexBuffer:buffer offset:0 atIndex:index];
       } else {
         [encoder setObjectBuffer:buffer offset:0 atIndex:index];
@@ -1008,7 +1129,7 @@ struct RenderHarness {
     bind_all_stages(ab_buffer, kIRArgumentBufferBindPoint);
     bind_all_stages(view_heap, kIRDescriptorHeapBindPoint);
     bind_all_stages(sampler_heap, kIRSamplerHeapBindPoint);
-    if (!spec.plain_control) {
+    if (!vertex_path) {
       [encoder setObjectBuffer:ab_buffer
                         offset:0
                        atIndex:kIRArgumentBufferHullDomainBindPoint];
@@ -1027,7 +1148,7 @@ struct RenderHarness {
                       atIndex:kIRVertexBufferBindPoint];
     }
     MTLRenderStages stages =
-        spec.plain_control
+        vertex_path
             ? (MTLRenderStageVertex | MTLRenderStageFragment)
             : (MTLRenderStageObject | MTLRenderStageMesh |
                MTLRenderStageFragment);
@@ -1038,6 +1159,11 @@ struct RenderHarness {
       [encoder useResource:resource usage:MTLResourceUsageRead stages:stages];
     }
     for (id<MTLBuffer> buffer : index_buffers) {
+      if (buffer) {
+        [encoder useResource:buffer usage:MTLResourceUsageRead stages:stages];
+      }
+    }
+    for (id<MTLBuffer> buffer : {host_records, host_indices, host_table}) {
       if (buffer) {
         [encoder useResource:buffer usage:MTLResourceUsageRead stages:stages];
       }
@@ -1053,6 +1179,20 @@ struct RenderHarness {
                                 /*vertexCount=*/(uint64_t)draw.count,
                                 /*instanceCount=*/(uint64_t)1,
                                 /*baseInstance=*/(uint64_t)0);
+      }
+    } else if (host_route) {
+      for (size_t i = 0; i < spec.draws.size(); ++i) {
+        const DrawSpec& draw = spec.draws[i];
+        if (draw.has_viewport) {
+          MTLViewport viewport = {draw.vp_x, draw.vp_y, draw.vp_w,
+                                  draw.vp_h, 0.0,     1.0};
+          [encoder setViewport:viewport];
+        }
+        IRRuntimeDrawIndexedPrimitives(
+            encoder, MTLPrimitiveTypeTriangle, host_ranges[i].index_count,
+            MTLIndexTypeUInt32, host_indices,
+            host_ranges[i].index_offset_bytes, /*instanceCount=*/1,
+            /*baseVertex=*/0, /*baseInstance=*/0);
       }
     } else if (spec.geometry_control) {
       IRRuntimeGeometryPipelineConfig geometry_config = {};
@@ -1865,6 +2005,22 @@ TEST_CASE("plain-pipeline variant ladder locates the environment delta",
 // ---------------------------------------------------------------------------
 // 1. The six mode/domain render cells.
 
+
+// implement-metal-host-tessellation task 4.1: runs a TEST_CASE body on BOTH
+// routes (Catch GENERATE re-enters the case per value) and restores the
+// shared harness's route on every exit, including assertion failures.
+struct RouteScope {
+  RenderHarness& h;
+  RouteScope(RenderHarness& harness, bool host_route) : h(harness) {
+    h.host_route = host_route;
+  }
+  ~RouteScope() { h.host_route = false; }
+};
+#define XE_TESS_BOTH_ROUTES(h)                                       \
+  const bool host_route = GENERATE(false, true);                      \
+  RouteScope route_scope(h, host_route);                              \
+  INFO("route=" << (host_route ? "host" : "mesh"))
+
 TEST_CASE("all six tessellation mode/domain cells render coverage",
           "[tessellation][render][device]") {
   auto& h = H();
@@ -1872,6 +2028,7 @@ TEST_CASE("all six tessellation mode/domain cells render coverage",
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
 
   struct Cell {
     const char* name;
@@ -1957,6 +2114,7 @@ TEST_CASE("discrete/continuous factor range renders more segments at higher max"
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
 
   struct Arm {
     const char* name;
@@ -2040,6 +2198,7 @@ TEST_CASE("adaptive factor stream values render distinctly; [2,1] clamps to hi",
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
 
   // The prebuilt adaptive VS computes clamp(asfloat(word) + 1, range).
   // Reference ladder, all with valid ranges (effective factor in the name):
@@ -2119,8 +2278,15 @@ TEST_CASE("adaptive factor stream values render distinctly; [2,1] clamps to hi",
               results[kEndianB].covered, results[kF2].covered);
   CHECK(results[kEndianA].covered == results[kF6].covered);
   CHECK(SameImage(results[kEndianA], results[kF6]));
-  CHECK(results[kEndianB].covered != results[kEndianA].covered);
-  CHECK(results[kEndianB].covered == results[kF2].covered);
+  if (host_route) {
+    // The host route never swaps in-shader (vertex_index_endian is not
+    // consulted by the domain_as_vertex translation), so the published
+    // endian cannot change the factor: B renders exactly like A.
+    CHECK(SameImage(results[kEndianB], results[kEndianA]));
+  } else {
+    CHECK(results[kEndianB].covered != results[kEndianA].covered);
+    CHECK(results[kEndianB].covered == results[kF2].covered);
+  }
   std::fflush(stdout);
 }
 
@@ -2407,6 +2573,7 @@ TEST_CASE("identical tessellated wire renders are repeatable",
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
   RenderResult runs[3];
   for (int i = 0; i < 3; ++i) {
     runs[i] = RenderAdaptiveQuadWire(h, 2.0f, 8.0f, FloatBits(7.0f),
@@ -2511,6 +2678,7 @@ TEST_CASE("two tessellated draws in one submission render their own factors",
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
 
   auto make_draw = [](float factor_value, double vp_x) {
     DrawSpec draw;
@@ -2624,6 +2792,7 @@ TEST_CASE("depth-only tessellated draw: fallback PS engages and depth lands",
     INFO(h.error);
     REQUIRE(h.ok);
   }
+  XE_TESS_BOTH_ROUTES(h);
 
   RenderSpec spec;
   spec.mode = xenos::TessellationMode::kDiscrete;

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/host_tessellator.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
 #include "xenia/gpu/metal/metal_draw_skip_accounting.h"
@@ -431,6 +432,13 @@ class MetalCommandProcessor : public CommandProcessor {
   // every tessellated draw a fail-closed kTessellationResourceMissing skip.
   // id<MTLBuffer>, retained; released in ShutdownDrawResources.
   void* tessellator_tables_buffer_ = nullptr;
+
+  // Host tessellation route (implement-metal-host-tessellation task 3.4): the
+  // D3D11 reference tessellator + pattern cache, and a reusable host-order
+  // staging copy of the guest control-point index / factor stream. Created
+  // lazily on the first routed draw so the OFF arm allocates nothing.
+  std::unique_ptr<HostTessellator> host_tessellator_;
+  std::vector<uint32_t> host_tessellation_stream_scratch_;
 
   // id<MTLRenderPipelineState> for the depth->R32Float conversion pass, built on
   // first depth resolve (see ConvertDepthToSnapshot).

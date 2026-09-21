@@ -45,6 +45,28 @@ inline bool MetalTessellationGateEngaged(MetalTessellationGate gate) {
   return gate == MetalTessellationGate::kOn;
 }
 
+// implement-metal-host-tessellation task 3.3: which implementation a
+// tessellated draw takes once the gate admits it. XE_METAL_TESS_ROUTE unset,
+// empty or exact "host" = the host tessellation route (design D1); exact
+// "mesh" = the MSC object/mesh emulation route (retained ONLY for this
+// change's A/B arms, deleted at promotion per design D10); anything else is
+// kMalformed: warn once, behave as host.
+enum class MetalTessellationRoute { kHost, kMesh, kMalformed };
+
+inline MetalTessellationRoute ParseMetalTessellationRoute(const char* value) {
+  if (!value || !value[0] || !std::strcmp(value, "host")) {
+    return MetalTessellationRoute::kHost;
+  }
+  if (!std::strcmp(value, "mesh")) {
+    return MetalTessellationRoute::kMesh;
+  }
+  return MetalTessellationRoute::kMalformed;
+}
+
+inline bool MetalTessellationRouteIsHost(MetalTessellationRoute route) {
+  return route != MetalTessellationRoute::kMesh;
+}
+
 // Whether the tessellation route's CPU-swap arena staging (SwapIndicesInto)
 // can reproduce the guest index/factor stream exactly (design D5 endian
 // decision: the route CPU-swaps the stream into the upload arena and keeps
