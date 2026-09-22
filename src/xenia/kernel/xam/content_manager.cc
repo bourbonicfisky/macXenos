@@ -416,7 +416,7 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
       data.file_name(), xuid, kernel_state_->title_id(), data.content_type));
 
   content_license = package->GetPackageLicense();
-  if (static_cast<uint32_t>(cvars::license_mask) > 1) {
+  if (static_cast<uint32_t>(cvars::license_mask) > 0) {
     content_license |= cvars::license_mask;
   }
 
