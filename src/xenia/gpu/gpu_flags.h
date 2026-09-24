@@ -95,6 +95,8 @@ DECLARE_double(ps_debug_export_scale);
 
 DECLARE_int32(ps_debug_export_component);
 
+DECLARE_bool(mulsc_round_toward_zero);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

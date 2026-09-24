@@ -389,3 +389,11 @@ DEFINE_int32(ps_debug_export_component, -1,
              "0-3 = broadcast that component (x/y/z/w) to RGB, making the "
              "w component readable through the color output.",
              "GPU");
+
+DEFINE_bool(
+    mulsc_round_toward_zero, false,
+    "Round mulsc products toward zero instead of to nearest even. This fixes "
+    "bad geometry in several Volition Engine titles and possibly others. "
+    "This rounding behavior hasn't been confirmed on real hardware, so it's "
+    "disabled by default.",
+    "GPU");
