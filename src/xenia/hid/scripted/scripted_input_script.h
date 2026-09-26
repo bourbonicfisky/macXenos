@@ -109,8 +109,8 @@ ScriptLoadResult LoadInputScript(const std::filesystem::path& path);
 // live file are consumed after the scripted timeline completes; each line is
 // one step, in the same units as the TOML profile:
 //   press <button>[+<button>...] [hold_ms] [release_ms] [repeat]
-//   stick <lx|ly|rx|ry> <value> [hold_ms] [release_ms]
-//   trigger <lt|rt> <value> [hold_ms] [release_ms]
+//   stick <lx|ly|rx|ry> <value> [<axis> <value>...] [hold_ms] [release_ms]
+//   trigger <lt|rt> <value> [<axis> <value>...] [hold_ms] [release_ms]
 //   wait <ms>
 //   marker <name>
 // Blank lines and lines starting with '#' are ignored (no step, no error).

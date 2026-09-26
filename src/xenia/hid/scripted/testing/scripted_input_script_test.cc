@@ -501,6 +501,15 @@ TEST_CASE("live input lines parse into single steps", "[hid][scripted][live]") {
   REQUIRE(input->state.left_stick_y == -32768);
   REQUIRE(input->hold_duration == 300ms);
 
+  auto diagonal = ParseLiveInputLine("stick lx -23000 ly -23000 250 750");
+  REQUIRE(diagonal.error.empty());
+  input = std::get_if<InputStep>(&*diagonal.step);
+  REQUIRE(input);
+  REQUIRE(input->state.left_stick_x == -23000);
+  REQUIRE(input->state.left_stick_y == -23000);
+  REQUIRE(input->hold_duration == 250ms);
+  REQUIRE(input->release_duration == 750ms);
+
   auto trigger = ParseLiveInputLine("trigger rt 255");
   REQUIRE(trigger.error.empty());
   input = std::get_if<InputStep>(&*trigger.step);
@@ -531,7 +540,7 @@ TEST_CASE("live input lines reject malformed steps", "[hid][scripted][live]") {
   for (std::string_view line :
        {"press", "press nope", "press a+a", "press a 0", "press a 500 0",
         "press a 500 500 0", "press a 500 500 1 extra", "stick lz 1",
-        "stick ly 40000", "trigger lt 256", "wait", "wait 0", "marker",
+        "stick ly 40000", "stick lx 1 ly", "stick lx 1 lt 2", "trigger lt 256", "wait", "wait 0", "marker",
         "jump a"}) {
     auto result = ParseLiveInputLine(line);
     INFO(line);

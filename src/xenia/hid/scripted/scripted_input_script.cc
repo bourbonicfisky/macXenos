@@ -476,39 +476,51 @@ LiveLineParseResult ParseLiveInputLine(std::string_view line) {
     }
     timing_index = 2;
   } else if (command == "stick" || command == "trigger") {
-    if (tokens.size() < 3) {
-      return fail(std::string(command) + " needs <axis> <value>");
-    }
-    const std::string_view axis = tokens[1];
-    int64_t value = 0;
-    if (command == "stick") {
-      if (!parse_int(tokens[2], -32768, 32767, &value)) {
-        return fail("stick value must be in [-32768, 32767]");
+    // One or more <axis> <value> pairs, so a diagonal is one line.
+    auto is_axis = [&](std::string_view token) {
+      return command == "stick" ? (token == "lx" || token == "ly" ||
+                                   token == "rx" || token == "ry")
+                                : (token == "lt" || token == "rt");
+    };
+    size_t index = 1;
+    while (index < tokens.size() && is_axis(tokens[index])) {
+      if (index + 1 >= tokens.size()) {
+        return fail(std::string(command) + " axis '" +
+                    std::string(tokens[index]) + "' needs a value");
       }
-      if (axis == "lx") {
-        state.left_stick_x = static_cast<int16_t>(value);
-      } else if (axis == "ly") {
-        state.left_stick_y = static_cast<int16_t>(value);
-      } else if (axis == "rx") {
-        state.right_stick_x = static_cast<int16_t>(value);
-      } else if (axis == "ry") {
-        state.right_stick_y = static_cast<int16_t>(value);
+      const std::string_view axis = tokens[index];
+      int64_t value = 0;
+      if (command == "stick") {
+        if (!parse_int(tokens[index + 1], -32768, 32767, &value)) {
+          return fail("stick value must be in [-32768, 32767]");
+        }
+        if (axis == "lx") {
+          state.left_stick_x = static_cast<int16_t>(value);
+        } else if (axis == "ly") {
+          state.left_stick_y = static_cast<int16_t>(value);
+        } else if (axis == "rx") {
+          state.right_stick_x = static_cast<int16_t>(value);
+        } else {
+          state.right_stick_y = static_cast<int16_t>(value);
+        }
       } else {
-        return fail("stick axis must be lx, ly, rx or ry");
+        if (!parse_int(tokens[index + 1], 0, 255, &value)) {
+          return fail("trigger value must be in [0, 255]");
+        }
+        if (axis == "lt") {
+          state.left_trigger = static_cast<uint8_t>(value);
+        } else {
+          state.right_trigger = static_cast<uint8_t>(value);
+        }
       }
-    } else {
-      if (!parse_int(tokens[2], 0, 255, &value)) {
-        return fail("trigger value must be in [0, 255]");
-      }
-      if (axis == "lt") {
-        state.left_trigger = static_cast<uint8_t>(value);
-      } else if (axis == "rt") {
-        state.right_trigger = static_cast<uint8_t>(value);
-      } else {
-        return fail("trigger axis must be lt or rt");
-      }
+      index += 2;
     }
-    timing_index = 3;
+    if (index == 1) {
+      return fail(std::string(command) + " needs <axis> <value>" +
+                  (command == "stick" ? " (axis lx, ly, rx or ry)"
+                                      : " (axis lt or rt)"));
+    }
+    timing_index = index;
   } else {
     return fail("unknown live command '" + std::string(command) + "'");
   }
