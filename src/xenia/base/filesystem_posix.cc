@@ -144,8 +144,10 @@ bool CreateEmptyFile(const std::filesystem::path& path) {
 
 class PosixFileHandle : public FileHandle {
  public:
-  PosixFileHandle(std::filesystem::path path, int handle)
-      : FileHandle(std::move(path)), handle_(handle) {}
+  PosixFileHandle(std::filesystem::path path, int handle, bool append_only)
+      : FileHandle(std::move(path)),
+        handle_(handle),
+        append_only_(append_only) {}
   ~PosixFileHandle() override {
     close(handle_);
     handle_ = -1;
@@ -163,7 +165,13 @@ class PosixFileHandle : public FileHandle {
   }
   bool Write(size_t file_offset, const void* buffer, size_t buffer_length,
              size_t* out_bytes_written) override {
-    ssize_t out = pwrite(handle_, buffer, buffer_length, file_offset);
+    // An append-only handle (FILE_APPEND_DATA without FILE_WRITE_DATA) ignores
+    // the caller's offset, as on Windows. pwrite honors the explicit offset on
+    // macOS even with O_APPEND, so append through write(), which O_APPEND
+    // positions at the end of the file atomically.
+    ssize_t out = append_only_
+                      ? write(handle_, buffer, buffer_length)
+                      : pwrite(handle_, buffer, buffer_length, file_offset);
     if (out >= 0) {
       *out_bytes_written = out;
       return true;
@@ -179,30 +187,36 @@ class PosixFileHandle : public FileHandle {
 
  private:
   int handle_ = -1;
+  bool append_only_ = false;
 };
 
 std::unique_ptr<FileHandle> FileHandle::OpenExisting(
     const std::filesystem::path& path, uint32_t desired_access) {
-  int open_access = 0;
-  if (desired_access & FileAccess::kGenericRead) {
-    open_access |= O_RDONLY;
+  // O_RDONLY / O_WRONLY / O_RDWR are an enumeration in O_ACCMODE, not
+  // independent bits: OR-ing them together as the Windows GENERIC_* flags
+  // allow yields the wrong mode (READ|WRITE collapsed to O_WRONLY, so guest
+  // reads failed; GENERIC_ALL|GENERIC_WRITE produced the invalid value 3 and
+  // the open itself failed). Resolve the requested access to one mode.
+  const bool wants_read =
+      (desired_access & (FileAccess::kGenericRead | FileAccess::kGenericExecute |
+                         FileAccess::kGenericAll | FileAccess::kFileReadData)) !=
+      0;
+  const bool wants_write_data =
+      (desired_access & (FileAccess::kGenericWrite | FileAccess::kGenericAll |
+                         FileAccess::kFileWriteData)) != 0;
+  const bool wants_append = (desired_access & FileAccess::kFileAppendData) != 0;
+  int open_access;
+  if (wants_read && (wants_write_data || wants_append)) {
+    open_access = O_RDWR;
+  } else if (wants_write_data || wants_append) {
+    open_access = O_WRONLY;
+  } else {
+    open_access = O_RDONLY;
   }
-  if (desired_access & FileAccess::kGenericWrite) {
-    open_access |= O_WRONLY;
-  }
-  if (desired_access & FileAccess::kGenericExecute) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kGenericAll) {
-    open_access |= O_RDWR;
-  }
-  if (desired_access & FileAccess::kFileReadData) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kFileWriteData) {
-    open_access |= O_WRONLY;
-  }
-  if (desired_access & FileAccess::kFileAppendData) {
+  // FILE_APPEND_DATA alone is an append-only handle; with FILE_WRITE_DATA the
+  // guest may position its writes (NtWriteFile carries a byte offset), and
+  // O_APPEND would force every pwrite to the end of the file.
+  if (wants_append && !wants_write_data) {
     open_access |= O_APPEND;
   }
   int handle = open(path.c_str(), open_access);
@@ -210,7 +224,8 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
     // TODO(benvanik): pick correct response.
     return nullptr;
   }
-  return std::make_unique<PosixFileHandle>(path, handle);
+  return std::make_unique<PosixFileHandle>(path, handle,
+                                           wants_append && !wants_write_data);
 }
 
 std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
