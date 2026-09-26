@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -103,6 +104,21 @@ struct ScriptLoadResult {
 ScriptLoadResult ParseInputScript(std::string_view content,
                                   std::filesystem::path source_path = {});
 ScriptLoadResult LoadInputScript(const std::filesystem::path& path);
+
+// Discovery-only live input lines (--input_live_file). Lines appended to the
+// live file are consumed after the scripted timeline completes; each line is
+// one step, in the same units as the TOML profile:
+//   press <button>[+<button>...] [hold_ms] [release_ms] [repeat]
+//   stick <lx|ly|rx|ry> <value> [hold_ms] [release_ms]
+//   trigger <lt|rt> <value> [hold_ms] [release_ms]
+//   wait <ms>
+//   marker <name>
+// Blank lines and lines starting with '#' are ignored (no step, no error).
+struct LiveLineParseResult {
+  std::optional<ScriptStep> step;
+  std::string error;
+};
+LiveLineParseResult ParseLiveInputLine(std::string_view line);
 
 }  // namespace xe::hid::scripted
 

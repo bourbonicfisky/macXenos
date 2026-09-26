@@ -382,6 +382,160 @@ ScriptLoadResult ParseInputScript(std::string_view content,
   return {.script = std::move(script), .error = {}};
 }
 
+LiveLineParseResult ParseLiveInputLine(std::string_view line) {
+  std::vector<std::string_view> tokens;
+  size_t pos = 0;
+  while (pos < line.size()) {
+    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t' ||
+                                 line[pos] == '\r')) {
+      ++pos;
+    }
+    size_t end = pos;
+    while (end < line.size() && line[end] != ' ' && line[end] != '\t' &&
+           line[end] != '\r') {
+      ++end;
+    }
+    if (end > pos) {
+      tokens.push_back(line.substr(pos, end - pos));
+    }
+    pos = end;
+  }
+  if (tokens.empty() || tokens[0].front() == '#') {
+    return {};
+  }
+  auto fail = [](std::string message) {
+    return LiveLineParseResult{.step = std::nullopt, .error = std::move(message)};
+  };
+  auto parse_int = [](std::string_view text, int64_t minimum, int64_t maximum,
+                      int64_t* out) {
+    if (text.empty()) {
+      return false;
+    }
+    size_t index = 0;
+    bool negative = false;
+    if (text[0] == '-') {
+      negative = true;
+      index = 1;
+    }
+    if (index >= text.size()) {
+      return false;
+    }
+    int64_t value = 0;
+    for (; index < text.size(); ++index) {
+      if (text[index] < '0' || text[index] > '9') {
+        return false;
+      }
+      value = value * 10 + (text[index] - '0');
+      if (value > 1000000000) {
+        return false;
+      }
+    }
+    if (negative) {
+      value = -value;
+    }
+    if (value < minimum || value > maximum) {
+      return false;
+    }
+    *out = value;
+    return true;
+  };
+  const std::string_view command = tokens[0];
+  if (command == "wait") {
+    int64_t duration = 0;
+    if (tokens.size() != 2 || !parse_int(tokens[1], 1, 1800000, &duration)) {
+      return fail("wait needs <ms> in [1, 1800000]");
+    }
+    return {.step = WaitStep{std::chrono::milliseconds(duration)}, .error = {}};
+  }
+  if (command == "marker") {
+    if (tokens.size() != 2 || tokens[1].size() > kMaximumStringLength) {
+      return fail("marker needs one <name>");
+    }
+    return {.step = MarkerStep{std::string(tokens[1])}, .error = {}};
+  }
+  GamepadState state;
+  size_t timing_index = 0;
+  if (command == "press") {
+    if (tokens.size() < 2) {
+      return fail("press needs <button>[+<button>...]");
+    }
+    std::string_view list = tokens[1];
+    while (!list.empty()) {
+      size_t plus = list.find('+');
+      std::string_view name = list.substr(0, plus);
+      auto value = ButtonValue(std::string(name));
+      if (!value) {
+        return fail("unknown button '" + std::string(name) + "'");
+      }
+      if ((state.buttons & *value) != 0) {
+        return fail("duplicate button '" + std::string(name) + "'");
+      }
+      state.buttons |= *value;
+      list = plus == std::string_view::npos ? std::string_view{}
+                                            : list.substr(plus + 1);
+    }
+    timing_index = 2;
+  } else if (command == "stick" || command == "trigger") {
+    if (tokens.size() < 3) {
+      return fail(std::string(command) + " needs <axis> <value>");
+    }
+    const std::string_view axis = tokens[1];
+    int64_t value = 0;
+    if (command == "stick") {
+      if (!parse_int(tokens[2], -32768, 32767, &value)) {
+        return fail("stick value must be in [-32768, 32767]");
+      }
+      if (axis == "lx") {
+        state.left_stick_x = static_cast<int16_t>(value);
+      } else if (axis == "ly") {
+        state.left_stick_y = static_cast<int16_t>(value);
+      } else if (axis == "rx") {
+        state.right_stick_x = static_cast<int16_t>(value);
+      } else if (axis == "ry") {
+        state.right_stick_y = static_cast<int16_t>(value);
+      } else {
+        return fail("stick axis must be lx, ly, rx or ry");
+      }
+    } else {
+      if (!parse_int(tokens[2], 0, 255, &value)) {
+        return fail("trigger value must be in [0, 255]");
+      }
+      if (axis == "lt") {
+        state.left_trigger = static_cast<uint8_t>(value);
+      } else if (axis == "rt") {
+        state.right_trigger = static_cast<uint8_t>(value);
+      } else {
+        return fail("trigger axis must be lt or rt");
+      }
+    }
+    timing_index = 3;
+  } else {
+    return fail("unknown live command '" + std::string(command) + "'");
+  }
+  int64_t hold_ms = 500;
+  int64_t release_ms = 500;
+  int64_t repeat = 1;
+  if (tokens.size() > timing_index &&
+      !parse_int(tokens[timing_index], 1, 60000, &hold_ms)) {
+    return fail("hold_ms must be in [1, 60000]");
+  }
+  if (tokens.size() > timing_index + 1 &&
+      !parse_int(tokens[timing_index + 1], 1, 60000, &release_ms)) {
+    return fail("release_ms must be in [1, 60000]");
+  }
+  if (tokens.size() > timing_index + 2 &&
+      !parse_int(tokens[timing_index + 2], 1, 64, &repeat)) {
+    return fail("repeat must be in [1, 64]");
+  }
+  if (tokens.size() > timing_index + 3) {
+    return fail("too many fields");
+  }
+  return {.step = InputStep{state, std::chrono::milliseconds(hold_ms),
+                            std::chrono::milliseconds(release_ms),
+                            static_cast<uint32_t>(repeat)},
+          .error = {}};
+}
+
 ScriptLoadResult LoadInputScript(const std::filesystem::path& path) {
   if (path.empty()) {
     return Failure("--hid=scripted requires --input_script=<path>");

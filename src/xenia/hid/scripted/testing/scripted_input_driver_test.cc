@@ -10,7 +10,11 @@
 #include "xenia/hid/scripted/scripted_input_driver.h"
 
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
@@ -475,6 +479,93 @@ TEST_CASE("scripted transition telemetry reports partial observation",
   REQUIRE_FALSE(on.completed);
   REQUIRE(on.transition_records < kTelemetryScriptTransitions);
   REQUIRE(on.completion_records == 0);
+}
+
+namespace {
+
+std::shared_ptr<const InputScript> ParseShortScript() {
+  const std::string document = R"(version = 1
+name = "short"
+expected_title_id = "1234ABCD"
+player = 1
+
+[[step]]
+wait_ms = 10
+)";
+  ScriptLoadResult result = ParseInputScript(document);
+  INFO(result.error);
+  REQUIRE(result);
+  return result.script;
+}
+
+}  // namespace
+
+TEST_CASE("live file lines play after the scripted timeline completes",
+          "[hid][scripted][live]") {
+  const std::filesystem::path live_path =
+      std::filesystem::temp_directory_path() / "xenia_scripted_live_test.txt";
+  std::error_code ec;
+  std::filesystem::remove(live_path, ec);
+  {
+    std::ofstream create(live_path);
+    REQUIRE(create.good());
+  }
+  FakeClock clock;
+  ScriptedInputDriver driver(nullptr, 0, ParseShortScript(),
+                             [&clock] { return clock.Now(); },
+                             ScriptedInputTimeline::EventCallback{}, false,
+                             live_path);
+  auto poll = [&]() {
+    X_INPUT_STATE state = {};
+    REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
+    return Record(state);
+  };
+
+  // Script: one 10 ms wait. Lines written now are NOT consumed yet.
+  {
+    std::ofstream append(live_path, std::ios::app);
+    append << "press a 30 20\n";
+  }
+  REQUIRE(poll().buttons == 0);
+  clock.Advance(5ms);
+  REQUIRE(poll().buttons == 0);
+  REQUIRE_FALSE(driver.completed());
+  REQUIRE(driver.live_lines_applied() == 0);
+
+  clock.Advance(10ms);
+  REQUIRE(poll().buttons == 0);  // completes the script this poll
+  REQUIRE(driver.completed());
+  clock.Advance(1ms);
+  REQUIRE(poll().buttons == X_INPUT_GAMEPAD_A);  // live batch begins
+  REQUIRE(driver.live_lines_applied() == 1);
+  clock.Advance(30ms);
+  REQUIRE(poll().buttons == 0);  // release phase
+  clock.Advance(20ms);
+  REQUIRE(poll().buttons == 0);  // batch complete, neutral
+
+  // A partial line (no newline) is held until it completes; a rejected line
+  // is skipped without stalling the following one.
+  {
+    std::ofstream append(live_path, std::ios::app);
+    append << "press nope\nstick ly 32767 40 10\npress b 10";
+  }
+  clock.Advance(150ms);
+  auto stick = poll();
+  REQUIRE(stick.buttons == 0);
+  REQUIRE(stick.thumb_ly == 32767);
+  REQUIRE(driver.live_lines_applied() == 2);
+  clock.Advance(40ms);
+  REQUIRE(poll().thumb_ly == 0);
+  clock.Advance(10ms);
+  REQUIRE(poll().thumb_ly == 0);
+  {
+    std::ofstream append(live_path, std::ios::app);
+    append << " 10\n";
+  }
+  clock.Advance(150ms);
+  REQUIRE(poll().buttons == X_INPUT_GAMEPAD_B);
+  REQUIRE(driver.live_lines_applied() == 3);
+  std::filesystem::remove(live_path, ec);
 }
 
 }  // namespace xe::hid::scripted::test

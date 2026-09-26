@@ -25,7 +25,8 @@ namespace xe::hid::scripted {
 
 std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
                                     size_t window_z_order,
-                                    std::shared_ptr<const InputScript> script) {
+                                    std::shared_ptr<const InputScript> script,
+                                    std::filesystem::path live_file) {
   if (!script) {
     return nullptr;
   }
@@ -33,7 +34,7 @@ std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
       window, window_z_order, std::move(script),
       ScriptedInputTimeline::NowFunction{},
       ScriptedInputTimeline::EventCallback{},
-      cvars::scripted_input_transition_telemetry);
+      cvars::scripted_input_transition_telemetry, std::move(live_file));
 }
 
 }  // namespace xe::hid::scripted

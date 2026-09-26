@@ -10,11 +10,13 @@
 #include "xenia/hid/scripted/scripted_input_driver.h"
 
 #include <algorithm>
+#include <fstream>
 #include <limits>
 #include <utility>
 #include <variant>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/string.h"
 
 namespace xe::hid::scripted {
 
@@ -51,15 +53,23 @@ ScriptedInputDriver::ScriptedInputDriver(
     std::shared_ptr<const InputScript> script,
     ScriptedInputTimeline::NowFunction now_function,
     ScriptedInputTimeline::EventCallback event_callback,
-    bool transition_telemetry)
+    bool transition_telemetry, std::filesystem::path live_file)
     : InputDriver(window, window_z_order),
       script_(std::move(script)),
-      transition_telemetry_(transition_telemetry) {
+      transition_telemetry_(transition_telemetry),
+      live_file_(std::move(live_file)) {
   if (transition_telemetry_ && script_) {
     expected_transitions_ = CountExpandedTransitions(*script_);
   }
   if (!now_function) {
     now_function = &ScriptedInputDriver::SteadyNow;
+  }
+  now_function_ = now_function;
+  if (!live_file_.empty()) {
+    XELOGI(
+        "scripted_input_live enabled file='{}' (discovery only; lines are "
+        "consumed after the scripted timeline completes)",
+        xe::path_to_utf8(live_file_));
   }
   if (!event_callback) {
     event_callback = [this](const TimelineEvent& event) {
@@ -142,6 +152,8 @@ X_RESULT ScriptedInputDriver::GetState(uint32_t user_index,
   }
   if (!timeline_->completed()) {
     CacheState(timeline_->Poll());
+  } else if (!live_file_.empty()) {
+    CacheState(PollLive(now_function_()));
   }
   if (transition_telemetry_) {
     LogTransitionObservation();
@@ -248,6 +260,101 @@ void ScriptedInputDriver::LogTransitionSummary() {
       "packet={} elapsed_ms={}",
       script_->content_digest(), expected_transitions_, observed_transitions_,
       poll_ordinal_, packet_number_, timeline_->elapsed().count());
+}
+
+uint32_t ScriptedInputDriver::live_lines_applied() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return live_lines_applied_;
+}
+
+GamepadState ScriptedInputDriver::PollLive(
+    ScriptedInputTimeline::Clock::time_point now) {
+  if (live_timeline_ && !live_timeline_->completed()) {
+    return live_timeline_->Poll();
+  }
+  // Between batches, look for appended lines at most every 100 ms.
+  if (live_last_check_ != ScriptedInputTimeline::Clock::time_point{} &&
+      now - live_last_check_ < std::chrono::milliseconds(100)) {
+    return {};
+  }
+  live_last_check_ = now;
+  IngestLiveLines(now);
+  if (live_timeline_ && !live_timeline_->completed()) {
+    return live_timeline_->Poll();
+  }
+  return {};
+}
+
+void ScriptedInputDriver::IngestLiveLines(
+    ScriptedInputTimeline::Clock::time_point now) {
+  std::error_code error_code;
+  const auto size = std::filesystem::file_size(live_file_, error_code);
+  if (error_code || size <= live_offset_) {
+    return;
+  }
+  std::ifstream stream(live_file_, std::ios::binary);
+  if (!stream) {
+    return;
+  }
+  stream.seekg(static_cast<std::streamoff>(live_offset_));
+  std::string appended(static_cast<size_t>(size - live_offset_), '\0');
+  stream.read(appended.data(), static_cast<std::streamsize>(appended.size()));
+  appended.resize(static_cast<size_t>(stream.gcount()));
+  live_offset_ += appended.size();
+  std::string buffer = live_partial_line_ + appended;
+  live_partial_line_.clear();
+  std::vector<ScriptStep> steps;
+  uint64_t expanded = 0;
+  uint64_t nominal_ms = 0;
+  size_t start = 0;
+  for (;;) {
+    size_t newline = buffer.find('\n', start);
+    if (newline == std::string::npos) {
+      live_partial_line_ = buffer.substr(start);
+      break;
+    }
+    std::string line = buffer.substr(start, newline - start);
+    start = newline + 1;
+    ++live_lines_seen_;
+    LiveLineParseResult parsed = ParseLiveInputLine(line);
+    if (!parsed.error.empty()) {
+      XELOGE("scripted_input_live line={} rejected ({}): '{}'",
+             live_lines_seen_, parsed.error, line);
+      continue;
+    }
+    if (!parsed.step) {
+      continue;
+    }
+    if (const auto* input = std::get_if<InputStep>(&*parsed.step)) {
+      expanded += static_cast<uint64_t>(input->repeat) * 2;
+      nominal_ms += static_cast<uint64_t>(
+          (input->hold_duration + input->release_duration).count() *
+          input->repeat);
+    } else if (const auto* wait = std::get_if<WaitStep>(&*parsed.step)) {
+      nominal_ms += static_cast<uint64_t>(wait->duration.count());
+    }
+    ++live_lines_applied_;
+    XELOGI("scripted_input_live line={} applied: '{}'", live_lines_seen_,
+           line);
+    steps.push_back(std::move(*parsed.step));
+  }
+  if (steps.empty()) {
+    return;
+  }
+  ++live_batches_;
+  auto script = std::make_shared<const InputScript>(
+      live_file_, static_cast<uint64_t>(live_batches_),
+      "live batch " + std::to_string(live_batches_),
+      script_->expected_title_id(), script_->player(), std::move(steps),
+      static_cast<uint32_t>(
+          std::min<uint64_t>(expanded, kMaximumExpandedTransitions)),
+      std::chrono::milliseconds(nominal_ms));
+  live_timeline_ = std::make_unique<ScriptedInputTimeline>(
+      script, now_function_, [this](const TimelineEvent& event) {
+        if (event.type == TimelineEventType::kMarker) {
+          XELOGI("scripted_input_live marker '{}'", event.marker);
+        }
+      });
 }
 
 void ScriptedInputDriver::HandleTimelineEvent(const TimelineEvent& event) {

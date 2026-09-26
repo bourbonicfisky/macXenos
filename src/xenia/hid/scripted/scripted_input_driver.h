@@ -10,8 +10,11 @@
 #ifndef XENIA_HID_SCRIPTED_SCRIPTED_INPUT_DRIVER_H_
 #define XENIA_HID_SCRIPTED_SCRIPTED_INPUT_DRIVER_H_
 
+#include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/scripted/scripted_input_timeline.h"
@@ -24,7 +27,8 @@ class ScriptedInputDriver final : public InputDriver {
                       std::shared_ptr<const InputScript> script,
                       ScriptedInputTimeline::NowFunction now_function = {},
                       ScriptedInputTimeline::EventCallback event_callback = {},
-                      bool transition_telemetry = false);
+                      bool transition_telemetry = false,
+                      std::filesystem::path live_file = {});
   ~ScriptedInputDriver() override;
 
   X_STATUS Setup() override;
@@ -47,6 +51,8 @@ class ScriptedInputDriver final : public InputDriver {
   // zero while the telemetry option is off.
   uint32_t transition_records_emitted() const;
   uint32_t completion_records_emitted() const;
+  // Discovery only: lines applied from the live file so far.
+  uint32_t live_lines_applied() const;
 
  private:
   static ScriptedInputTimeline::Clock::time_point SteadyNow();
@@ -55,8 +61,21 @@ class ScriptedInputDriver final : public InputDriver {
   // Both require mutex_ to be held by the caller.
   void LogTransitionObservation();
   void LogTransitionSummary();
+  // Live file (discovery only): consumed after the scripted timeline has
+  // completed. Requires mutex_. Returns the state to present this poll.
+  GamepadState PollLive(ScriptedInputTimeline::Clock::time_point now);
+  void IngestLiveLines(ScriptedInputTimeline::Clock::time_point now);
 
   const std::shared_ptr<const InputScript> script_;
+  const std::filesystem::path live_file_;
+  ScriptedInputTimeline::NowFunction now_function_;
+  std::unique_ptr<ScriptedInputTimeline> live_timeline_;
+  std::uintmax_t live_offset_ = 0;
+  std::string live_partial_line_;
+  ScriptedInputTimeline::Clock::time_point live_last_check_ = {};
+  uint32_t live_lines_seen_ = 0;
+  uint32_t live_lines_applied_ = 0;
+  uint32_t live_batches_ = 0;
   const bool transition_telemetry_;
   std::unique_ptr<ScriptedInputTimeline> timeline_;
   mutable std::mutex mutex_;

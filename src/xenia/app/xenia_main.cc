@@ -91,6 +91,12 @@ DEFINE_transient_path(input_script, "",
                       "Versioned TOML input timeline used only with "
                       "--hid=scripted.",
                       "HID");
+DEFINE_transient_path(
+    input_live_file, "",
+    "Discovery only, with --hid=scripted: a text file whose appended lines "
+    "(press/stick/trigger/wait/marker) are played after the input script "
+    "completes. Runs using it are never counted measurements.",
+    "HID");
 
 DEFINE_path(
     storage_root, "",
@@ -463,7 +469,8 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
   if (cvars::hid.compare("scripted") == 0) {
     auto driver = xe::hid::scripted::Create(
-        window, EmulatorWindow::kZOrderHidInput, prepared_input_script);
+        window, EmulatorWindow::kZOrderHidInput, prepared_input_script,
+        cvars::input_live_file);
     if (driver && XSUCCEEDED(driver->Setup())) {
       drivers.emplace_back(std::move(driver));
     } else {

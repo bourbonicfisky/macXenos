@@ -473,4 +473,71 @@ release_ms = 1
   }
 }
 
+TEST_CASE("live input lines parse into single steps", "[hid][scripted][live]") {
+  auto press = ParseLiveInputLine("press a");
+  REQUIRE(press.error.empty());
+  REQUIRE(press.step);
+  const auto* input = std::get_if<InputStep>(&*press.step);
+  REQUIRE(input);
+  REQUIRE(input->state.buttons == X_INPUT_GAMEPAD_A);
+  REQUIRE(input->hold_duration == 500ms);
+  REQUIRE(input->release_duration == 500ms);
+  REQUIRE(input->repeat == 1);
+
+  auto combo = ParseLiveInputLine("  press start+b 400 9600 6\r");
+  REQUIRE(combo.error.empty());
+  input = std::get_if<InputStep>(&*combo.step);
+  REQUIRE(input);
+  REQUIRE(input->state.buttons ==
+          (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_B));
+  REQUIRE(input->hold_duration == 400ms);
+  REQUIRE(input->release_duration == 9600ms);
+  REQUIRE(input->repeat == 6);
+
+  auto stick = ParseLiveInputLine("stick ly -32768 300");
+  REQUIRE(stick.error.empty());
+  input = std::get_if<InputStep>(&*stick.step);
+  REQUIRE(input);
+  REQUIRE(input->state.left_stick_y == -32768);
+  REQUIRE(input->hold_duration == 300ms);
+
+  auto trigger = ParseLiveInputLine("trigger rt 255");
+  REQUIRE(trigger.error.empty());
+  input = std::get_if<InputStep>(&*trigger.step);
+  REQUIRE(input);
+  REQUIRE(input->state.right_trigger == 255);
+
+  auto wait = ParseLiveInputLine("wait 2500");
+  REQUIRE(wait.error.empty());
+  const auto* wait_step = std::get_if<WaitStep>(&*wait.step);
+  REQUIRE(wait_step);
+  REQUIRE(wait_step->duration == 2500ms);
+
+  auto marker = ParseLiveInputLine("marker pause_menu");
+  REQUIRE(marker.error.empty());
+  const auto* marker_step = std::get_if<MarkerStep>(&*marker.step);
+  REQUIRE(marker_step);
+  REQUIRE(marker_step->name == "pause_menu");
+
+  auto blank = ParseLiveInputLine("   ");
+  REQUIRE(blank.error.empty());
+  REQUIRE_FALSE(blank.step);
+  auto comment = ParseLiveInputLine("# note");
+  REQUIRE(comment.error.empty());
+  REQUIRE_FALSE(comment.step);
+}
+
+TEST_CASE("live input lines reject malformed steps", "[hid][scripted][live]") {
+  for (std::string_view line :
+       {"press", "press nope", "press a+a", "press a 0", "press a 500 0",
+        "press a 500 500 0", "press a 500 500 1 extra", "stick lz 1",
+        "stick ly 40000", "trigger lt 256", "wait", "wait 0", "marker",
+        "jump a"}) {
+    auto result = ParseLiveInputLine(line);
+    INFO(line);
+    REQUIRE_FALSE(result.error.empty());
+    REQUIRE_FALSE(result.step);
+  }
+}
+
 }  // namespace xe::hid::scripted::test

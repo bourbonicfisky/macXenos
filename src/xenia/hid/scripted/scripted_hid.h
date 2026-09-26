@@ -10,6 +10,7 @@
 #ifndef XENIA_HID_SCRIPTED_SCRIPTED_HID_H_
 #define XENIA_HID_SCRIPTED_SCRIPTED_HID_H_
 
+#include <filesystem>
 #include <memory>
 
 #include "xenia/hid/input_driver.h"
@@ -17,9 +18,12 @@
 
 namespace xe::hid::scripted {
 
+// live_file (discovery only): see ParseLiveInputLine in
+// scripted_input_script.h. Empty keeps the immutable-timeline behavior.
 std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
                                     size_t window_z_order,
-                                    std::shared_ptr<const InputScript> script);
+                                    std::shared_ptr<const InputScript> script,
+                                    std::filesystem::path live_file = {});
 
 }  // namespace xe::hid::scripted
 
