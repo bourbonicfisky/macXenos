@@ -9,9 +9,10 @@
 #
 # Usage:
 #   tools/build/package_mac.sh [--config Release|Checked|Debug] [--notarize] [--adhoc]
-#                              [--x86_64 <bin>] [--x86_64-libs <prefix>]
+#                              [--version <str>] [--x86_64 <bin>] [--x86_64-libs <prefix>]
 #
 #   --config       Build config to package (default: Release).
+#   --version      CFBundleShortVersionString (default: 1.0-canary), e.g. 1.0-rc1.
 #   --notarize     Submit to Apple notarytool + staple (default: OFF). Uses
 #                  APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from .env.
 #   --adhoc        Sign ad-hoc instead of Developer ID (no .env identity required).
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --config) CONFIG="$2"; shift 2 ;;
     --notarize) DO_NOTARIZE=1; shift ;;
     --adhoc) ADHOC=1; shift ;;
+    --version) SHORT_VERSION_OVERRIDE="$2"; shift 2 ;;
     --x86_64) X86_BIN="$2"; shift 2 ;;
     --x86_64-libs) X86_LIB_PREFIX="$2"; shift 2 ;;
     *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
@@ -85,7 +87,7 @@ fi
 get_define() { sed -n "s/^#define $1 \"\\(.*\\)\"/\\1/p" "${VERSION_H}" 2>/dev/null | head -1; }
 COMMIT_SHORT="$(get_define XE_BUILD_COMMIT_SHORT)"; COMMIT_SHORT="${COMMIT_SHORT:-unknown}"
 BRANCH="$(get_define XE_BUILD_BRANCH)"; BRANCH="${BRANCH:-unknown}"
-SHORT_VERSION="1.0-canary"
+SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-1.0-canary}"
 BUILD_VERSION="${COMMIT_SHORT}"
 
 # ===========================================================================
@@ -160,6 +162,40 @@ install_name_tool -id "@rpath/libMoltenVK.dylib"  "${CONTENTS}/Frameworks/libMol
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
   "${CONTENTS}/MacOS/${BUNDLE_EXEC}" 2>/dev/null || true
 
+# ===========================================================================
+# 2b. Bundle the native-Metal shader path's helpers when the binary links them
+#     (XENIA_GPU_METAL builds): dxilconv (DXBC -> DXIL, built from the DXC fork)
+#     and Apple's Metal Shader Converter. Both are @rpath references, resolved
+#     in the dev tree through absolute LC_RPATH entries that must not ship.
+# ===========================================================================
+METAL_LIBS=()
+if otool -L "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | grep -q "@rpath/libdxilconv.dylib"; then
+  log "Bundling native-Metal helpers (dxilconv + Metal Shader Converter)"
+  DXILCONV_ARM64="${REPO_ROOT}/third_party/DirectXShaderCompiler/build_dxilconv_macos/lib/libdxilconv.dylib"
+  DXILCONV_X86="${REPO_ROOT}/third_party/DirectXShaderCompiler/build_dxilconv_macos_x86_64/lib/libdxilconv.dylib"
+  MSC_SRC="${REPO_ROOT}/third_party/metal-shader-converter/lib/libmetalirconverter.dylib"
+  [[ -f "${DXILCONV_ARM64}" ]] || die "libdxilconv.dylib not built at ${DXILCONV_ARM64}"
+  [[ -f "${MSC_SRC}" ]] || die "libmetalirconverter.dylib not found at ${MSC_SRC}"
+  if [[ "${UNIVERSAL}" -eq 1 ]]; then
+    [[ -f "${DXILCONV_X86}" ]] || die "Universal 2 needs the x86_64 dxilconv at ${DXILCONV_X86} (configure build-x86_64 with -DXENIA_GPU_METAL=ON)"
+    lipo -create "${DXILCONV_ARM64}" "${DXILCONV_X86}" -output "${CONTENTS}/Frameworks/libdxilconv.dylib"
+  else
+    cp "${DXILCONV_ARM64}" "${CONTENTS}/Frameworks/libdxilconv.dylib"
+  fi
+  cp "${MSC_SRC}" "${CONTENTS}/Frameworks/libmetalirconverter.dylib"
+  chmod u+w "${CONTENTS}/Frameworks/"*.dylib
+  install_name_tool -id "@rpath/libdxilconv.dylib" "${CONTENTS}/Frameworks/libdxilconv.dylib"
+  install_name_tool -id "@rpath/libmetalirconverter.dylib" "${CONTENTS}/Frameworks/libmetalirconverter.dylib"
+  METAL_LIBS=(libdxilconv.dylib libmetalirconverter.dylib)
+fi
+
+# Drop every absolute LC_RPATH the dev build baked in (they point into this
+# checkout); the bundle resolves @rpath through ../Frameworks only.
+while read -r rp; do
+  [[ "${rp}" == /* ]] || continue
+  install_name_tool -delete_rpath "${rp}" "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
+done < <(otool -l "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}')
+
 # ICD manifest pointing at the bundled MoltenVK (relative: icd.d -> Frameworks).
 cat > "${CONTENTS}/Resources/vulkan/icd.d/MoltenVK_icd.json" <<'JSON'
 {
@@ -180,12 +216,21 @@ macXenos (unofficial macOS port) — Xenia Canary ${SHORT_VERSION} (${BRANCH} ${
 Bundled MoltenVK : ${MVK_SRC} (${MVK_VER})
 Bundled loader   : ${VK_LOADER_SRC} (${VKL_VER})
 EOF
+if [[ ${#METAL_LIBS[@]} -gt 0 ]]; then
+  cat >> "${CONTENTS}/Resources/VERSIONS.txt" <<EOF
+Bundled dxilconv : ${DXILCONV_ARM64}$([[ "${UNIVERSAL}" -eq 1 ]] && echo " + ${DXILCONV_X86}")
+Bundled MSC      : ${MSC_SRC}
+EOF
+fi
 
 # Confirm nothing in the bundle points back at an absolute Cellar/host path.
 log "Verifying in-bundle dylib references"
 if otool -L "${CONTENTS}/MacOS/${BUNDLE_EXEC}" "${CONTENTS}/Frameworks/"*.dylib \
-     | grep -E "/usr/local/|/opt/homebrew/|/Cellar/" ; then
+     | grep -E "/usr/local/|/opt/homebrew/|/Cellar/|${REPO_ROOT}" ; then
   die "bundle still references absolute host paths (see above)"
+fi
+if otool -l "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}' | grep -E "^/" ; then
+  die "executable still carries absolute LC_RPATH entries (see above)"
 fi
 
 # Report (and, for --x86_64, enforce) the slices in the shipping binaries.
@@ -219,8 +264,9 @@ else
 fi
 
 # Sign nested dylibs first.
-codesign "${SIGN_ARGS[@]}" -s "${IDENTITY}" "${CONTENTS}/Frameworks/libMoltenVK.dylib"
-codesign "${SIGN_ARGS[@]}" -s "${IDENTITY}" "${CONTENTS}/Frameworks/libvulkan.1.dylib"
+for f in "${CONTENTS}/Frameworks/"*.dylib; do
+  codesign "${SIGN_ARGS[@]}" -s "${IDENTITY}" "${f}"
+done
 # Then deep-sign the app.
 codesign "${SIGN_ARGS[@]}" --deep -s "${IDENTITY}" "${APP_DIR}"
 
