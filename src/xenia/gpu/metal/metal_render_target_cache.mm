@@ -1529,7 +1529,6 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   rec.kind = kind;
   rec.start_tiles = transfer.start_tiles;
   rec.end_tiles = transfer.end_tiles;
-  transition_manifest_.push_back(rec);
   // Stage C lineage maintenance (key identities, sequence = transition_id):
   // a c2d lend records; every OTHER kind supersedes its overlap — EXCEPT
   // kDepthToColor, whose branch consumes-then-supersedes itself so this

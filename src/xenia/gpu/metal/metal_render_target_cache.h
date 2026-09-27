@@ -748,9 +748,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // manifest record cannot self-destroy the lineage it classifies against).
   MetalD2cLineage d2c_lineage_;
 
-  // Ordered ownership-transition manifest (see RecordTransition). Grows for the
-  // life of the cache; cheap metadata, capped-throttled logging.
-  std::vector<TransitionRecord> transition_manifest_;
+  // Transitions are classified and, under XE_METAL_TRANSITION_MANIFEST, logged
+  // in order (RecordTransition); nothing retains them. A retained manifest
+  // vector grew ~1.5 KB per frame for the life of the process (2026-09-26).
   uint32_t transition_counter_ = 0;
 
   // Snapshot textures retired mid-frame (grown), held retained until the frame
