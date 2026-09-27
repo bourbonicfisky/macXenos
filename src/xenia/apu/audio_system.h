@@ -11,6 +11,7 @@
 #define XENIA_APU_AUDIO_SYSTEM_H_
 
 #include <atomic>
+#include <mutex>
 #include <queue>
 
 #include "xenia/base/mutex.h"
@@ -91,6 +92,10 @@ class AudioSystem {
     uint32_t callback_arg;
     uint32_t wrapped_callback_arg;
     bool in_use;
+    // Held by the worker across the client's callback and by
+    // UnregisterClient/Shutdown while the driver is destroyed, so a client
+    // cannot be torn down mid-callback (upstream 7ef873b0d, adapted).
+    std::recursive_mutex lock;
   } clients_[kMaximumClientCount];
 
   int FindFreeClient();

@@ -135,10 +135,16 @@ void AudioSystem::WorkerThreadMain() {
       global_lock.unlock();
 
       if (client_callback) {
-        SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
-        uint64_t args[] = {client_callback_arg};
-        processor_->Execute(worker_thread_->thread_state(), client_callback,
-                            args, xe::countof(args));
+        // Hold the client's own lock across the callback so an unregister on
+        // another thread cannot destroy the driver underneath it; re-check
+        // the driver in case that already happened.
+        std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+        if (clients_[index].driver) {
+          SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
+          uint64_t args[] = {client_callback_arg};
+          processor_->Execute(worker_thread_->thread_state(), client_callback,
+                              args, xe::countof(args));
+        }
       }
 
       pumped = true;
@@ -184,6 +190,7 @@ void AudioSystem::Shutdown() {
   {
     auto global_lock = global_critical_region_.Acquire();
     for (size_t i = 0; i < kMaximumClientCount; ++i) {
+      std::lock_guard<std::recursive_mutex> guard(clients_[i].lock);
       if (clients_[i].in_use) {
         DestroyDriver(clients_[i].driver);
         if (clients_[i].wrapped_callback_arg) {
@@ -225,7 +232,14 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   uint32_t ptr = memory()->SystemHeapAlloc(0x4);
   xe::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
 
-  clients_[index] = {driver, callback, callback_arg, ptr, true};
+  {
+    std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+    clients_[index].driver = driver;
+    clients_[index].callback = callback;
+    clients_[index].callback_arg = callback_arg;
+    clients_[index].wrapped_callback_arg = ptr;
+    clients_[index].in_use = true;
+  }
   XELOGI("AudioSystem::RegisterClient: client {} registered successfully",
          index);
 
@@ -266,9 +280,16 @@ void AudioSystem::UnregisterClient(size_t index) {
 
   auto global_lock = global_critical_region_.Acquire();
   assert_true(index < kMaximumClientCount);
-  DestroyDriver(clients_[index].driver);
-  memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
-  clients_[index] = {0};
+  {
+    std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+    DestroyDriver(clients_[index].driver);
+    memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
+    clients_[index].driver = nullptr;
+    clients_[index].callback = 0;
+    clients_[index].callback_arg = 0;
+    clients_[index].wrapped_callback_arg = 0;
+    clients_[index].in_use = false;
+  }
 
   // Drain the semaphore of its count.
   auto client_semaphore = client_semaphores_[index].get();
