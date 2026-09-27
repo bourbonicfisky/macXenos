@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -285,22 +286,44 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
-  template <bool enable_invalidation_notifications>
+  template <bool enable_invalidation_notifications, bool enable_data_providers>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
       xe::memory::PageAccess protect_access) XE_RESTRICT;
 
-  // Returns true if any page in the range was watched.
+  // Returns true if any page in the range was watched (or, for a fault, if
+  // the access should be retried). contents_discarded: the caller is about
+  // to replace the whole range, so read watches learn kDiscard instead of
+  // kWrite for pages wholly inside it.
   bool TriggerCallbacks(global_unique_lock_type global_lock_locked_once,
                         uint32_t virtual_address, uint32_t length,
                         bool is_write, bool unwatch_exact_range,
-                        bool unprotect = true);
+                        bool unprotect = true,
+                        bool invalidate_unwatched = false,
+                        bool contents_discarded = false);
+
+  // Read-watch fault path (optimize-metal-gpu-resident-resolve-coherence,
+  // stage 2; mirrors xenia-edge 77f2cca80): if the host page holding
+  // virtual_address is read-watched, call the read callbacks with the global
+  // lock RELEASED so only the faulting thread waits on the producer, then
+  // re-lock. The watch stays armed; TriggerCallbacks makes the final decision.
+  void ProvideReadWatchedPage(global_unique_lock_type& global_lock_locked_once,
+                              uint32_t virtual_address, bool is_write);
+
+  // The most permissive guest access of any guest page inside a host page
+  // (host pages are 16 KiB on arm64 macOS, guest pages 4 KiB in the E0 heap).
+  xe::memory::PageAccess SystemPageGuestAccess(
+      uint32_t system_page_number) const;
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
   uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
-    return ((num << system_page_shift_) - host_address_offset()) >>
-           page_size_shift_;
+    uint32_t system_base = num << system_page_shift_;
+    uint32_t offset = host_address_offset();
+    if (system_base < offset) {
+      return 0;
+    }
+    return (system_base - offset) >> page_size_shift_;
   }
 
   uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
@@ -321,7 +344,10 @@ class PhysicalHeap : public BaseHeap {
   struct SystemPageFlagsBlock {
     // Whether writing to each page should result trigger invalidation
     // callbacks.
-    uint64_t notify_on_invalidation;
+    uint64_t notify_on_invalidation = 0;
+    // Whether the page is protected no-access and its first CPU access must
+    // call the physical memory read callbacks (one-shot, cleared on access).
+    uint64_t notify_on_read = 0;
   };
   // Protected by global_critical_region. Flags for each 64 system pages,
   // interleaved as blocks, so bit scan can be used to quickly extract ranges.
@@ -501,6 +527,24 @@ class Memory {
   // RegisterPhysicalMemoryInvalidationCallback.
   void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle);
 
+  // Read watches (stage 2 of optimize-metal-gpu-resident-resolve-coherence).
+  // kRead: the CPU is about to read the range and needs it current. kWrite:
+  // the CPU is about to write part of the range, so the rest must be current
+  // first. kDiscard: the old contents are irrelevant (fresh allocation,
+  // release, or the host already wrote over the whole range).
+  enum class PhysicalAccess {
+    kRead,
+    kWrite,
+    kDiscard,
+  };
+  typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
+                                             uint32_t physical_address_start,
+                                             uint32_t length,
+                                             PhysicalAccess access);
+  void* RegisterPhysicalMemoryReadCallback(PhysicalMemoryReadCallback callback,
+                                           void* callback_context);
+  void UnregisterPhysicalMemoryReadCallback(void* callback_handle);
+
   // Acquires the lock that serializes the callbacks above: PhysicalHeap::
   // TriggerCallbacks already holds it while it walks the callback list, so a
   // callback body never has to take it and two callbacks never run at once.
@@ -637,6 +681,11 @@ class Memory {
   xe::global_critical_region global_critical_region_;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
+  std::vector<std::pair<PhysicalMemoryReadCallback, void*>*>
+      physical_memory_read_callbacks_;
+  // Held shared across read callbacks called without the global lock, so
+  // unregistering waits for them to return.
+  std::shared_mutex physical_memory_read_callback_calls_mutex_;
 };
 
 }  // namespace xe

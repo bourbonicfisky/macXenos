@@ -10,6 +10,8 @@
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/virtual_file_system.h"
 
+#include <algorithm>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/kernel/kernel_state.h"
 
@@ -168,9 +170,23 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
               size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
-              buffer_physical_heap->TriggerCallbacks(
-                  xe::global_critical_region::AcquireDirect(),
-                  buffer_guest_address, buffer_length, true, true);
+              // The bytes the file supplied replace whatever the GPU may
+              // still owe those pages (a read watch learns kDiscard); the
+              // unread tail of the buffer keeps its contents (kWrite).
+              uint32_t discarded = uint32_t(
+                  std::min<size_t>(bytes_read, size_t(buffer_length)));
+              if (discarded) {
+                buffer_physical_heap->TriggerCallbacks(
+                    xe::global_critical_region::AcquireDirect(),
+                    buffer_guest_address, discarded, true, true, true, false,
+                    true);
+              }
+              if (discarded < buffer_length) {
+                buffer_physical_heap->TriggerCallbacks(
+                    xe::global_critical_region::AcquireDirect(),
+                    buffer_guest_address + discarded,
+                    buffer_length - discarded, true, true);
+              }
             }
 
             if (byte_offset) {
@@ -268,6 +284,18 @@ X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length,
     byte_offset = position_;
   }
 
+  // The host reads the guest buffer through the virtual view; a read-watched
+  // page there would make write(2) fail with EFAULT instead of faulting, so
+  // publish and lift any read watch on the range first.
+  {
+    BaseHeap* buffer_heap = memory()->LookupHeap(buffer_guest_address);
+    if (buffer_heap && buffer_heap->heap_type() == HeapType::kGuestPhysical) {
+      static_cast<PhysicalHeap*>(buffer_heap)
+          ->TriggerCallbacks(xe::global_critical_region::AcquireDirect(),
+                             buffer_guest_address, buffer_length, false,
+                             true);
+    }
+  }
   size_t bytes_written = 0;
   X_STATUS result = file_->WriteSync(
       std::span<uint8_t>(memory()->TranslateVirtual(buffer_guest_address),
