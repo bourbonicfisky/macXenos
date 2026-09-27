@@ -91,6 +91,7 @@ if(APPLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_present_swizzle_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_geometry_stage_identity_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_load_shader_dispatch_test.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_lazy_publication_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_buffer_backed_texture_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_direct_texture_load_test.mm
     # L1 acceptance oracle for integer texture scaling: proves a point-sampled

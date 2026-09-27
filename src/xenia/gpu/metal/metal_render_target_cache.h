@@ -162,11 +162,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       void* dest_snapshot,
       uint64_t dest_pixel_format, uint32_t width, uint32_t height,
       uint32_t dest_y_offset, float exp_bias_scale);
+  struct CanonicalScatterDest;
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
       uint32_t source_y, uint32_t sample_select, void* destination_buffer,
-      uint32_t width, uint32_t height);
+      uint32_t width, uint32_t height, uint32_t dest_endian = 0,
+      const CanonicalScatterDest* scatter = nullptr);
   // Stage B (implement-metal-gpu-visible-resolve-authority): when supplied,
   // the packed resolve dispatch writes GUEST-TILED into `destination_buffer`
   // (which must then be the shared-memory buffer, whose offset is the guest

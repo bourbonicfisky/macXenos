@@ -4071,7 +4071,8 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
     uint32_t msaa_samples, uint32_t format, uint32_t source_x,
     uint32_t source_y, uint32_t sample_select, void* destination_buffer,
-    uint32_t width, uint32_t height) {
+    uint32_t width, uint32_t height, uint32_t dest_endian,
+    const CanonicalScatterDest* scatter) {
   if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
       !destination_buffer || !width || !height ||
       !EnsureCanonicalMaterializePipeline()) {
@@ -4109,13 +4110,36 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     float exp_bias_scale;
     uint32_t width, height;
     uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
-  } params{surface, source_x, source_y, 0u, sample_select, 0u, 0u, 0u,
-           1.0f, width, height, 0u, 0u, 0u, 0u};
-  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+  } params{surface,
+           source_x,
+           source_y,
+           0u,
+           sample_select,
+           0u,
+           0u,
+           0u,
+           1.0f,
+           width,
+           height,
+           0u,
+           2u,
+           dest_endian,
+           1u,
+           uint32_t(scatter ? 1u : 0u),
+           scatter ? scatter->dest_base : 0u,
+           scatter ? scatter->dest_pitch_aligned : 0u,
+           scatter ? scatter->dest_offset_x : 0u,
+           scatter ? scatter->dest_offset_y : 0u,
+           scatter ? scatter->dest_extent_bytes : 0u};
+  static_assert(sizeof(ResolveParams) == 26u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  encoder.label = @"rtcache:canonical-depth-raw-resolve";
+  encoder.label = scatter ? @"rtcache:canonical-depth-raw-scatter"
+                          : @"rtcache:canonical-depth-raw-resolve";
   id<MTLComputePipelineState> pipeline =
       (__bridge id<MTLComputePipelineState>)
           canonical_depth_raw_resolve_pipeline_;

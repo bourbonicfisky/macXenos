@@ -1437,8 +1437,23 @@ kernel void resolve_canonical_depth_raw(
   // Depth resolve RAM is a raw copy. Preserve the selected physical D24S8 or
   // D24FS8 word, including stencil, while the separate R32F snapshot above is
   // the decoded sampling view used by Metal shaders.
-  destination[gid.y * p.width + gid.x] =
-      canonical[idx % p.surface.words];
+  uint word = canonical[idx % p.surface.words];
+  if (p.scatter_enable != 0u) {
+    // Stage B for depth (optimize-metal-gpu-resident-resolve-coherence):
+    // write the guest-endian word at its guest tiled address in the shared
+    // buffer, exactly what the CPU drain did for the raw staging word.
+    uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,
+                                 p.dest_offset_y + gid.y,
+                                 p.dest_pitch_aligned, 2u);
+    if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {
+      return;
+    }
+    device uchar* bytes = reinterpret_cast<device uchar*>(destination);
+    *reinterpret_cast<device uint*>(bytes + p.dest_base + off) =
+        xe_resolve_endian32(word, p.dest_endian);
+    return;
+  }
+  destination[gid.y * p.width + gid.x] = word;
 }
 // Canonical clear scatter. One gid is one logical pixel and one physical MSAA
 // sample; it writes the clear word(s) straight into the surface's own sample

@@ -28,6 +28,7 @@
 #include "xenia/gpu/metal/metal_fault_episode.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_apply.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
+#include "xenia/gpu/metal/metal_lazy_publication.h"
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_need_wait_classify.h"
 #include "xenia/gpu/metal/metal_resolve_shader_pipelines.h"
@@ -582,6 +583,18 @@ class MetalCommandProcessor : public CommandProcessor {
   // True between recording a ramp-reading pass and its completion wait. Exists
   // so the "IssueSwap always waits" invariant is asserted rather than assumed.
   bool gamma_ramp_upload_in_flight_ = false;
+  // Stage 3 (optimize-metal-gpu-resident-resolve-coherence,
+  // XE_METAL_SWAP_LIFETIME=1): the swap no longer drains the GPU. The frame
+  // command buffer is committed without waiting and the CPU waits only for
+  // the submission recorded two swaps earlier (bounded run-ahead of two
+  // frames). The present's gamma-ramp buffer becomes a ring so its upload
+  // never races the GPU and the presenter blit needs no completion wait
+  // (the presenter shares the command queue: queue order suffices).
+  static bool SwapLifetimeEnabled();
+  static constexpr uint32_t kFrameLifetimeRing = 3;
+  uint64_t frame_lifetime_submissions_[kFrameLifetimeRing] = {};
+  static constexpr uint32_t kGammaRampRing = 9;  // > max in-flight (8)
+  void* gamma_ramp_ring_[kGammaRampRing] = {};
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;
@@ -900,6 +913,10 @@ class MetalCommandProcessor : public CommandProcessor {
     // silently shifts `submission` into a uint32 slot (it does not even
     // compile cleanly -- it narrows). Keep new fields here.
     uint32_t gpu_current = 0;
+    // Stage 2 (optimize-metal-gpu-resident-resolve-coherence): the record's
+    // pages are read-watched; RAM publication happens on the first CPU touch
+    // (MetalLazyPublication) or on an eager drain, whichever comes first.
+    uint32_t lazy_armed = 0;
 
     // Guest-memory extent this writeback touches, for overlap / wait / drain-
     // filter tests. Tiled pitch, offsets, and row padding make the real extent
@@ -924,6 +941,27 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   std::vector<PendingMemexport> pending_memexports_;
   uint64_t memory_authority_sequence_ = 0;
+
+  // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH=1, exact-1,
+  // default OFF until the counted gate). See metal_lazy_publication.h.
+  static bool LazyPublishEnabled();
+  metal::MetalLazyPublication lazy_publication_;
+  void* lazy_read_callback_handle_ = nullptr;
+  std::atomic<bool> lazy_rearm_needed_{false};
+  // Set only around the swap / fence-packet full-domain publications: those
+  // are the requests whose GPU-current records may be armed instead of
+  // copied. Ranged host reads, waits, cache clears and trace capture stay
+  // eager.
+  bool lazy_full_domain_request_ = false;
+  void RegisterGpuResidentResolve(uint32_t base, uint32_t extent_bytes);
+  void ArmLazyPublication(PendingWriteback& wb);
+  void RearmLazyPublications();
+  void OnLazyRead(uint32_t physical_address_start, uint32_t length,
+                  Memory::PhysicalAccess access);
+  static void LazyReadCallbackThunk(void* context,
+                                    uint32_t physical_address_start,
+                                    uint32_t length,
+                                    Memory::PhysicalAccess access);
   // Same-frame consumer visibility (v1) is handled by the stage-3 lazy flush
   // in IssueDraw: a draw whose texture fetches overlap a pending memexport
   // commits + waits + drains before its uploads read guest RAM.

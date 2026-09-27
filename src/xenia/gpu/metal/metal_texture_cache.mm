@@ -1197,11 +1197,28 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (s_untile_timing) {
     const bool resolve_backed =
         resolved_targets_.find(base) != resolved_targets_.end();
+    const uint32_t timing_key = (uint32_t(fetch.format) << 2) |
+                                (is_signed ? 2u : 0u) |
+                                (resolve_backed ? 1u : 0u);
     untile_timing_scope.emplace(UntileTimingScope{
-        this,
-        (uint32_t(fetch.format) << 2) | (is_signed ? 2u : 0u) |
-            (resolve_backed ? 1u : 0u),
-        0, std::chrono::steady_clock::now()});
+        this, timing_key, 0, std::chrono::steady_clock::now()});
+    // Why is this fetch on the legacy path? Bounded per key: the fields the
+    // shared-route eligibility predicates look at.
+    static std::unordered_map<uint32_t, uint32_t> s_miss_logs;
+    if (s_miss_logs[timing_key]++ < 2) {
+      XELOGI(
+          "MetalUntileMiss fmt={} signed={} resolve_backed={} base={:08X} "
+          "{}x{} pitch={} tiled={} dim={} stacked={} mips={}-{} mip_addr={:08X} "
+          "signs={}{}{}{} endian={}",
+          uint32_t(fetch.format), is_signed ? 1 : 0, resolve_backed ? 1 : 0,
+          base, fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+          uint32_t(fetch.pitch), uint32_t(fetch.tiled),
+          uint32_t(fetch.dimension), uint32_t(fetch.stacked),
+          fetch.mip_min_level, fetch.mip_max_level, fetch.mip_address << 12,
+          uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
+          uint32_t(fetch.sign_z), uint32_t(fetch.sign_w),
+          uint32_t(fetch.endianness));
+    }
   }
 
   bool tiled = fetch.tiled != 0;

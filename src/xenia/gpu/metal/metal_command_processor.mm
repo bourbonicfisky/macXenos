@@ -150,6 +150,22 @@ namespace gpu {
 namespace metal {
 
 namespace {
+// XE_METAL_TEX_ROUTE_ALL=1 (exact-1, default OFF): the shared-buffer GPU load
+// route also serves fetches that are not resolve-backed (ordinary textures
+// and memexport-produced ones such as JC2's shadow map), the upstream D3D12
+// model where every texture is loaded from shared memory on the GPU.
+inline bool TexRouteAllEnabled() {
+  static const bool s_all = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_ALL");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return s_all;
+}
+inline bool RouteServiceOk(ResolvedFetchService service) {
+  return service == ResolvedFetchService::kRamContent ||
+         (TexRouteAllEnabled() &&
+          service == ResolvedFetchService::kNotResolveBacked);
+}
 inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
   return f.size_2d.width + 1;
 }
@@ -1327,6 +1343,11 @@ bool MetalCommandProcessor::SetupContext() {
     return false;
   }
   InstallMetalCrashCapture();
+  if (LazyPublishEnabled() && memory_ && !trace_playback_context()) {
+    lazy_read_callback_handle_ = memory_->RegisterPhysicalMemoryReadCallback(
+        &MetalCommandProcessor::LazyReadCallbackThunk, this);
+    XELOGI("MetalCommandProcessor: lazy RAM publication ON (read watches)");
+  }
   // Surface active debug toggles prominently so logs are self-describing.
   static const char* kDebugEnvs[] = {
       "XE_METAL_DISABLE_GEO",    "XE_METAL_NO_SIGNS",
@@ -1800,6 +1821,16 @@ void MetalCommandProcessor::ReportZeroCopyRuntimeCost(
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  if (lazy_read_callback_handle_ && memory_) {
+    memory_->UnregisterPhysicalMemoryReadCallback(lazy_read_callback_handle_);
+    lazy_read_callback_handle_ = nullptr;
+    auto st = lazy_publication_.stats();
+    XELOGI(
+        "MetalLazyPublication final: armed {} records / {} pages, faults {}, "
+        "pages copied {} ({} bytes), stale reads {}, retired {}",
+        st.armed_records, st.armed_pages, st.faults, st.fault_pages_copied,
+        st.fault_bytes_copied, st.stale_reads, st.retired_records);
+  }
   if (!sampler_census_.empty()) {
     for (const auto& kv : sampler_census_) {
       XELOGI("MetalSamplerCensus final key={:016X} count={}", kv.first,
@@ -2270,6 +2301,161 @@ bool MetalCommandProcessor::S7ArenaResetOff() {
 bool MetalCommandProcessor::S7TagsOff() {
   static const bool s_off = std::getenv("XE_METAL_S7_OFF_TAGS") != nullptr;
   return s_off || S7LifetimeOff();
+}
+
+bool MetalCommandProcessor::SwapLifetimeEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SWAP_LIFETIME");
+    return value && value[0] == '1' && !value[1];
+  }();
+  return s_enabled;
+}
+
+bool MetalCommandProcessor::LazyPublishEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_LAZY_PUBLISH");
+    return value && value[0] == '1' && !value[1];
+  }();
+  return s_enabled;
+}
+
+void MetalCommandProcessor::LazyReadCallbackThunk(
+    void* context, uint32_t physical_address_start, uint32_t length,
+    Memory::PhysicalAccess access) {
+  reinterpret_cast<MetalCommandProcessor*>(context)->OnLazyRead(
+      physical_address_start, length, access);
+}
+
+void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
+                                       uint32_t length,
+                                       Memory::PhysicalAccess access) {
+  if (access == Memory::PhysicalAccess::kDiscard) {
+    lazy_publication_.DropRange(physical_address_start, length);
+    return;
+  }
+  if (!shared_memory_ || !memory_) {
+    return;
+  }
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  const uint8_t* contents =
+      buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
+  if (!contents) {
+    return;
+  }
+  // A record still inside the open command buffer cannot be waited for from
+  // the faulting thread (committing is the GPU thread's job); the read then
+  // observes prior contents and the watch is re-armed at the next commit.
+  const uint64_t committed = submission_counter_;
+  uint32_t remaining = lazy_publication_.OnAccess(
+      physical_address_start, length,
+      [this, committed](uint64_t submission) {
+        if (submission > committed) {
+          return false;
+        }
+        return WaitForSubmission(submission, 4000, nullptr);
+      },
+      contents, [this](uint32_t address) {
+        return memory_->TranslatePhysical<uint8_t*>(address);
+      });
+  if (remaining) {
+    lazy_rearm_needed_.store(true, std::memory_order_release);
+  }
+}
+
+void MetalCommandProcessor::ArmLazyPublication(PendingWriteback& wb) {
+  if (!memory_ || !wb.gpu_current) {
+    return;
+  }
+  metal::MetalLazyPublication::Owner owner;
+  owner.authority_sequence = wb.authority_sequence;
+  owner.submission = wb.submission;
+  owner.guest_addr = wb.guest_addr;
+  owner.width = wb.width;
+  owner.height = wb.height;
+  owner.bpp = wb.bpp;
+  owner.dest_pitch_aligned = wb.dest_pitch_aligned;
+  owner.dest_offset_x = wb.dest_offset_x;
+  owner.dest_offset_y = wb.dest_offset_y;
+  owner.dest_extent_bytes = wb.dest_extent_bytes;
+  owner.range_bytes = wb.range_bytes();
+  lazy_publication_.Arm(owner, nullptr, nullptr);
+  memory_->EnablePhysicalMemoryAccessCallbacks(wb.guest_addr, wb.range_bytes(),
+                                               false, true);
+  wb.lazy_armed = 1u;
+}
+
+void MetalCommandProcessor::RearmLazyPublications() {
+  if (!memory_) {
+    return;
+  }
+  for (PendingWriteback& wb : pending_writebacks_) {
+    if (wb.lazy_armed && lazy_publication_.Owns(wb.authority_sequence)) {
+      memory_->EnablePhysicalMemoryAccessCallbacks(
+          wb.guest_addr, wb.range_bytes(), false, true);
+    }
+  }
+}
+
+// A GPU-resident resolve record was just pushed: the shared buffer holds its
+// bytes at the guest tiled addresses. Mark the pages GPU-written, fire the
+// range watches, and (stage 2) arm demand-driven publication.
+void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
+                                                       uint32_t extent_bytes) {
+  pending_writebacks_.back().gpu_current = 1u;
+  // Mark the destination GPU-written so the shared-memory
+  // validity model does not upload guest RAM over the freshly
+  // scattered bytes. LEAN marking (validity bits only), NOT the
+  // memexport-style RangeWrittenByGpu: that fires the global
+  // watch, whose queued invalidation applies the DEFAULT
+  // kAllRepresentations scope and ERASES the resolve's own
+  // just-registered bridge — probe #5 measured 143k vs 13.5k
+  // slot re-registrations per arm from exactly this. The CPU
+  // path's publication deliberately suppresses the same global
+  // fan-out for self-publications; cached-texture refresh is
+  // owed (and delivered) by the drain-side invalidation, and
+  // mid-frame consumers reach it through the corridor exactly
+  // as on the default path.
+  if (shared_memory_) {
+    shared_memory_->ReassertGpuWritten(
+        base, extent_bytes);
+    // The content-change signal for WATCHING textures (the
+    // shared-route entries reload from the buffer, GPU-ordered)
+    // — per-range only, so the global fan-out's default-scope
+    // invalidation cannot retire this resolve's own bridge
+    // (the probe #5/#6 churn). Without this, an
+    // ordering-served consumer reads the PREVIOUS generation's
+    // route entry (SF4 10581: 125k px when ordering first
+    // fired in replay).
+    shared_memory_->FireRangeWatches(
+        base, extent_bytes,
+        /*invalidated_by_gpu=*/true);
+  }
+  if (lazy_read_callback_handle_ && !trace_writer_.is_open() &&
+      !trace_playback_context()) {
+    // Stage 2: arm now (page ownership + read watch), and retire
+    // older armed GPU-current records this one fully covers --
+    // their bytes are superseded in the buffer, RAM will get the
+    // newest on demand, and an unbounded pending list would make
+    // every consumer decision O(records).
+    const uint32_t new_start = pending_writebacks_.back().guest_addr;
+    const uint32_t new_end =
+        new_start + pending_writebacks_.back().range_bytes();
+    const uint64_t newest_sequence =
+        pending_writebacks_.back().authority_sequence;
+    for (auto it = pending_writebacks_.begin();
+         it != pending_writebacks_.end();) {
+      if (it->authority_sequence != newest_sequence &&
+          it->gpu_current && it->lazy_armed && !it->staging &&
+          it->guest_addr >= new_start &&
+          it->guest_addr + it->range_bytes() <= new_end) {
+        lazy_publication_.Retire(it->authority_sequence);
+        it = pending_writebacks_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    ArmLazyPublication(pending_writebacks_.back());
+  }
 }
 
 bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
@@ -3721,6 +3907,9 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     upload_arena_->MarkSubmission(submission);
   }
   [command_buffer commit];
+  if (lazy_rearm_needed_.exchange(false, std::memory_order_acq_rel)) {
+    RearmLazyPublications();
+  }
   if (seam_on) {
     // `close` ends HERE, at the commit: entry -> commit, nothing after.
     seam_close_ns = SeamNowNs() - seam_t0;
@@ -5136,10 +5325,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   if (!vertex_dependency_ranges.empty() &&
       (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
+    // Vertex and index data are fetched from the shared buffer, so a pending
+    // GPU-current resolve or memexport under the range only needs command
+    // order, not a CPU wait-and-publish (the same Stage B ordering the
+    // texture path declares; memexport output lands in the buffer at
+    // execution time). XE_METAL_GPU_ORDERING=0 or XE_METAL_VERTEX_ORDERING=0
+    // restore the pre-change RAM-domain request.
+    static const bool s_vertex_ordering = [] {
+      const char* g = std::getenv("XE_METAL_GPU_ORDERING");
+      const char* v = std::getenv("XE_METAL_VERTEX_ORDERING");
+      return !(g && g[0] == '0' && !g[1]) && !(v && v[0] == '0' && !v[1]);
+    }();
+    metal::ConsumerRequest vertex_request =
+        metal::ConsumerRequest::Uniform(vertex_dependency_ranges);
+    if (s_vertex_ordering) {
+      vertex_request.access = metal::ConsumerAccess::kSharedBuffer;
+      vertex_request.order_memexport_producers = true;
+    }
     metal::ConsumerDecision authority_decision =
-        QueryPendingProducerDependencies(
-            metal::ConsumerKind::kVertex,
-            metal::ConsumerRequest::Uniform(vertex_dependency_ranges));
+        QueryPendingProducerDependencies(metal::ConsumerKind::kVertex,
+                                         vertex_request);
     // Consumer-attribution diagnostic (XE_METAL_MEMEXPORT_LOG=1, default off,
     // log only): names the CONSUMING draw for every exported range this
     // vertex/index read depends on -- the evidence task 1.1 needs to decide
@@ -5819,8 +6024,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             fetch_service =
                 texture_cache_->ClassifyFetchService(f, binding.is_signed);
             fetch_buffer_read =
-                strict_eligible &&
-                fetch_service == ResolvedFetchService::kRamContent;
+                (strict_eligible && RouteServiceOk(fetch_service)) ||
+                // Served GPU-side from the registered snapshot: reads neither
+                // guest RAM nor the shared buffer, so it neither needs the
+                // drain nor vetoes ordering for the fetches that do.
+                fetch_service == ResolvedFetchService::kExactCoverSnapshot ||
+                fetch_service == ResolvedFetchService::kBridgeSnapshot;
           }
           if (!fetch_buffer_read) {
             texture_resolve_consumers_buffer_read = false;
@@ -6131,6 +6340,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // from restored RAM.
   if (s_tex_route_enabled && shared_texture_cache_ && texture_cache_ &&
       !trace_writer_.is_open()) {
+    uint32_t route_signed_mask = 0;
     auto accumulate_eligible = [&](MetalShader* shader) {
       if (!shader) {
         return;
@@ -6171,8 +6381,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              (corridor_required && !FetchOverlapsPendingGpuCurrent(fetch)))) {
           continue;
         }
-        if (texture_cache_->ClassifyFetchService(fetch, binding.is_signed) !=
-            ResolvedFetchService::kRamContent) {
+        if (!RouteServiceOk(
+                texture_cache_->ClassifyFetchService(fetch, binding.is_signed))) {
           continue;
         }
         // Alias-class census (micro-drift bisect, XE_METAL_TEX_ROUTE_LOG=1):
@@ -6197,12 +6407,65 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
         }
         draw_shared_route_mask_ |= 1u << binding.fetch_constant;
+        if (binding.is_signed) {
+          route_signed_mask |= 1u << binding.fetch_constant;
+        }
       }
     };
     accumulate_eligible(vertex_shader);
     accumulate_eligible(pixel_shader);
     if (draw_shared_route_mask_) {
       shared_texture_cache_->PrepareEligible(draw_shared_route_mask_);
+      // Verify every routed fetch is actually servable now (its load may
+      // have been refused: unmappable range, view or slot failure). A fetch
+      // that cannot be served GPU-side leaves the mask, and if this draw
+      // elided the consumer drain on the strength of buffer serving, that
+      // fetch's ranges are drained here -- still before the consuming
+      // encoder opens -- so the legacy path reads converged RAM instead of
+      // the draw being skipped.
+      uint32_t bits = draw_shared_route_mask_;
+      uint32_t index;
+      metal::GuestRangeSet unserved_ranges;
+      while (xe::bit_scan_forward(bits, &index)) {
+        bits = xe::clear_lowest_bit(bits);
+        const bool is_signed = (route_signed_mask >> index) & 1u;
+        if (shared_texture_cache_->GetServedSlot(index, is_signed)) {
+          continue;
+        }
+        draw_shared_route_mask_ &= ~(1u << index);
+        auto fetch = regs.GetTextureFetch(index);
+        metal::FetchGuestRanges rng = ComputeFetchGuestRanges(fetch);
+        if (auto r = metal::GuestRange::FromBounds(rng.base_begin,
+                                                   rng.base_end)) {
+          unserved_ranges.Add(*r);
+        }
+        if (rng.mip_end > rng.mip_begin) {
+          if (auto r = metal::GuestRange::FromBounds(rng.mip_begin,
+                                                     rng.mip_end)) {
+            unserved_ranges.Add(*r);
+          }
+        }
+        static uint32_t s_unserved_logs = 0;
+        if (s_unserved_logs++ < 16) {
+          XELOGW(
+              "MetalSharedTex UNSERVED fc={} fmt={} base={:08X} {}x{} "
+              "signed={} draw={} ordering={}",
+              index, uint32_t(fetch.format), fetch.base_address << 12,
+              fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+              is_signed ? 1 : 0, trace_draw_index_,
+              draw_gpu_ordering_active_ ? 1 : 0);
+        }
+      }
+      if (!unserved_ranges.empty() && draw_gpu_ordering_active_) {
+        unserved_ranges.Normalize();
+        if (!ResolveRamConsumerDependencies(metal::ConsumerKind::kTexture,
+                                            unserved_ranges)) {
+          XELOGE(
+              "MetalCommandProcessor: unserved routed fetch RAM convergence "
+              "incomplete at draw {}",
+              trace_draw_index_);
+        }
+      }
     }
   }
 
@@ -9033,13 +9296,32 @@ bool MetalCommandProcessor::IssueCopy() {
               // overwrite it (unrecoverably when the buffer aliases RAM).
               // Conservative: ANY overlapping pending producer disqualifies
               // the scatter rather than trying to order against it here.
+              // Stage 2 (optimize-metal-gpu-resident-resolve-coherence): an
+              // unpublished GPU-resident record under the destination no
+              // longer refuses the scatter. Both writers land in the shared
+              // buffer in command order, publication walks records in
+              // authority-sequence order (older first), the validity bits keep
+              // RequestRange from uploading stale RAM over the older bytes,
+              // and the straddler refresh already excludes pending
+              // GPU-current spans. Staging resolves and memexports still
+              // refuse (their bytes are not in the buffer in command order).
+              // XE_METAL_GPU_RESOLVE_OVERLAP=0 restores the old refusal.
+              static const bool s_overlap_gpu_current = [] {
+                const char* v = std::getenv("XE_METAL_GPU_RESOLVE_OVERLAP");
+                return !(v && v[0] == '0' && !v[1]);
+              }();
               bool overlapping_pending = false;
               for (const metal::PendingProducer& p :
                    SnapshotPendingProducers()) {
-                if (p.range.Overlaps(*dest_range)) {
-                  overlapping_pending = true;
-                  break;
+                if (!p.range.Overlaps(*dest_range)) {
+                  continue;
                 }
+                if (s_overlap_gpu_current &&
+                    p.state == metal::TransitState::kGpuCurrentShared) {
+                  continue;
+                }
+                overlapping_pending = true;
+                break;
               }
               // DIAGNOSTIC BISECT (XE_METAL_GPU_RESOLVE_FULLRECT=1): restrict
               // the scatter to full-rect, offset-zero destinations to test
@@ -9212,35 +9494,8 @@ bool MetalCommandProcessor::IssueCopy() {
                     memory_->TranslatePhysical<const uint8_t*>(
                         resolve_info.copy_dest_base));
                 // The record's bytes are in the shared buffer, not staging.
-                pending_writebacks_.back().gpu_current = 1u;
-                // Mark the destination GPU-written so the shared-memory
-                // validity model does not upload guest RAM over the freshly
-                // scattered bytes. LEAN marking (validity bits only), NOT the
-                // memexport-style RangeWrittenByGpu: that fires the global
-                // watch, whose queued invalidation applies the DEFAULT
-                // kAllRepresentations scope and ERASES the resolve's own
-                // just-registered bridge — probe #5 measured 143k vs 13.5k
-                // slot re-registrations per arm from exactly this. The CPU
-                // path's publication deliberately suppresses the same global
-                // fan-out for self-publications; cached-texture refresh is
-                // owed (and delivered) by the drain-side invalidation, and
-                // mid-frame consumers reach it through the corridor exactly
-                // as on the default path.
-                if (shared_memory_) {
-                  shared_memory_->ReassertGpuWritten(
-                      resolve_info.copy_dest_base, scatter_extent_bytes);
-                  // The content-change signal for WATCHING textures (the
-                  // shared-route entries reload from the buffer, GPU-ordered)
-                  // — per-range only, so the global fan-out's default-scope
-                  // invalidation cannot retire this resolve's own bridge
-                  // (the probe #5/#6 churn). Without this, an
-                  // ordering-served consumer reads the PREVIOUS generation's
-                  // route entry (SF4 10581: 125k px when ordering first
-                  // fired in replay).
-                  shared_memory_->FireRangeWatches(
-                      resolve_info.copy_dest_base, scatter_extent_bytes,
-                      /*invalidated_by_gpu=*/true);
-                }
+                RegisterGpuResidentResolve(resolve_info.copy_dest_base,
+                                           scatter_extent_bytes);
               }
             }
             if (writeback_encoded &&
@@ -9416,7 +9671,77 @@ bool MetalCommandProcessor::IssueCopy() {
           const bool canonical_depth_writeback =
               render_target_cache_->sample_edram_raster_enabled();
           bool writeback_encoded = false;
-          if (canonical_depth_writeback) {
+          // Stage B for depth (optimize-metal-gpu-resident-resolve-coherence):
+          // scatter the raw guest words straight into the shared buffer under
+          // the same eligibility as color; the record is then GPU-resident and
+          // never needs a staging copy or a CPU drain wait.
+          bool depth_scatter = false;
+          {
+            const auto& dc_d = resolve_info.copy_dest_coordinate_info;
+            uint32_t depth_extent_bytes = resolve_info.copy_dest_extent_start -
+                                          resolve_info.copy_dest_base +
+                                          resolve_info.copy_dest_extent_length;
+            if (canonical_depth_writeback && GpuResolveScatterEnabled() &&
+                shared_memory_ && depth_extent_bytes &&
+                !resolve_info.copy_dest_info.copy_dest_array &&
+                !resolve_info.copy_dest_info.copy_dest_slice) {
+              id<MTLBuffer> depth_scatter_buffer =
+                  (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+              auto dest_range = metal::GuestRange::FromBaseLength(
+                  resolve_info.copy_dest_base, depth_extent_bytes);
+              if (depth_scatter_buffer && dest_range &&
+                  uint64_t(resolve_info.copy_dest_base) + depth_extent_bytes <=
+                      depth_scatter_buffer.length) {
+                bool overlapping_pending = false;
+                for (const metal::PendingProducer& p :
+                     SnapshotPendingProducers()) {
+                  if (p.range.Overlaps(*dest_range) &&
+                      p.state != metal::TransitState::kGpuCurrentShared) {
+                    overlapping_pending = true;
+                    break;
+                  }
+                }
+                depth_scatter =
+                    !overlapping_pending &&
+                    shared_memory_->RequestRange(
+                        resolve_info.copy_dest_extent_start,
+                        resolve_info.copy_dest_extent_length);
+              }
+            }
+            if (depth_scatter) {
+              MetalRenderTargetCache::CanonicalScatterDest depth_dest{
+                  resolve_info.copy_dest_base,
+                  (uint32_t(dc_d.pitch_aligned_div_32) << 5)
+                      ? (uint32_t(dc_d.pitch_aligned_div_32) << 5)
+                      : ((rw + 31u) & ~31u),
+                  uint32_t(dc_d.offset_x_div_8) << 3,
+                  uint32_t(dc_d.offset_y_div_8) << 3, depth_extent_bytes};
+              writeback_encoded =
+                  render_target_cache_->ResolveCanonicalDepthToBuffer(
+                      frame_command_buffer_,
+                      resolve_info.depth_edram_info.base_tiles,
+                      resolve_info.depth_edram_info.pitch_tiles,
+                      uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                      resolve_info.depth_edram_info.format,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_x_div_8)
+                          << 3,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_y_div_8)
+                          << 3,
+                      uint32_t(resolve_info.copy_dest_coordinate_info
+                                   .copy_sample_select),
+                      shared_memory_->GetBuffer(), rw, rh,
+                      uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                      &depth_dest);
+              if (!writeback_encoded) {
+                depth_scatter = false;
+              }
+            }
+          }
+          if (depth_scatter) {
+            // Encoded above, straight into the shared buffer.
+          } else if (canonical_depth_writeback) {
             writeback_encoded =
                 render_target_cache_->ResolveCanonicalDepthToBuffer(
                     frame_command_buffer_,
@@ -9455,10 +9780,16 @@ bool MetalCommandProcessor::IssueCopy() {
                                   resolve_info.copy_dest_base +
                                   resolve_info.copy_dest_extent_length;
           if (writeback_encoded) {
+            void* staging_retained = nullptr;
+            if (!depth_scatter) {
+              staging_retained = (__bridge_retained void*)staging;
+            }
             pending_writebacks_.push_back(PendingWriteback{
-                (__bridge_retained void*)staging,
+                staging_retained,
                 resolve_info.copy_dest_base, rw, rh, 4u,
-                uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                depth_scatter
+                    ? 0u
+                    : uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
                 uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
                 uint32_t(dc.pitch_aligned_div_32) << 5,
                 uint32_t(dc.offset_x_div_8) << 3,
@@ -9476,6 +9807,11 @@ bool MetalCommandProcessor::IssueCopy() {
                     ? 0u
                     : (is_float24 ? 2u : 1u),
                 ++memory_authority_sequence_});
+            if (depth_scatter) {
+              pending_writebacks_.back().gpu_current = 1u;
+              RegisterGpuResidentResolve(resolve_info.copy_dest_base,
+                                         extent_bytes);
+            }
           }
         }
       }
@@ -9972,13 +10308,21 @@ bool MetalCommandProcessor::SharedRouteEligible(
     *corridor_required_out = rgba8_class && is_signed && !s_signed_all;
   }
   if (rgba8_class) {
-    return is_signed
-               ? metal::IsStrictRgba8SignedRouteEligible(fetch, width, height,
-                                                          pitch_texels)
-               : (metal::IsStrictRgba8RouteEligible(fetch, false, width,
-                                                    height, pitch_texels) ||
-                  metal::IsStrictRgba8MipRouteEligible(fetch, false, width,
-                                                       height, pitch_texels));
+    if (is_signed) {
+      if (metal::IsStrictRgba8SignedRouteEligible(fetch, width, height,
+                                                  pitch_texels)) {
+        return true;
+      }
+      // Signed mipped RGBA8: served as a Snorm view of the mipped texture,
+      // the same as the unsigned mipped class, once the corridor is lifted.
+      return s_signed_all &&
+             metal::IsSharedRouteMipEligible(fetch, true, width, height,
+                                             pitch_texels);
+    }
+    return metal::IsStrictRgba8RouteEligible(fetch, false, width, height,
+                                             pitch_texels) ||
+           metal::IsStrictRgba8MipRouteEligible(fetch, false, width, height,
+                                                pitch_texels);
   }
   return metal::IsSharedRouteEligible(fetch, is_signed, width, height,
                                       pitch_texels) ||
@@ -11007,6 +11351,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     }
     ++outcome.drained_records;
     ++outcome.resolve_records;
+    if (wb.lazy_armed) {
+      lazy_publication_.Retire(wb.authority_sequence);
+      wb.lazy_armed = 0u;
+    }
     published_ranges.emplace_back(wb.guest_addr, wb.range_bytes());
     id<MTLBuffer> released_staging =
         (__bridge_transfer id<MTLBuffer>)wb.staging;
@@ -11158,7 +11506,57 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
 
 MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
-    const metal::ConsumerDecision& decision) {
+    const metal::ConsumerDecision& decision_in) {
+  // Stage 2: a swap / fence-packet full-domain publication arms its
+  // GPU-current records for demand-driven publication instead of copying
+  // them; only the rest (staging resolves, memexports, untagged records)
+  // continue through the wait-and-drain path below.
+  metal::ConsumerDecision decision = decision_in;
+  if (lazy_full_domain_request_ && LazyPublishEnabled() &&
+      lazy_read_callback_handle_ && !trace_writer_.is_open() &&
+      !trace_playback_context() &&
+      decision.consumer == metal::ConsumerKind::kHostCpuRead &&
+      !decision.selected.empty()) {
+    std::vector<metal::PendingProducer> eager;
+    eager.reserve(decision.selected.size());
+    const uint64_t completed_now =
+        completed_submission_.load(std::memory_order_acquire);
+    for (const metal::PendingProducer& p : decision.selected) {
+      bool armed = false;
+      if (p.state == metal::TransitState::kGpuCurrentShared && p.submission) {
+        for (PendingWriteback& wb : pending_writebacks_) {
+          if (wb.authority_sequence != p.sequence) {
+            continue;
+          }
+          if (!wb.lazy_armed) {
+            ArmLazyPublication(wb);
+          }
+          armed = wb.lazy_armed != 0;
+          break;
+        }
+      }
+      if (armed) {
+        continue;
+      }
+      // Opportunistic publication for what cannot be armed (staging-path
+      // resolves such as depth, memexports): publish now only if the GPU
+      // has already finished it, otherwise leave it pending for the next
+      // fence packet or swap. No CPU wait is spent at a full-domain
+      // publication; a consumer that needs the bytes earlier still drains
+      // through its own (ranged) request.
+      if (p.state != metal::TransitState::kPendingMemexport && p.submission &&
+          p.submission > completed_now) {
+        continue;
+      }
+      eager.push_back(p);
+    }
+    decision.selected = std::move(eager);
+    if (decision.selected.empty()) {
+      ProducerDependencyOutcome outcome;
+      outcome.complete = true;
+      return outcome;
+    }
+  }
   // Consumer attribution layer (metal_seam_timing.h). `inclusive` covers the
   // whole request and CONTAINS the nested stages; they are recorded separately
   // and never summed together.
@@ -11491,8 +11889,25 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
-  return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
-                                        requested);
+  if (LazyPublishEnabled() && lazy_read_callback_handle_ &&
+      !trace_writer_.is_open() && !trace_playback_context() &&
+      frame_command_buffer_) {
+    // A fault can only wait on committed work: close the open command buffer
+    // (no wait) when it holds a GPU-current record, so the completion the
+    // guest is about to observe is also one its reads can converge on.
+    const uint64_t encoding = CurrentEncodingSubmission();
+    for (const PendingWriteback& wb : pending_writebacks_) {
+      if (wb.gpu_current && wb.submission == encoding) {
+        EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+        break;
+      }
+    }
+  }
+  lazy_full_domain_request_ = true;
+  const bool ok = ResolveRamConsumerDependencies(
+      metal::ConsumerKind::kHostCpuRead, requested);
+  lazy_full_domain_request_ = false;
+  return ok;
 }
 
 bool MetalCommandProcessor::FlushPendingWritebacksForWait(
@@ -11590,7 +12005,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // silently discarded the whole frame (uniform magenta present).
   // The swap is the frame's ONE synchronous point (S8): the writeback drain
   // below reads staging buffers, and the wait doubles as frame pacing.
-  EndFrameEncoderAndWait(metal::SeamBoundaryReason::kSwapPacing);
+  if (SwapLifetimeEnabled() && !trace_writer_.is_open() &&
+      !trace_playback_context() && AsyncSubmissionEnabled()) {
+    // Stage 3: commit without waiting; bounded run-ahead of two frames.
+    EndFrameEncoder(metal::SeamBoundaryReason::kSwapPacing);
+    const uint32_t slot = swap_count_ % kFrameLifetimeRing;
+    frame_lifetime_submissions_[slot] = submission_counter_;
+    const uint64_t oldest =
+        frame_lifetime_submissions_[(swap_count_ + 1) % kFrameLifetimeRing];
+    if (oldest && WaitForSubmission(oldest, 4000, nullptr)) {
+      PumpCompletedActions();
+    }
+  } else {
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kSwapPacing);
+  }
 
   // Black-flicker forensics: a swap with no draws since the previous one
   // presents stale/black content — log which swaps do that (throttled).
@@ -11623,8 +12051,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   metal::GuestRangeSet swap_publication_domain;
   swap_publication_domain.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(metal::GuestRange::kGuestPhysicalSize)));
-  XE_UNLIKELY_IF(!ResolveRamConsumerDependencies(
-      metal::ConsumerKind::kHostCpuRead, swap_publication_domain)) {
+  lazy_full_domain_request_ = true;
+  const bool swap_publication_ok = ResolveRamConsumerDependencies(
+      metal::ConsumerKind::kHostCpuRead, swap_publication_domain);
+  lazy_full_domain_request_ = false;
+  XE_UNLIKELY_IF(!swap_publication_ok) {
     // Fail closed: full-domain publication did not converge every selected
     // producer (the shared executor's stop-on-first-failed-retirement policy
     // halted, or a wait failed). Presenting now would expose stale RAM for the
@@ -11711,6 +12142,38 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (lazy_read_callback_handle_) {
+        static metal::MetalLazyPublication::Stats s_last_lazy;
+        auto st = lazy_publication_.stats();
+        uint32_t armed_pending = 0, staging_depth = 0, staging_color = 0,
+                 untagged = 0;
+        for (const PendingWriteback& wb : pending_writebacks_) {
+          armed_pending += wb.lazy_armed ? 1u : 0u;
+          if (!wb.gpu_current) {
+            if (wb.depth_encode) {
+              ++staging_depth;
+            } else {
+              ++staging_color;
+            }
+          }
+          untagged += wb.submission ? 0u : 1u;
+        }
+        XELOGI(
+            "MetalLazyStats swap#{}: +{} armed records, +{} faults, +{} pages "
+            "copied ({} KiB), +{} stale, +{} retired; pending {} (armed {}, "
+            "staging depth {} color {}, untagged {}), owned pages {}, "
+            "memexports pending {}",
+            count, st.armed_records - s_last_lazy.armed_records,
+            st.faults - s_last_lazy.faults,
+            st.fault_pages_copied - s_last_lazy.fault_pages_copied,
+            (st.fault_bytes_copied - s_last_lazy.fault_bytes_copied) / 1024,
+            st.stale_reads - s_last_lazy.stale_reads,
+            st.retired_records - s_last_lazy.retired_records,
+            pending_writebacks_.size(), armed_pending, staging_depth,
+            staging_color, untagged, lazy_publication_.armed_page_count(),
+            pending_memexports_.size());
+        s_last_lazy = st;
+      }
       static const bool s_untile_timing =
           std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
       if (s_untile_timing) {
@@ -11979,6 +12442,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     present_height = uint32_t(source_rt.height);
     present_source_path = "fb-snapshot";
   } else if (prefer_ram_frontbuffer) {
+    if (lazy_read_callback_handle_) {
+      // Host read of the frontbuffer (RAM decode): converge any
+      // demand-published resolve under it first (ranged, eager).
+      PrepareGuestMemoryForHostRead(
+          frontbuffer_ptr,
+          ((requested_present_width + 31u) & ~31u) * requested_present_height *
+              4u);
+    }
     void* ram_fb = GetRamFrontbufferTexture(
         frontbuffer_ptr, requested_present_width, requested_present_height);
     if (ram_fb) {
@@ -12010,6 +12481,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // No snapshot AND nothing rendered this frame: the frontbuffer content
     // lives only in guest RAM (CPU-decoded FMV) — the RequestSwapTexture
     // pattern. Upload and present it instead of the test pattern.
+    if (lazy_read_callback_handle_) {
+      // The RAM-decoded present is a host read of the frontbuffer: converge
+      // any demand-published resolve under it first (ranged, eager).
+      const uint32_t fb_w = frontbuffer_width ? frontbuffer_width : 1280;
+      const uint32_t fb_h = frontbuffer_height ? frontbuffer_height : 720;
+      PrepareGuestMemoryForHostRead(frontbuffer_ptr,
+                                    ((fb_w + 31u) & ~31u) * fb_h * 4u);
+    }
     void* ram_fb = GetRamFrontbufferTexture(
         frontbuffer_ptr, frontbuffer_width ? frontbuffer_width : 1280,
         frontbuffer_height ? frontbuffer_height : 720);
@@ -12508,6 +12987,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           }
         }
         id<MTLBuffer> ramp_buffer = (__bridge id<MTLBuffer>)gamma_ramp_buffer_;
+        const bool ramp_ring = SwapLifetimeEnabled();
+        if (ramp_ring) {
+          void*& slot = gamma_ramp_ring_[swap_count_ % kGammaRampRing];
+          if (!slot) {
+            id<MTLBuffer> buf =
+                [gamma_device newBufferWithLength:kGammaRampTableBytes
+                                          options:MTLResourceStorageModeShared];
+            if (buf) {
+              buf.label = @"cp:gamma-ramp-256-ring";
+              slot = (__bridge_retained void*)buf;
+            }
+          }
+          if (slot) {
+            ramp_buffer = (__bridge id<MTLBuffer>)slot;
+          }
+        }
         id<MTLTexture> pre_ramp =
             (__bridge id<MTLTexture>)gamma_ramp_source_texture_;
         id<MTLRenderPipelineState> ramp_pipeline =
@@ -12521,12 +13016,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           // it, and a single immutable-per-frame buffer is sufficient -- no
           // ring, no per-frame versioning. The assertion below fails loudly if
           // a future change removes that wait.
-          assert_false(gamma_ramp_upload_in_flight_);
-          if (gamma_ramp_dirty_) {
+          if (ramp_ring) {
+            // A ring slot is reused only after every in-flight submission
+            // that could read it has retired (ring > max in flight), so the
+            // table is simply rewritten each frame (1 KiB).
             std::memcpy(ramp_buffer.contents, gamma_ramp_256_entry_table(),
                         kGammaRampTableBytes);
             gamma_ramp_dirty_ = false;
             ++gamma_ramp_uploads_;
+          } else {
+            assert_false(gamma_ramp_upload_in_flight_);
+            if (gamma_ramp_dirty_) {
+              std::memcpy(ramp_buffer.contents, gamma_ramp_256_entry_table(),
+                          kGammaRampTableBytes);
+              gamma_ramp_dirty_ = false;
+              ++gamma_ramp_uploads_;
+            }
           }
           id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
           [blit copyFromTexture:source_rt
@@ -12553,7 +13058,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                   vertexStart:0
                   vertexCount:3];
           [enc endEncoding];
-          gamma_ramp_upload_in_flight_ = true;
+          gamma_ramp_upload_in_flight_ = !ramp_ring;
           ++gamma_ramp_applications_;
           gamma_applied = true;
         }
@@ -12585,10 +13090,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       [encoder endEncoding];
     }
     [command_buffer commit];
-    [command_buffer waitUntilCompleted];
-    // The wait above is what makes a single ramp buffer safe; clearing here
-    // ties the invariant to the wait rather than to a comment.
-    gamma_ramp_upload_in_flight_ = false;
+    if (SwapLifetimeEnabled() && !trace_writer_.is_open() &&
+        !trace_playback_context() && AsyncSubmissionEnabled()) {
+      // Queue order carries the mailbox to the presenter (same command
+      // queue); the ramp buffer is ringed, so nothing here needs completion.
+    } else {
+      [command_buffer waitUntilCompleted];
+      // The wait above is what makes a single ramp buffer safe; clearing
+      // here ties the invariant to the wait rather than to a comment.
+      gamma_ramp_upload_in_flight_ = false;
+    }
     return true;
   };
   presenter->RefreshGuestOutput(present_width, present_height, /*aspect_x=*/16,
