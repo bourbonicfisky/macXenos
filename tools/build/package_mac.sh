@@ -237,7 +237,7 @@ fi
 # Confirm nothing in the bundle points back at an absolute Cellar/host path.
 log "Verifying in-bundle dylib references"
 if otool -L "${CONTENTS}/MacOS/${BUNDLE_EXEC}" "${CONTENTS}/Frameworks/"*.dylib \
-     | grep -E "/usr/local/|/opt/homebrew/|/Cellar/|${REPO_ROOT}" ; then
+     | grep -E "^[[:space:]]" | grep -E "/usr/local/|/opt/homebrew/|/Cellar/|${REPO_ROOT}" ; then
   die "bundle still references absolute host paths (see above)"
 fi
 if otool -l "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}' | grep -E "^/" ; then
