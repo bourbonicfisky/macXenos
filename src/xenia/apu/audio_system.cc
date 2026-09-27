@@ -138,7 +138,7 @@ void AudioSystem::WorkerThreadMain() {
         // Hold the client's own lock across the callback so an unregister on
         // another thread cannot destroy the driver underneath it; re-check
         // the driver in case that already happened.
-        std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+        std::lock_guard<std::recursive_mutex> guard(client_locks_[index]);
         if (clients_[index].driver) {
           SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
           uint64_t args[] = {client_callback_arg};
@@ -190,7 +190,7 @@ void AudioSystem::Shutdown() {
   {
     auto global_lock = global_critical_region_.Acquire();
     for (size_t i = 0; i < kMaximumClientCount; ++i) {
-      std::lock_guard<std::recursive_mutex> guard(clients_[i].lock);
+      std::lock_guard<std::recursive_mutex> guard(client_locks_[i]);
       if (clients_[i].in_use) {
         DestroyDriver(clients_[i].driver);
         if (clients_[i].wrapped_callback_arg) {
@@ -233,7 +233,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   xe::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
 
   {
-    std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+    std::lock_guard<std::recursive_mutex> guard(client_locks_[index]);
     clients_[index].driver = driver;
     clients_[index].callback = callback;
     clients_[index].callback_arg = callback_arg;
@@ -281,7 +281,7 @@ void AudioSystem::UnregisterClient(size_t index) {
   auto global_lock = global_critical_region_.Acquire();
   assert_true(index < kMaximumClientCount);
   {
-    std::lock_guard<std::recursive_mutex> guard(clients_[index].lock);
+    std::lock_guard<std::recursive_mutex> guard(client_locks_[index]);
     DestroyDriver(clients_[index].driver);
     memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
     clients_[index].driver = nullptr;

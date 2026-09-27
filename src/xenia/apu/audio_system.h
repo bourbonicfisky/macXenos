@@ -92,11 +92,14 @@ class AudioSystem {
     uint32_t callback_arg;
     uint32_t wrapped_callback_arg;
     bool in_use;
-    // Held by the worker across the client's callback and by
-    // UnregisterClient/Shutdown while the driver is destroyed, so a client
-    // cannot be torn down mid-callback (upstream 7ef873b0d, adapted).
-    std::recursive_mutex lock;
   } clients_[kMaximumClientCount];
+  // Held by the worker across a client's callback and by
+  // UnregisterClient/Shutdown while its driver is destroyed, so a client
+  // cannot be torn down mid-callback (upstream 7ef873b0d, adapted). Kept
+  // beside clients_ rather than inside it: the client records are plain
+  // aggregates that get zero-initialized and copied, which would corrupt a
+  // mutex living in them.
+  std::recursive_mutex client_locks_[kMaximumClientCount];
 
   int FindFreeClient();
 
