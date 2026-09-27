@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -261,6 +262,18 @@ class MetalTextureCache {
     return n;
   }
 
+  // Diagnostic (XE_METAL_UNTILE_TIMING=1, task 0.2 of
+  // optimize-metal-gpu-resident-resolve-coherence): wall time spent in the
+  // legacy CPU untile/upload miss path since the last query, bucketed by
+  // format / signedness / resolve-backed base. Returns a one-line report
+  // normalized per frame and resets the accumulators.
+  std::string ConsumeUntileTimingReport(uint32_t frames);
+  struct UntileTimingBucket {
+    uint64_t ns = 0;
+    uint32_t count = 0;
+    uint64_t bytes = 0;
+  };
+
   // --- C1T-R shared-subclass adapter (single slot/residency authority) ---
   // MetalSharedTextureCache allocates, binds, and retires bindless view-heap
   // slots and registers per-draw residency exclusively through these; a
@@ -342,6 +355,9 @@ class MetalTextureCache {
     return submission_provider_ ? submission_provider_() : UINT64_MAX;
   }
   uint32_t upload_count_ = 0;
+  std::unordered_map<uint32_t, UntileTimingBucket> untile_timing_;
+  uint64_t untile_total_ns_ = 0;
+  uint32_t untile_total_count_ = 0;
   TraceWriter* trace_writer_ = nullptr;  // not owned; may be null.
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
 

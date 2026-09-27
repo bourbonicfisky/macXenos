@@ -150,6 +150,19 @@ namespace gpu {
 namespace metal {
 
 namespace {
+inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
+  return f.size_2d.width + 1;
+}
+inline uint32_t fetch_height_serve(const xenos::xe_gpu_texture_fetch_t& f) {
+  return f.size_2d.height + 1;
+}
+inline uint32_t fetch_pitch_serve(const xenos::xe_gpu_texture_fetch_t& f) {
+  uint32_t w = f.size_2d.width + 1;
+  return f.pitch ? (uint32_t(f.pitch) << 5) : ((w + 31u) & ~31u);
+}
+}  // namespace
+
+namespace {
 
 // Process physical footprint in MiB, or 0.0 if the query fails. One sampler
 // for every consumer (frame telemetry and cache-clear resource evidence) so
@@ -1580,6 +1593,9 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       [this]() { return CurrentEncodingSubmission(); });
   shared_texture_cache_->SetSubmissionFaultQuery([this](uint64_t submission) {
     return faulted_submissions_.count(submission) != 0;
+  });
+  shared_texture_cache_->SetCompletedSubmissionProvider([this]() {
+    return completed_submission_.load(std::memory_order_acquire);
   });
   if (!shared_texture_cache_->Initialize()) {
     XELOGE(
@@ -5799,12 +5815,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             uint32_t fp =
                 f.pitch ? (uint32_t(f.pitch) << 5) : ((fw + 31u) & ~31u);
             strict_eligible =
-                binding.is_signed
-                    ? metal::IsStrictRgba8SignedRouteEligible(f, fw, fh, fp)
-                    : (metal::IsStrictRgba8RouteEligible(f, false, fw, fh,
-                                                         fp) ||
-                       metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh,
-                                                            fp));
+                SharedRouteEligible(f, binding.is_signed, fw, fh, fp, nullptr);
             fetch_service =
                 texture_cache_->ClassifyFetchService(f, binding.is_signed);
             fetch_buffer_read =
@@ -5819,12 +5830,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               ++s_blocker_detail_logs;
               XELOGI(
                   "MetalGpuOrderingBlockDetail draw={} base={:08X} fmt={} "
-                  "signed={} type={} cache={} writer={} strict={} svc={}",
+                  "signed={} type={} cache={} writer={} strict={} svc={} "
+                  "signs={}{}{}{} mips={}-{} tiled={} pitch={} dim={} "
+                  "stacked={} {}x{}",
                   trace_draw_index_, f.base_address << 12,
                   uint32_t(f.format), binding.is_signed ? 1 : 0,
                   uint32_t(f.type), shared_texture_cache_ != nullptr,
                   trace_writer_.is_open() ? 1 : 0, strict_eligible,
-                  uint32_t(fetch_service));
+                  uint32_t(fetch_service), uint32_t(f.sign_x),
+                  uint32_t(f.sign_y), uint32_t(f.sign_z), uint32_t(f.sign_w),
+                  f.mip_min_level, f.mip_max_level, uint32_t(f.tiled),
+                  uint32_t(f.pitch), uint32_t(f.dimension),
+                  uint32_t(f.stacked), f.size_2d.width + 1,
+                  f.size_2d.height + 1);
             }
             // Blocker census (reopen 4.2 probe follow-up): WHAT blocks the
             // ordering path on real corridors. Key = guest format, the serve
@@ -5932,9 +5950,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             uint32_t fw = f.size_2d.width + 1, fh = f.size_2d.height + 1;
             uint32_t fp = f.pitch ? (uint32_t(f.pitch) << 5)
                                   : ((fw + 31u) & ~31u);
-            bool strict =
-                metal::IsStrictRgba8RouteEligible(f, false, fw, fh, fp) ||
-                metal::IsStrictRgba8MipRouteEligible(f, false, fw, fh, fp);
+            bool strict = SharedRouteEligible(f, false, fw, fh, fp, nullptr);
             ResolvedFetchService svc =
                 texture_cache_
                     ? texture_cache_->ClassifyFetchService(f,
@@ -6144,20 +6160,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           const char* v = std::getenv("XE_METAL_TEX_ROUTE_SIGNED");
           return !(v && v[0] == '0' && !v[1]);
         }();
-        if (binding.is_signed) {
-          if (!s_route_signed ||
-              !metal::IsStrictRgba8SignedRouteEligible(
-                  fetch, fetch_width, fetch_height, fetch_pitch_texels) ||
-              !FetchOverlapsPendingGpuCurrent(fetch)) {
-            continue;
-          }
-        } else if (!metal::IsStrictRgba8RouteEligible(fetch, false, fetch_width,
-                                                      fetch_height,
-                                                      fetch_pitch_texels) &&
-                   !metal::IsStrictRgba8MipRouteEligible(fetch, false,
-                                                         fetch_width,
-                                                         fetch_height,
-                                                         fetch_pitch_texels)) {
+        bool corridor_required = false;
+        if (!SharedRouteEligible(fetch, binding.is_signed, fetch_width,
+                                 fetch_height, fetch_pitch_texels,
+                                 &corridor_required)) {
+          continue;
+        }
+        if (binding.is_signed &&
+            (!s_route_signed ||
+             (corridor_required && !FetchOverlapsPendingGpuCurrent(fetch)))) {
           continue;
         }
         if (texture_cache_->ClassifyFetchService(fetch, binding.is_signed) !=
@@ -7205,10 +7216,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // A signed binding may share a mask bit with its unsigned twin;
           // the corridor test at serve keeps ordinary signed content on the
           // byte-exact legacy path (see FetchOverlapsPendingGpuCurrent).
+          bool serve_corridor_required = false;
+          SharedRouteEligible(fetch, binding.is_signed, fetch_width_serve(fetch),
+                              fetch_height_serve(fetch),
+                              fetch_pitch_serve(fetch),
+                              &serve_corridor_required);
           const bool route_masked =
               shared_texture_cache_ &&
               (!binding.is_signed ||
-               (s_serve_signed && FetchOverlapsPendingGpuCurrent(fetch))) &&
+               (s_serve_signed && (!serve_corridor_required ||
+                                   FetchOverlapsPendingGpuCurrent(fetch)))) &&
               (draw_shared_route_mask_ & (1u << binding.fetch_constant));
           if (route_masked) {
             routed_slot = shared_texture_cache_->GetServedSlot(
@@ -9932,6 +9949,43 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
   return fb_ram_texture_;
 }
 
+// Stage-1 widening (optimize-metal-gpu-resident-resolve-coherence): route
+// eligibility for one binding. The promoted RGBA8 class keeps its exact
+// predicates (and the signed corridor, applied by the callers); every other
+// table format routes both signs on the shared shape rules.
+bool MetalCommandProcessor::SharedRouteEligible(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+    uint32_t width, uint32_t height, uint32_t pitch_texels,
+    bool* corridor_required_out) {
+  const bool rgba8_class =
+      fetch.format == xenos::TextureFormat::k_8_8_8_8 ||
+      fetch.format == xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
+  // XE_METAL_TEX_ROUTE_SIGNED_ALL=1 lifts the signed-RGBA8 corridor (every
+  // signed RGBA8 fetch routes, not only those overlapping a pending
+  // GPU-current record). Off by default until the trace A/B measures the
+  // corridor's historical +-1 LSB drift on the SF4 fixture.
+  static const bool s_signed_all = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_SIGNED_ALL");
+    return v && v[0] == '1' && !v[1];
+  }();
+  if (corridor_required_out) {
+    *corridor_required_out = rgba8_class && is_signed && !s_signed_all;
+  }
+  if (rgba8_class) {
+    return is_signed
+               ? metal::IsStrictRgba8SignedRouteEligible(fetch, width, height,
+                                                          pitch_texels)
+               : (metal::IsStrictRgba8RouteEligible(fetch, false, width,
+                                                    height, pitch_texels) ||
+                  metal::IsStrictRgba8MipRouteEligible(fetch, false, width,
+                                                       height, pitch_texels));
+  }
+  return metal::IsSharedRouteEligible(fetch, is_signed, width, height,
+                                      pitch_texels) ||
+         metal::IsSharedRouteMipEligible(fetch, is_signed, width, height,
+                                         pitch_texels);
+}
+
 bool MetalCommandProcessor::FetchOverlapsPendingGpuCurrent(
     const xenos::xe_gpu_texture_fetch_t& fetch) {
   if (pending_writebacks_.empty() && pending_memexports_.empty()) {
@@ -10046,6 +10100,17 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     metal::MemexportBoundaryEvidence boundary_evidence, uint32_t filter_base,
     uint32_t filter_size, uint64_t filter_authority_sequence) {
   metal::ProducerDrainOutcome outcome;
+  struct PublishTimingScope {
+    MetalCommandProcessor* self;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    ~PublishTimingScope() {
+      self->publish_ns_ += uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count());
+      self->publish_calls_ += 1;
+    }
+  } publish_timing_scope{this};
   // Ranges whose publication this drain executed (and whose page-granular
   // invalidation may have over-cleared a straddling neighbor). Used by the
   // scoped re-assert at the end of the function.
@@ -11646,6 +11711,18 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      static const bool s_untile_timing =
+          std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
+      if (s_untile_timing) {
+        XELOGI("MetalUntileTiming swap#{}: {}; publish {:.2f} ms/frame "
+               "({:.1f} drains/frame)",
+               count,
+               texture_cache_ ? texture_cache_->ConsumeUntileTimingReport(128)
+                              : std::string("no legacy cache"),
+               double(publish_ns_) / 1e6 / 128.0, float(publish_calls_) / 128.0f);
+        publish_ns_ = 0;
+        publish_calls_ = 0;
+      }
       if (ServingCensusEnabled()) {
         // Periodic by necessity: the emulator is killed, never shut down
         // cleanly, so an atexit dump would never run. Cumulative totals, so

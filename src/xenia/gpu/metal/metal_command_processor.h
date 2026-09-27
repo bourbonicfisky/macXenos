@@ -389,6 +389,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // ±1-LSB drift on ordinary content; the corridor is where routing pays).
   bool FetchOverlapsPendingGpuCurrent(
       const xenos::xe_gpu_texture_fetch_t& fetch);
+  bool SharedRouteEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
+                           bool is_signed, uint32_t width, uint32_t height,
+                           uint32_t pitch_texels, bool* corridor_required_out);
   std::unique_ptr<MetalUploadArena> upload_arena_;
   // PP1: shared xe::gpu::PrimitiveProcessor subclass, the single normalization
   // authority for routed native non-expanded restart-disabled line/triangle
@@ -582,6 +585,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;
+  // Diagnostic (XE_METAL_UNTILE_TIMING=1): wall time inside
+  // DrainPendingWritebacks (RAM publication) since the last frame-stats tick.
+  uint64_t publish_ns_ = 0;
+  uint32_t publish_calls_ = 0;
 
   // S7 — submission-gated lifetime. Every frame-command-buffer commit gets a
   // monotonically increasing submission id; a completion handler publishes

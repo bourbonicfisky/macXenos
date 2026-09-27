@@ -357,6 +357,157 @@ static void RunShapeCase(uint32_t blocks_w, uint32_t blocks_h,
   SUCCEED();
 }
 
+// ---- Stage-1 widening (optimize-metal-gpu-resident-resolve-coherence):
+// the bit-copy families the shared route now serves. Oracle = the guest
+// dword(s) containing each block, GpuSwap'ed with the fetch endian, then the
+// block's bytes taken at their offset inside the dword -- the hardware /
+// upstream-shader semantics (endian swaps act on 16/32-bit units of guest
+// memory, so an 8bpb or 16bpb block's neighbours participate). ----
+
+static void RunFamilyShapeCase(const char* family, uint32_t bpb,
+                               uint32_t block_log2,
+                               uint32_t blocks_per_thread, uint32_t blocks_w,
+                               uint32_t blocks_h, uint32_t pitch_aligned,
+                               xenos::Endian endian) {
+  auto& h = H();
+  REQUIRE(h.ok);
+  int index = h.pipelines.FindIndex(family);
+  REQUIRE(index >= 0);
+
+  const uint32_t logical_row = blocks_w * bpb;
+  const uint32_t padded_w =
+      ((blocks_w + blocks_per_thread - 1u) / blocks_per_thread) *
+      blocks_per_thread;
+  const uint32_t written_row = padded_w * bpb;
+  const uint32_t host_pitch = (written_row + 255u) & ~255u;
+  const uint32_t dest_size = host_pitch * blocks_h + 256;
+
+  int32_t max_off = 0;
+  for (uint32_t y = 0; y < blocks_h; ++y) {
+    for (uint32_t x = 0; x < padded_w; ++x) {
+      max_off = std::max(max_off, texture_address::Tiled2D(
+                                      int32_t(x), int32_t(y), pitch_aligned,
+                                      block_log2));
+    }
+  }
+  const uint32_t source_size = ((uint32_t(max_off) + bpb + 31u) & ~15u) + 32;
+  std::vector<uint8_t> guest(source_size);
+  for (uint32_t i = 0; i < source_size; ++i) {
+    guest[i] = uint8_t(i * 13 + (i >> 7) * 5 + 1);
+  }
+  std::vector<uint8_t> cpu(size_t(blocks_w) * bpb * blocks_h);
+  for (uint32_t y = 0; y < blocks_h; ++y) {
+    for (uint32_t x = 0; x < blocks_w; ++x) {
+      uint32_t src = uint32_t(texture_address::Tiled2D(
+          int32_t(x), int32_t(y), pitch_aligned, block_log2));
+      uint8_t* dst = &cpu[(size_t(y) * blocks_w + x) * bpb];
+      // Per-block swap, exactly the legacy cache's SwapEndian and the
+      // shaders' XeEndianSwap16/32/64: a swap unit wider than the block is a
+      // no-op (8bpb never swaps; 16bpb only honours 8in16).
+      std::memcpy(dst, &guest[src], bpb);
+      switch (endian) {
+        case xenos::Endian::k8in16:
+          for (uint32_t i = 0; i + 1 < bpb; i += 2) {
+            std::swap(dst[i], dst[i + 1]);
+          }
+          break;
+        case xenos::Endian::k8in32:
+          for (uint32_t i = 0; i + 3 < bpb; i += 4) {
+            std::swap(dst[i], dst[i + 3]);
+            std::swap(dst[i + 1], dst[i + 2]);
+          }
+          break;
+        case xenos::Endian::k16in32:
+          for (uint32_t i = 0; i + 3 < bpb; i += 4) {
+            std::swap(dst[i], dst[i + 2]);
+            std::swap(dst[i + 1], dst[i + 3]);
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  id<MTLBuffer> source =
+      [h.device newBufferWithLength:source_size
+                            options:MTLResourceStorageModeShared];
+  id<MTLBuffer> dest =
+      [h.device newBufferWithLength:dest_size
+                            options:MTLResourceStorageModeShared];
+  std::memcpy(source.contents, guest.data(), source_size);
+
+  LoadConstants constants = {};
+  constants.is_tiled_3d_endian_scale = 1u | (uint32_t(endian) << 2);
+  constants.guest_pitch_aligned = pitch_aligned;
+  constants.size_blocks[0] = blocks_w;
+  constants.size_blocks[1] = blocks_h;
+  constants.size_blocks[2] = 1;
+  constants.host_pitch = host_pitch;
+  constants.height_texels = blocks_h;
+
+  for (int pass = 0; pass < 2; ++pass) {
+    std::memset(dest.contents, 0xC5, dest_size);
+    REQUIRE(h.Dispatch(h.pipelines.pipeline(size_t(index)), constants, dest,
+                       source, padded_w / blocks_per_thread, blocks_h, 1));
+    const uint8_t* got = static_cast<const uint8_t*>(dest.contents);
+    INFO(family << " shape " << blocks_w << "x" << blocks_h << " pitch "
+                << pitch_aligned << " endian " << uint32_t(endian) << " pass "
+                << pass);
+    for (uint32_t y = 0; y < blocks_h; ++y) {
+      const uint8_t* row = got + size_t(y) * host_pitch;
+      if (std::memcmp(row, &cpu[size_t(y) * logical_row], logical_row) != 0) {
+        FAIL("logical mismatch in row " << y);
+      }
+      for (uint32_t i = written_row; i < host_pitch; ++i) {
+        if (row[i] != 0xC5) {
+          FAIL("guard byte touched at row " << y << " offset " << i);
+        }
+      }
+    }
+    const uint8_t* tail = got + size_t(blocks_h) * host_pitch;
+    for (uint32_t i = 0; i < 256; ++i) {
+      if (tail[i] != 0xC5) {
+        FAIL("tail guard touched at " << i);
+      }
+    }
+  }
+  SUCCEED();
+}
+
+TEST_CASE("load shaders: 16bpb family matches the legacy per-block untile",
+          "[l1][metal][loadshader][family]") {
+  REQUIRE_DEVICE();
+  for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in16,
+                          xenos::Endian::k8in32, xenos::Endian::k16in32}) {
+    RunFamilyShapeCase("texture_load_16bpb_cs", 2, 1, 16, 64, 16, 64, e);
+    RunFamilyShapeCase("texture_load_16bpb_cs", 2, 1, 16, 41, 17, 64, e);
+    RunFamilyShapeCase("texture_load_16bpb_cs", 2, 1, 16, 100, 7, 128, e);
+  }
+}
+
+TEST_CASE("load shaders: 64bpb family matches the legacy per-block untile",
+          "[l1][metal][loadshader][family]") {
+  REQUIRE_DEVICE();
+  for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in16,
+                          xenos::Endian::k8in32, xenos::Endian::k16in32}) {
+    RunFamilyShapeCase("texture_load_64bpb_cs", 8, 3, 4, 32, 16, 32, e);
+    RunFamilyShapeCase("texture_load_64bpb_cs", 8, 3, 4, 41, 17, 64, e);
+    RunFamilyShapeCase("texture_load_64bpb_cs", 8, 3, 4, 100, 7, 128, e);
+  }
+}
+
+TEST_CASE("load shaders: 8bpb family matches the legacy per-block untile",
+          "[l1][metal][loadshader][family]") {
+  REQUIRE_DEVICE();
+  for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in16,
+                          xenos::Endian::k8in32, xenos::Endian::k16in32}) {
+    RunFamilyShapeCase("texture_load_8bpb_cs", 1, 0, 16, 64, 16, 64, e);
+    RunFamilyShapeCase("texture_load_8bpb_cs", 1, 0, 16, 41, 17, 64, e);
+    RunFamilyShapeCase("texture_load_8bpb_cs", 1, 0, 16, 100, 7, 128, e);
+  }
+}
+
 TEST_CASE("load shaders: odd non-aligned dimensions and pitches",
           "[l1][metal][loadshader]") {
   REQUIRE_DEVICE();

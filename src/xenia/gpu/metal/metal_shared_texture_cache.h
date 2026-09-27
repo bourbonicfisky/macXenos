@@ -16,7 +16,9 @@
 #include <vector>
 
 #include "xenia/gpu/register_file.h"
+#include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_mip_level_plan.h"
+#include "xenia/gpu/metal/metal_shared_texture_format_table.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/xenos.h"
 
@@ -71,6 +73,11 @@ class MetalSharedTextureCache : public TextureCache {
   void SetSubmissionFaultQuery(std::function<bool(uint64_t)> query) {
     submission_fault_query_ = std::move(query);
   }
+  // Newest GPU-completed submission; gates scratch-ring reuse for the
+  // buffer-writing load families (stage-1 widening).
+  void SetCompletedSubmissionProvider(std::function<uint64_t()> provider) {
+    completed_submission_provider_ = std::move(provider);
+  }
 
   // Pre-encoder prepass (after the overlap commit/wait/drain gateway, before
   // BeginFrameEncoder): forces re-parse of the masked fetch constants (this
@@ -80,6 +87,10 @@ class MetalSharedTextureCache : public TextureCache {
   // LoadTextureDataFromResidentMemoryImpl encodes the direct dispatch on the
   // frame command buffer.
   void PrepareEligible(uint32_t eligible_mask);
+
+  // Loads served through the buffer-writing families since creation
+  // (engagement evidence for the stage-1 widening).
+  uint64_t family_load_count() const { return family_load_count_; }
 
   // Serve at descriptor-marshal time: the bindless slot for the prepared
   // fetch-constant index, or 0 when unserved (caller falls back to the
@@ -140,8 +151,8 @@ class MetalSharedTextureCache : public TextureCache {
     return false;
   }
   uint32_t GetHostFormatSwizzle(TextureKey key) const override {
-    // The direct load produces guest channel order in RGBA8Unorm.
-    return xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
+    const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
+    return entry ? entry->host_swizzle : xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
   }
   uint32_t GetMaxHostTextureWidthHeight(
       xenos::DataDimension dimension) const override {
@@ -175,10 +186,37 @@ class MetalSharedTextureCache : public TextureCache {
   void* device_;                        // id<MTLDevice>, not owned.
   MetalTextureCache* legacy_;           // slot/residency adapter, not owned.
   void* direct_pipeline_ = nullptr;     // id<MTLComputePipelineState>, retained.
+  // The compiled texture-load family (buffer-writing shaders) for every
+  // non-direct table format; empty when the widening is rolled back or the
+  // pipelines failed to build (those formats then stay legacy).
+  MetalLoadShaderPipelines family_pipelines_;
   std::function<void*()> prepare_transfer_;
   std::function<uint64_t()> submission_provider_;
   std::function<bool(uint64_t)> submission_fault_query_;
+  std::function<uint64_t()> completed_submission_provider_;
   uint64_t last_begun_submission_ = 0;
+
+  // Private scratch ring for the buffer-writing families: a load shader
+  // untiles into a linear scratch region, then a blit copies it into the
+  // host texture level in the same command buffer. Regions are bump-allocated
+  // per submission and a buffer is reused only once its submission has
+  // completed on the GPU.
+  struct ScratchBuffer {
+    void* buffer = nullptr;  // id<MTLBuffer>, private storage, retained.
+    uint32_t size = 0;
+    uint32_t head = 0;
+    uint64_t submission = 0;
+  };
+  static constexpr uint32_t kScratchBufferSize = 32u * 1024u * 1024u;
+  static constexpr size_t kScratchBufferMax = 8;
+  std::vector<ScratchBuffer> scratch_;
+  uint64_t family_load_count_ = 0;
+  bool AllocateScratch(uint32_t size, uint32_t alignment, uint64_t submission,
+                       void** buffer_out, uint32_t* offset_out);
+  bool LoadLevelsDirect(Texture& texture, const std::vector<MipLevelPlan>& plan,
+                        bool mipped);
+  bool LoadLevelsFamily(Texture& texture, const SharedTextureFormatEntry& entry,
+                        const std::vector<MipLevelPlan>& plan);
 
   BindingSlot binding_slots_[xenos::kTextureFetchConstantCount];
 

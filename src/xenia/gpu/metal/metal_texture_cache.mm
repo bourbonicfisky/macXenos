@@ -21,6 +21,8 @@
 
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/byte_order.h"
+#include <chrono>
+#include <optional>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/texture_address.h"
@@ -1169,6 +1171,38 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (!guest) {
     return 0;
   }
+  // Diagnostic scope timer for the whole miss path (untile + upload +
+  // finalize); see ConsumeUntileTimingReport.
+  struct UntileTimingScope {
+    MetalTextureCache* cache;
+    uint32_t key;
+    uint64_t bytes;
+    std::chrono::steady_clock::time_point t0;
+    ~UntileTimingScope() {
+      const uint64_t ns = uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count());
+      auto& b = cache->untile_timing_[key];
+      b.ns += ns;
+      b.count += 1;
+      b.bytes += bytes;
+      cache->untile_total_ns_ += ns;
+      cache->untile_total_count_ += 1;
+    }
+  };
+  static const bool s_untile_timing =
+      std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
+  std::optional<UntileTimingScope> untile_timing_scope;
+  if (s_untile_timing) {
+    const bool resolve_backed =
+        resolved_targets_.find(base) != resolved_targets_.end();
+    untile_timing_scope.emplace(UntileTimingScope{
+        this,
+        (uint32_t(fetch.format) << 2) | (is_signed ? 2u : 0u) |
+            (resolve_backed ? 1u : 0u),
+        0, std::chrono::steady_clock::now()});
+  }
 
   bool tiled = fetch.tiled != 0;
   xenos::Endian endian = fetch.endianness;
@@ -1805,6 +1839,33 @@ uint32_t MetalTextureCache::GetTextureSlot(
 // cache/lifetime semantics cannot diverge by producer.
 // texture_bridge is an id<MTLTexture> at +0 (caller holds a strong ref
 // through the call).
+std::string MetalTextureCache::ConsumeUntileTimingReport(uint32_t frames) {
+  const float f = float(std::max(frames, 1u));
+  std::vector<std::pair<uint32_t, UntileTimingBucket>> rows(
+      untile_timing_.begin(), untile_timing_.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.ns > b.second.ns;
+  });
+  std::string top;
+  size_t shown = 0;
+  for (const auto& [key, b] : rows) {
+    if (shown++ >= 6) {
+      break;
+    }
+    top += fmt::format(" fmt{}{}{}={:.2f}ms/{:.1f}", key >> 2,
+                       (key & 2) ? "s" : "u", (key & 1) ? "R" : "",
+                       double(b.ns) / 1e6 / f, float(b.count) / f);
+  }
+  std::string report = fmt::format(
+      "untile {:.2f} ms/frame over {:.1f} misses/frame; top:{}",
+      double(untile_total_ns_) / 1e6 / f, float(untile_total_count_) / f,
+      top);
+  untile_timing_.clear();
+  untile_total_ns_ = 0;
+  untile_total_count_ = 0;
+  return report;
+}
+
 uint32_t MetalTextureCache::FinalizeTexture(
     uint64_t key, const xenos::xe_gpu_texture_fetch_t& fetch,
     void* texture_bridge, uint64_t host_format, uint32_t host_swizzle,

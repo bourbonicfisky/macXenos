@@ -11,6 +11,25 @@
 
 #import <Metal/Metal.h>
 
+// The C++-visible format table stores MTLPixelFormat raw values; pin them.
+static_assert(MTLPixelFormatR8Unorm == xe::gpu::metal::kMtlPixelFormatR8Unorm, "");
+static_assert(MTLPixelFormatR8Snorm == xe::gpu::metal::kMtlPixelFormatR8Snorm, "");
+static_assert(MTLPixelFormatR16Unorm == xe::gpu::metal::kMtlPixelFormatR16Unorm, "");
+static_assert(MTLPixelFormatR16Snorm == xe::gpu::metal::kMtlPixelFormatR16Snorm, "");
+static_assert(MTLPixelFormatR16Float == xe::gpu::metal::kMtlPixelFormatR16Float, "");
+static_assert(MTLPixelFormatRG8Unorm == xe::gpu::metal::kMtlPixelFormatRG8Unorm, "");
+static_assert(MTLPixelFormatRG8Snorm == xe::gpu::metal::kMtlPixelFormatRG8Snorm, "");
+static_assert(MTLPixelFormatR32Float == xe::gpu::metal::kMtlPixelFormatR32Float, "");
+static_assert(MTLPixelFormatRG16Unorm == xe::gpu::metal::kMtlPixelFormatRG16Unorm, "");
+static_assert(MTLPixelFormatRG16Snorm == xe::gpu::metal::kMtlPixelFormatRG16Snorm, "");
+static_assert(MTLPixelFormatRG16Float == xe::gpu::metal::kMtlPixelFormatRG16Float, "");
+static_assert(MTLPixelFormatRGBA8Unorm == xe::gpu::metal::kMtlPixelFormatRGBA8Unorm, "");
+static_assert(MTLPixelFormatRGBA8Snorm == xe::gpu::metal::kMtlPixelFormatRGBA8Snorm, "");
+static_assert(MTLPixelFormatRGB10A2Unorm == xe::gpu::metal::kMtlPixelFormatRGB10A2Unorm, "");
+static_assert(MTLPixelFormatRGBA16Unorm == xe::gpu::metal::kMtlPixelFormatRGBA16Unorm, "");
+static_assert(MTLPixelFormatRGBA16Snorm == xe::gpu::metal::kMtlPixelFormatRGBA16Snorm, "");
+static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16Float, "");
+
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
@@ -57,9 +76,11 @@ class MetalSharedTextureCache::MetalTexture final
     // are driven by this number, so a mipped texture must not under-report.
     uint64_t bytes = 0;
     uint32_t levels = key.mip_max_level + 1;
+    const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
+    const uint32_t bpb = entry ? entry->bytes_per_block : 4u;
     for (uint32_t level = 0; level < levels; ++level) {
       bytes += uint64_t(std::max(key.GetWidth() >> level, 1u)) *
-               std::max(key.GetHeight() >> level, 1u) * 4u;
+               std::max(key.GetHeight() >> level, 1u) * bpb;
     }
     SetHostMemoryUsage(bytes);
   }
@@ -104,6 +125,14 @@ MetalSharedTextureCache::~MetalSharedTextureCache() {
   // base header documents exactly this pattern). The base destructor then
   // clears an empty map.
   DestroyAllTextures(true);
+  family_pipelines_.Shutdown();
+  for (ScratchBuffer& sb : scratch_) {
+    if (sb.buffer) {
+      id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)sb.buffer;
+      (void)released;
+    }
+  }
+  scratch_.clear();
   if (direct_pipeline_) {
     id<MTLComputePipelineState> released =
         (__bridge_transfer id<MTLComputePipelineState>)direct_pipeline_;
@@ -114,7 +143,17 @@ MetalSharedTextureCache::~MetalSharedTextureCache() {
 
 bool MetalSharedTextureCache::Initialize() {
   direct_pipeline_ = MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(device_);
-  return direct_pipeline_ != nullptr;
+  if (!direct_pipeline_) {
+    return false;
+  }
+  if (SharedTextureRouteFormatsWidened()) {
+    if (!family_pipelines_.Initialize(device_)) {
+      XELOGW(
+          "MetalSharedTextureCache: texture-load family pipelines failed to "
+          "build; only the RGBA8 direct class is routed");
+    }
+  }
+  return true;
 }
 
 bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
@@ -143,11 +182,12 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   // granularity, plus pitch != 0 (the key carries the raw fetch pitch; the
   // legacy align32(width) default is not representable) and the mip_page
   // agreement checked below.
-  if (key.dimension != xenos::DataDimension::k2DOrStacked ||
-      (key.format != xenos::TextureFormat::k_8_8_8_8 &&
-       key.format !=
-           xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) ||  // byte alias
-      !key.tiled || key.signed_separate || key.scaled_resolve ||
+  const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
+  if (!entry || (!entry->direct && !family_pipelines_.initialized())) {
+    return nullptr;
+  }
+  if (key.dimension != xenos::DataDimension::k2DOrStacked || !key.tiled ||
+      key.signed_separate || key.scaled_resolve ||
       key.depth_or_array_size_minus_1 != 0 || key.base_page == 0 ||
       key.pitch == 0) {
     return nullptr;
@@ -167,7 +207,7 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   uint32_t height = key.GetHeight();
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+      texture2DDescriptorWithPixelFormat:MTLPixelFormat(entry->host_format)
                                    width:width
                                   height:height
                                mipmapped:mipped ? YES : NO];
@@ -274,7 +314,58 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
       return false;
     }
   }
+  const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
+  if (!entry) {
+    return false;
+  }
+  if (!entry->direct) {
+    // The planner's exact range scan is the 32bpp tiled walk; for the other
+    // block sizes register the conservative whole tiled extent of each level
+    // (32-row aligned) as consumed. A superset can only add a hazard flush.
+    for (const MipLevelPlan& p : plan) {
+      uint32_t pitch_blocks = (p.pitch_blocks * 4u) / entry->bytes_per_block;
+      uint64_t rows = uint64_t(((p.py + p.height) + 31u) & ~31u);
+      uint64_t bytes = rows * pitch_blocks * entry->bytes_per_block;
+      uint64_t end = std::min<uint64_t>(uint64_t(p.guest_offset) + bytes,
+                                        SharedMemory::kBufferSize);
+      if (end <= p.guest_offset ||
+          !metal_shared_memory.RequestConsumedRange(
+              p.guest_offset, uint32_t(end - p.guest_offset))) {
+        return false;
+      }
+    }
+  }
 
+  if (entry->direct) {
+    if (!LoadLevelsDirect(texture, plan, mipped)) {
+      return false;
+    }
+  } else if (!LoadLevelsFamily(texture, *entry, plan)) {
+    return false;
+  }
+
+  uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  if (load_base) {
+    metal_texture.last_load_submission = submission;
+  }
+  if (load_mips) {
+    metal_texture.last_mip_load_submission = submission;
+  }
+  // Keep the texture out of LRU destruction while its load is in flight
+  // (completion actions can pump mid-frame on upload-ring pressure).
+  texture.MarkAsUsed();
+
+  // No trace recording here (M5 revised by gate-C evidence): the route
+  // disengages while a capture is open, so a load never encodes during a
+  // captured frame and the legacy path records the CPU-oracle read-set.
+  return true;
+}
+
+bool MetalSharedTextureCache::LoadLevelsDirect(
+    Texture& texture, const std::vector<MipLevelPlan>& plan, bool mipped) {
+  MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
+  TextureKey key = texture.key();
+  auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
   // ---- Pre-create and validate EVERY level view BEFORE opening the encoder.
   // A late newTextureView failure must not leave earlier dispatches encoded, so
   // view creation cannot be interleaved with dispatching. ----
@@ -396,21 +487,241 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
   level_views.clear();
+  return true;
+}
 
-  uint64_t submission = submission_provider_ ? submission_provider_() : 0;
-  if (load_base) {
-    metal_texture.last_load_submission = submission;
+bool MetalSharedTextureCache::AllocateScratch(uint32_t size,
+                                              uint32_t alignment,
+                                              uint64_t submission,
+                                              void** buffer_out,
+                                              uint32_t* offset_out) {
+  auto align_up = [](uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); };
+  // 1. Bump inside the buffer already stamped with this submission.
+  for (ScratchBuffer& sb : scratch_) {
+    if (sb.submission != submission || !sb.buffer) {
+      continue;
+    }
+    uint32_t head = align_up(sb.head, alignment);
+    if (uint64_t(head) + size <= sb.size) {
+      sb.head = head + size;
+      *buffer_out = sb.buffer;
+      *offset_out = head;
+      return true;
+    }
   }
-  if (load_mips) {
-    metal_texture.last_mip_load_submission = submission;
+  // 2. Reuse a buffer whose submission the GPU has finished with. A zero
+  //    submission id (S7 tags off) can never be proven complete, so such
+  //    buffers are never reused.
+  const uint64_t completed =
+      completed_submission_provider_ ? completed_submission_provider_() : 0;
+  for (ScratchBuffer& sb : scratch_) {
+    if (!sb.buffer || sb.submission == submission || sb.submission == 0 ||
+        sb.submission > completed || size > sb.size) {
+      continue;
+    }
+    sb.submission = submission;
+    sb.head = size;
+    *buffer_out = sb.buffer;
+    *offset_out = 0;
+    return true;
   }
-  // Keep the texture out of LRU destruction while its load is in flight
-  // (completion actions can pump mid-frame on upload-ring pressure).
-  texture.MarkAsUsed();
+  // 3. Grow the ring, bounded; beyond the bound the caller falls back.
+  if (scratch_.size() >= kScratchBufferMax) {
+    return false;
+  }
+  uint32_t buffer_size = std::max(kScratchBufferSize, align_up(size, 1u << 20));
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  id<MTLBuffer> buffer =
+      [device newBufferWithLength:buffer_size
+                          options:MTLResourceStorageModePrivate];
+  if (!buffer) {
+    return false;
+  }
+  buffer.label = @"shared-texcache load scratch";
+  ScratchBuffer sb;
+  sb.buffer = (__bridge_retained void*)buffer;
+  sb.size = buffer_size;
+  sb.head = size;
+  sb.submission = submission;
+  scratch_.push_back(sb);
+  *buffer_out = sb.buffer;
+  *offset_out = 0;
+  return true;
+}
 
-  // No trace recording here (M5 revised by gate-C evidence): the route
-  // disengages while a capture is open, so a load never encodes during a
-  // captured frame and the legacy path records the CPU-oracle read-set.
+// Buffer-writing families (everything but the direct RGBA8 class): each level
+// is untiled by the upstream load shader into a linear scratch region laid
+// out as the host texture rows (256-aligned pitch), then blitted into the
+// private texture level in the same command buffer. Metal's default hazard
+// tracking orders the compute writes before the blit reads.
+bool MetalSharedTextureCache::LoadLevelsFamily(
+    Texture& texture, const SharedTextureFormatEntry& entry,
+    const std::vector<MipLevelPlan>& plan) {
+  MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
+  TextureKey key = texture.key();
+  auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
+  void* pipeline_ptr = nullptr;
+  TextureCache::LoadShaderIndex load_shader_index = kLoadShaderIndexUnknown;
+  {
+    const char* wanted = nullptr;
+    switch (entry.load_shader) {
+      case SharedLoadFamily::k8bpb:
+        wanted = "texture_load_8bpb_cs";
+        load_shader_index = kLoadShaderIndex8bpb;
+        break;
+      case SharedLoadFamily::k16bpb:
+        wanted = "texture_load_16bpb_cs";
+        load_shader_index = kLoadShaderIndex16bpb;
+        break;
+      case SharedLoadFamily::k32bpb:
+        wanted = "texture_load_32bpb_cs";
+        load_shader_index = kLoadShaderIndex32bpb;
+        break;
+      case SharedLoadFamily::k64bpb:
+        wanted = "texture_load_64bpb_cs";
+        load_shader_index = kLoadShaderIndex64bpb;
+        break;
+    }
+    if (!wanted) {
+      return false;
+    }
+    int index = family_pipelines_.FindIndex(wanted);
+    if (index < 0) {
+      return false;
+    }
+    pipeline_ptr = family_pipelines_.pipeline(size_t(index));
+  }
+  if (!pipeline_ptr) {
+    return false;
+  }
+  const TextureCache::LoadShaderInfo& info =
+      GetLoadShaderInfo(load_shader_index);
+  const uint32_t bpb = entry.bytes_per_block;
+  if (info.bytes_per_host_block != bpb) {
+    return false;  // Tranche-1 families are bit copies: guest block == host.
+  }
+  const uint32_t blocks_per_thread = 1u << info.guest_x_blocks_per_thread_log2;
+
+  // Plan every level's scratch region before encoding anything (atomic
+  // fallback, like the direct path).
+  struct LevelDispatch {
+    MetalLoadShaderPipelines::LoadConstants constants;
+    void* scratch = nullptr;
+    uint32_t scratch_offset = 0;
+    uint32_t host_pitch = 0;
+    uint32_t region_w = 0;
+    uint32_t region_h = 0;
+    uint32_t threads_x = 0;
+  };
+  std::vector<LevelDispatch> dispatches;
+  dispatches.reserve(plan.size());
+  const uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  for (const MipLevelPlan& p : plan) {
+    LevelDispatch d;
+    // The shader reads blocks [0, region) relative to the level's guest
+    // offset; a packed sub-tile origin (px, py) is covered by dispatching the
+    // enclosing region and blitting the sub-rectangle out of it.
+    d.region_w = p.px + p.width;
+    d.region_h = p.py + p.height;
+    uint32_t written_row =
+        ((d.region_w + blocks_per_thread - 1u) / blocks_per_thread) *
+        blocks_per_thread * bpb;
+    d.host_pitch = (written_row + 255u) & ~255u;
+    uint64_t dest_bytes = uint64_t(d.host_pitch) * d.region_h + 256u;
+    if (dest_bytes > kScratchBufferSize) {
+      return false;
+    }
+    if (!AllocateScratch(uint32_t(dest_bytes), 256, submission, &d.scratch,
+                         &d.scratch_offset)) {
+      return false;
+    }
+    // The planner derives pitch_blocks at 32bpp; rescale to this format's
+    // block size (pitch_bytes == pitch_blocks * 4 by construction).
+    uint32_t pitch_blocks = (p.pitch_blocks * 4u) / bpb;
+    d.constants = {};
+    d.constants.is_tiled_3d_endian_scale =
+        1u | (uint32_t(key.endianness) << 2);
+    d.constants.guest_offset = p.guest_offset;
+    d.constants.guest_pitch_aligned = pitch_blocks;
+    d.constants.size_blocks[0] = d.region_w;
+    d.constants.size_blocks[1] = d.region_h;
+    d.constants.size_blocks[2] = 1;
+    d.constants.host_offset = 0;
+    d.constants.host_pitch = d.host_pitch;
+    d.constants.height_texels = d.region_h;
+    d.threads_x = (d.region_w + blocks_per_thread - 1u) / blocks_per_thread;
+    dispatches.push_back(d);
+  }
+
+  void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_() : nullptr;
+  if (!command_buffer_ptr) {
+    return false;
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge id<MTLCommandBuffer>)command_buffer_ptr;
+  id<MTLTexture> base_texture =
+      (__bridge id<MTLTexture>)metal_texture.mtl_texture();
+  if (!base_texture) {
+    return false;
+  }
+  id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+  if (!encoder) {
+    return false;
+  }
+  encoder.label = @"shared-texcache family load";
+  [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
+                                       pipeline_ptr];
+  [encoder setBuffer:(__bridge id<MTLBuffer>)metal_shared_memory.GetBuffer()
+              offset:0
+             atIndex:MetalLoadShaderPipelines::kBufferIndexSource];
+  MTLSize group = MTLSizeMake(MetalLoadShaderPipelines::kThreadgroupSizeX,
+                              MetalLoadShaderPipelines::kThreadgroupSizeY,
+                              MetalLoadShaderPipelines::kThreadgroupSizeZ);
+  for (const LevelDispatch& d : dispatches) {
+    [encoder setBytes:&d.constants
+               length:sizeof(d.constants)
+              atIndex:MetalLoadShaderPipelines::kBufferIndexPushConstants];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)d.scratch
+                offset:d.scratch_offset
+               atIndex:MetalLoadShaderPipelines::kBufferIndexDest];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      (d.threads_x + group.width - 1) /
+                                          group.width,
+                                      (d.region_h + group.height - 1) /
+                                          group.height,
+                                      1)
+            threadsPerThreadgroup:group];
+  }
+  [encoder endEncoding];
+
+  id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+  if (!blit) {
+    return false;
+  }
+  blit.label = @"shared-texcache family load blit";
+  for (size_t i = 0; i < plan.size(); ++i) {
+    const MipLevelPlan& p = plan[i];
+    const LevelDispatch& d = dispatches[i];
+    NSUInteger source_offset =
+        d.scratch_offset + NSUInteger(p.py) * d.host_pitch + NSUInteger(p.px) * bpb;
+    [blit copyFromBuffer:(__bridge id<MTLBuffer>)d.scratch
+               sourceOffset:source_offset
+          sourceBytesPerRow:d.host_pitch
+        sourceBytesPerImage:NSUInteger(d.host_pitch) * p.height
+                 sourceSize:MTLSizeMake(p.width, p.height, 1)
+                  toTexture:base_texture
+           destinationSlice:0
+           destinationLevel:p.host_level
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+  }
+  [blit endEncoding];
+  static uint32_t s_family_logs = 0;
+  if (s_family_logs++ < 16) {
+    XELOGI("MetalSharedTex FAMILY-LOAD fmt={} base={:08X} {}x{} levels={} bpb={}",
+           uint32_t(key.format), key.base_page << 12, key.GetWidth(),
+           key.GetHeight(), plan.size(), bpb);
+  }
+  family_load_count_ += 1;
   return true;
 }
 
@@ -452,8 +763,12 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
     // FULL mip range: a mipped texture served through a single-level view
     // samples only mip 0, which would silently break guest LOD selection.
     NSUInteger level_count = base_texture.mipmapLevelCount;
+    const SharedTextureFormatEntry* entry =
+        FindSharedTextureFormat(texture->key().format);
+    MTLPixelFormat view_format =
+        entry ? MTLPixelFormat(entry->host_format) : MTLPixelFormatRGBA8Unorm;
     id<MTLTexture> view = [base_texture
-        newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+        newTextureViewWithPixelFormat:view_format
                           textureType:MTLTextureType2DArray
                                levels:NSMakeRange(0, level_count)
                               slices:NSMakeRange(0, 1)
@@ -592,8 +907,14 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
           HostSwizzleComponentToMetal((swizzle >> 3) & 0b111),
           HostSwizzleComponentToMetal((swizzle >> 6) & 0b111),
           HostSwizzleComponentToMetal((swizzle >> 9) & 0b111));
+      const SharedTextureFormatEntry* entry =
+          FindSharedTextureFormat(texture->key().format);
+      MTLPixelFormat signed_format =
+          entry && entry->host_format_signed
+              ? MTLPixelFormat(entry->host_format_signed)
+              : MTLPixelFormatRGBA8Snorm;
       id<MTLTexture> view = [base_texture
-          newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Snorm
+          newTextureViewWithPixelFormat:signed_format
                             textureType:MTLTextureType2DArray
                                  levels:NSMakeRange(
                                             0, base_texture.mipmapLevelCount)

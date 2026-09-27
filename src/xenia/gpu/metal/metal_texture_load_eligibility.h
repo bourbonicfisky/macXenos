@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "xenia/gpu/texture_address.h"
+#include "xenia/gpu/metal/metal_shared_texture_format_table.h"
 #include "xenia/gpu/xenos.h"
 
 // Pure (device-free) strict-RGBA8 GPU texture-load contract, proven byte-exact
@@ -178,6 +179,85 @@ inline bool IsStrictRgba8MipRouteEligible(
 // of that contract. (The C1T-R route needs no matching record: it disengages
 // for captured frames, so the legacy path records the CPU-oracle read-set —
 // the gate-C identical-ranges property holds by construction.)
+// ---- Stage-1 widening (optimize-metal-gpu-resident-resolve-coherence):
+// every format in metal_shared_texture_format_table.h, same shape rules as
+// the strict RGBA8 class (tiled, 2D, not stacked, nonzero fetch pitch).
+// Signed bindings are served as views of the same host texture, so the only
+// sign exclusion is kUnsignedBiased (a value-changing class).
+inline bool IsSharedRouteFormat(xenos::TextureFormat format) {
+  return FindSharedTextureFormat(format) != nullptr;
+}
+
+inline bool IsSharedRouteShapeEligible(
+    const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
+    uint32_t height, uint32_t pitch_texels) {
+  if (!fetch.tiled || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+      fetch.stacked) {
+    return false;
+  }
+  if (!fetch.base_address || !width || !height || !pitch_texels) {
+    return false;
+  }
+  return fetch.pitch != 0;
+}
+
+// Single-mip class for any table format.
+inline bool IsSharedRouteEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
+                                  bool is_signed, uint32_t width,
+                                  uint32_t height, uint32_t pitch_texels) {
+  const SharedTextureFormatEntry* entry = FindSharedTextureFormat(fetch.format);
+  if (!entry) {
+    return false;
+  }
+  if (fetch.mip_min_level != 0 || fetch.mip_max_level != 0) {
+    return false;
+  }
+  // Formats with a distinct snorm sibling serve signed bindings through that
+  // view, so the component signs decide only which view a binding gets (a
+  // kSigned component must never reach the unorm view, mirroring the
+  // promoted RGBA8 class). Float formats and formats without a snorm sibling
+  // (RGB10A2) use one host format for every sign, exactly as the legacy
+  // plan does, so their component signs do not gate routing.
+  const bool sign_selects_view = entry->host_format_signed != entry->host_format;
+  if (sign_selects_view) {
+    auto sign_ok = [](xenos::TextureSign s) {
+      return s != xenos::TextureSign::kUnsignedBiased;
+    };
+    if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
+        !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
+      return false;
+    }
+    if (!is_signed) {
+      auto unsigned_ok = [](xenos::TextureSign s) {
+        return s == xenos::TextureSign::kUnsigned ||
+               s == xenos::TextureSign::kGamma;
+      };
+      if (!unsigned_ok(fetch.sign_x) || !unsigned_ok(fetch.sign_y) ||
+          !unsigned_ok(fetch.sign_z) || !unsigned_ok(fetch.sign_w)) {
+        return false;
+      }
+    }
+  }
+  return IsSharedRouteShapeEligible(fetch, width, height, pitch_texels);
+}
+
+// Mipped sibling: the chain has its own guest pointer and the base rules
+// hold for the level-0 shape.
+inline bool IsSharedRouteMipEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
+                                     bool is_signed, uint32_t width,
+                                     uint32_t height, uint32_t pitch_texels) {
+  if (fetch.mip_min_level != 0 || fetch.mip_max_level == 0) {
+    return false;
+  }
+  if (!fetch.mip_address || !fetch.pitch) {
+    return false;
+  }
+  xenos::xe_gpu_texture_fetch_t as_base = fetch;
+  as_base.mip_min_level = 0;
+  as_base.mip_max_level = 0;
+  return IsSharedRouteEligible(as_base, is_signed, width, height, pitch_texels);
+}
+
 inline uint32_t ComputeWatchedBaseBytes(uint32_t pitch_blocks_aligned,
                                         uint32_t blocks_h, uint32_t bpb,
                                         uint32_t base,
