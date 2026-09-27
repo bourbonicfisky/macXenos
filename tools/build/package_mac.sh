@@ -98,12 +98,30 @@ rm -rf "${APP_DIR}"
 mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Frameworks" \
          "${CONTENTS}/Resources/vulkan/icd.d"
 
+# Drop every absolute LC_RPATH the dev build baked in (they point into this
+# checkout); the bundle resolves @rpath through ../Frameworks only. Done per
+# thin slice before lipo: install_name_tool refuses to delete an rpath that
+# is not present in every architecture of a fat file.
+strip_abs_rpaths() {
+  local bin="$1" rp
+  while read -r rp; do
+    [[ "${rp}" == /* ]] || continue
+    install_name_tool -delete_rpath "${rp}" "${bin}"
+  done < <(otool -l "${bin}" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}')
+}
+SLICE_TMP="${DIST_DIR}/slices"
+rm -rf "${SLICE_TMP}"; mkdir -p "${SLICE_TMP}"
+cp "${BIN_PATH}" "${SLICE_TMP}/arm64"; chmod u+w "${SLICE_TMP}/arm64"
+strip_abs_rpaths "${SLICE_TMP}/arm64"
 if [[ "${UNIVERSAL}" -eq 1 ]]; then
   log "Universal 2: lipo arm64 ($(lipo -archs "${BIN_PATH}")) + x86_64 executable"
-  lipo -create "${BIN_PATH}" "${X86_BIN}" -output "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
+  cp "${X86_BIN}" "${SLICE_TMP}/x86_64"; chmod u+w "${SLICE_TMP}/x86_64"
+  strip_abs_rpaths "${SLICE_TMP}/x86_64"
+  lipo -create "${SLICE_TMP}/arm64" "${SLICE_TMP}/x86_64" -output "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
 else
-  cp "${BIN_PATH}" "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
+  cp "${SLICE_TMP}/arm64" "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
 fi
+rm -rf "${SLICE_TMP}"
 [[ -f "${ICON_SRC}" ]] && cp "${ICON_SRC}" "${CONTENTS}/Resources/xenia.icns" \
   || log "warning: no icon at ${ICON_SRC}; bundle will use the generic icon"
 # Credits.rtf is auto-loaded by the standard About panel (Patreon/repo links,
@@ -188,13 +206,6 @@ if otool -L "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | grep -q "@rpath/libdxilconv.dyl
   install_name_tool -id "@rpath/libmetalirconverter.dylib" "${CONTENTS}/Frameworks/libmetalirconverter.dylib"
   METAL_LIBS=(libdxilconv.dylib libmetalirconverter.dylib)
 fi
-
-# Drop every absolute LC_RPATH the dev build baked in (they point into this
-# checkout); the bundle resolves @rpath through ../Frameworks only.
-while read -r rp; do
-  [[ "${rp}" == /* ]] || continue
-  install_name_tool -delete_rpath "${rp}" "${CONTENTS}/MacOS/${BUNDLE_EXEC}"
-done < <(otool -l "${CONTENTS}/MacOS/${BUNDLE_EXEC}" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}')
 
 # ICD manifest pointing at the bundled MoltenVK (relative: icd.d -> Frameworks).
 cat > "${CONTENTS}/Resources/vulkan/icd.d/MoltenVK_icd.json" <<'JSON'
