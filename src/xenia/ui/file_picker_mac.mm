@@ -23,6 +23,9 @@ class MacFilePicker : public FilePicker {
   ~MacFilePicker() override = default;
 
   bool Show(Window* parent_window) override;
+
+ private:
+  bool ShowOnMainThread(Window* parent_window);
 };
 
 std::unique_ptr<FilePicker> FilePicker::Create() {
@@ -30,6 +33,23 @@ std::unique_ptr<FilePicker> FilePicker::Create() {
 }
 
 bool MacFilePicker::Show(Window* parent_window) {
+  // AppKit panels may only be created and run on the main thread. Guest
+  // threads reach here through XamSwapDisc (Emulator::GetNewDiscPath), and
+  // creating the panel off-main raises an NSException that std::terminate
+  // turns into a SIGABRT (Castlevania: Lords of Shadow disc 2, 2026-09-26).
+  // The main thread services its dispatch queue from the AppKit run loop, so
+  // a synchronous hop is safe and keeps the modal semantics the caller wants.
+  if (![NSThread isMainThread]) {
+    __block bool result = false;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      result = ShowOnMainThread(parent_window);
+    });
+    return result;
+  }
+  return ShowOnMainThread(parent_window);
+}
+
+bool MacFilePicker::ShowOnMainThread(Window* parent_window) {
   @autoreleasepool {
     std::vector<std::filesystem::path> results;
 

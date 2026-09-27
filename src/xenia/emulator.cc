@@ -67,6 +67,8 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #endif  // XE_ARCH
 
+DECLARE_bool(headless);
+
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
 UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
 
@@ -1234,6 +1236,11 @@ bool Emulator::RestoreFromFile(const std::filesystem::path& path) {
 const std::filesystem::path Emulator::GetNewDiscPath(
     std::string window_message) {
   std::filesystem::path path = "";
+  if (cvars::headless) {
+    // No UI: an unattended run must not block on a modal picker.
+    XELOGW("GetNewDiscPath: headless, no disc selected");
+    return path;
+  }
 
   auto file_picker = xe::ui::FilePicker::Create();
   file_picker->set_mode(ui::FilePicker::Mode::kOpen);

@@ -12,6 +12,27 @@
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
 
+// -[NSApplication terminate:] ends the process with exit(), which runs static
+// destructors (the global critical region's mutex among them) while guest and
+// host threads are still running; the next lock throws and the process aborts
+// instead of quitting (GTA V under Cmd-Q, 2026-09-26). Cancel AppKit's
+// termination and quit the way the window's close button does: through
+// QuitFromUIThread(), which ends the run loop and lets the app's OnDestroy
+// flush caches and quick_exit without destructors.
+@interface XeMacAppDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, assign) xe::ui::MacWindowedAppContext* context;
+@end
+
+@implementation XeMacAppDelegate
+- (NSApplicationTerminateReply)applicationShouldTerminate:
+    (NSApplication*)sender {
+  if (self.context) {
+    self.context->QuitFromUIThread();
+  }
+  return NSTerminateCancel;
+}
+@end
+
 namespace xe {
 namespace ui {
 
@@ -21,11 +42,24 @@ MacWindowedAppContext::MacWindowedAppContext() {
   // executable rather than a bundle.
   [NSApplication sharedApplication];
   [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+  XeMacAppDelegate* delegate = [[XeMacAppDelegate alloc] init];
+  delegate.context = this;
+  app_delegate_ = (void*)CFBridgingRetain(delegate);
+  [NSApp setDelegate:delegate];
 }
 
 MacWindowedAppContext::~MacWindowedAppContext() {
   // Execute anything still queued without invoking virtual methods.
   ExecutePendingFunctionsFromUIThread();
+  if (app_delegate_) {
+    XeMacAppDelegate* delegate = (__bridge XeMacAppDelegate*)app_delegate_;
+    delegate.context = nullptr;
+    if ([NSApp delegate] == delegate) {
+      [NSApp setDelegate:nil];
+    }
+    CFBridgingRelease(app_delegate_);
+    app_delegate_ = nullptr;
+  }
 }
 
 void MacWindowedAppContext::NotifyUILoopOfPendingFunctions() {

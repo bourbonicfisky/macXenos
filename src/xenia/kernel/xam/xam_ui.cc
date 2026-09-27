@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdlib>
 
 #include "xenia/app/emulator_window.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
 #include "xenia/hid/input_system.h"
@@ -610,9 +612,14 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
     XELOGE("XamShowDirtyDiscErrorUI called (user {}, guest lr {:08X})",
            uint32_t(user_index), ctx ? uint32_t(ctx->lr) : 0u);
   }
+  // exit() runs static destructors (the global critical region's mutex among
+  // them) while guest and host threads are still running; the next lock then
+  // throws and the process aborts (Mafia II add-on disc, 2026-09-26). Quit the
+  // way the app does: flush and quick_exit without destructors.
   if (cvars::headless) {
     assert_always();
-    exit(1);
+    xe::FlushLog();
+    std::quick_exit(1);
     return;
   }
 
@@ -626,9 +633,10 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   xeXamDispatchDialog<MessageBoxDialog>(
       new MessageBoxDialog(imgui_drawer, title, desc, {"OK"}, 0),
       [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
-  // This is death, and should never return.
-  // TODO(benvanik): cleaner exit.
-  exit(1);
+  // This is death, and should never return. See the headless branch above for
+  // why this must not be exit().
+  xe::FlushLog();
+  std::quick_exit(1);
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 

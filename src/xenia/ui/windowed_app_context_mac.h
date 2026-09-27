@@ -27,6 +27,12 @@ class MacWindowedAppContext final : public WindowedAppContext {
 
   // Runs [NSApp run] until QuitFromUIThread is requested.
   void RunMainMacLoop();
+
+ private:
+  // NSApplicationDelegate (retained through CFBridgingRetain) that turns
+  // -[NSApplication terminate:] (Cmd-Q, Dock Quit, Apple Event quit) into
+  // QuitFromUIThread() so the app exits through its own quick_exit path.
+  void* app_delegate_ = nullptr;
 };
 
 }  // namespace ui
