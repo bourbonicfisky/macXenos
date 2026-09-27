@@ -259,6 +259,33 @@ VirtualKey TranslateMacKeyCode(uint16_t key_code) {
       return VirtualKey::kF11;
     case 0x6F:  // kVK_F12
       return VirtualKey::kF12;
+    // Punctuation / OEM keys by physical position (ANSI layout key codes),
+    // matching the Win32 OEM virtual keys the keyboard input driver's default
+    // bindings use (';' = A, ''' = B, ...). Layout-independent like Win32.
+    case 0x29:  // kVK_ANSI_Semicolon
+      return VirtualKey::kOem1;
+    case 0x18:  // kVK_ANSI_Equal
+      return VirtualKey::kOemPlus;
+    case 0x2B:  // kVK_ANSI_Comma
+      return VirtualKey::kOemComma;
+    case 0x1B:  // kVK_ANSI_Minus
+      return VirtualKey::kOemMinus;
+    case 0x2F:  // kVK_ANSI_Period
+      return VirtualKey::kOemPeriod;
+    case 0x2C:  // kVK_ANSI_Slash
+      return VirtualKey::kOem2;
+    case 0x32:  // kVK_ANSI_Grave
+      return VirtualKey::kOem3;
+    case 0x21:  // kVK_ANSI_LeftBracket
+      return VirtualKey::kOem4;
+    case 0x2A:  // kVK_ANSI_Backslash
+      return VirtualKey::kOem5;
+    case 0x1E:  // kVK_ANSI_RightBracket
+      return VirtualKey::kOem6;
+    case 0x27:  // kVK_ANSI_Quote
+      return VirtualKey::kOem7;
+    case 0x0A:  // kVK_ISO_Section (the extra ISO key left of Z / by 1)
+      return VirtualKey::kOem102;
     default:
       return VirtualKey::kNone;
   }
