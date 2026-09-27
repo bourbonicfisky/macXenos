@@ -431,10 +431,17 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 #if XE_PLATFORM_WIN32
   factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
 #endif  // XE_PLATFORM_WIN32
-  factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
-#if XE_GPU_METAL
+  // "any" takes the first backend registered, so the order here is the
+  // default. On Apple Silicon the native Metal path is the product backend;
+  // Intel Macs keep MoltenVK first because Metal on AMD/Intel GPUs has not
+  // been validated. `gpu = vulkan` / `gpu = metal` still select explicitly.
+#if XE_GPU_METAL && XE_ARCH_ARM64
   factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
-#endif  // XE_GPU_METAL
+#endif  // XE_GPU_METAL && XE_ARCH_ARM64
+  factory.Add<gpu::vulkan::VulkanGraphicsSystem>("vulkan");
+#if XE_GPU_METAL && !XE_ARCH_ARM64
+  factory.Add<gpu::metal::MetalGraphicsSystem>("metal");
+#endif  // XE_GPU_METAL && !XE_ARCH_ARM64
   std::unique_ptr<gpu::GraphicsSystem> gpu_implementation =
       factory.Create(gpu_implementation_name);
   if (!gpu_implementation) {
