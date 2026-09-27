@@ -1704,6 +1704,15 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
     return X_STATUS_ABANDONED_WAIT_0;
   }
 
+  // An alertable wait delivers user APCs already queued on this thread before
+  // blocking and returns STATUS_USER_APC without waiting, as
+  // KeDelayExecutionThread already does. Without this, an APC a thread queues
+  // on itself (NtReadFile's completion routine) is never delivered on macOS,
+  // where the wake signal is dropped unless the thread is already inside an
+  // alertable wait (Spider-Man: Web of Shadows, 2026-09-27).
+  if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
+    return X_STATUS_USER_APC;
+  }
   X_STATUS result =
       object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
   if (alertable) {
@@ -1747,6 +1756,10 @@ uint32_t NtWaitForSingleObjectEx(uint32_t object_handle, uint32_t wait_mode,
       kernel_state()->object_table()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    // See xeKeWaitForSingleObject: pending user APCs are delivered first.
+    if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
+      return X_STATUS_USER_APC;
+    }
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable) {
@@ -1818,6 +1831,10 @@ dword_result_t KeWaitForMultipleObjects_entry(
                       false, harr);
     t0 = Clock::QueryHostUptimeMillis();
   }
+  // See xeKeWaitForSingleObject: pending user APCs are delivered first.
+  if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
+    return X_STATUS_USER_APC;
+  }
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
       wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
@@ -1867,6 +1884,10 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
     }
   }
 
+  // See xeKeWaitForSingleObject: pending user APCs are delivered first.
+  if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
+    return X_STATUS_USER_APC;
+  }
   auto result =
       XObject::WaitMultiple(count, reinterpret_cast<XObject**>(&objects[0]),
                             wait_type, 6, wait_mode, alertable, timeout_ptr);
