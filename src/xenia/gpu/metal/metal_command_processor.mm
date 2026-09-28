@@ -2384,6 +2384,22 @@ void MetalCommandProcessor::ArmLazyPublication(PendingWriteback& wb) {
   wb.lazy_armed = 1u;
 }
 
+void MetalCommandProcessor::ArmLazyMemexport(PendingMemexport& me) {
+  if (!memory_ || !me.submission) {
+    return;
+  }
+  metal::MetalLazyPublication::Owner owner;
+  owner.authority_sequence = me.authority_sequence;
+  owner.submission = me.submission;
+  owner.guest_addr = me.base_address;
+  owner.range_bytes = me.size_bytes;
+  owner.linear = true;
+  lazy_publication_.Arm(owner, nullptr, nullptr);
+  memory_->EnablePhysicalMemoryAccessCallbacks(me.base_address, me.size_bytes,
+                                               false, true);
+  me.lazy_armed = 1u;
+}
+
 void MetalCommandProcessor::RearmLazyPublications() {
   if (!memory_) {
     return;
@@ -2392,6 +2408,12 @@ void MetalCommandProcessor::RearmLazyPublications() {
     if (wb.lazy_armed && lazy_publication_.Owns(wb.authority_sequence)) {
       memory_->EnablePhysicalMemoryAccessCallbacks(
           wb.guest_addr, wb.range_bytes(), false, true);
+    }
+  }
+  for (PendingMemexport& me : pending_memexports_) {
+    if (me.lazy_armed && lazy_publication_.Owns(me.authority_sequence)) {
+      memory_->EnablePhysicalMemoryAccessCallbacks(me.base_address,
+                                                   me.size_bytes, false, true);
     }
   }
 }
@@ -8104,6 +8126,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               pending_memexports_.push_back(PendingMemexport{
                   owned.range.start(), owned.range.length(), owned.submission,
                   ++memory_authority_sequence_});
+              if (lazy_read_callback_handle_ && !trace_writer_.is_open() &&
+                  !trace_playback_context()) {
+                // Stage 2: arm the export for demand-driven publication and
+                // retire older armed exports this one fully covers.
+                const uint32_t new_start = owned.range.start();
+                const uint32_t new_end = new_start + owned.range.length();
+                const uint64_t newest_sequence =
+                    pending_memexports_.back().authority_sequence;
+                for (auto it = pending_memexports_.begin();
+                     it != pending_memexports_.end();) {
+                  if (it->authority_sequence != newest_sequence &&
+                      it->lazy_armed && it->base_address >= new_start &&
+                      it->base_address + it->size_bytes <= new_end) {
+                    lazy_publication_.Retire(it->authority_sequence);
+                    it = pending_memexports_.erase(it);
+                  } else {
+                    ++it;
+                  }
+                }
+                ArmLazyMemexport(pending_memexports_.back());
+              }
               return true;
             });
       }
@@ -10632,6 +10675,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       }
       ++outcome.drained_records;
       ++outcome.memexport_records;
+      if (me.lazy_armed) {
+        lazy_publication_.Retire(me.authority_sequence);
+      }
       published_ranges.emplace_back(me.base_address, me.size_bytes);
       outcome.invalidated_entries += result.invalidated_entries;
       // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1). `copied`
@@ -11535,17 +11581,28 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
           break;
         }
       }
+      if (!armed && p.state == metal::TransitState::kPendingMemexport &&
+          p.submission) {
+        for (PendingMemexport& me : pending_memexports_) {
+          if (me.authority_sequence != p.sequence) {
+            continue;
+          }
+          if (!me.lazy_armed) {
+            ArmLazyMemexport(me);
+          }
+          armed = me.lazy_armed != 0;
+          break;
+        }
+      }
       if (armed) {
         continue;
       }
-      // Opportunistic publication for what cannot be armed (staging-path
-      // resolves such as depth, memexports): publish now only if the GPU
-      // has already finished it, otherwise leave it pending for the next
-      // fence packet or swap. No CPU wait is spent at a full-domain
-      // publication; a consumer that needs the bytes earlier still drains
-      // through its own (ranged) request.
-      if (p.state != metal::TransitState::kPendingMemexport && p.submission &&
-          p.submission > completed_now) {
+      // Opportunistic publication for what cannot be armed (untagged
+      // records): publish now only if the GPU has already finished it,
+      // otherwise leave it pending for the next fence packet or swap. No
+      // CPU wait is spent at a full-domain publication; a consumer that
+      // needs the bytes earlier still drains through its own request.
+      if (p.submission && p.submission > completed_now) {
         continue;
       }
       eager.push_back(p);

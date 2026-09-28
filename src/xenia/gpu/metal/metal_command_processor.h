@@ -938,6 +938,8 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t size_bytes;
     uint64_t submission;
     uint64_t authority_sequence;
+    // Stage 2: read-watched; RAM gets the bytes on first CPU touch.
+    uint32_t lazy_armed = 0;
   };
   std::vector<PendingMemexport> pending_memexports_;
   uint64_t memory_authority_sequence_ = 0;
@@ -955,6 +957,7 @@ class MetalCommandProcessor : public CommandProcessor {
   bool lazy_full_domain_request_ = false;
   void RegisterGpuResidentResolve(uint32_t base, uint32_t extent_bytes);
   void ArmLazyPublication(PendingWriteback& wb);
+  void ArmLazyMemexport(PendingMemexport& me);
   void RearmLazyPublications();
   void OnLazyRead(uint32_t physical_address_start, uint32_t length,
                   Memory::PhysicalAccess access);

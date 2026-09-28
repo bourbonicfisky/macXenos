@@ -62,6 +62,8 @@ class MetalLazyPublication {
     uint32_t dest_offset_y = 0;
     uint32_t dest_extent_bytes = 0;
     uint32_t range_bytes = 0;
+    // Memexport output: a plain linear range in the shared buffer.
+    bool linear = false;
   };
 
   struct Stats {
@@ -215,7 +217,20 @@ class MetalLazyPublication {
     const uint32_t page_start = page << kPageShift;
     const uint32_t page_end = page_start + kPageSize;
     uint8_t* ram = translate_physical(o.guest_addr);
-    if (!ram || !shared_contents || !o.bpp) {
+    if (!ram || !shared_contents) {
+      return 0;
+    }
+    if (o.linear) {
+      uint32_t c0 = std::max(o.guest_addr, page_start);
+      uint32_t c1 = std::min(o.guest_addr + o.range_bytes, page_end);
+      if (c0 >= c1) {
+        return 0;
+      }
+      std::memcpy(ram + (c0 - o.guest_addr),
+                  shared_contents + c0, c1 - c0);
+      return c1 - c0;
+    }
+    if (!o.bpp) {
       return 0;
     }
     const uint8_t* src_base = shared_contents + o.guest_addr;
