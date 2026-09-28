@@ -1015,8 +1015,27 @@ TEST_CASE("An all-zero mip region declines before PrepareTransfer",
     REQUIRE(*memory.TranslatePhysical<const uint32_t*>(kGuardBase) != 0u);
     REQUIRE(*memory.TranslatePhysical<const uint32_t*>(kGuardMips) == 0u);
 
+    // Live, RAM is authoritative (and under demand-driven publication may
+    // simply be unpublished), so the routed load serves the texture, zero
+    // mips included -- the same as the legacy cache since 2026-09-18.
+    {
+      Fixture live;
+      REQUIRE(live.init_ok);
+      RegisterRamBackedTarget(*live.legacy, live.snapshot, kGuardBase, kTexW,
+                              kTexH, 0x40000);
+      live.SetFetch(kFetchIndex, fetch);
+      live.Prepare(kFetchIndex);
+      CHECK(live.prepare_transfer_calls == 1u);
+      CHECK(live.cache->GetServedSlot(kFetchIndex) != 0u);
+      live.EndFrame();
+      live.cache->ClearCache();
+      live.legacy->ClearCache();
+    }
+
+    // Trace playback restores all-zero mip pages; there the guard declines.
     Fixture f;
     REQUIRE(f.init_ok);
+    f.cache->SetTracePlayback();
     RegisterRamBackedTarget(*f.legacy, f.snapshot, kGuardBase, kTexW, kTexH,
                             0x40000);
     REQUIRE(f.legacy->ClassifyFetchService(fetch, false) ==
