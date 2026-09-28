@@ -1179,6 +1179,50 @@ static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
   }
 }
 
+uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
+                                                  uint32_t length) {
+  if (!length || !shared_memory_ || !memory_ || trace_writer_.is_open()) {
+    return 0;
+  }
+  id<MTLBuffer> shared = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  if (!shared || uint64_t(offset) + length > shared.length) {
+    return 0;
+  }
+  const void* source = memory_->TranslatePhysical(offset);
+  if (!source) {
+    return 0;
+  }
+  void* cb_ptr = PrepareTransferCommandBuffer();
+  if (!cb_ptr) {
+    return 0;
+  }
+  id<MTLCommandBuffer> command_buffer = (__bridge id<MTLCommandBuffer>)cb_ptr;
+  id<MTLBuffer> staging =
+      [shared.device newBufferWithBytes:source
+                                 length:length
+                                options:MTLResourceStorageModeShared];
+  if (!staging) {
+    return 0;
+  }
+  id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+  if (!blit) {
+    return 0;
+  }
+  blit.label = @"staged hazard upload";
+  [blit copyFromBuffer:staging
+          sourceOffset:0
+              toBuffer:shared
+     destinationOffset:offset
+                  size:length];
+  [blit endEncoding];
+  // The staging buffer lives until the blit has executed.
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    (void)cb;
+    (void)staging;
+  }];
+  return CurrentEncodingSubmission();
+}
+
 void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.
@@ -1435,6 +1479,16 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetHazardFlushCallback([this]() {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kHazardFlush);
   });
+  // Stage 3 (optimize-metal-gpu-resident-resolve-coherence): the hazard
+  // no longer waits. The open buffer is committed (its draws read the old
+  // bytes at execution) and the new bytes ride a blit in the next buffer.
+  shared_memory_->SetHazardCommitCallback([this]() {
+    EndFrameEncoder(metal::SeamBoundaryReason::kHazardFlush);
+  });
+  shared_memory_->SetStagedUploadCallback(
+      [this](uint32_t offset, uint32_t length) {
+        return StageHazardUpload(offset, length);
+      });
   // PP1 + PP2-auto: the shared PrimitiveProcessor normalization authority for
   // routed native restart-disabled line/triangle list/strip draws and
   // auto-indexed triangle fans. Depends on shared_memory_ (constructed above).
@@ -9390,6 +9444,18 @@ bool MetalCommandProcessor::IssueCopy() {
                 const char* v = std::getenv("XE_METAL_GPU_RESOLVE_OVERLAP");
                 return !(v && v[0] == '0' && !v[1]);
               }();
+              // A pending memexport under the destination is buffer-resident
+              // in command order too (the export wrote the shared buffer on
+              // the GPU; its RAM convergence copies from the buffer), so it
+              // orders the same way. Without this the JC2 lighting chain's
+              // resolve into the export region took the host-staged path and
+              // every consumer of it awaited the frame (one 6 ms boundary
+              // per frame). XE_METAL_GPU_RESOLVE_OVERLAP_MEMEXPORT=0 refuses.
+              static const bool s_overlap_memexport = [] {
+                const char* v =
+                    std::getenv("XE_METAL_GPU_RESOLVE_OVERLAP_MEMEXPORT");
+                return !(v && v[0] == '0' && !v[1]);
+              }();
               bool overlapping_pending = false;
               for (const metal::PendingProducer& p :
                    SnapshotPendingProducers()) {
@@ -9398,6 +9464,10 @@ bool MetalCommandProcessor::IssueCopy() {
                 }
                 if (s_overlap_gpu_current &&
                     p.state == metal::TransitState::kGpuCurrentShared) {
+                  continue;
+                }
+                if (s_overlap_gpu_current && s_overlap_memexport &&
+                    p.state == metal::TransitState::kPendingMemexport) {
                   continue;
                 }
                 overlapping_pending = true;

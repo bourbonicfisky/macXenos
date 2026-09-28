@@ -434,8 +434,16 @@ bool MetalSharedMemory::UploadRanges(
   // flush (commit + wait) BEFORE the new bytes land so those draws read the
   // old data. The callback also resets consumed_ranges_.
   bool hazard = false;
+  // True when the overlapping consumer is in the OPEN command buffer: the
+  // staged path must commit it first so the blit orders after it. An
+  // overlap with an already-committed (in-flight) submission, or with an
+  // earlier staged blit, needs no commit: the blit encoded into the open
+  // buffer already executes after them.
+  bool hazard_in_open_buffer = false;
   uint32_t hazard_upload_start = 0, hazard_upload_end = 0;
   uint32_t hazard_consumed_start = 0, hazard_consumed_end = 0;
+  const uint64_t open_submission =
+      submission_provider_ ? submission_provider_() : 0;
   // Experiment (XE_METAL_FLUSH_ALL_UPLOADS): flush before ANY mid-frame
   // invalidating upload once a draw has consumed shared memory this frame,
   // ignoring the overlap test. Over-approximates per-draw serialization for the
@@ -445,32 +453,59 @@ bool MetalSharedMemory::UploadRanges(
       std::getenv("XE_METAL_FLUSH_ALL_UPLOADS") != nullptr;
   if (s_flush_all && !consumed_ranges_.empty()) {
     hazard = true;
+    hazard_in_open_buffer = true;
   }
-  for (uint32_t i = 0; i < num_upload_ranges && !hazard; ++i) {
+  for (uint32_t i = 0; i < num_upload_ranges && !hazard_in_open_buffer; ++i) {
     uint32_t range_start = upload_page_ranges[i].first << page_size_log2();
     uint32_t range_end = range_start
                          + (upload_page_ranges[i].second << page_size_log2());
     for (const auto& consumed : consumed_ranges_) {
       if (range_start < consumed.second && range_end > consumed.first) {
-        hazard = true;
-        hazard_upload_start = range_start;
-        hazard_upload_end = range_end;
-        hazard_consumed_start = consumed.first;
-        hazard_consumed_end = consumed.second;
-        break;
+        if (!hazard) {
+          hazard = true;
+          hazard_upload_start = range_start;
+          hazard_upload_end = range_end;
+          hazard_consumed_start = consumed.first;
+          hazard_consumed_end = consumed.second;
+        }
+        if (!open_submission || consumed.submission >= open_submission) {
+          hazard_in_open_buffer = true;
+          break;
+        }
       }
     }
   }
-  if (hazard && hazard_flush_callback_) {
+  // XE_METAL_HAZARD_STAGED=0 restores the commit + wait for every hazard.
+  static const bool s_hazard_staged = [] {
+    const char* v = std::getenv("XE_METAL_HAZARD_STAGED");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  bool staged = false;
+  if (hazard) {
     static uint32_t s_hazard_flushes = 0;
+    const bool can_stage = s_hazard_staged && open_submission &&
+                           staged_upload_callback_ && hazard_commit_callback_;
     if (s_hazard_flushes++ < 24 || (s_hazard_flushes & 1023) == 0) {
       XELOGI(
-          "MetalSharedMemory: intra-frame rewrite hazard flush #{} upload "
-          "{:08X}-{:08X} over consumed {:08X}-{:08X} ({} consumed ranges)",
-          s_hazard_flushes, hazard_upload_start, hazard_upload_end,
-          hazard_consumed_start, hazard_consumed_end, consumed_ranges_.size());
+          "MetalSharedMemory: intra-frame rewrite hazard #{} ({}) upload "
+          "{:08X}-{:08X} over consumed {:08X}-{:08X} ({} consumed ranges, "
+          "open={})",
+          s_hazard_flushes,
+          can_stage ? (hazard_in_open_buffer ? "commit+stage" : "stage")
+                    : "flush+wait",
+          hazard_upload_start, hazard_upload_end, hazard_consumed_start,
+          hazard_consumed_end, consumed_ranges_.size(),
+          hazard_in_open_buffer ? 1 : 0);
     }
-    hazard_flush_callback_();
+    if (can_stage) {
+      if (hazard_in_open_buffer) {
+        hazard_commit_callback_();
+      }
+      staged = true;
+    } else if (hazard_flush_callback_) {
+      ++hazard_waits_;
+      hazard_flush_callback_();
+    }
   }
   for (uint32_t i = 0; i < num_upload_ranges; ++i) {
     uint32_t upload_start = upload_page_ranges[i].first << page_size_log2();
@@ -547,8 +582,31 @@ bool MetalSharedMemory::UploadRanges(
             upload_start, upload_length, uint64_t(s_upload_watch), wpage,
             IsPageValid(wpage), IsPageGpuWritten(wpage));
       }
-      std::memcpy(buffer_contents_ + upload_start,
-                  memory().TranslatePhysical(upload_start), upload_length);
+      bool copied_direct = true;
+      if (staged) {
+        uint64_t blit_submission =
+            staged_upload_callback_(upload_start, upload_length);
+        if (blit_submission) {
+          // The blit's target is consumed by its submission: a later direct
+          // memcpy over it before the blit executes would be undone by the
+          // blit, so it must stage too (the overlap test above sees this).
+          consumed_ranges_.push_back(ConsumedRange{
+              upload_start, upload_start + upload_length, blit_submission});
+          ++staged_uploads_;
+          staged_upload_bytes_ =
+              SaturatingAdd(staged_upload_bytes_, upload_length);
+          copied_direct = false;
+        } else if (hazard_flush_callback_) {
+          // Could not stage: the historical commit + wait, then the memcpy.
+          ++hazard_waits_;
+          hazard_flush_callback_();
+          staged = false;
+        }
+      }
+      if (copied_direct) {
+        std::memcpy(buffer_contents_ + upload_start,
+                    memory().TranslatePhysical(upload_start), upload_length);
+      }
       // Counted AT the copy, so the number is what moved, not what the mode
       // predicts would move.
       upload_bytes_copied_ =

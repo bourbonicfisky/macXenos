@@ -355,6 +355,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // (metal_seam_timing.h) and is deliberately DEFAULT-FREE: a new call site
   // does not compile until it declares why it closes the frame buffer.
   void EndFrameEncoder(metal::SeamBoundaryReason reason);
+  // Staged hazard upload (see MetalSharedMemory::SetStagedUploadCallback):
+  // copies guest RAM [offset, offset+length) into a staging buffer and
+  // encodes a blit into the shared buffer on the open frame command buffer.
+  uint64_t StageHazardUpload(uint32_t offset, uint32_t length);
 
   // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
   // texture (as depth2d) and writes its value into the R32Float snapshot

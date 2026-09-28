@@ -103,6 +103,25 @@ class MetalSharedMemory : public SharedMemory {
   void SetHazardFlushCallback(std::function<void()> callback) {
     hazard_flush_callback_ = std::move(callback);
   }
+  // Staged (no-wait) hazard upload, stage 3 of
+  // optimize-metal-gpu-resident-resolve-coherence: instead of committing and
+  // WAITING for the frame so the memcpy can land, the open frame command
+  // buffer is committed without a wait (`commit`) and the new bytes travel as
+  // a blit encoded into the next command buffer (`stage`), which executes
+  // after the in-flight readers in queue order. `stage` copies
+  // [offset, offset+length) of guest RAM into a staging buffer, encodes the
+  // blit into the shared buffer and returns the submission it was encoded
+  // into (0 = could not stage; the caller falls back to commit + wait). The
+  // staged range is then recorded as consumed by that submission so a later
+  // direct memcpy over it is itself detected as a hazard until the blit has
+  // executed.
+  void SetHazardCommitCallback(std::function<void()> callback) {
+    hazard_commit_callback_ = std::move(callback);
+  }
+  void SetStagedUploadCallback(
+      std::function<uint64_t(uint32_t offset, uint32_t length)> callback) {
+    staged_upload_callback_ = std::move(callback);
+  }
 
   // RequestRange plus recording [start, start+length) as consumed by the
   // current frame for the hazard detection above.
@@ -256,6 +275,11 @@ class MetalSharedMemory : public SharedMemory {
   std::vector<ConsumedRange> consumed_ranges_;
   std::function<uint64_t()> submission_provider_;
   std::function<void()> hazard_flush_callback_;
+  std::function<void()> hazard_commit_callback_;
+  std::function<uint64_t(uint32_t, uint32_t)> staged_upload_callback_;
+  uint64_t staged_uploads_ = 0;
+  uint64_t staged_upload_bytes_ = 0;
+  uint64_t hazard_waits_ = 0;
 
   // Fixed-size (512 MiB / host page) and installed ONLY in alias mode, which is
   // what makes every other arm structurally silent rather than silent by
