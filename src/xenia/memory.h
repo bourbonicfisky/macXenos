@@ -309,6 +309,10 @@ class PhysicalHeap : public BaseHeap {
   // re-lock. The watch stays armed; TriggerCallbacks makes the final decision.
   void ProvideReadWatchedPage(global_unique_lock_type& global_lock_locked_once,
                               uint32_t virtual_address, bool is_write);
+  // Before a host write through the physical view: provides, as for a write
+  // fault, the pages the range only partly covers, so the write lands over what
+  // they are still waiting for.
+  void ProvideReadWatchedEdgePages(uint32_t virtual_address, uint32_t length);
 
   // The most permissive guest access of any guest page inside a host page
   // (host pages are 16 KiB on arm64 macOS, guest pages 4 KiB in the E0 heap).

@@ -2442,6 +2442,32 @@ void PhysicalHeap::ProvideReadWatchedPage(
   global_lock_locked_once.lock();
 }
 
+void PhysicalHeap::ProvideReadWatchedEdgePages(uint32_t virtual_address,
+                                               uint32_t length) {
+  if (!length || virtual_address < heap_base_ ||
+      virtual_address - heap_base_ >= heap_size_) {
+    return;
+  }
+  length = std::min(length, heap_size_ - (virtual_address - heap_base_));
+  uint32_t host_first = virtual_address - heap_base_ + host_address_offset();
+  uint32_t host_last = host_first + length - 1;
+  uint32_t page_mask = system_page_size_ - 1;
+  bool first_partial = (host_first & page_mask) != 0;
+  bool last_partial = (host_last & page_mask) != page_mask;
+  bool one_page =
+      (host_first >> system_page_shift_) == (host_last >> system_page_shift_);
+  auto provide_page = [&](uint32_t address) {
+    auto global_lock = global_critical_region_.Acquire();
+    ProvideReadWatchedPage(global_lock, address, true);
+  };
+  if (first_partial) {
+    provide_page(virtual_address);
+  }
+  if (last_partial && !(first_partial && one_page)) {
+    provide_page(virtual_address + length - 1);
+  }
+}
+
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect,
