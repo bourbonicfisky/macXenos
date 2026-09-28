@@ -2361,17 +2361,22 @@ bool MetalCommandProcessor::S7TagsOff() {
 }
 
 bool MetalCommandProcessor::SwapLifetimeEnabled() {
+  // DEFAULT ON since the 2026-09-27 counted gate (stage 4 of
+  // optimize-metal-gpu-resident-resolve-coherence); XE_METAL_SWAP_LIFETIME=0
+  // is the exact-0 rollback to the swap-drained frame lifetime.
   static const bool s_enabled = [] {
     const char* value = std::getenv("XE_METAL_SWAP_LIFETIME");
-    return value && value[0] == '1' && !value[1];
+    return !(value && value[0] == '0' && !value[1]);
   }();
   return s_enabled;
 }
 
 bool MetalCommandProcessor::LazyPublishEnabled() {
+  // DEFAULT ON since the 2026-09-27 counted gate; XE_METAL_LAZY_PUBLISH=0 is
+  // the exact-0 rollback to eager swap / fence-packet publication.
   static const bool s_enabled = [] {
     const char* value = std::getenv("XE_METAL_LAZY_PUBLISH");
-    return value && value[0] == '1' && !value[1];
+    return !(value && value[0] == '0' && !value[1]);
   }();
   return s_enabled;
 }
@@ -10446,13 +10451,13 @@ bool MetalCommandProcessor::SharedRouteEligible(
   const bool rgba8_class =
       fetch.format == xenos::TextureFormat::k_8_8_8_8 ||
       fetch.format == xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
-  // XE_METAL_TEX_ROUTE_SIGNED_ALL=1 lifts the signed-RGBA8 corridor (every
-  // signed RGBA8 fetch routes, not only those overlapping a pending
-  // GPU-current record). Off by default until the trace A/B measures the
-  // corridor's historical +-1 LSB drift on the SF4 fixture.
+  // The signed-RGBA8 corridor is lifted by default since the 2026-09-27
+  // counted gate (every signed RGBA8 fetch routes, not only those overlapping
+  // a pending GPU-current record; the SF4 4942 drift is 16 px / MAE 0.0025).
+  // XE_METAL_TEX_ROUTE_SIGNED_ALL=0 restores the corridor.
   static const bool s_signed_all = [] {
     const char* v = std::getenv("XE_METAL_TEX_ROUTE_SIGNED_ALL");
-    return v && v[0] == '1' && !v[1];
+    return !(v && v[0] == '0' && !v[1]);
   }();
   if (corridor_required_out) {
     *corridor_required_out = rgba8_class && is_signed && !s_signed_all;
@@ -12556,12 +12561,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // texture's fetch swizzle (the RequestSwapTexture contract, applied in the
   // refresher), needs no decode. That pulsing turned out to be the title's
   // occlusion queries (invalid-typed fetch constants), not the present, so
-  // the snapshot present for the canonical 8-bit class stays OPT-IN
-  // (XE_METAL_PRESENT_SNAPSHOT=1; headless byte-identical to the RAM decode
-  // on Gears 3 and DOA5) until a live gate covers the RAM-decode titles.
+  // the snapshot present for the canonical 8-bit class is DEFAULT ON since
+  // the 2026-09-27 counted gate (the RAM decode waited on the frame's own
+  // resolve every swap; Gears 3 / DOA5 / VP checked live, headless
+  // byte-identical on Gears 3 and DOA5). XE_METAL_PRESENT_SNAPSHOT=0
+  // restores the RAM-decoded present.
   static const bool s_present_snapshot = [] {
     const char* v = std::getenv("XE_METAL_PRESENT_SNAPSHOT");
-    return v && std::strcmp(v, "1") == 0;
+    return !(v && std::strcmp(v, "0") == 0);
   }();
   if (canonical_ram_backed_snapshot && s_present_snapshot &&
       !partial_ram_backed_snapshot) {

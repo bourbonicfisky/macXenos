@@ -588,7 +588,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // so the "IssueSwap always waits" invariant is asserted rather than assumed.
   bool gamma_ramp_upload_in_flight_ = false;
   // Stage 3 (optimize-metal-gpu-resident-resolve-coherence,
-  // XE_METAL_SWAP_LIFETIME=1): the swap no longer drains the GPU. The frame
+  // XE_METAL_SWAP_LIFETIME, default on, exact-0 rollback): the swap no longer drains the GPU. The frame
   // command buffer is committed without waiting and the CPU waits only for
   // the submission recorded two swaps earlier (bounded run-ahead of two
   // frames). The present's gamma-ramp buffer becomes a ring so its upload
@@ -948,7 +948,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::vector<PendingMemexport> pending_memexports_;
   uint64_t memory_authority_sequence_ = 0;
 
-  // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH=1, exact-1,
+  // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,
   // default OFF until the counted gate). See metal_lazy_publication.h.
   static bool LazyPublishEnabled();
   metal::MetalLazyPublication lazy_publication_;
