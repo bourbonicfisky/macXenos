@@ -161,10 +161,59 @@ inline bool TexRouteAllEnabled() {
   }();
   return s_all;
 }
-inline bool RouteServiceOk(ResolvedFetchService service) {
+// Route-all bisect (SF4 10395 oracle): XE_METAL_ROUTE_SKIP_BASE=<hex,...>
+// keeps the named not-resolve-backed bases on the legacy path at BOTH the
+// dependency declaration and the mask (the two must agree, or a fetch is
+// declared buffer-read and then served from undrained RAM).
+inline bool RouteAllSkipsBase(uint32_t fetch_base) {
+  static const char* s_env = std::getenv("XE_METAL_ROUTE_SKIP_BASE");
+  if (!s_env) {
+    return false;
+  }
+  for (const char* p = s_env; *p;) {
+    char* end;
+    uint32_t v = uint32_t(strtoul(p, &end, 16));
+    if (end == p) {
+      break;
+    }
+    if (v == fetch_base) {
+      return true;
+    }
+    p = (*end == ',') ? end + 1 : end;
+  }
+  return false;
+}
+// XE_METAL_ROUTE_DRAIN_BASE=<hex,...>: bisect lever — the named
+// not-resolve-backed bases still ROUTE at the mask but are declared RAM
+// readers at the dependency site, so their producers are awaited and drained
+// before the load (separates "the loader misreads the bytes" from "the bytes
+// are not there yet at load time").
+inline bool RouteAllDrainsBase(uint32_t fetch_base) {
+  static const char* s_env = std::getenv("XE_METAL_ROUTE_DRAIN_BASE");
+  if (!s_env) {
+    return false;
+  }
+  for (const char* p = s_env; *p;) {
+    char* end;
+    uint32_t v = uint32_t(strtoul(p, &end, 16));
+    if (end == p) {
+      break;
+    }
+    if (v == fetch_base) {
+      return true;
+    }
+    p = (*end == ',') ? end + 1 : end;
+  }
+  return false;
+}
+inline bool RouteServiceOk(ResolvedFetchService service,
+                           uint32_t fetch_base = 0,
+                           bool declaration_site = false) {
   return service == ResolvedFetchService::kRamContent ||
          (TexRouteAllEnabled() &&
-          service == ResolvedFetchService::kNotResolveBacked);
+          service == ResolvedFetchService::kNotResolveBacked &&
+          !RouteAllSkipsBase(fetch_base) &&
+          !(declaration_site && RouteAllDrainsBase(fetch_base)));
 }
 inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
   return f.size_2d.width + 1;
@@ -1488,6 +1537,28 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetStagedUploadCallback(
       [this](uint32_t offset, uint32_t length) {
         return StageHazardUpload(offset, length);
+      });
+  // Straddler fix: uploads copy around pending GPU-current spans (the
+  // pending lists live on this thread, the same one that uploads).
+  shared_memory_->SetGpuCurrentSpanProvider(
+      [this](uint32_t start, uint32_t length,
+             std::vector<std::pair<uint32_t, uint32_t>>* out) {
+        const uint64_t end = uint64_t(start) + length;
+        for (const PendingWriteback& wb : pending_writebacks_) {
+          if (!wb.gpu_current || wb.staging) {
+            continue;
+          }
+          const uint32_t wb_len = wb.range_bytes();
+          if (wb.guest_addr < end && uint64_t(wb.guest_addr) + wb_len > start) {
+            out->emplace_back(wb.guest_addr, wb_len);
+          }
+        }
+        for (const PendingMemexport& me : pending_memexports_) {
+          if (me.base_address < end &&
+              uint64_t(me.base_address) + me.size_bytes > start) {
+            out->emplace_back(me.base_address, me.size_bytes);
+          }
+        }
       });
   // PP1 + PP2-auto: the shared PrimitiveProcessor normalization authority for
   // routed native restart-disabled line/triangle list/strip draws and
@@ -6135,7 +6206,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             fetch_service =
                 texture_cache_->ClassifyFetchService(f, binding.is_signed);
             fetch_buffer_read =
-                (strict_eligible && RouteServiceOk(fetch_service)) ||
+                (strict_eligible &&
+                 RouteServiceOk(fetch_service, f.base_address << 12, true)) ||
                 // Served GPU-side from the registered snapshot: reads neither
                 // guest RAM nor the shared buffer, so it neither needs the
                 // drain nor vetoes ordering for the fetches that do.
@@ -6499,9 +6571,39 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              (corridor_required && !FetchOverlapsPendingGpuCurrent(fetch)))) {
           continue;
         }
-        if (!RouteServiceOk(
-                texture_cache_->ClassifyFetchService(fetch, binding.is_signed))) {
-          continue;
+        {
+          const ResolvedFetchService mask_service =
+              texture_cache_->ClassifyFetchService(fetch, binding.is_signed);
+          if (!RouteServiceOk(mask_service, fetch.base_address << 12)) {
+            continue;
+          }
+          if (mask_service == ResolvedFetchService::kNotResolveBacked) {
+            // Route-all bisect (SF4 10395 oracle): XE_METAL_ROUTE_SKIP_BASE=
+            // <hex,...> keeps the named not-resolve-backed bases on the legacy
+            // path; XE_METAL_ROUTE_ALL_LOG=1 names every routed one (bounded,
+            // unique by base).
+            static const bool s_route_all_log =
+                std::getenv("XE_METAL_ROUTE_ALL_LOG") != nullptr;
+            const uint32_t fetch_base = fetch.base_address << 12;
+            const bool skip = false;  // skips never reach here (RouteServiceOk)
+            if (s_route_all_log) {
+              static std::set<uint32_t> s_seen;
+              if (s_seen.size() < 128 && s_seen.insert(fetch_base).second) {
+                XELOGI(
+                    "MetalRouteAll base={:08X} fmt={} {}x{} pitch={} mips={}-{} "
+                    "mip_addr={:08X} signed={} signs={}{}{}{} endian={} "
+                    "tiled={} skip={}",
+                    fetch_base, uint32_t(fetch.format), fetch_width,
+                    fetch_height, fetch_pitch_texels, fetch.mip_min_level,
+                    fetch.mip_max_level, fetch.mip_address << 12,
+                    binding.is_signed ? 1 : 0, uint32_t(fetch.sign_x),
+                    uint32_t(fetch.sign_y), uint32_t(fetch.sign_z),
+                    uint32_t(fetch.sign_w), uint32_t(fetch.endianness),
+                    uint32_t(fetch.tiled), skip ? 1 : 0);
+              }
+            }
+            (void)skip;
+          }
         }
         // Alias-class census (micro-drift bisect, XE_METAL_TEX_ROUTE_LOG=1):
         // the fields of every masked fmt-50 fetch, bounded.
@@ -9486,8 +9588,27 @@ bool MetalCommandProcessor::IssueCopy() {
               const bool full_rect_dest =
                   dc_pre.offset_x_div_8 == 0 && dc_pre.offset_y_div_8 == 0 &&
                   (uint32_t(dc_pre.pitch_aligned_div_32) << 5) == rw;
-              scatter_eligible =
-                  !overlapping_pending && (!s_fullrect_only || full_rect_dest);
+              // Bisect lever: XE_METAL_SCATTER_SKIP_BASE=<hex,...> sends the
+              // named destinations to the staging + CPU-scatter path.
+              static const char* s_scatter_skip_env =
+                  std::getenv("XE_METAL_SCATTER_SKIP_BASE");
+              bool scatter_skipped = false;
+              if (s_scatter_skip_env) {
+                for (const char* sp = s_scatter_skip_env; *sp;) {
+                  char* end;
+                  uint32_t v = uint32_t(strtoul(sp, &end, 16));
+                  if (end == sp) {
+                    break;
+                  }
+                  if (v == resolve_info.copy_dest_base) {
+                    scatter_skipped = true;
+                    break;
+                  }
+                  sp = (*end == ',') ? end + 1 : end;
+                }
+              }
+              scatter_eligible = !overlapping_pending && !scatter_skipped &&
+                                 (!s_fullrect_only || full_rect_dest);
               if (scatter_eligible &&
                   !shared_memory_->RequestRange(
                       resolve_info.copy_dest_extent_start,
@@ -12119,6 +12240,33 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // XE_METAL_BUFDUMP=<hexbase>,<hexlen>: at every swap, after waiting for the
+  // GPU, write the shared-buffer bytes and the guest-RAM bytes of that range
+  // to /tmp/bufdump_<swap>.{buf,ram} (scatter-vs-RAM oracle for a fixture).
+  {
+    static const std::string s_bufdump = [] {
+      const char* v = std::getenv("XE_METAL_BUFDUMP");
+      return std::string(v ? v : "");
+    }();
+    if (!s_bufdump.empty() && shared_memory_ && memory_) {
+      uint32_t base = uint32_t(strtoul(s_bufdump.c_str(), nullptr, 16));
+      const char* comma = strchr(s_bufdump.c_str(), ',');
+      uint32_t len = comma ? uint32_t(strtoul(comma + 1, nullptr, 16)) : 0x1000;
+      EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+      id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      const uint8_t* bc = b ? static_cast<const uint8_t*>(b.contents) : nullptr;
+      const uint8_t* rc = memory_->TranslatePhysical<const uint8_t*>(base);
+      if (bc && rc) {
+        std::string fb = fmt::format("/tmp/bufdump_{}.buf", swap_count_);
+        std::string fr = fmt::format("/tmp/bufdump_{}.ram", swap_count_);
+        FILE* f = fopen(fb.c_str(), "wb");
+        if (f) { fwrite(bc + base, 1, len, f); fclose(f); }
+        f = fopen(fr.c_str(), "wb");
+        if (f) { fwrite(rc, 1, len, f); fclose(f); }
+        XELOGI("MetalBufDump swap#{} {:08X}+{:X} -> {} / {}", swap_count_, base, len, fb, fr);
+      }
+    }
+  }
   // Cycle the GPU-thread autorelease pool once per frame: drain everything
   // autoreleased while encoding the frame just ended (command buffers,
   // encoders, pass descriptors, label strings — the thread has no run-loop

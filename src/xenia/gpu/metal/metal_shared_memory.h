@@ -122,6 +122,20 @@ class MetalSharedMemory : public SharedMemory {
       std::function<uint64_t(uint32_t offset, uint32_t length)> callback) {
     staged_upload_callback_ = std::move(callback);
   }
+  // GPU-current span provider (straddler fix, stage 4 of
+  // optimize-metal-gpu-resident-resolve-coherence): validity is tracked per
+  // host page (16 KiB on Apple Silicon), so a CPU write to a neighbour in
+  // the same page invalidates the page and the next upload would copy stale
+  // RAM over a GPU-resident resolve / memexport fragment sharing it (SF4
+  // 10395: the two luminance-pyramid resolves). The provider appends the
+  // byte-exact spans of every pending GPU-current record overlapping
+  // [start, start + length); UploadRanges copies around them.
+  using GpuCurrentSpanProvider = std::function<void(
+      uint32_t start, uint32_t length,
+      std::vector<std::pair<uint32_t, uint32_t>>* out)>;
+  void SetGpuCurrentSpanProvider(GpuCurrentSpanProvider provider) {
+    gpu_current_span_provider_ = std::move(provider);
+  }
 
   // RequestRange plus recording [start, start+length) as consumed by the
   // current frame for the hazard detection above.
@@ -277,6 +291,8 @@ class MetalSharedMemory : public SharedMemory {
   std::function<void()> hazard_flush_callback_;
   std::function<void()> hazard_commit_callback_;
   std::function<uint64_t(uint32_t, uint32_t)> staged_upload_callback_;
+  GpuCurrentSpanProvider gpu_current_span_provider_;
+  uint64_t upload_bytes_skipped_gpu_current_ = 0;
   uint64_t staged_uploads_ = 0;
   uint64_t staged_upload_bytes_ = 0;
   uint64_t hazard_waits_ = 0;

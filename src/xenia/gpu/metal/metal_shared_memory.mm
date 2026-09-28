@@ -582,30 +582,74 @@ bool MetalSharedMemory::UploadRanges(
             upload_start, upload_length, uint64_t(s_upload_watch), wpage,
             IsPageValid(wpage), IsPageGpuWritten(wpage));
       }
-      bool copied_direct = true;
-      if (staged) {
-        uint64_t blit_submission =
-            staged_upload_callback_(upload_start, upload_length);
-        if (blit_submission) {
-          // The blit's target is consumed by its submission: a later direct
-          // memcpy over it before the blit executes would be undone by the
-          // blit, so it must stage too (the overlap test above sees this).
-          consumed_ranges_.push_back(ConsumedRange{
-              upload_start, upload_start + upload_length, blit_submission});
-          ++staged_uploads_;
-          staged_upload_bytes_ =
-              SaturatingAdd(staged_upload_bytes_, upload_length);
-          copied_direct = false;
-        } else if (hazard_flush_callback_) {
-          // Could not stage: the historical commit + wait, then the memcpy.
-          ++hazard_waits_;
-          hazard_flush_callback_();
-          staged = false;
+      // Pieces of this upload that are NOT pending GPU-current spans: those
+      // bytes are the GPU's newest and RAM is stale for them (straddler
+      // fix, see SetGpuCurrentSpanProvider).
+      std::vector<std::pair<uint32_t, uint32_t>> pieces;
+      {
+        std::vector<std::pair<uint32_t, uint32_t>> spans;
+        if (gpu_current_span_provider_) {
+          gpu_current_span_provider_(upload_start, upload_length, &spans);
+        }
+        std::sort(spans.begin(), spans.end());
+        uint32_t cursor = upload_start;
+        const uint32_t upload_end = upload_start + upload_length;
+        for (const auto& span : spans) {
+          uint32_t s0 = std::max(span.first, upload_start);
+          uint32_t s1 = std::min(span.first + span.second, upload_end);
+          if (s0 >= s1) {
+            continue;
+          }
+          if (s0 > cursor) {
+            pieces.emplace_back(cursor, s0 - cursor);
+          }
+          cursor = std::max(cursor, s1);
+        }
+        if (cursor < upload_end) {
+          pieces.emplace_back(cursor, upload_end - cursor);
+        }
+        uint64_t skipped = upload_length;
+        for (const auto& piece : pieces) {
+          skipped -= piece.second;
+        }
+        upload_bytes_skipped_gpu_current_ =
+            SaturatingAdd(upload_bytes_skipped_gpu_current_, skipped);
+        static uint32_t s_skip_logs = 0;
+        if (skipped && s_skip_logs++ < 16) {
+          XELOGI(
+              "MetalSharedMemory: upload {:08X}+{:X} skips {} GPU-current "
+              "bytes in {} span(s)",
+              upload_start, upload_length, skipped, spans.size());
         }
       }
-      if (copied_direct) {
-        std::memcpy(buffer_contents_ + upload_start,
-                    memory().TranslatePhysical(upload_start), upload_length);
+      for (const auto& piece : pieces) {
+        const uint32_t piece_start = piece.first;
+        const uint32_t piece_length = piece.second;
+        bool copied_direct = true;
+        if (staged) {
+          uint64_t blit_submission =
+              staged_upload_callback_(piece_start, piece_length);
+          if (blit_submission) {
+            // The blit's target is consumed by its submission: a later
+            // direct memcpy over it before the blit executes would be undone
+            // by the blit, so it must stage too (the overlap test sees it).
+            consumed_ranges_.push_back(ConsumedRange{
+                piece_start, piece_start + piece_length, blit_submission});
+            ++staged_uploads_;
+            staged_upload_bytes_ =
+                SaturatingAdd(staged_upload_bytes_, piece_length);
+            copied_direct = false;
+          } else if (hazard_flush_callback_) {
+            // Could not stage: the historical commit + wait, then the memcpy.
+            ++hazard_waits_;
+            hazard_flush_callback_();
+            staged = false;
+          }
+        }
+        if (copied_direct) {
+          std::memcpy(buffer_contents_ + piece_start,
+                      memory().TranslatePhysical(piece_start), piece_length);
+        }
       }
       // Counted AT the copy, so the number is what moved, not what the mode
       // predicts would move.

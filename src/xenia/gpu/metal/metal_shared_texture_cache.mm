@@ -466,6 +466,18 @@ bool MetalSharedTextureCache::LoadLevelsDirect(
   }
   encoder.label = mipped ? @"shared-texcache direct load (mip chain)"
                          : @"shared-texcache direct load";
+  // XE_METAL_ROUTE_LOAD_LOG=1: every direct load in encode order (bounded),
+  // to interleave with the scatter / draw logs when bisecting staleness.
+  static const bool s_load_log = std::getenv("XE_METAL_ROUTE_LOAD_LOG") != nullptr;
+  if (s_load_log) {
+    static uint32_t s_load_logs = 0;
+    if (s_load_logs++ < 400) {
+      XELOGI("MetalRouteLoad #{} base={:08X} {}x{} levels={} submission={}",
+             s_load_logs, uint32_t(key.base_page) << 12, key.GetWidth(),
+             key.GetHeight(), plan.size(),
+             submission_provider_ ? submission_provider_() : 0);
+    }
+  }
   [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
                                        direct_pipeline_];
   [encoder setBuffer:(__bridge id<MTLBuffer>)metal_shared_memory.GetBuffer()
