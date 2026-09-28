@@ -850,6 +850,9 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   // range count.
   if (texture_cache_) {
     texture_cache_->SetTracePlayback();
+    if (shared_texture_cache_) {
+      shared_texture_cache_->SetTracePlayback();
+    }
   }
   auto publication = metal::DecideRamWritePublication(
       metal::WriterKind::kTraceRestore, base_ptr, length);
@@ -4722,6 +4725,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       preparations.push_back(*preparation);
     }
     MetalMemexportPreparationTarget preparation_target(shared_memory_.get());
+    // GPU-ordered destinations (stage 2 of the gpu-resident coherence
+    // change): when every older overlapping producer is GPU-resident the
+    // export is ordered behind it on the queue instead of waiting for it on
+    // the CPU. XE_METAL_MEMEXPORT_ORDERING=0 restores the await/drain
+    // barrier; capture and playback keep it (the recorded RAM must be
+    // converged).
+    static const bool s_memexport_ordering = [] {
+      const char* g = std::getenv("XE_METAL_GPU_ORDERING");
+      const char* v = std::getenv("XE_METAL_MEMEXPORT_ORDERING");
+      return !(g && g[0] == '0' && !g[1]) && !(v && v[0] == '0' && !v[1]);
+    }();
+    const bool gpu_ordered_destinations = s_memexport_ordering &&
+                                          !trace_writer_.is_open() &&
+                                          !trace_playback_context();
     metal::MemexportDestinationPreparationOutcome outcome =
         metal::PrepareOrderedMemexportDestinations(
             preparations, SnapshotPendingProducers(),
@@ -4743,7 +4760,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                   metal::ZeroCopyCostCounter::kMemexportSelectedPredecessors,
                   uint64_t(selected.selected.size()));
               return ResolvePendingProducerDependencies(selected).drain;
-            });
+            },
+            gpu_ordered_destinations);
+    if (outcome.ordering ==
+        metal::MemexportDestinationOrdering::kOlderProducersGpuOrdered) {
+      static uint64_t s_gpu_ordered_exports = 0;
+      if (++s_gpu_ordered_exports <= 4 ||
+          (s_gpu_ordered_exports & 4095) == 0) {
+        XELOGI(
+            "MetalMemexport: GPU-ordered destination #{} ({} older "
+            "producers, max_order_submission={})",
+            s_gpu_ordered_exports, outcome.decision.selected.size(),
+            outcome.decision.max_order_submission);
+      }
+    }
     // Preparation cost, from the outcome's own facts. The no-older fast path is
     // separated from the barrier above because it is the case that costs
     // nothing, and folding the two together would hide exactly the difference
@@ -6156,11 +6186,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Name those draws' fetches: for each boundary-taking decision at
     // guest-RAM access, log the pending-overlapping fetches' format/serve/
     // eligibility so the widening step is data-named.
-    if (s_gpu_ordering &&
-        texture_request.access == metal::ConsumerAccess::kGuestRam &&
-        !authority_decision.selected.empty()) {
+    // Widened 2026-09-27: every boundary-taking texture decision (either
+    // access mode) is named, so the per-frame texture wait is attributable.
+    if (s_gpu_ordering && !authority_decision.selected.empty() &&
+        authority_decision.action !=
+            metal::AuthorityAction::kOrderAgainstGpuProducers) {
       static uint32_t s_taker_logs = 0;
-      if (s_taker_logs < 32) {
+      if (s_taker_logs < 64) {
         std::string fetches;
         auto census_fetches = [&](MetalShader* shader) {
           if (!shader) return;
@@ -6207,8 +6239,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               ++sel_r;
             }
           }
-          XELOGI("MetalGpuOrderingTaker draw={} sel_r={} sel_m={}:{}",
-                 trace_draw_index_, sel_r, sel_m, fetches);
+          XELOGI("MetalGpuOrderingTaker draw={} access={} await={} sel_r={} "
+                 "sel_m={}:{}",
+                 trace_draw_index_,
+                 texture_request.access == metal::ConsumerAccess::kSharedBuffer
+                     ? "buffer"
+                     : "ram",
+                 authority_decision.await ? 1 : 0, sel_r, sel_m, fetches);
         }
       }
     }
@@ -11935,6 +11972,32 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
   }
   metal::GuestRangeSet requested;
   requested.Add(exact_range);
+  // XE_METAL_HOSTREAD_LOG=1: name the producers a ranged host read converges
+  // (attribution for the per-frame host_cpu_read wait in the seam report).
+  static const bool s_hostread_log =
+      std::getenv("XE_METAL_HOSTREAD_LOG") != nullptr;
+  if (s_hostread_log) {
+    static uint32_t s_logs = 0;
+    metal::ConsumerDecision d = metal::DecideConsumer(
+        metal::ConsumerKind::kHostCpuRead, requested,
+        SnapshotPendingProducers(),
+        completed_submission_.load(std::memory_order_acquire));
+    if (!d.selected.empty() && s_logs++ < 32) {
+      std::string sel;
+      for (const auto& p : d.selected) {
+        sel += fmt::format(
+            " {:08X}(+{}){}sub{}", p.range.start(), p.range.length(),
+            p.state == metal::TransitState::kPendingMemexport
+                ? "M"
+                : (p.state == metal::TransitState::kGpuCurrentShared ? "G"
+                                                                      : "R"),
+            p.submission);
+      }
+      XELOGW("MetalHostRead {:08X}+{} await={} encoding={} producers={}:{}",
+             guest_address, length, d.await ? 1 : 0,
+             CurrentEncodingSubmission(), d.selected.size(), sel);
+    }
+  }
   return ResolveRamConsumerDependencies(metal::ConsumerKind::kHostCpuRead,
                                         requested);
 }

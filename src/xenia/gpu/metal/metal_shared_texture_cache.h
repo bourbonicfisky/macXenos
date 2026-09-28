@@ -75,6 +75,12 @@ class MetalSharedTextureCache : public TextureCache {
   }
   // Newest GPU-completed submission; gates scratch-ring reuse for the
   // buffer-writing load families (stage-1 widening).
+  // Trace playback: replays restore all-zero mip pages, so the routed load
+  // declines mipped textures whose mip region is all zero (the legacy cache's
+  // playback-only guard). Live RAM is authoritative and may also be simply
+  // unpublished under demand-driven publication, so the probe never runs live.
+  void SetTracePlayback() { trace_playback_ = true; }
+
   void SetCompletedSubmissionProvider(std::function<uint64_t()> provider) {
     completed_submission_provider_ = std::move(provider);
   }
@@ -192,6 +198,7 @@ class MetalSharedTextureCache : public TextureCache {
   MetalLoadShaderPipelines family_pipelines_;
   std::function<void*()> prepare_transfer_;
   std::function<uint64_t()> submission_provider_;
+  bool trace_playback_ = false;
   std::function<bool(uint64_t)> submission_fault_query_;
   std::function<uint64_t()> completed_submission_provider_;
   uint64_t last_begun_submission_ = 0;

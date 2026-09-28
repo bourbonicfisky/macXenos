@@ -434,6 +434,8 @@ bool MetalSharedMemory::UploadRanges(
   // flush (commit + wait) BEFORE the new bytes land so those draws read the
   // old data. The callback also resets consumed_ranges_.
   bool hazard = false;
+  uint32_t hazard_upload_start = 0, hazard_upload_end = 0;
+  uint32_t hazard_consumed_start = 0, hazard_consumed_end = 0;
   // Experiment (XE_METAL_FLUSH_ALL_UPLOADS): flush before ANY mid-frame
   // invalidating upload once a draw has consumed shared memory this frame,
   // ignoring the overlap test. Over-approximates per-draw serialization for the
@@ -451,15 +453,22 @@ bool MetalSharedMemory::UploadRanges(
     for (const auto& consumed : consumed_ranges_) {
       if (range_start < consumed.second && range_end > consumed.first) {
         hazard = true;
+        hazard_upload_start = range_start;
+        hazard_upload_end = range_end;
+        hazard_consumed_start = consumed.first;
+        hazard_consumed_end = consumed.second;
         break;
       }
     }
   }
   if (hazard && hazard_flush_callback_) {
     static uint32_t s_hazard_flushes = 0;
-    if (s_hazard_flushes++ < 8) {
-      XELOGI("MetalSharedMemory: intra-frame rewrite hazard flush #{}",
-             s_hazard_flushes);
+    if (s_hazard_flushes++ < 24 || (s_hazard_flushes & 1023) == 0) {
+      XELOGI(
+          "MetalSharedMemory: intra-frame rewrite hazard flush #{} upload "
+          "{:08X}-{:08X} over consumed {:08X}-{:08X} ({} consumed ranges)",
+          s_hazard_flushes, hazard_upload_start, hazard_upload_end,
+          hazard_consumed_start, hazard_consumed_end, consumed_ranges_.size());
     }
     hazard_flush_callback_();
   }

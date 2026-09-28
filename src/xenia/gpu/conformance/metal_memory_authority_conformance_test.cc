@@ -784,7 +784,7 @@ std::vector<MemexportDestinationPreparation> Destinations(
 }  // namespace
 
 TEST_CASE("Authority: the memexport destination ordering vocabulary is "
-          "complete and only the two established verdicts license a store",
+          "complete and only the three established verdicts license a store",
           "[l0][authority][memexport][ordering]") {
   // Every declared value is named, in range, and classified exactly once.
   uint32_t satisfied = 0;
@@ -795,7 +795,7 @@ TEST_CASE("Authority: the memexport destination ordering vocabulary is "
       ++satisfied;
     }
   }
-  REQUIRE(satisfied == 2u);
+  REQUIRE(satisfied == 3u);
   REQUIRE_FALSE(IsMemexportDestinationOrderingValue(
       MemexportDestinationOrdering::kCount));
   REQUIRE_FALSE(MemexportDestinationOrderingSatisfied(
@@ -870,6 +870,56 @@ TEST_CASE("Authority: an older overlapping producer is retired BEFORE the "
   REQUIRE(retire.requests_before == 0u);
   REQUIRE(target.requests.size() == 1u);
   REQUIRE(outcome.prepared());
+}
+
+TEST_CASE("Authority: GPU-resident older producers order a memexport "
+          "destination on the queue without a CPU wait or a drain",
+          "[l0][authority][memexport][ordering]") {
+  // A GPU-current resolve and a pending memexport overlap the destination,
+  // neither complete. With gpu_ordered the store is ordered behind them: no
+  // retire callback, records untouched, pages requested.
+  std::vector<PendingProducer> producers = {
+      MakeProducer(0x5400u, 0x400u, TransitState::kGpuCurrentShared, 7u, 1u),
+      MakeProducer(0x5000u, 0x200u, TransitState::kPendingMemexport, 8u, 2u),
+  };
+  OrderedPreparationRecorder target;
+  RecordingRetire retire;
+  auto outcome = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target, std::ref(retire), /*gpu_ordered=*/true);
+  REQUIRE(outcome.ordering ==
+          MemexportDestinationOrdering::kOlderProducersGpuOrdered);
+  REQUIRE(outcome.decision.action ==
+          AuthorityAction::kOrderAgainstGpuProducers);
+  REQUIRE(outcome.decision.selected.size() == 2u);
+  REQUIRE(outcome.decision.max_order_submission == 8u);
+  REQUIRE(retire.calls == 0u);
+  REQUIRE(outcome.prepared());
+  REQUIRE(target.requests.size() == 1u);
+
+  // The same set without the opt-in keeps the historical await/drain barrier.
+  OrderedPreparationRecorder target_eager;
+  RecordingRetire retire_eager;
+  retire_eager.drained = 2;
+  auto eager = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target_eager, std::ref(retire_eager));
+  REQUIRE(eager.ordering == MemexportDestinationOrdering::kOlderProducersRetired);
+  REQUIRE(retire_eager.calls == 1u);
+
+  // A host-staged pending resolve in the set breaks GPU ordering: the
+  // barrier is taken even with the opt-in.
+  producers.push_back(
+      MakeProducer(0x5600u, 0x100u, TransitState::kPendingResolve, 9u, 3u));
+  OrderedPreparationRecorder target_mixed;
+  RecordingRetire retire_mixed;
+  retire_mixed.drained = 3;
+  auto mixed = PrepareOrderedMemexportDestinations(
+      Destinations({{0x5000u, 0x800u}}), producers, /*completed_submission=*/3u,
+      target_mixed, std::ref(retire_mixed), /*gpu_ordered=*/true);
+  REQUIRE(mixed.ordering == MemexportDestinationOrdering::kOlderProducersRetired);
+  REQUIRE(retire_mixed.calls == 1u);
+  REQUIRE(retire_mixed.selected_sizes[0] == 3u);
 }
 
 TEST_CASE("Authority: a short drain retains the memexport destination and "

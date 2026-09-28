@@ -654,6 +654,11 @@ enum class MemexportDestinationOrdering : uint32_t {
   kNoOlderProducer,
   // Older overlapping producers existed and every one of them retired.
   kOlderProducersRetired,
+  // Older overlapping producers existed, every one of them is GPU-resident
+  // (a GPU-current resolve or a pending memexport in the shared buffer) and
+  // the store is encoded behind them on the same queue: writer chronology is
+  // carried by GPU order, the records stay pending, no CPU wait was spent.
+  kOlderProducersGpuOrdered,
   // Older overlapping producers existed and at least one is STILL PENDING. The
   // destination is not prepared, the pages are not requested, and the caller
   // must fail the draw closed -- encoding the store anyway would leave the
@@ -669,6 +674,7 @@ inline constexpr std::array kMemexportDestinationOrderings = {
     MemexportDestinationOrdering::kNotEvaluated,
     MemexportDestinationOrdering::kNoOlderProducer,
     MemexportDestinationOrdering::kOlderProducersRetired,
+    MemexportDestinationOrdering::kOlderProducersGpuOrdered,
     MemexportDestinationOrdering::kOlderProducersRetained,
 };
 static_assert(kMemexportDestinationOrderings.size() ==
@@ -694,6 +700,7 @@ constexpr bool MemexportDestinationOrderingSatisfied(
       return false;
     case MemexportDestinationOrdering::kNoOlderProducer:
     case MemexportDestinationOrdering::kOlderProducersRetired:
+    case MemexportDestinationOrdering::kOlderProducersGpuOrdered:
       return true;
     case MemexportDestinationOrdering::kCount:
       break;  // not a value
@@ -710,6 +717,8 @@ constexpr const char* MemexportDestinationOrderingName(
       return "no_older_producer";
     case MemexportDestinationOrdering::kOlderProducersRetired:
       return "older_producers_retired";
+    case MemexportDestinationOrdering::kOlderProducersGpuOrdered:
+      return "older_producers_gpu_ordered";
     case MemexportDestinationOrdering::kOlderProducersRetained:
       return "older_producers_retained";
     case MemexportDestinationOrdering::kCount:
@@ -722,16 +731,30 @@ constexpr const char* MemexportDestinationOrderingName(
 // taken first so a draw exporting several ranges resolves its predecessors at a
 // single barrier: preparing the ranges one at a time would let the drain of a
 // later range invalidate pages an earlier range had already requested.
+//
+// `gpu_ordered`: the store executes on the same queue as every GPU-resident
+// producer, so when ALL older overlapping producers are GPU-resident
+// (kGpuCurrentShared, or kPendingMemexport) the decision is
+// kOrderAgainstGpuProducers: no wait, no drain. The shared buffer is the single
+// source of those bytes and the export overwrites it in queue order, so the
+// newest writer wins in the buffer, and every later RAM publication (eager
+// drain or demand fault) copies from the buffer. A host-staged pending resolve
+// in the set breaks the ordering and the historical await/drain applies.
 inline ConsumerDecision DecideMemexportDestinationOrdering(
     const std::vector<MemexportDestinationPreparation>& preparations,
     const std::vector<PendingProducer>& producers,
-    uint64_t completed_submission) {
+    uint64_t completed_submission, bool gpu_ordered = false) {
   GuestRangeSet destinations;
   for (const MemexportDestinationPreparation& preparation : preparations) {
     destinations.Add(preparation.range);
   }
   destinations.Normalize();
-  return DecideConsumer(ConsumerKind::kMemexportDestination, destinations,
+  ConsumerRequest request = ConsumerRequest::Uniform(destinations);
+  if (gpu_ordered) {
+    request.access = ConsumerAccess::kSharedBuffer;
+    request.order_memexport_producers = true;
+  }
+  return DecideConsumer(ConsumerKind::kMemexportDestination, request,
                         producers, completed_submission);
 }
 
@@ -774,7 +797,7 @@ PrepareOrderedMemexportDestinations(
     const std::vector<MemexportDestinationPreparation>& preparations,
     const std::vector<PendingProducer>& producers,
     uint64_t completed_submission, MemexportPreparationTarget& target,
-    RetireOlderProducers&& retire_older) {
+    RetireOlderProducers&& retire_older, bool gpu_ordered = false) {
   MemexportDestinationPreparationOutcome outcome;
   outcome.range_count = static_cast<uint32_t>(preparations.size());
   if (preparations.empty()) {
@@ -789,9 +812,14 @@ PrepareOrderedMemexportDestinations(
     return outcome;
   }
   outcome.decision = DecideMemexportDestinationOrdering(
-      preparations, producers, completed_submission);
+      preparations, producers, completed_submission, gpu_ordered);
   if (outcome.decision.selected.empty()) {
     outcome.ordering = MemexportDestinationOrdering::kNoOlderProducer;
+  } else if (outcome.decision.action ==
+             AuthorityAction::kOrderAgainstGpuProducers) {
+    // GPU order carries the chronology; the older records stay pending and
+    // retire through their ordinary RAM publication.
+    outcome.ordering = MemexportDestinationOrdering::kOlderProducersGpuOrdered;
   } else {
     outcome.drain = retire_older(outcome.decision);
     outcome.ordering =

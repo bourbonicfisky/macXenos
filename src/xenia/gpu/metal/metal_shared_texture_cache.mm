@@ -30,6 +30,10 @@ static_assert(MTLPixelFormatRGBA16Unorm == xe::gpu::metal::kMtlPixelFormatRGBA16
 static_assert(MTLPixelFormatRGBA16Snorm == xe::gpu::metal::kMtlPixelFormatRGBA16Snorm, "");
 static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16Float, "");
 
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
@@ -239,6 +243,25 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
       new MetalTexture(*this, key, (__bridge_retained void*)texture));
 }
 
+namespace {
+// Bounded per-reason log of shared-route load declines (the prepass then
+// reports the fetch as UNSERVED and drains it for the legacy path).
+template <typename Key>  // TextureCache::TextureKey (protected; deduced)
+void NoteDecline(const char* reason, const Key& key) {
+  static std::unordered_map<std::string, uint32_t> s_counts;
+  static std::mutex s_mutex;
+  std::lock_guard<std::mutex> lock(s_mutex);
+  uint32_t n = ++s_counts[reason];
+  if (n <= 4 || (n & 1023) == 0) {
+    XELOGW("MetalSharedTex DECLINE {} #{} fmt={} base={:08X} {}x{} mips={} "
+           "mip_base={:08X}",
+           reason, n, uint32_t(key.format), uint32_t(key.base_page) << 12,
+           key.GetWidth(), key.GetHeight(), key.mip_max_level,
+           uint32_t(key.mip_page) << 12);
+  }
+}
+}  // namespace
+
 bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     Texture& texture, bool load_base, bool load_mips) {
   MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
@@ -247,10 +270,12 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   if (!mipped) {
     // The promoted single-mip class: base-only by CreateTexture's guard.
     if (!load_base || load_mips) {
+      NoteDecline("single-mip-load-shape", key);
       return false;
     }
   }
   if (!load_base && !load_mips) {
+    NoteDecline("no-levels", key);
     return false;
   }
 
@@ -263,16 +288,20 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   // telemetry is evidence, not a substitute -- older or future traces could
   // engage. New-capture mip recording is unaffected (that is the warm sweep,
   // which only records regions already up to date).
-  if (mipped && load_mips) {
+  static const bool s_zero_guard_live =
+      std::getenv("XE_METAL_MIP_ZERO_GUARD_LIVE") != nullptr;
+  if (mipped && load_mips && (trace_playback_ || s_zero_guard_live)) {
     uint32_t mip_addr = uint32_t(key.mip_page) << 12;
     // Bound FIRST: the subtraction below underflows for an out-of-range
     // address, which would produce an enormous probe length.
     if (mip_addr >= SharedMemory::kBufferSize) {
+      NoteDecline("mip-address-out-of-range", key);
       return false;
     }
     const uint32_t* probe = reinterpret_cast<const uint32_t*>(
         shared_memory().guest_memory().TranslatePhysical(mip_addr));
     if (!probe) {
+      NoteDecline("mip-probe-untranslatable", key);
       return false;
     }
     uint32_t probe_words = std::min<uint32_t>(
@@ -287,6 +316,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     if (!any_nonzero) {
       // Zero mip region: decline the whole load so the legacy path applies its
       // own guard and serves the base level only. Atomic fallback.
+      NoteDecline("zero-mip-region", key);
       return false;
     }
   }
@@ -296,6 +326,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   // atomically instead of half-loading a texture. ----
   std::vector<MipLevelPlan> plan;
   if (!PlanLevels(texture, load_base, load_mips, &plan)) {
+    NoteDecline("plan-failed", key);
     return false;
   }
   auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
@@ -311,11 +342,13 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     // GPU work", not "no partial bookkeeping".
     if (!metal_shared_memory.RequestConsumedRange(
             p.consumed_begin, p.consumed_end - p.consumed_begin)) {
+      NoteDecline("consumed-range-refused", key);
       return false;
     }
   }
   const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
   if (!entry) {
+    NoteDecline("format-not-in-table", key);
     return false;
   }
   if (!entry->direct) {
@@ -331,6 +364,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
       if (end <= p.guest_offset ||
           !metal_shared_memory.RequestConsumedRange(
               p.guest_offset, uint32_t(end - p.guest_offset))) {
+        NoteDecline("family-consumed-range-refused", key);
         return false;
       }
     }
@@ -338,9 +372,11 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
 
   if (entry->direct) {
     if (!LoadLevelsDirect(texture, plan, mipped)) {
+      NoteDecline("direct-load-failed", key);
       return false;
     }
   } else if (!LoadLevelsFamily(texture, *entry, plan)) {
+    NoteDecline("family-load-failed", key);
     return false;
   }
 
