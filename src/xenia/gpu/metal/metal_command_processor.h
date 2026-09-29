@@ -946,6 +946,9 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t lazy_armed = 0;
   };
   std::vector<PendingMemexport> pending_memexports_;
+  // Trace playback only: guest ranges this frame's GPU resolves and memexports
+  // wrote (kept over later trace restores; cleared at the frame's swap).
+  std::vector<std::pair<uint32_t, uint32_t>> playback_gpu_written_;
   uint64_t memory_authority_sequence_ = 0;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,

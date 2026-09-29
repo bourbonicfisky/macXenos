@@ -916,6 +916,77 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
                                           texture_cache_.get());
     metal::PublishRamWrite(*publication, target);
   }
+  // The capture's bytes for a range this replay's GPU already produced in the
+  // frame are not this frame's output: a trace records what the CAPTURING
+  // build had published when the capture read the range (SF4 10395: the
+  // luminance pyramid at 19423000 is restored between draws 352 and 354,
+  // after this replay's draw-351 resolve was drained, with the capture's
+  // stale bytes -> the legacy RAM untile samples them -> streaked frame, while
+  // the buffer-served route reads the replay's own resolve). Keep the
+  // replay's GPU-written bytes, as the Vulkan backend does
+  // (InvalidateRangeKeepingGpuWritten). Pending records need nothing here:
+  // their drain publishes the buffer over RAM after the GPU runs them. For
+  // records already drained this frame the shared buffer still holds their
+  // bytes, because this hook runs right after the restore write and before
+  // any upload. XE_METAL_TRACE_RESTORE_CLOBBER=1 restores the old behavior;
+  // XE_METAL_TRACE_RESTORE_LOG=1 names each kept overlap.
+  static const bool s_restore_clobber =
+      std::getenv("XE_METAL_TRACE_RESTORE_CLOBBER") != nullptr;
+  static const bool s_restore_log =
+      std::getenv("XE_METAL_TRACE_RESTORE_LOG") != nullptr;
+  if (s_restore_clobber || playback_gpu_written_.empty() || !shared_memory_ ||
+      !memory_ || !length) {
+    return;
+  }
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  const uint8_t* contents =
+      buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
+  if (!contents) {
+    return;
+  }
+  const uint64_t end = uint64_t(base_ptr) + length;
+  auto pending_over = [&](uint64_t s0, uint64_t s1) {
+    for (const PendingWriteback& wb : pending_writebacks_) {
+      if (wb.gpu_current && !wb.staging && wb.guest_addr < s1 &&
+          uint64_t(wb.guest_addr) + wb.range_bytes() > s0) {
+        return true;
+      }
+    }
+    for (const PendingMemexport& me : pending_memexports_) {
+      if (me.base_address < s1 &&
+          uint64_t(me.base_address) + me.size_bytes > s0) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const auto& written : playback_gpu_written_) {
+    uint64_t s0 = std::max<uint64_t>(written.first, base_ptr);
+    uint64_t s1 =
+        std::min<uint64_t>(uint64_t(written.first) + written.second, end);
+    if (s0 >= s1 || pending_over(s0, s1)) {
+      continue;
+    }
+    uint8_t* ram = memory_->TranslatePhysical<uint8_t*>(uint32_t(s0));
+    if (!ram) {
+      continue;
+    }
+    uint32_t differing = 0;
+    for (uint64_t i = 0; i < s1 - s0; ++i) {
+      differing += ram[i] != contents[s0 + i] ? 1u : 0u;
+    }
+    if (!differing) {
+      continue;
+    }
+    std::memcpy(ram, contents + s0, size_t(s1 - s0));
+    if (s_restore_log) {
+      XELOGW(
+          "MetalTraceRestore before draw={} {:08X}+{:X}: kept {} differing "
+          "bytes of this frame's GPU output at {:08X}+{:X}",
+          trace_draw_index_, base_ptr, length, differing, uint32_t(s0),
+          uint32_t(s1 - s0));
+    }
+  }
 }
 
 void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
@@ -2616,6 +2687,9 @@ void MetalCommandProcessor::RearmLazyPublications() {
 // range watches, and (stage 2) arm demand-driven publication.
 void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
                                                        uint32_t extent_bytes) {
+  if (trace_playback_context()) {
+    playback_gpu_written_.emplace_back(base, extent_bytes);
+  }
   pending_writebacks_.back().gpu_current = 1u;
   // Mark the destination GPU-written so the shared-memory
   // validity model does not upload guest RAM over the freshly
@@ -4399,6 +4473,7 @@ static MetalAutoTraceConfig ParseAutoTraceConfigFromEnv() {
 // would never capture at all. Uses its own monotonic index for cooldown math:
 // swap_count_ does not advance on suppressed frames.
 void MetalCommandProcessor::FinalizeSwapFrame() {
+  playback_gpu_written_.clear();
   uint64_t finalize_index = ++swap_finalize_index_;
   // Seam-timing per-frame emission FROM THE LIFECYCLE BOUNDARY: this runs for
   // suppressed and early-return swaps too, so boundary attribution can never
@@ -8445,6 +8520,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               pending_memexports_.push_back(PendingMemexport{
                   owned.range.start(), owned.range.length(), owned.submission,
                   ++memory_authority_sequence_});
+              if (trace_playback_context()) {
+                playback_gpu_written_.emplace_back(owned.range.start(),
+                                                   owned.range.length());
+              }
               if (lazy_read_callback_handle_ && !trace_writer_.is_open() &&
                   !trace_playback_context()) {
                 // Stage 2: arm the export for demand-driven publication and
