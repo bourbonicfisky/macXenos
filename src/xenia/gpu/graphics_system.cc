@@ -9,6 +9,10 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -128,6 +132,8 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                                     normalized_framerate_limit))
                     : 1.0;
             uint64_t last_frame_time = Clock::QueryGuestTickCount();
+            // Guest tick of the next vblank (Linux/macOS deadline pacing).
+            uint64_t next_vblank_time = 0;
     // Sleep for 90% of the vblank duration on Windows, spin for 10%
     // Linux uses full sleep duration due to scheduler quantum issues
 #if XE_PLATFORM_WIN32
@@ -184,21 +190,59 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
               }
 #endif
 #if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
-              // Linux/macOS: Use simplified timing logic to avoid oversleeping.
-              // macOS (XE_PLATFORM_MAC) is its own platform branch and is NOT
+              // Linux/macOS: pace against a guest-tick deadline. macOS
+              // (XE_PLATFORM_MAC) is its own platform branch and is NOT
               // XE_PLATFORM_LINUX, so without this it would fall through the
               // whole loop with no MarkVblank() and no sleep — a sleepless spin
               // that also never delivers a vblank to the guest (black screen).
-              MarkVblank();
-
-              if (cvars::vsync || normalized_framerate_limit > 0) {
-                uint64_t sleep_duration_ns =
-                    static_cast<uint64_t>(vsync_duration_d * 1000000.0);
-                if (!cvars::vsync && normalized_framerate_limit > 0) {
-                  sleep_duration_ns = 1000000000 / normalized_framerate_limit;
+              //
+              // A flat period sleep per iteration stretches every period by the
+              // wake-up latency and the interrupt dispatch (60 Hz measured as
+              // 56.6 Hz idle and 52-54 Hz with the cores busy on an M4). Sleeping
+              // to the deadline lets a late wake-up shorten the next sleep
+              // instead; falling more than two periods behind restarts the
+              // schedule rather than bursting vblanks to catch up.
+              // XE_VBLANK_FLAT_SLEEP=1 restores the flat sleep (exact rollback).
+              static const bool flat_sleep =
+                  std::getenv("XE_VBLANK_FLAT_SLEEP") != nullptr;
+              if (flat_sleep) {
+                MarkVblank();
+                if (cvars::vsync || normalized_framerate_limit > 0) {
+                  uint64_t sleep_duration_ns =
+                      static_cast<uint64_t>(vsync_duration_d * 1000000.0);
+                  if (!cvars::vsync && normalized_framerate_limit > 0) {
+                    sleep_duration_ns =
+                        1000000000 / normalized_framerate_limit;
+                  }
+                  threading::NanoSleep(sleep_duration_ns);
+                } else {
+                  xe::threading::Sleep(std::chrono::milliseconds(1));
                 }
-                threading::NanoSleep(sleep_duration_ns);
+              } else if (cvars::vsync || normalized_framerate_limit > 0) {
+                double period_ms = vsync_duration_d;
+                if (!cvars::vsync && normalized_framerate_limit > 0) {
+                  period_ms = 1000.0 / double(normalized_framerate_limit);
+                }
+                const uint64_t tick_freq = Clock::guest_tick_frequency();
+                const uint64_t period_ticks = std::max<uint64_t>(
+                    1, uint64_t(double(tick_freq) * period_ms / 1000.0));
+                if (!next_vblank_time) {
+                  next_vblank_time = Clock::QueryGuestTickCount() + period_ticks;
+                }
+                const uint64_t now = Clock::QueryGuestTickCount();
+                if (now < next_vblank_time) {
+                  threading::NanoSleep(int64_t(
+                      double(next_vblank_time - now) * 1000000000.0 /
+                      (double(tick_freq) * Clock::guest_time_scalar())));
+                }
+                MarkVblank();
+                next_vblank_time += period_ticks;
+                const uint64_t after = Clock::QueryGuestTickCount();
+                if (after > next_vblank_time + 2 * period_ticks) {
+                  next_vblank_time = after + period_ticks;
+                }
               } else {
+                MarkVblank();
                 xe::threading::Sleep(std::chrono::milliseconds(1));
               }
 #endif
@@ -344,6 +388,21 @@ void GraphicsSystem::MarkVblank() {
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
+
+  // The delivered rate is what guest pacing actually sees; log it so limiter
+  // drift is measurable in any run without a title being frame-capped.
+  {
+    static uint32_t vblank_count = 0;
+    static auto window_start = std::chrono::steady_clock::now();
+    if (++vblank_count % 1024 == 0) {
+      auto now = std::chrono::steady_clock::now();
+      double seconds =
+          std::chrono::duration<double>(now - window_start).count();
+      window_start = now;
+      XELOGI("GuestVblank: {:.2f} Hz over the last 1024 vblanks",
+             1024.0 / std::max(seconds, 1e-6));
+    }
+  }
 
   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
   //     something wrong and the CP will block waiting for code that
