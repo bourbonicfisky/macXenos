@@ -247,6 +247,20 @@ inline ConsumerDecision DecideConsumer(
   decision.consumer = consumer;
   decision.requested = request.Combined();
   decision.revalidate_gpu_bytes = ConsumerReadsSharedBuffer(consumer);
+  // Fast path, exact: with no intersecting producer nothing is seeded, the
+  // closure adds nothing, and the result is the default no-dependency
+  // decision. Most per-draw texture/vertex queries end here (JC2: 74% of
+  // ~6,300 queries per frame), so skip the selection bookkeeping entirely.
+  bool any_seed = false;
+  for (const PendingProducer& producer : producers) {
+    if (request.ForProducer(producer.state).OverlapsAny(producer.range)) {
+      any_seed = true;
+      break;
+    }
+  }
+  if (!any_seed) {
+    return decision;
+  }
   std::vector<bool> selected(producers.size(), false);
   for (size_t i = 0; i < producers.size(); ++i) {
     const PendingProducer& producer = producers[i];

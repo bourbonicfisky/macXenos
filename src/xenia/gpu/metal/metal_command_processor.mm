@@ -10924,9 +10924,44 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
   // from the two existing producer queues and owns no authority state. The
   // caller executes the promoted one-boundary commit/wait and selective
   // drain policy for the returned decision.
-  return metal::DecideConsumer(
-      consumer, request, SnapshotPendingProducers(),
+  // Cost census (XE_METAL_DECIDE_CENSUS=1, diagnostic): producers scanned,
+  // records selected, and time per consumer query.
+  static const bool s_decide_census =
+      std::getenv("XE_METAL_DECIDE_CENSUS") != nullptr;
+  if (!s_decide_census) {
+    return metal::DecideConsumer(
+        consumer, request, SnapshotPendingProducers(),
+        completed_submission_.load(std::memory_order_acquire));
+  }
+  static uint64_t s_calls = 0, s_producers = 0, s_max_producers = 0,
+                  s_selected = 0, s_nonempty = 0, s_snapshot_ns = 0,
+                  s_decide_ns = 0;
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<metal::PendingProducer> producers = SnapshotPendingProducers();
+  auto t1 = std::chrono::steady_clock::now();
+  metal::ConsumerDecision decision = metal::DecideConsumer(
+      consumer, request, producers,
       completed_submission_.load(std::memory_order_acquire));
+  auto t2 = std::chrono::steady_clock::now();
+  ++s_calls;
+  s_producers += producers.size();
+  s_max_producers = std::max<uint64_t>(s_max_producers, producers.size());
+  s_selected += decision.selected.size();
+  s_nonempty += decision.selected.empty() ? 0 : 1;
+  s_snapshot_ns += uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  s_decide_ns += uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count());
+  if ((s_calls & 65535) == 0) {
+    XELOGI(
+        "MetalDecideCensus: calls={} producers avg {:.1f} max {} | selected "
+        "avg {:.2f} (non-empty {:.1f}%) | snapshot {:.2f} us/call, decide "
+        "{:.2f} us/call",
+        s_calls, double(s_producers) / s_calls, s_max_producers,
+        double(s_selected) / s_calls, 100.0 * s_nonempty / s_calls,
+        s_snapshot_ns / 1000.0 / s_calls, s_decide_ns / 1000.0 / s_calls);
+  }
+  return decision;
 }
 
 metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
