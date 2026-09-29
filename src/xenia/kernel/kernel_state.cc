@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <atomic>
 #include <ranges>
 
 #include "xenia/kernel/kernel_state.h"
@@ -1481,9 +1482,11 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
                                        uint32_t extended_error,
                                        uint32_t length) {
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
-  XOverlappedSetResult(ptr, result);
+  // Result last, so a caller polling it for completion reads a valid length.
   XOverlappedSetExtendedError(ptr, extended_error);
   XOverlappedSetLength(ptr, length);
+  std::atomic_thread_fence(std::memory_order_release);
+  XOverlappedSetResult(ptr, result);
   X_HANDLE event_handle = XOverlappedGetEvent(ptr);
   if (event_handle) {
     auto ev = object_table()->LookupObject<XEvent>(event_handle);

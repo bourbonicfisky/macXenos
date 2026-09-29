@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -484,6 +485,14 @@ dword_result_t NtOpenFile_entry(
 }
 DECLARE_XBOXKRNL_EXPORT1(NtOpenFile, kFileSystem, kImplemented);
 
+// Status last, so a caller polling it for completion reads a valid count.
+static void WriteIoStatus(X_IO_STATUS_BLOCK* status_block, X_STATUS status,
+                          uint32_t information) {
+  status_block->information = information;
+  std::atomic_thread_fence(std::memory_order_release);
+  status_block->status = status;
+}
+
 dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                                 lpvoid_t apc_routine_ptr, lpvoid_t apc_context,
                                 pointer_t<X_IO_STATUS_BLOCK> io_status_block,
@@ -526,15 +535,17 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                hb[14], hb[15]);
       }
       if (io_status_block) {
-        io_status_block->status = result;
-        io_status_block->information = bytes_read;
+        WriteIoStatus(io_status_block, result, bytes_read);
       }
 
       // Queue the APC callback. It must be delivered via the APC mechanism even
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
+      // A caller told PENDING always gets its APC, as on NT, even on failure:
+      // it has no other way to learn the read finished.
+      bool pending = !file->is_synchronous() && result != X_STATUS_END_OF_FILE;
       if ((uint32_t)apc_routine_ptr & ~1) {
-        if (apc_context && result == X_STATUS_SUCCESS) {
+        if (apc_context && (pending || result == X_STATUS_SUCCESS)) {
           auto thread = XThread::GetCurrentThread();
           thread->EnqueueApc(static_cast<uint32_t>(apc_routine_ptr) & ~1u,
                              apc_context, io_status_block, 0);
@@ -637,15 +648,16 @@ dword_result_t NtReadFileScatter_entry(
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
       if (io_status_block) {
-        io_status_block->status = result;
-        io_status_block->information = bytes_read;
+        WriteIoStatus(io_status_block, result, bytes_read);
       }
 
       // Queue the APC callback. It must be delivered via the APC mechanism even
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
+      // An async handle is always told PENDING, and then always gets its APC.
       if ((uint32_t)apc_routine_ptr & ~1) {
-        if (apc_context) {
+        if (apc_context &&
+            (!file->is_synchronous() || result == X_STATUS_SUCCESS)) {
           auto thread = XThread::GetCurrentThread();
           thread->EnqueueApc(static_cast<uint32_t>(apc_routine_ptr) & ~1u,
                              apc_context, io_status_block, 0);
