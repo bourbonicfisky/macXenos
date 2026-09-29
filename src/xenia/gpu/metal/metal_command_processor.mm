@@ -4170,12 +4170,10 @@ void MetalCommandProcessor::EmitSeamTimingReport(const char* site) {
 
 void MetalCommandProcessor::EmitNeedBasedWaitReport(const char* site) {
   const bool enabled = NeedBasedWaitsEnabled();
-  if (!enabled && !need_wait_meter_.AnyActivity()) {
-    // Flag off AND nothing ever reached the corridor: no honest line to print.
-    // A flag-off run that DID serve consumer requests still prints, because the
-    // request denominator is what the ON arm's shares are read against.
-    return;
-  }
+  // Printed even when nothing reached the corridor: "requests=0" is the honest
+  // denominator of a run that never needed a consumer boundary (route-all JC2
+  // serves every texture consumer GPU-ordered), and gate arms read this line as
+  // the flag banner that proves which wait mode ran.
   char buf[512];
   need_wait_meter_.Format(buf, sizeof(buf), enabled);
   // The meter is NOT reset here. Seam timing resets per emission because it
