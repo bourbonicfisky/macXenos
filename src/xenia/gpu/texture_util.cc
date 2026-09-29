@@ -494,6 +494,12 @@ uint32_t GetTiledAddressUpperBound2D(uint32_t right, uint32_t bottom,
   return upper_bound;
 }
 
+static uint64_t SearchTiledAddressUpperBound3D(uint32_t right, uint32_t bottom,
+                                               uint32_t back,
+                                               uint32_t pitch_aligned,
+                                               uint32_t height_aligned,
+                                               uint32_t bytes_per_block_log2);
+
 uint64_t GetTiledAddressUpperBound3D(uint32_t right, uint32_t bottom,
                                      uint32_t back, uint32_t pitch_aligned,
                                      uint32_t height_aligned,
@@ -501,6 +507,38 @@ uint64_t GetTiledAddressUpperBound3D(uint32_t right, uint32_t bottom,
   if (!right || !bottom || !back) {
     return 0;
   }
+  // The exact search costs up to several microseconds, and guest layouts of
+  // the same 3D textures are recomputed for every draw that binds them, so
+  // remember recent shapes per thread.
+  struct Entry {
+    uint32_t right, bottom, back, pitch_aligned, height_aligned;
+    uint32_t bytes_per_block_log2;
+    uint64_t upper_bound;
+  };
+  static thread_local Entry cache[64] = {};
+  uint32_t hash = right * 0x9E3779B1u ^ bottom * 0x85EBCA77u ^
+                  back * 0xC2B2AE3Du ^ pitch_aligned * 0x27D4EB2Fu ^
+                  height_aligned * 0x165667B1u ^ bytes_per_block_log2;
+  Entry& entry = cache[(hash ^ (hash >> 16)) & 63];
+  if (entry.right != right || entry.bottom != bottom || entry.back != back ||
+      entry.pitch_aligned != pitch_aligned ||
+      entry.height_aligned != height_aligned ||
+      entry.bytes_per_block_log2 != bytes_per_block_log2) {
+    entry = {right,          bottom,
+             back,           pitch_aligned,
+             height_aligned, bytes_per_block_log2,
+             SearchTiledAddressUpperBound3D(right, bottom, back, pitch_aligned,
+                                            height_aligned,
+                                            bytes_per_block_log2)};
+  }
+  return entry.upper_bound;
+}
+
+static uint64_t SearchTiledAddressUpperBound3D(uint32_t right, uint32_t bottom,
+                                               uint32_t back,
+                                               uint32_t pitch_aligned,
+                                               uint32_t height_aligned,
+                                               uint32_t bytes_per_block_log2) {
   // Find the highest block address within the last 32 row x 4 slice portion.
   // Addresses increase within aligned runs of 8 blocks walking x, where only
   // x[2:0] changes. Bank/pipe selection can place earlier runs at a higher
