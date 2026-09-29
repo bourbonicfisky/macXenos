@@ -57,11 +57,20 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
   uint32_t start_address = static_cast<uint32_t>(function->address());
   uint32_t end_address = static_cast<uint32_t>(function->end_address());
   uint32_t address = start_address;
+  // Every exit leaves address somewhere different, so track what the walk took.
+  uint32_t last_address = 0;
   uint32_t furthest_target = start_address;
   size_t blocks_found = 0;
   bool in_block = false;
   bool starts_with_mfspr_lr = false;
   while (true) {
+    // Checked before the read, not after the step, so the bound holds even
+    // when it lands below the address the walk started from.
+    if (end_address && address > end_address) {
+      LOGPPC("Ran over function bounds! {:08X}-{:08X}", start_address,
+             end_address);
+      break;
+    }
     uint32_t code =
         xe::load_and_swap<uint32_t>(memory->TranslateVirtual(address));
 
@@ -69,10 +78,10 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
     // 'no really we meant to end after that bl' functions.
     if (!code) {
       LOGPPC("function end {:08X} (0x00000000 read)", address);
-      // Don't include the 0's.
-      address -= 4;
       break;
     }
+
+    last_address = address;
 
     auto opcode = LookupOpcode(code);
 
@@ -254,23 +263,22 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
     }
 
     address += 4;
-    if (end_address && address > end_address) {
-      // Hmm....
-      LOGPPC("Ran over function bounds! {:08X}-{:08X}", start_address,
-             end_address);
-      break;
-    }
   }
 
-  if (end_address && address + 4 < end_address) {
+  if (!last_address) {
+    LOGPPC("function {:08X} has no instructions", start_address);
+    return false;
+  }
+
+  if (end_address && last_address < end_address) {
     // Ran under the expected value - since we probably got the initial bounds
     // from someplace valid (like method hints) this may indicate an error.
     // It's also possible that we guessed in hole-filling and there's another
     // function below this one.
     LOGPPC("Function ran under: {:08X}-{:08X} ended at {:08X}", start_address,
-           end_address, address + 4);
+           end_address, last_address);
   }
-  function->set_end_address(address);
+  function->set_end_address(last_address);
 
   // If there's spare bits at the end, split the function.
   // TODO(benvanik): splitting?
