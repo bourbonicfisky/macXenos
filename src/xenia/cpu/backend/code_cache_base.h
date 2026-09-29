@@ -254,6 +254,7 @@ class CodeCacheBase : public CodeCache {
           generated_code_write_base_ + generated_code_offset_;
 
       size_t high_mark = generated_code_offset_;
+      CheckCapacity(high_mark);
 
       generated_code_map_.emplace_back(
           (uint64_t(code_execute_address - generated_code_execute_base_)
@@ -319,6 +320,7 @@ class CodeCacheBase : public CodeCache {
       generated_code_offset_ += xe::round_up(length, 16);
       high_mark = generated_code_offset_;
     }
+    CheckCapacity(high_mark);
     EnsureCommitted(high_mark);
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
     SetJitWritable();
@@ -373,10 +375,13 @@ class CodeCacheBase : public CodeCache {
   static constexpr size_t kIndirectionTableSize = 0x1FFFFFFF;
 #endif
   static constexpr uintptr_t kIndirectionTableBase = 0x80000000;
-  static constexpr size_t kGeneratedCodeSize = 0x0FFFFFFF;
+  // Encoded slots and x64 rel32 need offsets below 2GB, fast-path slots need
+  // the cache below 4GB.
+  static constexpr size_t kGeneratedCodeSize = 0x3FFFFFFF;
   static constexpr uintptr_t kGeneratedCodeExecuteBase = 0xA0000000;
-  static const uintptr_t kGeneratedCodeWriteBase =
-      kGeneratedCodeExecuteBase + kGeneratedCodeSize + 1;
+  static_assert(kGeneratedCodeSize < 0x80000000);
+  static_assert(kGeneratedCodeExecuteBase + kGeneratedCodeSize <
+                0x100000000ull);
   static constexpr size_t kMaximumFunctionCount = 1000000;
 
   struct UnwindReservation {
@@ -477,19 +482,18 @@ class CodeCacheBase : public CodeCache {
           reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
               mapping_, reinterpret_cast<void*>(kGeneratedCodeExecuteBase),
               kGeneratedCodeSize, xe::memory::PageAccess::kExecuteReadOnly, 0));
-      generated_code_write_base_ =
-          reinterpret_cast<uint8_t*>(xe::memory::MapFileView(
-              mapping_, reinterpret_cast<void*>(kGeneratedCodeWriteBase),
-              kGeneratedCodeSize, xe::memory::PageAccess::kReadWrite, 0));
+      // The write view goes wherever the OS puts it: a fixed address past
+      // the execute view would collide with guest memory at this size.
+      generated_code_write_base_ = reinterpret_cast<uint8_t*>(
+          xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
+                                  xe::memory::PageAccess::kReadWrite, 0));
       if (!generated_code_execute_base_ || !generated_code_write_base_) {
         XELOGE("Unable to allocate code cache generated code storage");
         XELOGE(
-            "This is likely because the {:X}-{:X} and {:X}-{:X} ranges are "
-            "in use by some other system DLL",
+            "This is likely because the {:X}-{:X} range is in use by some "
+            "other system DLL",
             uint64_t(kGeneratedCodeExecuteBase),
-            uint64_t(kGeneratedCodeExecuteBase + kGeneratedCodeSize),
-            uint64_t(kGeneratedCodeWriteBase),
-            uint64_t(kGeneratedCodeWriteBase + kGeneratedCodeSize));
+            uint64_t(kGeneratedCodeExecuteBase + kGeneratedCodeSize));
         return false;
       }
     }
@@ -517,6 +521,15 @@ class CodeCacheBase : public CodeCache {
 
  private:
   Derived& self() { return static_cast<Derived&>(*this); }
+
+  static void CheckCapacity(size_t high_mark) {
+    if (high_mark > kGeneratedCodeSize) {
+      xe::FatalError(fmt::format(
+          "JIT code cache is full ({} MiB). Please report this game to Xenia "
+          "developers.",
+          (kGeneratedCodeSize + 1) >> 20));
+    }
+  }
 
   void EnsureCommitted(size_t high_mark) {
     using namespace xe::literals;
