@@ -2262,6 +2262,32 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
 
   uint32_t system_one = GuestPagenumToSystemPagenum(1);
   for (; i <= system_page_last; ++i) {
+    {
+      // Pages still armed, as most are when a resolve or memexport range is
+      // re-armed every frame, need nothing, so skip a fully armed block.
+      uint32_t block_last = std::min(i | 63, system_page_last);
+      uint64_t block_mask = (~uint64_t(0) >> (63 - (block_last & 63))) &
+                            (~uint64_t(0) << (i & 63));
+      const SystemPageFlagsBlock& block = sys_page_flags[i >> 6];
+      uint64_t armed = ~uint64_t(0);
+      if constexpr (enable_invalidation_notifications) {
+        armed &= block.notify_on_invalidation;
+      }
+      if constexpr (enable_data_providers) {
+        armed &= block.notify_on_read;
+      }
+      if ((armed & block_mask) == block_mask) {
+        if (protect_system_page_first != UINT32_MAX) {
+          xe::memory::Protect(
+              protect_base + (protect_system_page_first << system_page_shift_),
+              (i - protect_system_page_first) << system_page_shift_,
+              protect_access);
+          protect_system_page_first = UINT32_MAX;
+        }
+        i = block_last;
+        continue;
+      }
+    }
     // Check if need to enable callbacks for the page and raise its protection.
     //
     // If enabling invalidation notifications:
