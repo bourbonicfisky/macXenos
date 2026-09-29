@@ -1562,7 +1562,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // (pow2-rounded, 32-block-aligned, small levels packed into a tail —
   // texture_util::GetGuestTextureLayout). Serving mip 0 only point/linear
   // aliases every minified texture (JC2 cloth moire). 2D only for now.
-  uint32_t mip_addr = fetch.mip_address << 12;
+  // The page comes from the same normalization the key used: when level 0 is
+  // already the packed tail, D3D leaves mip_address at 0 and the mips share
+  // the tail at the base address (texture_util, canary ace153cb8).
+  uint32_t mip_page = 0;
+  texture_util::GetSubresourcesFromFetchConstant(
+      fetch, nullptr, nullptr, nullptr, nullptr, &mip_page, nullptr, nullptr);
+  uint32_t mip_addr = mip_page << 12;
   uint32_t host_levels = 1;
   // A/B: XE_METAL_NO_MIPS=1 disables mip upload; XE_METAL_NO_PACKED_MIPS=1
   // uploads only the levels before the packed tail.

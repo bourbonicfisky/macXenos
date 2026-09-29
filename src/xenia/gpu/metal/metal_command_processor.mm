@@ -670,8 +670,14 @@ metal::FetchGuestRanges ComputeFetchGuestRanges(
   uint32_t base_addr = f.base_address << 12;
   r.base_begin = base_addr;
   r.base_end = clamp_end(base_addr, lay.base.level_data_extent_bytes);
-  if (f.mip_max_level > 0 && lay.mips_total_extent_bytes) {
-    uint32_t mip_addr = f.mip_address << 12;
+  // The mip chain's page as the upload sees it: absent when normalization
+  // drops it (a raw mip_max_level with no mip page used to yield a range at
+  // physical 0), and the base page when level 0 is the packed tail.
+  uint32_t mip_page = 0;
+  texture_util::GetSubresourcesFromFetchConstant(
+      f, nullptr, nullptr, nullptr, nullptr, &mip_page, nullptr, nullptr);
+  if (f.mip_max_level > 0 && mip_page && lay.mips_total_extent_bytes) {
+    uint32_t mip_addr = mip_page << 12;
     r.mip_begin = mip_addr;
     r.mip_end = clamp_end(mip_addr, lay.mips_total_extent_bytes);
   }
