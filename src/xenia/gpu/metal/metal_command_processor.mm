@@ -150,14 +150,29 @@ namespace gpu {
 namespace metal {
 
 namespace {
-// XE_METAL_TEX_ROUTE_ALL=1 (exact-1, default OFF): the shared-buffer GPU load
-// route also serves fetches that are not resolve-backed (ordinary textures
-// and memexport-produced ones such as JC2's shadow map), the upstream D3D12
-// model where every texture is loaded from shared memory on the GPU.
+// Route-all (DEFAULT ON since 2026-09-29): the shared-buffer GPU load route
+// also serves fetches that are not resolve-backed (ordinary textures and
+// memexport-produced ones such as JC2's shadow map), the upstream D3D12 model
+// where every texture is loaded from shared memory on the GPU. JC2 15.3 ->
+// 22.9 fps live; 0 px vs the legacy path on all 40 renderable corpus traces
+// once playback stopped clobbering in-frame output (the SF4 10395 "whiteout"
+// was that artifact). XE_METAL_TEX_ROUTE_ALL=0 is the exact rollback.
 inline bool TexRouteAllEnabled() {
   static const bool s_all = [] {
     const char* v = std::getenv("XE_METAL_TEX_ROUTE_ALL");
-    return v && v[0] == '1' && !v[1];
+    if (!v || !v[0]) {
+      return true;
+    }
+    if (v[0] == '0' && !v[1]) {
+      return false;
+    }
+    if (!(v[0] == '1' && !v[1])) {
+      XELOGW(
+          "XE_METAL_TEX_ROUTE_ALL='{}' is malformed; failing open to the "
+          "default (on; use 0 or 1)",
+          v);
+    }
+    return true;
   }();
   return s_all;
 }
