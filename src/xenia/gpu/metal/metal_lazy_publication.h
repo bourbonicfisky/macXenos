@@ -177,6 +177,39 @@ class MetalLazyPublication {
     return it != owner_pages_.end() && !it->second.empty();
   }
 
+  // Returns the oldest armed owner registered before `sequence` whose byte
+  // range overlaps [phys_start, phys_start + length), or 0. Such an owner's
+  // first-access copy would land over a newer record's bytes published to RAM
+  // in that range (memexport/resolve ordering census).
+  uint64_t OldestOwnerBefore(uint32_t phys_start, uint32_t length,
+                             uint64_t sequence) const {
+    if (!length) {
+      return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t oldest = 0;
+    uint64_t end = uint64_t(phys_start) + length;
+    uint32_t first = phys_start >> kPageShift;
+    uint32_t last = uint32_t((end - 1) >> kPageShift);
+    for (uint32_t page = first; page <= last; ++page) {
+      auto it = pages_.find(page);
+      if (it == pages_.end()) {
+        continue;
+      }
+      for (const Owner& owner : it->second) {
+        if (owner.authority_sequence >= sequence ||
+            (oldest && owner.authority_sequence >= oldest)) {
+          continue;
+        }
+        uint64_t owner_end = uint64_t(owner.guest_addr) + owner.range_bytes;
+        if (owner.guest_addr < end && phys_start < owner_end) {
+          oldest = owner.authority_sequence;
+        }
+      }
+    }
+    return oldest;
+  }
+
   // Fault path. `wait_for_submission(submission)` returns true once the
   // owner's submission has completed on the GPU (false if it cannot be
   // waited for, e.g. not yet committed). `shared_contents` is the shared

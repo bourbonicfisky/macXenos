@@ -1565,6 +1565,44 @@ bool MetalCommandProcessor::SetupContext() {
             out->emplace_back(me.base_address, me.size_bytes);
           }
         }
+        // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a pending span the
+        // lazy table no longer owns was already published to RAM, so RAM and
+        // the buffer agree unless the CPU wrote after the publication. A
+        // difference there is a CPU write the upload skip keeps from the GPU.
+        static const bool s_skip_census =
+            std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
+        if (s_skip_census && !out->empty() && lazy_read_callback_handle_) {
+          id<MTLBuffer> buffer =
+              (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          const uint8_t* contents =
+              buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
+          static uint64_t s_unowned_spans = 0, s_realized = 0;
+          for (const auto& span : *out) {
+            uint32_t s0 = std::max(span.first, start);
+            uint32_t s1 = uint32_t(
+                std::min<uint64_t>(uint64_t(span.first) + span.second, end));
+            if (!contents || s0 >= s1 ||
+                lazy_publication_.OldestOwnerBefore(s0, s1 - s0, UINT64_MAX)) {
+              continue;
+            }
+            const uint8_t* ram = memory_->TranslatePhysical<const uint8_t*>(s0);
+            uint32_t differing = 0;
+            for (uint32_t i = 0; ram && i < s1 - s0; ++i) {
+              differing += ram[i] != contents[s0 + i] ? 1u : 0u;
+            }
+            ++s_unowned_spans;
+            if (differing) {
+              ++s_realized;
+            }
+            if (differing || s_unowned_spans <= 16) {
+              XELOGW(
+                  "MetalSkipCensus: upload {:08X}+{:X} skips unowned pending "
+                  "span {:08X}+{:X}: {} bytes differ (realized {}/{} spans)",
+                  start, length, s0, s1 - s0, differing, s_realized,
+                  s_unowned_spans);
+            }
+          }
+        }
       });
   // PP1 + PP2-auto: the shared PrimitiveProcessor normalization authority for
   // routed native restart-disabled line/triangle list/strip draws and
@@ -2468,6 +2506,22 @@ void MetalCommandProcessor::LazyReadCallbackThunk(
 void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
                                        uint32_t length,
                                        Memory::PhysicalAccess access) {
+  // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a CPU write or a release
+  // over bytes a pending record still owns leaves that record's upload skip
+  // span describing bytes that are no longer the newest.
+  static const bool s_cpu_census =
+      std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
+  if (s_cpu_census && access != Memory::PhysicalAccess::kRead &&
+      lazy_publication_.OldestOwnerBefore(physical_address_start, length,
+                                          UINT64_MAX)) {
+    static std::atomic<uint64_t> s_cpu_over_owned{0};
+    uint64_t n = ++s_cpu_over_owned;
+    if (n <= 50 || (n & 1023) == 0) {
+      XELOGW("MetalLazyCpuCensus #{}: CPU {} over owned bytes {:08X}+{:X}", n,
+             access == Memory::PhysicalAccess::kDiscard ? "discard" : "write",
+             physical_address_start, length);
+    }
+  }
   if (access == Memory::PhysicalAccess::kDiscard) {
     lazy_publication_.DropRange(physical_address_start, length);
     return;
@@ -2609,6 +2663,67 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
           it->gpu_current && it->lazy_armed && !it->staging &&
           it->guest_addr >= new_start &&
           it->guest_addr + it->range_bytes() <= new_end) {
+        // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): byte-range nesting
+        // does not imply the newer rectangle rewrote the older one's texels
+        // (sub-rectangles at one base, different offsets). Count retires the
+        // geometry cannot prove superseded.
+        static const bool s_retire_census =
+            std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
+        if (s_retire_census) {
+          const PendingWriteback& nw = pending_writebacks_.back();
+          auto pitch = [](const PendingWriteback& w) {
+            return w.dest_pitch_aligned ? w.dest_pitch_aligned
+                                        : ((w.width + 31u) & ~31u);
+          };
+          // A tiled resolve whose rectangle is its whole pitch from row 0 in
+          // whole 32-row bands writes every byte of its extent.
+          bool newer_whole_extent =
+              nw.dest_offset_x == 0 && nw.dest_offset_y == 0 &&
+              nw.width == pitch(nw) && (nw.height & 31u) == 0;
+          // Otherwise same pitch and bpp with a base offset of whole 32x32
+          // tiles: tiled addresses are linear in the tile index and the
+          // bank/pipe bits only see (x >> 3) & 3 and y & 24, which whole-tile
+          // shifts leave unchanged, so the older rectangle sits at
+          // (+shift_x, +shift_y) in the newer record's frame.
+          bool contained = newer_whole_extent;
+          const uint32_t tile_bytes = 32u * 32u * nw.bpp;
+          const uint32_t tiles_per_row = pitch(nw) / 32u;
+          if (!contained && it->bpp == nw.bpp && pitch(*it) == pitch(nw) &&
+              tile_bytes && tiles_per_row && it->guest_addr >= nw.guest_addr &&
+              (it->guest_addr - nw.guest_addr) % tile_bytes == 0) {
+            uint32_t tiles = (it->guest_addr - nw.guest_addr) / tile_bytes;
+            uint32_t shift_x = tiles % tiles_per_row * 32u;
+            uint32_t shift_y = tiles / tiles_per_row * 32u;
+            contained =
+                it->dest_offset_x + shift_x >= nw.dest_offset_x &&
+                it->dest_offset_x + shift_x + it->width <=
+                    nw.dest_offset_x + nw.width &&
+                it->dest_offset_y + shift_y >= nw.dest_offset_y &&
+                it->dest_offset_y + shift_y + it->height <=
+                    nw.dest_offset_y + nw.height;
+          }
+          static uint64_t s_retires = 0, s_unproven = 0;
+          ++s_retires;
+          if (!contained) {
+            ++s_unproven;
+            if (s_unproven <= 100) {
+              XELOGW(
+                  "MetalLazyRetireCensus #{} swap#{}: retired {:08X} {}x{} "
+                  "off=({},{}) bpp={} pitch={} under {:08X} {}x{} off=({},{}) "
+                  "bpp={} pitch={}",
+                  s_unproven, swap_count_, it->guest_addr, it->width,
+                  it->height, it->dest_offset_x, it->dest_offset_y, it->bpp,
+                  pitch(*it), nw.guest_addr, nw.width, nw.height,
+                  nw.dest_offset_x, nw.dest_offset_y, nw.bpp, pitch(nw));
+            }
+          }
+          if ((s_retires & 1023) == 1) {
+            XELOGI(
+                "MetalLazyRetireCensus summary: {} covered retires, {} not "
+                "provably superseded",
+                s_retires, s_unproven);
+          }
+        }
         lazy_publication_.Retire(it->authority_sequence);
         it = pending_writebacks_.erase(it);
       } else {
@@ -11636,6 +11751,47 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     }
     ++outcome.drained_records;
     ++outcome.resolve_records;
+    // Ordering census (XE_METAL_LAZY_ORDER_CENSUS=1, diagnostic): a staging
+    // resolve writes RAM, not the shared buffer, so an OLDER record still
+    // armed for lazy publication over the same bytes would copy its buffer
+    // bytes over this newer RAM content on the first access.
+    // =selftest reports any overlapping armed owner regardless of age (the
+    // positive control that the query sees live owners at all).
+    static const char* s_lazy_order_census =
+        std::getenv("XE_METAL_LAZY_ORDER_CENSUS");
+    if (s_lazy_order_census && !wb.gpu_current) {
+      static const bool s_selftest =
+          std::strcmp(s_lazy_order_census, "selftest") == 0;
+      static uint64_t s_order_checked = 0;
+      static uint64_t s_order_hazards = 0;
+      uint64_t older = lazy_publication_.OldestOwnerBefore(
+          wb.guest_addr, wb.range_bytes(),
+          s_selftest ? UINT64_MAX : wb.authority_sequence);
+      ++s_order_checked;
+      if (older) {
+        ++s_order_hazards;
+      }
+      if ((s_order_checked & 255) == 1) {
+        XELOGI(
+            "MetalLazyOrderCensus summary: {} staging resolve publications "
+            "checked, {} over an armed older owner{}",
+            s_order_checked, s_order_hazards, s_selftest ? " (selftest)" : "");
+      }
+      if (older && s_order_hazards <= 200) {
+        const char* older_kind = "resolve";
+        for (const PendingMemexport& me : pending_memexports_) {
+          if (me.authority_sequence == older) {
+            older_kind = "memexport";
+            break;
+          }
+        }
+        XELOGW(
+            "MetalLazyOrderCensus #{} swap#{}: staging resolve {:08X}+{:X} "
+            "seq={} published over armed older {} seq={}",
+            s_order_hazards, swap_count_, wb.guest_addr, wb.range_bytes(),
+            wb.authority_sequence, older_kind, older);
+      }
+    }
     if (wb.lazy_armed) {
       lazy_publication_.Retire(wb.authority_sequence);
       wb.lazy_armed = 0u;

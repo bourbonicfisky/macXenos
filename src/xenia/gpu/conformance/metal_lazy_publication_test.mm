@@ -184,6 +184,42 @@ TEST_CASE("lazy publication: OnAccess copies the touched page of a tiled owner",
   CHECK(!table.Owns(7));
 }
 
+TEST_CASE("lazy publication: OldestOwnerBefore finds older overlapping owners",
+          "[l0][metal][lazypub]") {
+  MetalLazyPublication table;
+  auto linear = [](uint64_t sequence, uint32_t addr, uint32_t bytes) {
+    MetalLazyPublication::Owner owner;
+    owner.authority_sequence = sequence;
+    owner.submission = 1;
+    owner.guest_addr = addr;
+    owner.range_bytes = bytes;
+    owner.linear = true;
+    return owner;
+  };
+  // Partial-page owners accumulate; a whole-page linear owner would replace.
+  table.Arm(linear(5, 0x10100, 0x1E00), nullptr, nullptr);
+  table.Arm(linear(3, 0x10800, 0x100), nullptr, nullptr);
+  table.Arm(linear(9, 0x30000, 0x100), nullptr, nullptr);
+
+  // Overlapping and older: the oldest of the two wins.
+  REQUIRE(table.OldestOwnerBefore(0x10800, 0x80, 7) == 3);
+  REQUIRE(table.OldestOwnerBefore(0x11000, 0x80, 7) == 5);
+  // Not older (equal or newer sequence) is never reported.
+  REQUIRE(table.OldestOwnerBefore(0x11000, 0x80, 5) == 0);
+  REQUIRE(table.OldestOwnerBefore(0x30000, 0x100, 9) == 0);
+  // Same page, disjoint bytes: byte overlap, not page overlap, decides.
+  REQUIRE(table.OldestOwnerBefore(0x30800, 0x100, 10) == 0);
+  REQUIRE(table.OldestOwnerBefore(0x300F0, 0x100, 10) == 9);
+  // Adjacent past the end.
+  REQUIRE(table.OldestOwnerBefore(0x11F00, 0x100, 7) == 0);
+  REQUIRE(table.OldestOwnerBefore(0x11000, 0, 7) == 0);
+  // Retired owners stop being reported.
+  table.Retire(3);
+  REQUIRE(table.OldestOwnerBefore(0x10800, 0x80, 7) == 5);
+  table.Retire(5);
+  REQUIRE(table.OldestOwnerBefore(0x10800, 0x80, 7) == 0);
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe
