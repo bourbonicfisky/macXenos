@@ -972,6 +972,29 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
     }
     return true;
   };
+  // A full-width span (every row covers its whole pitch) is one contiguous
+  // tile interval, so synchronize it at once: the tracker then emits one pack
+  // per source run instead of one per row (a 48-row resolve issued 48 packs,
+  // each dispatching every row above its range), and the command processor
+  // walks the tracker once instead of once per row. The packed tile set is
+  // identical. XE_METAL_RESOLVE_SPAN_COALESCE=0 restores per-row sync.
+  static const bool s_coalesce = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_RESOLVE_SPAN_COALESCE"), true);
+  if (s_coalesce && row_length_used == span_pitch) {
+    uint64_t total = std::min<uint64_t>(uint64_t(rows) * span_pitch,
+                                        xenos::kEdramTileCount);
+    uint32_t start = span_base & (xenos::kEdramTileCount - 1u);
+    uint32_t first_length =
+        uint32_t(std::min<uint64_t>(total, xenos::kEdramTileCount - start));
+    if (!synchronize(start, start + first_length)) {
+      return false;
+    }
+    if (first_length < total &&
+        !synchronize(0u, uint32_t(total - first_length))) {
+      return false;
+    }
+    return true;
+  }
   for (uint32_t row = 0; row < rows; ++row) {
     uint32_t start =
         (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
