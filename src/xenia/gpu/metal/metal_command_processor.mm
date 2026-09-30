@@ -9883,6 +9883,18 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(dc_pre.offset_x_div_8) << 3,
               uint32_t(dc_pre.offset_y_div_8) << 3,
               scatter_extent_bytes};
+          // The destination RequestRange above can take an intra-frame
+          // rewrite hazard whose flush commits the frame command buffer
+          // (synchronous mode, or XE_METAL_HAZARD_STAGED=0). Encoding on the
+          // null buffer returns false and the resolve is SILENTLY DROPPED (SF4
+          // 10395 luminance pyramid under XE_METAL_ASYNC=0), so recreate it
+          // before any writeback encode, as IssueCopy does on entry.
+          // XE_METAL_RESOLVE_NULL_CB_LEGACY=1 restores the old behavior.
+          static const bool s_null_cb_legacy =
+              std::getenv("XE_METAL_RESOLVE_NULL_CB_LEGACY") != nullptr;
+          if (!s_null_cb_legacy) {
+            PrepareTransferCommandBuffer();
+          }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {
@@ -10200,6 +10212,12 @@ bool MetalCommandProcessor::IssueCopy() {
                         resolve_info.copy_dest_extent_start,
                         resolve_info.copy_dest_extent_length);
               }
+            }
+            // Same null-buffer hazard as the color writeback (see there).
+            static const bool s_depth_null_cb_legacy =
+                std::getenv("XE_METAL_RESOLVE_NULL_CB_LEGACY") != nullptr;
+            if (!s_depth_null_cb_legacy) {
+              PrepareTransferCommandBuffer();
             }
             if (depth_scatter) {
               MetalRenderTargetCache::CanonicalScatterDest depth_dest{
