@@ -1012,6 +1012,39 @@ fragment void materialize_sten_ms_range_fs(
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
   if ((xe_stencil(w) & bit) == 0u) discard_fragment();
 }
+// Single-pass depth+stencil materialize: the fragment exports the stencil
+// byte ([[stencil]]) so a REPLACE depth-stencil state writes the complete byte
+// per sample, replacing the depth pass + eight bit-plane passes above.
+struct DepthStencilFragOut {
+  float depth [[depth(any)]];
+  uint stencil [[stencil]];
+};
+fragment DepthStencilFragOut materialize_depth_sten_ms_range_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device const float* lane [[buffer(4)]],
+    uint sid [[sample_id]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint guest_sample = xe_metal_sample_to_guest(sp.msaa, sid);
+  if (!xe_authority_in_range(gid.x, gid.y, sp, guest_sample, range)) {
+    discard_fragment();
+  }
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, guest_sample);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthStencilFragOut o;
+  if ((hl.mode & 2u) && sp.is_depth == 2u && idx < sp.words) {
+    o.depth = xe_host_depth_reconcile(w, lane[idx], (hl.mode >> 2u) & 1u);
+  } else {
+    o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  }
+  o.stencil = xe_stencil(w);
+  return o;
+}
 kernel void pack_depth_ms_range(
     depth2d_ms<float, access::read> tex [[texture(0)]],
     texture2d_ms<uint, access::read> sten [[texture(1)]],

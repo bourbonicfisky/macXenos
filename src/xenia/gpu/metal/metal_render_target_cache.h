@@ -549,6 +549,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // (lane_store_range for 1x sources, lane_store_ms_range for 2x/4x).
     void* lane_store = nullptr;
     void* mat_sten_ms_range = nullptr;
+    // Single-pass depth + exported-stencil materialize, ranged (the 1x or
+    // 2x/4x variant matching sample_count); null falls back to the bit planes.
+    void* mat_depth_sten_range = nullptr;
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
     uint32_t sample_count = 0;

@@ -2356,6 +2356,224 @@ fragment float4 disc_fs() { return float4(1.0, 0.0, 0.0, 1.0); }
   CHECK(guest_arm < 0.01);
 }
 
+TEST_CASE("Stencil-export depth materialize equals depth + bit-plane passes",
+          "[l1][metal][canonical][depth][stencil_export]") {
+  // The production 2x/4x ranged materialize has two encodings: the depth pass
+  // (stencil REPLACEd to 0) followed by eight masked bit-plane passes, and a
+  // single pass exporting [[stencil]] under the same REPLACE state. Both must
+  // leave every sample's depth bits and stencil byte identical, inside and
+  // outside the tile range, for both depth formats.
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  if (!device) { SUCCEED("no device"); return; }
+  NSError* error = nil;
+  id<MTLLibrary> library = [device
+      newLibraryWithSource:[NSString stringWithUTF8String:
+                                         xe::gpu::metal::kEdramMsl]
+                   options:nil
+                     error:&error];
+  REQUIRE(library != nil);
+  static const char* kReadSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void read_ds_ms(depth2d_ms<float, access::read> d [[texture(0)]],
+                       texture2d_ms<uint, access::read> s [[texture(1)]],
+                       device uint* out [[buffer(0)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= d.get_width() || gid.y >= d.get_height()) return;
+  uint n = d.get_num_samples();
+  for (uint i = 0; i < n; ++i) {
+    uint idx = ((gid.y * d.get_width() + gid.x) * n + i) * 2u;
+    out[idx] = as_type<uint>(d.read(gid, i));
+    out[idx + 1u] = s.read(gid, i).r;
+  }
+}
+)MSL";
+  id<MTLLibrary> read_library = [device
+      newLibraryWithSource:[NSString stringWithUTF8String:kReadSource]
+                   options:nil
+                     error:&error];
+  REQUIRE(read_library != nil);
+  id<MTLComputePipelineState> read_pipeline = [device
+      newComputePipelineStateWithFunction:[read_library
+                                              newFunctionWithName:@"read_ds_ms"]
+                                    error:&error];
+  REQUIRE(read_pipeline != nil);
+
+  MTLDepthStencilDescriptor* dsd = [MTLDepthStencilDescriptor new];
+  dsd.depthCompareFunction = MTLCompareFunctionAlways;
+  dsd.depthWriteEnabled = YES;
+  MTLStencilDescriptor* zs = [MTLStencilDescriptor new];
+  zs.stencilCompareFunction = MTLCompareFunctionAlways;
+  zs.depthStencilPassOperation = MTLStencilOperationReplace;
+  zs.writeMask = 0xFF;
+  dsd.frontFaceStencil = zs;
+  dsd.backFaceStencil = zs;
+  id<MTLDepthStencilState> depth_state =
+      [device newDepthStencilStateWithDescriptor:dsd];
+  id<MTLDepthStencilState> bit_states[8];
+  for (uint32_t b = 0; b < 8; ++b) {
+    MTLDepthStencilDescriptor* bds = [MTLDepthStencilDescriptor new];
+    bds.depthCompareFunction = MTLCompareFunctionAlways;
+    bds.depthWriteEnabled = NO;
+    MTLStencilDescriptor* bs = [MTLStencilDescriptor new];
+    bs.stencilCompareFunction = MTLCompareFunctionAlways;
+    bs.depthStencilPassOperation = MTLStencilOperationReplace;
+    bs.writeMask = 1u << b;
+    bds.frontFaceStencil = bs;
+    bds.backFaceStencil = bs;
+    bit_states[b] = [device newDepthStencilStateWithDescriptor:bds];
+  }
+  id<MTLCommandQueue> queue = [device newCommandQueue];
+
+  for (uint32_t samples : {2u, 4u}) {
+    for (uint32_t is_depth : {1u, 2u}) {
+      MTLRenderPipelineDescriptor* rpd = [MTLRenderPipelineDescriptor new];
+      rpd.vertexFunction = [library newFunctionWithName:@"xe_depth_vs"];
+      rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+      rpd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+      rpd.rasterSampleCount = samples;
+      rpd.fragmentFunction =
+          [library newFunctionWithName:@"materialize_depth_ms_range_fs"];
+      id<MTLRenderPipelineState> depth_pipeline =
+          [device newRenderPipelineStateWithDescriptor:rpd error:&error];
+      rpd.fragmentFunction =
+          [library newFunctionWithName:@"materialize_sten_ms_range_fs"];
+      id<MTLRenderPipelineState> sten_pipeline =
+          [device newRenderPipelineStateWithDescriptor:rpd error:&error];
+      rpd.fragmentFunction =
+          [library newFunctionWithName:@"materialize_depth_sten_ms_range_fs"];
+      id<MTLRenderPipelineState> export_pipeline =
+          [device newRenderPipelineStateWithDescriptor:rpd error:&error];
+      REQUIRE(depth_pipeline != nil);
+      REQUIRE(sten_pipeline != nil);
+      REQUIRE(export_pipeline != nil);
+
+      // Two tiles wide, three tall (pitch 2); the range covers tiles [1, 4)
+      // so both in-range and discarded samples are checked.
+      const uint32_t msaa_log2 = samples == 4u ? 2u : 1u;
+      const uint32_t width = samples == 4u ? 80u : 160u;
+      const uint32_t height = samples == 4u ? 24u : 24u;
+      const uint32_t words = 6u * 1280u;
+      id<MTLBuffer> canonical =
+          [device newBufferWithLength:words * 4
+                              options:MTLResourceStorageModeShared];
+      uint32_t* canonical_cpu = static_cast<uint32_t*>(canonical.contents);
+      uint32_t lcg = 0x1234567u + samples * 31u + is_depth;
+      for (uint32_t i = 0; i < words; ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        uint32_t d24 = lcg >> 8;
+        if (is_depth == 1u) d24 &= 0xFFFFFFu;
+        // float24 stays in the representable [0,2) code space.
+        if (is_depth == 2u) d24 &= 0x7FFFFFu;
+        lcg = lcg * 1664525u + 1013904223u;
+        canonical_cpu[i] = (d24 << 8) | (lcg >> 24);
+      }
+      id<MTLBuffer> lane =
+          [device newBufferWithLength:words * 4
+                              options:MTLResourceStorageModeShared];
+      struct { uint32_t base, pitch, msaa, is_depth, fmt_log2, words; } sp{
+          0u, 2u, msaa_log2, is_depth, 0u, words};
+      struct { uint32_t start_tiles, end_tiles; } range{1u, 4u};
+      uint32_t hl_mode = 0u;
+
+      MTLTextureDescriptor* td = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                       width:width
+                                      height:height
+                                   mipmapped:NO];
+      td.textureType = MTLTextureType2DMultisample;
+      td.sampleCount = samples;
+      td.storageMode = MTLStorageModePrivate;
+      td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+                 MTLTextureUsagePixelFormatView;
+
+      auto run_arm = [&](bool stencil_export) -> std::vector<uint32_t> {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:td];
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        MTLRenderPassDescriptor* pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.depthAttachment.texture = texture;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.clearDepth = 0.625;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.stencilAttachment.texture = texture;
+        pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        pass.stencilAttachment.clearStencil = 0xA5;
+        pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> encoder =
+            [command renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:stencil_export ? export_pipeline
+                                                       : depth_pipeline];
+        [encoder setDepthStencilState:depth_state];
+        [encoder setStencilReferenceValue:0];
+        [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+        [encoder setFragmentBytes:&sp length:sizeof(sp) atIndex:1];
+        [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+        [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+        [encoder setFragmentBuffer:lane offset:0 atIndex:4];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:3];
+        if (!stencil_export) {
+          [encoder setRenderPipelineState:sten_pipeline];
+          [encoder setStencilReferenceValue:0xFF];
+          for (uint32_t b = 0; b < 8; ++b) {
+            uint32_t bit = 1u << b;
+            [encoder setDepthStencilState:bit_states[b]];
+            [encoder setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:0
+                        vertexCount:3];
+          }
+        }
+        [encoder endEncoding];
+        id<MTLTexture> stencil_view =
+            [texture newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+        const size_t count = size_t(width) * height * samples * 2u;
+        id<MTLBuffer> out =
+            [device newBufferWithLength:count * 4
+                                options:MTLResourceStorageModeShared];
+        id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+        [compute setComputePipelineState:read_pipeline];
+        [compute setTexture:texture atIndex:0];
+        [compute setTexture:stencil_view atIndex:1];
+        [compute setBuffer:out offset:0 atIndex:0];
+        [compute dispatchThreads:MTLSizeMake(width, height, 1)
+            threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        [compute endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        REQUIRE(command.status == MTLCommandBufferStatusCompleted);
+        const uint32_t* data = static_cast<const uint32_t*>(out.contents);
+        return std::vector<uint32_t>(data, data + count);
+      };
+
+      std::vector<uint32_t> legacy = run_arm(false);
+      std::vector<uint32_t> exported = run_arm(true);
+      size_t mismatches = 0, in_range = 0, untouched = 0;
+      float clear_depth = 0.625f;
+      uint32_t clear_bits;
+      std::memcpy(&clear_bits, &clear_depth, 4);
+      for (size_t i = 0; i < legacy.size(); i += 2) {
+        if (legacy[i] != exported[i] || legacy[i + 1] != exported[i + 1]) {
+          ++mismatches;
+        }
+        if (legacy[i] == clear_bits && legacy[i + 1] == 0xA5u) {
+          ++untouched;
+        } else {
+          ++in_range;
+        }
+      }
+      INFO("samples " << samples << " is_depth " << is_depth << " in-range "
+                      << in_range << " untouched " << untouched);
+      CHECK(mismatches == 0);
+      // The range must exercise both written and discarded samples.
+      CHECK(in_range > 0);
+      CHECK(untouched > 0);
+    }
+  }
+}
+
 TEST_CASE("Canonical depth resolve exposes guest rather than attachment domain",
           "[l1][metal][canonical][resolve][depth]") {
   MetalCompute mc;

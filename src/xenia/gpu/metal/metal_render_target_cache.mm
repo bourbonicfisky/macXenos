@@ -376,6 +376,7 @@ void MetalRenderTargetCache::Shutdown() {
     release_compute_pipeline(pipelines.lane_store);
     release_render_pipeline(pipelines.mat_depth_ms_range);
     release_render_pipeline(pipelines.mat_sten_ms_range);
+    release_render_pipeline(pipelines.mat_depth_sten_range);
     release_depth_state(pipelines.depth_state);
     for (void*& bit_state : pipelines.bit_states) {
       release_depth_state(bit_state);
@@ -1729,6 +1730,30 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
   uint w = (idx < sp.words) ? canonical[idx] : 0u;
   if ((xe_stencil(w) & bit) == 0u) discard_fragment();
 }
+// Single-pass 1x sibling of materialize_depth_sten_ms_range_fs.
+fragment DepthStencilFragOut materialize_depth_sten_range_fs(
+    DepthVOut in [[stage_in]],
+    device const uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant RangeParams& rp [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device const float* lane [[buffer(4)]]) {
+  uint2 gid = uint2(in.pos.xy);
+  uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
+  if (tile < rp.start_tiles || tile >= rp.end_tiles) discard_fragment();
+  uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
+                                   sp.is_depth, 0u, 0u);
+  uint idx = off >> 2;
+  uint w = (idx < sp.words) ? canonical[idx] : 0u;
+  DepthStencilFragOut o;
+  if ((hl.mode & 2u) && sp.is_depth == 2u && idx < sp.words) {
+    o.depth = xe_host_depth_reconcile(w, lane[idx], (hl.mode >> 2u) & 1u);
+  } else {
+    o.depth = xe_depth_word_to_host(w, sp.is_depth);
+  }
+  o.stencil = xe_stencil(w);
+  return o;
+}
 )MSL";
     std::string src = std::string(kEdramMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
@@ -1802,6 +1827,26 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
     mat_sten_ms_range =
         [device newRenderPipelineStateWithDescriptor:rpd error:&err];
   }
+  // Single-pass depth+stencil export materialize (warn-only: the encoders fall
+  // back to the depth + bit-plane passes when absent).
+  id<MTLRenderPipelineState> mat_depth_sten_range = nil;
+  {
+    NSError* export_err = nil;
+    rpd.fragmentFunction = [lib
+        newFunctionWithName:(ms ? @"materialize_depth_sten_ms_range_fs"
+                                : @"materialize_depth_sten_range_fs")];
+    mat_depth_sten_range =
+        rpd.fragmentFunction
+            ? [device newRenderPipelineStateWithDescriptor:rpd
+                                                     error:&export_err]
+            : nil;
+    if (!mat_depth_sten_range) {
+      XELOGW("MetalShadow: stencil-export materialize pipeline failed "
+             "sc={}: {}",
+             sample_count,
+             export_err ? export_err.localizedDescription.UTF8String : "?");
+    }
+  }
   if (!matd || !mats || !pack ||
       (!ms &&
        (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range)) ||
@@ -1833,6 +1878,9 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
   p.pack_range = pack_range ? (__bridge_retained void*)pack_range : nullptr;
   p.mat_depth_range =
       mat_depth_range ? (__bridge_retained void*)mat_depth_range : nullptr;
+  p.mat_depth_sten_range = mat_depth_sten_range
+                               ? (__bridge_retained void*)mat_depth_sten_range
+                               : nullptr;
   p.mat_sten_range =
       mat_sten_range ? (__bridge_retained void*)mat_sten_range : nullptr;
   p.pack_ms_range =
@@ -1872,6 +1920,15 @@ fragment void materialize_sten_range_fs(DepthVOut in [[stage_in]],
   }
   auto ins = shadow_pipelines_.emplace(sample_count, p);
   return &ins.first->second;
+}
+
+// Depth materialize writes the stencil byte from the fragment shader
+// ([[stencil]] export) in the depth pass instead of eight bit-plane passes.
+// XE_METAL_STENCIL_EXPORT=0 is the exact rollback to the bit-plane passes.
+static bool CanonicalStencilExportEnabled() {
+  static const bool enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_STENCIL_EXPORT"), true);
+  return enabled;
 }
 
 bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
@@ -1955,8 +2012,12 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
     return false;
   }
   [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
-  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                      pipelines->mat_depth_range];
+  const bool stencil_export =
+      CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
+                                      stencil_export
+                                          ? pipelines->mat_depth_sten_range
+                                          : pipelines->mat_depth_range)];
   [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                     pipelines->depth_state];
   [encoder setStencilReferenceValue:0];
@@ -1985,6 +2046,10 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
+  }
+  if (stencil_export) {
+    [encoder endEncoding];
+    return true;
   }
   if (!two_source.empty()) {
     // Restore the full-range rp for the stencil bit-plane passes.
@@ -2157,11 +2222,15 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   }
   [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
 
-  // The first pass writes every depth sample and replaces stencil with zero.
-  // Eight masked REPLACE passes then reconstruct the complete stencil byte per
-  // sample without relying on a shader stencil export Metal doesn't provide.
-  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                      pipelines->mat_depth_ms_range];
+  // With stencil export the first pass writes every depth sample and its
+  // complete stencil byte. Otherwise it replaces stencil with zero and eight
+  // masked REPLACE passes reconstruct the byte per sample.
+  const bool stencil_export =
+      CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
+                                      stencil_export
+                                          ? pipelines->mat_depth_sten_range
+                                          : pipelines->mat_depth_ms_range)];
   [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
                                     pipelines->depth_state];
   [encoder setStencilReferenceValue:0];
@@ -2185,6 +2254,10 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
+  }
+  if (stencil_export) {
+    [encoder endEncoding];
+    return true;
   }
   if (!two_source.empty()) {
     [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
