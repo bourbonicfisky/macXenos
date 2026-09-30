@@ -10481,6 +10481,18 @@ bool MetalCommandProcessor::IssueCopy() {
                                  resolve_info)) {
     return true;
   }
+  // Copy command 2 (compare to k_DXT3A_AS_1_1_1_1) exists only as the shared
+  // resolve shader, and the Metal copy and clear routes below do not know it:
+  // they would copy the color as-is. Keep skipping the whole resolve, as before
+  // GetResolveInfo accepted the command.
+  if (resolve_info.rb_copy_control.copy_command ==
+      xenos::CopyCommand::kConvertTo1111) {
+    static uint32_t s_convert_1111_logs = 0;
+    if (s_convert_1111_logs++ < 4) {
+      XELOGW("Metal: resolve copy command 2 (DXT3A as 1_1_1_1) skipped");
+    }
+    return true;
+  }
   if (ScaleCoverageCensusEnabled()) {
     metal::ScaleCoverageCensus::Get().RecordResolve(
         resolve_info.copy_dest_extent_start,

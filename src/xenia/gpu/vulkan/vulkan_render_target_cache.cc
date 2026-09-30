@@ -65,6 +65,7 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_clear_32bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_clear_64bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_clear_64bpp_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_dxt3aas1111_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_32bpp_4xmsaa_cs.h"
@@ -120,6 +121,8 @@ const VulkanRenderTargetCache::ResolveCopyShaderCode
          sizeof(shaders::resolve_full_128bpp_cs),
          shaders::resolve_full_128bpp_scaled_cs,
          sizeof(shaders::resolve_full_128bpp_scaled_cs)},
+        {shaders::resolve_dxt3aas1111_cs,
+         sizeof(shaders::resolve_dxt3aas1111_cs), nullptr, 0},
 };
 
 const VulkanRenderTargetCache::TransferPipelineLayoutInfo
@@ -492,9 +495,11 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         kResolveCopyShaders[i];
     // Somewhat verification whether resolve_copy_shaders_ is up to date.
     assert_true(resolve_copy_shader_code.unscaled &&
-                resolve_copy_shader_code.unscaled_size_bytes &&
-                resolve_copy_shader_code.scaled &&
-                resolve_copy_shader_code.scaled_size_bytes);
+                resolve_copy_shader_code.unscaled_size_bytes);
+    if (draw_resolution_scaled && !resolve_copy_shader_code.scaled) {
+      // Unscaled-only shader (DXT3A as 1_1_1_1); its resolves are skipped.
+      continue;
+    }
     VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
         vulkan_device, resolve_copy_pipeline_layout_,
         draw_resolution_scaled ? resolve_copy_shader_code.scaled

@@ -59,8 +59,13 @@ class MetalResolveShaderPipelines {
     uint32_t dest_info;              // 8
     uint32_t dest_coordinate_info;   // 12
     uint32_t dest_base;              // 16
+    // Read only by the kDXT3AAs1111 shader (resolve.xesli
+    // XE_RESOLVE_COPY_DXT3A_AS_1111): RB_COPY_FUNC, RB_COPY_REF, RB_COPY_MASK.
+    uint32_t copy_func;              // 20
+    uint32_t copy_ref;               // 24
+    uint32_t copy_mask;              // 28
   };
-  static_assert(sizeof(ResolveConstants) == 20, "MSL push-const ABI");
+  static_assert(sizeof(ResolveConstants) == 32, "MSL push-const ABI");
 
   MetalResolveShaderPipelines() = default;
   ~MetalResolveShaderPipelines();

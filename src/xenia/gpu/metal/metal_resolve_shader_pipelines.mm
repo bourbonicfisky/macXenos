@@ -13,6 +13,7 @@
 
 #include "xenia/base/logging.h"
 
+#include "xenia/gpu/shaders/bytecode/metal/resolve_dxt3aas1111_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/resolve_fast_32bpp_1x2xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/resolve_fast_32bpp_4xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/resolve_fast_64bpp_1x2xmsaa_cs.h"
@@ -53,6 +54,7 @@ const ResolveShaderSource kResolveShaders[] = {
     XE_RESOLVE_SHADER(resolve_full_32bpp_cs),           // kFull32bpp
     XE_RESOLVE_SHADER(resolve_full_64bpp_cs),           // kFull64bpp
     XE_RESOLVE_SHADER(resolve_full_128bpp_cs),          // kFull128bpp
+    XE_RESOLVE_SHADER(resolve_dxt3aas1111_cs),          // kDXT3AAs1111
 };
 
 #undef XE_RESOLVE_SHADER
