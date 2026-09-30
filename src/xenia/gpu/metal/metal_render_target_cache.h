@@ -621,6 +621,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   };
   std::array<RasterSyncMemo, xenos::kMaxColorRenderTargets + 1>
       raster_sync_memo_{};
+  // The same memo for MarkCurrentRasterTargetsWritten: when an attachment
+  // re-marks the range it marked last with the tracker version unchanged, the
+  // mark would only re-stamp tiles it already holds as authority and clean
+  // cache, which no tracker decision can observe (every order is drawn from
+  // one strictly increasing counter). XE_METAL_RASTER_MARK_SKIP=0 off.
+  std::array<RasterSyncMemo, xenos::kMaxColorRenderTargets + 1>
+      raster_mark_memo_{};
   static MetalEdramAuthorityTracker::AttachmentId GetCanonicalAttachmentId(
       const RenderTarget* render_target);
   RenderTarget* FindCanonicalAttachment(

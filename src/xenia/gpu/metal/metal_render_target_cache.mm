@@ -1004,9 +1004,20 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
       continue;
     }
     uint32_t start_tiles = render_target->key().base_tiles;
-    canonical_authority_.MarkAttachment(
-        GetCanonicalAttachmentId(render_target), start_tiles,
-        start_tiles + lengths[slot], ++canonical_authority_order_);
+    uint32_t end_tiles = start_tiles + lengths[slot];
+    const uint64_t attachment = GetCanonicalAttachmentId(render_target);
+    static const bool s_mark_skip = ParseMetalEnvironmentFlag(
+        std::getenv("XE_METAL_RASTER_MARK_SKIP"), true);
+    RasterSyncMemo& memo = raster_mark_memo_[slot];
+    if (s_mark_skip && memo.valid && memo.attachment == attachment &&
+        memo.start_tiles == start_tiles && memo.end_tiles == end_tiles &&
+        memo.version == canonical_authority_.version()) {
+      continue;
+    }
+    canonical_authority_.MarkAttachment(attachment, start_tiles, end_tiles,
+                                        ++canonical_authority_order_);
+    memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
+            true};
   }
 }
 
