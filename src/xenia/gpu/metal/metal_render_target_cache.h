@@ -608,6 +608,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // resolve, clear, and writeback paths to canonical EDRAM.
   MetalEdramAuthorityTracker canonical_authority_;
   uint64_t canonical_authority_order_ = 0;
+  // Per raster slot: the attachment/tile range last synchronized and the
+  // tracker version right after it. An unchanged version proves the repeat
+  // SynchronizeAttachment a no-op (see MetalEdramAuthorityTracker::version),
+  // so PrepareCurrentRasterViews skips it. XE_METAL_RASTER_SYNC_SKIP=0 off.
+  struct RasterSyncMemo {
+    uint64_t attachment = 0;
+    uint32_t start_tiles = 0;
+    uint32_t end_tiles = 0;
+    uint64_t version = 0;
+    bool valid = false;
+  };
+  std::array<RasterSyncMemo, xenos::kMaxColorRenderTargets + 1>
+      raster_sync_memo_{};
   static MetalEdramAuthorityTracker::AttachmentId GetCanonicalAttachmentId(
       const RenderTarget* render_target);
   RenderTarget* FindCanonicalAttachment(

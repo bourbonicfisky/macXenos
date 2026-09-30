@@ -876,9 +876,19 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     }
     const uint32_t start_tiles = render_target->key().base_tiles;
     const uint32_t end_tiles = start_tiles + lengths[slot];
+    const uint64_t attachment = GetCanonicalAttachmentId(render_target);
+    static const bool s_sync_skip = [] {
+      const char* v = std::getenv("XE_METAL_RASTER_SYNC_SKIP");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    RasterSyncMemo& memo = raster_sync_memo_[slot];
+    if (s_sync_skip && memo.valid && memo.attachment == attachment &&
+        memo.start_tiles == start_tiles && memo.end_tiles == end_tiles &&
+        memo.version == canonical_authority_.version()) {
+      continue;
+    }
     auto operations = canonical_authority_.SynchronizeAttachment(
-        GetCanonicalAttachmentId(render_target), start_tiles, end_tiles,
-        ++canonical_authority_order_);
+        attachment, start_tiles, end_tiles, ++canonical_authority_order_);
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
@@ -898,6 +908,8 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         return false;
       }
     }
+    memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
+            true};
   }
   return true;
 }

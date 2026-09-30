@@ -104,7 +104,20 @@ class MetalEdramAuthorityTracker {
     uint64_t consumer_order;
   };
 
-  void ResetUnknown() { tiles_.fill(TileState{}); }
+  void ResetUnknown() {
+    tiles_.fill(TileState{});
+    ++version_;
+  }
+
+  // Bumped by every change to tile state EXCEPT an attachment re-stamping the
+  // submission order of tiles it already holds as authority and clean cache
+  // (every ordinary draw into an unchanged render target). With order stamps
+  // drawn from one strictly increasing counter, SynchronizeAttachment(A, r)
+  // is a no-op -- no operations, no state change -- whenever the version
+  // still equals its value right after the previous SynchronizeAttachment(A,
+  // r): that sync left every tile of r either A's authority or canonical and
+  // clean for A, and a re-stamp by A keeps it so.
+  uint64_t version() const { return version_; }
 
   // Drops every cached reference to a replaced or retired working view. The
   // caller should synchronize canonical first; if an attachment is still the
@@ -114,21 +127,28 @@ class MetalEdramAuthorityTracker {
     if (!attachment) {
       return;
     }
+    bool changed = false;
     for (TileState& state : tiles_) {
       if (state.location == Location::kAttachment &&
           state.authority_attachment == attachment) {
         state.location = Location::kUnknown;
         state.authority_attachment = 0;
         state.clean_attachment = 0;
+        changed = true;
       } else if (state.clean_attachment == attachment) {
         state.clean_attachment = 0;
+        changed = true;
       }
+    }
+    if (changed) {
+      ++version_;
     }
   }
 
   void MarkCanonical(uint32_t start_tiles, uint32_t end_tiles,
                      uint64_t submission_order) {
     ClampRange(start_tiles, end_tiles);
+    bool changed = false;
     for (uint32_t tile = start_tiles; tile < end_tiles; ++tile) {
       TileState& state = tiles_[tile];
       if (submission_order < state.submission_order) {
@@ -139,6 +159,10 @@ class MetalEdramAuthorityTracker {
       // A canonical write invalidates every previously materialized view.
       state.clean_attachment = 0;
       state.submission_order = submission_order;
+      changed = true;
+    }
+    if (changed) {
+      ++version_;
     }
   }
 
@@ -148,15 +172,24 @@ class MetalEdramAuthorityTracker {
       return;
     }
     ClampRange(start_tiles, end_tiles);
+    bool changed = false;
     for (uint32_t tile = start_tiles; tile < end_tiles; ++tile) {
       TileState& state = tiles_[tile];
       if (submission_order < state.submission_order) {
         continue;
       }
+      if (state.location != Location::kAttachment ||
+          state.authority_attachment != attachment ||
+          state.clean_attachment != attachment) {
+        changed = true;
+      }
       state.location = Location::kAttachment;
       state.authority_attachment = attachment;
       state.clean_attachment = attachment;
       state.submission_order = submission_order;
+    }
+    if (changed) {
+      ++version_;
     }
   }
 
@@ -215,6 +248,9 @@ class MetalEdramAuthorityTracker {
       }
       tile = operation_end;
     }
+    if (!operations.empty()) {
+      ++version_;
+    }
     return operations;
   }
 
@@ -260,6 +296,9 @@ class MetalEdramAuthorityTracker {
       }
       tile = operation_end;
     }
+    if (!operations.empty()) {
+      ++version_;
+    }
     return operations;
   }
   static void ClampRange(uint32_t& start_tiles, uint32_t& end_tiles) {
@@ -275,6 +314,7 @@ class MetalEdramAuthorityTracker {
   }
 
   std::array<TileState, xenos::kEdramTileCount> tiles_{};
+  uint64_t version_ = 0;
 };
 
 }  // namespace metal
