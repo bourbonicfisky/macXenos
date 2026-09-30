@@ -658,6 +658,10 @@ bool A64Backend::Initialize(Processor* processor) {
     XELOGE("A64Backend: Failed to generate thunks");
     return false;
   }
+  XELOGI("A64Backend: thunks host_to_guest={} guest_to_host={} resolve={}",
+         reinterpret_cast<void*>(host_to_guest_thunk_),
+         reinterpret_cast<void*>(guest_to_host_thunk_),
+         reinterpret_cast<void*>(resolve_function_thunk_));
 
   if (cvars::a64_enable_host_guest_stack_synchronization) {
     synchronize_guest_and_host_stack_helper_ =

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -31,6 +32,10 @@
 #include "xenia/base/platform.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
+
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+#include <unistd.h>
+#endif
 
 #if XE_PLATFORM_MAC && XE_ARCH_ARM64
 #include <pthread.h>
@@ -303,6 +308,26 @@ class CodeCacheBase : public CodeCache {
     // Post-placement hook (e.g. VTune notification).
     self().OnCodePlaced(guest_address, function_info, code_execute_address,
                         func_info.code_size.total);
+
+#if XE_PLATFORM_MAC || XE_PLATFORM_LINUX
+    // XE_JIT_PERF_MAP=1 (diagnostic): append "<host start> <size> guest_<addr>"
+    // to /tmp/perf-<pid>.map, the perf-map format, so host sample addresses in
+    // generated code resolve to guest functions.
+    static FILE* perf_map = [] {
+      if (!std::getenv("XE_JIT_PERF_MAP")) {
+        return static_cast<FILE*>(nullptr);
+      }
+      return std::fopen(fmt::format("/tmp/perf-{}.map", ::getpid()).c_str(),
+                        "w");
+    }();
+    if (perf_map) {
+      std::fprintf(perf_map, "%llx %zx guest_%08X\n",
+                   static_cast<unsigned long long>(
+                       reinterpret_cast<uintptr_t>(code_execute_address)),
+                   size_t(func_info.code_size.total), guest_address);
+      std::fflush(perf_map);
+    }
+#endif
 
     // Fix up indirection table.
     if (guest_address && indirection_table_base_) {
