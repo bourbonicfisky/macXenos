@@ -4843,9 +4843,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // path). With the gate off use_tessellation_emulation is always false and
   // this is exactly the pre-existing expression.
   draw_trace_milestone("after-shaders");
-  if (std::getenv("XE_METAL_DRAW_TRACE") &&
+  static const char* const s_draw_trace_env =
+      std::getenv("XE_METAL_DRAW_TRACE");
+  if (s_draw_trace_env &&
       int64_t(trace_draw_index_) - 1 ==
-          strtoll(std::getenv("XE_METAL_DRAW_TRACE"), nullptr, 10)) {
+          strtoll(s_draw_trace_env, nullptr, 10)) {
     XELOGW("MetalDrawTrace shaders draw={} vs={:016X} ps={:016X}",
            trace_draw_index_ - 1,
            vertex_shader ? vertex_shader->ucode_data_hash() : 0ull,
@@ -4900,7 +4902,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
   // ucode disassembly to /tmp/xe_ps_<hash>.txt once, for single-shader
   // forensics (what inputs drive the color output).
-  if (const char* dump_ps = std::getenv("XE_METAL_DUMP_PS")) {
+  static const char* const s_dump_ps_env = std::getenv("XE_METAL_DUMP_PS");
+  if (const char* dump_ps = s_dump_ps_env) {
     uint64_t dump_hash = strtoull(dump_ps, nullptr, 16);
     // Matches the PS hash OR the VS hash (several VSes share one PS).
     if ((pixel_shader && pixel_shader->ucode_data_hash() == dump_hash) ||
@@ -7289,7 +7292,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     };
     // A/B: XE_METAL_NO_SIGNS=1 leaves signs zeroed (all-unsigned, no gamma
     // decode) to isolate sign-driven fetch behavior (signed-SRV selection).
-    if (!std::getenv("XE_METAL_NO_SIGNS")) {
+    static const bool s_no_signs = std::getenv("XE_METAL_NO_SIGNS") != nullptr;
+    if (!s_no_signs) {
       fill_texture_signs(vertex_shader);
       fill_texture_signs(pixel_shader);
     }
@@ -7719,7 +7723,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Forensics (with XE_METAL_DUMP_PS): log the packed VS b1 upload once —
   // bitmap words + the packed values for the HIGH constants (bitmap word 3,
   // c192-255: the terrain lighting bank) + direct register reads to compare.
-  if (const char* dump_ps2 = std::getenv("XE_METAL_DUMP_PS")) {
+  if (const char* dump_ps2 = s_dump_ps_env) {
     if (pixel_shader &&
         pixel_shader->ucode_data_hash() == strtoull(dump_ps2, nullptr, 16)) {
       static bool s_logged_b1 = false;
