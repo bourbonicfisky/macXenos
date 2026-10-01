@@ -97,6 +97,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // canonical per-sample EDRAM before the render pass opens. Returns false if
   // a required scheduled conversion couldn't be encoded.
   bool PrepareCurrentRasterViews();
+  // Host depth a canonical depth->depth transfer leaves in the destination
+  // view when the source view held `host_depth` (pack with the truncating
+  // 24-bit encode, materialize decode, Stage B lane reconcile for float24).
+  // The MSAA fast-clear fold pins a folded depth clear to this value so it
+  // matches the transfer path it replaces.
+  float CanonicalDepthTransferResult(
+      float host_depth, xenos::DepthRenderTargetFormat format) const;
   // Packs every dirty attachment interval needed by canonical diagnostics.
   // The caller must submit/wait the returned command-buffer work before
   // reading canonical storage.

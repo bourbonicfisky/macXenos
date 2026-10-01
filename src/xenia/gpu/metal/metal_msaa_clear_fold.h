@@ -1,0 +1,406 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_GPU_METAL_METAL_MSAA_CLEAR_FOLD_H_
+#define XENIA_GPU_METAL_METAL_MSAA_CLEAR_FOLD_H_
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+#include "xenia/gpu/register_file.h"
+#include "xenia/gpu/shader_interpreter.h"
+#include "xenia/gpu/registers.h"
+#include "xenia/gpu/xenos.h"
+
+namespace xe {
+namespace gpu {
+namespace metal {
+
+// MSAA fast-clear fold (openspec fold-metal-msaa-fast-clears). The 360 D3D
+// runtime clears a 2x/4x surface with a screen-space rectangle drawn at that
+// MSAA level. An EDRAM tile holds the same words at every MSAA level: with
+// the MSAA shifts (sx, sy) = (1, 1) for 4x and (0, 1) for 2x, guest sample s
+// of MSAA pixel (x, y) is the word of 1x pixel
+// ((x << sx) + (((s >> 1) & 1) if sx), (y << sy) + (s & 1)) per
+// xe_edram_offset_bytes. Such a clear can therefore be drawn through the 1x
+// view of the same base, format and tile pitch with screen coordinates scaled
+// by (1 << sx, 1 << sy) instead of transferring the tiles into the MSAA view
+// and back. This header is the pure, device-free
+// qualification; anything it refuses takes the ordinary transfer path.
+
+// The runtime clear pair found on every 1x<->4x flip of Gears 3 and JC2
+// (phase 0, xenia-mac-evidence/msaa-clear-phase0-20260930/): VS passes the
+// fetched position and colour through, PS outputs the interpolated colour.
+constexpr uint64_t kMsaaClearFoldVertexShader = 0x1E6883FCCDE1F688ull;
+constexpr uint64_t kMsaaClearFoldPixelShader = 0xA4A965C189287B99ull;
+
+enum class MsaaClearFoldRefusal : uint32_t {
+  kNone,
+  kShaderPair,
+  kPrimitive,
+  kSingleSample,
+  kViewportTransform,
+  kEdramMode,
+  kDepthFunction,
+  kStencil,
+  kBlending,
+  kAlphaTest,
+  kPitch,
+  kVertexEvaluation,
+  kHomogeneousW,
+  kDepthVaries,
+  kColourVaries,
+  kEdgeAlignment,
+  kDepthRange,
+  kColourFormat,
+  kCount,
+};
+
+inline const char* MsaaClearFoldRefusalName(MsaaClearFoldRefusal refusal) {
+  switch (refusal) {
+    case MsaaClearFoldRefusal::kNone:
+      return "folded";
+    case MsaaClearFoldRefusal::kShaderPair:
+      return "shader-pair";
+    case MsaaClearFoldRefusal::kPrimitive:
+      return "primitive";
+    case MsaaClearFoldRefusal::kSingleSample:
+      return "single-sample";
+    case MsaaClearFoldRefusal::kViewportTransform:
+      return "viewport-transform";
+    case MsaaClearFoldRefusal::kEdramMode:
+      return "edram-mode";
+    case MsaaClearFoldRefusal::kDepthFunction:
+      return "depth-function";
+    case MsaaClearFoldRefusal::kStencil:
+      return "stencil";
+    case MsaaClearFoldRefusal::kBlending:
+      return "blending";
+    case MsaaClearFoldRefusal::kAlphaTest:
+      return "alpha-test";
+    case MsaaClearFoldRefusal::kPitch:
+      return "pitch";
+    case MsaaClearFoldRefusal::kVertexEvaluation:
+      return "vertex-evaluation";
+    case MsaaClearFoldRefusal::kHomogeneousW:
+      return "homogeneous-w";
+    case MsaaClearFoldRefusal::kDepthVaries:
+      return "depth-varies";
+    case MsaaClearFoldRefusal::kColourVaries:
+      return "colour-varies";
+    case MsaaClearFoldRefusal::kEdgeAlignment:
+      return "edge-alignment";
+    case MsaaClearFoldRefusal::kDepthRange:
+      return "depth-range";
+    case MsaaClearFoldRefusal::kColourFormat:
+      return "colour-format";
+    case MsaaClearFoldRefusal::kCount:
+      break;
+  }
+  return "?";
+}
+
+struct MsaaClearFoldDecision {
+  MsaaClearFoldRefusal refusal = MsaaClearFoldRefusal::kShaderPair;
+  // Log2 of the screen-coordinate scale into the 1x view.
+  uint32_t scale_x_log2 = 0;
+  uint32_t scale_y_log2 = 0;
+  // RB_SURFACE_INFO presenting the draw as 1x over the same tiles.
+  uint32_t surface_info_1x = 0;
+  bool fold() const { return refusal == MsaaClearFoldRefusal::kNone; }
+};
+
+inline bool MsaaClearFoldStencilOpKeepsConstant(xenos::StencilOp op) {
+  return op == xenos::StencilOp::kKeep || op == xenos::StencilOp::kReplace;
+}
+
+// Colour formats whose host attachment holds exactly the guest EDRAM encoding,
+// so the canonical pack/materialize round trip of a cleared value is the
+// identity and a clear written straight into the 1x view matches the transfer
+// path. Gamma and the float-encoded formats keep more host precision than the
+// guest encoding (the round trip quantizes), so they do not fold.
+inline bool MsaaClearFoldColourFormatIsExact(
+    xenos::ColorRenderTargetFormat format) {
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+inline bool MsaaClearFoldBlendIsReplace(reg::RB_BLENDCONTROL blend) {
+  return blend.color_srcblend == xenos::BlendFactor::kOne &&
+         blend.color_destblend == xenos::BlendFactor::kZero &&
+         blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+         blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+         blend.alpha_destblend == xenos::BlendFactor::kZero &&
+         blend.alpha_comb_fcn == xenos::BlendOp::kAdd;
+}
+
+// `normalized_depth_control` and `normalized_color_mask` are the draw's
+// draw_util-normalized values (depth/stencil disabled outside EDRAM modes
+// that use them; colour mask already folded with the shader's writes).
+inline MsaaClearFoldDecision QualifyMsaaClearFold(
+    const RegisterFile& regs, uint64_t vertex_shader_hash,
+    uint64_t pixel_shader_hash, xenos::PrimitiveType primitive_type,
+    uint32_t index_count, reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask) {
+  MsaaClearFoldDecision decision;
+  if (vertex_shader_hash != kMsaaClearFoldVertexShader ||
+      pixel_shader_hash != kMsaaClearFoldPixelShader) {
+    decision.refusal = MsaaClearFoldRefusal::kShaderPair;
+    return decision;
+  }
+  if (primitive_type != xenos::PrimitiveType::kRectangleList ||
+      index_count != 3) {
+    decision.refusal = MsaaClearFoldRefusal::kPrimitive;
+    return decision;
+  }
+  auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  if (surface_info.msaa_samples == xenos::MsaaSamples::k1X ||
+      surface_info.msaa_samples > xenos::MsaaSamples::k4X) {
+    decision.refusal = MsaaClearFoldRefusal::kSingleSample;
+    return decision;
+  }
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  if (vte.vport_x_scale_ena || vte.vport_x_offset_ena ||
+      vte.vport_y_scale_ena || vte.vport_y_offset_ena) {
+    decision.refusal = MsaaClearFoldRefusal::kViewportTransform;
+    return decision;
+  }
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth &&
+      edram_mode != xenos::EdramMode::kDepthOnly) {
+    decision.refusal = MsaaClearFoldRefusal::kEdramMode;
+    return decision;
+  }
+  // A depth test against existing content would read the destination.
+  if (normalized_depth_control.z_enable &&
+      normalized_depth_control.zfunc != xenos::CompareFunction::kAlways) {
+    decision.refusal = MsaaClearFoldRefusal::kDepthFunction;
+    return decision;
+  }
+  if (normalized_depth_control.stencil_enable) {
+    bool front_ok =
+        normalized_depth_control.stencilfunc ==
+            xenos::CompareFunction::kAlways &&
+        MsaaClearFoldStencilOpKeepsConstant(
+            normalized_depth_control.stencilfail) &&
+        MsaaClearFoldStencilOpKeepsConstant(
+            normalized_depth_control.stencilzpass) &&
+        MsaaClearFoldStencilOpKeepsConstant(
+            normalized_depth_control.stencilzfail);
+    bool back_ok =
+        !normalized_depth_control.backface_enable ||
+        (normalized_depth_control.stencilfunc_bf ==
+             xenos::CompareFunction::kAlways &&
+         MsaaClearFoldStencilOpKeepsConstant(
+             normalized_depth_control.stencilfail_bf) &&
+         MsaaClearFoldStencilOpKeepsConstant(
+             normalized_depth_control.stencilzpass_bf) &&
+         MsaaClearFoldStencilOpKeepsConstant(
+             normalized_depth_control.stencilzfail_bf));
+    if (!front_ok || !back_ok) {
+      decision.refusal = MsaaClearFoldRefusal::kStencil;
+      return decision;
+    }
+  }
+  if (normalized_color_mask) {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!((normalized_color_mask >> (i * 4)) & 0xF)) {
+        continue;
+      }
+      if (!MsaaClearFoldBlendIsReplace(regs.Get<reg::RB_BLENDCONTROL>(
+              reg::RB_BLENDCONTROL::rt_register_indices[i]))) {
+        decision.refusal = MsaaClearFoldRefusal::kBlending;
+        return decision;
+      }
+      if (!MsaaClearFoldColourFormatIsExact(
+              regs.Get<reg::RB_COLOR_INFO>(
+                      reg::RB_COLOR_INFO::rt_register_indices[i])
+                  .color_format)) {
+        decision.refusal = MsaaClearFoldRefusal::kColourFormat;
+        return decision;
+      }
+    }
+  }
+  auto color_control = regs.Get<reg::RB_COLORCONTROL>();
+  if ((color_control.alpha_test_enable &&
+       color_control.alpha_func != xenos::CompareFunction::kAlways) ||
+      color_control.alpha_to_mask_enable) {
+    decision.refusal = MsaaClearFoldRefusal::kAlphaTest;
+    return decision;
+  }
+  // 4x doubles both axes; 2x doubles Y only (xe_edram_msaa_shifts).
+  uint32_t x_log2 =
+      surface_info.msaa_samples >= xenos::MsaaSamples::k4X ? 1u : 0u;
+  uint32_t y_log2 = 1u;
+  uint32_t pitch_1x = uint32_t(surface_info.surface_pitch) << x_log2;
+  if (!surface_info.surface_pitch ||
+      pitch_1x > xenos::kTexture2DCubeMaxWidthHeight) {
+    decision.refusal = MsaaClearFoldRefusal::kPitch;
+    return decision;
+  }
+  reg::RB_SURFACE_INFO surface_info_1x = surface_info;
+  surface_info_1x.msaa_samples = xenos::MsaaSamples::k1X;
+  surface_info_1x.surface_pitch = pitch_1x;
+  decision.refusal = MsaaClearFoldRefusal::kNone;
+  decision.scale_x_log2 = x_log2;
+  decision.scale_y_log2 = y_log2;
+  decision.surface_info_1x = surface_info_1x.value;
+  return decision;
+}
+
+// Post-vertex-shader values of the clear rectangle's three vertices, from the
+// shared ShaderInterpreter (the same CPU execution DrawExtentEstimator uses
+// for screen-space draws).
+struct MsaaClearFoldVertices {
+  float position[3][4] = {};
+  float interpolator0[3][4] = {};
+  bool has_interpolator0 = false;
+};
+
+class MsaaClearFoldExportSink : public ShaderInterpreter::ExportSink {
+ public:
+  void Reset() {
+    has_position_ = false;
+    has_interpolator0_ = false;
+  }
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    float* target = nullptr;
+    if (export_register == ucode::ExportRegister::kVSPosition) {
+      target = position_;
+      has_position_ = true;
+    } else if (export_register == ucode::ExportRegister::kVSInterpolator0) {
+      target = interpolator0_;
+      has_interpolator0_ = true;
+    } else {
+      return;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (value_mask & (1u << i)) {
+        target[i] = value[i];
+      }
+    }
+  }
+  bool has_position_ = false;
+  bool has_interpolator0_ = false;
+  float position_[4] = {};
+  float interpolator0_[4] = {};
+};
+
+// Runs the clear's vertex shader for its three auto-generated indices.
+// Returns false (do not fold) if the draw is index-buffer sourced, the shader
+// cannot be interpreted, or a vertex exports no position.
+inline bool EvaluateMsaaClearFoldVertices(const RegisterFile& regs,
+                                          ShaderInterpreter& interpreter,
+                                          const Shader& vertex_shader,
+                                          MsaaClearFoldVertices& out) {
+  if (!ShaderInterpreter::CanInterpretShader(vertex_shader)) {
+    return false;
+  }
+  auto draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
+    return false;
+  }
+  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+  interpreter.SetShader(vertex_shader);
+  MsaaClearFoldExportSink sink;
+  interpreter.SetExportSink(&sink);
+  bool ok = true;
+  out.has_interpolator0 = true;
+  for (uint32_t i = 0; i < 3 && ok; ++i) {
+    uint32_t vertex_index =
+        std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF));
+    sink.Reset();
+    interpreter.temp_registers()[0] = float(vertex_index);
+    interpreter.Execute();
+    if (!sink.has_position_) {
+      ok = false;
+      break;
+    }
+    std::memcpy(out.position[i], sink.position_, sizeof(sink.position_));
+    std::memcpy(out.interpolator0[i], sink.interpolator0_,
+                sizeof(sink.interpolator0_));
+    out.has_interpolator0 &= sink.has_interpolator0_;
+  }
+  interpreter.SetExportSink(nullptr);
+  return ok;
+}
+
+enum class MsaaClearFoldValueRefusal : uint32_t {
+  kNone,
+  kVertexEvaluation,
+  kHomogeneousW,
+  kDepthVaries,
+  kColourVaries,
+  kEdgeAlignment,
+};
+
+// Value invariance and pixel alignment of the evaluated rectangle (design D3):
+// every vertex has w == 1 (or the vertex format already divides), the same z
+// and the same interpolated colour (when colour is written), and every edge
+// lands on a guest pixel boundary after the window and half-pixel offsets, so
+// the 2x2-scaled host footprint covers exactly the guest samples the MSAA draw
+// covers regardless of the host sample pattern.
+inline MsaaClearFoldValueRefusal CheckMsaaClearFoldValues(
+    const RegisterFile& regs, const MsaaClearFoldVertices& v,
+    bool colour_written, bool half_pixel_offset_enabled) {
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  for (uint32_t i = 0; i < 3; ++i) {
+    if (!vte.vtx_xy_fmt && v.position[i][3] != 1.0f) {
+      return MsaaClearFoldValueRefusal::kHomogeneousW;
+    }
+  }
+  for (uint32_t i = 1; i < 3; ++i) {
+    if (std::memcmp(&v.position[i][2], &v.position[0][2], sizeof(float))) {
+      return MsaaClearFoldValueRefusal::kDepthVaries;
+    }
+    if (colour_written &&
+        (!v.has_interpolator0 ||
+         std::memcmp(v.interpolator0[i], v.interpolator0[0],
+                     sizeof(v.interpolator0[0])))) {
+      return MsaaClearFoldValueRefusal::kColourVaries;
+    }
+  }
+  float offset_x = 0.0f, offset_y = 0.0f;
+  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    offset_x += float(window_offset.window_x_offset);
+    offset_y += float(window_offset.window_y_offset);
+  }
+  if (half_pixel_offset_enabled &&
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
+          xenos::PixelCenter::kD3DZero) {
+    offset_x += 0.5f;
+    offset_y += 0.5f;
+  }
+  for (uint32_t i = 0; i < 3; ++i) {
+    float x = v.position[i][0] + offset_x;
+    float y = v.position[i][1] + offset_y;
+    if (x != std::floor(x) || y != std::floor(y)) {
+      return MsaaClearFoldValueRefusal::kEdgeAlignment;
+    }
+  }
+  return MsaaClearFoldValueRefusal::kNone;
+}
+
+}  // namespace metal
+}  // namespace gpu
+}  // namespace xe
+
+#endif  // XENIA_GPU_METAL_METAL_MSAA_CLEAR_FOLD_H_

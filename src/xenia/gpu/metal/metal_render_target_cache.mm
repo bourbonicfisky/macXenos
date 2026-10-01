@@ -12,6 +12,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -1393,6 +1394,38 @@ void MetalRenderTargetCache::PerformTransfers(
     command_processor_.EndFrameEncoderAndWait(
         metal::SeamBoundaryReason::kDebugProbe);
   }
+}
+
+float MetalRenderTargetCache::CanonicalDepthTransferResult(
+    float host_depth, xenos::DepthRenderTargetFormat format) const {
+  if (format == xenos::DepthRenderTargetFormat::kD24S8) {
+    // CPU mirrors of xe_f32_to_unorm24 / xe_unorm24_to_f32 (metal_edram_msl.h):
+    // rint() rounds half to even under the default rounding mode, as MSL rint.
+    float clamped = std::min(std::max(host_depth, 0.0f), 1.0f);
+    uint32_t t = std::min(uint32_t(std::nearbyint(clamped * 16777216.0f)),
+                          uint32_t(16777216u));
+    uint32_t n24 = (t > 8388608u ? t - 1u : t) & 0xFFFFFFu;
+    return float(n24 + (n24 >> 23)) * (1.0f / 16777216.0f);
+  }
+  // float24: pack = xe_f32_to_f20e4(d * 2) (truncating), materialize =
+  // xe_f20e4_to_f32(d24) * 0.5, unless the lane reconcile restores the host
+  // value (xe_host_depth_reconcile: the arm's rounding of d * 2 reproduces the
+  // packed bits).
+  uint32_t d24 = xenos::Float32To20e4(host_depth * 2.0f, false);
+  uint32_t lane_mode = HostLaneMode(/*materialize=*/true);
+  bool reconcile =
+      lane_mode != 0 &&
+      MetalDepthToDepthCarriesHostPrecision(
+          host_depth_d2d_enabled_ && host_depth_gate_enabled_ &&
+              !f24_ps_engaged_,
+          /*has_planner_host_source=*/false, true, true,
+          xenos::DepthRenderTargetFormat::kD24FS8,
+          xenos::DepthRenderTargetFormat::kD24FS8);
+  if (reconcile &&
+      xenos::Float32To20e4(host_depth * 2.0f, (lane_mode & 4u) != 0) == d24) {
+    return host_depth;
+  }
+  return xenos::Float20e4To32(d24) * 0.5f;
 }
 
 uint32_t MetalRenderTargetCache::HostLaneMode(bool materialize) const {

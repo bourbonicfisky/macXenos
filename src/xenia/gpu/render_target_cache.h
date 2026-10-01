@@ -43,6 +43,10 @@ namespace gpu {
 
 class RenderTargetCache {
  public:
+  // See draw_extent_y_scale_ (MSAA fast-clear fold in the Metal backend).
+  void SetDrawExtentYScale(uint32_t scale) {
+    draw_extent_y_scale_ = scale ? scale : 1;
+  }
   // High-level emulation logic implementation path.
   enum class Path {
     // Approximate method using conventional host render targets and copying
@@ -616,6 +620,14 @@ class RenderTargetCache {
   uint32_t draw_resolution_scale_y_;
 
   DrawExtentEstimator draw_extent_estimator_;
+
+  // Multiplies the estimated used height for the next Update (guest rows ->
+
+  // host-view rows) when a backend draws an MSAA-level draw through another
+
+  // MSAA view of the same tiles; 1 otherwise. Set and reset by the backend.
+
+  uint32_t draw_extent_y_scale_ = 1;
 
   // For host render targets.
 

@@ -56,6 +56,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_fetch_overlap.h"
 #include "xenia/gpu/metal/metal_fixed_function_state.h"
+#include "xenia/gpu/metal/metal_msaa_clear_fold.h"
 #include "xenia/gpu/metal/metal_depth_semantics_flags.h"
 #include "xenia/gpu/metal/metal_integer_scale_publish.h"
 #include "xenia/gpu/metal/metal_memexport_gap_report.h"
@@ -4960,6 +4961,121 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
   bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  // MSAA fast-clear fold (metal_msaa_clear_fold.h): a qualifying runtime
+  // clear is presented to the rest of the draw as a 1x draw over the same
+  // tiles (RB_SURFACE_INFO rewritten for this draw only, restored on every
+  // exit path) with screen coordinates scaled into the 1x view.
+  // XE_METAL_MSAA_CLEAR_FOLD=1 enables it (default off until promotion);
+  // XE_METAL_MSAA_CLEAR_FOLD_LOG=1 reports folded/refused counts per swap.
+  uint32_t msaa_fold_scale_x = 1, msaa_fold_scale_y = 1;
+  // Folded depth clears pin their depth (NDC z = this, z scale 0) to the value
+  // the replaced canonical transfer would leave in the 1x view.
+  bool msaa_fold_pin_depth = false;
+  float msaa_fold_pin_ndc_z = 0.0f;
+  struct MsaaFoldSurfaceRestore {
+    RegisterFile* regs = nullptr;
+    RenderTargetCache* render_target_cache = nullptr;
+    uint32_t saved = 0;
+    ~MsaaFoldSurfaceRestore() {
+      if (regs) {
+        regs->values[XE_GPU_REG_RB_SURFACE_INFO] = saved;
+      }
+      if (render_target_cache) {
+        render_target_cache->SetDrawExtentYScale(1);
+      }
+    }
+  } msaa_fold_restore;
+  {
+    static const bool s_fold_enabled = metal::ParseMetalEnvironmentFlag(
+        std::getenv("XE_METAL_MSAA_CLEAR_FOLD"), false);
+    static const bool s_fold_log =
+        std::getenv("XE_METAL_MSAA_CLEAR_FOLD_LOG") != nullptr;
+    if (s_fold_enabled || s_fold_log) {
+      metal::MsaaClearFoldDecision fold = metal::QualifyMsaaClearFold(
+          regs, vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0, prim_type,
+          index_count, norm_depth, normalized_color_mask);
+      // Value invariance, edge alignment and the depth the transfer path
+      // would leave (design D3): evaluate the clear's vertices on the CPU.
+      if (fold.fold()) {
+        if (!msaa_fold_interpreter_) {
+          msaa_fold_interpreter_ =
+              std::make_unique<ShaderInterpreter>(*register_file_, *memory_);
+        }
+        metal::MsaaClearFoldVertices vertices;
+        if (!vertex_shader ||
+            !metal::EvaluateMsaaClearFoldVertices(
+                regs, *msaa_fold_interpreter_, *vertex_shader, vertices)) {
+          fold.refusal = metal::MsaaClearFoldRefusal::kVertexEvaluation;
+        } else {
+          switch (metal::CheckMsaaClearFoldValues(
+              regs, vertices, normalized_color_mask != 0,
+              cvars::half_pixel_offset)) {
+            case metal::MsaaClearFoldValueRefusal::kNone:
+              break;
+            case metal::MsaaClearFoldValueRefusal::kVertexEvaluation:
+              fold.refusal = metal::MsaaClearFoldRefusal::kVertexEvaluation;
+              break;
+            case metal::MsaaClearFoldValueRefusal::kHomogeneousW:
+              fold.refusal = metal::MsaaClearFoldRefusal::kHomogeneousW;
+              break;
+            case metal::MsaaClearFoldValueRefusal::kDepthVaries:
+              fold.refusal = metal::MsaaClearFoldRefusal::kDepthVaries;
+              break;
+            case metal::MsaaClearFoldValueRefusal::kColourVaries:
+              fold.refusal = metal::MsaaClearFoldRefusal::kColourVaries;
+              break;
+            case metal::MsaaClearFoldValueRefusal::kEdgeAlignment:
+              fold.refusal = metal::MsaaClearFoldRefusal::kEdgeAlignment;
+              break;
+          }
+        }
+        if (fold.fold() && norm_depth.z_enable && norm_depth.z_write_enable) {
+          // Host depth the MSAA clear would rasterize: only the plain
+          // mapping (NDC z scale 1, offset 0, viewport z [0, 1] or [0, 0.5]
+          // for float24) is reproduced exactly on the CPU.
+          draw_util::ViewportInfo fold_viewport;
+          draw_util::GetViewportInfoArgs fold_vp_args = GetMetalViewportInfoArgs(
+              regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
+              1u << fold.scale_x_log2, 1u << fold.scale_y_log2);
+          draw_util::GetHostViewportInfo(&fold_vp_args, fold_viewport);
+          if (fold_viewport.ndc_scale[2] != 1.0f ||
+              fold_viewport.ndc_offset[2] != 0.0f ||
+              fold_viewport.z_min != 0.0f ||
+              (fold_viewport.z_max != 1.0f && fold_viewport.z_max != 0.5f) ||
+              (pixel_shader && pixel_shader->writes_depth())) {
+            fold.refusal = metal::MsaaClearFoldRefusal::kDepthRange;
+          } else {
+            float host_depth = vertices.position[0][2] * fold_viewport.z_max;
+            float transferred = render_target_cache_->CanonicalDepthTransferResult(
+                host_depth, rb_depth_info.depth_format);
+            msaa_fold_pin_depth = true;
+            msaa_fold_pin_ndc_z = transferred / fold_viewport.z_max;
+          }
+        }
+      }
+      // Census over the runtime clear pair only (other draws are not
+      // candidates and would drown the refusal reasons).
+      if (fold.refusal != metal::MsaaClearFoldRefusal::kShaderPair) {
+        ++msaa_fold_census_[uint32_t(fold.refusal)];
+      }
+      if (!s_fold_enabled || !fold.fold()) {
+        msaa_fold_pin_depth = false;
+      }
+      if (s_fold_enabled && fold.fold()) {
+        msaa_fold_restore.regs = register_file_;
+        msaa_fold_restore.saved = regs.values[XE_GPU_REG_RB_SURFACE_INFO];
+        register_file_->values[XE_GPU_REG_RB_SURFACE_INFO] =
+            fold.surface_info_1x;
+        msaa_fold_scale_x = 1u << fold.scale_x_log2;
+        msaa_fold_scale_y = 1u << fold.scale_y_log2;
+        // The render-target cache estimates the used height from guest
+        // (MSAA-level) rows; scale it into the 1x view's rows.
+        msaa_fold_restore.render_target_cache = render_target_cache_.get();
+        render_target_cache_->SetDrawExtentYScale(msaa_fold_scale_y);
+      }
+    }
+  }
   // Write-provenance probe (XE_METAL_DEPTH_PROVENANCE): the pack-shader-
   // INDEPENDENT answer to "does the guest ever write real depth into the 4x
   // view?" — read straight from guest registers, so it can't be fooled by a
@@ -7091,11 +7207,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // 16384 viewport limit) so guest content beyond 1280x720 is clipped, not
     // scaled.
     draw_util::GetViewportInfoArgs vp_args = GetMetalViewportInfoArgs(
-        regs, norm_depth, pixel_shader && pixel_shader->writes_depth());
+        regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
+        msaa_fold_scale_x, msaa_fold_scale_y);
     draw_util::GetHostViewportInfo(&vp_args, viewport_info);
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
+    }
+    if (msaa_fold_pin_depth) {
+      // Constant depth = the canonical transfer's result (see the fold).
+      system_constants.ndc_scale[2] = 0.0f;
+      system_constants.ndc_offset[2] = msaa_fold_pin_ndc_z;
     }
     draw_util::NormalizedUserClipPlanes user_clip_planes =
         draw_util::GetNormalizedUserClipPlanes(regs);
@@ -7583,6 +7705,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       draw_util::Scissor guest_scissor;
       draw_util::GetScissor(regs, guest_scissor);
+      // A folded MSAA clear draws into the 1x view: scale the guest scissor
+      // by the same factor as the viewport (identity otherwise).
+      guest_scissor.offset[0] *= msaa_fold_scale_x;
+      guest_scissor.extent[0] *= msaa_fold_scale_x;
+      guest_scissor.offset[1] *= msaa_fold_scale_y;
+      guest_scissor.extent[1] *= msaa_fold_scale_y;
       MetalScissorRect metal_scissor = ClampScissorToRenderExtent(
           guest_scissor, render_width, render_height);
       if (metal_scissor.empty()) {
@@ -12588,6 +12716,28 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     objc_autoreleasePoolPop(frame_autorelease_pool_);
   }
   frame_autorelease_pool_ = objc_autoreleasePoolPush();
+  {
+    static_assert(uint32_t(metal::MsaaClearFoldRefusal::kCount) <=
+                      sizeof(msaa_fold_census_) / sizeof(msaa_fold_census_[0]),
+                  "MSAA fold census too small");
+    static const bool s_fold_log =
+        std::getenv("XE_METAL_MSAA_CLEAR_FOLD_LOG") != nullptr;
+    if (s_fold_log && swap_count_ && (swap_count_ % 60) == 0) {
+      std::string line;
+      for (uint32_t i = 0; i < uint32_t(metal::MsaaClearFoldRefusal::kCount);
+           ++i) {
+        if (msaa_fold_census_[i]) {
+          line += fmt::format(
+              " {}={}",
+              metal::MsaaClearFoldRefusalName(metal::MsaaClearFoldRefusal(i)),
+              msaa_fold_census_[i]);
+        }
+      }
+      XELOGI("MetalMsaaClearFold swap#{} (60 swaps):{}", swap_count_,
+             line.empty() ? std::string(" none") : line);
+      std::memset(msaa_fold_census_, 0, sizeof(msaa_fold_census_));
+    }
+  }
 
   // TEMPORARY census probe (task 1.5). At swap, because that is where a
   // production decoder would read DC_LUTA_CONTROL under design D3.

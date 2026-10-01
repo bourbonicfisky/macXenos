@@ -20,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "xenia/gpu/shader_interpreter.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/host_tessellator.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
@@ -949,6 +950,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // Trace playback only: guest ranges this frame's GPU resolves and memexports
   // wrote (kept over later trace restores; cleared at the frame's swap).
   std::vector<std::pair<uint32_t, uint32_t>> playback_gpu_written_;
+  // MSAA fast-clear fold census (XE_METAL_MSAA_CLEAR_FOLD_LOG), indexed by
+  // metal::MsaaClearFoldRefusal (kNone = folded); reset each report.
+  uint64_t msaa_fold_census_[32] = {};
+  // CPU vertex-shader evaluation for the fold's value/alignment proof.
+  std::unique_ptr<ShaderInterpreter> msaa_fold_interpreter_;
   uint64_t memory_authority_sequence_ = 0;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,

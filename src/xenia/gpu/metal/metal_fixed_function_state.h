@@ -295,12 +295,16 @@ inline MetalSystemConstantGuestState GetMetalSystemConstantGuestState(
 // Metal's canonical depth transfer stores the full guest float24 [0, 2)
 // domain in host [0, 1]. These arguments keep interpolated raster depth and
 // explicit pixel-shader depth in that same domain.
+// `scale_x`/`scale_y` map guest pixels to host pixels (1 except for a
+// fast-clear folded into the 1x view, see metal_msaa_clear_fold.h).
 inline draw_util::GetViewportInfoArgs GetMetalViewportInfoArgs(
     const RegisterFile& regs,
     reg::RB_DEPTHCONTROL normalized_depth_control,
-    bool pixel_shader_writes_depth) {
+    bool pixel_shader_writes_depth, uint32_t scale_x = 1,
+    uint32_t scale_y = 1) {
   draw_util::GetViewportInfoArgs args;
-  args.Setup(1, 1, divisors::MagicDiv(1), divisors::MagicDiv(1),
+  args.Setup(scale_x, scale_y, divisors::MagicDiv(scale_x),
+             divisors::MagicDiv(scale_y),
              /*origin_bottom_left=*/true,
              xenos::kTexture2DCubeMaxWidthHeight,
              xenos::kTexture2DCubeMaxWidthHeight,
