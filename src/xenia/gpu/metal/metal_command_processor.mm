@@ -4965,7 +4965,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // clear is presented to the rest of the draw as a 1x draw over the same
   // tiles (RB_SURFACE_INFO rewritten for this draw only, restored on every
   // exit path) with screen coordinates scaled into the 1x view.
-  // XE_METAL_MSAA_CLEAR_FOLD=1 enables it (default off until promotion);
+  // Default on (promoted 2026-10-01: Gears 3 18.4 -> 30.0 fps, corpus 60/60
+  // 0 px); XE_METAL_MSAA_CLEAR_FOLD=0 is the exact rollback.
   // XE_METAL_MSAA_CLEAR_FOLD_LOG=1 reports folded/refused counts per swap.
   uint32_t msaa_fold_scale_x = 1, msaa_fold_scale_y = 1;
   // Folded depth clears pin their depth (NDC z = this, z scale 0) to the value
@@ -4987,7 +4988,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   } msaa_fold_restore;
   {
     static const bool s_fold_enabled = metal::ParseMetalEnvironmentFlag(
-        std::getenv("XE_METAL_MSAA_CLEAR_FOLD"), false);
+        std::getenv("XE_METAL_MSAA_CLEAR_FOLD"), true);
     static const bool s_fold_log =
         std::getenv("XE_METAL_MSAA_CLEAR_FOLD_LOG") != nullptr;
     if (s_fold_enabled || s_fold_log) {
