@@ -27,6 +27,36 @@
 #include "xenia/gpu/render_target_transfer_class.h"
 #include "xenia/gpu/xenos.h"
 
+DEFINE_bool(
+    metal_stencil_export, true,
+    "Rebuild depth/stencil render targets from EDRAM in one pass, writing the "
+    "stencil value from the shader, instead of one depth pass plus eight "
+    "stencil bit-plane passes. Performance only (Just Cause 2 +15% on an M4); "
+    "turn off only to troubleshoot a rendering problem. "
+    "XE_METAL_STENCIL_EXPORT=0/1 overrides this setting.",
+    "GPU");
+DEFINE_bool(
+    metal_raster_sync_skip, true,
+    "Skip re-synchronizing a render target with EDRAM when nothing has "
+    "changed since its last synchronization. Performance only (Just Cause 2 "
+    "+12% on an M4); turn off only to troubleshoot a rendering problem. "
+    "XE_METAL_RASTER_SYNC_SKIP=0/1 overrides this setting.",
+    "GPU");
+DEFINE_bool(
+    metal_raster_mark_skip, true,
+    "Skip re-marking EDRAM tiles a render target already owns on every draw. "
+    "Performance only (Just Cause 2 +5% on an M4); turn off only to "
+    "troubleshoot a rendering problem. XE_METAL_RASTER_MARK_SKIP=0/1 "
+    "overrides this setting.",
+    "GPU");
+DEFINE_bool(
+    metal_resolve_span_coalesce, true,
+    "Synchronize a full-width resolve's EDRAM rows as one span instead of row "
+    "by row. Performance only (Just Cause 2 +25% on an M4 once the other "
+    "optimizations are on); turn off only to troubleshoot a rendering "
+    "problem. XE_METAL_RESOLVE_SPAN_COALESCE=0/1 overrides this setting.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -878,10 +908,9 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     const uint32_t start_tiles = render_target->key().base_tiles;
     const uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
-    static const bool s_sync_skip = [] {
-      const char* v = std::getenv("XE_METAL_RASTER_SYNC_SKIP");
-      return !(v && v[0] == '0' && !v[1]);
-    }();
+    static const bool s_sync_skip =
+        MetalSwitchEnabled(cvars::metal_raster_sync_skip,
+                           std::getenv("XE_METAL_RASTER_SYNC_SKIP"));
     RasterSyncMemo& memo = raster_sync_memo_[slot];
     if (s_sync_skip && memo.valid && memo.attachment == attachment &&
         memo.start_tiles == start_tiles && memo.end_tiles == end_tiles &&
@@ -979,8 +1008,9 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
   // each dispatching every row above its range), and the command processor
   // walks the tracker once instead of once per row. The packed tile set is
   // identical. XE_METAL_RESOLVE_SPAN_COALESCE=0 restores per-row sync.
-  static const bool s_coalesce = ParseMetalEnvironmentFlag(
-      std::getenv("XE_METAL_RESOLVE_SPAN_COALESCE"), true);
+  static const bool s_coalesce =
+      MetalSwitchEnabled(cvars::metal_resolve_span_coalesce,
+                         std::getenv("XE_METAL_RESOLVE_SPAN_COALESCE"));
   if (s_coalesce && row_length_used == span_pitch) {
     uint64_t total = std::min<uint64_t>(uint64_t(rows) * span_pitch,
                                         xenos::kEdramTileCount);
@@ -1030,8 +1060,9 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     uint32_t start_tiles = render_target->key().base_tiles;
     uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
-    static const bool s_mark_skip = ParseMetalEnvironmentFlag(
-        std::getenv("XE_METAL_RASTER_MARK_SKIP"), true);
+    static const bool s_mark_skip =
+        MetalSwitchEnabled(cvars::metal_raster_mark_skip,
+                           std::getenv("XE_METAL_RASTER_MARK_SKIP"));
     RasterSyncMemo& memo = raster_mark_memo_[slot];
     if (s_mark_skip && memo.valid && memo.attachment == attachment &&
         memo.start_tiles == start_tiles && memo.end_tiles == end_tiles &&
@@ -2005,8 +2036,8 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
 // ([[stencil]] export) in the depth pass instead of eight bit-plane passes.
 // XE_METAL_STENCIL_EXPORT=0 is the exact rollback to the bit-plane passes.
 static bool CanonicalStencilExportEnabled() {
-  static const bool enabled = ParseMetalEnvironmentFlag(
-      std::getenv("XE_METAL_STENCIL_EXPORT"), true);
+  static const bool enabled = MetalSwitchEnabled(
+      cvars::metal_stencil_export, std::getenv("XE_METAL_STENCIL_EXPORT"));
   return enabled;
 }
 

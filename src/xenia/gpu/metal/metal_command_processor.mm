@@ -112,6 +112,17 @@ DEFINE_bool(
 UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
+    metal_msaa_clear_fold, true,
+    "Draw the Xbox 360's 2x/4x MSAA fast clears straight into the matching "
+    "1x view of the same EDRAM instead of copying the whole surface out and "
+    "back for each clear. Large speedup in titles that clear MSAA buffers "
+    "often (Gears of War 3: 18 -> 30 fps on an M4); no visual change is "
+    "intended - clears it cannot prove identical take the old path. Turn off "
+    "only to troubleshoot a rendering problem. XE_METAL_MSAA_CLEAR_FOLD=0/1 "
+    "overrides this setting.",
+    "GPU");
+
+DEFINE_bool(
     metal_texture_integer_scale, true,
     "Restore the guest's integer range for texture fetches whose fetch "
     "constant declares an integer num_format on a fixed-point format. The host "
@@ -4966,7 +4977,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // tiles (RB_SURFACE_INFO rewritten for this draw only, restored on every
   // exit path) with screen coordinates scaled into the 1x view.
   // Default on (promoted 2026-10-01: Gears 3 18.4 -> 30.0 fps, corpus 60/60
-  // 0 px); XE_METAL_MSAA_CLEAR_FOLD=0 is the exact rollback.
+  // 0 px); the metal_msaa_clear_fold option or XE_METAL_MSAA_CLEAR_FOLD=0 is
+  // the exact rollback.
   // XE_METAL_MSAA_CLEAR_FOLD_LOG=1 reports folded/refused counts per swap.
   uint32_t msaa_fold_scale_x = 1, msaa_fold_scale_y = 1;
   // Folded depth clears pin their depth (NDC z = this, z scale 0) to the value
@@ -4987,8 +4999,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   } msaa_fold_restore;
   {
-    static const bool s_fold_enabled = metal::ParseMetalEnvironmentFlag(
-        std::getenv("XE_METAL_MSAA_CLEAR_FOLD"), true);
+    static const bool s_fold_enabled = metal::MetalSwitchEnabled(
+        cvars::metal_msaa_clear_fold, std::getenv("XE_METAL_MSAA_CLEAR_FOLD"));
     static const bool s_fold_log =
         std::getenv("XE_METAL_MSAA_CLEAR_FOLD_LOG") != nullptr;
     if (s_fold_enabled || s_fold_log) {

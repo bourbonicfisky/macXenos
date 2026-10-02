@@ -33,6 +33,14 @@ inline bool ParseMetalEnvironmentFlag(const char* value,
   return value[0] == '1' && value[1] == '\0';
 }
 
+// A user-facing Metal switch: the config option (cvar) decides, unless the
+// matching XE_METAL_* environment variable is set, which then overrides it with
+// the strict contract above (exact 1 on, exact 0 / malformed off). Keeps the
+// developer rollbacks and test harnesses working unchanged.
+inline bool MetalSwitchEnabled(bool config_value, const char* env_value) {
+  return ParseMetalEnvironmentFlag(env_value, config_value);
+}
+
 // Returns the smallest top-aligned texture height containing every pixel whose
 // physical tile may be below end_tiles. Range shaders retain their exact
 // start/end guards; this only avoids dispatching rows that are guaranteed to be
