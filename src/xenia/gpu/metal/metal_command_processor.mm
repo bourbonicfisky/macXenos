@@ -66,6 +66,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_scale_coverage_census.h"
 #include "xenia/gpu/metal/metal_serving_census.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_host_tessellation.h"
@@ -233,6 +234,17 @@ inline bool RouteAllDrainsBase(uint32_t fetch_base) {
   }
   return false;
 }
+// XE_METAL_SCALE_CENSUS=1 (exact-1, default OFF): OBSERVATIONAL census of
+// how much resolve-written texture traffic is served from live snapshots
+// (metal_scale_coverage_census.h). Counts only.
+bool ScaleCoverageCensusEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_SCALE_CENSUS");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  return s_enabled;
+}
+
 inline bool RouteServiceOk(ResolvedFetchService service,
                            uint32_t fetch_base = 0,
                            bool declaration_site = false) {
@@ -6483,6 +6495,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // class (kBridgeSnapshot's condition is equivalent to BridgeServes when
         // color_bridge is off, and covered_r32f implies !ram_backed); the
         // census measures how often that class actually fires on real content.
+        if (ScaleCoverageCensusEnabled() && texture_cache_) {
+          metal::ScaleCoverageCensus::Get().RecordFetch(
+              fbase, f.size_2d.width + 1, f.size_2d.height + 1,
+              texture_cache_->ClassifyFetchService(f, binding.is_signed));
+        }
         if (ServingCensusEnabled() && texture_cache_) {
           ResolvedFetchService service =
               texture_cache_->ClassifyFetchService(f, binding.is_signed);
@@ -9426,6 +9443,11 @@ bool MetalCommandProcessor::IssueCopy() {
                                  /*fixed_rgba16_truncated_to_minus_1_to_1=*/false,
                                  resolve_info)) {
     return true;
+  }
+  if (ScaleCoverageCensusEnabled()) {
+    metal::ScaleCoverageCensus::Get().RecordResolve(
+        resolve_info.copy_dest_extent_start,
+        resolve_info.copy_dest_extent_length);
   }
   // Commit encoded draws BEFORE processing the resolve (default-on;
   // XE_METAL_NO_RESOLVE_COMMIT=1 restores the old whole-frame buffer for A/B).
@@ -13002,6 +13024,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                double(publish_ns_) / 1e6 / 128.0, float(publish_calls_) / 128.0f);
         publish_ns_ = 0;
         publish_calls_ = 0;
+      }
+      if (ScaleCoverageCensusEnabled()) {
+        metal::ScaleCoverageCensus::Get().Dump(count);
       }
       if (ServingCensusEnabled()) {
         // Periodic by necessity: the emulator is killed, never shut down
