@@ -85,13 +85,18 @@ inline std::string TranslateAnsiPath(const Memory* memory,
       std::string(TranslateAnsiString(memory, ansi_string)));
 }
 
+// A null pointer is no string. Translating it would point at guest address 0.
+inline const X_ANSI_STRING* TranslateAnsiStringPointer(const Memory* memory,
+                                                       uint32_t guest_address) {
+  return guest_address
+             ? memory->TranslateVirtual<const X_ANSI_STRING*>(guest_address)
+             : nullptr;
+}
+
 inline std::string_view TranslateAnsiStringAddress(const Memory* memory,
                                                    uint32_t guest_address) {
-  if (!guest_address) {
-    return "";
-  }
-  return TranslateAnsiString(
-      memory, memory->TranslateVirtual<const X_ANSI_STRING*>(guest_address));
+  return TranslateAnsiString(memory,
+                             TranslateAnsiStringPointer(memory, guest_address));
 }
 
 inline std::u16string TranslateUnicodeString(
@@ -447,7 +452,7 @@ inline void AppendParam(StringBuffer* string_buffer,
   string_buffer->AppendFormat("{:08X}", record.guest_address());
   if (record) {
     auto name_string =
-        kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(record->name_ptr);
+        util::TranslateAnsiStringPointer(kernel_memory(), record->name_ptr);
     std::string_view name =
         name_string == nullptr
             ? "(null)"
