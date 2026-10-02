@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 
+#include "xenia/gpu/metal/metal_draw_resolution_scale.h"
+
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
@@ -224,7 +226,9 @@ std::string MetalPipelineStorageIdentity::DescribeMismatch(
   return out.empty() ? "none" : out;
 }
 
-MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
+MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
+    void* device, uint32_t draw_resolution_scale_x,
+    uint32_t draw_resolution_scale_y) {
   MetalPipelineStorageIdentity identity;
 
   // 3.3b — read from MetalTranslatorConfig, the same constants
@@ -238,7 +242,12 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
     uint32_t msc_bindless_resources_used : 1;
     uint32_t fetch_abi_revision : 8;
     uint32_t dxilconv_generation : 4;
-    uint32_t reserved : 15;
+    // Draw resolution scale minus 1 per axis (implement-metal-draw-resolution-
+    // scaling): the translator bakes the scale into pixel position, texture
+    // offset and memexport code. 0 at 1x, so 1x identities are unchanged.
+    uint32_t draw_resolution_scale_x_minus_1 : 2;
+    uint32_t draw_resolution_scale_y_minus_1 : 2;
+    uint32_t reserved : 11;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -274,6 +283,10 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
   // kFetchAbiRevision so the conformance mirror can name it rather than repeat
   // a literal that would drift silently.
   schema.dxilconv_generation = MetalTranslatorConfig::kDxilconvGeneration;
+  schema.draw_resolution_scale_x_minus_1 =
+      std::max(draw_resolution_scale_x, uint32_t(1)) - 1;
+  schema.draw_resolution_scale_y_minus_1 =
+      std::max(draw_resolution_scale_y, uint32_t(1)) - 1;
   // A value wider than its bitfield does not fail to compile — it TRUNCATES,
   // and a truncated revision aliases an older one onto a newer build: exactly
   // the stale-serve these fields exist to prevent, arriving through the guard
@@ -287,6 +300,9 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device) {
                 "kDxilconvGeneration no longer fits its 4-bit schema field; "
                 "widen the field (and bump kFormatVersion) before bumping "
                 "past 15, or the generation aliases an earlier one");
+  static_assert(kMetalMaxDrawResolutionScale - 1 < (1u << 2),
+                "The maximum draw resolution scale no longer fits its 2-bit "
+                "schema fields");
   static_assert(sizeof(SchemaBits) == sizeof(identity.translator_schema),
                 "SchemaBits must exactly fill translator_schema");
   std::memcpy(&identity.translator_schema, &schema, sizeof(schema));

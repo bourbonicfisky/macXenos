@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_RENDER_TARGET_CACHE_H_
 #define XENIA_GPU_METAL_METAL_RENDER_TARGET_CACHE_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -62,7 +63,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   MetalRenderTargetCache(const RegisterFile& register_file,
                          const Memory& memory, TraceWriter* trace_writer,
                          MetalCommandProcessor& command_processor,
-                         void* device);
+                         void* device, uint32_t draw_resolution_scale_x,
+                         uint32_t draw_resolution_scale_y);
   ~MetalRenderTargetCache();
 
   bool Initialize();
@@ -356,8 +358,16 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                           std::vector<uint8_t>& edram_out);
 
  protected:
-  uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
-  uint32_t GetMaxRenderTargetHeight() const override { return 8192; }
+  // The guest maximum at the draw resolution scale, within the Metal 2D
+  // texture limit (8192 at 1x, as before scaling).
+  uint32_t GetMaxRenderTargetWidth() const override {
+    return std::min(uint32_t(8192) * draw_resolution_scale_x(),
+                    uint32_t(16384));
+  }
+  uint32_t GetMaxRenderTargetHeight() const override {
+    return std::min(uint32_t(8192) * draw_resolution_scale_y(),
+                    uint32_t(16384));
+  }
 
   // XE_GPU_TILE_TRACE correlation: ownership-claim events log the trace draw
   // index they happened at.

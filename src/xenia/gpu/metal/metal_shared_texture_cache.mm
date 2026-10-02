@@ -114,8 +114,10 @@ class MetalSharedTextureCache::MetalTexture final
 
 MetalSharedTextureCache::MetalSharedTextureCache(
     const RegisterFile& register_file, MetalSharedMemory& shared_memory,
-    void* device, MetalTextureCache* legacy_adapter)
-    : TextureCache(register_file, shared_memory, 1, 1),
+    void* device, MetalTextureCache* legacy_adapter,
+    uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
+    : TextureCache(register_file, shared_memory, draw_resolution_scale_x,
+                   draw_resolution_scale_y),
       device_(device),
       legacy_(legacy_adapter) {}
 

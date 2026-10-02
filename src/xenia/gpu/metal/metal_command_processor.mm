@@ -66,6 +66,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_shader_build_census.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_draw_resolution_scale.h"
 #include "xenia/gpu/metal/metal_scale_coverage_census.h"
 #include "xenia/gpu/metal/metal_serving_census.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -91,6 +92,9 @@ extern "C" void objc_autoreleasePoolPop(void*);
 // ir_runtime_impl.mm). Provides IRDescriptorTableEntry, the kIR*BindPoint slot
 // constants, IRDescriptorTableSet*, and the IRRuntimeDraw* helpers.
 #include "metal_irconverter_runtime.h"
+
+DECLARE_int32(draw_resolution_scale_x);
+DECLARE_int32(draw_resolution_scale_y);
 
 DEFINE_bool(
     metal_present_format_convert, true,
@@ -1591,13 +1595,51 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: no Metal device from provider");
     return false;
   }
-  pipeline_cache_ = std::make_unique<MetalPipelineCache>(device);
+  {
+    // implement-metal-draw-resolution-scaling. Scaled render targets, EDRAM,
+    // resolves and texture serving are not delivered yet, so the session
+    // renders at 1x. XE_METAL_DRAW_RESOLUTION_SCALE_DEV=1 (development only)
+    // applies the requested scale to the wiring that exists so far.
+    const char* dev_value = std::getenv("XE_METAL_DRAW_RESOLUTION_SCALE_DEV");
+    const bool dev_scaled =
+        dev_value && dev_value[0] == '1' && dev_value[1] == '\0';
+    const metal::MetalDrawResolutionScale scale =
+        metal::ResolveMetalDrawResolutionScale(cvars::draw_resolution_scale_x,
+                                               cvars::draw_resolution_scale_y,
+                                               dev_scaled);
+    if (scale.clamped) {
+      XELOGW(
+          "MetalCommandProcessor: draw resolution scale {}x{} clamped to {}x{} "
+          "(the Metal renderer supports 1 to {} per axis)",
+          cvars::draw_resolution_scale_x, cvars::draw_resolution_scale_y,
+          scale.requested_x, scale.requested_y,
+          metal::kMetalMaxDrawResolutionScale);
+    }
+    if (scale.x != scale.requested_x || scale.y != scale.requested_y) {
+      XELOGW(
+          "MetalCommandProcessor: draw resolution scale {}x{} requested; the "
+          "Metal renderer renders at 1x until scaled rendering is delivered",
+          scale.requested_x, scale.requested_y);
+    } else if (scale.x != 1 || scale.y != 1) {
+      XELOGW(
+          "MetalCommandProcessor: draw resolution scale {}x{} (development "
+          "override XE_METAL_DRAW_RESOLUTION_SCALE_DEV=1)",
+          scale.x, scale.y);
+    }
+    draw_resolution_scale_x_ = scale.x;
+    draw_resolution_scale_y_ = scale.y;
+    zpd_draw_resolution_scale_x_ = scale.x;
+    zpd_draw_resolution_scale_y_ = scale.y;
+  }
+  pipeline_cache_ = std::make_unique<MetalPipelineCache>(
+      device, draw_resolution_scale_x_, draw_resolution_scale_y_);
   if (!pipeline_cache_->Initialize()) {
     XELOGE("MetalCommandProcessor: pipeline cache init failed");
     return false;
   }
   render_target_cache_ = std::make_unique<MetalRenderTargetCache>(
-      *register_file_, *memory_, &trace_writer_, *this, device);
+      *register_file_, *memory_, &trace_writer_, *this, device,
+      draw_resolution_scale_x_, draw_resolution_scale_y_);
   if (!render_target_cache_->Initialize()) {
     XELOGE("MetalCommandProcessor: render target cache init failed");
     return false;
@@ -1884,7 +1926,8 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
         "build; XE_METAL_SHARED_RESOLVE will not engage");
   }
   shared_texture_cache_ = std::make_unique<MetalSharedTextureCache>(
-      *register_file_, *shared_memory_, device_ptr, texture_cache_.get());
+      *register_file_, *shared_memory_, device_ptr, texture_cache_.get(),
+      draw_resolution_scale_x_, draw_resolution_scale_y_);
   shared_texture_cache_->SetPrepareTransferCallback(
       [this]() { return PrepareTransferCommandBuffer(); });
   // NOT gated on S7TagsOff: these ids drive the subclass's BeginSubmission
@@ -2922,10 +2965,10 @@ bool MetalCommandProcessor::DispatchSharedResolveCopy(
   uint32_t group_count_x = 0;
   uint32_t group_count_y = 0;
   // ONE selector, shared with D3D12/Vulkan: it decides the shader, fills the
-  // constants and returns the dispatch shape. Metal is 1x, so the resolution
-  // scale is fixed at (1,1) and only unscaled variants can be selected.
+  // constants and returns the dispatch shape, at the draw resolution scale.
   draw_util::ResolveCopyShaderIndex shader_index = resolve_info.GetCopyShader(
-      1, 1, constants, group_count_x, group_count_y);
+      draw_resolution_scale_x_, draw_resolution_scale_y_, constants,
+      group_count_x, group_count_y);
   if (shader_index == draw_util::ResolveCopyShaderIndex::kUnknown) {
     return decline("shader-index-unknown");
   }
@@ -5062,7 +5105,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           draw_util::ViewportInfo fold_viewport;
           draw_util::GetViewportInfoArgs fold_vp_args = GetMetalViewportInfoArgs(
               regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
-              1u << fold.scale_x_log2, 1u << fold.scale_y_log2);
+              (1u << fold.scale_x_log2) * draw_resolution_scale_x_,
+              (1u << fold.scale_y_log2) * draw_resolution_scale_y_,
+              draw_resolution_scale_x_, draw_resolution_scale_y_);
           draw_util::GetHostViewportInfo(&fold_vp_args, fold_viewport);
           if (fold_viewport.ndc_scale[2] != 1.0f ||
               fold_viewport.ndc_offset[2] != 0.0f ||
@@ -7238,7 +7283,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // scaled.
     draw_util::GetViewportInfoArgs vp_args = GetMetalViewportInfoArgs(
         regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
-        msaa_fold_scale_x, msaa_fold_scale_y);
+        msaa_fold_scale_x * draw_resolution_scale_x_,
+        msaa_fold_scale_y * draw_resolution_scale_y_, draw_resolution_scale_x_,
+        draw_resolution_scale_y_);
     draw_util::GetHostViewportInfo(&vp_args, viewport_info);
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
@@ -7255,7 +7302,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 user_clip_planes.equations,
                 sizeof(system_constants.user_clip_planes));
     draw_util::NormalizedPointParameters point_parameters =
-        draw_util::GetNormalizedPointParameters(regs, viewport_info, 1, 1);
+        draw_util::GetNormalizedPointParameters(regs, viewport_info,
+                                                draw_resolution_scale_x_,
+                                                draw_resolution_scale_y_);
     system_constants.point_vertex_diameter_min =
         point_parameters.vertex_diameter_min;
     system_constants.point_vertex_diameter_max =
@@ -7680,9 +7729,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                     : MTLWindingCounterClockwise];
 
       // Apply a complete fill/depth-bias value every draw so state cannot leak
-      // across guest transitions or newly opened render encoders. The local
-      // Metal path currently renders at 1x; the helper keeps resolution scale
-      // explicit for the eventual scaled-render-target path.
+      // across guest transitions or newly opened render encoders. The slope
+      // scales with the larger draw resolution scale axis, as on D3D12.
       float polygon_offset_scale = 0.0f;
       float polygon_offset = 0.0f;
       draw_util::GetPreferredFacePolygonOffset(
@@ -7690,7 +7738,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       MetalFillDepthBiasState fill_bias = GetMetalFillDepthBiasState(
           regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal,
           regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset_scale,
-          polygon_offset, 1);
+          polygon_offset,
+          std::max(draw_resolution_scale_x_, draw_resolution_scale_y_));
       [encoder
           setTriangleFillMode:fill_bias.triangle_fill_mode ==
                                       MetalTriangleFillMode::kLines
@@ -7735,12 +7784,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       draw_util::Scissor guest_scissor;
       draw_util::GetScissor(regs, guest_scissor);
-      // A folded MSAA clear draws into the 1x view: scale the guest scissor
-      // by the same factor as the viewport (identity otherwise).
-      guest_scissor.offset[0] *= msaa_fold_scale_x;
-      guest_scissor.extent[0] *= msaa_fold_scale_x;
-      guest_scissor.offset[1] *= msaa_fold_scale_y;
-      guest_scissor.extent[1] *= msaa_fold_scale_y;
+      // Scale the guest scissor by the same factor as the viewport: the draw
+      // resolution scale, times the fold scale of an MSAA clear folded into
+      // the 1x view (identity at 1x otherwise).
+      guest_scissor.offset[0] *= msaa_fold_scale_x * draw_resolution_scale_x_;
+      guest_scissor.extent[0] *= msaa_fold_scale_x * draw_resolution_scale_x_;
+      guest_scissor.offset[1] *= msaa_fold_scale_y * draw_resolution_scale_y_;
+      guest_scissor.extent[1] *= msaa_fold_scale_y * draw_resolution_scale_y_;
       MetalScissorRect metal_scissor = ClampScissorToRenderExtent(
           guest_scissor, render_width, render_height);
       if (metal_scissor.empty()) {
@@ -9437,8 +9487,8 @@ bool MetalCommandProcessor::IssueCopy() {
 
   draw_util::ResolveInfo resolve_info;
   if (!draw_util::GetResolveInfo(*register_file_, *memory_, trace_writer_,
-                                 /*draw_resolution_scale_x=*/1,
-                                 /*draw_resolution_scale_y=*/1,
+                                 draw_resolution_scale_x_,
+                                 draw_resolution_scale_y_,
                                  /*fixed_rg16_truncated_to_minus_1_to_1=*/false,
                                  /*fixed_rgba16_truncated_to_minus_1_to_1=*/false,
                                  resolve_info)) {

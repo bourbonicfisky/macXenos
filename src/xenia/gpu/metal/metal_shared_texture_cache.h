@@ -51,7 +51,9 @@ class MetalSharedTextureCache : public TextureCache {
  public:
   MetalSharedTextureCache(const RegisterFile& register_file,
                           MetalSharedMemory& shared_memory, void* device,
-                          MetalTextureCache* legacy_adapter);
+                          MetalTextureCache* legacy_adapter,
+                          uint32_t draw_resolution_scale_x,
+                          uint32_t draw_resolution_scale_y);
   ~MetalSharedTextureCache() override;
 
   // Builds the direct-load pipeline. Returns false (route unusable, callers

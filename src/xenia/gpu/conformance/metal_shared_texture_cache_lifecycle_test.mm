@@ -259,7 +259,8 @@ struct Fixture {
     legacy->SetSubmissionProvider([this]() { return submission; });
 
     cache = std::make_unique<MetalSharedTextureCache>(
-        regs, *env.shared_memory, (__bridge void*)env.device, legacy.get());
+        regs, *env.shared_memory, (__bridge void*)env.device, legacy.get(),
+        /*draw_resolution_scale_x=*/1, /*draw_resolution_scale_y=*/1);
     cache->SetPrepareTransferCallback([this]() -> void* {
       ++prepare_transfer_calls;
       if (fail_prepare_transfer) {

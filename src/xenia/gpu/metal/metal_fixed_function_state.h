@@ -295,19 +295,26 @@ inline MetalSystemConstantGuestState GetMetalSystemConstantGuestState(
 // Metal's canonical depth transfer stores the full guest float24 [0, 2)
 // domain in host [0, 1]. These arguments keep interpolated raster depth and
 // explicit pixel-shader depth in that same domain.
-// `scale_x`/`scale_y` map guest pixels to host pixels (1 except for a
-// fast-clear folded into the 1x view, see metal_msaa_clear_fold.h).
+// `scale_x`/`scale_y` map guest pixels to host pixels: the draw resolution
+// scale times the scale of a fast-clear folded into the 1x view (see
+// metal_msaa_clear_fold.h). The maximum host viewport extent is the guest
+// maximum at the draw resolution scale alone, within Metal's 16384.
 inline draw_util::GetViewportInfoArgs GetMetalViewportInfoArgs(
     const RegisterFile& regs,
     reg::RB_DEPTHCONTROL normalized_depth_control,
     bool pixel_shader_writes_depth, uint32_t scale_x = 1,
-    uint32_t scale_y = 1) {
+    uint32_t scale_y = 1, uint32_t draw_resolution_scale_x = 1,
+    uint32_t draw_resolution_scale_y = 1) {
   draw_util::GetViewportInfoArgs args;
   args.Setup(scale_x, scale_y, divisors::MagicDiv(scale_x),
              divisors::MagicDiv(scale_y),
              /*origin_bottom_left=*/true,
-             xenos::kTexture2DCubeMaxWidthHeight,
-             xenos::kTexture2DCubeMaxWidthHeight,
+             std::min(xenos::kTexture2DCubeMaxWidthHeight *
+                          draw_resolution_scale_x,
+                      uint32_t(16384)),
+             std::min(xenos::kTexture2DCubeMaxWidthHeight *
+                          draw_resolution_scale_y,
+                      uint32_t(16384)),
              /*allow_reverse_z=*/true, normalized_depth_control,
              /*convert_z_to_float24=*/false,
              /*full_float24_in_0_to_1=*/true, pixel_shader_writes_depth);

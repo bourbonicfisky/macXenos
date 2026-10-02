@@ -45,7 +45,12 @@ namespace gpu {
 namespace metal {
 
 
-MetalPipelineCache::MetalPipelineCache(void* device) : device_(device) {}
+MetalPipelineCache::MetalPipelineCache(void* device,
+                                       uint32_t draw_resolution_scale_x,
+                                       uint32_t draw_resolution_scale_y)
+    : device_(device),
+      draw_resolution_scale_x_(draw_resolution_scale_x),
+      draw_resolution_scale_y_(draw_resolution_scale_y) {}
 
 MetalPipelineCache::~MetalPipelineCache() { Shutdown(); }
 
@@ -65,7 +70,9 @@ bool MetalPipelineCache::Initialize() {
       ui::GraphicsProvider::GpuVendorID::kApple,
       MetalTranslatorConfig::kBindlessResourcesUsed,
       MetalTranslatorConfig::kEdramRovUsed,
-      MetalTranslatorConfig::GammaRenderTargetAsUnorm8());
+      MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
+      /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
+      draw_resolution_scale_y_);
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {
@@ -111,8 +118,8 @@ void MetalPipelineCache::InitializeDurableStorage(
       !cvars::metal_pipeline_binary_archive) {
     return;
   }
-  MetalPipelineStorageIdentity identity =
-      ComputeMetalPipelineStorageIdentity(device_);
+  MetalPipelineStorageIdentity identity = ComputeMetalPipelineStorageIdentity(
+      device_, draw_resolution_scale_x_, draw_resolution_scale_y_);
   if (!storage_.Open(cache_root, title_id, identity)) {
     XELOGW(
         "MetalPipelineCache: durable storage unavailable for title {:08X}; "

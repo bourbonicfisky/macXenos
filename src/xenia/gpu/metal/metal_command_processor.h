@@ -371,6 +371,9 @@ class MetalCommandProcessor : public CommandProcessor {
                               uint32_t width, uint32_t height,
                               uint32_t dest_y_offset = 0);
 
+  // The session's draw resolution scale (metal_draw_resolution_scale.h).
+  uint32_t draw_resolution_scale_x_ = 1;
+  uint32_t draw_resolution_scale_y_ = 1;
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;

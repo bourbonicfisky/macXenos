@@ -243,7 +243,11 @@ struct MetalGeometryVertexStageKey {
 // Never fails: an unavailable input hashes to 0, which still participates in
 // equality, so an entry written when it was unavailable is not served once it
 // becomes available.
-MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(void* device);
+// The draw resolution scale changes the translated code, so it is part of the
+// identity (1x encodes as before scaling existed).
+MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
+    void* device, uint32_t draw_resolution_scale_x = 1,
+    uint32_t draw_resolution_scale_y = 1);
 
 // Owns one title's durable directory: trust, admission accounting, and the
 // cross-session bounds. Fail-soft throughout — any error degrades to "no

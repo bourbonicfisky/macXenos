@@ -38,8 +38,11 @@ namespace metal {
 // MTLRenderPipelineStates yet (that arrives with the render-target/draw wiring).
 class MetalPipelineCache {
  public:
-  // device is an id<MTLDevice>, owned by the MetalProvider.
-  explicit MetalPipelineCache(void* device);
+  // device is an id<MTLDevice>, owned by the MetalProvider. The draw
+  // resolution scale is baked into translated shaders.
+  explicit MetalPipelineCache(void* device,
+                              uint32_t draw_resolution_scale_x = 1,
+                              uint32_t draw_resolution_scale_y = 1);
   ~MetalPipelineCache();
 
   bool Initialize();
@@ -154,6 +157,8 @@ class MetalPipelineCache {
   void* NewLibraryFromBytes(const std::vector<uint8_t>& bytes, const char* label);
 
   void* device_;  // id<MTLDevice>, not owned.
+  uint32_t draw_resolution_scale_x_;
+  uint32_t draw_resolution_scale_y_;
 
   std::unique_ptr<DxbcShaderTranslator> shader_translator_;
   // NAMED to make a bypass visible. Only ConvertDxbcToDxilCached may call this

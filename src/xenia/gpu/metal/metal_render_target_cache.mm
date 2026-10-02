@@ -208,8 +208,10 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
 MetalRenderTargetCache::MetalRenderTargetCache(
     const RegisterFile& register_file, const Memory& memory,
     TraceWriter* trace_writer, MetalCommandProcessor& command_processor,
-    void* device)
-    : RenderTargetCache(register_file, memory, trace_writer, 1, 1),
+    void* device, uint32_t draw_resolution_scale_x,
+    uint32_t draw_resolution_scale_y)
+    : RenderTargetCache(register_file, memory, trace_writer,
+                        draw_resolution_scale_x, draw_resolution_scale_y),
       command_processor_(command_processor),
       device_(device) {}
 
