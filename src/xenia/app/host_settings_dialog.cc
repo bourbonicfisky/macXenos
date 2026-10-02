@@ -48,7 +48,28 @@ struct Group {
   const char* title;
   bool macos_only;
   std::vector<Entry> entries;
+  // The entries are display (presenter) settings, re-applied to the presenter
+  // when changed, so they take effect immediately.
+  bool applies_display_config = false;
+  // Optional explainer shown in a collapsible section under the group title.
+  const char* explainer = nullptr;
 };
+
+constexpr const char* kUpscalingExplainer =
+    "Xbox 360 games draw at 720p or less. These options choose how that image "
+    "is stretched to fit your window or screen. They don't change the "
+    "resolution the game itself renders at.\n\n"
+    "bilinear: plain smoothing. Cheapest, and the softest image.\n\n"
+    "cas: AMD FidelityFX Contrast Adaptive Sharpening. Sharpens while "
+    "upscaling up to 2x, then smooths the rest of the way. Cheap.\n\n"
+    "fsr: AMD FidelityFX Super Resolution 1.0. Edge-aware upscaling, the "
+    "sharpest option. Costs the most at 4K and 5K.\n\n"
+    "metalfx: Apple MetalFX spatial upscaling. Edge-aware like FSR, slightly "
+    "softer, and cheaper at 4K and 5K. Metal renderer only.\n\n"
+    "Which to pick: on a 1080p screen all four cost almost nothing, so choose "
+    "by look. On Retina, 4K or 5K screens, MetalFX or FSR give the clearest "
+    "image; MetalFX is lighter on the GPU, which matters most on older or "
+    "base-model Macs.";
 
 // CURATED allowlist. This is deliberately hand-picked - the cvar registry has
 // no "user-facing" flag, so iterating it would expose dev/debug internals as
@@ -67,6 +88,23 @@ const std::vector<Group>& GetGroups() {
            {"anisotropic_override", "Anisotropic filtering override",
             ControlKind::kIntInput, ApplyTiming::kNextLaunch},
        }},
+      {"Display upscaling",
+       false,
+       {
+           {"postprocess_scaling_and_sharpening", "Upscaling / sharpening",
+            ControlKind::kCombo, ApplyTiming::kLive, 0, 0,
+            {"bilinear", "cas", "fsr", "metalfx"}},
+           {"postprocess_ffx_fsr_sharpness_reduction",
+            "FSR sharpness reduction", ControlKind::kFloatSlider,
+            ApplyTiming::kLive, 0.0, 2.0},
+           {"postprocess_ffx_cas_additional_sharpness",
+            "CAS additional sharpness", ControlKind::kFloatSlider,
+            ApplyTiming::kLive, 0.0, 1.0},
+           {"postprocess_dither", "Dither to 8 bits per channel",
+            ControlKind::kBool, ApplyTiming::kLive},
+       },
+       true,
+       kUpscalingExplainer},
       {"Metal renderer (troubleshooting)",
        true,
        {
@@ -79,6 +117,8 @@ const std::vector<Group>& GetGroups() {
            {"metal_raster_sync_skip", "Skip unchanged render-target syncs",
             ControlKind::kBool, ApplyTiming::kNextLaunch},
            {"metal_raster_mark_skip", "Skip redundant tile marking",
+            ControlKind::kBool, ApplyTiming::kNextLaunch},
+           {"metal_fsr_half_precision", "FSR in half precision",
             ControlKind::kBool, ApplyTiming::kNextLaunch},
        }},
       {"MoltenVK (macOS)",
@@ -136,13 +176,14 @@ void DrawHelpMarker(const std::string& description) {
   }
 }
 
-// Returns true if the entry rendered (its cvar exists). Missing cvars are
-// skipped (e.g. a setting from a not-yet-merged change) rather than crashing.
+// Returns true if the user changed the value. Missing cvars are skipped (e.g. a
+// setting from a not-yet-merged change) rather than crashing.
 bool DrawEntry(const Entry& entry) {
   cvar::IConfigVar* base = FindConfigVar(entry.cvar_name);
   if (!base) {
     return false;
   }
+  bool changed = false;
   ImGui::PushID(entry.cvar_name);
   switch (entry.kind) {
     case ControlKind::kBool: {
@@ -150,6 +191,7 @@ bool DrawEntry(const Entry& entry) {
         bool value = *v->current_value();
         if (ImGui::Checkbox(entry.label, &value)) {
           v->OverrideConfigValue(value);
+          changed = true;
         }
       }
     } break;
@@ -160,6 +202,7 @@ bool DrawEntry(const Entry& entry) {
                              static_cast<int>(entry.min_value),
                              static_cast<int>(entry.max_value))) {
           v->OverrideConfigValue(value);
+          changed = true;
         }
       }
     } break;
@@ -168,6 +211,7 @@ bool DrawEntry(const Entry& entry) {
         int value = *v->current_value();
         if (ImGui::InputInt(entry.label, &value)) {
           v->OverrideConfigValue(value);
+          changed = true;
         }
       }
     } break;
@@ -178,17 +222,21 @@ bool DrawEntry(const Entry& entry) {
                                static_cast<float>(entry.min_value),
                                static_cast<float>(entry.max_value), "%.2f")) {
           v->OverrideConfigValue(static_cast<double>(value));
+          changed = true;
         }
       }
     } break;
     case ControlKind::kCombo: {
       if (auto* v = FindTypedVar<std::string>(entry.cvar_name)) {
         const std::string current = *v->current_value();
-        if (ImGui::BeginCombo(entry.label, current.c_str())) {
+        if (ImGui::BeginCombo(entry.label, current.empty()
+                                               ? "(default)"
+                                               : current.c_str())) {
           for (const char* option : entry.combo_options) {
             bool selected = current == option;
             if (ImGui::Selectable(option, selected)) {
               v->OverrideConfigValue(std::string(option));
+              changed = true;
             }
             if (selected) {
               ImGui::SetItemDefaultFocus();
@@ -205,7 +253,7 @@ bool DrawEntry(const Entry& entry) {
   }
   DrawHelpMarker(base->description());
   ImGui::PopID();
-  return true;
+  return changed;
 }
 
 }  // namespace
@@ -252,8 +300,23 @@ void HostSettingsDialog::OnDraw(ImGuiIO& io) {
       continue;
     }
     ImGui::SeparatorText(group.title);
+    if (group.explainer) {
+      ImGui::PushID(group.title);
+      if (ImGui::TreeNode("About these options")) {
+        // Wrapped at the dialog's width, which the controls determine.
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(group.explainer);
+        ImGui::PopTextWrapPos();
+        ImGui::TreePop();
+      }
+      ImGui::PopID();
+    }
+    bool group_changed = false;
     for (const Entry& entry : group.entries) {
-      DrawEntry(entry);
+      group_changed |= DrawEntry(entry);
+    }
+    if (group_changed && group.applies_display_config) {
+      emulator_window_.ApplyDisplayConfigForCvars();
     }
   }
 

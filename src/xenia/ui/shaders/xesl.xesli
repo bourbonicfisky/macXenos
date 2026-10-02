@@ -32,7 +32,9 @@
 // will be performed), and / or that is the most visually consistent
 // (`float4_xe` over `vec4_xe` because it's a vector of `float`s).
 
-#if SHADING_LANGUAGE_MSL_XE
+#if SHADING_LANGUAGE_MSL_XE && !XE_MSL_PREPROCESS_ONLY
+  // compile_shader_metal.py preprocesses without the standard library when it
+  // needs to rewrite the source, then prepends these two lines back.
   #include <metal_stdlib>
   using namespace metal;
 #endif

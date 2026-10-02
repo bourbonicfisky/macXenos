@@ -22,14 +22,58 @@ push_const_begin_xe(b0, space0)
   block_offset_member_xe(24, c0.z, float, xe_fsr_rcas_sharpness_post_setup)
 push_const_end_xe
 
-// FIXME(Triang3l): This approach doesn't work for MSL - the texture must be
-// passed explicitly from the entry point's arguments to FsrRcasLoadF.
+// The callbacks FsrRcasF uses. XE_FSR_RCAS_SCOPE is the struct qualifier on
+// MSL, empty elsewhere.
+#define XE_FSR_RCAS_CALLBACKS                                                \
+  float4_xe XE_FSR_RCAS_SCOPE FsrRcasLoadF(int2_xe p) {                      \
+    return float4_xe(texel_fetch_2d_xe(xe_fsr_rcas_source, p, 0).rgb, 1.0f); \
+  }                                                                          \
+  void XE_FSR_RCAS_SCOPE FsrRcasInputF(inout_param_xe(float, r),             \
+                                       inout_param_xe(float, g),             \
+                                       inout_param_xe(float, b)) {}
 
-// Forward declaration because FsrRcasLoadF needs xe_fsr_rcas_source from the
-// entry point bindings.
-void FsrRcasF(out_param_xe(float, pixel_r), out_param_xe(float, pixel_g),
-              out_param_xe(float, pixel_b), uint2_xe pixel_position,
-              uint4_xe constants);
+#if SHADING_LANGUAGE_MSL_XE
+  // MSL has no global resource bindings, so FsrRcasLoadF can't reach the
+  // entry point's texture as a free function. The FidelityFX code is compiled
+  // as members of a struct carrying the texture instead (ffx_fsr1.h declares
+  // the callbacks, so they're defined out of the struct).
+  #define A_GPU 1
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
+  #if XE_FFX_HALF
+    #define FSR_RCAS_H 1
+  #else
+    #define FSR_RCAS_F 1
+  #endif
+  struct XeFsrRcas {
+    texture_2d_xe xe_fsr_rcas_source;
+    #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+  };
+  #define XE_FSR_RCAS_SCOPE XeFsrRcas::
+  #if XE_FFX_HALF
+    // The 16-bit path loads the same texels, converted to half.
+    half4 XeFsrRcas::FsrRcasLoadH(short2 p) {
+      return half4(half3(texel_fetch_2d_xe(xe_fsr_rcas_source, int2(p), 0).rgb),
+                   1.0h);
+    }
+    void XeFsrRcas::FsrRcasInputH(thread half& r, thread half& g,
+                                  thread half& b) {}
+    #define XE_FSR_RCAS_F XeFsrRcas{xe_fsr_rcas_source}.FsrRcasH
+    #define XE_FSR_RCAS_PIXEL_TYPE half
+  #else
+    XE_FSR_RCAS_CALLBACKS
+    #define XE_FSR_RCAS_F XeFsrRcas{xe_fsr_rcas_source}.FsrRcasF
+  #endif
+#else
+  // Forward declaration because FsrRcasLoadF needs xe_fsr_rcas_source from the
+  // entry point bindings.
+  void FsrRcasF(out_param_xe(float, pixel_r), out_param_xe(float, pixel_g),
+                out_param_xe(float, pixel_b), uint2_xe pixel_position,
+                uint4_xe constants);
+  #define XE_FSR_RCAS_F FsrRcasF
+#endif
+#ifndef XE_FSR_RCAS_PIXEL_TYPE
+  #define XE_FSR_RCAS_PIXEL_TYPE float
+#endif
 
 entry_outputs_begin_xe
   entry_out_target_xe(float4_xe, xe_fsr_rcas_color, 0)
@@ -50,8 +94,11 @@ entry_inputs_end_code_begin_xe
   uint4_xe rcas_const =
       uint4_xe(float_bits_to_uint_xe(sharpness),
                pack_half_2x16_xe(float2_xe(sharpness, sharpness)), 0u, 0u);
-  float4_xe rcas_color;
-  FsrRcasF(rcas_color.r, rcas_color.g, rcas_color.b, pixel_coord, rcas_const);
+  // Separate scalars because MSL references can't bind to vector components.
+  XE_FSR_RCAS_PIXEL_TYPE rcas_r, rcas_g, rcas_b;
+  XE_FSR_RCAS_F(rcas_r, rcas_g, rcas_b, pixel_coord, rcas_const);
+  float4_xe rcas_color =
+      float4_xe(float(rcas_r), float(rcas_g), float(rcas_b), 1.0f);
   #if XE_GUEST_OUTPUT_DITHER
     // Clamping because on Vulkan, the surface may specify any format, including
     // floating-point.
@@ -64,12 +111,11 @@ entry_inputs_end_code_begin_xe
 }
 entry_code_end_xe
 
-#define A_GPU 1
-#include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
-#define FSR_RCAS_F 1
-float4_xe FsrRcasLoadF(int2_xe p) {
-  return float4_xe(texel_fetch_2d_xe(xe_fsr_rcas_source, p, 0).rgb, 1.0f);
-}
-void FsrRcasInputF(inout_param_xe(float, r), inout_param_xe(float, g),
-                   inout_param_xe(float, b)) {}
-#include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+#if !SHADING_LANGUAGE_MSL_XE
+  #define A_GPU 1
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
+  #define FSR_RCAS_F 1
+  #define XE_FSR_RCAS_SCOPE
+  XE_FSR_RCAS_CALLBACKS
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+#endif

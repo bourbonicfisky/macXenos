@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/surface.h"
@@ -68,12 +69,12 @@ class MetalUIDrawContext final : public UIDrawContext {
   void* render_encoder_;
 };
 
-// Phase 2b.3 Metal presenter. Owns a CAMetalLayer connection and presents a
-// cleared drawable each frame. Guest-output blitting (showing the actual game
-// framebuffer, with the FSR/CAS paint effects) is deferred to the render path;
-// RefreshGuestOutputImpl currently reports no guest output, so the frame is a
-// solid clear color plus (later) the UI overlay. Metal/Objective-C objects are
-// held as opaque pointers so this header stays usable from plain C++.
+// Metal presenter. Owns a CAMetalLayer connection and paints the guest output
+// into its drawable through the shared guest output paint flow (bilinear
+// stretching, AMD FidelityFX CAS sharpening / resampling, FSR upscaling, and
+// dithering, with letterboxing), then the UI overlays on top.
+// Metal/Objective-C objects are held as opaque pointers so this header stays
+// usable from plain C++.
 class MetalPresenter : public Presenter {
  public:
   ~MetalPresenter() override;
@@ -93,6 +94,9 @@ class MetalPresenter : public Presenter {
   void SetCommandQueue(void* command_queue) { command_queue_ = command_queue; }
 
   bool CaptureGuestOutput(RawImage& image_out) override;
+
+  bool SupportsGuestOutputPaintEffect(
+      GuestOutputPaintConfig::Effect effect) const override;
 
  protected:
   SurfacePaintConnectResult ConnectOrReconnectPaintingToSurfaceFromUIThread(
@@ -121,9 +125,40 @@ class MetalPresenter : public Presenter {
   // id<MTLTexture> (as void*), or nullptr on failure.
   void* EnsureGuestOutputTexture(uint32_t index, uint32_t width,
                                  uint32_t height);
-  // Lazily builds the fullscreen-blit pipeline (samples the guest output into
-  // the drawable). Returns false on compile failure.
-  bool EnsureBlitPipeline();
+  static const char* GetGuestOutputPaintEffectName(
+      GuestOutputPaintEffect effect);
+  // Lazily loads the guest output paint shaders and creates the sampler.
+  // Returns false (and keeps returning false) if they can't be loaded.
+  bool EnsureGuestOutputPaintResources();
+  // The id<MTLRenderPipelineState> for an effect drawing either into an
+  // intermediate texture or into the drawable, created on first use. Returns
+  // nullptr on failure.
+  void* GetGuestOutputPaintPipeline(GuestOutputPaintEffect effect,
+                                    bool to_drawable);
+  // Ensures the intermediate texture `index` (the output of effect `index`
+  // when another effect follows) is `width`x`height`. Returns the
+  // id<MTLTexture>, or nullptr on failure.
+  void* EnsureGuestOutputIntermediateTexture(size_t index, uint32_t width,
+                                             uint32_t height);
+  // Encodes effect `effect_index` of the flow into `render_encoder`, reading
+  // `source_texture` and writing a `target_width`x`target_height` target.
+  // Returns false if the pipeline is unavailable.
+  bool EncodeGuestOutputPaintEffect(void* render_encoder,
+                                    const GuestOutputPaintFlow& flow,
+                                    size_t effect_index,
+                                    const GuestOutputPaintConfig& config,
+                                    void* source_texture, bool to_drawable,
+                                    uint32_t target_width,
+                                    uint32_t target_height);
+  // The MetalFX spatial scaler (id<MTLFXSpatialScaler>) from the guest output
+  // size to the output size, and its output texture, recreated when a size
+  // changes. Returns nullptr if MetalFX can't scale between these sizes; the
+  // output texture is written to `output_texture_out`.
+  void* EnsureMetalFxScaler(uint32_t input_width, uint32_t input_height,
+                            uint32_t output_width, uint32_t output_height,
+                            void*& output_texture_out);
+  // Logs the effect chain when it differs from the previous paint's.
+  void LogGuestOutputPaintFlowIfChanged(const GuestOutputPaintFlow& flow);
 
   // id<MTLDevice> / id<MTLCommandQueue>, owned by the provider.
   void* device_ = nullptr;
@@ -143,10 +178,44 @@ class MetalPresenter : public Presenter {
   std::array<uint32_t, kGuestOutputMailboxSize> guest_output_texture_widths_{};
   std::array<uint32_t, kGuestOutputMailboxSize> guest_output_texture_heights_{};
 
-  // Fullscreen textured-blit pipeline + sampler (id<MTLRenderPipelineState> /
-  // id<MTLSamplerState>, retained), built on first guest-output paint.
-  void* blit_pipeline_state_ = nullptr;
-  void* blit_sampler_ = nullptr;
+  // Guest output paint shaders (id<MTLFunction>, retained): the shared
+  // rectangle vertex shader and one pixel shader per effect. Loaded on the
+  // first paint with guest output.
+  bool guest_output_paint_resources_loaded_ = false;
+  bool guest_output_paint_resources_failed_ = false;
+  void* guest_output_paint_vs_ = nullptr;
+  std::array<void*, size_t(GuestOutputPaintEffect::kCount)>
+      guest_output_paint_ps_{};
+  // Linear clamp-to-edge sampler (id<MTLSamplerState>, retained).
+  void* guest_output_paint_sampler_ = nullptr;
+  // id<MTLRenderPipelineState> (retained) per effect, [0] for intermediate
+  // textures, [1] for the drawable.
+  std::array<std::array<void*, 2>, size_t(GuestOutputPaintEffect::kCount)>
+      guest_output_paint_pipelines_{};
+
+  // Intermediate textures between effects (id<MTLTexture>, retained).
+  std::array<void*, kMaxGuestOutputPaintEffects - 1>
+      guest_output_intermediate_textures_{};
+  std::array<std::pair<uint32_t, uint32_t>, kMaxGuestOutputPaintEffects - 1>
+      guest_output_intermediate_texture_sizes_{};
+
+  // MetalFX spatial scaling (id<MTLFXSpatialScaler> and id<MTLTexture>,
+  // retained), for the sizes below.
+  void* metalfx_scaler_ = nullptr;
+  void* metalfx_output_texture_ = nullptr;
+  uint32_t metalfx_input_width_ = 0;
+  uint32_t metalfx_input_height_ = 0;
+  uint32_t metalfx_output_width_ = 0;
+  uint32_t metalfx_output_height_ = 0;
+  // Sizes MetalFX failed for, so creation isn't retried every paint.
+  uint32_t metalfx_failed_sizes_[4] = {};
+
+  // The effect chain of the last paint, for logging changes to it.
+  size_t last_logged_effect_count_ = SIZE_MAX;
+  std::array<GuestOutputPaintEffect, kMaxGuestOutputPaintEffects>
+      last_logged_effects_{};
+  std::array<std::pair<uint32_t, uint32_t>, kMaxGuestOutputPaintEffects>
+      last_logged_effect_output_sizes_{};
 };
 
 }  // namespace metal

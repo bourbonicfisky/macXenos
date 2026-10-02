@@ -19,14 +19,70 @@ push_const_begin_xe(b0, space0)
   block_offset_member_xe(24, c0.z, float2_xe, xe_fsr_easu_input_size_inv)
 push_const_end_xe
 
-// FIXME(Triang3l): This approach doesn't work for MSL - the texture must be
-// passed explicitly from the entry point's arguments to FsrEasu#F.
+// The callbacks FsrEasuF uses. XE_FSR_EASU_SCOPE is the struct qualifier on
+// MSL, empty elsewhere.
+#define XE_FSR_EASU_CALLBACKS                                                \
+  float4_xe XE_FSR_EASU_SCOPE FsrEasuRF(float2_xe p) {                       \
+    return gather_sep_2d_r_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);   \
+  }                                                                          \
+  float4_xe XE_FSR_EASU_SCOPE FsrEasuGF(float2_xe p) {                       \
+    return gather_sep_2d_g_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);   \
+  }                                                                          \
+  float4_xe XE_FSR_EASU_SCOPE FsrEasuBF(float2_xe p) {                       \
+    return gather_sep_2d_b_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);   \
+  }
 
-// Forward declaration because FsrEasu#F need xe_fsr_easu_source from the entry
-// point bindings.
-void FsrEasuF(out_param_xe(float3_xe, pixel), uint2_xe pixel_position,
-              uint4_xe const0, uint4_xe const1, uint4_xe const2,
-              uint4_xe const3);
+#if SHADING_LANGUAGE_MSL_XE
+  // MSL has no global resource bindings, so FsrEasu#F can't reach the entry
+  // point's texture as free functions. The FidelityFX code is compiled as
+  // members of a struct carrying the texture and the sampler instead
+  // (ffx_fsr1.h declares the callbacks, so they're defined out of the struct).
+  #define A_GPU 1
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
+  #if XE_FFX_HALF
+    #define FSR_EASU_H 1
+  #else
+    #define FSR_EASU_F 1
+  #endif
+  struct XeFsrEasu {
+    texture_2d_xe xe_fsr_easu_source;
+    sampler xe_fsr_easu_sampler;
+    #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+  };
+  #define XE_FSR_EASU_SCOPE XeFsrEasu::
+  #if XE_FFX_HALF
+    // The 16-bit path gathers the same texels, converted to half.
+    half4 XeFsrEasu::FsrEasuRH(float2 p) {
+      return half4(gather_sep_2d_r_xe(xe_fsr_easu_source, xe_fsr_easu_sampler,
+                                      p));
+    }
+    half4 XeFsrEasu::FsrEasuGH(float2 p) {
+      return half4(gather_sep_2d_g_xe(xe_fsr_easu_source, xe_fsr_easu_sampler,
+                                      p));
+    }
+    half4 XeFsrEasu::FsrEasuBH(float2 p) {
+      return half4(gather_sep_2d_b_xe(xe_fsr_easu_source, xe_fsr_easu_sampler,
+                                      p));
+    }
+    #define XE_FSR_EASU_F                                                    \
+      XeFsrEasu{xe_fsr_easu_source, xe_fsr_easu_sampler}.FsrEasuH
+    #define XE_FSR_EASU_PIXEL_TYPE half3
+  #else
+    XE_FSR_EASU_CALLBACKS
+    #define XE_FSR_EASU_F                                                    \
+      XeFsrEasu{xe_fsr_easu_source, xe_fsr_easu_sampler}.FsrEasuF
+  #endif
+#else
+  // Forward declaration because FsrEasu#F need xe_fsr_easu_source from the
+  // entry point bindings.
+  void FsrEasuF(out_param_xe(float3_xe, pixel), uint2_xe pixel_position,
+                uint4_xe const0, uint4_xe const1, uint4_xe const2,
+                uint4_xe const3);
+  #define XE_FSR_EASU_F FsrEasuF
+#endif
+#ifndef XE_FSR_EASU_PIXEL_TYPE
+  #define XE_FSR_EASU_PIXEL_TYPE float3_xe
+#endif
 
 entry_outputs_begin_xe
   entry_out_target_xe(float4_xe, xe_fsr_easu_color, 0)
@@ -61,22 +117,19 @@ entry_inputs_end_code_begin_xe
       float_bits_to_uint_xe(0.0f),
       float_bits_to_uint_xe(4.0f * push_const_xe(xe_fsr_easu_input_size_inv).y),
       0u, 0u);
-  FsrEasuF(out_xe(xe_fsr_easu_color).rgb, uint2_xe(in_pixel_coord_xe.xy),
-           easu_const_0, easu_const_1, easu_const_2, easu_const_3);
-  out_xe(xe_fsr_easu_color).a = 1.0f;
+  // A separate variable because MSL references can't bind to vector swizzles.
+  XE_FSR_EASU_PIXEL_TYPE easu_color;
+  XE_FSR_EASU_F(easu_color, uint2_xe(in_pixel_coord_xe.xy), easu_const_0,
+                easu_const_1, easu_const_2, easu_const_3);
+  out_xe(xe_fsr_easu_color) = float4_xe(float3_xe(easu_color), 1.0f);
 }
 entry_code_end_xe
 
-#define A_GPU 1
-#include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
-#define FSR_EASU_F 1
-float4_xe FsrEasuRF(float2_xe p) {
-  return gather_sep_2d_r_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);
-}
-float4_xe FsrEasuGF(float2_xe p) {
-  return gather_sep_2d_g_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);
-}
-float4_xe FsrEasuBF(float2_xe p) {
-  return gather_sep_2d_b_xe(xe_fsr_easu_source, xe_fsr_easu_sampler, p);
-}
-#include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+#if !SHADING_LANGUAGE_MSL_XE
+  #define A_GPU 1
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_a.h"
+  #define FSR_EASU_F 1
+  #define XE_FSR_EASU_SCOPE
+  XE_FSR_EASU_CALLBACKS
+  #include "../../../../third_party/FidelityFX-FSR/ffx-fsr/ffx_fsr1.h"
+#endif

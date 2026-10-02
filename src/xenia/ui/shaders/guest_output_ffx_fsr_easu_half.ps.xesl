@@ -1,0 +1,12 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// The FidelityFX 16-bit path (MSL only; elsewhere the 32-bit path).
+#define XE_FFX_HALF 1
+#include "guest_output_ffx_fsr_easu.ps.xesl"

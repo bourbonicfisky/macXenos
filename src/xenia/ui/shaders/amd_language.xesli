@@ -10,10 +10,78 @@
 #ifndef XENIA_UI_SHADERS_AMD_LANGUAGE_XESLI_
 #define XENIA_UI_SHADERS_AMD_LANGUAGE_XESLI_
 
+// XE_FFX_HALF selects the FidelityFX 16-bit (half precision) paths. They're
+// implemented for MSL only; the other languages build the 32-bit paths.
+#if XE_FFX_HALF && !SHADING_LANGUAGE_MSL_XE
+  #undef XE_FFX_HALF
+#endif
+
 #if SHADING_LANGUAGE_GLSL_XE
   #define A_GLSL 1
 #elif SHADING_LANGUAGE_HLSL_XE
   #define A_HLSL 1
+#elif SHADING_LANGUAGE_MSL_XE
+  // MSL takes the HLSL dialect of ffx_a.h, with the HLSL intrinsics it uses
+  // supplied here. The HLSL `in` / `out` / `inout` parameter qualifiers have no
+  // MSL equivalent; compile_shader_metal.py rewrites them into references.
+  #define A_HLSL 1
+  template <typename T>
+  T lerp(T x, T y, T s) {
+    return mix(x, y, s);
+  }
+  template <typename T>
+  T rcp(T x) {
+    return 1.0f / x;
+  }
+  float asfloat(uint x) { return as_type<float>(x); }
+  float2 asfloat(uint2 x) { return as_type<float2>(x); }
+  float3 asfloat(uint3 x) { return as_type<float3>(x); }
+  float4 asfloat(uint4 x) { return as_type<float4>(x); }
+  uint asuint(float x) { return as_type<uint>(x); }
+  uint2 asuint(float2 x) { return as_type<uint2>(x); }
+  uint3 asuint(float3 x) { return as_type<uint3>(x); }
+  uint4 asuint(float4 x) { return as_type<uint4>(x); }
+  uint f32tof16(float x) { return uint(as_type<ushort>(half(x))); }
+  float f16tof32(uint x) { return float(as_type<half>(ushort(x & 0xFFFFu))); }
+  float2 f16tof32(uint2 x) { return float2(f16tof32(x.x), f16tof32(x.y)); }
+  #if XE_FFX_HALF
+    // The HLSL 6.2 dialect: explicit 16-bit types and bit casts, which map
+    // directly onto MSL's half / ushort / short.
+    #define A_HALF 1
+    #define A_HLSL_6_2 1
+    #define float32_t float
+    #define float32_t2 float2
+    #define float32_t3 float3
+    #define float32_t4 float4
+    #define uint32_t uint
+    #define uint32_t2 uint2
+    #define uint32_t3 uint3
+    #define uint32_t4 uint4
+    #define int32_t int
+    #define int32_t2 int2
+    #define int32_t3 int3
+    #define int32_t4 int4
+    #define float16_t half
+    #define float16_t2 half2
+    #define float16_t3 half3
+    #define float16_t4 half4
+    #define uint16_t ushort
+    #define uint16_t2 ushort2
+    #define uint16_t3 ushort3
+    #define uint16_t4 ushort4
+    #define int16_t short
+    #define int16_t2 short2
+    #define int16_t3 short3
+    #define int16_t4 short4
+    ushort asuint16(half x) { return as_type<ushort>(x); }
+    ushort2 asuint16(half2 x) { return as_type<ushort2>(x); }
+    ushort3 asuint16(half3 x) { return as_type<ushort3>(x); }
+    ushort4 asuint16(half4 x) { return as_type<ushort4>(x); }
+    half asfloat16(ushort x) { return as_type<half>(x); }
+    half2 asfloat16(ushort2 x) { return as_type<half2>(x); }
+    half3 asfloat16(ushort3 x) { return as_type<half3>(x); }
+    half4 asfloat16(ushort4 x) { return as_type<half4>(x); }
+  #endif  // XE_FFX_HALF
 #else
   #error Unknown shading language for AMD shaders.
 #endif

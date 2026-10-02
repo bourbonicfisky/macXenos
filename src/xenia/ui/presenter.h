@@ -201,6 +201,10 @@ class Presenter {
       // AMD FidelityFX Super Resolution upsampling, Contrast Adaptive
       // Sharpening otherwise.
       kFsr,
+      // Apple MetalFX spatial upscaling. Only presenters reporting it in
+      // SupportsGuestOutputPaintEffect implement it; the paint flow for it is
+      // bilinear, which the others paint as is.
+      kMetalFxSpatial,
     };
 
     // This value is used as a lerp factor.
@@ -323,6 +327,14 @@ class Presenter {
   // multiple at the same time, and it should acquire the latest guest output
   // image via ConsumeGuestOutput.
   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
+
+  // Whether the presenter implements the effect (rather than painting it as
+  // bilinear).
+  virtual bool SupportsGuestOutputPaintEffect(
+      GuestOutputPaintConfig::Effect effect) const {
+    return effect != GuestOutputPaintConfig::Effect::kMetalFxSpatial;
+  }
+
   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
     return guest_output_paint_config_;
   }

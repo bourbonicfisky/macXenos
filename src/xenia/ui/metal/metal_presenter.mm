@@ -7,39 +7,107 @@
  ******************************************************************************
  */
 
+#include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <string>
 
 #include "xenia/ui/metal/metal_presenter.h"
 
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
 #include "xenia/ui/surface_mac.h"
+
+#include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_cas_resample_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_cas_resample_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_cas_sharpen_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_cas_sharpen_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_easu_half_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_easu_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_rcas_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_rcas_half_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_rcas_half_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_ffx_fsr_rcas_ps.h"
+#include "xenia/ui/shaders/bytecode/metal/guest_output_triangle_strip_rect_vs.h"
+
+DEFINE_bool(
+    metal_fsr_half_precision, true,
+    "Run AMD FidelityFX Super Resolution (FSR) in half precision (16 bits) on "
+    "the Metal renderer: 11-12% less GPU time at 4K and 5K output on an M4, "
+    "with no visible difference. Takes effect on the next launch.",
+    "Display");
 
 namespace xe {
 namespace ui {
 namespace metal {
 
+namespace {
+
+// The CAMetalLayer drawable format.
+constexpr MTLPixelFormat kDrawablePixelFormat = MTLPixelFormatBGRA8Unorm;
+// Outputs of effects followed by another effect (FSR EASU passes, or CAS / FSR
+// RCAS before the final bilinear stretch). 10bpc, like the Vulkan presenter's
+// intermediate images.
+constexpr MTLPixelFormat kIntermediatePixelFormat = MTLPixelFormatRGB10A2Unorm;
+// The largest 2D texture dimension on all Apple-silicon Macs.
+constexpr uint32_t kMaxRenderTargetSize = 16384;
+
+id<MTLFunction> LoadEntryFunction(id<MTLDevice> device, const uint8_t* metallib,
+                                  size_t size, const char* name) {
+  dispatch_data_t data = dispatch_data_create(metallib, size, nullptr, ^{
+  });
+  NSError* error = nil;
+  id<MTLLibrary> library = [device newLibraryWithData:data error:&error];
+  if (!library) {
+    XELOGE("MetalPresenter: failed to load the {} shader: {}", name,
+           error ? [[error localizedDescription] UTF8String] : "unknown");
+    return nil;
+  }
+  // The XeSL MSL entry point is always entry_xe.
+  id<MTLFunction> function = [library newFunctionWithName:@"entry_xe"];
+  if (!function) {
+    XELOGE("MetalPresenter: no entry_xe in the {} shader", name);
+  }
+  return function;
+}
+
+}  // namespace
+
 MetalPresenter::~MetalPresenter() {
   // device_/command_queue_ are owned by the provider; metal_layer_ by the
-  // window. Release the objects we retained: mailbox textures + blit pipeline.
-  for (void* tex : guest_output_textures_) {
-    if (tex) {
-      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)tex;
-      (void)released;
+  // window. Release the objects we retained: mailbox and intermediate textures,
+  // shaders, pipelines and the sampler.
+  auto release = [](void* object) {
+    if (object) {
+      CFRelease(object);
+    }
+  };
+  for (void* texture : guest_output_textures_) {
+    release(texture);
+  }
+  for (void* texture : guest_output_intermediate_textures_) {
+    release(texture);
+  }
+  for (const std::array<void*, 2>& effect_pipelines :
+       guest_output_paint_pipelines_) {
+    for (void* pipeline : effect_pipelines) {
+      release(pipeline);
     }
   }
-  if (blit_pipeline_state_) {
-    id<MTLRenderPipelineState> released =
-        (__bridge_transfer id<MTLRenderPipelineState>)blit_pipeline_state_;
-    (void)released;
+  for (void* ps : guest_output_paint_ps_) {
+    release(ps);
   }
-  if (blit_sampler_) {
-    id<MTLSamplerState> released =
-        (__bridge_transfer id<MTLSamplerState>)blit_sampler_;
-    (void)released;
-  }
+  release(guest_output_paint_vs_);
+  release(guest_output_paint_sampler_);
+  release(metalfx_scaler_);
+  release(metalfx_output_texture_);
 }
 
 std::unique_ptr<MetalPresenter> MetalPresenter::Create(
@@ -58,6 +126,17 @@ std::unique_ptr<MetalPresenter> MetalPresenter::Create(
 
 Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
   return Surface::kTypeFlag_MetalLayer;
+}
+
+bool MetalPresenter::SupportsGuestOutputPaintEffect(
+    GuestOutputPaintConfig::Effect effect) const {
+  if (effect == GuestOutputPaintConfig::Effect::kMetalFxSpatial) {
+    // The device doesn't change, so ask once.
+    static const bool metalfx_spatial_supported = [MTLFXSpatialScalerDescriptor
+        supportsDevice:(__bridge id<MTLDevice>)device_];
+    return metalfx_spatial_supported;
+  }
+  return true;
 }
 
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
@@ -202,71 +281,351 @@ void* MetalPresenter::EnsureGuestOutputTexture(uint32_t index, uint32_t width,
   return guest_output_textures_[index];
 }
 
-bool MetalPresenter::EnsureBlitPipeline() {
-  if (blit_pipeline_state_) {
+const char* MetalPresenter::GetGuestOutputPaintEffectName(
+    GuestOutputPaintEffect effect) {
+  using Effect = GuestOutputPaintEffect;
+  switch (effect) {
+    case Effect::kBilinear:
+      return "bilinear";
+    case Effect::kBilinearDither:
+      return "bilinear+dither";
+    case Effect::kCasSharpen:
+      return "CAS sharpen";
+    case Effect::kCasSharpenDither:
+      return "CAS sharpen+dither";
+    case Effect::kCasResample:
+      return "CAS resample";
+    case Effect::kCasResampleDither:
+      return "CAS resample+dither";
+    case Effect::kFsrEasu:
+      return "FSR EASU";
+    case Effect::kFsrRcas:
+      return "FSR RCAS";
+    case Effect::kFsrRcasDither:
+      return "FSR RCAS+dither";
+    default:
+      return "unknown";
+  }
+}
+
+bool MetalPresenter::EnsureGuestOutputPaintResources() {
+  if (guest_output_paint_resources_loaded_) {
     return true;
   }
+  if (guest_output_paint_resources_failed_) {
+    return false;
+  }
+  // Fail once, loudly, rather than retrying every frame.
+  guest_output_paint_resources_failed_ = true;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
-  // Fullscreen triangle that samples the guest output into the drawable. The
-  // texcoord flips Y so the guest image is upright on screen.
-  NSString* source = @R"METAL(
-    #include <metal_stdlib>
-    using namespace metal;
-    struct VOut { float4 pos [[position]]; float2 uv; };
-    // 4-vertex triangle-strip QUAD (not an oversized fullscreen triangle): a
-    // triangle would overhang the aspect-ratio bars and sample out-of-range uv
-    // there instead of leaving them as the clear color. Corners c = (0,0),(1,0),
-    // (0,1),(1,1). `scale` (<=1 on one axis) shrinks the quad to preserve the
-    // guest display aspect ratio; the vacated area shows the clear color as
-    // letterbox/pillarbox bars.
-    vertex VOut blit_vs(uint vid [[vertex_id]],
-                        constant float2& scale [[buffer(0)]]) {
-      float2 c = float2(vid & 1, (vid >> 1) & 1);
-      VOut o;
-      o.pos = float4((c * 2.0 - 1.0) * scale, 0.0, 1.0);
-      o.uv = float2(c.x, 1.0 - c.y);               // flip Y
-      return o;
+
+  id<MTLFunction> vs = LoadEntryFunction(
+      device, guest_output_triangle_strip_rect_vs_metallib,
+      sizeof(guest_output_triangle_strip_rect_vs_metallib),
+      "guest_output_triangle_strip_rect_vs");
+  if (!vs) {
+    return false;
+  }
+  struct PixelShader {
+    const uint8_t* metallib;
+    size_t size;
+  };
+  static const PixelShader kPixelShaders[] = {
+      {guest_output_bilinear_ps_metallib,
+       sizeof(guest_output_bilinear_ps_metallib)},
+      {guest_output_bilinear_dither_ps_metallib,
+       sizeof(guest_output_bilinear_dither_ps_metallib)},
+      {guest_output_ffx_cas_sharpen_ps_metallib,
+       sizeof(guest_output_ffx_cas_sharpen_ps_metallib)},
+      {guest_output_ffx_cas_sharpen_dither_ps_metallib,
+       sizeof(guest_output_ffx_cas_sharpen_dither_ps_metallib)},
+      {guest_output_ffx_cas_resample_ps_metallib,
+       sizeof(guest_output_ffx_cas_resample_ps_metallib)},
+      {guest_output_ffx_cas_resample_dither_ps_metallib,
+       sizeof(guest_output_ffx_cas_resample_dither_ps_metallib)},
+      {guest_output_ffx_fsr_easu_ps_metallib,
+       sizeof(guest_output_ffx_fsr_easu_ps_metallib)},
+      {guest_output_ffx_fsr_rcas_ps_metallib,
+       sizeof(guest_output_ffx_fsr_rcas_ps_metallib)},
+      {guest_output_ffx_fsr_rcas_dither_ps_metallib,
+       sizeof(guest_output_ffx_fsr_rcas_dither_ps_metallib)},
+  };
+  static_assert(xe::countof(kPixelShaders) ==
+                    size_t(GuestOutputPaintEffect::kCount),
+                "A pixel shader is needed for every guest output effect, in "
+                "GuestOutputPaintEffect order");
+  // The FSR passes in half precision, replacing their 32-bit versions.
+  static const std::pair<GuestOutputPaintEffect, PixelShader>
+      kHalfPixelShaders[] = {
+          {GuestOutputPaintEffect::kFsrEasu,
+           {guest_output_ffx_fsr_easu_half_ps_metallib,
+            sizeof(guest_output_ffx_fsr_easu_half_ps_metallib)}},
+          {GuestOutputPaintEffect::kFsrRcas,
+           {guest_output_ffx_fsr_rcas_half_ps_metallib,
+            sizeof(guest_output_ffx_fsr_rcas_half_ps_metallib)}},
+          {GuestOutputPaintEffect::kFsrRcasDither,
+           {guest_output_ffx_fsr_rcas_half_dither_ps_metallib,
+            sizeof(guest_output_ffx_fsr_rcas_half_dither_ps_metallib)}},
+      };
+  std::array<PixelShader, size_t(GuestOutputPaintEffect::kCount)>
+      pixel_shaders;
+  std::copy(std::begin(kPixelShaders), std::end(kPixelShaders),
+            pixel_shaders.begin());
+  if (cvars::metal_fsr_half_precision) {
+    for (const auto& half_pixel_shader : kHalfPixelShaders) {
+      pixel_shaders[size_t(half_pixel_shader.first)] = half_pixel_shader.second;
     }
-    fragment float4 blit_fs(VOut in [[stage_in]],
-                            texture2d<float> tex [[texture(0)]],
-                            sampler s [[sampler(0)]]) {
-      return tex.sample(s, in.uv);
+  }
+  std::array<id<MTLFunction>, size_t(GuestOutputPaintEffect::kCount)> ps;
+  for (size_t i = 0; i < ps.size(); ++i) {
+    ps[i] = LoadEntryFunction(
+        device, pixel_shaders[i].metallib, pixel_shaders[i].size,
+        GetGuestOutputPaintEffectName(GuestOutputPaintEffect(i)));
+    if (!ps[i]) {
+      return false;
     }
-  )METAL";
-  NSError* error = nil;
-  id<MTLLibrary> library = [device newLibraryWithSource:source
-                                                options:nil
-                                                  error:&error];
-  if (!library) {
-    XELOGE("MetalPresenter: blit library compile failed: {}",
-           error ? [[error localizedDescription] UTF8String] : "unknown");
-    return false;
   }
-  id<MTLFunction> vs = [library newFunctionWithName:@"blit_vs"];
-  id<MTLFunction> fs = [library newFunctionWithName:@"blit_fs"];
-  if (!vs || !fs) {
-    XELOGE("MetalPresenter: blit functions missing");
-    return false;
-  }
-  MTLRenderPipelineDescriptor* desc =
-      [[MTLRenderPipelineDescriptor alloc] init];
-  desc.vertexFunction = vs;
-  desc.fragmentFunction = fs;
-  desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-  id<MTLRenderPipelineState> pipeline =
-      [device newRenderPipelineStateWithDescriptor:desc error:&error];
-  if (!pipeline) {
-    XELOGE("MetalPresenter: blit pipeline creation failed: {}",
-           error ? [[error localizedDescription] UTF8String] : "unknown");
-    return false;
-  }
+
   MTLSamplerDescriptor* sampler_desc = [[MTLSamplerDescriptor alloc] init];
   sampler_desc.minFilter = MTLSamplerMinMagFilterLinear;
   sampler_desc.magFilter = MTLSamplerMinMagFilterLinear;
+  sampler_desc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+  sampler_desc.tAddressMode = MTLSamplerAddressModeClampToEdge;
   id<MTLSamplerState> sampler =
       [device newSamplerStateWithDescriptor:sampler_desc];
-  blit_pipeline_state_ = (__bridge_retained void*)pipeline;
-  blit_sampler_ = (__bridge_retained void*)sampler;
+  if (!sampler) {
+    XELOGE("MetalPresenter: failed to create the guest output sampler");
+    return false;
+  }
+
+  guest_output_paint_vs_ = (__bridge_retained void*)vs;
+  for (size_t i = 0; i < ps.size(); ++i) {
+    guest_output_paint_ps_[i] = (__bridge_retained void*)ps[i];
+  }
+  guest_output_paint_sampler_ = (__bridge_retained void*)sampler;
+  guest_output_paint_resources_failed_ = false;
+  guest_output_paint_resources_loaded_ = true;
+  return true;
+}
+
+void* MetalPresenter::GetGuestOutputPaintPipeline(
+    GuestOutputPaintEffect effect, bool to_drawable) {
+  void*& pipeline_ref =
+      guest_output_paint_pipelines_[size_t(effect)][to_drawable ? 1 : 0];
+  if (pipeline_ref) {
+    return pipeline_ref;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLRenderPipelineDescriptor* desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  desc.vertexFunction = (__bridge id<MTLFunction>)guest_output_paint_vs_;
+  desc.fragmentFunction =
+      (__bridge id<MTLFunction>)guest_output_paint_ps_[size_t(effect)];
+  desc.colorAttachments[0].pixelFormat =
+      to_drawable ? kDrawablePixelFormat : kIntermediatePixelFormat;
+  NSError* error = nil;
+  id<MTLRenderPipelineState> pipeline =
+      [device newRenderPipelineStateWithDescriptor:desc error:&error];
+  if (!pipeline) {
+    XELOGE("MetalPresenter: failed to create the {} pipeline: {}",
+           GetGuestOutputPaintEffectName(effect),
+           error ? [[error localizedDescription] UTF8String] : "unknown");
+    return nullptr;
+  }
+  pipeline_ref = (__bridge_retained void*)pipeline;
+  return pipeline_ref;
+}
+
+void* MetalPresenter::EnsureGuestOutputIntermediateTexture(size_t index,
+                                                           uint32_t width,
+                                                           uint32_t height) {
+  void*& texture_ref = guest_output_intermediate_textures_[index];
+  std::pair<uint32_t, uint32_t>& size_ref =
+      guest_output_intermediate_texture_sizes_[index];
+  if (texture_ref && size_ref.first == width && size_ref.second == height) {
+    return texture_ref;
+  }
+  // A texture still in use by a submitted command buffer stays alive until it
+  // completes, as command buffers retain their resources.
+  if (texture_ref) {
+    CFRelease(texture_ref);
+    texture_ref = nullptr;
+  }
+  size_ref = std::make_pair(uint32_t(0), uint32_t(0));
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLTextureDescriptor* desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:kIntermediatePixelFormat
+                                   width:width
+                                  height:height
+                               mipmapped:NO];
+  desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  if (!texture) {
+    XELOGE("MetalPresenter: failed to create a {}x{} guest output "
+           "intermediate texture",
+           width, height);
+    return nullptr;
+  }
+  texture_ref = (__bridge_retained void*)texture;
+  size_ref = std::make_pair(width, height);
+  return texture_ref;
+}
+
+void* MetalPresenter::EnsureMetalFxScaler(uint32_t input_width,
+                                          uint32_t input_height,
+                                          uint32_t output_width,
+                                          uint32_t output_height,
+                                          void*& output_texture_out) {
+  if (metalfx_scaler_ && metalfx_input_width_ == input_width &&
+      metalfx_input_height_ == input_height &&
+      metalfx_output_width_ == output_width &&
+      metalfx_output_height_ == output_height) {
+    output_texture_out = metalfx_output_texture_;
+    return metalfx_scaler_;
+  }
+  const uint32_t sizes[4] = {input_width, input_height, output_width,
+                             output_height};
+  if (std::equal(std::begin(sizes), std::end(sizes),
+                 std::begin(metalfx_failed_sizes_))) {
+    return nullptr;
+  }
+  if (metalfx_scaler_) {
+    CFRelease(metalfx_scaler_);
+    metalfx_scaler_ = nullptr;
+  }
+  if (metalfx_output_texture_) {
+    CFRelease(metalfx_output_texture_);
+    metalfx_output_texture_ = nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  // 10bpc output like the other effects' intermediates, 8bpc if MetalFX can't.
+  id<MTLFXSpatialScaler> scaler = nil;
+  for (MTLPixelFormat output_format :
+       {kIntermediatePixelFormat, MTLPixelFormatRGBA8Unorm}) {
+    MTLFXSpatialScalerDescriptor* desc =
+        [[MTLFXSpatialScalerDescriptor alloc] init];
+    desc.inputWidth = input_width;
+    desc.inputHeight = input_height;
+    desc.outputWidth = output_width;
+    desc.outputHeight = output_height;
+    // The guest output mailbox texture.
+    desc.colorTextureFormat = MTLPixelFormatRGBA8Unorm;
+    desc.outputTextureFormat = output_format;
+    // The guest output is gamma-encoded.
+    desc.colorProcessingMode =
+        MTLFXSpatialScalerColorProcessingModePerceptual;
+    scaler = [desc newSpatialScalerWithDevice:device];
+    if (scaler) {
+      MTLTextureDescriptor* texture_desc = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:output_format
+                                       width:output_width
+                                      height:output_height
+                                   mipmapped:NO];
+      texture_desc.usage = scaler.outputTextureUsage | MTLTextureUsageShaderRead;
+      texture_desc.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> output_texture =
+          [device newTextureWithDescriptor:texture_desc];
+      if (!output_texture) {
+        scaler = nil;
+        break;
+      }
+      metalfx_output_texture_ = (__bridge_retained void*)output_texture;
+      break;
+    }
+  }
+  if (!scaler) {
+    XELOGW("MetalPresenter: MetalFX can't scale {}x{} to {}x{}; painting "
+           "bilinear instead",
+           input_width, input_height, output_width, output_height);
+    std::copy(std::begin(sizes), std::end(sizes),
+              std::begin(metalfx_failed_sizes_));
+    return nullptr;
+  }
+  XELOGI("MetalPresenter: MetalFX spatial scaling {}x{} to {}x{}",
+         input_width, input_height, output_width, output_height);
+  metalfx_scaler_ = (__bridge_retained void*)scaler;
+  metalfx_input_width_ = input_width;
+  metalfx_input_height_ = input_height;
+  metalfx_output_width_ = output_width;
+  metalfx_output_height_ = output_height;
+  output_texture_out = metalfx_output_texture_;
+  return metalfx_scaler_;
+}
+
+bool MetalPresenter::EncodeGuestOutputPaintEffect(
+    void* render_encoder, const GuestOutputPaintFlow& flow,
+    size_t effect_index, const GuestOutputPaintConfig& config,
+    void* source_texture, bool to_drawable, uint32_t target_width,
+    uint32_t target_height) {
+  GuestOutputPaintEffect effect = flow.effects[effect_index];
+  void* pipeline = GetGuestOutputPaintPipeline(effect, to_drawable);
+  if (!pipeline) {
+    return false;
+  }
+  id<MTLRenderCommandEncoder> encoder =
+      (__bridge id<MTLRenderCommandEncoder>)render_encoder;
+  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                      pipeline];
+
+  // The rectangle in normalized device coordinates. Unlike Vulkan's, Metal's
+  // Y axis points up, so the rectangle grows downwards from its top edge.
+  int32_t output_x, output_y;
+  flow.GetEffectOutputOffset(effect_index, output_x, output_y);
+  const std::pair<uint32_t, uint32_t>& output_size =
+      flow.effect_output_sizes[effect_index];
+  float x_to_ndc = 2.0f / float(target_width);
+  float y_to_ndc = 2.0f / float(target_height);
+  float rect[4] = {
+      -1.0f + float(output_x) * x_to_ndc,
+      1.0f - float(output_y) * y_to_ndc,
+      float(output_size.first) * x_to_ndc,
+      -float(output_size.second) * y_to_ndc,
+  };
+  [encoder setVertexBytes:rect length:sizeof(rect) atIndex:0];
+
+  // MSL lays the effect constants out from offset 0 of their own buffer, and
+  // may pad the structure past the C++ size, so pass a zero-padded block.
+  union {
+    BilinearConstants bilinear;
+    CasSharpenConstants cas_sharpen;
+    CasResampleConstants cas_resample;
+    FsrEasuConstants fsr_easu;
+    FsrRcasConstants fsr_rcas;
+    uint8_t padded[32];
+  } constants = {};
+  switch (effect) {
+    case GuestOutputPaintEffect::kBilinear:
+    case GuestOutputPaintEffect::kBilinearDither:
+      constants.bilinear.Initialize(flow, effect_index);
+      break;
+    case GuestOutputPaintEffect::kCasSharpen:
+    case GuestOutputPaintEffect::kCasSharpenDither:
+      constants.cas_sharpen.Initialize(flow, effect_index, config);
+      break;
+    case GuestOutputPaintEffect::kCasResample:
+    case GuestOutputPaintEffect::kCasResampleDither:
+      constants.cas_resample.Initialize(flow, effect_index, config);
+      break;
+    case GuestOutputPaintEffect::kFsrEasu:
+      constants.fsr_easu.Initialize(flow, effect_index);
+      break;
+    case GuestOutputPaintEffect::kFsrRcas:
+    case GuestOutputPaintEffect::kFsrRcasDither:
+      constants.fsr_rcas.Initialize(flow, effect_index, config);
+      break;
+    default:
+      break;
+  }
+  [encoder setFragmentBytes:&constants length:sizeof(constants) atIndex:0];
+  [encoder setFragmentTexture:(__bridge id<MTLTexture>)source_texture
+                      atIndex:0];
+  [encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)
+                                       guest_output_paint_sampler_
+                           atIndex:0];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+              vertexStart:0
+              vertexCount:4];
   return true;
 }
 
@@ -284,7 +643,37 @@ bool MetalPresenter::RefreshGuestOutputImpl(
   // Hand the mailbox texture to the producer (IssueSwap) to fill with the
   // current frontbuffer; it records + submits its own Metal work.
   MetalGuestOutputRefreshContext context(is_8bpc_out_ref, texture);
+  // The mailbox texture is RGBA8, so whatever the guest format, the image has
+  // no more than 8 bits per channel and needs no dithering at 1:1.
+  context.SetIs8bpc(true);
   return refresher(context);
+}
+
+void MetalPresenter::LogGuestOutputPaintFlowIfChanged(
+    const GuestOutputPaintFlow& flow) {
+  bool changed = flow.effect_count != last_logged_effect_count_;
+  for (size_t i = 0; !changed && i < flow.effect_count; ++i) {
+    changed = flow.effects[i] != last_logged_effects_[i] ||
+              flow.effect_output_sizes[i] != last_logged_effect_output_sizes_[i];
+  }
+  if (!changed) {
+    return;
+  }
+  last_logged_effect_count_ = flow.effect_count;
+  std::string chain;
+  for (size_t i = 0; i < flow.effect_count; ++i) {
+    last_logged_effects_[i] = flow.effects[i];
+    last_logged_effect_output_sizes_[i] = flow.effect_output_sizes[i];
+    chain += fmt::format("{}{} -> {}x{}", i ? ", " : "",
+                         GetGuestOutputPaintEffectName(flow.effects[i]),
+                         flow.effect_output_sizes[i].first,
+                         flow.effect_output_sizes[i].second);
+  }
+  if (flow.effect_count) {
+    XELOGI("MetalPresenter: guest output {}x{} painted with: {}",
+           flow.properties.frontbuffer_width,
+           flow.properties.frontbuffer_height, chain);
+  }
 }
 
 Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
@@ -330,6 +719,84 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
           (__bridge id<MTLTexture>)guest_output_textures_[mailbox_index];
     }
 
+    uint32_t drawable_width = uint32_t(drawable.texture.width);
+    uint32_t drawable_height = uint32_t(drawable.texture.height);
+    GuestOutputPaintFlow flow = {};
+    if (guest_output_texture && EnsureGuestOutputPaintResources()) {
+      flow = GetGuestOutputPaintFlow(
+          guest_output_properties, drawable_width, drawable_height,
+          kMaxRenderTargetSize, kMaxRenderTargetSize,
+          guest_output_paint_config);
+    }
+    LogGuestOutputPaintFlowIfChanged(flow);
+
+    // Effects followed by another effect render into intermediate textures in
+    // their own passes, before the drawable pass.
+    void* effect_source = (__bridge void*)guest_output_texture;
+    for (size_t i = 0; i + 1 < flow.effect_count; ++i) {
+      const std::pair<uint32_t, uint32_t>& intermediate_size =
+          flow.effect_output_sizes[i];
+      void* intermediate = EnsureGuestOutputIntermediateTexture(
+          i, intermediate_size.first, intermediate_size.second);
+      if (!intermediate) {
+        flow.effect_count = 0;
+        break;
+      }
+      MTLRenderPassDescriptor* intermediate_pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      intermediate_pass.colorAttachments[0].texture =
+          (__bridge id<MTLTexture>)intermediate;
+      // The effect covers the whole intermediate texture.
+      intermediate_pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+      intermediate_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> intermediate_encoder =
+          [command_buffer renderCommandEncoderWithDescriptor:intermediate_pass];
+      bool encoded = EncodeGuestOutputPaintEffect(
+          (__bridge void*)intermediate_encoder, flow, i,
+          guest_output_paint_config, effect_source, false,
+          intermediate_size.first, intermediate_size.second);
+      [intermediate_encoder endEncoding];
+      if (!encoded) {
+        flow.effect_count = 0;
+        break;
+      }
+      effect_source = intermediate;
+    }
+
+    // MetalFX spatial scaling: the flow painted for it is a bilinear stretch
+    // (with dithering) to the output size. MetalFX upscales to that size
+    // instead, and the bilinear pass then copies its output 1:1.
+    if (flow.effect_count == 1 &&
+        guest_output_paint_config.GetEffect() ==
+            GuestOutputPaintConfig::Effect::kMetalFxSpatial) {
+      uint32_t input_width = guest_output_properties.frontbuffer_width;
+      uint32_t input_height = guest_output_properties.frontbuffer_height;
+      const std::pair<uint32_t, uint32_t>& output_size =
+          flow.effect_output_sizes[0];
+      // Upscaling only.
+      if (output_size.first >= input_width &&
+          output_size.second >= input_height &&
+          (output_size.first > input_width ||
+           output_size.second > input_height) &&
+          SupportsGuestOutputPaintEffect(
+              GuestOutputPaintConfig::Effect::kMetalFxSpatial)) {
+        void* metalfx_output = nullptr;
+        void* scaler_ptr =
+            EnsureMetalFxScaler(input_width, input_height, output_size.first,
+                                output_size.second, metalfx_output);
+        if (scaler_ptr) {
+          id<MTLFXSpatialScaler> scaler =
+              (__bridge id<MTLFXSpatialScaler>)scaler_ptr;
+          scaler.colorTexture = guest_output_texture;
+          scaler.outputTexture = (__bridge id<MTLTexture>)metalfx_output;
+          scaler.inputContentWidth = input_width;
+          scaler.inputContentHeight = input_height;
+          [scaler encodeToCommandBuffer:command_buffer];
+          effect_source = metalfx_output;
+        }
+      }
+    }
+
     MTLRenderPassDescriptor* pass =
         [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = drawable.texture;
@@ -340,35 +807,11 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
 
     id<MTLRenderCommandEncoder> encoder =
         [command_buffer renderCommandEncoderWithDescriptor:pass];
-    if (guest_output_texture && EnsureBlitPipeline()) {
-      // Fit the guest image into the drawable preserving its display aspect
-      // ratio: shrink the blit quad on the axis the drawable is "too long" on,
-      // leaving the clear color as bars. Compare drawable aspect (actual pixels)
-      // to the guest display aspect.
-      float scale[2] = {1.0f, 1.0f};
-      uint32_t out_w = uint32_t(drawable.texture.width);
-      uint32_t out_h = uint32_t(drawable.texture.height);
-      uint32_t dar_x = guest_output_properties.display_aspect_ratio_x;
-      uint32_t dar_y = guest_output_properties.display_aspect_ratio_y;
-      if (out_w && out_h && dar_x && dar_y) {
-        double image_aspect = double(dar_x) / double(dar_y);
-        double surface_aspect = double(out_w) / double(out_h);
-        if (surface_aspect > image_aspect) {
-          scale[0] = float(image_aspect / surface_aspect);  // pillarbox
-        } else {
-          scale[1] = float(surface_aspect / image_aspect);  // letterbox
-        }
-      }
-      [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                          blit_pipeline_state_];
-      [encoder setVertexBytes:scale length:sizeof(scale) atIndex:0];
-      [encoder setFragmentTexture:guest_output_texture atIndex:0];
-      [encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)
-                                           blit_sampler_
-                              atIndex:0];
-      [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
-                  vertexStart:0
-                  vertexCount:4];
+    if (flow.effect_count) {
+      EncodeGuestOutputPaintEffect(
+          (__bridge void*)encoder, flow, flow.effect_count - 1,
+          guest_output_paint_config, effect_source, true, drawable_width,
+          drawable_height);
     }
 
     // UI overlays (ImGui: emulator dialogs AND guest system dialogs) draw into
@@ -392,7 +835,26 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
 
     // A silent GPU fault in the present blit leaves the window on the last good
     // frame while the game keeps running — reads as a "GPU freeze". Log it.
+    // Also report the paint's GPU time every 600 paints, which is what the
+    // upscaling effects cost on top of the guest's own rendering.
     [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      static std::atomic<uint64_t> s_paint_gpu_ns{0};
+      static std::atomic<uint32_t> s_paint_count{0};
+      if (cb.status == MTLCommandBufferStatusCompleted &&
+          cb.GPUEndTime > cb.GPUStartTime) {
+        uint64_t paint_gpu_ns =
+            uint64_t((cb.GPUEndTime - cb.GPUStartTime) * 1e9);
+        uint64_t gpu_ns =
+            s_paint_gpu_ns.fetch_add(paint_gpu_ns) + paint_gpu_ns;
+        uint32_t paint_count = s_paint_count.fetch_add(1) + 1;
+        if (paint_count >= 600) {
+          XELOGI("MetalPresenter: paint GPU time {:.3f} ms average over {} "
+                 "paints",
+                 double(gpu_ns) / double(paint_count) * 1e-6, paint_count);
+          s_paint_gpu_ns.store(0);
+          s_paint_count.store(0);
+        }
+      }
       if (cb.status == MTLCommandBufferStatusError) {
         static uint32_t s_present_errors = 0;
         if (s_present_errors++ < 32) {

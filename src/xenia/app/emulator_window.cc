@@ -105,7 +105,7 @@ DEFINE_string(
     postprocess_scaling_and_sharpening, "",
     "Post-processing effect to use for resampling and/or sharpening of the "
     "final display output.\n"
-    "Use: [bilinear, cas, fsr]\n"
+    "Use: [bilinear, cas, fsr, metalfx]\n"
     " bilinear (or any value not listed here):\n"
     "  Original image at 1:1, simple bilinear stretching for resampling.\n"
     " cas:\n"
@@ -116,7 +116,10 @@ DEFINE_string(
     "  Use AMD FidelityFX Super Resolution 1.0 (FSR) for highest-quality "
     "upscaling, or AMD FidelityFX Contrast Adaptive Sharpening for sharpening "
     "while not scaling or downsampling.\n"
-    "  For scaling by factors of more than 2x2, multiple FSR passes are done.",
+    "  For scaling by factors of more than 2x2, multiple FSR passes are done.\n"
+    " metalfx:\n"
+    "  Use Apple MetalFX spatial upscaling, in one pass at any factor (Metal "
+    "renderer only; bilinear elsewhere).",
     "Display");
 DEFINE_double(
     postprocess_ffx_cas_additional_sharpness,
@@ -444,6 +447,13 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
       ImGui::RadioButton(
           "AMD FidelityFX Super Resolution 1.0 (FSR)", &new_effect_index,
           int(ui::Presenter::GuestOutputPaintConfig::Effect::kFsr));
+      if (presenter->SupportsGuestOutputPaintEffect(
+              ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial)) {
+        ImGui::RadioButton(
+            "Apple MetalFX spatial upscaling", &new_effect_index,
+            int(ui::Presenter::GuestOutputPaintConfig::Effect::
+                    kMetalFxSpatial));
+      }
       new_presenter_config.SetEffect(
           ui::Presenter::GuestOutputPaintConfig::Effect(new_effect_index));
 
@@ -474,6 +484,11 @@ void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
               "done.\n"
               "If not upscaling, Contrast Adaptive Sharpening (CAS) is used "
               "instead.";
+          break;
+        case ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial:
+          effect_description =
+              "Apple's edge-preserving upscaling, in one pass at any factor.\n"
+              "If not upscaling, bilinear filtering is done.";
           break;
       }
       if (effect_description) {
@@ -1010,6 +1025,8 @@ const char* EmulatorWindow::GetCvarValueForGuestOutputPaintEffect(
       return "cas";
     case ui::Presenter::GuestOutputPaintConfig::Effect::kFsr:
       return "fsr";
+    case ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial:
+      return "metalfx";
     default:
       return "";
   }
@@ -1025,6 +1042,11 @@ EmulatorWindow::GetGuestOutputPaintEffectForCvarValue(
   if (cvar_value == GetCvarValueForGuestOutputPaintEffect(
                         ui::Presenter::GuestOutputPaintConfig::Effect::kFsr)) {
     return ui::Presenter::GuestOutputPaintConfig::Effect::kFsr;
+  }
+  if (cvar_value ==
+      GetCvarValueForGuestOutputPaintEffect(
+          ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial)) {
+    return ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial;
   }
   return ui::Presenter::GuestOutputPaintConfig::Effect::kBilinear;
 }

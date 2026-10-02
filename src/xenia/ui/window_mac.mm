@@ -9,6 +9,8 @@
 
 #include "xenia/ui/window_mac.h"
 
+#include <cstdlib>
+
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -751,6 +753,17 @@ void MacWindow::UpdateSizeFromView() {
     return;
   }
   NSSize backing = [view convertSizeToBacking:view.bounds.size];
+  // Test aid: XE_MAC_DRAWABLE_SCALE=2..4 multiplies the drawable as if the
+  // display had that much higher density (the compositor scales it down to the
+  // window), to exercise and measure 4K / 5K output paths on a lower-resolution
+  // display.
+  static const uint32_t s_drawable_scale = [] {
+    const char* value = std::getenv("XE_MAC_DRAWABLE_SCALE");
+    int scale = value ? std::atoi(value) : 1;
+    return uint32_t(scale >= 2 && scale <= 4 ? scale : 1);
+  }();
+  backing.width *= s_drawable_scale;
+  backing.height *= s_drawable_scale;
   uint32_t physical_width = uint32_t(backing.width);
   uint32_t physical_height = uint32_t(backing.height);
   // Keep the CAMetalLayer's drawable size in physical pixels.
