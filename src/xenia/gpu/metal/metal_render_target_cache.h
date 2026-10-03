@@ -128,8 +128,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        uint32_t rows, uint32_t span_pitch);
   // Records successful raster writes after a draw has been emitted. Only the
   // exact spans and slots actually used by that draw become authoritative.
+  // `host_y0`/`host_y1` bound the draw's host scissor rows (raster-view
+  // pixels); the pack census marks the tile rows they cover dirty.
   void MarkCurrentRasterTargetsWritten(uint32_t color_write_mask,
-                                       bool depth_or_stencil_written);
+                                       bool depth_or_stencil_written,
+                                       uint32_t host_y0 = 0,
+                                       uint32_t host_y1 = UINT32_MAX);
+  // The largest guest MSAA sample count (1, 2 or 4) among the accumulated
+  // attachments; 1 when none.
+  uint32_t current_msaa_samples() const;
+  // Pack census (XE_METAL_PASS_CENSUS=1): canonical pack/materialize
+  // operations by requester, with the share of packed tiles no draw dirtied
+  // since the attachment's previous pack. One line; `reset` clears the window.
+  std::string FormatPackCensus(bool reset);
   // A stable identity for "did the attachment set change" pass management.
   uint64_t current_attachment_key() const;
   // Human-readable composition behind current_attachment_key(). That key is a
@@ -693,6 +704,29 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   bool EncodeCanonicalAuthorityOperation(
       const void* command_buffer,
       const MetalEdramAuthorityTracker::SyncOperation& operation);
+  // Pack census state. Dirty tile rows per attachment id are set by
+  // MarkCurrentRasterTargetsWritten from the draw's host scissor rows and
+  // cleared by a pack of those tiles; a packed tile that is not dirty was
+  // packed before and untouched since (a redundant pack).
+  enum class CanonicalSyncRequester : uint32_t {
+    kRasterViews,  // PrepareCurrentRasterViews (alias / materialize)
+    kReadback,     // PrepareCanonicalEdramForReadback
+    kResolve,      // PrepareCanonicalEdramForResolve
+    kOther,
+    kCount,
+  };
+  CanonicalSyncRequester sync_requester_ = CanonicalSyncRequester::kOther;
+  std::unordered_map<uint64_t, std::vector<uint8_t>> pack_dirty_tiles_;
+  struct PackCensus {
+    uint64_t pack_ops[4] = {}, pack_tiles[4] = {}, pack_tiles_redundant[4] = {};
+    uint64_t pack_ops_all_redundant[4] = {};
+    uint64_t materialize_ops[4] = {}, materialize_tiles[4] = {};
+    uint64_t frames = 0;
+  } pack_census_;
+  void NotePackCensusFrame() { ++pack_census_.frames; }
+ public:
+  void NotePackCensusSwap() { ++pack_census_.frames; }
+ private:
 
   // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the
   // authority for depth ownership flips, single-sample rendering). Gated behind

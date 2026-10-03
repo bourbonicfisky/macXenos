@@ -311,6 +311,17 @@ uint32_t AttachmentBytesPerPixel(MTLPixelFormat format) {
   }
 }
 
+// XE_METAL_SCALED_COVER_ORDERING=0: a scaled-cover-served fetch over a
+// pending GPU-current resolve waits for the resolve (the pre-2026-10-03
+// behavior) instead of ordering against it on the GPU.
+inline bool ScaledCoverOrderingEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SCALED_COVER_ORDERING");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool RouteServiceOk(ResolvedFetchService service,
                            uint32_t fetch_base = 0,
                            bool declaration_site = false) {
@@ -2642,8 +2653,10 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       [command_buffer renderCommandEncoderWithDescriptor:pass];
   // Fault attribution: names this encoder in per-encoder execution status.
   encoder.label = [NSString
-      stringWithFormat:@"draws@%u rt=%016llX", draw_count_,
-                       (unsigned long long)want_key];
+      stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
+                       (unsigned long long)want_key,
+                       memexport_pass_ ? 1u
+                                       : render_target_cache_->current_msaa_samples()];
   // The label's rt= value is a one-way rolling hash of the accumulated
   // attachment set (current_attachment_key), so a recurring hash in fault
   // reports cannot be read back into a concrete render target. Log the
@@ -6895,7 +6908,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 // guest RAM nor the shared buffer, so it neither needs the
                 // drain nor vetoes ordering for the fetches that do.
                 fetch_service == ResolvedFetchService::kExactCoverSnapshot ||
-                fetch_service == ResolvedFetchService::kBridgeSnapshot;
+                fetch_service == ResolvedFetchService::kBridgeSnapshot ||
+                // Draw resolution scaling: the scaled-cover snapshot is the
+                // same never-reads-RAM service as exact cover; before
+                // 2026-10-03 it was missing here, so at 2x2 every scaled-
+                // cover fetch over a pending resolve forced a CPU wait (JC2:
+                // 5 blocking waits, ~50 ms, per frame; GPU idle ~19%).
+                // XE_METAL_SCALED_COVER_ORDERING=0 restores the wait.
+                (fetch_service == ResolvedFetchService::kScaledCoverSnapshot &&
+                 ScaledCoverOrderingEnabled());
+            if (touches_me &&
+                (fetch_service == ResolvedFetchService::kExactCoverSnapshot ||
+                 fetch_service == ResolvedFetchService::kScaledCoverSnapshot ||
+                 fetch_service == ResolvedFetchService::kBridgeSnapshot)) {
+              // Snapshot serving cannot observe buffer-resident memexport
+              // bytes (the same veto the bridge-served branch applies): keep
+              // the memexport producers on the wait-and-drain path. Found by
+              // Viva Pinata at 2x2 rendering black once scaled-cover fetches
+              // were ordered on the GPU.
+              memexport_order_safe = false;
+            }
           }
           if (!fetch_buffer_read) {
             texture_resolve_consumers_buffer_read = false;
@@ -7006,7 +7038,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         authority_decision.action !=
             metal::AuthorityAction::kOrderAgainstGpuProducers) {
       static uint32_t s_taker_logs = 0;
-      if (s_taker_logs < 64) {
+      static uint32_t s_taker_total = 0;
+      // The first 64 takers name the boot period; afterwards every 512th is
+      // sampled so the steady-state scene's takers are attributable too.
+      if (s_taker_logs < 64 || (++s_taker_total & 511) == 0) {
         std::string fetches;
         auto census_fetches = [&](MetalShader* shader) {
           if (!shader) return;
@@ -7536,6 +7571,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
   pending_pass_bound_ = pass_bound;
+  // Host scissor rows of this draw (pack census dirty rows); whole range
+  // until the scissor is applied below.
+  uint32_t draw_host_y0 = 0, draw_host_y1 = UINT32_MAX;
   // Attribution aid: XE_METAL_PASS_SPLIT_EVERY=<n> ends the open pass every n
   // draws (legacy binding), to measure what a pass boundary alone does to
   // attachment contents on this GPU.
@@ -8125,6 +8163,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       MTLScissorRect scissor_rect{metal_scissor.x, metal_scissor.y,
                                   metal_scissor.width, metal_scissor.height};
       [encoder setScissorRect:scissor_rect];
+      draw_host_y0 = uint32_t(metal_scissor.y);
+      draw_host_y1 = uint32_t(metal_scissor.y + metal_scissor.height);
     }
   draw_trace_milestone("before-rt-probe");
     // Diagnostic (XE_METAL_RT_PROBE=<draw>): the attachments this draw is
@@ -9078,7 +9118,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   auto mark_raster_targets_written = [&] {
     render_target_cache_->MarkCurrentRasterTargetsWritten(
         normalized_color_mask,
-        norm_depth.z_write_enable || norm_depth.stencil_enable);
+        norm_depth.z_write_enable || norm_depth.stencil_enable, draw_host_y0,
+        draw_host_y1);
   };
 
   // Post-encode memexport publication, shared by every draw path that can
@@ -13510,6 +13551,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   uint32_t count = swap_count_++;
   if (PassCensusEnabled()) {
     pass_census_.NoteFrame();
+    if (render_target_cache_) {
+      render_target_cache_->NotePackCensusSwap();
+    }
   }
   // Task 1.1 shader/pipeline build census. NoteSwap closes this frame's build
   // accumulator, which is what separates startup cost from an in-frame stall —
@@ -13551,6 +13595,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
       if (PassCensusEnabled()) {
         XELOGI("{}", pass_census_.Format("periodic", /*window=*/true));
+        if (render_target_cache_) {
+          XELOGI("{}", render_target_cache_->FormatPackCensus(/*reset=*/true));
+        }
       }
       if (lazy_read_callback_handle_) {
         static metal::MetalLazyPublication::Stats s_last_lazy;

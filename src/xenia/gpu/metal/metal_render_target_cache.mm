@@ -924,6 +924,31 @@ bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
       operation.kind ==
       MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical;
   const RenderTargetKey& key = render_target->key();
+  if (MetalCommandProcessor::PassCensusEnabled()) {
+    const uint32_t r = uint32_t(sync_requester_);
+    const uint32_t tiles = operation.end_tiles - operation.start_tiles;
+    if (materialize) {
+      ++pack_census_.materialize_ops[r];
+      pack_census_.materialize_tiles[r] += tiles;
+    } else {
+      std::vector<uint8_t>& dirty = pack_dirty_tiles_[operation.attachment];
+      if (dirty.size() != xenos::kEdramTileCount) {
+        // First sight of this attachment: everything counts as dirty.
+        dirty.assign(xenos::kEdramTileCount, 1);
+      }
+      uint32_t redundant = 0;
+      for (uint32_t t = operation.start_tiles; t < operation.end_tiles; ++t) {
+        redundant += dirty[t] ? 0 : 1;
+        dirty[t] = 0;
+      }
+      ++pack_census_.pack_ops[r];
+      pack_census_.pack_tiles[r] += tiles;
+      pack_census_.pack_tiles_redundant[r] += redundant;
+      if (redundant == tiles) {
+        ++pack_census_.pack_ops_all_redundant[r];
+      }
+    }
+  }
   if (key.is_depth) {
     if (key.msaa_samples == xenos::MsaaSamples::k1X) {
       return materialize
@@ -986,6 +1011,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     }
     auto operations = canonical_authority_.SynchronizeAttachment(
         attachment, start_tiles, end_tiles, ++canonical_authority_order_);
+    sync_requester_ = CanonicalSyncRequester::kRasterViews;
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
@@ -1020,6 +1046,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
   if (operations.empty()) {
     return true;
   }
+  sync_requester_ = CanonicalSyncRequester::kReadback;
   id<MTLCommandBuffer> command_buffer = (__bridge id<MTLCommandBuffer>)
       command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kCanonicalReadback));
   if (!command_buffer) {
@@ -1050,6 +1077,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
   auto synchronize = [&](uint32_t start, uint32_t end) {
     auto operations = canonical_authority_.SynchronizeCanonical(
         start, end, ++canonical_authority_order_);
+    sync_requester_ = CanonicalSyncRequester::kResolve;
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
@@ -1110,12 +1138,14 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
 }
 
 void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
-    uint32_t color_write_mask, bool depth_or_stencil_written) {
+    uint32_t color_write_mask, bool depth_or_stencil_written,
+    uint32_t host_y0, uint32_t host_y1) {
   if (!sample_edram_raster_enabled_) {
     return;
   }
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const bool census = MetalCommandProcessor::PassCensusEnabled();
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     bool written = slot == 0 ? depth_or_stencil_written
                              : (color_write_mask &
@@ -1127,6 +1157,28 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     uint32_t start_tiles = render_target->key().base_tiles;
     uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
+    if (census) {
+      // Dirty tile rows covered by the draw's host scissor rows (whole rows:
+      // a lower bound on redundancy). The raster view holds one pixel per
+      // sample, so a tile row is 16 x scale_y host rows.
+      std::vector<uint8_t>& dirty = pack_dirty_tiles_[attachment];
+      if (dirty.size() != xenos::kEdramTileCount) {
+        dirty.assign(xenos::kEdramTileCount, 1);
+      }
+      const uint32_t pitch = render_target->key().GetPitchTiles();
+      const uint32_t rows_per_tile =
+          xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
+      uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+      uint32_t d1 = host_y1 == UINT32_MAX
+                        ? end_tiles
+                        : start_tiles + ((host_y1 + rows_per_tile - 1) /
+                                         rows_per_tile) * pitch;
+      d0 = std::max(d0, start_tiles);
+      d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
+      for (uint32_t t = d0; t < d1; ++t) {
+        dirty[t] = 1;
+      }
+    }
     static const bool s_mark_skip =
         MetalSwitchEnabled(cvars::metal_raster_mark_skip,
                            std::getenv("XE_METAL_RASTER_MARK_SKIP"));
@@ -1151,6 +1203,49 @@ uint64_t MetalRenderTargetCache::current_attachment_key() const {
           (accumulated[i] ? uint64_t(accumulated[i]->key().key) + 1 : 0);
   }
   return key;
+}
+
+uint32_t MetalRenderTargetCache::current_msaa_samples() const {
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  uint32_t samples = 1;
+  for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+    if (accumulated[i]) {
+      samples = std::max(
+          samples, 1u << uint32_t(accumulated[i]->key().msaa_samples));
+    }
+  }
+  return samples;
+}
+
+std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
+  static const char* kNames[] = {"rasterviews", "readback", "resolve", "other"};
+  PackCensus& c = pack_census_;
+  const double frames = double(std::max<uint64_t>(c.frames, 1));
+  const double tile_mb = double(xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples * 4u) *
+                         draw_resolution_scale_x() * draw_resolution_scale_y() /
+                         (1024.0 * 1024.0);
+  std::string out = fmt::format("MetalPackCensus frames={}", c.frames);
+  for (uint32_t r = 0; r < 4; ++r) {
+    if (!c.pack_ops[r] && !c.materialize_ops[r]) {
+      continue;
+    }
+    out += fmt::format(
+        " | {}: pack {:.1f}/frame {:.1f} MB/frame redundant {:.1f}% "
+        "(all-redundant ops {:.1f}/frame) materialize {:.1f}/frame {:.1f} "
+        "MB/frame",
+        kNames[r], double(c.pack_ops[r]) / frames,
+        double(c.pack_tiles[r]) * tile_mb / frames,
+        c.pack_tiles[r] ? 100.0 * double(c.pack_tiles_redundant[r]) /
+                              double(c.pack_tiles[r])
+                        : 0.0,
+        double(c.pack_ops_all_redundant[r]) / frames,
+        double(c.materialize_ops[r]) / frames,
+        double(c.materialize_tiles[r]) * tile_mb / frames);
+  }
+  if (reset) {
+    c = PackCensus{};
+  }
+  return out;
 }
 
 std::string MetalRenderTargetCache::DescribeCurrentAttachments() const {
