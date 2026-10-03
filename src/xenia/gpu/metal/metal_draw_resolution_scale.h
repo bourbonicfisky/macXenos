@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_DRAW_RESOLUTION_SCALE_H_
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace xe {
 namespace gpu {
@@ -56,6 +57,49 @@ constexpr MetalDrawResolutionScale ResolveMetalDrawResolutionScale(
     scale.y = scale.requested_y;
   }
   return scale;
+}
+
+// Exact representative pixel (default on; XE_METAL_SCALE_EXACT_PIXEL=0 is the
+// rollback). At an even scale no host pixel center coincides with the guest
+// pixel's sample point: the representative (scale >> 1) host pixel samples a
+// quarter guest pixel past it on each axis, so resolves wrote guest memory
+// from shifted samples (Red Dead Redemption's offscreen chains drifted a
+// little more with every pass). With this on, geometry is shifted half a host
+// pixel on even-scale axes and the translator's pixel position and
+// scaled-texture coordinates match, so the representative host pixel renders
+// what 1x renders for its guest pixel. No effect at 1x or on odd scales'
+// geometry.
+inline bool MetalExactScaledPixelPositionEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_SCALE_EXACT_PIXEL");
+    return !(v && v[0] == '0');
+  }();
+  return enabled;
+}
+
+// The geometry shift in host pixels for an axis at this scale (right and down).
+inline float MetalScaledPixelShiftHostPixels(uint32_t scale) {
+  return (MetalExactScaledPixelPositionEnabled() && !(scale & 1)) ? 0.5f
+                                                                   : 0.0f;
+}
+
+// Anisotropic filtering in a scaled session (default off;
+// XE_METAL_SCALE_ANISO=1 keeps the guest's anisotropy). Derivatives at scale
+// come from host pixels a fraction of a guest pixel apart, so a shader whose
+// coordinates jump between guest pixels - Gears of War 3 builds its color
+// grading LUT from frac() of an interpolant that wraps just above each slice's
+// first row - gets a huge gradient in the representative pixel's quad, and the
+// anisotropic footprint smears neighbouring slices into the 1x bytes (the grey
+// menu). At 1x the same jump falls between quads. Bilinear sampling is exact
+// there, and the supersampling of a scaled session covers most of what
+// anisotropy adds (corpus at 2x2: median 1x distance 1.28 with it, 0.55
+// without; only Gears 3 changes visibly).
+inline bool MetalScaledAnisotropyEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_SCALE_ANISO");
+    return v && v[0] == '1';
+  }();
+  return enabled;
 }
 
 }  // namespace metal

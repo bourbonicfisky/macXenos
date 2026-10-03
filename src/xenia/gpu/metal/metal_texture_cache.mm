@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_fetch_constant_type.h"
@@ -368,6 +369,16 @@ MetalTextureCache::~MetalTextureCache() {
     pair.second.tip_swizzle_views.clear();
   }
   resolved_targets_.clear();
+  for (auto& pair : scaled_assemblies_) {
+    for (auto& sv : pair.second.swizzle_views) {
+      if (sv.second.view) {
+        id<MTLTexture> released =
+            (__bridge_transfer id<MTLTexture>)sv.second.view;
+        (void)released;
+      }
+    }
+  }
+  scaled_assemblies_.clear();
 }
 
 void MetalTextureCache::ReleaseDerivedResolveBridges(
@@ -399,6 +410,12 @@ void MetalTextureCache::ReleaseDerivedResolveBridges(
     }
     it = resolved_targets_.erase(it);
   }
+  // Column assemblies are derived from RAM-backed column resolves too. Their
+  // textures stay with the render-target cache; only serving retires.
+  for (auto& pair : scaled_assemblies_) {
+    RetireScaledAssembly(pair.second);
+  }
+  scaled_assemblies_.clear();
 }
 
 void MetalTextureCache::RetireAllResolvedTargets() {
@@ -409,6 +426,10 @@ void MetalTextureCache::RetireAllResolvedTargets() {
     RetireResolvedTarget(pair.second);
   }
   resolved_targets_.clear();
+  for (auto& pair : scaled_assemblies_) {
+    RetireScaledAssembly(pair.second);
+  }
+  scaled_assemblies_.clear();
 }
 
 void MetalTextureCache::ClearCache() {
@@ -703,6 +724,68 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
       uint32_t(fetch.endianness),
       rt.wb_endian};
   out->covered_r32f = covered_r32f;
+  // XE_METAL_SCALED_COVER=0: exact rollback of scaled-cover serving (scaled
+  // sessions then serve these fetches from 1x RAM, as before it existed).
+  static const bool s_scaled_cover_enabled =
+      ParseMetalEnvironmentFlag(std::getenv("XE_METAL_SCALED_COVER"), true);
+  if (IsDrawResolutionScaled() && s_scaled_cover_enabled) {
+    // Snapshot formats whose texels are exactly what the RAM upload of the
+    // fetch format decodes to.
+    MTLPixelFormat snapshot_format = exact_snap.pixelFormat;
+    bool format_matches =
+        (snapshot_format == MTLPixelFormatRGBA8Unorm &&
+         fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
+        (snapshot_format == MTLPixelFormatRGBA16Float &&
+         fetch.format == xenos::TextureFormat::k_16_16_16_16_FLOAT) ||
+        (snapshot_format == MTLPixelFormatR32Float &&
+         fetch.format == xenos::TextureFormat::k_32_FLOAT);
+    ScaledCoverInputs& scaled = out->scaled;
+    scaled.scaled_session = true;
+    scaled.rt_is_depth = rt.is_depth;
+    scaled.ram_backed = rt.ram_backed;
+    scaled.is_signed = is_signed;
+    scaled.snapshot_format_matches_fetch = format_matches;
+    scaled.fetch_tiled = bool(fetch.tiled);
+    scaled.fetch_dimension = fetch.dimension;
+    scaled.fetch_stacked = bool(fetch.stacked);
+    scaled.fetch_mip_min_level = fetch.mip_min_level;
+    scaled.fetch_mip_max_level = fetch.mip_max_level;
+    scaled.fetch_width = fetch_w;
+    scaled.fetch_height = fetch_h;
+    scaled.fetch_pitch_texels = uint32_t(fetch.pitch) << 5;
+    scaled.snapshot_width =
+        uint32_t(exact_snap.width) / draw_resolution_scale_x_;
+    scaled.snapshot_height =
+        uint32_t(exact_snap.height) / draw_resolution_scale_y_;
+    scaled.rows_written = rt.scaled_rows_written;
+    scaled.fetch_endianness = uint32_t(fetch.endianness);
+    scaled.wb_endian = rt.wb_endian;
+    // A fetch wider than the base's own snapshot may span a column assembly
+    // at this base (columns of a wider destination).
+    auto assembly_it = scaled_assemblies_.find(fetch.base_address << 12);
+    if (scaled.snapshot_width != fetch_w &&
+        assembly_it != scaled_assemblies_.end() &&
+        assembly_it->second.texture) {
+      const ScaledAssembly& assembly = assembly_it->second;
+      id<MTLTexture> assembly_texture =
+          (__bridge id<MTLTexture>)assembly.texture;
+      MTLPixelFormat assembly_format = assembly_texture.pixelFormat;
+      scaled.snapshot_format_matches_fetch =
+          (assembly_format == MTLPixelFormatRGBA8Unorm &&
+           fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
+          (assembly_format == MTLPixelFormatRGBA16Float &&
+           fetch.format == xenos::TextureFormat::k_16_16_16_16_FLOAT) ||
+          (assembly_format == MTLPixelFormatR32Float &&
+           fetch.format == xenos::TextureFormat::k_32_FLOAT);
+      scaled.snapshot_width = assembly.width;
+      scaled.snapshot_height = assembly.height;
+      // Rows are complete once the full-height columns cover the width.
+      scaled.rows_written =
+          assembly.covered_width >= assembly.width ? assembly.height : 0;
+      scaled.wb_endian = assembly.wb_endian;
+      scaled.from_assembly = true;
+    }
+  }
   out->has_resolved_target = true;
   return true;
 }
@@ -891,11 +974,27 @@ uint32_t MetalTextureCache::GetTextureSlot(
       ResolvedFetchServiceInputs service_in;
       BuildResolvedServiceInputs(fetch, is_signed, &service_in);
       ResolvedFetchService service = ClassifyResolvedFetch(service_in);
+      if (service == ResolvedFetchService::kRamContent && xe_lineage_base() &&
+          (fetch.base_address << 12) == xe_lineage_base() &&
+          service_in.scaled.scaled_session) {
+        const ScaledCoverInputs& sc = service_in.scaled;
+        XELOGW(
+            "MetalLineage SCALED-RAM draw={} base={:08X} fetch {}x{} pitch={} "
+            "snapshot {}x{} rows={} fmt_match={} assembly={} endian {}/{}",
+            lineage_draw_, fetch.base_address << 12, sc.fetch_width,
+            sc.fetch_height, sc.fetch_pitch_texels, sc.snapshot_width,
+            sc.snapshot_height, sc.rows_written,
+            sc.snapshot_format_matches_fetch, sc.from_assembly,
+            sc.fetch_endianness, sc.wb_endian);
+      }
       bool covered_r32f = service_in.covered_r32f;
-      if (service == ResolvedFetchService::kExactCoverSnapshot) {
+      if (service == ResolvedFetchService::kExactCoverSnapshot ||
+          service == ResolvedFetchService::kScaledCoverSnapshot) {
         // Exact-cover RGBA8 fast path: the snapshot is provably the same
         // content the RAM upload would produce (per-condition rationale in
-        // metal_exact_cover_predicate.h and the design doc).
+        // metal_exact_cover_predicate.h and the design doc). Scaled cover
+        // (draw resolution scaling only) serves the same way: guest RAM holds
+        // the snapshot's representative pixels (metal_scaled_cover_predicate.h).
         if (xe_lineage_base() &&
             (fetch.base_address << 12) == xe_lineage_base()) {
           XELOGW(
@@ -910,23 +1009,54 @@ uint32_t MetalTextureCache::GetTextureSlot(
         // swizzle from a per-swizzle cached view so the exact-cover fast path
         // reads the same channels the RAM path would.
         uint32_t guest_swizzle = fetch.swizzle & 0xFFF;
-        if (!rt.requires_fetch_swizzle ||
-            GuestSwizzleIsIdentity(guest_swizzle)) {
-          active_textures_.push_back(rt.texture);
-          return rt.slot;
+        if (service == ResolvedFetchService::kScaledCoverSnapshot &&
+            service_in.scaled.from_assembly) {
+          // The column assembly at this base, same swizzle handling. On a view
+          // failure, fall through to the RAM path (it holds the columns).
+          auto assembly_it =
+              scaled_assemblies_.find(fetch.base_address << 12);
+          if (assembly_it != scaled_assemblies_.end() &&
+              assembly_it->second.texture) {
+            ScaledAssembly& assembly = assembly_it->second;
+            if (xe_lineage_base() &&
+                (fetch.base_address << 12) == xe_lineage_base()) {
+              XELOGW(
+                  "MetalLineage SCALED-ASSEMBLY draw={} base={:08X} served "
+                  "{}x{} assembly (covered {})",
+                  lineage_draw_, fetch.base_address << 12, assembly.width,
+                  assembly.height, assembly.covered_width);
+            }
+            if (!rt.requires_fetch_swizzle ||
+                GuestSwizzleIsIdentity(guest_swizzle)) {
+              active_textures_.push_back(assembly.texture);
+              return assembly.slot;
+            }
+            uint32_t assembly_swz_slot = GetSwizzledSnapshotSlot(
+                assembly.texture, guest_swizzle, assembly.swizzle_views);
+            if (assembly_swz_slot) {
+              return assembly_swz_slot;
+            }
+            ClearBindingAllocationFailure();
+          }
+        } else {
+          if (!rt.requires_fetch_swizzle ||
+              GuestSwizzleIsIdentity(guest_swizzle)) {
+            active_textures_.push_back(rt.texture);
+            return rt.slot;
+          }
+          ResolvedTarget& rt_mut = rit->second;
+          uint32_t swz_slot = GetSwizzledSnapshotSlot(
+              rt_mut.texture, guest_swizzle, rt_mut.swizzle_views);
+          if (swz_slot) {
+            return swz_slot;
+          }
+          // View creation or heap allocation failed: fall through to the
+          // guest RAM path below (which bakes the swizzle into its own view)
+          // rather than serve the unswizzled raw snapshot (wrong channels) or
+          // null. Exact-cover is RAM-backed by definition (RAM holds
+          // scatter(snapshot)), so the untile reproduces the content.
+          ClearBindingAllocationFailure();
         }
-        ResolvedTarget& rt_mut = rit->second;
-        uint32_t swz_slot = GetSwizzledSnapshotSlot(
-            rt_mut.texture, guest_swizzle, rt_mut.swizzle_views);
-        if (swz_slot) {
-          return swz_slot;
-        }
-        // View creation or heap allocation failed: fall through to the guest
-        // RAM path below (which bakes the swizzle into its own view) rather
-        // than serve the unswizzled raw snapshot (wrong channels) or null.
-        // Exact-cover is RAM-backed by definition (RAM holds scatter(snapshot)),
-        // so the untile reproduces the content.
-        ClearBindingAllocationFailure();
       }
       if (service == ResolvedFetchService::kBridgeSnapshot) {
         // The raw snapshot / tip slots carry no swizzle, exactly like the
@@ -2044,6 +2174,27 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     it->second.requires_fetch_swizzle = requires_fetch_swizzle;
     it->second.guest_extent_start = normalized_extent_start;
     it->second.guest_extent_length = normalized_extent_length;
+    if (IsDrawResolutionScaled()) {
+      // A new texture starts with only this resolve's rows. Reusing the same
+      // texture keeps the rows earlier resolves wrote, which still match
+      // guest RAM: any writer overlapping them since would have retired this
+      // registration through the union extent.
+      if (texture_changed || !it->second.scaled_extent_length) {
+        it->second.scaled_rows_written = height;
+        it->second.scaled_extent_start = normalized_extent_start;
+        it->second.scaled_extent_length = normalized_extent_length;
+      } else {
+        it->second.scaled_rows_written =
+            std::max(it->second.scaled_rows_written, height);
+        uint32_t union_start =
+            std::min(it->second.scaled_extent_start, normalized_extent_start);
+        uint32_t union_end = std::max(
+            it->second.scaled_extent_start + it->second.scaled_extent_length,
+            normalized_extent_start + normalized_extent_length);
+        it->second.scaled_extent_start = union_start;
+        it->second.scaled_extent_length = union_end - union_start;
+      }
+    }
     return;
   }
   uint32_t slot = AllocateSlot();
@@ -2063,6 +2214,12 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       guest_extent ? guest_extent->length() : 0,
       is_depth,
       requires_fetch_swizzle};
+  if (IsDrawResolutionScaled()) {
+    ResolvedTarget& registered = resolved_targets_[base];
+    registered.scaled_rows_written = height;
+    registered.scaled_extent_start = registered.guest_extent_start;
+    registered.scaled_extent_length = registered.guest_extent_length;
+  }
   XELOGI("MetalTex: resolved RT registered base={:08X} {}x{} -> slot {}", base,
          width, height, slot);
 }
@@ -2111,6 +2268,42 @@ bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
     return true;
   }
   return false;
+}
+
+void MetalTextureCache::ExtendResolvedTargetCoverage(void* texture,
+                                                     uint32_t strip_y,
+                                                     uint32_t rows,
+                                                     uint32_t extent_start,
+                                                     uint32_t extent_length,
+                                                     uint32_t wb_endian) {
+  if (!IsDrawResolutionScaled() || !texture) {
+    return;
+  }
+  auto extent = metal::GuestRange::FromBaseLength(extent_start, extent_length);
+  for (auto& pair : resolved_targets_) {
+    ResolvedTarget& rt = pair.second;
+    if (rt.texture != texture) {
+      continue;
+    }
+    // Only a strip contiguous with the written rows, written back like the
+    // base resolve, extends them; a gap would leave rows holding content
+    // guest RAM never received.
+    if (strip_y <= rt.scaled_rows_written && wb_endian == rt.wb_endian) {
+      rt.scaled_rows_written =
+          std::max(rt.scaled_rows_written, strip_y + rows);
+    }
+    if (extent) {
+      uint32_t union_start = rt.scaled_extent_length
+                                 ? std::min(rt.scaled_extent_start,
+                                            extent->start())
+                                 : extent->start();
+      uint32_t union_end = std::max(
+          rt.scaled_extent_start + rt.scaled_extent_length, extent->end());
+      rt.scaled_extent_start = union_start;
+      rt.scaled_extent_length = union_end - union_start;
+    }
+    return;
+  }
 }
 
 void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
@@ -2241,6 +2434,64 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
   retired_textures_.erase(tex_it, retired_textures_.end());
 }
 
+void MetalTextureCache::RetireScaledAssembly(ScaledAssembly& assembly) {
+  uint64_t retire_submission = RetireSubmission();
+  if (assembly.slot) {
+    stale_slots_.emplace_back(retire_submission, assembly.slot);
+  }
+  for (auto& swizzle_view : assembly.swizzle_views) {
+    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    retired_textures_.emplace_back(retire_submission,
+                                   swizzle_view.second.view);
+  }
+  assembly.swizzle_views.clear();
+}
+
+void MetalTextureCache::RegisterScaledAssembly(
+    uint32_t base0, void* texture, uint32_t width, uint32_t height, uint32_t x,
+    uint32_t w, uint32_t extent_start, uint32_t extent_length,
+    uint32_t wb_endian) {
+  if (!IsDrawResolutionScaled() || !texture) {
+    return;
+  }
+  ScaledAssembly& assembly = scaled_assemblies_[base0];
+  if (assembly.texture != texture) {
+    // A new texture (or first use) holds only this column. Allocate before
+    // retiring so exhaustion leaves the previous state consistent.
+    uint32_t slot = AllocateSlot();
+    if (!slot) {
+      return;
+    }
+    RetireScaledAssembly(assembly);
+    WriteSlotDescriptor(slot, texture);
+    assembly.texture = texture;
+    assembly.slot = slot;
+    assembly.width = width;
+    assembly.height = height;
+    assembly.covered_width = 0;
+    assembly.extent_start = 0;
+    assembly.extent_length = 0;
+    assembly.wb_endian = wb_endian;
+  }
+  // Only a column contiguous with the covered columns, written back like
+  // them, extends the coverage; a gap would leave columns holding content
+  // guest RAM never received.
+  if (x <= assembly.covered_width && wb_endian == assembly.wb_endian) {
+    assembly.covered_width = std::max(assembly.covered_width, x + w);
+  }
+  auto extent = metal::GuestRange::FromBaseLength(extent_start, extent_length);
+  if (extent) {
+    uint32_t union_start = assembly.extent_length
+                               ? std::min(assembly.extent_start,
+                                          extent->start())
+                               : extent->start();
+    uint32_t union_end = std::max(
+        assembly.extent_start + assembly.extent_length, extent->end());
+    assembly.extent_start = union_start;
+    assembly.extent_length = union_end - union_start;
+  }
+}
+
 void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
   uint64_t retire_submission = RetireSubmission();
   if (target.slot) {
@@ -2294,9 +2545,24 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
          it != resolved_targets_.end();) {
       auto guest_extent = metal::GuestRange::FromBaseLength(
           it->second.guest_extent_start, it->second.guest_extent_length);
-      if (guest_extent && invalidation->Overlaps(*guest_extent)) {
+      auto scaled_extent = metal::GuestRange::FromBaseLength(
+          it->second.scaled_extent_start, it->second.scaled_extent_length);
+      if ((guest_extent && invalidation->Overlaps(*guest_extent)) ||
+          (scaled_extent && invalidation->Overlaps(*scaled_extent))) {
         RetireResolvedTarget(it->second);
         it = resolved_targets_.erase(it);
+        ++evicted;
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = scaled_assemblies_.begin();
+         it != scaled_assemblies_.end();) {
+      auto extent = metal::GuestRange::FromBaseLength(
+          it->second.extent_start, it->second.extent_length);
+      if (extent && invalidation->Overlaps(*extent)) {
+        RetireScaledAssembly(it->second);
+        it = scaled_assemblies_.erase(it);
         ++evicted;
       } else {
         ++it;

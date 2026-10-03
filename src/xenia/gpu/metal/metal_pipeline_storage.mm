@@ -287,6 +287,12 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
       std::max(draw_resolution_scale_x, uint32_t(1)) - 1;
   schema.draw_resolution_scale_y_minus_1 =
       std::max(draw_resolution_scale_y, uint32_t(1)) - 1;
+  // The exact scaled pixel position changes the pixel position the translator
+  // emits, at a scale only (1x encodes as before).
+  if ((draw_resolution_scale_x > 1 || draw_resolution_scale_y > 1) &&
+      MetalExactScaledPixelPositionEnabled()) {
+    schema.fetch_abi_revision += 128;
+  }
   // A value wider than its bitfield does not fail to compile — it TRUNCATES,
   // and a truncated revision aliases an older one onto a newer build: exactly
   // the stale-serve these fields exist to prevent, arriving through the guard

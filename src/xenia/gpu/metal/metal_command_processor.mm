@@ -67,6 +67,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_draw_resolution_scale.h"
+#include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/metal/metal_scale_coverage_census.h"
 #include "xenia/gpu/metal/metal_serving_census.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -815,7 +816,11 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider())
           ->device();
   MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
-  const uint32_t aniso = uint32_t((key >> 15) & 7);
+  const uint32_t aniso =
+      ((draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) &&
+       !metal::MetalScaledAnisotropyEnabled())
+          ? 0u
+          : uint32_t((key >> 15) & 7);
   const uint32_t border = uint32_t((key >> 18) & 3);
   const uint32_t mip_min_level = uint32_t((key >> 20) & 15);
   const bool base_map = ((key >> 24) & 1) != 0;
@@ -1910,6 +1915,8 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       device_ptr, memory_, shared_memory_.get(), view_bindless_heap_,
       kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
+  texture_cache_->SetDrawResolutionScale(draw_resolution_scale_x_,
+                                         draw_resolution_scale_y_);
   // The same null texture every heap slot is initialized to, so a slot freed
   // by a cache clear returns to a valid resource rather than an empty entry.
   texture_cache_->SetNullTexture(null_texture_);
@@ -7304,6 +7311,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
     }
+    // Exact representative pixel at an even draw resolution scale
+    // (metal_draw_resolution_scale.h): shift geometry half a host pixel right
+    // and down so the representative host pixel samples the guest pixel's own
+    // sample point. Host NDC Y points up (Metal's viewport maps +1 to the top
+    // row), so moving down is a negative Y offset.
+    for (uint32_t i = 0; i < 2; ++i) {
+      float shift = metal::MetalScaledPixelShiftHostPixels(
+          i ? draw_resolution_scale_y_ : draw_resolution_scale_x_);
+      if (shift != 0.0f && viewport_info.xy_extent[i]) {
+        system_constants.ndc_offset[i] +=
+            (i ? -shift : shift) * 2.0f / float(viewport_info.xy_extent[i]);
+      }
+    }
     if (msaa_fold_pin_depth) {
       // Constant depth = the canonical transfer's result (see the fold).
       system_constants.ndc_scale[2] = 0.0f;
@@ -7487,7 +7507,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           ResolvedFetchService service =
               texture_cache_->ClassifyFetchService(fetch, binding.is_signed);
           if (service == ResolvedFetchService::kBridgeSnapshot ||
-              service == ResolvedFetchService::kExactCoverSnapshot) {
+              service == ResolvedFetchService::kExactCoverSnapshot ||
+              service == ResolvedFetchService::kScaledCoverSnapshot) {
             system_constants.textures_resolution_scaled |= uint32_t(1) << fc;
           }
         }
@@ -8151,8 +8172,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                               fetch_height_serve(fetch),
                               fetch_pitch_serve(fetch),
                               &serve_corridor_required);
+          // Draw resolution scaling: the route mask is per fetch constant, so
+          // a snapshot-served binding (bridge, exact or scaled cover) can share
+          // a bit with a RAM-content twin (its signed variant). At 1x the two
+          // hold the same content; at scale only the snapshot is scaled, so it
+          // is served from the snapshot, GPU-ordered, never from the shared
+          // cache's 1x RAM load.
+          bool snapshot_binding_at_scale = false;
+          if ((draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) &&
+              texture_cache_) {
+            ResolvedFetchService binding_service =
+                texture_cache_->ClassifyFetchService(fetch, binding.is_signed);
+            snapshot_binding_at_scale =
+                binding_service == ResolvedFetchService::kBridgeSnapshot ||
+                binding_service == ResolvedFetchService::kExactCoverSnapshot ||
+                binding_service == ResolvedFetchService::kScaledCoverSnapshot;
+          }
           const bool route_masked =
-              shared_texture_cache_ &&
+              shared_texture_cache_ && !snapshot_binding_at_scale &&
               (!binding.is_signed ||
                (s_serve_signed && (!serve_corridor_required ||
                                    FetchOverlapsPendingGpuCurrent(fetch)))) &&
@@ -8190,6 +8227,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      "binding allocation failure");
               return false;
             }
+          }
+          if (xe_lineage_base() &&
+              (fetch.base_address << 12) == xe_lineage_base()) {
+            XELOGW(
+                "MetalLineage BIND draw={} base={:08X} fc={} {}x{} routed={} "
+                "slot={} svc={}",
+                trace_draw_index_, fetch.base_address << 12,
+                binding.fetch_constant, fetch.size_2d.width + 1,
+                fetch.size_2d.height + 1, routed_slot != 0, texture_slot,
+                texture_cache_ ? uint32_t(texture_cache_->ClassifyFetchService(
+                                     fetch, binding.is_signed))
+                               : 99u);
           }
           indices[binding.bindless_descriptor_index] = texture_slot;
           // The audit's ENCODED side: this is the slot the shader will index,
@@ -9724,9 +9773,12 @@ bool MetalCommandProcessor::IssueCopy() {
         // ghosting. Reject the join; the resolve gets its own snapshot and
         // stage-3 RAM assembly handles placement.
         if (parent_snap) {
+          // Snapshot textures are at the draw resolution scale; compare guest
+          // pixels.
           id<MTLTexture> parent_tex = (__bridge id<MTLTexture>)parent_snap;
-          if (rw != uint32_t(parent_tex.width) ||
-              strip_y_offset + rh > uint32_t(parent_tex.height)) {
+          if (rw != uint32_t(parent_tex.width) / draw_resolution_scale_x_ ||
+              strip_y_offset + rh >
+                  uint32_t(parent_tex.height) / draw_resolution_scale_y_) {
             parent_snap = nullptr;
             strip_y_offset = 0;
           }
@@ -9785,6 +9837,75 @@ bool MetalCommandProcessor::IssueCopy() {
               span_pitch,
               uint32_t(resolve_info.color_edram_info.msaa_samples), snap,
               dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale);
+        }
+        // Draw resolution scaling: a column of a destination wider than the
+        // resolve (no offset, dest pitch > width, not a vertical strip) also
+        // renders into the destination's column assembly at its x offset, so
+        // a fetch of the whole destination can be served at scale. The x
+        // offset is the column whose tiled address is this base's delta from
+        // an assembly's x = 0 base. Only formats scaled cover serves.
+        uint32_t assembly_base = 0, assembly_x = 0, assembly_pitch = 0;
+        void* assembly_snap = nullptr;
+        if (resolved && canonical_resolve && canonical_prepared && !parent_snap &&
+            (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1)) {
+          const auto& dca = resolve_info.copy_dest_coordinate_info;
+          uint32_t dest_pitch = uint32_t(dca.pitch_aligned_div_32) << 5;
+          uint32_t bpp_log2 =
+              dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float) ? 3u
+              : (dest_pixel_format == uint64_t(MTLPixelFormatRGBA8Unorm) ||
+                 dest_pixel_format == uint64_t(MTLPixelFormatR32Float))
+                  ? 2u
+                  : 0u;
+          if (bpp_log2 && dest_pitch > rw && !dca.offset_x_div_8 &&
+              !dca.offset_y_div_8) {
+            assembly_base = resolve_info.copy_dest_base;
+            for (const auto& assembly : scaled_assembly_pitches_) {
+              if (assembly.second != dest_pitch ||
+                  resolve_info.copy_dest_base <= assembly.first) {
+                continue;
+              }
+              uint32_t delta = resolve_info.copy_dest_base - assembly.first;
+              for (uint32_t x = 32; x < dest_pitch; x += 32) {
+                if (uint32_t(texture_address::Tiled2D(int32_t(x), 0, dest_pitch,
+                                                      bpp_log2)) == delta) {
+                  assembly_base = assembly.first;
+                  assembly_x = x;
+                  break;
+                }
+              }
+              if (assembly_x) {
+                break;
+              }
+            }
+            if (assembly_x + rw <= dest_pitch) {
+              assembly_snap = render_target_cache_->EnsureAssemblySnapshot(
+                  assembly_base, dest_pitch, rh, dest_pixel_format);
+            }
+            if (assembly_snap) {
+              scaled_assembly_pitches_[assembly_base] = dest_pitch;
+              assembly_pitch = dest_pitch;
+              if (!render_target_cache_->ResolveCanonicalToSnapshot(
+                      frame_command_buffer_, /*is_depth=*/false,
+                      resolve_info.color_edram_info.base_tiles,
+                      resolve_info.color_edram_info.pitch_tiles,
+                      uint32_t(resolve_info.color_edram_info.msaa_samples),
+                      resolve_info.color_edram_info.format,
+                      resolve_info.color_edram_info.format_is_64bpp != 0,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_x_div_8)
+                          << 3,
+                      uint32_t(resolve_info.coordinate_info
+                                   .edram_offset_y_div_8)
+                          << 3,
+                      uint32_t(resolve_info.copy_dest_coordinate_info
+                                   .copy_sample_select),
+                      resolve_info.copy_dest_info.copy_dest_swap != 0,
+                      canonical_raw_copy, assembly_snap, dest_pixel_format, rw,
+                      rh, /*dest_y_offset=*/0, exp_bias_scale, assembly_x)) {
+                assembly_snap = nullptr;
+              }
+            }
+          }
         }
         if (resolved) {
           // Advance provenance for every successful resolve, including a
@@ -10265,6 +10386,25 @@ bool MetalCommandProcessor::IssueCopy() {
                   dc.offset_x_div_8 == 0 && dc.offset_y_div_8 == 0 &&
                       (uint32_t(dc.pitch_aligned_div_32) << 5) == rw,
                   uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
+              if (assembly_snap) {
+                // Draw resolution scaling: this column is in its assembly and
+                // in guest RAM.
+                texture_cache_->RegisterScaledAssembly(
+                    assembly_base, assembly_snap, assembly_pitch, rh,
+                    assembly_x, rw, resolve_info.copy_dest_extent_start,
+                    resolve_info.copy_dest_extent_length,
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
+              }
+              if (parent_snap) {
+                // Draw resolution scaling: this strip's rows are in the parent
+                // snapshot and in guest RAM, so they extend the parent
+                // registration's scaled cover (no-op at 1x).
+                texture_cache_->ExtendResolvedTargetCoverage(
+                    snap, strip_y_offset, rh,
+                    resolve_info.copy_dest_extent_start,
+                    resolve_info.copy_dest_extent_length,
+                    uint32_t(resolve_info.copy_dest_info.copy_dest_endian));
+              }
             }
             if (writeback_encoded && xe_lineage_base() &&
                 resolve_info.copy_dest_base == xe_lineage_base()) {
@@ -10340,8 +10480,9 @@ bool MetalCommandProcessor::IssueCopy() {
       if (parent_snap) {
         id<MTLTexture> parent_tex = (__bridge id<MTLTexture>)parent_snap;
         if (parent_tex.pixelFormat != MTLPixelFormatR32Float ||
-            rw != uint32_t(parent_tex.width) ||
-            strip_y_offset + rh > uint32_t(parent_tex.height)) {
+            rw != uint32_t(parent_tex.width) / draw_resolution_scale_x_ ||
+            strip_y_offset + rh >
+                uint32_t(parent_tex.height) / draw_resolution_scale_y_) {
           parent_snap = nullptr;
           strip_y_offset = 0;
         }
@@ -10722,6 +10863,27 @@ bool MetalCommandProcessor::IssueCopy() {
       std::getenv("XE_METAL_SERIALIZE_RESOLVES") != nullptr;
   if (s_serialize_resolves) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+  }
+  // XE_METAL_RESOLVE_DUMP: after each resolve completes, write its destination
+  // extent's guest bytes to /tmp/xe_rd_<draw>_<base>.bin, so a 1x and a scaled
+  // replay can be compared resolve by resolve.
+  static const bool s_resolve_dump =
+      std::getenv("XE_METAL_RESOLVE_DUMP") != nullptr;
+  if (s_resolve_dump && resolve_info.copy_dest_extent_length) {
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+    std::string path =
+        fmt::format("/tmp/xe_rd_{:06}_{:08X}.bin", trace_draw_index_,
+                    resolve_info.copy_dest_base);
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+      // The shared buffer, not guest RAM: GPU-resident publication leaves
+      // resolved bytes only in the buffer.
+      id<MTLBuffer> shared_buffer =
+          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      fwrite(static_cast<const uint8_t*>([shared_buffer contents]) +
+                 resolve_info.copy_dest_extent_start,
+             1, resolve_info.copy_dest_extent_length, f);
+      fclose(f);
+    }
   }
   return true;
 }

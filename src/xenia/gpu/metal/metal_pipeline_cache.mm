@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_pipeline_cache.h"
+#include "xenia/gpu/metal/metal_draw_resolution_scale.h"
 
 #import <Metal/Metal.h>
 
@@ -73,6 +74,8 @@ bool MetalPipelineCache::Initialize() {
       MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
       /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
       draw_resolution_scale_y_);
+  shader_translator_->SetExactScaledPixelPosition(
+      MetalExactScaledPixelPositionEnabled());
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {

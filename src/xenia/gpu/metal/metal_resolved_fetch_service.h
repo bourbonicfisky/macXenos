@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_RESOLVED_FETCH_SERVICE_H_
 
 #include "xenia/gpu/metal/metal_exact_cover_predicate.h"
+#include "xenia/gpu/metal/metal_scaled_cover_predicate.h"
 
 namespace xe {
 namespace gpu {
@@ -39,6 +40,11 @@ enum class ResolvedFetchService {
   // under slice 5R it is the ONLY service class eligible for the GPU
   // load-shader route.
   kRamContent,
+  // Draw resolution scaling only: a fetch that would otherwise be kRamContent,
+  // served GPU-side from the snapshot because its guest RAM holds exactly the
+  // snapshot's representative pixels (ScaledCoverSnapshotEligible). Never
+  // reads RAM. Never selected at 1x.
+  kScaledCoverSnapshot,
 };
 
 struct ResolvedFetchServiceInputs {
@@ -49,6 +55,8 @@ struct ResolvedFetchServiceInputs {
   // The covered-R32F fast-path condition, computed by the caller exactly as
   // the serve chain computes it (incl. the XE_METAL_TIP_RAM_FETCH override).
   bool covered_r32f = false;
+  // Scaled-cover inputs (scaled_session is false at 1x).
+  ScaledCoverInputs scaled = {};
 };
 
 inline ResolvedFetchService ClassifyResolvedFetch(
@@ -63,6 +71,9 @@ inline ResolvedFetchService ClassifyResolvedFetch(
   if (in.exact.rt_is_depth || in.exact.color_bridge || !in.exact.ram_backed ||
       in.covered_r32f) {
     return ResolvedFetchService::kBridgeSnapshot;
+  }
+  if (ScaledCoverSnapshotEligible(in.scaled)) {
+    return ResolvedFetchService::kScaledCoverSnapshot;
   }
   return ResolvedFetchService::kRamContent;
 }

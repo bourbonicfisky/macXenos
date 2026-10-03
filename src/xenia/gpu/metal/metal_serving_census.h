@@ -42,7 +42,7 @@ struct ServingCensus {
   static std::atomic<uint64_t>& Bucket(ResolvedFetchService service,
                                        bool bridge_served) {
     // [service][bridge_served]
-    static std::atomic<uint64_t> s_buckets[4][2];
+    static std::atomic<uint64_t> s_buckets[5][2];
     return s_buckets[uint32_t(service)][bridge_served ? 1 : 0];
   }
 
@@ -57,7 +57,8 @@ struct ServingCensus {
   // A fetch the serve chain serves GPU-side (never reads RAM).
   static bool IsGpuServed(ResolvedFetchService service) {
     return service == ResolvedFetchService::kBridgeSnapshot ||
-           service == ResolvedFetchService::kExactCoverSnapshot;
+           service == ResolvedFetchService::kExactCoverSnapshot ||
+           service == ResolvedFetchService::kScaledCoverSnapshot;
   }
 
   // Fetches served GPU-side whose declaration still registered a resolve

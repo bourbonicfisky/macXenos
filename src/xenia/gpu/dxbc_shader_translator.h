@@ -56,6 +56,23 @@ class DxbcShaderTranslator : public ShaderTranslator {
                        bool force_emit_source_map = false);
   ~DxbcShaderTranslator() override;
 
+  // Exact representative pixel at a draw resolution scale (the Metal backend):
+  // the host shifts geometry by half a host pixel on even-scale axes so that
+  // the representative host pixel of each guest pixel (scale >> 1) samples
+  // exactly the guest pixel's own sample point, and the pixel position given
+  // to the guest shader (PsParamGen) is made consistent with that: the
+  // representative host pixel sees the guest pixel's integer position, other
+  // host pixels see the fractional position of their own sample point.
+  // Default off - upstream behavior (position truncated then divided).
+  void SetExactScaledPixelPosition(bool exact) {
+    exact_scaled_pixel_position_ = exact;
+  }
+  // Half a host pixel on even-scale axes, zero on odd ones (where the
+  // representative pixel's center already is the guest pixel's center).
+  static float ScaledPixelShiftHostPixels(uint32_t draw_resolution_scale) {
+    return (draw_resolution_scale & 1) ? 0.0f : 0.5f;
+  }
+
   // Stage linkage ordering and rules (must be respected not only within the
   // DxbcShaderTranslator, but also by everything else between the VS and the
   // PS, such as geometry shaders for primitive types, and built-in pixel
@@ -1097,6 +1114,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Guest pixel host width / height.
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  bool exact_scaled_pixel_position_ = false;
 
   // Is currently writing the empty depth-only pixel shader, for
   // CompleteTranslation.

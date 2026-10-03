@@ -85,23 +85,27 @@ class ScaleCoverageCensus {
     std::lock_guard<std::mutex> lock(mutex_);
     auto line = [](const char* label, const Totals& t) {
       uint64_t count = 0, area = 0, snapshot_count = 0, snapshot_area = 0;
-      for (uint32_t i = 0; i < 4; ++i) {
+      for (uint32_t i = 0; i < 5; ++i) {
         count += t.count[i];
         area += t.area[i];
       }
-      for (ResolvedFetchService s : {ResolvedFetchService::kBridgeSnapshot,
-                                     ResolvedFetchService::kExactCoverSnapshot}) {
+      for (ResolvedFetchService s :
+           {ResolvedFetchService::kBridgeSnapshot,
+            ResolvedFetchService::kExactCoverSnapshot,
+            ResolvedFetchService::kScaledCoverSnapshot}) {
         snapshot_count += t.count[uint32_t(s)];
         snapshot_area += t.area[uint32_t(s)];
       }
       return fmt::format(
           "{}: fetches={} snapshot={} ({:.1f}%) area_snapshot={:.1f}% "
-          "[bridge={} exact_cover={} ram_content={} not_resolve_backed={}]",
+          "[bridge={} exact_cover={} scaled_cover={} ram_content={} "
+          "not_resolve_backed={}]",
           label, count, snapshot_count,
           count ? 100.0 * double(snapshot_count) / double(count) : 0.0,
           area ? 100.0 * double(snapshot_area) / double(area) : 0.0,
           t.count[uint32_t(ResolvedFetchService::kBridgeSnapshot)],
           t.count[uint32_t(ResolvedFetchService::kExactCoverSnapshot)],
+          t.count[uint32_t(ResolvedFetchService::kScaledCoverSnapshot)],
           t.count[uint32_t(ResolvedFetchService::kRamContent)],
           t.count[uint32_t(ResolvedFetchService::kNotResolveBacked)]);
     };
@@ -115,11 +119,12 @@ class ScaleCoverageCensus {
       };
       XELOGI(
           "MetalScaleCensus base={:08X} in_resolve_range={:08X} exact_base={} "
-          "max={}x{} count/area: bridge={} exact_cover={} ram_content={} "
-          "not_resolve_backed={}",
+          "max={}x{} count/area: bridge={} exact_cover={} scaled_cover={} "
+          "ram_content={} not_resolve_backed={}",
           kv.first, p.range_start, kv.first == p.range_start ? 1 : 0, p.width,
           p.height, cls(ResolvedFetchService::kBridgeSnapshot),
           cls(ResolvedFetchService::kExactCoverSnapshot),
+          cls(ResolvedFetchService::kScaledCoverSnapshot),
           cls(ResolvedFetchService::kRamContent),
           cls(ResolvedFetchService::kNotResolveBacked));
     }
@@ -131,15 +136,15 @@ class ScaleCoverageCensus {
 
  private:
   struct Totals {
-    uint64_t count[4] = {};
-    uint64_t area[4] = {};
+    uint64_t count[5] = {};
+    uint64_t area[5] = {};
   };
   struct PerBase {
     uint32_t range_start = 0;
     uint32_t width = 0;
     uint32_t height = 0;
-    uint64_t count[4] = {};
-    uint64_t area[4] = {};
+    uint64_t count[5] = {};
+    uint64_t area[5] = {};
   };
 
   // The containing range with the closest start. Ranges may overlap, so all

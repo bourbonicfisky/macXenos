@@ -11,6 +11,8 @@
 // (metal_draw_resolution_scale.h): per-axis clamping to 1..3, and a session
 // that renders at 1x1 until scaled rendering is enabled.
 
+#include <algorithm>
+
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/gpu/metal/metal_draw_resolution_scale.h"
 
@@ -18,6 +20,8 @@ namespace xe {
 namespace gpu {
 namespace test {
 
+using metal::kMetalMaxDrawResolutionScale;
+using metal::MetalScaledPixelShiftHostPixels;
 using metal::ResolveMetalDrawResolutionScale;
 
 TEST_CASE("Draw resolution scale: in-range values pass through",
@@ -52,6 +56,30 @@ TEST_CASE("Draw resolution scale: renders at 1x until scaling is enabled",
   CHECK(scale.requested_y == 2);
   CHECK(scale.x == 1);
   CHECK(scale.y == 1);
+}
+
+// D4a: with the shift, the representative host pixel (scale >> 1) of guest
+// pixel g samples exactly g's 1x sample point, and the pixel position the
+// translator gives it is exactly g.
+TEST_CASE("Draw resolution scale: the representative pixel is 1x-exact",
+          "[metal][draw_resolution_scale]") {
+  CHECK(MetalScaledPixelShiftHostPixels(1) == 0.0f);
+  CHECK(MetalScaledPixelShiftHostPixels(2) == 0.5f);
+  CHECK(MetalScaledPixelShiftHostPixels(3) == 0.0f);
+  for (uint32_t scale = 1; scale <= kMetalMaxDrawResolutionScale; ++scale) {
+    float shift = MetalScaledPixelShiftHostPixels(scale);
+    for (uint32_t g = 0; g < 4; ++g) {
+      uint32_t host = g * scale + (scale >> 1);
+      // The scene point the host pixel center samples, in guest pixels (the
+      // 1x sample point of pixel g is g + 0.5).
+      float sampled = (float(host) + 0.5f - shift) / float(scale);
+      CHECK(sampled == float(g) + 0.5f);
+      // The translator's pixel position.
+      float position = std::max(
+          (float(host) + 0.5f - shift) / float(scale) - 0.5f, 0.0f);
+      CHECK(position == float(g));
+    }
+  }
 }
 
 }  // namespace test

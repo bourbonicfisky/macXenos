@@ -772,7 +772,31 @@ void DxbcShaderTranslator::StartPixelShader() {
     uint32_t resolution_scaled_axes =
         uint32_t(draw_resolution_scale_x_ > 1) |
         (uint32_t(draw_resolution_scale_y_ > 1) << 1);
-    if (resolution_scaled_axes) {
+    if (resolution_scaled_axes && exact_scaled_pixel_position_) {
+      // The guest position of this host pixel's sample point minus the guest
+      // pixel center: (floor(host) + 0.5 - shift) / scale - 0.5, which is the
+      // guest pixel's integer position for the representative host pixel
+      // (scale >> 1) and fractional for the others, so tfetch still samples
+      // at host resolution. Clamped at 0 since the sign bit carries faceness
+      // (only host pixels left of / above guest pixel 0's sample point go
+      // negative).
+      float scale_x = float(draw_resolution_scale_x_);
+      float scale_y = float(draw_resolution_scale_y_);
+      a_.OpMAd(
+          dxbc::Dest::R(param_gen_temp, resolution_scaled_axes),
+          dxbc::Src::R(param_gen_temp),
+          dxbc::Src::LF(1.0f / scale_x, 1.0f / scale_y, 1.0f, 1.0f),
+          dxbc::Src::LF(
+              (0.5f - ScaledPixelShiftHostPixels(draw_resolution_scale_x_)) /
+                      scale_x -
+                  0.5f,
+              (0.5f - ScaledPixelShiftHostPixels(draw_resolution_scale_y_)) /
+                      scale_y -
+                  0.5f,
+              0.0f, 0.0f));
+      a_.OpMax(dxbc::Dest::R(param_gen_temp, resolution_scaled_axes),
+               dxbc::Src::R(param_gen_temp), dxbc::Src::LF(0.0f));
+    } else if (resolution_scaled_axes) {
       // Revert resolution scale - after truncating, so if the pixel position
       // is passed to tfetch (assuming the game doesn't round it by itself),
       // it will be sampled with higher resolution too.

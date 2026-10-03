@@ -865,6 +865,28 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   //           for simplicity).
   // 3D: X - width, Y - height, Z - depth, W - 0 if stacked 2D, 1 if 3D.
   uint32_t size_needed_components = 0b0000;
+  // With the exact scaled pixel position, geometry is shifted on even-scale
+  // axes, so a host pixel's normalized coordinates are that shift short of the
+  // center of the host texel it corresponds to in a resolution-scaled texture
+  // (a scaled resolve, rendered under the same shift) - add it back so scaled
+  // textures are sampled texel-exact instead of half a host texel blurred.
+  float scaled_coord_shift[2] = {};
+  uint32_t scaled_coord_shift_axes = 0;
+  if (exact_scaled_pixel_position_ &&
+      instr.opcode == FetchOpcode::kTextureFetch &&
+      instr.dimension == xenos::FetchOpDimension::k2D) {
+    scaled_coord_shift[0] =
+        ScaledPixelShiftHostPixels(draw_resolution_scale_x_) /
+        float(draw_resolution_scale_x_);
+    scaled_coord_shift[1] =
+        ScaledPixelShiftHostPixels(draw_resolution_scale_y_) /
+        float(draw_resolution_scale_y_);
+    scaled_coord_shift_axes = uint32_t(draw_resolution_scale_x_ > 1 &&
+                                       scaled_coord_shift[0] != 0.0f) |
+                              (uint32_t(draw_resolution_scale_y_ > 1 &&
+                                        scaled_coord_shift[1] != 0.0f)
+                               << 1);
+  }
   if (instr.opcode == FetchOpcode::kGetTextureWeights) {
     // Size needed for denormalization for coordinate lerp factor.
     // FIXME(Triang3l): Currently disregarding the LOD completely in getWeights.
@@ -889,7 +911,7 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   } else {
     // Size needed for normalization (or, for stacked texture layers,
     // denormalization) and for offsets.
-    size_needed_components |= offsets_not_zero;
+    size_needed_components |= offsets_not_zero | scaled_coord_shift_axes;
     switch (instr.dimension) {
       case xenos::FetchOpDimension::k1D:
         if (instr.attributes.unnormalized_coordinates) {
@@ -1242,6 +1264,29 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                  dxbc::Src::LF(0.0f));
         break;
       case xenos::FetchOpDimension::k2D:
+        if (scaled_coord_shift_axes) {
+          // Using coord_and_sampler_temp.zw as temporaries - padding and the
+          // sampler are written after this.
+          a_.OpAnd(dxbc::Dest::R(coord_and_sampler_temp, 0b1000),
+                   LoadSystemConstant(
+                       SystemConstants::Index::kTexturesResolutionScaled,
+                       offsetof(SystemConstants, textures_resolution_scaled),
+                       dxbc::Src::kXXXX),
+                   dxbc::Src::LU(uint32_t(1) << tfetch_index));
+          a_.OpIf(true, dxbc::Src::R(coord_and_sampler_temp, dxbc::Src::kWWWW));
+          for (uint32_t i = 0; i < 2; ++i) {
+            if (!(scaled_coord_shift_axes & (1 << i))) {
+              continue;
+            }
+            a_.OpDiv(dxbc::Dest::R(coord_and_sampler_temp, 0b0100),
+                     dxbc::Src::LF(scaled_coord_shift[i]),
+                     dxbc::Src::R(size_and_is_3d_temp).Select(i));
+            a_.OpAdd(dxbc::Dest::R(coord_and_sampler_temp, 1 << i),
+                     dxbc::Src::R(coord_and_sampler_temp).Select(i),
+                     dxbc::Src::R(coord_and_sampler_temp, dxbc::Src::kZZZZ));
+          }
+          a_.OpEndIf();
+        }
         // Pad to 2D array coordinates.
         a_.OpMov(dxbc::Dest::R(coord_and_sampler_temp, 0b0100),
                  dxbc::Src::LF(0.0f));

@@ -91,6 +91,31 @@ class MetalTextureCache {
   void MarkResolvedTargetRamBacked(uint32_t base, uint32_t wb_width,
                                    uint32_t wb_height, bool full_rect_geometry,
                                    uint32_t wb_endian);
+  // Draw resolution scaling: the session scale (snapshot textures are the
+  // guest size times it), enabling scaled-cover serving above 1x.
+  void SetDrawResolutionScale(uint32_t scale_x, uint32_t scale_y) {
+    draw_resolution_scale_x_ = scale_x;
+    draw_resolution_scale_y_ = scale_y;
+  }
+  // Draw resolution scaling: a resolve strip that rendered into the snapshot
+  // `texture` at guest rows [strip_y, strip_y + rows) and wrote guest bytes
+  // [extent_start, + extent_length) with writeback endian wb_endian. Extends
+  // the registration's scaled-cover rows when the strip is contiguous with
+  // them and was written like the base resolve. No-op at 1x.
+  void ExtendResolvedTargetCoverage(void* texture, uint32_t strip_y,
+                                    uint32_t rows, uint32_t extent_start,
+                                    uint32_t extent_length,
+                                    uint32_t wb_endian);
+  // Draw resolution scaling: a column resolve rendered into the assembly
+  // snapshot `texture` (the destination's full pitch x height, at guest x
+  // offset x, width w, full height) and wrote guest bytes [extent_start,
+  // + extent_length) with endian wb_endian, after its writeback was encoded.
+  // The assembly at base0 serves scaled cover once its columns contiguously
+  // cover its width from x = 0. No-op at 1x.
+  void RegisterScaledAssembly(uint32_t base0, void* texture, uint32_t width,
+                              uint32_t height, uint32_t x, uint32_t w,
+                              uint32_t extent_start, uint32_t extent_length,
+                              uint32_t wb_endian);
   // XE_METAL_TIP_SNAP_VIEW: attach the derived 1x1 texel-(0,0) copy to the
   // registered resolve target at base (allocates/repoints its bindless slot).
   void RegisterResolvedTipView(uint32_t base, void* texture);
@@ -375,6 +400,12 @@ class MetalTextureCache {
   std::unordered_map<uint64_t, Entry> cache_;
   std::vector<void*> active_textures_;
 
+  uint32_t draw_resolution_scale_x_ = 1;
+  uint32_t draw_resolution_scale_y_ = 1;
+  bool IsDrawResolutionScaled() const {
+    return draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1;
+  }
+
   struct ResolvedTarget {
     void* texture;  // id<MTLTexture>, owned by the render-target cache.
     uint32_t width;
@@ -434,6 +465,13 @@ class MetalTextureCache {
     // column writes) clear this and keep the exact-address RAM path.
     bool full_rect = false;
     uint32_t wb_endian = 0;
+    // Draw resolution scaling only (scaled-cover serving): guest rows from the
+    // top of the snapshot written by resolves (the base resolve and joined
+    // strips) since the texture was created, and the union of their guest
+    // extents, which retires the registration on any overlapping writer.
+    uint32_t scaled_rows_written = 0;
+    uint32_t scaled_extent_start = 0;
+    uint32_t scaled_extent_length = 0;
     // Per-swizzle sampled views for the exact-cover fast path. Serving the raw
     // snapshot slot (rt.slot) bypasses the fetch swizzle the ordinary RAM
     // upload bakes into a texture view, so a nonidentity guest swizzle would
@@ -456,6 +494,24 @@ class MetalTextureCache {
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+  // Draw resolution scaling: column assemblies (see RegisterScaledAssembly),
+  // keyed by the destination's x = 0 base. The texture is owned by the
+  // render-target cache; the slot and swizzle views are ours.
+  struct ScaledAssembly {
+    void* texture = nullptr;
+    uint32_t slot = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    // Contiguous guest columns from x = 0 written by column resolves since the
+    // texture was created.
+    uint32_t covered_width = 0;
+    uint32_t extent_start = 0;
+    uint32_t extent_length = 0;
+    uint32_t wb_endian = 0;
+    std::unordered_map<uint32_t, ResolvedTarget::SwizzleView> swizzle_views;
+  };
+  std::unordered_map<uint32_t, ScaledAssembly> scaled_assemblies_;
+  void RetireScaledAssembly(ScaledAssembly& assembly);
 
   // Retires descriptors and cache-owned views without releasing the snapshot
   // or tip texture objects, whose ownership remains outside this cache.

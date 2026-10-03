@@ -4179,7 +4179,8 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     uint32_t sample_select, bool dest_swap, bool raw_copy,
     void* dest_snapshot,
     uint64_t dest_pixel_format, uint32_t width, uint32_t height,
-    uint32_t dest_y_offset, float exp_bias_scale) {
+    uint32_t dest_y_offset, float exp_bias_scale,
+    uint32_t dest_x_offset) {
   xenos::ColorRenderTargetFormat storage_format =
       is_depth
           ? xenos::ColorRenderTargetFormat::k_8_8_8_8
@@ -4233,10 +4234,11 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   const uint32_t sx = draw_resolution_scale_x(), sy = draw_resolution_scale_y();
   const uint32_t guest_dest_width = uint32_t(destination.width) / sx;
   const uint32_t guest_dest_height = uint32_t(destination.height) / sy;
-  if (dest_y_offset >= guest_dest_height) {
+  if (dest_y_offset >= guest_dest_height || dest_x_offset >= guest_dest_width) {
     return false;
   }
-  uint32_t clipped_width = std::min<uint32_t>(width, guest_dest_width);
+  uint32_t clipped_width =
+      std::min<uint32_t>(width, guest_dest_width - dest_x_offset);
   uint32_t clipped_height =
       std::min<uint32_t>(height, guest_dest_height - dest_y_offset);
   if (!clipped_width || !clipped_height) {
@@ -4259,11 +4261,17 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     float exp_bias_scale;
     uint32_t width, height;
     uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
-  } params{surface, source_x, source_y, dest_y_offset, sample_select,
+  } params{surface,
+           // A destination x offset (an assembled column) shifts the shader's
+           // destination->source mapping and bound; the scissor excludes the
+           // columns left of it. The subtraction wraps; the shader's
+           // source_x + dest.x wraps back.
+           source_x - dest_x_offset, source_y, dest_y_offset, sample_select,
            uint32_t(storage_format), uint32_t(dest_swap),
            uint32_t(!is_depth && raw_copy &&
                     dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
-           exp_bias_scale, clipped_width, clipped_height, 0u, 0u, 0u, 0u};
+           exp_bias_scale, dest_x_offset + clipped_width, clipped_height, 0u,
+           0u, 0u, 0u};
   static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
   static const bool s_canonical_resolve_log =
       std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
@@ -4286,7 +4294,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
                            : @"rtcache:canonical-color-resolve";
   [encoder setRenderPipelineState:
                (__bridge id<MTLRenderPipelineState>)found->second];
-  [encoder setScissorRect:MTLScissorRect{0, dest_y_offset * sy,
+  [encoder setScissorRect:MTLScissorRect{dest_x_offset * sx, dest_y_offset * sy,
                                          clipped_width * sx,
                                          clipped_height * sy}];
   [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)canonical_edram_
@@ -4825,13 +4833,34 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   if (width >= 1280 && height < 720) {
     height = 720;
   }
+  return EnsureSnapshotTexture(
+      (uint64_t(dest_base) << 1) |
+          (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0),
+      width, height, pixel_format);
+}
+
+void* MetalRenderTargetCache::EnsureAssemblySnapshot(uint32_t base,
+                                                     uint32_t width,
+                                                     uint32_t height,
+                                                     uint64_t pixel_format) {
+  if (pixel_format == uint64_t(MTLPixelFormatInvalid)) {
+    return nullptr;
+  }
+  return EnsureSnapshotTexture(
+      kAssemblySnapshotKeyFlag | (uint64_t(base) << 1) |
+          (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0),
+      width, height, pixel_format);
+}
+
+void* MetalRenderTargetCache::EnsureSnapshotTexture(uint64_t snap_key,
+                                                    uint32_t width,
+                                                    uint32_t height,
+                                                    uint64_t pixel_format) {
   // Key by (base, format): JC2 resolves color (BGRA8) and depth (R32F) to
   // the same guest base — a single-slot map destroyed/recreated the snapshot
   // EVERY resolve, and each new texture burned a bindless view slot until
   // the heap ran dry a few minutes into gameplay (black samples, then a
   // frozen present).
-  uint64_t snap_key = (uint64_t(dest_base) << 1) |
-                      (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0);
   auto it = resolve_snapshots_.find(snap_key);
   // EXACT-size reuse (2026-09-17, DOA5). The snapshot is served to fetches
   // that sample it with NORMALIZED coordinates, so its texture dimensions
@@ -5096,6 +5125,10 @@ void* MetalRenderTargetCache::FindContainingSnapshot(
     uint32_t dest_base, uint32_t* y_offset_out) const {
   for (const auto& pair : resolve_snapshots_) {
     const Snapshot& snap = pair.second;
+    if (pair.first & kAssemblySnapshotKeyFlag) {
+      // Column assemblies are not vertical-strip parents.
+      continue;
+    }
     uint32_t snap_base = uint32_t(pair.first >> 1);
     if (!snap.texture || dest_base <= snap_base) {
       continue;

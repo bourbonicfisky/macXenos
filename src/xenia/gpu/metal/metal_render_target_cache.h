@@ -175,7 +175,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       uint32_t sample_select, bool dest_swap, bool raw_copy,
       void* dest_snapshot,
       uint64_t dest_pixel_format, uint32_t width, uint32_t height,
-      uint32_t dest_y_offset, float exp_bias_scale);
+      uint32_t dest_y_offset, float exp_bias_scale,
+      uint32_t dest_x_offset = 0);
   struct CanonicalScatterDest;
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
@@ -232,6 +233,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // it with direct guest-memory resolves) ---
   void* EnsureResolveSnapshot(uint32_t dest_base, uint32_t width,
                               uint32_t height, uint64_t pixel_format);
+  // Draw resolution scaling: the snapshot assembling the columns of a
+  // destination wider than its resolves (SF4 resolves a 1280-pitch scene as
+  // 544-wide columns at adjusted bases), keyed apart from the per-resolve
+  // snapshots. `base` is the destination's x = 0 base; width is its pitch.
+  void* EnsureAssemblySnapshot(uint32_t base, uint32_t width, uint32_t height,
+                               uint64_t pixel_format);
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
 
@@ -799,8 +806,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint64_t pixel_format;
   };
   // Keyed by (dest_base << 1) | is_r32f — color and depth snapshots at the
-  // same guest base coexist (JC2 resolves both to one base).
+  // same guest base coexist (JC2 resolves both to one base). Assembly
+  // snapshots (draw resolution scaling) also carry kAssemblySnapshotKeyFlag.
   std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
+  static constexpr uint64_t kAssemblySnapshotKeyFlag = uint64_t(1) << 40;
+  // The snapshot texture at `snap_key`, created or replaced (exact-size reuse,
+  // in-flight-safe retirement) at the draw resolution scale.
+  void* EnsureSnapshotTexture(uint64_t snap_key, uint32_t width,
+                              uint32_t height, uint64_t pixel_format);
 
   // Same-frame c2d->d2c ping-pong detection (Sonic's DoF bit-transport: a
   // color key lends tiles to a depth key, one depth pass writes a packed
