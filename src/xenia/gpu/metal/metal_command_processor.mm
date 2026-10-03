@@ -6587,16 +6587,52 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       used |= metal::kMetalPassAttachmentDepth;
     }
     used &= pass_present;
+    // Attribution aid: XE_METAL_PASS_STENCIL_KEEP=<mode> re-adds the stencil
+    // plane for a class of depth-using draws (1: draws using a colour target,
+    // 2: draws using none, 3: depth-writing draws, 4: depth-read-only draws).
+    static const int s_stencil_keep = [] {
+      const char* v = std::getenv("XE_METAL_PASS_STENCIL_KEEP");
+      return v ? atoi(v) : 0;
+    }();
+    if (s_stencil_keep && (used & metal::kMetalPassAttachmentDepth)) {
+      bool colour = (used & ~metal::kMetalPassAttachmentDepthStencil) != 0;
+      bool zwrite = (use.writes & metal::kMetalPassAttachmentDepth) != 0;
+      if ((s_stencil_keep == 1 && colour) || (s_stencil_keep == 2 && !colour) ||
+          (s_stencil_keep == 3 && zwrite) || (s_stencil_keep == 4 && !zwrite)) {
+        used |= metal::kMetalPassAttachmentStencil & pass_present;
+      }
+    }
     if (used) {
+      // Learned set for this key (see pass_learned_use_): the pass binds what
+      // any draw under the key has ever used, so a steady-state frame has no
+      // "attachment needed" splits. XE_METAL_PASS_ATTACHMENTS_HYSTERESIS=1
+      // binds the running union instead (the design's original D2, split per
+      // transition; attribution only).
+      static const bool s_hysteresis_only = [] {
+        const char* v = std::getenv("XE_METAL_PASS_ATTACHMENTS_HYSTERESIS");
+        return v && v[0] == '1' && v[1] == '\0';
+      }();
+      const uint64_t key = PassAttachmentKey(dummy_depth, false);
+      if (!s_hysteresis_only) {
+        uint32_t& learned = pass_learned_use_[key];
+        learned |= used;
+        used = learned & pass_present;
+      }
       // A draw that touches nothing present keeps the legacy set (a pass needs
       // an attachment; the census counts how often this happens).
       metal::MetalPassBindingDecision decision = metal::DecideMetalPassBinding(
-          pass_present, used,
-          frame_open_ &&
-              encoder_attachment_key_ == PassAttachmentKey(dummy_depth, false),
+          pass_present, used, frame_open_ && encoder_attachment_key_ == key,
           encoder_bound_attachments_);
       pass_bound = decision.bound;
     }
+    // Attribution aid: XE_METAL_PASS_ATTACHMENTS_DROPPABLE=<hex set> limits
+    // which attachments by-use binding may leave unbound (bits: 1 depth,
+    // 2 stencil, 4.. colour 0..3); the rest stay bound as under legacy.
+    static const uint32_t s_droppable = [] {
+      const char* v = std::getenv("XE_METAL_PASS_ATTACHMENTS_DROPPABLE");
+      return v ? uint32_t(strtoul(v, nullptr, 16)) : metal::kMetalPassAttachmentAll;
+    }();
+    pass_bound |= pass_present & ~s_droppable;
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
       if (!(pass_bound & metal::MetalPassColorAttachmentBit(i))) {
         color_pixel_formats[i] = uint64_t(MTLPixelFormatInvalid);
@@ -7484,6 +7520,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
   pending_pass_bound_ = pass_bound;
+  // Attribution aid: XE_METAL_PASS_SPLIT_EVERY=<n> ends the open pass every n
+  // draws (legacy binding), to measure what a pass boundary alone does to
+  // attachment contents on this GPU.
+  static const uint32_t s_split_every = [] {
+    const char* v = std::getenv("XE_METAL_PASS_SPLIT_EVERY");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_split_every && frame_open_ && (draw_count_ % s_split_every) == 0) {
+    EndRenderEncoder(metal::MetalPassEndReason::kAttachmentKey);
+  }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {

@@ -489,6 +489,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // from the draw's use and the open pass; BeginFrameEncoder applies it when
   // by-use binding is enabled).
   uint32_t pending_pass_bound_ = metal::kMetalPassAttachmentAll;
+  // Learned attachment use per pass key (D2): the OR of every draw's use ever
+  // seen under that key. A pass binds the learned set, so after a key's first
+  // occurrence the pass structure equals the bind-everything policy's (no
+  // "attachment needed" splits, which this GPU does not render invisibly:
+  // a pass boundary between blended draws moves colour LSBs) while planes the
+  // key never touches stay unbound. Bounded by the number of attachment
+  // configurations a title uses.
+  std::unordered_map<uint64_t, uint32_t> pass_learned_use_;
   // Draw-pass census (XE_METAL_PASS_CENSUS=1): fed at every pass begin, draw
   // and pass end; reported on the frame-stats tick and at lifecycle sites.
   metal::MetalPassCensus pass_census_;

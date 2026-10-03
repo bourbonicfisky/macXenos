@@ -87,6 +87,7 @@ if(APPLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_transfer_tail_verification_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_scaled_edram_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_gamma_blend_device_test.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_depth_plane_binding_device_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_gamma_ramp_apply_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_present_convert_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_present_swizzle_test.mm
