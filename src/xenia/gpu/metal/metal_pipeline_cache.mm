@@ -819,11 +819,15 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     ApplyRtBlendState(desc.colorAttachments[i], blend_controls[i],
                       (color_write_mask >> (i * 4u)) & 0xFu);
   }
-  if (depth_pixel_format != MTLPixelFormatInvalid) {
-    desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
-    if ((MTLPixelFormat)depth_pixel_format ==
-        MTLPixelFormatDepth32Float_Stencil8) {
-      desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+  {
+    const MTLPixelFormat depth_format =
+        (MTLPixelFormat)(depth_pixel_format & ~kDepthWithoutStencilBit);
+    if (depth_format != MTLPixelFormatInvalid) {
+      desc.depthAttachmentPixelFormat = depth_format;
+      if (depth_format == MTLPixelFormatDepth32Float_Stencil8 &&
+          !(depth_pixel_format & kDepthWithoutStencilBit)) {
+        desc.stencilAttachmentPixelFormat = depth_format;
+      }
     }
   }
 
@@ -1210,11 +1214,15 @@ void* MetalPipelineCache::GetOrCreateGeometryPipelineState(
     ApplyRtBlendState(desc.colorAttachments[i], blend_controls[i],
                       (color_write_mask >> (i * 4u)) & 0xFu);
   }
-  if (depth_pixel_format != MTLPixelFormatInvalid) {
-    desc.depthAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
-    if ((MTLPixelFormat)depth_pixel_format ==
-        MTLPixelFormatDepth32Float_Stencil8) {
-      desc.stencilAttachmentPixelFormat = (MTLPixelFormat)depth_pixel_format;
+  {
+    const MTLPixelFormat depth_format =
+        (MTLPixelFormat)(depth_pixel_format & ~kDepthWithoutStencilBit);
+    if (depth_format != MTLPixelFormatInvalid) {
+      desc.depthAttachmentPixelFormat = depth_format;
+      if (depth_format == MTLPixelFormatDepth32Float_Stencil8 &&
+          !(depth_pixel_format & kDepthWithoutStencilBit)) {
+        desc.stencilAttachmentPixelFormat = depth_format;
+      }
     }
   }
   desc.rasterSampleCount = raster_key.raster_sample_count;

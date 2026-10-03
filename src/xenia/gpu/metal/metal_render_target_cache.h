@@ -104,6 +104,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // canonical per-sample EDRAM before the render pass opens. Returns false if
   // a required scheduled conversion couldn't be encoded.
   bool PrepareCurrentRasterViews();
+  // Pass census: does any tile of the resolve span [edram_base, rows x
+  // row_length_used at pitch_tiles) belong to a render target in the
+  // accumulated (currently bound) attachment set? Ownership-truth query, no
+  // side effects.
+  bool ResolveSpanTouchesCurrentAttachments(uint32_t edram_base,
+                                            uint32_t row_length_used,
+                                            uint32_t rows,
+                                            uint32_t pitch_tiles) const;
   // Host depth a canonical depth->depth transfer leaves in the destination
   // view when the source view held `host_depth` (pack with the truncating
   // 24-bit encode, materialize decode, Stage B lane reconcile for float24).

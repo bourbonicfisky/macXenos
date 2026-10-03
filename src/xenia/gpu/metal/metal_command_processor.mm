@@ -118,6 +118,16 @@ DEFINE_bool(
 UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
+    metal_pass_attachments_by_use, false,
+    "Bind a Metal draw pass's colour, depth and stencil attachments only when "
+    "a draw in the pass can read or write them, so the Apple GPU skips the "
+    "tile load and store of untouched attachments (HUD and post-process "
+    "passes leave depth and stencil alone). Attachment contents are "
+    "unchanged. XE_METAL_PASS_ATTACHMENTS=0/1 overrides this setting; "
+    "XE_METAL_PASS_ATTACHMENTS_LEGACY=1 forces the bind-everything policy.",
+    "GPU");
+
+DEFINE_bool(
     metal_msaa_clear_fold, true,
     "Draw the Xbox 360's 2x/4x MSAA fast clears straight into the matching "
     "1x view of the same EDRAM instead of copying the whole surface out and "
@@ -248,6 +258,54 @@ bool ScaleCoverageCensusEnabled() {
     return value && value[0] == '1' && value[1] == '\0';
   }();
   return s_enabled;
+}
+
+// Bytes per pixel (per sample) an attachment of this MTLPixelFormat loads or
+// stores on a tile boundary. Combined depth/stencil counts its depth plane
+// here; the stencil plane is 1 byte and accounted separately (Apple GPUs store
+// the two planes apart, and Metal binds them apart).
+uint32_t AttachmentBytesPerPixel(MTLPixelFormat format) {
+  switch (format) {
+    case MTLPixelFormatA8Unorm:
+    case MTLPixelFormatR8Unorm:
+    case MTLPixelFormatR8Snorm:
+    case MTLPixelFormatR8Uint:
+    case MTLPixelFormatR8Sint:
+    case MTLPixelFormatStencil8:
+      return 1;
+    case MTLPixelFormatR16Unorm:
+    case MTLPixelFormatR16Snorm:
+    case MTLPixelFormatR16Uint:
+    case MTLPixelFormatR16Sint:
+    case MTLPixelFormatR16Float:
+    case MTLPixelFormatRG8Unorm:
+    case MTLPixelFormatRG8Snorm:
+    case MTLPixelFormatRG8Uint:
+    case MTLPixelFormatRG8Sint:
+    case MTLPixelFormatB5G6R5Unorm:
+    case MTLPixelFormatA1BGR5Unorm:
+    case MTLPixelFormatABGR4Unorm:
+    case MTLPixelFormatBGR5A1Unorm:
+    case MTLPixelFormatDepth16Unorm:
+      return 2;
+    case MTLPixelFormatRGBA16Unorm:
+    case MTLPixelFormatRGBA16Snorm:
+    case MTLPixelFormatRGBA16Uint:
+    case MTLPixelFormatRGBA16Sint:
+    case MTLPixelFormatRGBA16Float:
+    case MTLPixelFormatRG32Uint:
+    case MTLPixelFormatRG32Sint:
+    case MTLPixelFormatRG32Float:
+      return 8;
+    case MTLPixelFormatRGBA32Uint:
+    case MTLPixelFormatRGBA32Sint:
+    case MTLPixelFormatRGBA32Float:
+      return 16;
+    default:
+      // RGBA8/BGRA8 (+sRGB), RG16*, R32*, RGB10A2, RG11B10, RGB9E5,
+      // Depth32Float, Depth32Float_Stencil8 (depth plane).
+      return 4;
+  }
 }
 
 inline bool RouteServiceOk(ResolvedFetchService service,
@@ -1366,7 +1424,8 @@ uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
   if (!source) {
     return 0;
   }
-  void* cb_ptr = PrepareTransferCommandBuffer();
+  void* cb_ptr = PrepareTransferCommandBuffer(
+      uint32_t(metal::MetalTransferSite::kHazardUpload));
   if (!cb_ptr) {
     return 0;
   }
@@ -1397,10 +1456,10 @@ uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
   return CurrentEncodingSubmission();
 }
 
-void* MetalCommandProcessor::PrepareTransferCommandBuffer() {
+void* MetalCommandProcessor::PrepareTransferCommandBuffer(uint32_t site) {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.
-  EndRenderEncoder();
+  EndRenderEncoder(metal::MetalPassEndReason::kTransfer, site);
   if (!frame_command_buffer_) {
     auto* provider =
         static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -1941,7 +2000,10 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       *register_file_, *shared_memory_, device_ptr, texture_cache_.get(),
       draw_resolution_scale_x_, draw_resolution_scale_y_);
   shared_texture_cache_->SetPrepareTransferCallback(
-      [this]() { return PrepareTransferCommandBuffer(); });
+      [this]() {
+        return PrepareTransferCommandBuffer(
+            uint32_t(metal::MetalTransferSite::kTextureUpload));
+      });
   // NOT gated on S7TagsOff: these ids drive the subclass's BeginSubmission
   // advance, LRU gating, and M4 faulted-submission matching — equality
   // bookkeeping that needs real monotonic ids in both sync and async
@@ -2276,6 +2338,42 @@ void MetalCommandProcessor::ShutdownContext() {
 // attachment format and the render pass consistent (both on or both off).
 static constexpr bool kDepthEnabled = true;
 
+bool MetalCommandProcessor::PassCensusEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_PASS_CENSUS");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  return s_enabled;
+}
+
+bool MetalCommandProcessor::PassAttachmentsByUseEnabled() {
+  static const bool s_enabled = [] {
+    const char* legacy = std::getenv("XE_METAL_PASS_ATTACHMENTS_LEGACY");
+    if (legacy && legacy[0] == '1' && legacy[1] == '\0') {
+      return false;
+    }
+    return metal::MetalSwitchEnabled(cvars::metal_pass_attachments_by_use,
+                                     std::getenv("XE_METAL_PASS_ATTACHMENTS"));
+  }();
+  return s_enabled;
+}
+
+uint64_t MetalCommandProcessor::PassAttachmentKey(bool dummy_depth,
+                                                  bool memexport) const {
+  uint64_t key = render_target_cache_->current_attachment_key();
+  if (dummy_depth) {
+    // Scratch-depth passes are distinct from same-color passes without one:
+    // their pipelines carry a depth pixel format the plain pass lacks.
+    key ^= 0x9E3779B97F4A7C15ull;
+  }
+  if (memexport) {
+    // Memexport draws run in their own attachment-less pass; never share an
+    // encoder with attachment passes.
+    key = 0x4D454D4558504F52ull;  // 'MEMEXPOR'
+  }
+  return key;
+}
+
 void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
@@ -2283,18 +2381,17 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       !render_target_cache_->PrepareCurrentRasterViews()) {
     return nullptr;
   }
-  uint64_t want_key = render_target_cache_->current_attachment_key();
-  if (dummy_depth_pass_) {
-    // Scratch-depth passes are distinct from same-color passes without one:
-    // their pipelines carry a depth pixel format the plain pass lacks.
-    want_key ^= 0x9E3779B97F4A7C15ull;
-  }
-  if (memexport_pass_) {
-    // Memexport draws run in their own attachment-less pass; never share an
-    // encoder with attachment passes.
-    want_key = 0x4D454D4558504F52ull;  // 'MEMEXPOR'
-  }
-  bool reuse_encoder = frame_open_ && encoder_attachment_key_ == want_key;
+  const uint64_t want_key = PassAttachmentKey(dummy_depth_pass_, memexport_pass_);
+  // D2: the attachment subset this draw's pass must bind. Under the legacy
+  // policy every present attachment is bound and the subset test is skipped.
+  const bool by_use = PassAttachmentsByUseEnabled() && !memexport_pass_;
+  const uint32_t want_bound =
+      by_use ? pending_pass_bound_ : metal::kMetalPassAttachmentAll;
+  const bool attachments_covered =
+      !by_use || (want_bound & ~encoder_bound_attachments_) == 0;
+  bool reuse_encoder = frame_open_ && encoder_attachment_key_ == want_key &&
+                       attachments_covered;
+  bool zpd_rebuild = false;
   if (reuse_encoder && ZPDSegmentPending()) {
     // A report can open, and a closed segment can become pending again, while
     // this encoder is already current -- a path that would otherwise never
@@ -2312,6 +2409,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       // Bounded: every encoder created afterwards carries it, so this happens
       // once per pool lifetime rather than per draw.
       reuse_encoder = false;
+      zpd_rebuild = true;
     }
     // Pool unavailable: keep the encoder rather than rebuilding it forever.
   }
@@ -2319,7 +2417,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     if (reuse_encoder) {
       return frame_render_encoder_;
     }
-    EndRenderEncoder();
+    EndRenderEncoder(
+        zpd_rebuild ? metal::MetalPassEndReason::kZpdRebuild
+        : (encoder_attachment_key_ == want_key && !attachments_covered)
+            ? metal::MetalPassEndReason::kAttachmentNeeded
+            : metal::MetalPassEndReason::kAttachmentKey);
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -2334,6 +2436,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   bool any_color_target = false;
   if (!memexport_pass_) {
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (by_use && !(want_bound & metal::MetalPassColorAttachmentBit(i))) {
+        // D2: no draw of this pass can touch the target; leave it unbound so
+        // its texture is neither loaded nor stored (contents preserved).
+        continue;
+      }
       color_resolves[i] =
           render_target_cache_->current_color_texture(i, nullptr);
       color_targets[i] =
@@ -2353,6 +2460,16 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   void* depth = (kDepthEnabled && !memexport_pass_)
                     ? render_target_cache_->current_depth_raster_texture()
                     : nullptr;
+  // D2: the depth plane and the stencil plane of the combined texture bind
+  // independently; a stencil-less pass skips the stencil plane's traffic.
+  const bool bind_depth_plane =
+      !by_use || (want_bound & metal::kMetalPassAttachmentDepth) != 0;
+  const bool bind_stencil_plane =
+      !by_use || (want_bound & metal::kMetalPassAttachmentStencil) != 0;
+  if (depth && !bind_depth_plane && !bind_stencil_plane) {
+    depth = nullptr;
+    depth_resolve = nullptr;
+  }
   if (!any_color_target && !depth && !memexport_pass_) {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
@@ -2439,7 +2556,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
   // menus) clear to 0 and test "greater"; a hardcoded 1.0 made every fragment
   // fail z>=1.0 -> black. Reading the guest value serves both directions.
-  if (depth) {
+  if (depth && bind_depth_plane) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction = MTLLoadActionLoad;
     if (raster_sample_count > 1u) {
@@ -2452,6 +2569,8 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     } else {
       pass.depthAttachment.storeAction = MTLStoreActionStore;
     }
+  }
+  if (depth && bind_stencil_plane) {
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.stencilAttachment.loadAction = MTLLoadActionLoad;
     if (raster_sample_count > 1u) {
@@ -2464,7 +2583,8 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     } else {
       pass.stencilAttachment.storeAction = MTLStoreActionStore;
     }
-  } else if (primary_color_target && dummy_depth_pass_) {
+  }
+  if (!depth && primary_color_target && dummy_depth_pass_) {
     // The draw's PS exports depth with no depth target bound — attach a
     // throwaway scratch depth so the pipeline is valid (see dummy_depth in
     // IssueDraw). Never loaded, never stored; content is irrelevant.
@@ -2565,6 +2685,38 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
   encoder_attachment_key_ = want_key;
+  {
+    // The Load + Store set this pass binds (scratch DontCare attachments of
+    // memexport and dummy-depth passes move no tile traffic and are excluded).
+    uint32_t bound = 0;
+    uint64_t attachment_bytes[metal::kMetalPassAttachmentCount] = {};
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!color_targets[i]) {
+        continue;
+      }
+      bound |= metal::MetalPassColorAttachmentBit(i);
+      id<MTLTexture> t = (__bridge id<MTLTexture>)color_targets[i];
+      attachment_bytes[metal::kMetalPassAttachmentColorShift + i] =
+          uint64_t(t.width) * t.height * t.sampleCount *
+          AttachmentBytesPerPixel(t.pixelFormat);
+    }
+    if (depth) {
+      id<MTLTexture> t = (__bridge id<MTLTexture>)depth;
+      uint64_t pixels = uint64_t(t.width) * t.height * t.sampleCount;
+      if (bind_depth_plane) {
+        bound |= metal::kMetalPassAttachmentDepth;
+        attachment_bytes[0] = pixels * AttachmentBytesPerPixel(t.pixelFormat);
+      }
+      if (bind_stencil_plane) {
+        bound |= metal::kMetalPassAttachmentStencil;
+        attachment_bytes[1] = pixels;  // the stencil plane
+      }
+    }
+    encoder_bound_attachments_ = bound;
+    if (PassCensusEnabled()) {
+      pass_census_.BeginPass(want_key, bound, attachment_bytes);
+    }
+  }
   encoder_has_zpd_visibility_ = zpd_visibility_buffer != nil;
   {
     static const bool s_zpd_trace =
@@ -4164,9 +4316,14 @@ bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
          (report->second.pending_segments == 0 && report->second.ended);
 }
 
-void MetalCommandProcessor::EndRenderEncoder() {
+void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
+                                             uint32_t detail,
+                                             bool resolve_touches_pass) {
   if (!frame_open_) {
     return;
+  }
+  if (PassCensusEnabled()) {
+    pass_census_.EndPass(reason, detail, resolve_touches_pass);
   }
   // The encoder is a query-segment boundary (Metal's analogue of a Vulkan
   // render pass): close the active segment while setVisibilityResultMode can
@@ -4273,6 +4430,9 @@ void MetalCommandProcessor::EmitNeedBasedWaitReport(const char* site) {
 void MetalCommandProcessor::EmitLifecycleReports(const char* site) {
   EmitSeamTimingReport(site);
   EmitNeedBasedWaitReport(site);
+  if (PassCensusEnabled()) {
+    XELOGI("{}", pass_census_.Format(site, /*window=*/false));
+  }
 }
 
 void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
@@ -4281,7 +4441,7 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   // close through commit" measured as claimed. A noop (no buffer) is counted
   // but never timed; the entry read is the only cost it pays.
   const uint64_t seam_t0 = seam_on ? SeamNowNs() : 0;
-  EndRenderEncoder();
+  EndRenderEncoder(metal::MetalPassEndReason::kSubmission, uint32_t(reason));
   if (!frame_command_buffer_) {
     if (seam_on) {
       // Free call: no buffer to close. Counted apart so boundary frequency is
@@ -6391,6 +6551,65 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       ((kDepthEnabled && depth_bound) || dummy_depth)
           ? MetalRenderTargetCache::kDepthFormat
           : uint64_t(MTLPixelFormatInvalid);
+  uint32_t blend_controls[xenos::kMaxColorRenderTargets] = {};
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    blend_controls[i] =
+        regs.Get<reg::RB_BLENDCONTROL>(
+                reg::RB_BLENDCONTROL::rt_register_indices[i])
+            .value;
+  }
+  // D2 (reduce-metal-draw-pass-traffic, metal_pass_attachment_use.h): the
+  // attachments present in the accumulated set, the subset this draw can
+  // touch, and the set its pass binds (the open same-key pass's set when it
+  // covers the draw, else the union: hysteresis splits once per transition).
+  // The pipeline declares exactly the bound set, as it declares the present
+  // set under the legacy policy (unwritten targets keep a zero write mask).
+  uint32_t pass_present = 0;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (color_pixel_formats[i] != uint64_t(MTLPixelFormatInvalid)) {
+      pass_present |= metal::MetalPassColorAttachmentBit(i);
+    }
+  }
+  if (kDepthEnabled && depth_bound) {
+    pass_present |= metal::kMetalPassAttachmentDepthStencil;
+  }
+  uint32_t pass_bound = pass_present;
+  if (PassAttachmentsByUseEnabled() && !memexport_draw) {
+    metal::MetalPassAttachmentUse use = metal::GetMetalPassAttachmentUse(
+        norm_depth, normalized_color_mask, blend_controls,
+        regs[XE_GPU_REG_RB_STENCILREFMASK],
+        regs[XE_GPU_REG_RB_STENCILREFMASK_BF],
+        pixel_shader && pixel_shader->writes_depth());
+    uint32_t used = use.used();
+    if (used & metal::kMetalPassAttachmentStencil) {
+      // The combined Depth32Float_Stencil8 texture binds its stencil plane
+      // only alongside its depth plane.
+      used |= metal::kMetalPassAttachmentDepth;
+    }
+    used &= pass_present;
+    if (used) {
+      // A draw that touches nothing present keeps the legacy set (a pass needs
+      // an attachment; the census counts how often this happens).
+      metal::MetalPassBindingDecision decision = metal::DecideMetalPassBinding(
+          pass_present, used,
+          frame_open_ &&
+              encoder_attachment_key_ == PassAttachmentKey(dummy_depth, false),
+          encoder_bound_attachments_);
+      pass_bound = decision.bound;
+    }
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!(pass_bound & metal::MetalPassColorAttachmentBit(i))) {
+        color_pixel_formats[i] = uint64_t(MTLPixelFormatInvalid);
+      }
+    }
+    if (!(pass_bound & metal::kMetalPassAttachmentDepth)) {
+      if (!dummy_depth) {
+        pipeline_depth_format = uint64_t(MTLPixelFormatInvalid);
+      }
+    } else if (!(pass_bound & metal::kMetalPassAttachmentStencil)) {
+      pipeline_depth_format |= MetalPipelineCache::kDepthWithoutStencilBit;
+    }
+  }
   // Geometry-emulation config (VS output size + GS max input primitives per mesh
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
@@ -6405,13 +6624,6 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           regs.Get<reg::RB_COLORCONTROL>());
   uint32_t raster_sample_count =
       pipeline_raster_state.pipeline_key().raster_sample_count;
-  uint32_t blend_controls[xenos::kMaxColorRenderTargets] = {};
-  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    blend_controls[i] =
-        regs.Get<reg::RB_BLENDCONTROL>(
-                reg::RB_BLENDCONTROL::rt_register_indices[i])
-            .value;
-  }
   if (memexport_draw) {
     // Vertex-only, rasterization disabled, zero attachments.
     pipeline = pipeline_cache_->GetOrCreateMemexportPipelineState(vs_translation);
@@ -7271,12 +7483,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
+  pending_pass_bound_ = pass_bound;
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                    "encoder-unavailable");
     return true;
+  }
+  if (PassCensusEnabled() && !memexport_draw) {
+    pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
+        norm_depth, normalized_color_mask, blend_controls,
+        regs[XE_GPU_REG_RB_STENCILREFMASK],
+        regs[XE_GPU_REG_RB_STENCILREFMASK_BF],
+        pixel_shader && pixel_shader->writes_depth()));
   }
 
   // --- Marshal the constant buffers (b0-b4), matching the D3D12 backend. ---
@@ -8685,10 +8905,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                          blue:blend_stencil.blend_color_blue
                         alpha:blend_stencil.blend_color_alpha];
   }
-  if (kDepthEnabled && depth_bound) {
+  if (kDepthEnabled && depth_bound &&
+      (encoder_bound_attachments_ & metal::kMetalPassAttachmentDepthStencil)) {
     // Only when the pass has a depth attachment — setting a depth-test state on
     // an encoder without one is a Metal validation error. norm_depth already
-    // collapsed "always, no write" to disabled.
+    // collapsed "always, no write" to disabled. (D2: a by-use pass may leave
+    // depth unbound; its draws then neither test nor write it.)
     void* depth_state = GetOrCreateDepthStencilState(
         norm_depth.value, stencil_ref_mask.value, stencil_ref_mask_back.value);
     if (depth_state) {
@@ -9597,7 +9819,7 @@ bool MetalCommandProcessor::IssueCopy() {
   // or never-written snapshot (missing scene / transient black blips; found
   // by the draw-range bisect: one commit after the last scene draw dropped
   // the scene resolve and lost the whole frame). Recreate it up front.
-  PrepareTransferCommandBuffer();
+  PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
   // RT-as-texture bridge. A color resolve is the boundary of a render pass: blit
   // what the pass drew into ITS color target (looked up by the resolve's EDRAM
   // base + format — the same key the draws bound it with) out into a
@@ -9617,13 +9839,16 @@ bool MetalCommandProcessor::IssueCopy() {
       // then copy the color RT region into the snapshot on the frame command
       // buffer (Metal orders the blit after the render encoder and before the
       // later composite encoder that samples the snapshot).
-      EndRenderEncoder();
-      // Ownership truth: ask the base class which render target owns the
-      // resolve's EDRAM tiles. The snapshot's pixel format mirrors the
-      // source's so the blit is format-compatible.
       uint32_t span_base, span_row_length, span_rows, span_pitch;
       resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                         span_pitch);
+      EndRenderEncoder(
+          metal::MetalPassEndReason::kColorResolve, 0,
+          frame_open_ && render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+                             span_base, span_row_length, span_rows, span_pitch));
+      // Ownership truth: ask the base class which render target owns the
+      // resolve's EDRAM tiles. The snapshot's pixel format mirrors the
+      // source's so the blit is format-compatible.
       // The snapshot format mirrors the first color owner's; the copy itself is
       // per-owner + per-tile with FULL layout remapping (owner pitch vs the
       // resolve's linear span -- a naive rect blit scrambles any owner whose
@@ -9646,7 +9871,7 @@ bool MetalCommandProcessor::IssueCopy() {
             uint32_t(strtoul(s_probe_resolve, nullptr, 16)) ==
                 resolve_info.copy_dest_base) {
           EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
-          PrepareTransferCommandBuffer();
+          PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
           id<MTLTexture> owner_tex = (__bridge id<MTLTexture>)probe;
           uint32_t pw = std::min<uint32_t>(uint32_t(owner_tex.width), 64);
           id<MTLBuffer> pstage =
@@ -10254,7 +10479,7 @@ bool MetalCommandProcessor::IssueCopy() {
           static const bool s_null_cb_legacy =
               std::getenv("XE_METAL_RESOLVE_NULL_CB_LEGACY") != nullptr;
           if (!s_null_cb_legacy) {
-            PrepareTransferCommandBuffer();
+            PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
           }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
@@ -10440,10 +10665,13 @@ bool MetalCommandProcessor::IssueCopy() {
     uint32_t rh = resolve_info.height_div_8 * 8;
     if (rw && rh && kDepthEnabled && render_target_cache_ && texture_cache_ &&
         frame_command_buffer_) {
-      EndRenderEncoder();
       uint32_t span_base, span_row_length, span_rows, span_pitch;
       resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                         span_pitch);
+      EndRenderEncoder(
+          metal::MetalPassEndReason::kDepthResolve, 0,
+          frame_open_ && render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+                             span_base, span_row_length, span_rows, span_pitch));
       // Multi-strip resolve: if this strip's destination lands inside an
       // existing (full-height) snapshot, convert into that snapshot at the row
       // offset — shaders sample the FIRST strip's base as the whole buffer.
@@ -10598,7 +10826,7 @@ bool MetalCommandProcessor::IssueCopy() {
             static const bool s_depth_null_cb_legacy =
                 std::getenv("XE_METAL_RESOLVE_NULL_CB_LEGACY") != nullptr;
             if (!s_depth_null_cb_legacy) {
-              PrepareTransferCommandBuffer();
+              PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
             }
             if (depth_scatter) {
               MetalRenderTargetCache::CanonicalScatterDest depth_dest{
@@ -10714,10 +10942,37 @@ bool MetalCommandProcessor::IssueCopy() {
   // the chain; shadow cascades clear depth between renders).
   if ((resolve_info.IsClearingColor() || resolve_info.IsClearingDepth()) &&
       render_target_cache_ && frame_command_buffer_) {
-    EndRenderEncoder();
     uint32_t span_base, span_row_length, span_rows, span_pitch;
     resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows,
                                       span_pitch);
+    {
+      // Census own/other: the copied surface's span, plus the other surface a
+      // dual clear names through its own edram_info.
+      bool touches = false;
+      if (frame_open_) {
+        touches = render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+            span_base, span_row_length, span_rows, span_pitch);
+        if (!touches && resolve_info.IsClearingDepth()) {
+          uint32_t b, rl, r;
+          draw_util::GetResolveEdramTileSpan(resolve_info.depth_edram_info,
+                                             resolve_info.coordinate_info,
+                                             resolve_info.height_div_8, b, rl,
+                                             r);
+          touches = render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+              b, rl, r, resolve_info.depth_edram_info.pitch_tiles);
+        }
+        if (!touches && resolve_info.IsClearingColor()) {
+          uint32_t b, rl, r;
+          draw_util::GetResolveEdramTileSpan(resolve_info.color_edram_info,
+                                             resolve_info.coordinate_info,
+                                             resolve_info.height_div_8, b, rl,
+                                             r);
+          touches = render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+              b, rl, r, resolve_info.color_edram_info.pitch_tiles);
+        }
+      }
+      EndRenderEncoder(metal::MetalPassEndReason::kResolveClear, 0, touches);
+    }
     static const bool s_clear_log =
         std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
     if (s_clear_log) {
@@ -13182,6 +13437,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  if (PassCensusEnabled()) {
+    pass_census_.NoteFrame();
+  }
   // Task 1.1 shader/pipeline build census. NoteSwap closes this frame's build
   // accumulator, which is what separates startup cost from an in-frame stall —
   // neither is recoverable from a single total.
@@ -13220,6 +13478,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (PassCensusEnabled()) {
+        XELOGI("{}", pass_census_.Format("periodic", /*window=*/true));
+      }
       if (lazy_read_callback_handle_) {
         static metal::MetalLazyPublication::Stats s_last_lazy;
         auto st = lazy_publication_.stats();

@@ -76,6 +76,13 @@ class MetalPipelineCache {
   // failure.
   void* GetOrCreateMemexportPipelineState(MetalShader::MetalTranslation* vertex);
 
+  // Flag bit OR-ed into a `depth_pixel_format` argument: the pass binds the
+  // (combined Depth32Float_Stencil8) texture's depth plane only, so the
+  // pipeline declares no stencil attachment (reduce-metal-draw-pass-traffic
+  // D2: a pass whose draws never test or write stencil leaves the plane
+  // unbound and skips its tile load/store). Part of the pipeline key.
+  static constexpr uint64_t kDepthWithoutStencilBit = 1ull << 40;
+
   void* GetOrCreateRenderPipelineState(MetalShader::MetalTranslation* vertex,
                                        MetalShader::MetalTranslation* pixel,
                                        const uint64_t* color_pixel_formats,

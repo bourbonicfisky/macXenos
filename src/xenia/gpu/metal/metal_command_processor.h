@@ -24,6 +24,7 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/host_tessellator.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
+#include "xenia/gpu/metal/metal_pass_census.h"
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
 #include "xenia/gpu/metal/metal_draw_skip_accounting.h"
 #include "xenia/gpu/metal/metal_fault_episode.h"
@@ -129,7 +130,6 @@ class MetalCommandProcessor : public CommandProcessor {
   // For MetalRenderTargetCache: closes any open render encoder (a transfer is
   // a pass boundary) and returns the frame id<MTLCommandBuffer> (creating it if
   // needed) so ownership-transfer blits / snapshot uploads can be encoded.
-  void* PrepareTransferCommandBuffer();
 
   // Diagnostics: the current trace draw index (for correlating RT-cache
   // transfer logs with manifest/capture draw indices).
@@ -348,9 +348,31 @@ class MetalCommandProcessor : public CommandProcessor {
   // reopen_clear_); otherwise it loads so multiple draws accumulate. Returns the
   // encoder (id<MTL...>) or nullptr on failure.
   void* BeginFrameEncoder();
+  // Closes any open render encoder (a transfer is a pass boundary) and returns
+  // the frame id<MTLCommandBuffer>, creating it if needed. `site` names the
+  // caller for the pass census (metal::MetalTransferSite).
+  void* PrepareTransferCommandBuffer(uint32_t site = 0);
   // Ends the current render encoder only (keeps the frame command buffer open so
-  // a resolve blit / the next pass can be encoded on it).
-  void EndRenderEncoder();
+  // a resolve blit / the next pass can be encoded on it). The reason is the
+  // pass census attribution (metal_pass_census.h) and is deliberately
+  // DEFAULT-FREE: a new pass end does not compile until it says why. `detail`
+  // is the SeamBoundaryReason index for kSubmission; `resolve_touches_pass`
+  // says, for the resolve reasons, whether the resolved tiles belong to one of
+  // the open pass's attachments.
+  void EndRenderEncoder(metal::MetalPassEndReason reason, uint32_t detail = 0,
+                        bool resolve_touches_pass = false);
+  // XE_METAL_PASS_CENSUS=1 (exact-1, default OFF): observational draw-pass
+  // census (reduce-metal-draw-pass-traffic task 0.1).
+  static bool PassCensusEnabled();
+  // reduce-metal-draw-pass-traffic D2: a draw pass binds only the attachments
+  // its draws can read or write (metal_pass_attachment_use.h). Config
+  // metal_pass_attachments_by_use, XE_METAL_PASS_ATTACHMENTS=0/1 override,
+  // XE_METAL_PASS_ATTACHMENTS_LEGACY=1 forces the bind-everything policy.
+  static bool PassAttachmentsByUseEnabled();
+  // The encoder identity BeginFrameEncoder compares: the render-target cache's
+  // accumulated attachment key, distinguished for scratch-depth and memexport
+  // passes.
+  uint64_t PassAttachmentKey(bool dummy_depth, bool memexport) const;
   // Ends any open encoder, then commits + waits on the frame command buffer.
   // The reason parameter is the seam-timing global attribution layer
   // (metal_seam_timing.h) and is deliberately DEFAULT-FREE: a new call site
@@ -460,6 +482,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // the open encoder was created with; a draw whose accumulated render targets
   // differ closes the encoder and opens a new pass.
   uint64_t encoder_attachment_key_ = 0;
+  // The MetalPassAttachment set the open encoder binds with Load + Store
+  // (depth, stencil, colour 0..3); DontCare scratch attachments are excluded.
+  uint32_t encoder_bound_attachments_ = 0;
+  // The attachment set the next draw's pass must bind (IssueDraw decides it
+  // from the draw's use and the open pass; BeginFrameEncoder applies it when
+  // by-use binding is enabled).
+  uint32_t pending_pass_bound_ = metal::kMetalPassAttachmentAll;
+  // Draw-pass census (XE_METAL_PASS_CENSUS=1): fed at every pass begin, draw
+  // and pass end; reported on the frame-stats tick and at lifecycle sites.
+  metal::MetalPassCensus pass_census_;
   // Guest PS exports depth (oDepth) but the draw binds no depth target: Metal
   // rejects such pipelines ("shader writes to depth" with no attachment), and
   // the draw used to be NULL-PIPELINE skipped — Sonic's fullscreen bloom

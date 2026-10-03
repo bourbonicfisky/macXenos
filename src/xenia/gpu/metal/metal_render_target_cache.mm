@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_pass_census.h"
 
 #import <Metal/Metal.h>
 
@@ -549,7 +550,7 @@ void MetalRenderTargetCache::Shutdown() {
 void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
                                                     bool is_depth) {
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)
-      command_processor_.PrepareTransferCommandBuffer();
+      command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kClearAtCreation));
   if (!cb || !texture) {
     return;
   }
@@ -726,7 +727,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   // reference an old view; deferred release then keeps it alive through the
   // current submission.
   if (!PrepareCanonicalEdramForReadback() ||
-      !command_processor_.PrepareTransferCommandBuffer()) {
+      !command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kMsaaCompanions))) {
     return false;
   }
 
@@ -988,7 +989,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
-            command_processor_.PrepareTransferCommandBuffer();
+            command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
       }
       if (!command_buffer || !EncodeCanonicalAuthorityOperation(
                                  (__bridge const void*)command_buffer,
@@ -1020,7 +1021,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
     return true;
   }
   id<MTLCommandBuffer> command_buffer = (__bridge id<MTLCommandBuffer>)
-      command_processor_.PrepareTransferCommandBuffer();
+      command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kCanonicalReadback));
   if (!command_buffer) {
     canonical_authority_.ResetUnknown();
     return false;
@@ -1052,7 +1053,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
-            command_processor_.PrepareTransferCommandBuffer();
+            command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kCanonicalResolve));
       }
       if (!command_buffer || !EncodeCanonicalAuthorityOperation(
                                  (__bridge const void*)command_buffer,
@@ -1195,7 +1196,7 @@ void MetalRenderTargetCache::PerformTransfers(
   // Transfers are encoded as standalone blits at a pass boundary before the
   // draw's encoder opens.
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)
-      command_processor_.PrepareTransferCommandBuffer();
+      command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kOwnershipTransfer));
   if (!cb) {
     return;
   }
@@ -3643,6 +3644,26 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   [enc endEncoding];
 }
 
+bool MetalRenderTargetCache::ResolveSpanTouchesCurrentAttachments(
+    uint32_t edram_base, uint32_t row_length_used, uint32_t rows,
+    uint32_t pitch_tiles) const {
+  std::vector<ResolveCopyDumpRectangle> rectangles;
+  GetResolveCopyRectanglesToDump(edram_base, row_length_used, rows, pitch_tiles,
+                                 rectangles);
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  for (const ResolveCopyDumpRectangle& rect : rectangles) {
+    if (!rect.render_target) {
+      continue;
+    }
+    for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+      if (accumulated[i] == rect.render_target) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void* MetalRenderTargetCache::GetResolveSourceTexture(
     uint32_t edram_base, uint32_t row_length_used, uint32_t rows,
     uint32_t pitch_tiles, bool is_depth, uint64_t* pixel_format_out) {
@@ -6047,7 +6068,7 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
                           length:size_t(row_bytes) * height
                          options:MTLResourceStorageModeShared];
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)
-      command_processor_.PrepareTransferCommandBuffer();
+      command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kSnapshotRestore));
   if (!staging || !cb) {
     return;
   }
