@@ -1603,10 +1603,19 @@ bool MetalCommandProcessor::SetupContext() {
     const char* dev_value = std::getenv("XE_METAL_DRAW_RESOLUTION_SCALE_DEV");
     const bool dev_scaled =
         dev_value && dev_value[0] == '1' && dev_value[1] == '\0';
+    // Scaling exists only on the canonical EDRAM raster path; its rollbacks
+    // keep the session at 1x.
+    const bool canonical_raster =
+        MetalRenderTargetCache::CanonicalRasterConfigured();
+    if (dev_scaled && !canonical_raster) {
+      XELOGW(
+          "MetalCommandProcessor: draw resolution scaling requires canonical "
+          "EDRAM raster (XE_METAL_SAMPLE_EDRAM / _RASTER); rendering at 1x");
+    }
     const metal::MetalDrawResolutionScale scale =
         metal::ResolveMetalDrawResolutionScale(cvars::draw_resolution_scale_x,
                                                cvars::draw_resolution_scale_y,
-                                               dev_scaled);
+                                               dev_scaled && canonical_raster);
     if (scale.clamped) {
       XELOGW(
           "MetalCommandProcessor: draw resolution scale {}x{} clamped to {}x{} "

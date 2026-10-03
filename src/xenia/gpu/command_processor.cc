@@ -2271,6 +2271,20 @@ void CommandProcessor::MaybeCaptureEdramSnapshot(uint32_t draw_index) {
   if (!want_snapshot && !want_hashes) {
     return;
   }
+  // Per-draw captures and sample-plane hashes describe the 1x EDRAM image. At
+  // a draw resolution scale (which the ZPD normalization fields carry) the
+  // EDRAM is scaled, so they are unsupported rather than mixing scales.
+  if (zpd_draw_resolution_scale_x_ != 1 || zpd_draw_resolution_scale_y_ != 1) {
+    static bool s_scaled_capture_logged = false;
+    if (!s_scaled_capture_logged) {
+      s_scaled_capture_logged = true;
+      XELOGE(
+          "capture_dir: per-draw EDRAM capture and hashing are unsupported at "
+          "a draw resolution scale ({}x{})",
+          zpd_draw_resolution_scale_x_, zpd_draw_resolution_scale_y_);
+    }
+    return;
+  }
   // One EDRAM download serves both the full snapshot and the hash record.
   std::vector<uint8_t> edram;
   if (!DumpEdramToBuffer(edram) || edram.size() != xenos::kEdramSizeBytes) {

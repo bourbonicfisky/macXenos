@@ -60,6 +60,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // MTLPixelFormatDepth32Float_Stencil8 — full depth + stencil planes.
   static const uint64_t kDepthFormat;
 
+  // Whether the environment selects canonical per-sample EDRAM with real-MSAA
+  // raster views (the default). Draw resolution scaling is implemented only on
+  // that path, so a session without it renders at 1x.
+  static bool CanonicalRasterConfigured();
+
   MetalRenderTargetCache(const RegisterFile& register_file,
                          const Memory& memory, TraceWriter* trace_writer,
                          MetalCommandProcessor& command_processor,
@@ -356,6 +361,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   }
   bool DumpCanonicalEdram(void* command_queue,
                           std::vector<uint8_t>& edram_out);
+  // Draw resolution scaling: a 1x tile-major EDRAM snapshot replicated into the
+  // scaled canonical layout (each word into its sx x sy block), and the
+  // inverse, taking each block's representative word. Raw words, so restoring
+  // and dumping round-trips.
+  void ExpandEdramSnapshotToScale(const uint32_t* snapshot,
+                                  uint32_t* scaled) const;
+  void CompactScaledEdramToSnapshot(const uint32_t* scaled,
+                                    uint32_t* snapshot) const;
 
  protected:
   // The guest maximum at the draw resolution scale, within the Metal 2D
@@ -607,6 +620,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // XE_METAL_SAMPLE_EDRAM=0 retains the collapsed rollback through the next
   // milestone.
   static constexpr uint32_t kCanonicalEdramSize = 10u * 1024 * 1024;
+  // The canonical EDRAM at the draw resolution scale: each guest sample is an
+  // sx x sy block of host samples (implement-metal-draw-resolution-scaling).
+  uint32_t canonical_edram_size() const {
+    return kCanonicalEdramSize * draw_resolution_scale_x() *
+           draw_resolution_scale_y();
+  }
+  // Host samples per 32bpp EDRAM tile at the draw resolution scale.
+  uint32_t edram_tile_width_samples() const {
+    return xenos::kEdramTileWidthSamples * draw_resolution_scale_x();
+  }
+  uint32_t edram_tile_height_samples() const {
+    return xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
+  }
   bool sample_edram_enabled_ = false;
   bool sample_edram_raster_enabled_ = false;
   // Snapshot restore validation is deliberately separate from canonical

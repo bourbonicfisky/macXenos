@@ -45,9 +45,10 @@ inline bool MetalSwitchEnabled(bool config_value, const char* env_value) {
 // physical tile may be below end_tiles. Range shaders retain their exact
 // start/end guards; this only avoids dispatching rows that are guaranteed to be
 // beyond the operation. The result is clamped to the allocated texture.
+// `scale_y` is the vertical draw resolution scale: texture rows are host rows.
 inline uint32_t ComputeCanonicalRangeTextureHeight(
     uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_y_shift,
-    uint32_t end_tiles, uint32_t texture_height) {
+    uint32_t end_tiles, uint32_t texture_height, uint32_t scale_y = 1) {
   if (!pitch_tiles || end_tiles <= base_tiles || !texture_height) {
     return 0u;
   }
@@ -55,7 +56,8 @@ inline uint32_t ComputeCanonicalRangeTextureHeight(
   uint64_t tile_rows =
       (local_end_tiles + pitch_tiles - 1u) / pitch_tiles;
   uint64_t pixel_rows =
-      (uint64_t(tile_rows) * xenos::kEdramTileHeightSamples) >> msaa_y_shift;
+      ((uint64_t(tile_rows) * xenos::kEdramTileHeightSamples) >> msaa_y_shift) *
+      scale_y;
   return uint32_t(std::min<uint64_t>(pixel_rows, texture_height));
 }
 

@@ -27,7 +27,8 @@ struct MetalDrawResolutionScale {
   // The configured scale after clamping.
   uint32_t requested_x = 1;
   uint32_t requested_y = 1;
-  // Whether either configured value was outside 1..kMetalMaxDrawResolutionScale.
+  // Whether either configured value was outside
+  // 1..kMetalMaxDrawResolutionScale.
   bool clamped = false;
   // The scale the session renders at. Stays 1x1 until scaled rendering is
   // enabled, which it is only once render targets, EDRAM, resolves and texture

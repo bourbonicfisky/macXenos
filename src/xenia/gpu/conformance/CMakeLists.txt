@@ -85,6 +85,7 @@ if(APPLE)
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/shaders)
   target_sources(xenia-gpu-conformance PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_transfer_tail_verification_test.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_scaled_edram_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_gamma_blend_device_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_gamma_ramp_apply_test.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_present_convert_test.mm

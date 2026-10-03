@@ -121,12 +121,27 @@ void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
 }
 NSUInteger GetCanonicalRangeTextureHeight(
     uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
-    uint32_t end_tiles, NSUInteger texture_height) {
+    uint32_t end_tiles, NSUInteger texture_height, uint32_t scale_y) {
   uint32_t x_shift, y_shift;
   GetMsaaShifts(msaa_samples, x_shift, y_shift);
   (void)x_shift;
-  return ComputeCanonicalRangeTextureHeight(
-      base_tiles, pitch_tiles, y_shift, end_tiles, uint32_t(texture_height));
+  return ComputeCanonicalRangeTextureHeight(base_tiles, pitch_tiles, y_shift,
+                                            end_tiles, uint32_t(texture_height),
+                                            scale_y);
+}
+// Compile options defining the scaled EDRAM tile geometry for the canonical
+// EDRAM MSL (kEdramMsl's XE_EDRAM_TILE_WIDTH/HEIGHT_SAMPLES). At 1x they equal
+// the source's own defaults, so the generated code is unchanged.
+MTLCompileOptions* EdramMslCompileOptions(uint32_t tile_width_samples,
+                                          uint32_t tile_height_samples) {
+  MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+  options.preprocessorMacros = @{
+    @"XE_EDRAM_TILE_WIDTH_SAMPLES" :
+        [NSString stringWithFormat:@"%uu", tile_width_samples],
+    @"XE_EDRAM_TILE_HEIGHT_SAMPLES" :
+        [NSString stringWithFormat:@"%uu", tile_height_samples],
+  };
+  return options;
 }
 bool IsCanonicalColorFormatSupported(xenos::ColorRenderTargetFormat format) {
   switch (format) {
@@ -217,6 +232,11 @@ MetalRenderTargetCache::MetalRenderTargetCache(
 
 MetalRenderTargetCache::~MetalRenderTargetCache() { Shutdown(); }
 
+bool MetalRenderTargetCache::CanonicalRasterConfigured() {
+  return IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM", true) &&
+         IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER", true);
+}
+
 bool MetalRenderTargetCache::Initialize() {
   InitializeCommon();
   // Canonical per-sample EDRAM and real-MSAA raster views are the promoted
@@ -294,13 +314,13 @@ bool MetalRenderTargetCache::Initialize() {
   if (sample_edram_enabled_ || canonical_depth_enabled_) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
     id<MTLBuffer> buffer =
-        [device newBufferWithLength:kCanonicalEdramSize
+        [device newBufferWithLength:canonical_edram_size()
                             options:MTLResourceStorageModePrivate];
     if (!buffer) {
       XELOGE(
           "MetalRenderTargetCache: canonical EDRAM allocation failed ({} MB); "
           "falling back to the collapsed path",
-          kCanonicalEdramSize / (1024 * 1024));
+          canonical_edram_size() / (1024 * 1024));
       sample_edram_enabled_ = false;
       sample_edram_raster_enabled_ = false;
       canonical_depth_enabled_ = false;
@@ -310,7 +330,7 @@ bool MetalRenderTargetCache::Initialize() {
       XELOGI(
           "MetalRenderTargetCache: canonical per-sample EDRAM enabled "
           "({} MB private buffer){}",
-          kCanonicalEdramSize / (1024 * 1024),
+          canonical_edram_size() / (1024 * 1024),
           canonical_depth_enabled_ ? " [depth authority]" : "");
       if (sample_edram_raster_enabled_) {
         XELOGI(
@@ -544,10 +564,12 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   // doubled), GetWidth()/GetRenderTargetHeight() convert to msaa-aware PIXEL
   // dimensions. Textures are still single-sample (no host MSAA) — MSAA'd guest
   // surfaces just render aliased at their pixel size; all tile math converts
-  // sample coordinates to pixels with the key's shifts.
-  uint32_t width = key.GetWidth();
+  // sample coordinates to pixels with the key's shifts. Host textures are the
+  // guest size times the draw resolution scale.
+  uint32_t width = key.GetWidth() * draw_resolution_scale_x();
   uint32_t height =
-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples);
+      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) *
+      draw_resolution_scale_y();
   if (!width || !height) {
     return nullptr;
   }
@@ -613,17 +635,21 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       return false;
     }
     sample_count = target_sample_count;
+    // Host rows: the guest rows times the vertical draw resolution scale.
     full_height = GetRenderTargetHeight(key.pitch_tiles_at_32bpp,
-                                        key.msaa_samples);
+                                        key.msaa_samples) *
+                  draw_resolution_scale_y();
     uint32_t x_shift, y_shift;
     GetMsaaShifts(uint32_t(key.msaa_samples), x_shift, y_shift);
     (void)x_shift;
-    tile_row_height = xenos::kEdramTileHeightSamples >> y_shift;
+    tile_row_height = (xenos::kEdramTileHeightSamples >> y_shift) *
+                      draw_resolution_scale_y();
     requested_height = std::max(
         requested_height,
         ComputeCanonicalRangeTextureHeight(
             key.base_tiles, key.GetPitchTiles(), y_shift,
-            key.base_tiles + lengths[slot], full_height));
+            key.base_tiles + lengths[slot], full_height,
+            draw_resolution_scale_y()));
   }
   if (!sample_count || !requested_height || !full_height) {
     return true;
@@ -682,7 +708,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
     descriptor.textureType = MTLTextureType2DMultisample;
     descriptor.pixelFormat = (MTLPixelFormat)target->pixel_format();
-    descriptor.width = key.GetWidth();
+    descriptor.width = key.GetWidth() * draw_resolution_scale_x();
     descriptor.height = allocation_height;
     descriptor.sampleCount = sample_count;
     descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -698,7 +724,8 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       XELOGW(
           "MetalRenderTargetCache: {}x MSAA companion alloc failed for {} "
           "({}x{})",
-          sample_count, key.GetDebugName(), key.GetWidth(), allocation_height);
+          sample_count, key.GetDebugName(),
+          key.GetWidth() * draw_resolution_scale_x(), allocation_height);
       uint64_t submission =
           MetalCommandProcessor::S7TagsOff()
               ? 0
@@ -1476,9 +1503,9 @@ void* MetalRenderTargetCache::EnsureHostLaneBuffer(void* device_handle) {
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_handle;
   if (host_depth_gate_enabled_ && !f24_ps_engaged_) {
     if (!host_depth_lane_) {
-      // Same index space as the canonical words: 10 MiB of float.
+      // Same index space as the canonical words: one float per word.
       id<MTLBuffer> lane =
-          [device newBufferWithLength:10 * 1024 * 1024
+          [device newBufferWithLength:canonical_edram_size()
                               options:MTLResourceStorageModePrivate];
       lane.label = @"rtcache:host-depth-lane";
       host_depth_lane_ = (__bridge_retained void*)lane;
@@ -1504,8 +1531,10 @@ void* MetalRenderTargetCache::EnsureHostLaneBuffer(void* device_handle) {
 // these counts are the positive evidence promotion needs.
 static void EncodeTwoSourceLaneDiagnostic(
     id<MTLCommandBuffer> command, id<MTLBuffer> canonical, id<MTLBuffer> lane,
-    const std::vector<MetalTwoSourceRecord>& records, bool rne) {
-  constexpr uint32_t kTileBytes = 5120;  // 1280 words per tile
+    const std::vector<MetalTwoSourceRecord>& records, bool rne,
+    uint32_t tile_bytes) {
+  // 1280 words per tile at 1x, times the draw resolution scale.
+  const uint32_t kTileBytes = tile_bytes;
   uint32_t total_bytes = 0;
   for (const MetalTwoSourceRecord& record : records) {
     total_bytes += (record.end_tiles - record.start_tiles) * kTileBytes;
@@ -1547,7 +1576,8 @@ static void EncodeTwoSourceLaneDiagnostic(
         static_cast<const uint8_t*>(readback.contents) + total_bytes);
     uint32_t offset_words = 0;
     for (const MetalTwoSourceRecord& record : records_copy) {
-      uint32_t count = (record.end_tiles - record.start_tiles) * 1280u;
+      uint32_t count = (record.end_tiles - record.start_tiles) *
+                       (kTileBytes / uint32_t(sizeof(uint32_t)));
       uint64_t host_wins = 0, guest_wins = 0, precision_restores = 0;
       for (uint32_t i = 0; i < count; ++i) {
         uint32_t word = words[offset_words + i];
@@ -1607,7 +1637,8 @@ bool MetalRenderTargetCache::EncodeLaneRefresh(
   id<MTLCommandBuffer> command = (__bridge id<MTLCommandBuffer>)command_buffer;
   EdramSurfaceParams params{key.base_tiles, key.GetPitchTiles(),
                             uint32_t(key.msaa_samples), 2u, 0u,
-                            kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+                            canonical_edram_size() /
+                                uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{record.start_tiles, record.end_tiles};
@@ -1743,12 +1774,14 @@ kernel void pack_depth_cov(depth2d<float, access::read> tex [[texture(0)]],
 // just those tiles, leaving every other tile of the real RT intact.
 struct RangeParams { uint start_tiles; uint end_tiles; };
 // Tile index for a host pixel (mirrors the toff math in xe_edram_offset_bytes;
-// fmt_log2 = 0 for 32bpp depth, so the tile grid is 80x16 samples).
+// fmt_log2 = 0 for 32bpp depth, so the tile grid is the 32bpp tile, 80x16
+// samples times the draw resolution scale).
 inline uint xe_edram_tile_of(uint px, uint py, uint base, uint pitch, uint msaa,
                              uint sample) {
   uint2 s = uint2(px, py) << xe_edram_msaa_shifts(msaa);
   s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-  return base + (s.y / 16u) * pitch + (s.x / 80u);
+  return base + (s.y / XE_EDRAM_TILE_HEIGHT_SAMPLES) * pitch +
+         (s.x / XE_EDRAM_TILE_WIDTH_SAMPLES);
 }
 kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
                              texture2d<uint, access::read> sten [[texture(1)]],
@@ -1870,7 +1903,9 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
     std::string src = std::string(kEdramMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
         newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
-                     options:nil
+                     options:EdramMslCompileOptions(
+                                 edram_tile_width_samples(),
+                                 edram_tile_height_samples())
                        error:&err];
     if (!lib) {
       XELOGE("MetalShadow: kEdramMsl failed to compile: {}",
@@ -2065,7 +2100,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -2103,7 +2138,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
       host_depth_lane_) {
     EncodeTwoSourceLaneDiagnostic(
         command, canonical, (__bridge id<MTLBuffer>)host_depth_lane_,
-        two_source, cvars::depth_float24_round);
+        two_source, cvars::depth_float24_round,
+        5120u * draw_resolution_scale_x() * draw_resolution_scale_y());
   }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
@@ -2118,7 +2154,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   encoder.label = @"rtcache:canonical-depth-materialize-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2209,7 +2246,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -2239,7 +2276,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2277,7 +2315,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -2312,7 +2350,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
       host_depth_lane_) {
     EncodeTwoSourceLaneDiagnostic(
         command, canonical, (__bridge id<MTLBuffer>)host_depth_lane_,
-        two_source, cvars::depth_float24_round);
+        two_source, cvars::depth_float24_round,
+        5120u * draw_resolution_scale_x() * draw_resolution_scale_y());
   }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
@@ -2327,7 +2366,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2422,7 +2462,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   EdramSurfaceParams params{
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), depth_format, 0u,
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -2452,7 +2492,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2671,7 +2712,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
                ? 2u
                : 1u;
   };
-  const uint32_t kWords = kCanonicalEdramSize / 4u;
+  const uint32_t kWords = canonical_edram_size() / 4u;
   EdramSurfaceParams sp_src{
       source->key().base_tiles, source->key().GetPitchTiles(),
       uint32_t(source->key().msaa_samples), fmt_is_depth(source), 0u, kWords};
@@ -4204,7 +4245,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
                                                                         : 1u)
           : 0u,
       uint32_t(!is_depth && is_64bpp),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct ResolveParams {
     EdramSurfaceParams surface;
     uint32_t source_x, source_y, dest_y, sample_select;
@@ -4285,7 +4326,7 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
   EdramSurfaceParams surface{
       base_tiles, pitch_tiles, msaa_samples,
       format == uint32_t(xenos::DepthRenderTargetFormat::kD24FS8) ? 2u : 1u,
-      0u, kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      0u, canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct ResolveParams {
     EdramSurfaceParams surface;
     uint32_t source_x, source_y, dest_y, sample_select;
@@ -4383,7 +4424,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
   }
   EdramSurfaceParams surface{
       base_tiles, pitch_tiles, msaa_samples, 0u, uint32_t(is_64bpp),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct ResolveParams {
     EdramSurfaceParams surface;
     uint32_t source_x, source_y, dest_y, sample_select;
@@ -4479,7 +4520,7 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
   EdramSurfaceParams surface{
       base_tiles, surface_pitch_tiles, msaa_samples, uint32_t(is_depth),
       uint32_t(!is_depth && is_64bpp),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct ClearParams {
     EdramSurfaceParams surface;
     uint32_t source_x, source_y, width, height, clear_lo, clear_hi;
@@ -4497,9 +4538,13 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
               offset:0
              atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
+  // The kernel clears every host pixel of the guest rectangle at the draw
+  // resolution scale.
+  uint32_t host_width = width * draw_resolution_scale_x();
+  uint32_t host_height = height * draw_resolution_scale_y();
   MTLSize threads = MTLSizeMake(8, 8, 1);
-  MTLSize groups = MTLSizeMake((width + 7u) / 8u, (height + 7u) / 8u,
-                               1u << msaa_samples);
+  MTLSize groups = MTLSizeMake((host_width + 7u) / 8u,
+                               (host_height + 7u) / 8u, 1u << msaa_samples);
   [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
   [encoder endEncoding];
   // SynchronizeCanonical intentionally keeps the attachment it packed as a
@@ -5110,8 +5155,12 @@ bool MetalRenderTargetCache::EnsureCanonicalMaterializePipeline() {
     // stencil word helpers under one source contract.
     NSString* src = [NSString stringWithUTF8String:kEdramMsl];
     NSError* err = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
-                                                error:&err];
+    id<MTLLibrary> lib =
+        [device newLibraryWithSource:src
+                             options:EdramMslCompileOptions(
+                                         edram_tile_width_samples(),
+                                         edram_tile_height_samples())
+                               error:&err];
     if (!lib) {
       XELOGE("MetalRenderTargetCache: canonical materialize library failed: {}",
              err ? err.localizedDescription.UTF8String : "?");
@@ -5284,7 +5333,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u,
       uint32_t(target->key().Is64bpp()),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -5306,7 +5355,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5352,7 +5402,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u,
       uint32_t(target->key().Is64bpp()),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -5373,7 +5423,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5418,7 +5469,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u,
       uint32_t(target->key().Is64bpp()),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -5441,7 +5492,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
                  : @"rtcache:canonical-color-materialize-msaa-range");
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5494,7 +5546,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), 0u,
       uint32_t(target->key().Is64bpp()),
-      kCanonicalEdramSize / uint32_t(sizeof(uint32_t))};
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
@@ -5517,7 +5569,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height);
+      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
+      draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5529,6 +5582,51 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
   return true;
 }
 
+void MetalRenderTargetCache::ExpandEdramSnapshotToScale(
+    const uint32_t* snapshot, uint32_t* scaled) const {
+  const uint32_t sx = draw_resolution_scale_x(), sy = draw_resolution_scale_y();
+  const uint32_t tile_w = xenos::kEdramTileWidthSamples;
+  const uint32_t tile_h = xenos::kEdramTileHeightSamples;
+  const uint32_t scaled_tile_w = tile_w * sx;
+  const size_t tile_words = size_t(tile_w) * tile_h;
+  const size_t scaled_tile_words = tile_words * sx * sy;
+  for (uint32_t tile = 0; tile < xenos::kEdramTileCount; ++tile) {
+    const uint32_t* src = snapshot + tile * tile_words;
+    uint32_t* dst = scaled + tile * scaled_tile_words;
+    for (uint32_t y = 0; y < tile_h; ++y) {
+      for (uint32_t x = 0; x < tile_w; ++x) {
+        uint32_t word = src[y * tile_w + x];
+        for (uint32_t j = 0; j < sy; ++j) {
+          uint32_t* row = dst + size_t(y * sy + j) * scaled_tile_w + x * sx;
+          for (uint32_t i = 0; i < sx; ++i) {
+            row[i] = word;
+          }
+        }
+      }
+    }
+  }
+}
+
+void MetalRenderTargetCache::CompactScaledEdramToSnapshot(
+    const uint32_t* scaled, uint32_t* snapshot) const {
+  const uint32_t sx = draw_resolution_scale_x(), sy = draw_resolution_scale_y();
+  const uint32_t tile_w = xenos::kEdramTileWidthSamples;
+  const uint32_t tile_h = xenos::kEdramTileHeightSamples;
+  const uint32_t scaled_tile_w = tile_w * sx;
+  const size_t tile_words = size_t(tile_w) * tile_h;
+  const size_t scaled_tile_words = tile_words * sx * sy;
+  for (uint32_t tile = 0; tile < xenos::kEdramTileCount; ++tile) {
+    const uint32_t* src = scaled + tile * scaled_tile_words;
+    uint32_t* dst = snapshot + tile * tile_words;
+    for (uint32_t y = 0; y < tile_h; ++y) {
+      const uint32_t* row = src + size_t(y * sy + (sy >> 1)) * scaled_tile_w;
+      for (uint32_t x = 0; x < tile_w; ++x) {
+        dst[y * tile_w + x] = row[x * sx + (sx >> 1)];
+      }
+    }
+  }
+}
+
 bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
   if (!sample_edram_enabled_ || !canonical_edram_ || !snapshot) {
     return false;
@@ -5536,10 +5634,24 @@ bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
   @autoreleasepool {
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
     id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
-    id<MTLBuffer> staging =
-        [device newBufferWithBytes:snapshot
-                            length:kCanonicalEdramSize
-                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> staging = nil;
+    if (IsDrawResolutionScaled()) {
+      // The snapshot is 1x. Each of its words is replicated into its sx x sy
+      // block of the scaled tile, as raw single-sample words: exact for
+      // single-sample and depth surfaces (the depth column swap commutes with
+      // the replication), approximate for MSAA and 64bpp history, whose scaled
+      // sample positions depend on the format that later reads them.
+      staging = [device newBufferWithLength:canonical_edram_size()
+                                    options:MTLResourceStorageModeShared];
+      if (staging) {
+        ExpandEdramSnapshotToScale(static_cast<const uint32_t*>(snapshot),
+                                   static_cast<uint32_t*>(staging.contents));
+      }
+    } else {
+      staging = [device newBufferWithBytes:snapshot
+                                    length:kCanonicalEdramSize
+                                   options:MTLResourceStorageModeShared];
+    }
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (!staging || !queue) {
       XELOGE("MetalRenderTargetCache: canonical EDRAM restore allocation failed");
@@ -5552,7 +5664,7 @@ bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
              sourceOffset:0
                  toBuffer:canonical
         destinationOffset:0
-                     size:kCanonicalEdramSize];
+                     size:canonical_edram_size()];
     [blit endEncoding];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -5577,7 +5689,7 @@ bool MetalRenderTargetCache::DumpCanonicalEdram(
     id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)command_queue;
     id<MTLBuffer> staging =
-        [device newBufferWithLength:kCanonicalEdramSize
+        [device newBufferWithLength:canonical_edram_size()
                             options:MTLResourceStorageModeShared];
     if (!staging) {
       XELOGE("MetalRenderTargetCache: canonical EDRAM dump allocation failed");
@@ -5590,7 +5702,7 @@ bool MetalRenderTargetCache::DumpCanonicalEdram(
             sourceOffset:0
                 toBuffer:staging
        destinationOffset:0
-                    size:kCanonicalEdramSize];
+                    size:canonical_edram_size()];
     [blit endEncoding];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -5600,7 +5712,15 @@ bool MetalRenderTargetCache::DumpCanonicalEdram(
       return false;
     }
     edram_out.resize(kCanonicalEdramSize);
-    std::memcpy(edram_out.data(), staging.contents, kCanonicalEdramSize);
+    if (IsDrawResolutionScaled()) {
+      // The dump keeps the 1x layout: each word is the representative word of
+      // its sx x sy block, so restoring a dump and dumping again round-trips.
+      CompactScaledEdramToSnapshot(
+          static_cast<const uint32_t*>(staging.contents),
+          reinterpret_cast<uint32_t*>(edram_out.data()));
+    } else {
+      std::memcpy(edram_out.data(), staging.contents, kCanonicalEdramSize);
+    }
   }
   return true;
 }
@@ -5783,6 +5903,20 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   }
   auto* rt = static_cast<MetalRenderTarget*>(full_rt);
   id<MTLTexture> texture = (__bridge id<MTLTexture>)rt->texture();
+  if (IsDrawResolutionScaled()) {
+    // The canonical restore below marks every tile canonical, so the host
+    // render target is rematerialized from it before use; its 1x upload here
+    // would be both superseded and laid out for a 1280-wide texture.
+    if (sample_edram_enabled_ && canonical_edram_ &&
+        RestoreCanonicalEdram(snapshot)) {
+      XELOGI("MetalRenderTargetCache: EDRAM snapshot restored into the scaled "
+             "canonical EDRAM");
+    } else {
+      XELOGW("MetalRenderTargetCache: EDRAM snapshot restore at a draw "
+             "resolution scale requires canonical EDRAM");
+    }
+    return;
+  }
   {
     // Diagnostic: sample the snapshot content (is it real data or a fill
     // pattern?). Words from the depth region (tiles ~16+) and a simple sum.

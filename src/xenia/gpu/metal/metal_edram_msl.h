@@ -35,6 +35,17 @@ static constexpr const char* kEdramMsl = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 
+// Host samples per 32bpp EDRAM tile: 80x16 times the draw resolution scale
+// (implement-metal-draw-resolution-scaling). The live cache defines these per
+// session (MetalRenderTargetCache::EdramMslCompileOptions); a compile without
+// them, such as the conformance harness, gets the unscaled 1x tile.
+#ifndef XE_EDRAM_TILE_WIDTH_SAMPLES
+#define XE_EDRAM_TILE_WIDTH_SAMPLES 80u
+#endif
+#ifndef XE_EDRAM_TILE_HEIGHT_SAMPLES
+#define XE_EDRAM_TILE_HEIGHT_SAMPLES 16u
+#endif
+
 inline uint2 xe_edram_msaa_shifts(uint msaa) {
   return uint2(msaa >= 2u ? 1u : 0u, msaa >= 1u ? 1u : 0u);
 }
@@ -58,15 +69,18 @@ inline uint xe_edram_depth_swap_x(uint x, uint tile_width) {
   return x >= half_width ? x - half_width : x + half_width;
 }
 
-// Shared addresser: edram.xesli XeEdramOffsetBytes at resolution_scale=(1,1),
-// wrap=false. One MSL definition used by BOTH the offset-parity kernel and the
-// canonical pack/unpack kernels, so they cannot drift. msaa: 0=1x,1=2x,2=4x.
+// Shared addresser: edram.xesli XeEdramOffsetBytes with wrap=false, at the
+// session's draw resolution scale (the tile is 80x16 samples at 32bpp times the
+// scale; px/py are host pixels). One MSL definition used by BOTH the
+// offset-parity kernel and the canonical pack/unpack kernels, so they cannot
+// drift. msaa: 0=1x,1=2x,2=4x.
 inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
                                   uint msaa, uint is_depth, uint fmt_log2,
                                   uint sample) {
   uint2 s = uint2(px, py) << xe_edram_msaa_shifts(msaa);
   s += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-  uint2 tsize32 = uint2(80u, 16u);
+  uint2 tsize32 =
+      uint2(XE_EDRAM_TILE_WIDTH_SAMPLES, XE_EDRAM_TILE_HEIGHT_SAMPLES);
   uint2 tsize = tsize32 >> uint2(fmt_log2, 0u);
   uint2 toff = s / tsize;
   uint b = base + toff.y * pitch + toff.x;
@@ -319,8 +333,8 @@ inline uint xe_authority_tile_of(uint px, uint py, constant SurfaceParams& sp,
                                  uint sample) {
   uint2 sample_xy = uint2(px, py) << xe_edram_msaa_shifts(sp.msaa);
   sample_xy += (uint2(sample, sample) >> uint2(1u, 0u)) & 1u;
-  uint tile_width_samples = 80u >> sp.fmt_log2;
-  return sp.base + (sample_xy.y / 16u) * sp.pitch +
+  uint tile_width_samples = XE_EDRAM_TILE_WIDTH_SAMPLES >> sp.fmt_log2;
+  return sp.base + (sample_xy.y / XE_EDRAM_TILE_HEIGHT_SAMPLES) * sp.pitch +
          sample_xy.x / tile_width_samples;
 }
 inline bool xe_authority_in_range(uint px, uint py,
@@ -1123,9 +1137,22 @@ struct CanonicalResolveParams {
   uint dest_offset_y;
   uint dest_extent_bytes;
 };
+// The draw resolution scale (host pixels per guest pixel) implied by the tile
+// geometry, and the host pixel a resolve reads for a guest pixel: the
+// representative (scale >> 1) pixel of its block, the same one the shader
+// translator uses for memory export at scale. Identity at 1x.
+inline uint2 xe_resolution_scale() {
+  return uint2(XE_EDRAM_TILE_WIDTH_SAMPLES / 80u,
+               XE_EDRAM_TILE_HEIGHT_SAMPLES / 16u);
+}
+inline uint2 xe_resolve_host_pixel(uint2 guest_pixel) {
+  uint2 scale = xe_resolution_scale();
+  return guest_pixel * scale + (scale >> 1u);
+}
 inline float4 xe_resolve_read_color(device const uint* canonical,
                                     constant CanonicalResolveParams& p,
-                                    uint2 pixel, uint sample) {
+                                    uint2 guest_pixel, uint sample) {
+  uint2 pixel = xe_resolve_host_pixel(guest_pixel);
   uint idx = xe_edram_offset_bytes(
                  pixel.x, pixel.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, 0u, p.surface.fmt_log2, sample) >>
@@ -1332,8 +1359,9 @@ inline uint xe_tiled2d_offset(uint x, uint y, uint pitch_aligned,
 
 inline uint4 xe_resolve_read_raw(device const uint* canonical,
                                  constant CanonicalResolveParams& p,
-                                 uint2 source) {
+                                 uint2 guest_source) {
   uint sample = min(p.sample_select, 3u);
+  uint2 source = xe_resolve_host_pixel(guest_source);
   uint idx = xe_edram_offset_bytes(
                  source.x, source.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, 0u, p.surface.fmt_log2, sample) >> 2u;
@@ -1443,8 +1471,8 @@ fragment float4 resolve_canonical_depth_fs(
       dest.y - p.dest_y >= p.height) {
     discard_fragment();
   }
-  uint2 source = uint2(p.source_x + dest.x,
-                       p.source_y + dest.y - p.dest_y);
+  uint2 source = xe_resolve_host_pixel(
+      uint2(p.source_x + dest.x, p.source_y + dest.y - p.dest_y));
   uint idx = xe_edram_offset_bytes(
                  source.x, source.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, p.surface.is_depth, 0u,
@@ -1462,7 +1490,8 @@ kernel void resolve_canonical_depth_raw(
   if (gid.x >= p.width || gid.y >= p.height) {
     return;
   }
-  uint2 source = uint2(p.source_x + gid.x, p.source_y + gid.y);
+  uint2 source =
+      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
   uint idx = xe_edram_offset_bytes(
                  source.x, source.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, p.surface.is_depth, 0u, p.sample_select) >>
@@ -1488,10 +1517,12 @@ kernel void resolve_canonical_depth_raw(
   }
   destination[gid.y * p.width + gid.x] = word;
 }
-// Canonical clear scatter. One gid is one logical pixel and one physical MSAA
+// Canonical clear scatter. One gid is one host pixel and one physical MSAA
 // sample; it writes the clear word(s) straight into the surface's own sample
 // layout (including depth's 40-column swap via surface.is_depth), so a cleared
 // canonical EDRAM matches what a resolve of the same surface would read back.
+// source/width/height are guest pixels; the grid covers them at the draw
+// resolution scale, so every host pixel of each guest pixel is cleared.
 struct CanonicalClearParams {
   SurfaceParams surface;
   uint source_x;
@@ -1505,14 +1536,16 @@ kernel void resolve_canonical_clear(
     device uint* canonical [[buffer(0)]],
     constant CanonicalClearParams& p [[buffer(1)]],
     uint3 gid [[thread_position_in_grid]]) {
-  if (gid.x >= p.width || gid.y >= p.height ||
+  uint2 scale = xe_resolution_scale();
+  if (gid.x >= p.width * scale.x || gid.y >= p.height * scale.y ||
       gid.z >= (1u << p.surface.msaa)) {
     return;
   }
+  uint2 host = uint2(p.source_x, p.source_y) * scale + gid.xy;
   uint idx = xe_edram_offset_bytes(
-                 p.source_x + gid.x, p.source_y + gid.y, p.surface.base,
-                 p.surface.pitch, p.surface.msaa, p.surface.is_depth,
-                 p.surface.fmt_log2, gid.z) >>
+                 host.x, host.y, p.surface.base, p.surface.pitch,
+                 p.surface.msaa, p.surface.is_depth, p.surface.fmt_log2,
+                 gid.z) >>
              2u;
   idx %= p.surface.words;
   canonical[idx] = p.clear_lo;
