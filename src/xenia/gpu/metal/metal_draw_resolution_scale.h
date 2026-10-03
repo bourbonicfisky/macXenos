@@ -31,9 +31,9 @@ struct MetalDrawResolutionScale {
   // Whether either configured value was outside
   // 1..kMetalMaxDrawResolutionScale.
   bool clamped = false;
-  // The scale the session renders at. Stays 1x1 until scaled rendering is
-  // enabled, which it is only once render targets, EDRAM, resolves and texture
-  // serving support it.
+  // The scale the session renders at: the requested scale, or 1x1 when
+  // scaled rendering is unavailable (the XE_METAL_DRAW_RESOLUTION_SCALE=0 kill
+  // switch, or a canonical EDRAM raster rollback).
   uint32_t x = 1;
   uint32_t y = 1;
 };

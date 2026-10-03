@@ -71,6 +71,24 @@ constexpr const char* kUpscalingExplainer =
     "image; MetalFX is lighter on the GPU, which matters most on older or "
     "base-model Macs.";
 
+constexpr const char* kInternalResolutionExplainer =
+    "Renders the game itself at a higher resolution, so edges, text and "
+    "distant detail are genuinely sharper - not just stretched. X and Y "
+    "multiply the game's own resolution: most games draw at 1280x720, so 2 "
+    "and 2 renders at 2560x1440 and 3 and 3 at 3840x2160.\n\n"
+    "Cost: the GPU does about X times Y as much pixel work (4x at 2 and 2, "
+    "9x at 3 and 3) and needs about 1 GB more memory at 2 and 2, 3 GB at 3 "
+    "and 3. "
+    "On a base M4, games that already run at their 30 fps cap drop to "
+    "about 10-23 fps at 2 and 2 and 5-11 fps at 3 and 3, depending on "
+    "the game. Pro, Max and Ultra chips have proportionally more room.\n\n"
+    "This is separate from Display upscaling below: upscaling only stretches "
+    "the finished image to your window, while internal resolution adds real "
+    "detail. They combine - the upscaler starts from the sharper image.\n\n"
+    "Takes effect the next time you start a game. A few effects that depend "
+    "on exact pixel positions can look slightly different; set both back to "
+    "1 if a game looks wrong.";
+
 // CURATED allowlist. This is deliberately hand-picked - the cvar registry has
 // no "user-facing" flag, so iterating it would expose dev/debug internals as
 // footguns. Add an entry here to surface a setting; the help text comes from
@@ -81,13 +99,21 @@ const std::vector<Group>& GetGroups() {
        false,
        {
            {"vsync", "VSync", ControlKind::kBool, ApplyTiming::kLive},
-           {"draw_resolution_scale_x", "Resolution scale X",
-            ControlKind::kIntSlider, ApplyTiming::kNextLaunch, 1, 7},
-           {"draw_resolution_scale_y", "Resolution scale Y",
-            ControlKind::kIntSlider, ApplyTiming::kNextLaunch, 1, 7},
            {"anisotropic_override", "Anisotropic filtering override",
             ControlKind::kIntInput, ApplyTiming::kNextLaunch},
        }},
+      // 1..3: the Metal renderer's limit (memory: EDRAM, render targets and
+      // resolve snapshots all grow by X * Y).
+      {"Internal resolution",
+       false,
+       {
+           {"draw_resolution_scale_x", "Resolution scale X",
+            ControlKind::kIntSlider, ApplyTiming::kNextLaunch, 1, 3},
+           {"draw_resolution_scale_y", "Resolution scale Y",
+            ControlKind::kIntSlider, ApplyTiming::kNextLaunch, 1, 3},
+       },
+       false,
+       kInternalResolutionExplainer},
       {"Display upscaling",
        false,
        {

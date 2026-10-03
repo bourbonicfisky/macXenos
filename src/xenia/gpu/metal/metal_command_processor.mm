@@ -1601,26 +1601,21 @@ bool MetalCommandProcessor::SetupContext() {
     return false;
   }
   {
-    // implement-metal-draw-resolution-scaling. Scaled render targets, EDRAM,
-    // resolves and texture serving are not delivered yet, so the session
-    // renders at 1x. XE_METAL_DRAW_RESOLUTION_SCALE_DEV=1 (development only)
-    // applies the requested scale to the wiring that exists so far.
-    const char* dev_value = std::getenv("XE_METAL_DRAW_RESOLUTION_SCALE_DEV");
-    const bool dev_scaled =
-        dev_value && dev_value[0] == '1' && dev_value[1] == '\0';
+    // implement-metal-draw-resolution-scaling: draw_resolution_scale_x/y
+    // (1..3 per axis on Metal) apply at session start.
+    // XE_METAL_DRAW_RESOLUTION_SCALE=0 is the kill switch that keeps every
+    // session at 1x whatever the configuration says.
+    const char* kill_value = std::getenv("XE_METAL_DRAW_RESOLUTION_SCALE");
+    const bool scaling_killed = kill_value && kill_value[0] == '0';
     // Scaling exists only on the canonical EDRAM raster path; its rollbacks
     // keep the session at 1x.
     const bool canonical_raster =
         MetalRenderTargetCache::CanonicalRasterConfigured();
-    if (dev_scaled && !canonical_raster) {
-      XELOGW(
-          "MetalCommandProcessor: draw resolution scaling requires canonical "
-          "EDRAM raster (XE_METAL_SAMPLE_EDRAM / _RASTER); rendering at 1x");
-    }
+    const bool scaled_rendering_enabled = !scaling_killed && canonical_raster;
     const metal::MetalDrawResolutionScale scale =
         metal::ResolveMetalDrawResolutionScale(cvars::draw_resolution_scale_x,
                                                cvars::draw_resolution_scale_y,
-                                               dev_scaled && canonical_raster);
+                                               scaled_rendering_enabled);
     if (scale.clamped) {
       XELOGW(
           "MetalCommandProcessor: draw resolution scale {}x{} clamped to {}x{} "
@@ -1631,14 +1626,15 @@ bool MetalCommandProcessor::SetupContext() {
     }
     if (scale.x != scale.requested_x || scale.y != scale.requested_y) {
       XELOGW(
-          "MetalCommandProcessor: draw resolution scale {}x{} requested; the "
-          "Metal renderer renders at 1x until scaled rendering is delivered",
-          scale.requested_x, scale.requested_y);
+          "MetalCommandProcessor: draw resolution scale {}x{} requested; "
+          "rendering at 1x ({})",
+          scale.requested_x, scale.requested_y,
+          scaling_killed ? "XE_METAL_DRAW_RESOLUTION_SCALE=0"
+                         : "canonical EDRAM raster disabled by "
+                           "XE_METAL_SAMPLE_EDRAM / _RASTER");
     } else if (scale.x != 1 || scale.y != 1) {
-      XELOGW(
-          "MetalCommandProcessor: draw resolution scale {}x{} (development "
-          "override XE_METAL_DRAW_RESOLUTION_SCALE_DEV=1)",
-          scale.x, scale.y);
+      XELOGI("MetalCommandProcessor: draw resolution scale {}x{}", scale.x,
+             scale.y);
     }
     draw_resolution_scale_x_ = scale.x;
     draw_resolution_scale_y_ = scale.y;
