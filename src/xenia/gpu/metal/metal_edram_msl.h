@@ -1149,10 +1149,12 @@ inline uint2 xe_resolve_host_pixel(uint2 guest_pixel) {
   uint2 scale = xe_resolution_scale();
   return guest_pixel * scale + (scale >> 1u);
 }
+// The resolve read helpers below take HOST pixels: the guest-memory kernels
+// pass the representative pixel (xe_resolve_host_pixel), the scaled snapshot
+// passes every host pixel of the block.
 inline float4 xe_resolve_read_color(device const uint* canonical,
                                     constant CanonicalResolveParams& p,
-                                    uint2 guest_pixel, uint sample) {
-  uint2 pixel = xe_resolve_host_pixel(guest_pixel);
+                                    uint2 pixel, uint sample) {
   uint idx = xe_edram_offset_bytes(
                  pixel.x, pixel.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, 0u, p.surface.fmt_log2, sample) >>
@@ -1359,9 +1361,8 @@ inline uint xe_tiled2d_offset(uint x, uint y, uint pitch_aligned,
 
 inline uint4 xe_resolve_read_raw(device const uint* canonical,
                                  constant CanonicalResolveParams& p,
-                                 uint2 guest_source) {
+                                 uint2 source) {
   uint sample = min(p.sample_select, 3u);
-  uint2 source = xe_resolve_host_pixel(guest_source);
   uint idx = xe_edram_offset_bytes(
                  source.x, source.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, 0u, p.surface.fmt_log2, sample) >> 2u;
@@ -1395,7 +1396,9 @@ kernel void resolve_canonical_color_packed(
     constant CanonicalResolveParams& p [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= p.width || gid.y >= p.height) return;
-  uint2 source = uint2(p.source_x + gid.x, p.source_y + gid.y);
+  // Guest memory takes the representative host pixel of each guest pixel.
+  uint2 source =
+      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
   uint byte_offset = (gid.y * p.width + gid.x) << p.dest_bpp_log2;
   if (p.scatter_enable != 0u) {
     // Same texel, guest tiled address. Mirrors the CPU scatter exactly: the
@@ -1449,30 +1452,39 @@ kernel void resolve_canonical_color_packed(
       break;
   }
 }
+// The snapshot is at the draw resolution scale: each of its host pixels copies
+// the same host pixel of the source block (dest/source/width/height are guest
+// pixels). Identity at 1x.
+inline uint2 xe_resolve_snapshot_source(constant CanonicalResolveParams& p,
+                                        uint2 host_dest, uint2 dest) {
+  uint2 scale = xe_resolution_scale();
+  return uint2(p.source_x + dest.x, p.source_y + dest.y - p.dest_y) * scale +
+         host_dest % scale;
+}
 fragment float4 resolve_canonical_color_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
     constant CanonicalResolveParams& p [[buffer(1)]]) {
-  uint2 dest = uint2(in.pos.xy);
+  uint2 host_dest = uint2(in.pos.xy);
+  uint2 dest = host_dest / xe_resolution_scale();
   if (dest.x >= p.width || dest.y < p.dest_y ||
       dest.y - p.dest_y >= p.height) {
     discard_fragment();
   }
-  uint2 source = uint2(p.source_x + dest.x,
-                       p.source_y + dest.y - p.dest_y);
-  return xe_resolve_color_value(canonical, p, source);
+  return xe_resolve_color_value(canonical, p,
+                                xe_resolve_snapshot_source(p, host_dest, dest));
 }
 fragment float4 resolve_canonical_depth_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
     constant CanonicalResolveParams& p [[buffer(1)]]) {
-  uint2 dest = uint2(in.pos.xy);
+  uint2 host_dest = uint2(in.pos.xy);
+  uint2 dest = host_dest / xe_resolution_scale();
   if (dest.x >= p.width || dest.y < p.dest_y ||
       dest.y - p.dest_y >= p.height) {
     discard_fragment();
   }
-  uint2 source = xe_resolve_host_pixel(
-      uint2(p.source_x + dest.x, p.source_y + dest.y - p.dest_y));
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
   uint idx = xe_edram_offset_bytes(
                  source.x, source.y, p.surface.base, p.surface.pitch,
                  p.surface.msaa, p.surface.is_depth, 0u,

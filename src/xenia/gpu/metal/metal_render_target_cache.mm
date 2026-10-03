@@ -4228,13 +4228,17 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
                 .first;
   }
   id<MTLTexture> destination = (__bridge id<MTLTexture>)dest_snapshot;
-  if (dest_y_offset >= destination.height) {
+  // The snapshot texture is at the draw resolution scale; the resolve's
+  // offsets and extents are guest pixels.
+  const uint32_t sx = draw_resolution_scale_x(), sy = draw_resolution_scale_y();
+  const uint32_t guest_dest_width = uint32_t(destination.width) / sx;
+  const uint32_t guest_dest_height = uint32_t(destination.height) / sy;
+  if (dest_y_offset >= guest_dest_height) {
     return false;
   }
-  uint32_t clipped_width =
-      std::min<uint32_t>(width, uint32_t(destination.width));
-  uint32_t clipped_height = std::min<uint32_t>(
-      height, uint32_t(destination.height) - dest_y_offset);
+  uint32_t clipped_width = std::min<uint32_t>(width, guest_dest_width);
+  uint32_t clipped_height =
+      std::min<uint32_t>(height, guest_dest_height - dest_y_offset);
   if (!clipped_width || !clipped_height) {
     return false;
   }
@@ -4282,8 +4286,9 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
                            : @"rtcache:canonical-color-resolve";
   [encoder setRenderPipelineState:
                (__bridge id<MTLRenderPipelineState>)found->second];
-  [encoder setScissorRect:MTLScissorRect{0, dest_y_offset, clipped_width,
-                                         clipped_height}];
+  [encoder setScissorRect:MTLScissorRect{0, dest_y_offset * sy,
+                                         clipped_width * sx,
+                                         clipped_height * sy}];
   [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)canonical_edram_
                        offset:0
                      atIndex:0];
@@ -4866,8 +4871,10 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   // 2D array so the texture cache (ForceTextureArray reads) can sample it.
   desc.textureType = MTLTextureType2DArray;
   desc.pixelFormat = (MTLPixelFormat)pixel_format;
-  desc.width = width;
-  desc.height = height;
+  // At the draw resolution scale; the record below keeps guest dimensions,
+  // which the serving rules compare.
+  desc.width = width * draw_resolution_scale_x();
+  desc.height = height * draw_resolution_scale_y();
   desc.arrayLength = 1;
   desc.mipmapLevelCount = 1;
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;

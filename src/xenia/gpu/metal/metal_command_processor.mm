@@ -2176,6 +2176,10 @@ void MetalCommandProcessor::ShutdownContext() {
   // down so a run killed during teardown still leaves a complete record. The
   // periodic samples are progress; this line is the measurement.
   XELOGI("{}", GetMetalShaderBuildCensus().Report("final"));
+  if (ScaleCoverageCensusEnabled()) {
+    // The headless trace-dump tool exits cleanly before any periodic tick.
+    metal::ScaleCoverageCensus::Get().Dump(0);
+  }
   if (ServingCensusEnabled()) {
     // The headless trace-dump tool DOES exit cleanly, so this is the only
     // emission a single-frame trace run ever reaches (the swap-tick dump needs
@@ -7474,6 +7478,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                   system_constants.texture_integer_scale_bits,
                                   kMetalIntegerScaleSlotCount);
         }
+        // Draw resolution scaling: a fetch served from a resolve snapshot reads
+        // the scaled snapshot, so the shader applies the scaled texel-offset
+        // convention to it. Decided by the shared serve classification, the
+        // same one GetTextureSlot serves from; every other source is 1x.
+        if ((draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) &&
+            texture_cache_) {
+          ResolvedFetchService service =
+              texture_cache_->ClassifyFetchService(fetch, binding.is_signed);
+          if (service == ResolvedFetchService::kBridgeSnapshot ||
+              service == ResolvedFetchService::kExactCoverSnapshot) {
+            system_constants.textures_resolution_scaled |= uint32_t(1) << fc;
+          }
+        }
         // Gamma-parity diagnostic: the game's signs describe the raw bytes
         // hardware resolves preserve — compare against the resolve source's
         // gamma-ness we recorded (see IssueCopy).
@@ -9875,8 +9892,13 @@ bool MetalCommandProcessor::IssueCopy() {
             dest_pixel_format == MetalRenderTargetCache::kColorFormat ||
             dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
             dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float);
+        // At a draw resolution scale the snapshot is scaled, so only the
+        // canonical kernel (which reads representative pixels) can write guest
+        // memory; the snapshot blit is a 1x-only source.
         const bool writeback_source_available =
-            canonical_packed || (resolved && snap && legacy_blit_format);
+            canonical_packed ||
+            (resolved && snap && legacy_blit_format &&
+             draw_resolution_scale_x_ == 1 && draw_resolution_scale_y_ == 1);
         // TASK 6.3: which gate decides whether the INCUMBENT writes this
         // destination. The byte comparison showed Metal leaves the implicated
         // wide-pitch dest ~98.7% zero, so "baseline" there may be UNWRITTEN
@@ -13228,9 +13250,12 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   bool canonical_ram_backed_snapshot = false;
   if (fb_snapshot && texture_cache_) {
     id<MTLTexture> snapshot_texture = (__bridge id<MTLTexture>)fb_snapshot;
+    // Snapshot textures are at the draw resolution scale; compare guest pixels.
     bool snapshot_covers_frontbuffer =
-        snapshot_texture.width >= requested_present_width &&
-        snapshot_texture.height >= requested_present_height;
+        snapshot_texture.width / draw_resolution_scale_x_ >=
+            requested_present_width &&
+        snapshot_texture.height / draw_resolution_scale_y_ >=
+            requested_present_height;
     partial_ram_backed_snapshot =
         !snapshot_covers_frontbuffer &&
         !texture_cache_->BridgeServes(frontbuffer_ptr,
