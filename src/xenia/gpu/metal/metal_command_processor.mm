@@ -118,13 +118,16 @@ DEFINE_bool(
 UPDATE_from_bool(metal_present_format_convert, 2026, 7, 29, 13, false);
 
 DEFINE_bool(
-    metal_pass_attachments_by_use, false,
+    metal_pass_attachments_by_use, true,
     "Bind a Metal draw pass's colour, depth and stencil attachments only when "
     "a draw in the pass can read or write them, so the Apple GPU skips the "
-    "tile load and store of untouched attachments (HUD and post-process "
-    "passes leave depth and stencil alone). Attachment contents are "
-    "unchanged. XE_METAL_PASS_ATTACHMENTS=0/1 overrides this setting; "
-    "XE_METAL_PASS_ATTACHMENTS_LEGACY=1 forces the bind-everything policy.",
+    "tile load and store of untouched attachments (mostly the stencil plane "
+    "of passes that never test stencil). The set is learned per pass so pass "
+    "boundaries stay where they were; attachment contents are unchanged. "
+    "Promoted 2026-10-03 (Just Cause 2 at 2x2 draw scale 10.5 -> 10.8 fps on "
+    "an M4, corpus identical). XE_METAL_PASS_ATTACHMENTS=0/1 overrides this "
+    "setting; XE_METAL_PASS_ATTACHMENTS_LEGACY=1 forces the bind-everything "
+    "policy.",
     "GPU");
 
 DEFINE_bool(
@@ -2713,6 +2716,9 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       }
     }
     encoder_bound_attachments_ = bound;
+    encoder_pass_signature_ = pending_pass_signature_;
+    encoder_depth_stencil_state_ = nullptr;
+    encoder_stencil_ref_front_ = encoder_stencil_ref_back_ = ~0u;
     if (PassCensusEnabled()) {
       pass_census_.BeginPass(want_key, bound, attachment_bytes);
     }
@@ -6613,16 +6619,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return v && v[0] == '1' && v[1] == '\0';
       }();
       const uint64_t key = PassAttachmentKey(dummy_depth, false);
+      const bool same_key_open = frame_open_ && encoder_attachment_key_ == key;
+      // Pass signature: the open pass's when this draw joins it, else the key
+      // mixed with this (first) draw's shader pair.
+      uint64_t signature = same_key_open ? encoder_pass_signature_ : key;
+      if (!same_key_open) {
+        signature ^= (vertex_shader ? vertex_shader->ucode_data_hash() : 0) *
+                     0x9E3779B97F4A7C15ull;
+        signature ^= (pixel_shader ? pixel_shader->ucode_data_hash() : 0) *
+                     0xC2B2AE3D27D4EB4Full;
+      }
+      pending_pass_signature_ = signature;
       if (!s_hysteresis_only) {
-        uint32_t& learned = pass_learned_use_[key];
+        uint32_t& learned = pass_learned_use_[signature];
         learned |= used;
         used = learned & pass_present;
       }
       // A draw that touches nothing present keeps the legacy set (a pass needs
       // an attachment; the census counts how often this happens).
       metal::MetalPassBindingDecision decision = metal::DecideMetalPassBinding(
-          pass_present, used, frame_open_ && encoder_attachment_key_ == key,
-          encoder_bound_attachments_);
+          pass_present, used, same_key_open, encoder_bound_attachments_);
       pass_bound = decision.bound;
     }
     // Attribution aid: XE_METAL_PASS_ATTACHMENTS_DROPPABLE=<hex set> limits
@@ -8960,14 +8976,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     void* depth_state = GetOrCreateDepthStencilState(
         norm_depth.value, stencil_ref_mask.value, stencil_ref_mask_back.value);
     if (depth_state) {
-      [encoder
-          setDepthStencilState:(__bridge id<MTLDepthStencilState>)depth_state];
-      if (blend_stencil.stencil_enabled) {
+      // Encoder state persists across draws; skip re-setting what the open
+      // encoder already carries.
+      if (depth_state != encoder_depth_stencil_state_) {
+        [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                          depth_state];
+        encoder_depth_stencil_state_ = depth_state;
+      }
+      if (blend_stencil.stencil_enabled &&
+          (blend_stencil.stencil_reference_front != encoder_stencil_ref_front_ ||
+           blend_stencil.stencil_reference_back != encoder_stencil_ref_back_)) {
         [encoder
             setStencilFrontReferenceValue:
                 blend_stencil.stencil_reference_front
                       backReferenceValue:
                           blend_stencil.stencil_reference_back];
+        encoder_stencil_ref_front_ = blend_stencil.stencil_reference_front;
+        encoder_stencil_ref_back_ = blend_stencil.stencil_reference_back;
       }
     }
   }

@@ -497,6 +497,18 @@ class MetalCommandProcessor : public CommandProcessor {
   // key never touches stay unbound. Bounded by the number of attachment
   // configurations a title uses.
   std::unordered_map<uint64_t, uint32_t> pass_learned_use_;
+  // The learned-set signature of the open pass and of the pass the next draw
+  // opens: the attachment key mixed with the pass's first draw's shader pair,
+  // so passes of one key that differ in content (a stencil-masked UI pass and
+  // a stencil-free post pass over the same targets) learn separately.
+  uint64_t encoder_pass_signature_ = 0;
+  uint64_t pending_pass_signature_ = 0;
+  // Per-encoder redundant-state elision: the depth-stencil state and stencil
+  // references last set on the open encoder (Metal's validation layer counts
+  // ~2000 redundant setDepthStencilState calls per RDR frame).
+  void* encoder_depth_stencil_state_ = nullptr;
+  uint32_t encoder_stencil_ref_front_ = ~0u;
+  uint32_t encoder_stencil_ref_back_ = ~0u;
   // Draw-pass census (XE_METAL_PASS_CENSUS=1): fed at every pass begin, draw
   // and pass end; reported on the frame-stats tick and at lifecycle sites.
   metal::MetalPassCensus pass_census_;
