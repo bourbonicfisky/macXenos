@@ -47,6 +47,7 @@ namespace test {
 namespace {
 
 using metal::ComputeCanonicalRangeTextureHeight;
+using metal::ComputeCanonicalRangeTextureRowStart;
 using metal::ComputeMsaaCompanionAllocationHeight;
 using metal::MetalEdramAuthorityTracker;
 using metal::ParseMetalEnvironmentFlag;
@@ -2824,6 +2825,18 @@ TEST_CASE("Metal canonical range work height excludes untouched lower rows",
         16u);
   CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 9999u, 8192u) ==
         8192u);
+  // Rows above the first tile row of a range: none inside the first row, one
+  // 16-sample tile row at 1x, halved by the 2x MSAA sample shift, doubled by a
+  // vertical draw resolution scale of 2, and clamped to the texture.
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 0u, 0u, 2048u) == 0u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 0u, 15u, 2048u) == 0u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 0u, 16u, 2048u) == 16u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 1u, 32u, 1024u) == 16u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(174u, 2u, 1u, 178u, 8192u) ==
+        16u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 0u, 16u, 4096u, 2u) ==
+        32u);
+  CHECK(ComputeCanonicalRangeTextureRowStart(0u, 16u, 0u, 9999u, 64u) == 64u);
   CHECK(ComputeCanonicalRangeTextureHeight(174u, 0u, 1u, 178u, 8192u) == 0u);
   CHECK(ComputeCanonicalRangeTextureHeight(174u, 2u, 1u, 174u, 8192u) == 0u);
 }

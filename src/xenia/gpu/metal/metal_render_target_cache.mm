@@ -119,15 +119,39 @@ void GetMsaaShifts(uint32_t msaa_samples, uint32_t& x_shift,
   x_shift = shifts.x;
   y_shift = shifts.y;
 }
+// XE_METAL_RANGE_CENSUS=1: for every range operation, the rows it dispatched
+// (clipped at the end tile) against the rows above its first tile row that it
+// could also have skipped. Logged at shutdown.
+struct RangeDispatchCensus {
+  uint64_t dispatches = 0;
+  uint64_t rows_full = 0;
+  uint64_t rows_dispatched = 0;
+  uint64_t rows_skippable = 0;
+};
+RangeDispatchCensus s_range_census;
+const bool s_range_census_enabled =
+    std::getenv("XE_METAL_RANGE_CENSUS") != nullptr;
 NSUInteger GetCanonicalRangeTextureHeight(
     uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
-    uint32_t end_tiles, NSUInteger texture_height, uint32_t scale_y) {
+    uint32_t start_tiles, uint32_t end_tiles, NSUInteger texture_height,
+    uint32_t scale_y) {
   uint32_t x_shift, y_shift;
   GetMsaaShifts(msaa_samples, x_shift, y_shift);
   (void)x_shift;
-  return ComputeCanonicalRangeTextureHeight(base_tiles, pitch_tiles, y_shift,
-                                            end_tiles, uint32_t(texture_height),
-                                            scale_y);
+  uint32_t height = ComputeCanonicalRangeTextureHeight(
+      base_tiles, pitch_tiles, y_shift, end_tiles, uint32_t(texture_height),
+      scale_y);
+  if (s_range_census_enabled) {
+    uint32_t row_start = std::min(
+        height, ComputeCanonicalRangeTextureRowStart(
+                    base_tiles, pitch_tiles, y_shift, start_tiles,
+                    uint32_t(texture_height), scale_y));
+    ++s_range_census.dispatches;
+    s_range_census.rows_full += texture_height;
+    s_range_census.rows_dispatched += height;
+    s_range_census.rows_skippable += row_start;
+  }
+  return height;
 }
 // Compile options defining the scaled EDRAM tile geometry for the canonical
 // EDRAM MSL (kEdramMsl's XE_EDRAM_TILE_WIDTH/HEIGHT_SAMPLES). At 1x they equal
@@ -384,6 +408,19 @@ bool MetalRenderTargetCache::Initialize() {
 }
 
 void MetalRenderTargetCache::Shutdown() {
+  if (s_range_census_enabled && s_range_census.dispatches) {
+    XELOGI(
+        "MetalRangeCensus final: dispatches {} full_rows {} dispatched_rows {} "
+        "({:.1f}% of full) skippable_above_start {} ({:.1f}% of dispatched)",
+        s_range_census.dispatches, s_range_census.rows_full,
+        s_range_census.rows_dispatched,
+        100.0 * double(s_range_census.rows_dispatched) /
+            double(s_range_census.rows_full),
+        s_range_census.rows_skippable,
+        100.0 * double(s_range_census.rows_skippable) /
+            double(std::max<uint64_t>(s_range_census.rows_dispatched, 1)));
+    s_range_census = RangeDispatchCensus();
+  }
   for (auto& pair : resolve_snapshots_) {
     if (pair.second.texture) {
       id<MTLTexture> released =
@@ -1654,7 +1691,17 @@ bool MetalRenderTargetCache::EncodeLaneRefresh(
              atIndex:0];
   [encoder setBytes:&params length:sizeof(params) atIndex:1];
   [encoder setBytes:&range length:sizeof(range) atIndex:2];
-  [encoder dispatchThreads:MTLSizeMake(texture.width, texture.height,
+  // The kernel guards every thread by tile range; dispatch only the rows the
+  // range can reach, as the pack and materialize kernels do.
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      key.base_tiles, key.GetPitchTiles(), uint32_t(key.msaa_samples),
+      record.start_tiles, record.end_tiles, texture.height,
+      draw_resolution_scale_y());
+  if (!work_height) {
+    [encoder endEncoding];
+    return false;
+  }
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height,
                                        ms ? texture.sampleCount : 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
@@ -2154,8 +2201,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   encoder.label = @"rtcache:canonical-depth-materialize-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2276,8 +2323,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2366,8 +2413,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -2492,8 +2539,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5395,8 +5442,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5463,8 +5510,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
   NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5532,8 +5579,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
                  : @"rtcache:canonical-color-materialize-msaa-range");
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;
@@ -5609,8 +5656,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       pipeline.maxTotalThreadsPerThreadgroup / thread_width;
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), end_tiles, texture.height,
-      draw_resolution_scale_y());
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
   if (!work_height) {
     [encoder endEncoding];
     return false;

@@ -61,6 +61,23 @@ inline uint32_t ComputeCanonicalRangeTextureHeight(
   return uint32_t(std::min<uint64_t>(pixel_rows, texture_height));
 }
 
+// Returns the top-aligned texture height every pixel of which lies in a
+// physical tile row strictly above the row holding start_tiles: rows a range
+// operation can skip from the top. Pairs with
+// ComputeCanonicalRangeTextureHeight to bound a range operation to the rows
+// [start, end) can touch. The range shaders keep their exact start/end guards.
+inline uint32_t ComputeCanonicalRangeTextureRowStart(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_y_shift,
+    uint32_t start_tiles, uint32_t texture_height, uint32_t scale_y = 1) {
+  if (!pitch_tiles || start_tiles <= base_tiles || !texture_height) {
+    return 0u;
+  }
+  uint64_t tile_rows = (uint64_t(start_tiles) - base_tiles) / pitch_tiles;
+  uint64_t pixel_rows =
+      ((tile_rows * xenos::kEdramTileHeightSamples) >> msaa_y_shift) * scale_y;
+  return uint32_t(std::min<uint64_t>(pixel_rows, texture_height));
+}
+
 // Chooses the height for a real-MSAA working view that resolves into the
 // persistent single-sample render target. Metal requires the multisample and
 // resolve attachments to have identical dimensions, so any non-empty use must
