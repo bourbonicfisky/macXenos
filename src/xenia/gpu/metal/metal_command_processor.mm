@@ -10868,6 +10868,65 @@ bool MetalCommandProcessor::IssueCopy() {
       }
       void* snap = parent_snap;
       bool is_new_snapshot = false;
+      uint32_t strip_x_offset = 0;
+      // Column-strip depth destination (2026-10-03, Viva Pinata title
+      // screen): the guest resolves a 1280-pitch scene depth as two 640x720
+      // columns, the second at the tiled address of x = 640, and samples the
+      // FIRST column's base as the whole 1280x720 buffer. Depth is always
+      // served from its snapshot, so the parent object must hold both
+      // columns: allocate it at the destination pitch and resolve each column
+      // at its x. The later column does not register its own base (it would
+      // alias the parent without the x offset). XE_METAL_DEPTH_COLUMN_JOIN=0
+      // restores one snapshot per column base.
+      static const bool s_depth_column_join = metal::ParseMetalEnvironmentFlag(
+          std::getenv("XE_METAL_DEPTH_COLUMN_JOIN"), true);
+      if (!snap && s_depth_column_join &&
+          render_target_cache_->sample_edram_raster_enabled() &&
+          !resolve_info.copy_dest_info.copy_dest_array) {
+        const auto& dca = resolve_info.copy_dest_coordinate_info;
+        uint32_t dest_pitch = uint32_t(dca.pitch_aligned_div_32) << 5;
+        if (dest_pitch > rw && !dca.offset_x_div_8 && !dca.offset_y_div_8) {
+          uint32_t base0 = resolve_info.copy_dest_base;
+          uint32_t x = 0;
+          for (const auto& column : depth_column_pitches_) {
+            if (column.second != dest_pitch ||
+                resolve_info.copy_dest_base <= column.first) {
+              continue;
+            }
+            uint32_t delta = resolve_info.copy_dest_base - column.first;
+            for (uint32_t xx = 32; xx < dest_pitch; xx += 32) {
+              if (uint32_t(texture_address::Tiled2D(int32_t(xx), 0, dest_pitch,
+                                                    2)) == delta) {
+                base0 = column.first;
+                x = xx;
+                break;
+              }
+            }
+            if (x) {
+              break;
+            }
+          }
+          if (x + rw <= dest_pitch) {
+            void* column_snap = render_target_cache_->EnsureResolveSnapshot(
+                base0, dest_pitch, rh, MTLPixelFormatR32Float);
+            if (column_snap) {
+              if (!depth_column_pitches_.count(base0)) {
+                XELOGI(
+                    "MetalResolve: depth column parent base={:08X} pitch={} "
+                    "rows={} (first column {}x{})",
+                    base0, dest_pitch, rh, rw, rh);
+              }
+              depth_column_pitches_[base0] = dest_pitch;
+              snap = column_snap;
+              strip_x_offset = x;
+              strip_y_offset = 0;
+              // The x = 0 column (re)registers the parent base; a later column
+              // is a join and must not register.
+              is_new_snapshot = x == 0;
+            }
+          }
+        }
+      }
       if (!snap) {
         snap = render_target_cache_->EnsureResolveSnapshot(
             resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
@@ -10901,7 +10960,7 @@ bool MetalCommandProcessor::IssueCopy() {
                        /*dest_swap=*/false,
                        /*raw_copy=*/false,
                        snap, MTLPixelFormatR32Float, rw, rh, strip_y_offset,
-                       1.0f);
+                       1.0f, strip_x_offset);
       } else if (snap) {
         resolved = render_target_cache_->ResolveDepthToSnapshot(
             frame_command_buffer_, span_base, span_row_length, span_rows,
@@ -11041,7 +11100,7 @@ bool MetalCommandProcessor::IssueCopy() {
             [wb_blit copyFromTexture:(__bridge id<MTLTexture>)snap
                           sourceSlice:0
                           sourceLevel:0
-                         sourceOrigin:MTLOriginMake(0, strip_y_offset, 0)
+                         sourceOrigin:MTLOriginMake(strip_x_offset, strip_y_offset, 0)
                            sourceSize:MTLSizeMake(rw, rh, 1)
                              toBuffer:staging
                     destinationOffset:0

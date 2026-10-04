@@ -398,6 +398,10 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t draw_resolution_scale_y_ = 1;
   // Draw resolution scaling: column assemblies by x = 0 base -> dest pitch.
   std::unordered_map<uint32_t, uint32_t> scaled_assembly_pitches_;
+  // Depth column strips: x = 0 base -> dest pitch of a depth destination the
+  // guest resolves as vertical columns (Viva Pinata's 2 x 640x720 strips of a
+  // 1280-pitch scene depth, fetched 1280x720 from the first column's base).
+  std::unordered_map<uint32_t, uint32_t> depth_column_pitches_;
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
