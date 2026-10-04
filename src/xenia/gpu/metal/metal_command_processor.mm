@@ -131,6 +131,15 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
+    metal_memexport_raster, false,
+    "Route memory exports from vertex shaders that also rasterize (the "
+    "exports of a draw that has a render target bound). Required by titles "
+    "that copy data through such draws, for example Child of Eden's video "
+    "decoder; costs about 11% on Viva Pinata, so it is off by default and "
+    "enabled per title through the title's config file. "
+    "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+    "GPU");
+DEFINE_bool(
     metal_msaa_clear_fold, true,
     "Draw the Xbox 360's 2x/4x MSAA fast clears straight into the matching "
     "1x view of the same EDRAM instead of copying the whole surface out and "
@@ -389,6 +398,11 @@ bool MetalTessellationGateOn() {
 bool MetalMemexportRasterGateOn() {
   static const bool s_gate_on = [] {
     const char* value = std::getenv("XE_METAL_MEMEXPORT_RASTER");
+    if (!value || !value[0]) {
+      // Unset: the config option (per-title files set it for the titles
+      // that need the route).
+      return cvars::metal_memexport_raster;
+    }
     MetalMemexportRasterGate gate = ParseMetalMemexportRasterGate(value);
     if (gate == MetalMemexportRasterGate::kMalformed) {
       XELOGW(
@@ -1802,6 +1816,30 @@ bool MetalCommandProcessor::SetupContext() {
               uint64_t(me.base_address) + me.size_bytes > start) {
             out->emplace_back(me.base_address, me.size_bytes);
           }
+        }
+        // Only bytes the lazy table still OWNS are the GPU's newest. A page
+        // it has published holds the same bytes in RAM, and a CPU write after
+        // that publication makes RAM newer: skipping the upload there fed
+        // Child of Eden's video copy (a vertex buffer the game placed over a
+        // retired 832x624 resolve) the resolve's bytes instead of the decoded
+        // frame. XE_METAL_GPU_CURRENT_OWNED_ONLY=0 restores whole-span skips.
+        // Not in trace playback: a trace restore replays capture-time RAM, not
+        // a newer guest write, and the frame's GPU output must survive it
+        // (e63bb82d4); the whole-span skip is what keeps playback exact.
+        static const bool s_owned_only = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_GPU_CURRENT_OWNED_ONLY"), true);
+        if (s_owned_only && !trace_playback_context() &&
+            lazy_read_callback_handle_ && !out->empty()) {
+          std::vector<std::pair<uint32_t, uint32_t>> owned;
+          for (const auto& span : *out) {
+            uint32_t s0 = std::max(span.first, start);
+            uint64_t s1 =
+                std::min<uint64_t>(uint64_t(span.first) + span.second, end);
+            if (s0 < s1) {
+              lazy_publication_.OwnedRanges(s0, uint32_t(s1 - s0), &owned);
+            }
+          }
+          out->swap(owned);
         }
         // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a pending span the
         // lazy table no longer owns was already published to RAM, so RAM and
@@ -5934,6 +5972,36 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vertex_fetch_dependencies.push_back(
           {fetch_constant, fetch, *range});
       vertex_dependency_ranges.Add(*range);
+      // XE_METAL_MEMEXPORT_LOG: a memexport producer's vertex input as the
+      // CPU and the GPU buffer see it (Child of Eden's video copy exported a
+      // constant live while the headless replay was right).
+      if (s_memexport_log && vertex_shader->memexport_eM_written()) {
+        uint32_t pending_overlaps = 0;
+        for (const metal::PendingProducer& p : SnapshotPendingProducers()) {
+          if (p.range.Overlaps(*range)) {
+            ++pending_overlaps;
+          }
+        }
+        const uint32_t* ram =
+            memory_->TranslatePhysical<const uint32_t*>(fetch_base);
+        const uint32_t* buf = nullptr;
+        if (shared_memory_) {
+          id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          if (b && b.storageMode != MTLStorageModePrivate && b.contents) {
+            buf = reinterpret_cast<const uint32_t*>(
+                static_cast<const uint8_t*>(b.contents) + fetch_base);
+          }
+        }
+        XELOGW(
+            "MetalMemexportVfetch draw={} fc={} base={:08X} size={} "
+            "pending_overlaps={} ram={:08X} {:08X} {:08X} {:08X} "
+            "buf={:08X} {:08X} {:08X} {:08X}",
+            trace_draw_index_, fetch_constant, fetch_base,
+            uint32_t(fetch.size) * 4, pending_overlaps, ram ? ram[0] : 0,
+            ram ? ram[1] : 0, ram ? ram[2] : 0, ram ? ram[3] : 0,
+            buf ? buf[0] : 0, buf ? buf[1] : 0, buf ? buf[2] : 0,
+            buf ? buf[3] : 0);
+      }
     }
   }
   {

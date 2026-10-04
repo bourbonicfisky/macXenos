@@ -306,9 +306,23 @@ void SetupConfig(const std::filesystem::path& config_folder) {
 }
 
 void LoadGameConfig(const std::string_view title_id) {
+  const auto file_name = std::string(title_id) + game_config_suffix;
+  // Built-in per-title defaults shipped with the program (docs/game_configs:
+  // beside a bare binary as game_configs/, inside the app bundle as
+  // Contents/Resources/game_configs/). Loaded first so the user's own file in
+  // the storage root's config/ folder overrides them.
+  const auto exe_folder = xe::filesystem::GetExecutableFolder();
+  for (const auto& folder :
+       {exe_folder / "game_configs",
+        exe_folder / ".." / "Resources" / "game_configs"}) {
+    const auto bundled_path = folder / file_name;
+    if (std::filesystem::exists(bundled_path)) {
+      ReadGameConfig(bundled_path);
+      break;
+    }
+  }
   const auto game_config_folder = config_folder / "config";
-  const auto game_config_path =
-      game_config_folder / (std::string(title_id) + game_config_suffix);
+  const auto game_config_path = game_config_folder / file_name;
   if (std::filesystem::exists(game_config_path)) {
     ReadGameConfig(game_config_path);
   }

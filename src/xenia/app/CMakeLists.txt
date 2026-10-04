@@ -170,3 +170,11 @@ if(APPLE)
     COMMENT "Ad-hoc signing xenia_canary with JIT entitlements"
   )
 endif()
+
+# Built-in per-title configs (docs/game_configs/<title id>.config.toml) are
+# read from game_configs/ beside the binary (config::LoadGameConfig); the
+# bundle packager copies the same folder into Contents/Resources.
+add_custom_command(TARGET xenia-app POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xenia-app>/game_configs"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/docs/game_configs" "$<TARGET_FILE_DIR:xenia-app>/game_configs"
+  COMMENT "Copying built-in per-title configs")

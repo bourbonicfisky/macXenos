@@ -1,0 +1,7 @@
+# macXenos built-in per-title config: Child of Eden (5553084C).
+# The title's video decoder copies each decoded frame to its texture planes
+# through a vertex shader that also rasterizes (a point-list draw exporting
+# 16 dwords per point); that memexport class is off by default for its cost
+# elsewhere. Without it the intro and the in-game videos render flat green.
+[GPU]
+metal_memexport_raster = true

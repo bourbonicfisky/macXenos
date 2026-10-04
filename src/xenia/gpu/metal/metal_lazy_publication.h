@@ -177,6 +177,43 @@ class MetalLazyPublication {
     return it != owner_pages_.end() && !it->second.empty();
   }
 
+  // Appends the page-granular sub-ranges of [phys_start, phys_start + length)
+  // that some armed owner still holds (GPU output not yet published to RAM),
+  // coalesced and clipped to the query. Pages the table does not own have
+  // been published (RAM holds the GPU bytes) or were never GPU-written.
+  void OwnedRanges(uint32_t phys_start, uint32_t length,
+                   std::vector<std::pair<uint32_t, uint32_t>>* out) const {
+    if (!length) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t end = uint64_t(phys_start) + length;
+    uint32_t first = phys_start >> kPageShift;
+    uint32_t last = uint32_t((end - 1) >> kPageShift);
+    uint64_t run_start = 0, run_end = 0;
+    for (uint32_t page = first; page <= last; ++page) {
+      auto it = pages_.find(page);
+      if (it == pages_.end() || it->second.empty()) {
+        continue;
+      }
+      uint64_t p0 = std::max<uint64_t>(uint64_t(page) << kPageShift,
+                                       phys_start);
+      uint64_t p1 = std::min<uint64_t>(uint64_t(page + 1) << kPageShift, end);
+      if (run_end && p0 == run_end) {
+        run_end = p1;
+      } else {
+        if (run_end) {
+          out->emplace_back(uint32_t(run_start), uint32_t(run_end - run_start));
+        }
+        run_start = p0;
+        run_end = p1;
+      }
+    }
+    if (run_end) {
+      out->emplace_back(uint32_t(run_start), uint32_t(run_end - run_start));
+    }
+  }
+
   // Returns the oldest armed owner registered before `sequence` whose byte
   // range overlaps [phys_start, phys_start + length), or 0. Such an owner's
   // first-access copy would land over a newer record's bytes published to RAM
