@@ -308,6 +308,22 @@ class Emulator {
   xe::Delegate<> on_terminate;
   xe::Delegate<> on_exit;
 
+  // A title asked for another title (or itself) to be launched
+  // (XamLoaderLaunchTitle). The host app decides how: on macOS it spawns a
+  // fresh process with the loader data on its command line. Parameters: host
+  // path of the media to boot, guest launch module (empty = default), launch
+  // flags, launch data bytes. Called from a non-guest thread; returns only on
+  // failure (a successful relaunch ends this process).
+  using LaunchNewTitleCallback =
+      std::function<void(const std::string&, const std::string&, uint32_t,
+                         const std::vector<uint8_t>&)>;
+  const LaunchNewTitleCallback& on_launch_new_title() const {
+    return on_launch_new_title_;
+  }
+  void set_on_launch_new_title(LaunchNewTitleCallback callback) {
+    on_launch_new_title_ = std::move(callback);
+  }
+
  private:
   enum : uint64_t { EmulatorFlagDisclaimerAcknowledged = 1ULL << 0 };
   static uint64_t GetPersistentEmulatorFlags();
@@ -366,6 +382,8 @@ class Emulator {
   bool paused_;
   bool restoring_;
   threading::Fence restore_fence_;  // Fired on restore finish.
+
+  LaunchNewTitleCallback on_launch_new_title_;
 };
 
 }  // namespace xe

@@ -38,15 +38,22 @@ char** g_saved_argv = nullptr;
 namespace xe {
 namespace ui {
 
-bool RelaunchWithTarget(const std::string& target_path) {
+bool RelaunchWithTarget(const std::string& target_path,
+                        const std::vector<std::string>& extra_args) {
   if (!g_saved_argv || g_saved_argc < 1) {
     XELOGE("RelaunchWithTarget: no saved argv; cannot relaunch");
     return false;
   }
 
   // Rebuild argv: keep argv[0] and all original flags, drop any prior
-  // positional path or --target (we supply a fresh one), then append the new
-  // --target last so it wins.
+  // positional path or --target (we supply a fresh one) and the per-launch
+  // loader-data flags (a title-to-title chain must not inherit the previous
+  // hop's launch data), then append the new --target and the extra args last
+  // so they win.
+  static const char* const kPerLaunchFlags[] = {
+      "--target", "--relaunch_module", "--launch_flags", "--launch_data",
+      "--log_append",
+  };
   std::vector<char*> new_argv;
   new_argv.push_back(g_saved_argv[0]);
   for (int i = 1; i < g_saved_argc; ++i) {
@@ -54,13 +61,24 @@ bool RelaunchWithTarget(const std::string& target_path) {
     if (!a || a[0] != '-') {
       continue;  // positional (the old target) - drop
     }
-    if (std::strncmp(a, "--target", 8) == 0) {
-      continue;  // old --target - drop
+    bool per_launch = false;
+    for (const char* flag : kPerLaunchFlags) {
+      size_t n = std::strlen(flag);
+      if (std::strncmp(a, flag, n) == 0 && (a[n] == '\0' || a[n] == '=')) {
+        per_launch = true;
+        break;
+      }
+    }
+    if (per_launch) {
+      continue;
     }
     new_argv.push_back(a);
   }
   std::string target_arg = "--target=" + target_path;
   new_argv.push_back(const_cast<char*>(target_arg.c_str()));
+  for (const std::string& extra : extra_args) {
+    new_argv.push_back(const_cast<char*>(extra.c_str()));
+  }
   new_argv.push_back(nullptr);
 
   // Give the relaunch a fresh ASLR-retry budget (we may be a relaunch already).

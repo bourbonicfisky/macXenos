@@ -9,6 +9,7 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include <cstdlib>
 #include <set>
 
 #include "third_party/imgui/imgui.h"
@@ -782,6 +783,71 @@ bool EmulatorWindow::Initialize() {
   window_->AddListener(&window_listener_);
   window_->AddInputListener(&window_listener_, kZOrderEmulatorWindowInput);
 
+#if XE_PLATFORM_MAC
+  // A title asking for another title (XamLoaderLaunchTitle) is served the way
+  // the lifecycle Reboot is: flush config + the shader cache, then spawn a
+  // fresh process on the new target with the loader data on its command line.
+  // Runs on a host thread spawned by the XAM shim; the requesting guest thread
+  // is parked and dies with the title.
+  emulator_->set_on_launch_new_title(
+      [this](const std::string& host_path, const std::string& launch_module,
+             uint32_t launch_flags, const std::vector<uint8_t>& launch_data) {
+        // A title that re-requests itself every boot would spawn forever;
+        // after a few hops fall back to the "restart Xenia" message.
+        constexpr int kMaxTitleRelaunchHops = 4;
+        const char* hops_str = std::getenv("XENIA_TITLE_RELAUNCH_HOPS");
+        int hops = hops_str ? std::atoi(hops_str) : 0;
+        if (hops >= kMaxTitleRelaunchHops) {
+          XELOGE(
+              "Title relaunch: {} hops already; not spawning again for '{}'",
+              hops, host_path);
+          app_context().CallInUIThreadSynchronous([this]() {
+            ui::ImGuiDialog::ShowMessageBox(
+                imgui_drawer_.get(), "Title was restarted",
+                "The title keeps asking to be relaunched. Please restart "
+                "macXenos.");
+          });
+          return;
+        }
+        setenv("XENIA_TITLE_RELAUNCH_HOPS", std::to_string(hops + 1).c_str(),
+               1);
+
+        std::vector<std::string> extra_args;
+        extra_args.push_back("--log_append=true");
+        if (!launch_module.empty()) {
+          extra_args.push_back("--relaunch_module=" + launch_module);
+        }
+        if (launch_flags) {
+          extra_args.push_back(fmt::format("--launch_flags={}", launch_flags));
+        }
+        if (!launch_data.empty()) {
+          std::string hex;
+          hex.reserve(launch_data.size() * 2);
+          for (uint8_t b : launch_data) {
+            hex += fmt::format("{:02X}", b);
+          }
+          extra_args.push_back("--launch_data=" + hex);
+        }
+        if (window_->IsFullscreen()) {
+          extra_args.push_back("--fullscreen=true");
+        }
+
+        FlushBeforeRelaunch();
+        xe::ui::RelaunchWithTarget(host_path, extra_args);
+        // RelaunchWithTarget only returns on failure.
+        XELOGE("Title relaunch to '{}' failed; the title has been stopped.",
+               host_path);
+        app_context().CallInUIThreadSynchronous([this, host_path]() {
+          ui::ImGuiDialog::ShowMessageBox(
+              imgui_drawer_.get(), "Title was restarted",
+              fmt::format("The title asked to launch '{}' but the new process "
+                          "could not be started. Please restart macXenos.",
+                          host_path)
+                  .c_str());
+        });
+      });
+#endif  // XE_PLATFORM_MAC
+
   // Main menu.
   // FIXME: This code is really messy.
   auto main_menu = MenuItem::Create(MenuItem::Type::kNormal);
@@ -1362,6 +1428,8 @@ void EmulatorWindow::RelaunchLastTitle(bool warm) {
     // race. Also the safe fallback if the warm path ever misbehaves.
     config::SaveConfig();
   }
+  // A user-driven relaunch starts a fresh title-relaunch chain.
+  unsetenv("XENIA_TITLE_RELAUNCH_HOPS");
   xe::ui::RelaunchWithTarget(xe::path_to_utf8(last_media_path_));
   // RelaunchWithTarget only returns on failure.
   XELOGE("Relaunch failed; staying in the current state.");
@@ -2452,6 +2520,7 @@ xe::X_STATUS EmulatorWindow::RunTitle(
     // Re-exec into a pristine process with the new target instead. Flush config
     // + the host shader cache first so the relaunch boots warm.
     FlushBeforeRelaunch();
+    unsetenv("XENIA_TITLE_RELAUNCH_HOPS");
     xe::ui::RelaunchWithTarget(
         xe::path_to_utf8(std::filesystem::absolute(path_to_file)));
     // RelaunchWithTarget only returns on failure.

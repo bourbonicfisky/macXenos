@@ -7,11 +7,16 @@
  ******************************************************************************
  */
 
+#include <thread>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
+#include "xenia/base/threading.h"
+#include "xenia/base/utf8.h"
 #include "xenia/config.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -300,6 +305,54 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
     loader_data.launch_path = xe::path_to_utf8(raw_name_ptr.value());
     loader_data.launch_data_present = true;
     xam->SaveLoaderData();
+
+    // When the host app can boot the requested title itself (macOS spawns a
+    // fresh process with the loader data on its command line), hand off
+    // instead of asking the user to restart. Titles that relaunch themselves
+    // at boot (Call of Duty 4, Batman: Arkham Origins, Assassin's Creed III)
+    // otherwise exit on their first launch.
+    const auto& launch_new_title =
+        kernel_state()->emulator()->on_launch_new_title();
+    if (launch_new_title) {
+      // Resolve the guest launch path the way SaveLoaderData does: a module
+      // beside a .xex host becomes the new host path; inside a disc image it
+      // stays the launch module.
+      std::filesystem::path host_path = loader_data.host_path;
+      std::string launch_module = loader_data.launch_path;
+      auto remove_prefix = [&launch_module](std::string_view prefix) {
+        if (xe::utf8::lower_ascii(launch_module)
+                .starts_with(xe::utf8::lower_ascii(prefix))) {
+          launch_module = launch_module.substr(prefix.length());
+        }
+      };
+      remove_prefix(fmt::format("{}\\", kDefaultGameSymbolicLink));
+      remove_prefix(fmt::format("{}\\", kDefaultPartitionSymbolicLink));
+      if (host_path.extension() == ".xex") {
+        host_path.remove_filename();
+        host_path = host_path / launch_module;
+        launch_module.clear();
+      }
+      XELOGI(
+          "XamLoaderLaunchTitle: relaunching host '{}' module '{}' flags={:#x} "
+          "data={} bytes",
+          xe::path_to_utf8(host_path), launch_module, loader_data.launch_flags,
+          loader_data.launch_data.size());
+      // The handler terminates the title (every guest thread, this one
+      // included), so it must run on a host thread while this thread parks.
+      std::thread([launch_new_title, host = xe::path_to_utf8(host_path),
+                   launch_module, flags = loader_data.launch_flags,
+                   data = loader_data.launch_data]() {
+        launch_new_title(host, launch_module, flags, data);
+      }).detach();
+      auto* current_thread = XThread::GetCurrentThread();
+      while (true) {
+        if (current_thread) {
+          current_thread->SelfSuspend();
+        }
+        xe::threading::NanoSleep(int64_t(1'000'000'000));
+      }
+    }
+
     title = "Title was restarted";
     message =
         "Title closed with new launch data. \nPlease restart Xenia. "

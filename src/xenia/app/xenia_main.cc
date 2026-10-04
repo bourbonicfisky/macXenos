@@ -133,6 +133,19 @@ DECLARE_bool(force_mount_devkit);
 DEFINE_transient_path(target, "",
                       "Specifies the target .xex or .iso to execute.",
                       "General");
+// Loader data carried across a title-to-title relaunch (XamLoaderLaunchTitle
+// spawns a fresh process on macOS with these on its command line, so the
+// handoff does not depend on a writable working directory for
+// launch_data.bin). Internal; not persisted.
+DEFINE_transient_string(relaunch_module, "",
+                        "Guest path of the module to boot inside the target "
+                        "(from a title restart request).",
+                        "General");
+DEFINE_CVar(launch_flags, 0, "Launch flags from a title restart request.",
+            "General", true, uint32_t);
+DEFINE_transient_string(launch_data, "",
+                        "Hex-encoded launch data from a title restart request.",
+                        "General");
 #ifndef XE_PLATFORM_WIN32
 DEFINE_transient_bool(portable, false,
                       "Specifies if Xenia should run in portable mode.",
@@ -920,6 +933,28 @@ void EmulatorApp::EmulatorThread() {
 
   if (!relaunch_path.empty()) {
     path = relaunch_path;
+  }
+
+  // Loader data passed on the command line by a title-to-title relaunch wins
+  // over (and does not need) launch_data.bin. Set before LaunchPath: the title
+  // may query XamLoaderGetLaunchData during early init.
+  if (xam && (!cvars::relaunch_module.empty() || cvars::launch_flags != 0 ||
+              !cvars::launch_data.empty())) {
+    auto& loader_data = xam->loader_data();
+    loader_data.launch_data_present = true;
+    loader_data.launch_path = cvars::relaunch_module;
+    loader_data.launch_flags = cvars::launch_flags;
+    loader_data.launch_data.clear();
+    const std::string& hex = cvars::launch_data;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+      loader_data.launch_data.push_back(
+          uint8_t(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    }
+    XELOGI(
+        "Title relaunch: relaunch_module='{}' launch_flags={:#x} launch_data={} "
+        "bytes",
+        loader_data.launch_path, loader_data.launch_flags,
+        loader_data.launch_data.size());
   }
 
   if (!path.empty()) {

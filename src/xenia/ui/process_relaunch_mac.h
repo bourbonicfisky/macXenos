@@ -11,6 +11,7 @@
 #define XENIA_UI_PROCESS_RELAUNCH_MAC_H_
 
 #include <string>
+#include <vector>
 
 namespace xe {
 namespace ui {
@@ -22,9 +23,15 @@ namespace ui {
 // add-emulation-lifecycle-controls design). The caller is responsible for
 // flushing config + the host shader cache before calling this.
 //
+// The parent's flags are forwarded, except the per-launch ones this helper
+// owns (--target, --launch_module, --launch_flags, --launch_data,
+// --log_append); `extra_args` are appended after them (each a full
+// "--name=value" token), so a title-to-title launch can carry its loader data.
+//
 // macOS only. On success this does not return (the image is replaced). Returns
 // false only if the relaunch failed.
-bool RelaunchWithTarget(const std::string& target_path);
+bool RelaunchWithTarget(const std::string& target_path,
+                        const std::vector<std::string>& extra_args = {});
 
 }  // namespace ui
 }  // namespace xe
