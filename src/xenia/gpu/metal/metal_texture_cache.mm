@@ -350,6 +350,11 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   cache_.clear();
+  for (auto& pair : parked_) {
+    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
+    (void)released;
+  }
+  parked_.clear();
   // Per-swizzle exact-cover views are ours (retained +1); the resolved target
   // snapshots and tip textures are owned elsewhere and are not released here.
   for (auto& pair : resolved_targets_) {
@@ -475,6 +480,11 @@ void MetalTextureCache::ClearCache() {
     }
   }
   cache_.clear();
+  for (auto& pair : parked_) {
+    id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
+    (void)released;
+  }
+  parked_.clear();
   active_textures_.clear();
   // The retire lists exist to hold objects until the submissions that may read
   // them complete. At the clear boundary every submission HAS completed, so
@@ -574,8 +584,20 @@ void MetalTextureCache::DrainPendingInvalidations() {
     invalidations.swap(pending_invalidations_);
   }
   uint32_t evicted = 0;
+  static const bool s_census =
+      std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
   for (const auto& range : invalidations) {
-    evicted += InvalidateRange(range.first, range.second);
+    uint32_t n = InvalidateRange(range.first, range.second,
+                                 InvalidationScope::kAllRepresentations,
+                                 "cpu-watch");
+    evicted += n;
+    // Census: the watch ranges that evicted entries since the last report,
+    // so the writer behind a per-frame re-upload storm can be named.
+    if (s_census && n) {
+      auto& r = inval_ranges_[(uint64_t(range.first) << 32) | range.second];
+      ++r.first;
+      r.second += n;
+    }
   }
   static uint32_t s_cpu_invalidation_logs = 0;
   if (evicted && s_cpu_invalidation_logs++ < 16) {
@@ -1557,6 +1579,42 @@ uint32_t MetalTextureCache::GetTextureSlot(
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
+  if (RevalidateEnabled()) {
+    auto pk = parked_.find(key);
+    if (pk != parked_.end()) {
+      ParkedTexture parked = pk->second;
+      parked_.erase(pk);
+      const auto t0 = std::chrono::steady_clock::now();
+      const uint64_t now_hash =
+          HashGuestRegions(parked.guest_base, parked.guest_bytes,
+                           parked.mip_base, parked.mip_bytes);
+      census_revalidate_ns_ += uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count());
+      if (now_hash == parked.guest_hash) {
+        uint32_t slot = AllocateSlot();
+        if (slot) {
+          WriteSlotDescriptor(slot, parked.texture);
+          cache_.emplace(key, Entry{parked.texture, slot, parked.guest_base,
+                                    parked.guest_bytes, parked.mip_base,
+                                    parked.mip_bytes, parked.guest_hash});
+          // The write that parked it unwatched its region; watch again so a
+          // later rewrite reaches this entry.
+          if (!trace_playback_ && shared_memory_) {
+            shared_memory_->RequestWatchOnlyRange(parked.guest_base,
+                                                  parked.guest_bytes);
+          }
+          active_textures_.push_back(parked.texture);
+          ++census_revalidated_;
+          return slot;
+        }
+      } else {
+        ++census_revalidate_changed_;
+      }
+      retired_textures_.emplace_back(RetireSubmission(), parked.texture);
+    }
+  }
   const uint8_t* guest =
       static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
   if (!guest) {
@@ -2263,6 +2321,11 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
 
+  pending_guest_hash_ =
+      RevalidateEnabled()
+          ? HashGuestRegions(base, watched_base_bytes,
+                             entry_mip_bytes ? mip_addr : 0, entry_mip_bytes)
+          : 0;
   return FinalizeTexture(key, fetch, (__bridge void*)texture,
                          uint64_t(plan.host_format), plan.host_swizzle,
                          is_cube, host_levels, base, watched_base_bytes,
@@ -2293,10 +2356,40 @@ std::string MetalTextureCache::ConsumeUntileTimingReport(uint32_t frames) {
                        (key & 2) ? "s" : "u", (key & 1) ? "R" : "",
                        double(b.ns) / 1e6 / f, float(b.count) / f);
   }
+  std::string inval;
+  for (const auto& [site, b] : inval_census_) {
+    inval += fmt::format(" {}={:.1f}calls/{:.1f}evicted/{:.0f}KB", site,
+                         float(b.calls) / f, float(b.evicted) / f,
+                         double(b.bytes) / 1024.0 / f);
+  }
+  inval_census_.clear();
+  std::vector<std::pair<uint64_t, std::pair<uint32_t, uint32_t>>> ranges(
+      inval_ranges_.begin(), inval_ranges_.end());
+  std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
+    return a.second.second > b.second.second;
+  });
+  std::string top_ranges;
+  size_t shown_ranges = 0;
+  for (const auto& [k, v] : ranges) {
+    if (shown_ranges++ >= 12) {
+      break;
+    }
+    top_ranges += fmt::format(" {:08X}+{:X}={:.1f}/{:.1f}", uint32_t(k >> 32),
+                              uint32_t(k), float(v.first) / f,
+                              float(v.second) / f);
+  }
+  inval_ranges_.clear();
   std::string report = fmt::format(
-      "untile {:.2f} ms/frame over {:.1f} misses/frame; top:{}",
+      "untile {:.2f} ms/frame over {:.1f} misses/frame; top:{}; inval/frame:{}; "
+      "revalidated {:.1f}/frame in {:.2f} ms (changed {:.1f}, parked {}); "
+      "evicting ranges (calls/evicted per frame):{}",
       double(untile_total_ns_) / 1e6 / f, float(untile_total_count_) / f,
-      top);
+      top, inval, float(census_revalidated_) / f,
+      double(census_revalidate_ns_) / 1e6 / f,
+      float(census_revalidate_changed_) / f, parked_.size(), top_ranges);
+  census_revalidated_ = 0;
+  census_revalidate_changed_ = 0;
+  census_revalidate_ns_ = 0;
   untile_timing_.clear();
   untile_total_ns_ = 0;
   untile_total_count_ = 0;
@@ -2360,8 +2453,9 @@ uint32_t MetalTextureCache::FinalizeTexture(
       trace_writer_->WriteMemoryRead(mip_base, mip_bytes);
     }
   }
-  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes,
-                            mip_base, mip_bytes});
+  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes, mip_base,
+                            mip_bytes, pending_guest_hash_});
+  pending_guest_hash_ = 0;
   active_textures_.push_back(texture_ptr);
   return slot;
 }
@@ -2809,12 +2903,21 @@ void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
 }
 
 uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
-                                            InvalidationScope scope) {
+                                            InvalidationScope scope,
+                                            const char* site) {
   auto invalidation = metal::GuestRange::FromBaseLength(base, length);
   if (!invalidation) {
     return 0;
   }
   uint32_t evicted = 0;
+  static const bool s_census =
+      std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
+  InvalidationSiteBucket* census = nullptr;
+  if (s_census) {
+    census = &inval_census_[site ? site : "other"];
+    ++census->calls;
+    census->bytes += length;
+  }
   for (auto it = cache_.begin(); it != cache_.end();) {
     const Entry& e = it->second;
     auto guest_range =
@@ -2826,7 +2929,11 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
       // Retire, don't free: in-flight draws may still reference the texture
       // (bindless) and the slot; both drain once the submissions encoded
       // against them complete.
-      retired_textures_.emplace_back(RetireSubmission(), e.texture);
+      if (RevalidateEnabled() && e.guest_hash && e.texture) {
+        ParkEvictedEntry(it->first, e);
+      } else {
+        retired_textures_.emplace_back(RetireSubmission(), e.texture);
+      }
       stale_slots_.emplace_back(RetireSubmission(), e.slot);
       it = cache_.erase(it);
       ++evicted;
@@ -2863,7 +2970,74 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
       }
     }
   }
+  if (census) {
+    census->evicted += evicted;
+  }
   return evicted;
+}
+
+bool MetalTextureCache::RevalidateEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_REVALIDATE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+uint64_t MetalTextureCache::HashGuestRegions(uint32_t base, uint32_t bytes,
+                                             uint32_t mip_base,
+                                             uint32_t mip_bytes) const {
+  if (!memory_) {
+    return 0;
+  }
+  uint64_t hash = 0;
+  if (base && bytes && base < kPhysicalSize) {
+    const uint8_t* g =
+        static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
+    if (!g) {
+      return 0;
+    }
+    hash = XXH3_64bits(g, std::min<size_t>(bytes, kPhysicalSize - base));
+  }
+  if (mip_base && mip_bytes && mip_base < kPhysicalSize) {
+    const uint8_t* g =
+        static_cast<const uint8_t*>(memory_->TranslatePhysical(mip_base));
+    if (!g) {
+      return 0;
+    }
+    hash = XXH3_64bits_withSeed(
+        g, std::min<size_t>(mip_bytes, kPhysicalSize - mip_base), hash);
+  }
+  // 0 is the "no hash" sentinel.
+  return hash ? hash : 1;
+}
+
+void MetalTextureCache::ParkEvictedEntry(uint64_t key, const Entry& entry) {
+  DropParked(key);
+  if (parked_.size() >= kMaxParkedTextures) {
+    // Drop the oldest parked texture.
+    auto oldest = parked_.begin();
+    for (auto it = parked_.begin(); it != parked_.end(); ++it) {
+      if (it->second.stamp < oldest->second.stamp) {
+        oldest = it;
+      }
+    }
+    retired_textures_.emplace_back(RetireSubmission(), oldest->second.texture);
+    parked_.erase(oldest);
+  }
+  parked_.emplace(key, ParkedTexture{entry.texture, entry.guest_hash,
+                                     entry.guest_base, entry.guest_bytes,
+                                     entry.mip_base, entry.mip_bytes,
+                                     ++parked_stamp_});
+}
+
+void MetalTextureCache::DropParked(uint64_t key) {
+  auto it = parked_.find(key);
+  if (it == parked_.end()) {
+    return;
+  }
+  retired_textures_.emplace_back(RetireSubmission(), it->second.texture);
+  parked_.erase(it);
 }
 
 }  // namespace metal

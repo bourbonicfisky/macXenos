@@ -495,6 +495,14 @@ TEST_CASE(
   shared_cache.Reload(shared_b);
   REQUIRE_FALSE(shared_a->base_outdated_lockless());
   REQUIRE_FALSE(shared_b->base_outdated_lockless());
+  // The invalidation retired both aliased keys' slots, but their bytes did
+  // not change: content revalidation re-adopts the parked textures without
+  // an upload. A real rewrite of the bytes is what forces the re-upload.
+  REQUIRE(legacy.GetTextureSlot(legacy_a, false) != 0u);
+  REQUIRE(legacy.GetTextureSlot(legacy_b, true) != 0u);
+  REQUIRE(legacy.ConsumeUploadCount() == 0u);
+  FillMemory(*h.memory, kBase, page, 0x5A);
+  shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, true);
   REQUIRE(legacy.GetTextureSlot(legacy_a, false) != 0u);
   REQUIRE(legacy.GetTextureSlot(legacy_b, true) != 0u);
   REQUIRE(legacy.ConsumeUploadCount() == 2u);
@@ -506,7 +514,8 @@ TEST_CASE(
   REQUIRE(shared_b->base_outdated_lockless());
   REQUIRE_FALSE(shared_adjacent->base_outdated_lockless());
   REQUIRE_FALSE(shared_disjoint->base_outdated_lockless());
-  REQUIRE(probe.calls == 2u);
+  // Two CPU invalidations above plus this GPU publication.
+  REQUIRE(probe.calls == 3u);
   REQUIRE(legacy.GetTextureSlot(legacy_adjacent, false) == adjacent_slot);
   legacy_live.clear();
   legacy.AppendAllTextures(legacy_live);

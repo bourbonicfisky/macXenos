@@ -564,7 +564,7 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
       return false;
     }
     *invalidated_entries = texture_cache_->InvalidateRange(
-        base, length, texture_invalidation_scope_);
+        base, length, texture_invalidation_scope_, "ram-write-publication");
     return true;
   }
 
@@ -676,7 +676,10 @@ class MetalMemexportConvergenceTarget
       // normal mode, but trace playback unregisters that global watch and
       // skips queue draining. Keep this direct retirement globally so replayed
       // memexports cannot leave aliases or resolved bridges stale.
-      *invalidated_entries = texture_cache_->InvalidateRange(base, length);
+      *invalidated_entries = texture_cache_->InvalidateRange(
+          base, length,
+          metal::MetalTextureCache::InvalidationScope::kAllRepresentations,
+          "lazy-publish");
     }
     return true;
   }
@@ -12413,7 +12416,8 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       if (texture_cache_) {
         invalidated_entries = texture_cache_->InvalidateRange(
             wb.guest_addr, wb.range_bytes(),
-            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+            metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly,
+            "resolve-scatter");
         outcome.invalidated_entries += invalidated_entries;
       }
       auto gpu_publication = metal::DecideRamWritePublication(
@@ -12580,7 +12584,8 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         invalidated_entries =
             texture_cache_->InvalidateRange(
                 wb.guest_addr, wb.range_bytes(),
-                metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly);
+                metal::MetalTextureCache::InvalidationScope::kRamUploadsOnly,
+                "resolve-writeback");
         outcome.invalidated_entries += invalidated_entries;
       }
       if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {

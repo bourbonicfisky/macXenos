@@ -191,9 +191,12 @@ class MetalTextureCache {
     // RAM-derived uploads are stale; preserve the GPU-ordered bridge.
     kRamUploadsOnly,
   };
+  // `site` names the caller for the XE_METAL_UNTILE_TIMING eviction census
+  // (per-frame calls / evicted entries / bytes per site).
   uint32_t InvalidateRange(
       uint32_t base, uint32_t length,
-      InvalidationScope scope = InvalidationScope::kAllRepresentations);
+      InvalidationScope scope = InvalidationScope::kAllRepresentations,
+      const char* site = "other");
 
   // Trace playback restores guest ranges explicitly and calls InvalidateRange
   // for each restore. It doesn't need live CPU page watching, which would add
@@ -282,6 +285,7 @@ class MetalTextureCache {
   uint32_t retired_texture_count() const {
     return uint32_t(retired_textures_.size());
   }
+  uint32_t parked_texture_count() const { return uint32_t(parked_.size()); }
   uint32_t resolved_bridge_count() const {
     return uint32_t(resolved_targets_.size());
   }
@@ -410,6 +414,13 @@ class MetalTextureCache {
     return submission_provider_ ? submission_provider_() : UINT64_MAX;
   }
   uint32_t upload_count_ = 0;
+  // Eviction census (XE_METAL_UNTILE_TIMING=1): per InvalidateRange site.
+  struct InvalidationSiteBucket {
+    uint32_t calls = 0;
+    uint32_t evicted = 0;
+    uint64_t bytes = 0;
+  };
+  std::unordered_map<std::string, InvalidationSiteBucket> inval_census_;
   std::unordered_map<uint32_t, UntileTimingBucket> untile_timing_;
   uint64_t untile_total_ns_ = 0;
   uint32_t untile_total_count_ = 0;
@@ -426,8 +437,48 @@ class MetalTextureCache {
     // Mip range (0/0 when single-level) for invalidation + trace recording.
     uint32_t mip_base = 0;
     uint32_t mip_bytes = 0;
+    // XXH3 of the guest bytes (base extent, then mips) at upload time; 0 when
+    // revalidation is disabled.
+    uint64_t guest_hash = 0;
   };
   std::unordered_map<uint64_t, Entry> cache_;
+
+  // Content revalidation (XE_METAL_TEX_REVALIDATE=0 disables): a CPU write
+  // watch fires for the whole unwatched region (1 MB in Dead to Rights'
+  // texture pool, 16 KB host pages elsewhere), not for the bytes that
+  // changed, so an invalidation evicted every texture in the region whether
+  // or not its bytes moved. Measured: 366 re-uploads per frame, every one
+  // byte-identical, 34 ms of CPU untile per frame at 20 fps. An invalidated
+  // entry's texture is PARKED here with the guest hash it was uploaded from
+  // (its slot is retired as before); the next fetch of the key re-hashes
+  // the guest bytes and re-adopts the texture into a fresh slot when they
+  // match, re-arming the write watch. Parked textures are released through
+  // the retire list (in-flight draws may still read them).
+  struct ParkedTexture {
+    void* texture;  // retained +1
+    uint64_t guest_hash;
+    uint32_t guest_base;
+    uint32_t guest_bytes;
+    uint32_t mip_base;
+    uint32_t mip_bytes;
+    uint64_t stamp;
+  };
+  static constexpr size_t kMaxParkedTextures = 4096;
+  std::unordered_map<uint64_t, ParkedTexture> parked_;
+  uint64_t parked_stamp_ = 0;
+  uint64_t pending_guest_hash_ = 0;
+  static bool RevalidateEnabled();
+  uint64_t HashGuestRegions(uint32_t base, uint32_t bytes, uint32_t mip_base,
+                            uint32_t mip_bytes) const;
+  void ParkEvictedEntry(uint64_t key, const Entry& entry);
+  void DropParked(uint64_t key);
+  // Census (XE_METAL_UNTILE_TIMING=1): revalidation outcomes since the last
+  // report and the watch ranges that evicted entries
+  // (base<<32|len -> calls, evicted).
+  uint32_t census_revalidated_ = 0;
+  uint32_t census_revalidate_changed_ = 0;
+  uint64_t census_revalidate_ns_ = 0;
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> inval_ranges_;
   std::vector<void*> active_textures_;
 
   uint32_t draw_resolution_scale_x_ = 1;

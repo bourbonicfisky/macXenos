@@ -476,9 +476,19 @@ TEST_CASE("A clear releases cached textures, slots, and descriptors", "[cachecle
   // clear time -- the state where "drain on clear" actually matters.
   REQUIRE(cache.InvalidateRange(kBaseC, kExtent,
                                 MetalTextureCache::InvalidationScope::kAllRepresentations) == 1u);
-  REQUIRE(cache.retired_texture_count() == 1u);
+  // Content revalidation parks the evicted texture (its slot is retired as
+  // before); the retire list receives it only once its bytes prove changed.
+  // Change them, then re-fetch: the parked texture retires and a fresh one
+  // uploads, which is the non-empty retire list this clear case needs.
+  REQUIRE(cache.parked_texture_count() == 1u);
+  REQUIRE(cache.retired_texture_count() == 0u);
   REQUIRE(cache.slots_stale() == 1u);
   REQUIRE(cache.cached_texture_count() == 2u);
+  FillMemory(*h.memory, kBaseC, kExtent, 0x44);
+  REQUIRE(cache.GetTextureSlot(MakeFetch(kBaseC), false) != 0u);
+  REQUIRE(cache.parked_texture_count() == 0u);
+  REQUIRE(cache.retired_texture_count() == 1u);
+  REQUIRE(cache.cached_texture_count() == 3u);
 
   // A slot+view retired exactly the way MetalSharedTextureCache's
   // ReleaseBindingSlot retires them: through this adapter, into these pools.
