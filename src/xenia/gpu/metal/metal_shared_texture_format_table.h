@@ -55,6 +55,7 @@ struct SharedTextureFormatEntry {
 enum : uint32_t {
   kMtlPixelFormatInvalid = 0,
   kMtlPixelFormatR8Unorm = 10,
+  kMtlPixelFormatABGR4Unorm = 42,
   kMtlPixelFormatR8Snorm = 12,
   kMtlPixelFormatR16Unorm = 20,
   kMtlPixelFormatR16Snorm = 22,
@@ -132,6 +133,16 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
        SharedLoadFamily::k32bpb, kMtlPixelFormatRGB10A2Unorm,
        kMtlPixelFormatRGB10A2Unorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
        false},
+      // 4:4:4:4 (2026-10-04, Red Dead Redemption: 49 resolve-backed CPU
+      // decodes per frame behind 26 blocking consumer waits at its title
+      // scene). After the fetch-endian swap the guest word holds R in bits
+      // 0-3 through A in bits 12-15 (the legacy decode_4444 oracle); Metal's
+      // ABGR4Unorm reads A from bits 0-3 through R from bits 12-15 (device
+      // probe), so the host swizzle reverses the channels. No snorm sibling.
+      // XE_METAL_TEX_ROUTE_4444=0 drops this entry (legacy CPU decode).
+      {xenos::TextureFormat::k_4_4_4_4, SharedLoadFamily::k16bpb,
+       kMtlPixelFormatABGR4Unorm, kMtlPixelFormatABGR4Unorm,
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(A, B, G, R), 2, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -159,6 +170,15 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
     }
     if (!table[i].direct && !SharedTextureRouteFormatsWidened()) {
       return nullptr;
+    }
+    if (table[i].format == xenos::TextureFormat::k_4_4_4_4) {
+      static const bool s_4444 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_4444");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_4444) {
+        return nullptr;
+      }
     }
     return &table[i];
   }

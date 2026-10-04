@@ -13,6 +13,7 @@
 
 // The C++-visible format table stores MTLPixelFormat raw values; pin them.
 static_assert(MTLPixelFormatR8Unorm == xe::gpu::metal::kMtlPixelFormatR8Unorm, "");
+static_assert(MTLPixelFormatABGR4Unorm == xe::gpu::metal::kMtlPixelFormatABGR4Unorm, "");
 static_assert(MTLPixelFormatR8Snorm == xe::gpu::metal::kMtlPixelFormatR8Snorm, "");
 static_assert(MTLPixelFormatR16Unorm == xe::gpu::metal::kMtlPixelFormatR16Unorm, "");
 static_assert(MTLPixelFormatR16Snorm == xe::gpu::metal::kMtlPixelFormatR16Snorm, "");
@@ -194,19 +195,30 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   }
   if (key.dimension != xenos::DataDimension::k2DOrStacked || !key.tiled ||
       key.signed_separate || key.scaled_resolve ||
-      key.depth_or_array_size_minus_1 != 0 || key.base_page == 0 ||
-      key.pitch == 0) {
+      key.depth_or_array_size_minus_1 != 0 || key.pitch == 0) {
     return nullptr;
   }
   // The strict MIPPED sibling is served whenever the chain has its own guest
   // pointer; the single-mip class stays exactly base-only. Each class refuses
   // the other's mip_page shape, so they remain mutually exclusive.
+  //
+  // A mips-only key (base_page 0: the fetch's minimum level is above 0, so
+  // the base cache zeroes the base page and the guest layout has no base
+  // extent) is the D3D12/Vulkan contract for such fetches: levels 1..max load
+  // from the mip chain, level 0 of the host texture is never written and
+  // never sampled (the sampler's lodMinClamp is the fetch's minimum level,
+  // and base-map pins to it). Red Dead Redemption fetches mips 1 and 2 of
+  // its resolve-backed 4:4:4:4 pyramids alone (2026-10-04;
+  // XE_METAL_TEX_ROUTE_MINMIP=0 keeps such fetches off the route).
   bool mipped = key.mip_max_level != 0;
   if (mipped) {
     if (key.mip_page == 0) {
       return nullptr;
     }
-  } else if (key.mip_page != 0) {
+    if (key.base_page == 0 && !SharedRouteMinMipEnabled()) {
+      return nullptr;
+    }
+  } else if (key.mip_page != 0 || key.base_page == 0) {
     return nullptr;
   }
   uint32_t width = key.GetWidth();
@@ -764,9 +776,51 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
            destinationLevel:p.host_level
           destinationOrigin:MTLOriginMake(0, 0, 0)];
   }
+  // XE_METAL_DUMP_ROUTE=<hex base>: read every loaded level of this routed
+  // texture back after the load (host rows, bpb bytes per texel) to
+  // /tmp/xe_route_<base>_L<level>_<n>.bin -- the texel-level oracle against
+  // the legacy decode's XE_METAL_DUMP_FETCH dumps of the same base.
+  static const uint32_t s_dump_route = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_ROUTE");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_dump_route && (uint32_t(key.base_page) << 12) == s_dump_route) {
+    static uint32_t s_n = 0;
+    const uint32_t n = s_n++;
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    for (const MipLevelPlan& p0 : plan) {
+      NSUInteger row = NSUInteger(p0.width) * bpb;
+      id<MTLBuffer> rb = [device newBufferWithLength:row * p0.height
+                                             options:MTLResourceStorageModeShared];
+      [blit copyFromTexture:base_texture
+                  sourceSlice:0
+                  sourceLevel:p0.host_level
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(p0.width, p0.height, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:row
+     destinationBytesPerImage:row * p0.height];
+      std::string path = fmt::format("/tmp/xe_route_{:08X}_L{}_{}.bin",
+                                     s_dump_route, p0.host_level, n);
+      uint32_t w = p0.width, h = p0.height, lvl = p0.host_level,
+               go = p0.guest_offset, px = p0.px, py = p0.py,
+               pb = p0.pitch_blocks;
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+        if (FILE* f = fopen(path.c_str(), "wb")) {
+          fwrite([rb contents], 1, row * h, f);
+          fclose(f);
+        }
+        XELOGW("MetalRouteDump {} L{} {}x{} bpb={} guest_offset={:08X} px={} py={} pitch_blocks32={}",
+               path, lvl, w, h, bpb, go, px, py, pb);
+      }];
+    }
+  }
   [blit endEncoding];
   static uint32_t s_family_logs = 0;
-  if (s_family_logs++ < 16) {
+  static const bool s_family_log_all =
+      std::getenv("XE_METAL_FAMILY_LOAD_LOG") != nullptr;
+  if (s_family_logs++ < 16 || s_family_log_all) {
     XELOGI("MetalSharedTex FAMILY-LOAD fmt={} base={:08X} {}x{} levels={} bpb={}",
            uint32_t(key.format), key.base_page << 12, key.GetWidth(),
            key.GetHeight(), plan.size(), bpb);
@@ -1003,6 +1057,37 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
     legacy_->AddActiveTexture(binding_slot.sampled_view);
   }
   return binding_slot.slot;
+}
+
+const char* MetalSharedTextureCache::UnservedReason(
+    uint32_t fetch_constant_index, bool is_signed) {
+  if (fetch_constant_index >= xenos::kTextureFetchConstantCount) {
+    return "index";
+  }
+  BindingSlot& binding_slot = binding_slots_[fetch_constant_index];
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
+  if (!binding) {
+    return "no-valid-binding";
+  }
+  if (!binding->texture) {
+    return "no-texture";
+  }
+  if (!binding_slot.slot) {
+    return "no-slot";
+  }
+  if (binding_slot.texture != binding->texture) {
+    return "slot-texture-mismatch";
+  }
+  if (binding->texture->base_outdated_lockless()) {
+    return "base-outdated";
+  }
+  if (binding->texture->mips_outdated_lockless()) {
+    return "mips-outdated";
+  }
+  if (is_signed && !binding_slot.signed_slot) {
+    return "signed-view";
+  }
+  return "served";
 }
 
 void MetalSharedTextureCache::OnSubmissionsFaulted(

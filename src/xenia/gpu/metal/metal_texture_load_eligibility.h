@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 #include "xenia/gpu/texture_address.h"
 #include "xenia/gpu/metal/metal_shared_texture_format_table.h"
@@ -243,10 +244,27 @@ inline bool IsSharedRouteEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
 
 // Mipped sibling: the chain has its own guest pointer and the base rules
 // hold for the level-0 shape.
+// A fetch whose minimum level is above 0 (Red Dead resolves into mips 1 and 2
+// of its 4:4:4:4 pyramids and fetches each level alone) still loads the whole
+// chain: the shared key ignores mip_min_level and the sampler clamps the LOD
+// to [min, max] (D3D12 MinLOD/MaxLOD). XE_METAL_TEX_ROUTE_MINMIP=0 restores
+// the base-level-only mip class.
+inline bool SharedRouteMinMipEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_MINMIP");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool IsSharedRouteMipEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
                                      bool is_signed, uint32_t width,
                                      uint32_t height, uint32_t pitch_texels) {
-  if (fetch.mip_min_level != 0 || fetch.mip_max_level == 0) {
+  if (fetch.mip_max_level == 0 ||
+      fetch.mip_min_level > fetch.mip_max_level) {
+    return false;
+  }
+  if (fetch.mip_min_level != 0 && !SharedRouteMinMipEnabled()) {
     return false;
   }
   if (!fetch.mip_address || !fetch.pitch) {

@@ -13,6 +13,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_fetch_constant_type.h"
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
+#include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 
 #import <Metal/Metal.h>
@@ -1620,6 +1621,44 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (!guest) {
     return 0;
   }
+  // XE_METAL_UNTILE_TIMING=1: the first 4:4:4:4 misses with the fields the
+  // shared-route eligibility reads, so a table entry that does not engage
+  // can be attributed (RDR 2026-10-04).
+  {
+    static const bool s_untile_diag =
+        std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
+    // Unique by (base, level range, signedness), bounded.
+    static std::set<uint64_t> s_4444_shapes;
+    if (s_untile_diag && fetch.format == xenos::TextureFormat::k_4_4_4_4 &&
+        s_4444_shapes.size() < 64 &&
+        s_4444_shapes
+            .insert((uint64_t(base) << 16) |
+                    (uint64_t(fetch.mip_min_level) << 8) |
+                    (uint64_t(fetch.mip_max_level) << 4) |
+                    (is_signed ? 1u : 0u))
+            .second) {
+      XELOGW(
+          "MetalTexMiss4444 base={:08X} {}x{} pitch={} tiled={} dim={} "
+          "stacked={} mips={}..{} mip_addr={:08X} packed={} signs={}{}{}{} "
+          "endian={} signed={} resolve_backed={} elig_base={} elig_mip={}",
+          base, width, height, pitch_texels, uint32_t(fetch.tiled),
+          uint32_t(fetch.dimension), uint32_t(fetch.stacked),
+          uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level),
+          uint32_t(fetch.mip_address) << 12, uint32_t(fetch.packed_mips),
+          uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
+          uint32_t(fetch.sign_z), uint32_t(fetch.sign_w),
+          uint32_t(fetch.endianness), is_signed ? 1 : 0,
+          resolved_targets_.count(base) ? 1 : 0,
+          metal::IsSharedRouteEligible(fetch, is_signed, width, height,
+                                       pitch_texels)
+              ? 1
+              : 0,
+          metal::IsSharedRouteMipEligible(fetch, is_signed, width, height,
+                                          pitch_texels)
+              ? 1
+              : 0);
+    }
+  }
   // Diagnostic scope timer for the whole miss path (untile + upload +
   // finalize); see ConsumeUntileTimingReport.
   struct UntileTimingScope {
@@ -1841,6 +1880,34 @@ uint32_t MetalTextureCache::GetTextureSlot(
       XELOGW("MetalFetchDump {:08X} fmt={} {}x{} swz={:03X} endian={}:{}",
              base, uint32_t(fetch.format), width, height, fetch.swizzle & 0xFFF,
              uint32_t(endian), vals);
+      static uint32_t s_n = 0;
+      std::string path = fmt::format("/tmp/xe_fetch_{:08X}_{}.bin", base, s_n++);
+      if (FILE* f = fopen(path.c_str(), "wb")) {
+        fwrite(linear.data(), 1, size_t(blocks_w) * blocks_h * bpb, f);
+        fclose(f);
+        XELOGW("MetalFetchDump wrote {} rows={} row_bytes={}", path, blocks_h, blocks_w * bpb);
+      }
+    }
+  }
+  // XE_METAL_DUMP_FETCH: also compare guest RAM with the shared buffer over
+  // the fetched region (RAM is what this legacy path untiles; the buffer is
+  // what the GPU load route untiles) -- identical bytes attribute a routed
+  // divergence to interpretation, different bytes to content/ordering.
+  if (s_dump_fetch && base == s_dump_fetch && shared_memory_) {
+    auto* msm = static_cast<MetalSharedMemory*>(shared_memory_);
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)msm->GetBuffer();
+    const uint8_t* ram = static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
+    const uint8_t* gpu = buf ? static_cast<const uint8_t*>([buf contents]) + base : nullptr;
+    const size_t bytes = size_t(blocks_h) * pitch_texels * bpb;
+    if (ram && gpu) {
+      size_t diff = 0, first = SIZE_MAX;
+      for (size_t i = 0; i < bytes; ++i) {
+        if (ram[i] != gpu[i]) { if (first == SIZE_MAX) first = i; ++diff; }
+      }
+      XELOGW("MetalFetchDump RAM-vs-BUFFER {:08X} bytes={} differing={} first=+{:X} ram={:02X}{:02X} buf={:02X}{:02X}",
+             base, bytes, diff, first == SIZE_MAX ? 0 : first,
+             first == SIZE_MAX ? 0 : ram[first], first == SIZE_MAX ? 0 : ram[first + 1],
+             first == SIZE_MAX ? 0 : gpu[first], first == SIZE_MAX ? 0 : gpu[first + 1]);
     }
   }
   // XE_METAL_DUMP_FETCH_PNG=<hex base>: dump the whole untiled+swapped upload

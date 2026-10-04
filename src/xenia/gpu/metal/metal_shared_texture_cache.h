@@ -112,6 +112,9 @@ class MetalSharedTextureCache : public TextureCache {
   // a binding and retired with the binding slot.
   uint32_t GetServedSlot(uint32_t fetch_constant_index,
                          bool is_signed = false);
+  // Diagnostic: why GetServedSlot returned 0 for this binding (static
+  // string; "served" when it would not have).
+  const char* UnservedReason(uint32_t fetch_constant_index, bool is_signed);
 
   // M4 (mandatory): called by the command processor when fault publication
   // records lost submissions. Every texture whose last load rode one of

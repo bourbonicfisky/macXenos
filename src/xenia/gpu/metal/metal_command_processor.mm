@@ -914,6 +914,8 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
   const uint32_t mip_min_level = uint32_t((key >> 20) & 15);
   const bool base_map = ((key >> 24) & 1) != 0;
   const bool legacy = ((key >> 25) & 1) != 0;
+  // Maximum level (D3D12 MaxLOD); 0 = unset (the pre-MINMIP key).
+  const uint32_t mip_max_level = uint32_t((key >> 26) & 15);
   auto minmag = [](uint32_t f) {
     // TextureFilter: 0=point, 1=linear, 2=base-map (no mip; min/mag linear
     // gives the least-surprising look), 3 resolved before packing.
@@ -952,6 +954,8 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
     if (!aniso) {
       d.mipFilter = MTLSamplerMipFilterNearest;
     }
+  } else if (!legacy && mip_max_level) {
+    d.lodMaxClamp = float(mip_max_level);
   }
   switch (xenos::BorderColor(border)) {
     case xenos::BorderColor::k_ABGR_White:
@@ -7385,6 +7389,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              (corridor_required && !FetchOverlapsPendingGpuCurrent(fetch)))) {
           continue;
         }
+        // Bisect lever (any format, any service): XE_METAL_TEX_ROUTE_SKIP_ANY=
+        // <hex base,...> keeps the named fetch bases on the legacy path.
+        {
+          static const std::vector<uint32_t> s_skip_any = [] {
+            std::vector<uint32_t> v;
+            if (const char* e = std::getenv("XE_METAL_TEX_ROUTE_SKIP_ANY")) {
+              for (const char* c = e; *c;) {
+                char* end = nullptr;
+                uint32_t b = uint32_t(strtoul(c, &end, 16));
+                if (end == c) break;
+                v.push_back(b);
+                c = (*end == ',') ? end + 1 : end;
+              }
+            }
+            return v;
+          }();
+          if (!s_skip_any.empty() &&
+              std::find(s_skip_any.begin(), s_skip_any.end(),
+                        uint32_t(fetch.base_address << 12)) != s_skip_any.end()) {
+            continue;
+          }
+        }
         {
           const ResolvedFetchService mask_service =
               texture_cache_->ClassifyFetchService(fetch, binding.is_signed);
@@ -7480,14 +7506,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
         }
         static uint32_t s_unserved_logs = 0;
-        if (s_unserved_logs++ < 16) {
+        if (s_unserved_logs++ < 64) {
           XELOGW(
               "MetalSharedTex UNSERVED fc={} fmt={} base={:08X} {}x{} "
-              "signed={} draw={} ordering={}",
+              "mips={}..{} mip_addr={:08X} signed={} draw={} ordering={} "
+              "why={}",
               index, uint32_t(fetch.format), fetch.base_address << 12,
               fetch.size_2d.width + 1, fetch.size_2d.height + 1,
-              is_signed ? 1 : 0, trace_draw_index_,
-              draw_gpu_ordering_active_ ? 1 : 0);
+              uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level),
+              uint32_t(fetch.mip_address) << 12, is_signed ? 1 : 0,
+              trace_draw_index_, draw_gpu_ordering_active_ ? 1 : 0,
+              shared_texture_cache_->UnservedReason(index, is_signed));
         }
       }
       if (!unserved_ranges.empty() && draw_gpu_ordering_active_) {
@@ -8808,7 +8837,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  ((uint32_t(ncz) & 7) << 12) | ((an & 7) << 15) |
                  (uint64_t(border & 3) << 18) |
                  (uint64_t(nmin_level & 15) << 20) |
-                 (uint64_t(base_map) << 24);
+                 (uint64_t(base_map) << 24) |
+                 (metal::SharedRouteMinMipEnabled()
+                      ? (uint64_t(nmax_level & 15) << 26)
+                      : 0ull);
         }
         // Sampler-semantics census (XE_METAL_SAMPLER_CENSUS=1): every guest
         // sampler field, raw and as the shared D3D12/Vulkan contract
