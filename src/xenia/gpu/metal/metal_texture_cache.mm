@@ -367,6 +367,18 @@ MetalTextureCache::~MetalTextureCache() {
       }
     }
     pair.second.tip_swizzle_views.clear();
+    if (pair.second.fitted.texture) {
+      id<MTLTexture> released =
+          (__bridge_transfer id<MTLTexture>)pair.second.fitted.texture;
+      (void)released;
+    }
+    for (auto& sv : pair.second.fitted.swizzle_views) {
+      if (sv.second.view) {
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)sv.second.view;
+        (void)released;
+      }
+    }
+    pair.second.fitted = ResolvedTarget::FittedView{};
   }
   resolved_targets_.clear();
   for (auto& pair : scaled_assemblies_) {
@@ -790,6 +802,25 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   return true;
 }
 
+std::string MetalTextureCache::FormatDimensionCensus() const {
+  static const char* kDim[4] = {"1d", "2d", "3d", "cube"};
+  std::string out = "MetalTexDimCensus uploads:";
+  for (uint32_t i = 0; i < 16; ++i) {
+    if (!dim_census_[i]) {
+      continue;
+    }
+    out += fmt::format(" {}{}{}={}", kDim[i >> 2], (i & 1) ? "_stacked" : "",
+                       (i & 2) ? "_mip" : "", dim_census_[i]);
+    if (dim_census_signed_[i]) {
+      out += fmt::format("(signed {})", dim_census_signed_[i]);
+    }
+  }
+  out += fmt::format(" | null: dim={} fmt={} volume_decoded={} other={}",
+                     null_census_dim_, null_census_fmt_,
+                     null_census_volume_decoded_, null_census_other_);
+  return out;
+}
+
 ResolvedFetchService MetalTextureCache::ClassifyFetchService(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) const {
   ResolvedFetchServiceInputs in;
@@ -833,6 +864,221 @@ uint32_t MetalTextureCache::GetSwizzledSnapshotSlot(
   return view_slot;
 }
 
+namespace {
+bool DepthBridgeOff() {
+  static const bool s_off = [] {
+    const char* v = std::getenv("XE_METAL_DEPTH_BRIDGE");
+    return v && v[0] == '0';
+  }();
+  return s_off;
+}
+bool SnapshotFitEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SNAPSHOT_FIT");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+}  // namespace
+
+// The snapshot OBJECT's guest dims. Not the registered rt.width/height: a
+// strip-resolved depth target (JC2/RDR/LEGO 1280x384 + 1280x336 strips) is
+// joined into a full-size parent texture while the registration tracks the
+// last strip, and a fetch of the parent's size needs no fit (fitting it to
+// one strip blanked the lower half of the scene depth: corpus A/B 2026-10-03).
+void MetalTextureCache::SnapshotObjectDims(const ResolvedTarget& rt,
+                                           uint32_t* width_out,
+                                           uint32_t* height_out) const {
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)rt.texture;
+  *width_out = uint32_t(tex.width) / std::max(1u, draw_resolution_scale_x_);
+  *height_out = uint32_t(tex.height) / std::max(1u, draw_resolution_scale_y_);
+}
+
+bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
+                                           uint32_t fetch_w, uint32_t fetch_h,
+                                           bool covered_r32f) const {
+  if (!SnapshotFitEnabled() || !snapshot_fit_blit_ || !rt.texture) {
+    return false;
+  }
+  if (DepthBridgeOff() && rt.is_depth) {
+    return false;
+  }
+  if (!fetch_w || !fetch_h || fetch_w > 8192 || fetch_h > 8192) {
+    return false;
+  }
+  uint32_t snap_w = 0, snap_h = 0;
+  SnapshotObjectDims(rt, &snap_w, &snap_h);
+  if (fetch_w == snap_w && fetch_h == snap_h) {
+    return false;
+  }
+  // The derived 1x1 tip view owns the covered-R32F 1x1 case.
+  if (covered_r32f && fetch_w == 1 && fetch_h == 1) {
+    return false;
+  }
+  return true;
+}
+
+void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
+  uint64_t retire_submission = RetireSubmission();
+  if (fitted.slot) {
+    stale_slots_.emplace_back(retire_submission, fitted.slot);
+  }
+  if (fitted.texture) {
+    retired_textures_.emplace_back(retire_submission, fitted.texture);
+  }
+  for (auto& sv : fitted.swizzle_views) {
+    stale_slots_.emplace_back(retire_submission, sv.second.slot);
+    retired_textures_.emplace_back(retire_submission, sv.second.view);
+  }
+  fitted = ResolvedTarget::FittedView{};
+}
+
+bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
+                                             uint32_t fetch_w,
+                                             uint32_t fetch_h) {
+  id<MTLTexture> src = (__bridge id<MTLTexture>)rt.texture;
+  ResolvedTarget::FittedView& fv = rt.fitted;
+  // A previous view at other dims carries its content (the union of the
+  // rects resolved so far, as guest RAM would hold it) into the new one.
+  ResolvedTarget::FittedView carried;
+  if (fv.texture) {
+    id<MTLTexture> cur = (__bridge id<MTLTexture>)fv.texture;
+    if (fv.width != fetch_w || fv.height != fetch_h ||
+        cur.pixelFormat != src.pixelFormat) {
+      if (cur.pixelFormat == src.pixelFormat) {
+        carried = fv;
+        fv = ResolvedTarget::FittedView{};
+      } else {
+        RetireFittedView(fv);
+      }
+    }
+  }
+  const uint32_t sx = draw_resolution_scale_x_, sy = draw_resolution_scale_y_;
+  if (!fv.texture) {
+    uint32_t slot = AllocateSlot();
+    if (!slot) {
+      if (carried.texture) {
+        RetireFittedView(carried);
+      }
+      return false;
+    }
+    MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+    desc.textureType = MTLTextureType2DArray;
+    desc.pixelFormat = src.pixelFormat;
+    desc.width = fetch_w * sx;
+    desc.height = fetch_h * sy;
+    desc.arrayLength = 1;
+    desc.mipmapLevelCount = 1;
+    desc.usage = MTLTextureUsageShaderRead;
+    // Shared so the texels the snapshot does not cover can be zeroed once at
+    // creation from the CPU (deterministic stand-in for guest RAM the game
+    // does not sample); the GPU blit below writes the covered rect.
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [src.device newTextureWithDescriptor:desc];
+    if (!tex) {
+      free_slots_.push_back(slot);
+      if (carried.texture) {
+        RetireFittedView(carried);
+      }
+      return false;
+    }
+    // 16 bytes/texel covers every snapshot pixel format; replaceRegion reads
+    // width*bpp bytes from each 16*width-byte row.
+    const size_t row_bytes = size_t(fetch_w) * sx * 16;
+    std::vector<uint8_t> zeros(row_bytes * size_t(fetch_h) * sy, 0);
+    [tex replaceRegion:MTLRegionMake2D(0, 0, fetch_w * sx, fetch_h * sy)
+           mipmapLevel:0
+                 slice:0
+             withBytes:zeros.data()
+           bytesPerRow:row_bytes
+         bytesPerImage:0];
+    WriteSlotDescriptor(slot, (__bridge void*)tex);
+    fv.texture = (__bridge_retained void*)tex;
+    fv.slot = slot;
+    fv.width = fetch_w;
+    fv.height = fetch_h;
+    fv.source = nullptr;
+    fv.source_generation = 0;
+    if (carried.texture) {
+      snapshot_fit_blit_(carried.texture, fv.texture,
+                         std::min(carried.width, fetch_w) * sx,
+                         std::min(carried.height, fetch_h) * sy);
+      RetireFittedView(carried);
+    }
+    static uint32_t s_fit_logs = 0;
+    if (s_fit_logs < 16) {
+      ++s_fit_logs;
+      XELOGI(
+          "MetalTex: snapshot fit base view {}x{} (snapshot object {}x{}, "
+          "registered {}x{}, depth={}) -> slot {}",
+          fetch_w, fetch_h, uint32_t(src.width) / sx, uint32_t(src.height) / sy,
+          rt.width, rt.height, rt.is_depth, slot);
+    }
+  }
+  if (fv.source != rt.texture || fv.source_generation != rt.generation) {
+    uint32_t snap_w = 0, snap_h = 0;
+    SnapshotObjectDims(rt, &snap_w, &snap_h);
+    const uint32_t copy_w = std::min(snap_w, fetch_w) * sx;
+    const uint32_t copy_h = std::min(snap_h, fetch_h) * sy;
+    if (!snapshot_fit_blit_(rt.texture, fv.texture, copy_w, copy_h)) {
+      return false;
+    }
+    fv.source = rt.texture;
+    fv.source_generation = rt.generation;
+  }
+  return true;
+}
+
+uint32_t MetalTextureCache::ServeFittedSnapshot(ResolvedTarget& rt,
+                                                uint32_t fetch_w,
+                                                uint32_t fetch_h,
+                                                uint32_t guest_swizzle,
+                                                bool identity) {
+  ResolvedTarget::FittedView& fv = rt.fitted;
+  // Bind time never blits (the draw's encoder is open): serve only a view
+  // prepared for exactly this snapshot generation and these dims.
+  if (!fv.texture || fv.width != fetch_w || fv.height != fetch_h ||
+      fv.source != rt.texture || fv.source_generation != rt.generation) {
+    return 0;
+  }
+  if (identity) {
+    active_textures_.push_back(fv.texture);
+    return fv.slot;
+  }
+  return GetSwizzledSnapshotSlot(fv.texture, guest_swizzle, fv.swizzle_views);
+}
+
+void MetalTextureCache::PrepareSnapshotFit(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
+  if (!SnapshotFitEnabled() || !snapshot_fit_blit_) {
+    return;
+  }
+  if (fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+      fetch.stacked) {
+    return;
+  }
+  auto rit = resolved_targets_.find(fetch.base_address << 12);
+  if (rit == resolved_targets_.end() || !rit->second.texture) {
+    return;
+  }
+  const uint32_t fetch_w = fetch.size_2d.width + 1;
+  const uint32_t fetch_h = fetch.size_2d.height + 1;
+  uint32_t snap_w = 0, snap_h = 0;
+  SnapshotObjectDims(rit->second, &snap_w, &snap_h);
+  if (fetch_w == snap_w && fetch_h == snap_h) {
+    return;  // the common case: nothing to prepare
+  }
+  ResolvedFetchServiceInputs in;
+  BuildResolvedServiceInputs(fetch, is_signed, &in);
+  if (ClassifyResolvedFetch(in) != ResolvedFetchService::kBridgeSnapshot) {
+    return;
+  }
+  if (!SnapshotFitApplies(rit->second, fetch_w, fetch_h, in.covered_r32f)) {
+    return;
+  }
+  EnsureFittedSnapshot(rit->second, fetch_w, fetch_h);
+}
+
 uint32_t MetalTextureCache::GetTextureSlot(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   if (!trace_playback_) {
@@ -844,6 +1090,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // a non-2D dimension, or a resolve-backed base with no data.
   static uint32_t s_null_log = 0;
   auto log_null = [&](const char* reason) {
+    if (!std::strcmp(reason, "dim")) {
+      ++null_census_dim_;
+    } else if (!std::strcmp(reason, "fmt")) {
+      ++null_census_fmt_;
+    } else if (!std::strcmp(reason, "volume-decoded")) {
+      ++null_census_volume_decoded_;
+    } else {
+      ++null_census_other_;
+    }
     if (s_null_log < 300) {
       ++s_null_log;
       XELOGI(
@@ -960,10 +1215,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
     // XE_METAL_DEPTH_BRIDGE=0 (diagnostic, 2026-09-19): serve depth resolve
     // destinations from guest RAM (the k_24_8 CPU decode) instead of the
     // depth snapshot, to attribute Gears of War 3's zero occlusion counts.
-    static const bool s_depth_bridge_off = [] {
-      const char* v = std::getenv("XE_METAL_DEPTH_BRIDGE");
-      return v && v[0] == '0';
-    }();
+    const bool s_depth_bridge_off = DepthBridgeOff();
     if (rit != resolved_targets_.end() && rit->second.texture &&
         !(s_depth_bridge_off && rit->second.is_depth)) {
       const ResolvedTarget& rt = rit->second;
@@ -1109,6 +1361,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
               "(RAM bypassed)",
               lineage_draw_, fetch.base_address << 12, rt.width, rt.height,
               fetch_w, fetch_h, rt.is_depth, rt.ram_backed, covered_r32f);
+        }
+        if (SnapshotFitApplies(rt, fetch_w, fetch_h, covered_r32f)) {
+          uint32_t fit_slot = ServeFittedSnapshot(rit->second, fetch_w,
+                                                  fetch_h, guest_swizzle,
+                                                  identity);
+          if (fit_slot) {
+            return fit_slot;
+          }
+          // Not prepared for this draw: the raw snapshot, as before.
         }
         if (identity) {
           active_textures_.push_back(rt.texture);
@@ -1665,6 +1926,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
       break;
     }
   }
+  {
+    const uint32_t census_index =
+        (uint32_t(fetch.dimension) << 2) | (is_stacked ? 1u : 0u) |
+        (fetch.mip_max_level > fetch.mip_min_level ? 2u : 0u);
+    ++dim_census_[census_index & 15u];
+    if (is_signed) {
+      ++dim_census_signed_[census_index & 15u];
+    }
+  }
   if (s_tex_log < 24) {
     ++s_tex_log;
     XELOGI(
@@ -1711,8 +1981,17 @@ uint32_t MetalTextureCache::GetTextureSlot(
       std::getenv("XE_METAL_MIPS_UNCOMP_ONLY") != nullptr;
   bool mip_format_allowed = !(s_mips_dxt_only && !plan.compressed) &&
                             !(s_mips_uncomp_only && plan.compressed);
-  if (!s_no_mips && mip_format_allowed && !is_cube && !is_3d && depth == 1 &&
-      mip_addr &&
+  // Cube maps: every level holds six faces at the level's array-slice stride
+  // (texture_util layout with array size 6, the same walk D3D12 uses). Found
+  // engaged by the 2026-10-03 dimension census (Batman Arkham Asylum 872,
+  // Skate 2 28 mipped cube uploads); level-0-only serving sharpened every
+  // roughness-driven reflection. XE_METAL_CUBE_MIPS=0 restores level 0 only.
+  static const bool s_cube_mips = [] {
+    const char* v = std::getenv("XE_METAL_CUBE_MIPS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_no_mips && mip_format_allowed && (!is_cube || s_cube_mips) &&
+      !is_3d && depth == 1 && mip_addr &&
       mip_addr < kPhysicalSize && normalized_mip_max > 0 &&
       !plan_cpu_decoded) {
     // Same normalized value the key was built from — see the normalization
@@ -1867,8 +2146,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
   uint32_t entry_mip_bytes = 0;
   if (host_levels > 1) {
     texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
-        fetch.dimension, fetch.pitch, width, height, 1, tiled, fetch.format,
-        fetch.packed_mips != 0, /*has_base=*/true, normalized_mip_max);
+        fetch.dimension, fetch.pitch, width, height, is_cube ? 6u : 1u, tiled,
+        fetch.format, fetch.packed_mips != 0, /*has_base=*/true,
+        normalized_mip_max);
     entry_mip_bytes = std::min<uint32_t>(layout.mips_total_extent_bytes,
                                          kPhysicalSize - mip_addr);
     // Mips live at mip_address, NOT relative to the base level — read through
@@ -1896,7 +2176,10 @@ uint32_t MetalTextureCache::GetTextureSlot(
       if (!lvl.row_pitch_bytes) {
         break;
       }
-      uint32_t level_base = layout.mip_offsets_bytes[storage_level];
+      const uint32_t level_faces = is_cube ? 6u : 1u;
+      for (uint32_t face = 0; face < level_faces; ++face) {
+      uint32_t level_base = layout.mip_offsets_bytes[storage_level] +
+                            face * lvl.array_slice_stride_bytes;
       uint32_t lpitch_blocks = lvl.row_pitch_bytes / bpb;
       mip_linear.assign(size_t(lbw) * lbh * bpb, 0);
       for (uint32_t by = 0; by < lbh; ++by) {
@@ -1972,10 +2255,11 @@ uint32_t MetalTextureCache::GetTextureSlot(
       }
       [texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh)
                  mipmapLevel:level
-                       slice:0
+                       slice:face
                    withBytes:mip_linear.data()
                  bytesPerRow:lbw * bpb
                bytesPerImage:0];
+      }  // face
     }
   }
 
@@ -2168,6 +2452,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
     // as one consistent generation. ram_backed itself stays sticky, so no
     // serving decision changes.
     it->second.generation_ram_backed = false;
+    ++it->second.generation;
     it->second.width = width;
     it->second.height = height;
     it->second.is_depth = is_depth;
@@ -2355,6 +2640,14 @@ void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
         out.push_back(sv.second.view);
       }
     }
+    if (pair.second.fitted.texture) {
+      out.push_back(pair.second.fitted.texture);
+    }
+    for (const auto& sv : pair.second.fitted.swizzle_views) {
+      if (sv.second.view) {
+        out.push_back(sv.second.view);
+      }
+    }
   }
 }
 
@@ -2512,6 +2805,7 @@ void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
                                    swizzle_view.second.view);
   }
   target.tip_swizzle_views.clear();
+  RetireFittedView(target.fitted);
 }
 
 uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,

@@ -1989,6 +1989,31 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // The same null texture every heap slot is initialized to, so a slot freed
   // by a cache clear returns to a valid resource rather than an empty entry.
   texture_cache_->SetNullTexture(null_texture_);
+  texture_cache_->SetSnapshotFitBlitter(
+      [this](void* src, void* dst, uint32_t width, uint32_t height) {
+        if (!src || !dst || !width || !height) {
+          return false;
+        }
+        id<MTLCommandBuffer> cb =
+            (__bridge id<MTLCommandBuffer>)PrepareTransferCommandBuffer(
+                uint32_t(metal::MetalTransferSite::kSnapshotFit));
+        if (!cb) {
+          return false;
+        }
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        blit.label = @"texcache:snapshot-fit";
+        [blit copyFromTexture:(__bridge id<MTLTexture>)src
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(width, height, 1)
+                    toTexture:(__bridge id<MTLTexture>)dst
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        return true;
+      });
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
@@ -7583,6 +7608,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }();
   if (s_split_every && frame_open_ && (draw_count_ % s_split_every) == 0) {
     EndRenderEncoder(metal::MetalPassEndReason::kAttachmentKey);
+  }
+  // Snapshot fit (texture cache): prepare fetch-sized views of bridge
+  // snapshots BEFORE this draw's encoder opens — the blit is a transfer
+  // (pass boundary) and cannot be encoded once the render encoder exists.
+  if (texture_cache_) {
+    auto prepare_fits = [&](MetalShader* shader) {
+      if (!shader) return;
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        if (binding.fetch_constant >= xenos::kTextureFetchConstantCount) {
+          continue;
+        }
+        auto f = regs.GetTextureFetch(binding.fetch_constant);
+        if (!(f.base_address << 12)) continue;
+        texture_cache_->PrepareSnapshotFit(f, binding.is_signed);
+      }
+    };
+    prepare_fits(pixel_shader);
+    prepare_fits(vertex_shader);
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
@@ -13593,6 +13636,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (texture_cache_) {
+        XELOGI("{}", texture_cache_->FormatDimensionCensus());
+      }
       if (PassCensusEnabled()) {
         XELOGI("{}", pass_census_.Format("periodic", /*window=*/true));
         if (render_target_cache_) {

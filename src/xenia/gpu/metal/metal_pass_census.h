@@ -54,6 +54,7 @@ enum class MetalTransferSite : uint32_t {
   kCanonicalResolve,    // PrepareCanonicalEdramForResolve
   kOwnershipTransfer,   // PerformTransfers
   kSnapshotRestore,     // RestoreEdramSnapshot
+  kSnapshotFit,         // texture cache: fetch-sized view of a bridge snapshot
   kCount,
 };
 
@@ -69,6 +70,7 @@ inline const char* MetalTransferSiteName(uint32_t site) {
     case MetalTransferSite::kCanonicalResolve: return "canonres";
     case MetalTransferSite::kOwnershipTransfer: return "owner";
     case MetalTransferSite::kSnapshotRestore: return "snaprestore";
+    case MetalTransferSite::kSnapshotFit: return "snapfit";
     default: return "unknown";
   }
 }

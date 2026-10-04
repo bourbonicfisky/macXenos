@@ -119,6 +119,27 @@ class MetalTextureCache {
   // XE_METAL_TIP_SNAP_VIEW: attach the derived 1x1 texel-(0,0) copy to the
   // registered resolve target at base (allocates/repoints its bindless slot).
   void RegisterResolvedTipView(uint32_t base, void* texture);
+  // Snapshot fit (2026-10-03, Batman AA guard shadows): a bridge-served fetch
+  // whose dimensions differ from the snapshot's samples a fetch-sized derived
+  // texture holding the snapshot's overlapping texels at (0,0) (zero
+  // elsewhere), so normalized coordinates address the same guest texels the
+  // RAM path would. UE3 resolves 16 per-caster shadow depth maps of different
+  // rect sizes into one 512x512 texture and fetches it as 512x512; serving a
+  // 512x320 snapshot to that fetch stretched the map and failed every depth
+  // comparison (whole-frustum dark shadows). DOA5 needs the opposite (a
+  // 1024x608 fetch must not see a 1280x720 snapshot), which exact-size
+  // snapshots already give; the fit covers both. The blit is a transfer
+  // (pass boundary), so it is prepared BEFORE a draw's encoder opens
+  // (PrepareSnapshotFit) and only consumed at bind time.
+  // XE_METAL_SNAPSHOT_FIT=0 serves the raw snapshot as before.
+  void SetSnapshotFitBlitter(
+      std::function<bool(void* src, void* dst, uint32_t width,
+                         uint32_t height)>
+          blitter) {
+    snapshot_fit_blit_ = std::move(blitter);
+  }
+  void PrepareSnapshotFit(const xenos::xe_gpu_texture_fetch_t& fetch,
+                          bool is_signed);
 
   // True if a fetch of (base, width, height) will be served by the bridge
   // snapshot rather than guest RAM — the command processor skips the
@@ -275,6 +296,15 @@ class MetalTextureCache {
   }
 
   uint32_t slots_used() const { return next_slot_; }
+  // Dimension census (always on, lifetime): unique texture uploads by guest
+  // dimension (1D/2D/3D/cube), stacking and mip presence, plus null serves by
+  // reason. One line for the frame-stats tick; the boot census greps it.
+  std::string FormatDimensionCensus() const;
+  // index = dimension (0..3) << 2 | stacked | (mips ? 2 : 0)
+  uint32_t dim_census_[16] = {};
+  uint32_t dim_census_signed_[16] = {};
+  uint32_t null_census_dim_ = 0, null_census_fmt_ = 0,
+           null_census_volume_decoded_ = 0, null_census_other_ = 0;
   uint32_t slots_free() const { return uint32_t(free_slots_.size()); }
   uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
   uint32_t slots_capacity() const { return view_heap_slots_; }
@@ -491,9 +521,38 @@ class MetalTextureCache {
     // texture generation changes (RegisterResolvedTipView), not when the full
     // snapshot changes.
     std::unordered_map<uint32_t, SwizzleView> tip_swizzle_views;
+    // Content generation: bumped by every registration (each resolve to the
+    // base). The fitted view below records the generation it was blitted
+    // from so a stale copy is never served.
+    uint32_t generation = 0;
+    // Snapshot fit (see PrepareSnapshotFit): fetch-sized derived texture,
+    // ours (retained +1), one per base; re-created when the fetch dims or
+    // the snapshot pixel format change, re-blitted when the snapshot object
+    // or generation changes.
+    struct FittedView {
+      void* texture = nullptr;  // id<MTLTexture>, retained by us.
+      uint32_t slot = 0;
+      uint32_t width = 0;   // guest fetch dims (unscaled)
+      uint32_t height = 0;
+      void* source = nullptr;  // snapshot object the content came from
+      uint32_t source_generation = 0;
+      std::unordered_map<uint32_t, SwizzleView> swizzle_views;
+    };
+    FittedView fitted;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+  void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
+                          uint32_t* height_out) const;
+  bool SnapshotFitApplies(const ResolvedTarget& rt, uint32_t fetch_w,
+                          uint32_t fetch_h, bool covered_r32f) const;
+  bool EnsureFittedSnapshot(ResolvedTarget& rt, uint32_t fetch_w,
+                            uint32_t fetch_h);
+  uint32_t ServeFittedSnapshot(ResolvedTarget& rt, uint32_t fetch_w,
+                               uint32_t fetch_h, uint32_t guest_swizzle,
+                               bool identity);
+  void RetireFittedView(ResolvedTarget::FittedView& fitted);
+  std::function<bool(void*, void*, uint32_t, uint32_t)> snapshot_fit_blit_;
   // Draw resolution scaling: column assemblies (see RegisterScaledAssembly),
   // keyed by the destination's x = 0 base. The texture is owned by the
   // render-target cache; the slot and swizzle views are ours.
