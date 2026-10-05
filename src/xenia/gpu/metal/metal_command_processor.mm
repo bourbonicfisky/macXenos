@@ -2031,6 +2031,13 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   texture_cache_->SetTraceWriter(&trace_writer_);
   texture_cache_->SetDrawResolutionScale(draw_resolution_scale_x_,
                                          draw_resolution_scale_y_);
+  {
+    auto* residency_provider = static_cast<xe::ui::metal::MetalProvider*>(
+        graphics_system_->provider());
+    InitializeResidencySet(
+        device_ptr,
+        residency_provider ? residency_provider->command_queue() : nullptr);
+  }
   // The same null texture every heap slot is initialized to, so a slot freed
   // by a cache clear returns to a valid resource rather than an empty entry.
   texture_cache_->SetNullTexture(null_texture_);
@@ -2114,6 +2121,13 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   // The shared-route subclass retires slots/textures through texture_cache_;
   // destroy it first.
   shared_texture_cache_.reset();
+  {
+    auto* provider = graphics_system_
+                         ? static_cast<xe::ui::metal::MetalProvider*>(
+                               graphics_system_->provider())
+                         : nullptr;
+    ShutdownResidencySet(provider ? provider->command_queue() : nullptr);
+  }
   texture_cache_.reset();  // references view_bindless_heap_, free first.
   auto release = [](void*& p) {
     if (p) {
@@ -2748,7 +2762,15 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // a non-resident texture -> GPU page fault (the attributed 'draws@N'
   // faults). Textures created after this sweep are covered by the per-draw
   // loop as before.
-  if (texture_cache_) {
+  if (residency_set_) {
+    if (residency_set_dirty_) {
+      if (@available(macOS 15.0, *)) {
+        [(__bridge id<MTLResidencySet>)residency_set_ commit];
+      }
+      residency_set_dirty_ = false;
+      ++residency_commits_;
+    }
+  } else if (texture_cache_) {
     resident_sweep_scratch_.clear();
     texture_cache_->AppendAllTextures(resident_sweep_scratch_);
     if (shared_texture_cache_) {
@@ -13485,10 +13507,158 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
                                         requested);
 }
 
+void MetalCommandProcessor::InitializeResidencySet(void* device_ptr,
+                                                   void* queue_ptr) {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_RESIDENCY_SET");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled || !device_ptr || !queue_ptr || !texture_cache_) {
+    return;
+  }
+  if (@available(macOS 15.0, *)) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_ptr;
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queue_ptr;
+    MTLResidencySetDescriptor* desc = [[MTLResidencySetDescriptor alloc] init];
+    desc.label = @"xenia bindless textures";
+    desc.initialCapacity = 4096;
+    NSError* error = nil;
+    id<MTLResidencySet> set = [device newResidencySetWithDescriptor:desc
+                                                               error:&error];
+    if (!set) {
+      XELOGW("MetalResidencySet: unavailable ({}); per-encoder sweep stays",
+             error ? [[error localizedDescription] UTF8String] : "nil");
+      return;
+    }
+    [queue addResidencySet:set];
+    residency_set_ = (__bridge_retained void*)set;
+    texture_cache_->SetResidencyHooks(
+        [this](void* texture_bridge) {
+          if (!residency_members_.insert(texture_bridge).second) {
+            return;
+          }
+          if (@available(macOS 15.0, *)) {
+            [(__bridge id<MTLResidencySet>)residency_set_
+                addAllocation:(__bridge id<MTLTexture>)texture_bridge];
+          }
+          residency_set_dirty_ = true;
+          ++residency_adds_;
+        },
+        [this](void* texture_bridge) {
+          if (!residency_members_.erase(texture_bridge)) {
+            return;
+          }
+          if (@available(macOS 15.0, *)) {
+            [(__bridge id<MTLResidencySet>)residency_set_
+                removeAllocation:(__bridge id<MTLTexture>)texture_bridge];
+          }
+          residency_set_dirty_ = true;
+          ++residency_removes_;
+        });
+    // Textures that already hold slots (none at construction; defensive).
+    resident_sweep_scratch_.clear();
+    texture_cache_->AppendAllTextures(resident_sweep_scratch_);
+    for (void* t : resident_sweep_scratch_) {
+      if (residency_members_.insert(t).second) {
+        [set addAllocation:(__bridge id<MTLTexture>)t];
+        residency_set_dirty_ = true;
+      }
+    }
+    XELOGI("MetalResidencySet: attached to the command queue (per-encoder "
+           "texture sweep off)");
+  }
+}
+
+void MetalCommandProcessor::ReconcileResidencySet() {
+  if (!residency_set_ || !texture_cache_) {
+    return;
+  }
+  resident_sweep_scratch_.clear();
+  texture_cache_->AppendAllTextures(resident_sweep_scratch_);
+  texture_cache_->AppendRetiredTextures(resident_sweep_scratch_);
+  if (shared_texture_cache_) {
+    shared_texture_cache_->AppendAllTextures(resident_sweep_scratch_);
+  }
+  std::unordered_set<void*> reachable(resident_sweep_scratch_.begin(),
+                                      resident_sweep_scratch_.end());
+  if (@available(macOS 15.0, *)) {
+    id<MTLResidencySet> set = (__bridge id<MTLResidencySet>)residency_set_;
+    for (void* t : resident_sweep_scratch_) {
+      if (residency_members_.insert(t).second) {
+        [set addAllocation:(__bridge id<MTLTexture>)t];
+        residency_set_dirty_ = true;
+        ++residency_adds_;
+      }
+    }
+    for (auto it = residency_members_.begin();
+         it != residency_members_.end();) {
+      if (reachable.count(*it)) {
+        ++it;
+        continue;
+      }
+      [set removeAllocation:(__bridge id<MTLTexture>)*it];
+      it = residency_members_.erase(it);
+      residency_set_dirty_ = true;
+      ++residency_reconcile_removes_;
+    }
+    if (residency_set_dirty_) {
+      [set commit];
+      residency_set_dirty_ = false;
+      ++residency_commits_;
+    }
+  }
+}
+
+void MetalCommandProcessor::ShutdownResidencySet(void* queue_ptr) {
+  if (!residency_set_) {
+    return;
+  }
+  if (texture_cache_) {
+    texture_cache_->SetResidencyHooks(nullptr, nullptr);
+  }
+  if (@available(macOS 15.0, *)) {
+    id<MTLResidencySet> set =
+        (__bridge_transfer id<MTLResidencySet>)residency_set_;
+    if (queue_ptr) {
+      [(__bridge id<MTLCommandQueue>)queue_ptr removeResidencySet:set];
+    }
+    [set endResidency];
+    (void)set;
+  }
+  residency_set_ = nullptr;
+  residency_members_.clear();
+  XELOGI("MetalResidencySet: adds={} removes={} commits={}", residency_adds_,
+         residency_removes_, residency_commits_);
+}
+
 bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   // Completion notifications do not identify the range the guest CPU will
   // inspect next. Publish every existing deferred producer before exposing the
   // signal; the query is still a strict no-op when the pending set is empty.
+  static const bool s_memo = [] {
+    const char* v = std::getenv("XE_METAL_COMPLETION_EXPOSURE_MEMO");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  auto fingerprint = [&]() {
+    CompletionExposureFingerprint f;
+    f.writebacks = pending_writebacks_.size();
+    f.memexports = pending_memexports_.size();
+    f.sequence = memory_authority_sequence_;
+    f.completed = completed_submission_.load(std::memory_order_acquire);
+    f.encoding = CurrentEncodingSubmission();
+    return f;
+  };
+  if (s_memo && completion_exposure_valid_ &&
+      fingerprint() == completion_exposure_last_) {
+    ++completion_exposure_skips_;
+    return true;
+  }
+  ++completion_exposure_runs_;
+  if (SeamTimingEnabled() && (completion_exposure_runs_ & 1023) == 0) {
+    XELOGI("MetalCompletionExposure: runs={} skips={} pending={}+{}",
+           completion_exposure_runs_, completion_exposure_skips_,
+           pending_writebacks_.size(), pending_memexports_.size());
+  }
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
@@ -13510,6 +13680,10 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);
   lazy_full_domain_request_ = false;
+  // Fingerprint the state AFTER the effects (drains retire records, waits
+  // advance the completed submission): a repeat against this state is a no-op.
+  completion_exposure_last_ = fingerprint();
+  completion_exposure_valid_ = ok;
   return ok;
 }
 
@@ -13564,6 +13738,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     objc_autoreleasePoolPop(frame_autorelease_pool_);
   }
   frame_autorelease_pool_ = objc_autoreleasePoolPush();
+  ReconcileResidencySet();
   {
     static_assert(uint32_t(metal::MsaaClearFoldRefusal::kCount) <=
                       sizeof(msaa_fold_census_) / sizeof(msaa_fold_census_[0]),
@@ -13802,6 +13977,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
       if (texture_cache_) {
         XELOGI("{}", texture_cache_->FormatDimensionCensus());
+        MetalTextureCache::ByteCensus bc = texture_cache_->CensusBytes();
+        XELOGI("MetalTexBytes swap#{}: cache {} MB/{} parked {} MB/{} "
+               "resolved {} MB/{} retired {} MB/{} residency-members {} "
+               "(adds {} removes {} reconciled {} commits {})",
+               count, bc.cache_bytes >> 20, bc.cache_count,
+               bc.parked_bytes >> 20, bc.parked_count,
+               bc.resolved_bytes >> 20, bc.resolved_count,
+               bc.retired_bytes >> 20, bc.retired_count,
+               residency_members_.size(), residency_adds_, residency_removes_,
+               residency_reconcile_removes_, residency_commits_);
       }
       if (PassCensusEnabled()) {
         XELOGI("{}", pass_census_.Format("periodic", /*window=*/true));

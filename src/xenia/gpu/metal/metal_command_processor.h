@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -1017,6 +1018,29 @@ class MetalCommandProcessor : public CommandProcessor {
   // CPU vertex-shader evaluation for the fold's value/alignment proof.
   std::unique_ptr<ShaderInterpreter> msaa_fold_interpreter_;
   uint64_t memory_authority_sequence_ = 0;
+  // Completion-exposure memo (XE_METAL_COMPLETION_EXPOSURE_MEMO=0 rollback):
+  // the full-domain publication decision a fence packet triggers depends
+  // only on the pending-producer set (size of each queue + the monotonic
+  // registration sequence identify it exactly), the GPU's completed
+  // submission and the encoding submission. A fence packet that arrives
+  // with none of them changed would repeat the previous decision and its
+  // (already applied) effects, so it is skipped. Red Dead Redemption's
+  // cinematic issues ~2,400 fence packets per frame against ~210 pending
+  // GPU-current records: 27k consumer queries and ~85 ms of a 240 ms frame
+  // in DecideConsumer (2026-10-04).
+  struct CompletionExposureFingerprint {
+    uint64_t writebacks = 0, memexports = 0, sequence = 0, completed = 0,
+             encoding = 0;
+    bool operator==(const CompletionExposureFingerprint& o) const {
+      return writebacks == o.writebacks && memexports == o.memexports &&
+             sequence == o.sequence && completed == o.completed &&
+             encoding == o.encoding;
+    }
+  };
+  CompletionExposureFingerprint completion_exposure_last_;
+  bool completion_exposure_valid_ = false;
+  uint64_t completion_exposure_runs_ = 0;
+  uint64_t completion_exposure_skips_ = 0;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,
   // default OFF until the counted gate). See metal_lazy_publication.h.
@@ -1082,6 +1106,28 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
+  // Residency set (macOS 15+, XE_METAL_RESIDENCY_SET=0 rollback to the
+  // per-encoder sweep): every slot-reachable texture is added once (hooked at
+  // the bindless slot descriptor write) and removed when its retired object
+  // is released; the set is attached to the command queue and committed
+  // when dirty at encoder begin. Replaces useResources over the whole
+  // texture population (~3,500) on every render encoder (~170 per frame in
+  // Red Dead's cinematic: the IOGPU resource-list rebuild was 14% of the
+  // command processor's time, 2026-10-04).
+  void* residency_set_ = nullptr;  // id<MTLResidencySet> (retained)
+  bool residency_set_dirty_ = false;
+  std::unordered_set<void*> residency_members_;
+  uint64_t residency_adds_ = 0, residency_removes_ = 0,
+           residency_commits_ = 0;
+  void InitializeResidencySet(void* device_ptr, void* queue_ptr);
+  void ShutdownResidencySet(void* queue_ptr);
+  // Once per swap: drop members no longer reachable (cache, parked, resolved
+  // targets, shared-route views, retired-in-flight). Texture views released
+  // outside the legacy drain (the shared route's binding views) would
+  // otherwise stay retained by the set together with their parent
+  // textures: Red Dead's cinematic grew to 13.8 GB in 3,000 swaps.
+  void ReconcileResidencySet();
+  uint64_t residency_reconcile_removes_ = 0;
 
   // Exposure-loop telemetry (XE_METAL_EXPO_TRACE=<tonemap ps ucode hash hex>):
   // per-swap snapshot of the auto-exposure FEEDBACK LOOP's three stages —

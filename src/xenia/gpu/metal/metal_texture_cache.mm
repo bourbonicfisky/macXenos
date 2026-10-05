@@ -497,6 +497,9 @@ void MetalTextureCache::ClearCache() {
   }
   stale_slots_.clear();
   for (const auto& entry : retired_textures_) {
+    if (residency_release_) {
+      residency_release_(entry.second);
+    }
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
     (void)released;
   }
@@ -2778,6 +2781,33 @@ void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
   it->second.wb_endian = wb_endian;
 }
 
+MetalTextureCache::ByteCensus MetalTextureCache::CensusBytes() const {
+  ByteCensus c;
+  auto bytes = [](void* bridge) -> uint64_t {
+    return bridge ? uint64_t([(__bridge id<MTLTexture>)bridge allocatedSize])
+                  : 0;
+  };
+  for (const auto& pair : cache_) {
+    c.cache_bytes += bytes(pair.second.texture);
+    ++c.cache_count;
+  }
+  for (const auto& parked : parked_) {
+    c.parked_bytes += bytes(parked.second.texture);
+    ++c.parked_count;
+  }
+  for (const auto& pair : resolved_targets_) {
+    c.resolved_bytes += bytes(pair.second.texture) +
+                        bytes(pair.second.tip_texture) +
+                        bytes(pair.second.fitted.texture);
+    ++c.resolved_count;
+  }
+  for (const auto& entry : retired_textures_) {
+    c.retired_bytes += bytes(entry.second);
+    ++c.retired_count;
+  }
+  return c;
+}
+
 void MetalTextureCache::AppendAllTextures(std::vector<void*>& out) const {
   for (const auto& pair : cache_) {
     if (pair.second.texture) {
@@ -2850,6 +2880,9 @@ void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
   }
   IRDescriptorTableSetTexture(&entries[slot],
                               (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
+  if (residency_add_ && texture_bridge) {
+    residency_add_(texture_bridge);
+  }
 }
 
 void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
@@ -2880,6 +2913,9 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
       [&](const std::pair<uint64_t, void*>& entry) {
         if (entry.first > completed_submission) {
           return false;
+        }
+        if (residency_release_) {
+          residency_release_(entry.second);
         }
         id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
         (void)released;

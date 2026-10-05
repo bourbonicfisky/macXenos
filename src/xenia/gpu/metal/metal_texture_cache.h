@@ -165,6 +165,24 @@ class MetalTextureCache {
   // descriptor index, prior-generation slot) page-faults otherwise — the
   // attributed live faults ('draws@N' encoders) are exactly this class.
   void AppendAllTextures(std::vector<void*>& out) const;
+  // Census: bytes (allocatedSize) and counts of the owned textures (views
+  // excluded): cache entries, parked entries, resolved-target textures.
+  struct ByteCensus {
+    uint64_t cache_bytes = 0, cache_count = 0, parked_bytes = 0,
+             parked_count = 0, resolved_bytes = 0, resolved_count = 0,
+             retired_bytes = 0, retired_count = 0;
+  };
+  ByteCensus CensusBytes() const;
+  // Retired-but-not-yet-released textures (in-flight submissions may still
+  // reference them through stale slots): residency-set reconciliation keeps
+  // them resident until the drain releases them.
+  void AppendRetiredTextures(std::vector<void*>& out) const {
+    for (const auto& entry : retired_textures_) {
+      if (entry.second) {
+        out.push_back(entry.second);
+      }
+    }
+  }
 
   // Returns bindless slots retired by submissions <= `completed_submission`
   // (a resolved target got a new texture generation -> new slot) to the free
@@ -337,6 +355,16 @@ class MetalTextureCache {
   // MetalSharedTextureCache allocates, binds, and retires bindless view-heap
   // slots and registers per-draw residency exclusively through these; a
   // second allocator over the same heap is forbidden (seam audit, proof 1).
+  // Residency-set hooks (MetalCommandProcessor): `on_add` fires when a
+  // texture becomes reachable through a bindless slot descriptor (the single
+  // funnel every sampled texture and view passes), `on_release` when a
+  // retired texture is finally released (its last referencing submission
+  // completed). Null hooks = the per-encoder residency sweep.
+  using ResidencyHook = std::function<void(void*)>;
+  void SetResidencyHooks(ResidencyHook on_add, ResidencyHook on_release) {
+    residency_add_ = std::move(on_add);
+    residency_release_ = std::move(on_release);
+  }
   uint32_t AllocateExternalSlot() { return AllocateSlot(); }
   // Points `slot` at a retained id<MTLTexture> the caller keeps alive.
   void BindExternalSlot(uint32_t slot, void* texture_bridge);
@@ -396,6 +424,8 @@ class MetalTextureCache {
   // Textures evicted by InvalidateRange, released once their submissions
   // complete.
   std::vector<std::pair<uint64_t, void*>> retired_textures_;
+  ResidencyHook residency_add_;
+  ResidencyHook residency_release_;
   std::function<uint64_t()> submission_provider_;
   bool BuildResolvedServiceInputs(const xenos::xe_gpu_texture_fetch_t& fetch,
                                   bool is_signed,
