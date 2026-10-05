@@ -1800,6 +1800,9 @@ bool MetalCommandProcessor::SetupContext() {
       [this](uint32_t offset, uint32_t length) {
         return StageHazardUpload(offset, length);
       });
+  shared_memory_->SetCompletedSubmissionProvider([this]() {
+    return completed_submission_.load(std::memory_order_acquire);
+  });
   // Straddler fix: uploads copy around pending GPU-current spans (the
   // pending lists live on this thread, the same one that uploads).
   shared_memory_->SetGpuCurrentSpanProvider(
@@ -2017,12 +2020,12 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
   IRDescriptorTableSetBuffer(&system_entries[kSystemViewSharedMemorySRV],
                              [shared_buffer gpuAddress],
-                             MetalSharedMemory::kBufferSize);
+                             shared_memory_->gpu_visible_length());
   IRDescriptorTableSetBuffer(&system_entries[kSystemViewNullUAV],
                              [null_buffer gpuAddress], 256);
   IRDescriptorTableSetBuffer(&system_entries[kSystemViewSharedMemoryUAV],
                              [shared_buffer gpuAddress],
-                             MetalSharedMemory::kBufferSize);
+                             shared_memory_->gpu_visible_length());
   system_view_tables_ = (__bridge_retained void*)system_view;
 
   texture_cache_ = std::make_unique<MetalTextureCache>(
@@ -5984,6 +5987,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   };
   std::vector<VertexFetchDependency> vertex_fetch_dependencies;
   metal::GuestRangeSet vertex_dependency_ranges;
+  draw_vfetch_renames_.clear();
   for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
     uint32_t bits = vs_map.vertex_fetch_bitmap[i];
     uint32_t j;
@@ -6410,8 +6414,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              uint32_t(dependency.fetch.endian), sampled_words[0],
              sampled_words[1], sampled_words[2], sampled_words[3]);
     }
-    if (!shared_memory_->RequestConsumedRange(dependency.range.start(),
-                                               dependency.range.length())) {
+    bool vertex_range_ok;
+    if (MetalSharedMemory::VfetchRenameEnabled() && !trace_writer_.is_open()) {
+      MetalSharedMemory::VfetchRename rename;
+      vertex_range_ok = shared_memory_->RequestVertexFetchRange(
+          dependency.range.start(), dependency.range.length(), &rename);
+      if (vertex_range_ok && rename.length) {
+        draw_vfetch_renames_.push_back({dependency.fetch_constant,
+                                        rename.guest_start, rename.length,
+                                        rename.buffer_offset});
+      }
+    } else {
+      vertex_range_ok = shared_memory_->RequestConsumedRange(
+          dependency.range.start(), dependency.range.length());
+    }
+    if (!vertex_range_ok) {
       XELOGE("MetalCommandProcessor: failed to validate vertex range "
              "{:08X}(+{})",
              dependency.range.start(), dependency.range.length());
@@ -8595,6 +8612,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    "boolloop-fetch-alloc");
     return true;
   }
+  // Vertex-fetch renames: point this draw's renamed fetch constants at the
+  // arena copy (this draw's marshalled block only; the register file is
+  // untouched).
+  for (const DrawVfetchRename& r : draw_vfetch_renames_) {
+    uint32_t* words = static_cast<uint32_t*>(fetch_alloc.cpu_ptr);
+    const uint32_t index = r.fetch_constant * 2u;
+    if (index + 1 >= kMetalFetchConstantsSize / sizeof(uint32_t)) {
+      continue;
+    }
+    xenos::xe_gpu_vertex_fetch_t vf;
+    std::memcpy(&vf, &words[index], sizeof(vf));
+    const uint32_t fetch_base = vf.address << 2;
+    if (fetch_base < r.guest_start || fetch_base >= r.guest_start + r.length) {
+      continue;
+    }
+    vf.address = (r.buffer_offset + (fetch_base - r.guest_start)) >> 2;
+    std::memcpy(&words[index], &vf, sizeof(vf));
+  }
 
   // Descriptor indices (b4): for each texture binding, resolve its guest fetch
   // constant to a bindless view-heap slot (real texture, or 0=null/gray if the
@@ -9105,7 +9140,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
     IRDescriptorTableSetBuffer(&tess_table_entries[0],
                                [tess_shared_buffer gpuAddress],
-                               MetalSharedMemory::kBufferSize);
+                               shared_memory_->gpu_visible_length());
     IRDescriptorTableSetBuffer(
         &tess_table_entries[1], tess_host_records_alloc.gpu_address,
         tess_counts.vertex_count * metal::kXeTessellationVertexSizeBytes);
@@ -13986,6 +14021,12 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       if (texture_cache_) {
         XELOGI("{}", texture_cache_->FormatDimensionCensus());
         MetalTextureCache::ByteCensus bc = texture_cache_->CensusBytes();
+        if (shared_memory_ && MetalSharedMemory::VfetchRenameEnabled()) {
+          XELOGI("MetalVfetchRename swap#{}: renames={} bytes={} refusals={}",
+                 count, shared_memory_->vfetch_renames(),
+                 shared_memory_->vfetch_rename_bytes(),
+                 shared_memory_->vfetch_rename_refusals());
+        }
         XELOGI("MetalTexBytes swap#{}: cache {} MB/{} parked {} MB/{} "
                "resolved {} MB/{} retired {} MB/{} residency-members {} "
                "(adds {} removes {} reconciled {} commits {})",

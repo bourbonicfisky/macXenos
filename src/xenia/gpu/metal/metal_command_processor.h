@@ -1106,6 +1106,15 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Scratch for the per-encoder bindless residency sweep (BeginFrameEncoder).
   std::vector<void*> resident_sweep_scratch_;
+  // Vertex-fetch renames of the draw being issued (see
+  // MetalSharedMemory::RequestVertexFetchRange).
+  struct DrawVfetchRename {
+    uint32_t fetch_constant;
+    uint32_t guest_start;
+    uint32_t length;
+    uint32_t buffer_offset;
+  };
+  std::vector<DrawVfetchRename> draw_vfetch_renames_;
   // Residency set (macOS 15+, XE_METAL_RESIDENCY_SET=0 rollback to the
   // per-encoder sweep): every slot-reachable texture is added once (hooked at
   // the bindless slot descriptor write) and removed when its retired object

@@ -172,9 +172,12 @@ bool MetalSharedMemory::Initialize() {
     // The pre-existing mirror allocation, unchanged: shared storage so uploads
     // are plain host memcpys (unified memory on Apple Silicon); write-combined
     // is fine because nothing reads it from the CPU.
-    buffer = [device newBufferWithLength:kBufferSize
+    const uint32_t mirror_length =
+        kBufferSize + (VfetchRenameEnabled() ? kRenameArenaBytes : 0u);
+    buffer = [device newBufferWithLength:mirror_length
                                  options:MTLResourceStorageModeShared |
                                          MTLResourceCPUCacheModeWriteCombined];
+    gpu_visible_length_ = mirror_length;
     if (!buffer) {
       XELOGE("MetalSharedMemory: failed to allocate {} MiB shared buffer",
              kBufferSize / (1024 * 1024));
@@ -290,6 +293,11 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
         memory().LockPhysicalMemoryInvalidationCallbacks();
     zero_copy_overlap_.StampConsumer(start, length, submission);
   }
+  return NoteConsumed(start, length, result);
+}
+
+bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
+                                     bool result) {
   uint32_t end = start + length;
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
   for (auto& range : consumed_ranges_) {
@@ -302,6 +310,77 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   }
   consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   return result;
+}
+
+bool MetalSharedMemory::VfetchRenameEnabled() {
+  // Default on (2026-10-05 gate); XE_METAL_VFETCH_RENAME=0 is the exact
+  // rollback to the staged (pass-ending) hazard upload.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_VFETCH_RENAME");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+bool MetalSharedMemory::RequestVertexFetchRange(uint32_t start, uint32_t length,
+                                                VfetchRename* rename_out) {
+  *rename_out = VfetchRename{};
+  if (!length) {
+    return true;
+  }
+  rename_context_ = true;
+  rename_request_start_ = start;
+  rename_request_length_ = length;
+  rename_happened_ = false;
+  bool result = RequestRange(start, length);
+  rename_context_ = false;
+  if (result && rename_happened_) {
+    *rename_out = rename_result_;
+    return true;
+  }
+  if (is_zero_copy_ && result) {
+    uint64_t submission =
+        overlap_submission_provider_ ? overlap_submission_provider_() : 0;
+    auto invalidation_lock =
+        memory().LockPhysicalMemoryInvalidationCallbacks();
+    zero_copy_overlap_.StampConsumer(start, length, submission);
+  }
+  return NoteConsumed(start, length, result);
+}
+
+bool MetalSharedMemory::AllocateRename(uint32_t length,
+                                       uint32_t* arena_offset_out) {
+  const uint64_t completed =
+      completed_submission_provider_ ? completed_submission_provider_() : 0;
+  while (!rename_fences_.empty() &&
+         rename_fences_.front().submission <= completed) {
+    rename_fences_.pop_front();
+  }
+  length = (length + 255u) & ~255u;
+  if (!length || length > kRenameArenaBytes) {
+    return false;
+  }
+  uint32_t start = rename_head_;
+  if (start + length > kRenameArenaBytes) {
+    start = 0;
+  }
+  const uint32_t end = start + length;
+  for (const RenameFence& fence : rename_fences_) {
+    if (start < fence.end && end > fence.start) {
+      return false;  // still in flight: the caller takes the staged route.
+    }
+  }
+  const uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  if (!rename_fences_.empty() &&
+      rename_fences_.back().submission == submission &&
+      rename_fences_.back().end == start) {
+    rename_fences_.back().end = end;
+  } else {
+    rename_fences_.push_back({start, end, submission});
+  }
+  rename_head_ = end;
+  *arena_offset_out = start;
+  return true;
 }
 
 void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
@@ -496,6 +575,42 @@ bool MetalSharedMemory::UploadRanges(
           hazard_upload_start, hazard_upload_end, hazard_consumed_start,
           hazard_consumed_end, consumed_ranges_.size(),
           hazard_in_open_buffer ? 1 : 0);
+    }
+    if (rename_context_ && !is_zero_copy_ && gpu_visible_length_ > kBufferSize &&
+        rename_request_length_) {
+      uint32_t arena_offset = 0;
+      const void* source = memory().TranslatePhysical(rename_request_start_);
+      // Guest RAM is the source of the copy, so a range holding GPU output
+      // that only the mirror has (a pending resolve writeback or memexport
+      // not yet published to RAM: JC2's memexport-fed vertex buffers) must
+      // not be renamed; the ordinary path orders the draw after its producer.
+      bool gpu_current_overlap = false;
+      if (gpu_current_span_provider_) {
+        std::vector<std::pair<uint32_t, uint32_t>> spans;
+        gpu_current_span_provider_(rename_request_start_,
+                                   rename_request_length_, &spans);
+        gpu_current_overlap = !spans.empty();
+      }
+      if (!gpu_current_overlap && source &&
+          AllocateRename(rename_request_length_, &arena_offset)) {
+        std::memcpy(buffer_contents_ + kBufferSize + arena_offset, source,
+                    rename_request_length_);
+        rename_result_ = {rename_request_start_, rename_request_length_,
+                          kBufferSize + arena_offset};
+        rename_happened_ = true;
+        ++vfetch_renames_;
+        vfetch_rename_bytes_ += rename_request_length_;
+        static uint32_t s_rename_logs = 0;
+        if (s_rename_logs++ < 8) {
+          XELOGI("MetalSharedMemory: vfetch rename #{} {:08X}+{:X} -> arena+{:X} "
+                 "(hazard over {:08X}-{:08X})",
+                 vfetch_renames_, rename_request_start_, rename_request_length_,
+                 arena_offset, hazard_consumed_start, hazard_consumed_end);
+        }
+        // The mirror's pages stay invalid: nothing was uploaded for them.
+        return true;
+      }
+      ++vfetch_rename_refusals_;
     }
     if (can_stage) {
       if (hazard_in_open_buffer) {

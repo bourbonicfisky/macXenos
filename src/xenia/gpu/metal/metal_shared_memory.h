@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -115,6 +116,40 @@ class MetalSharedMemory : public SharedMemory {
   // staged range is then recorded as consumed by that submission so a later
   // direct memcpy over it is itself detected as a hazard until the blit has
   // executed.
+  // Vertex-fetch rename (default on; XE_METAL_VFETCH_RENAME=0 rollback): when a vertex-fetch
+  // upload would hazard against draws still queued in the open command
+  // buffer, the fetched range is copied from guest RAM into a rename arena at
+  // the tail of the mirror buffer and the draw's fetch constant is pointed at
+  // it, so the queued draws keep their bytes, this draw gets the new ones,
+  // and no transfer encoder (= no render-pass end) is needed. The mirror's
+  // pages stay INVALID for the range: any later consumer re-requests it
+  // through the ordinary upload path (a texture or resolve consumer then
+  // takes the staged route; a draw renames again). LEGO Star Wars II: 21 of
+  // its 81 render passes per frame ended for staged hazard uploads
+  // (2026-10-04). Mirror mode only; zero-copy has no arena.
+  static constexpr uint32_t kRenameArenaBytes = 16u * 1024u * 1024u;
+  struct VfetchRename {
+    uint32_t guest_start = 0;
+    uint32_t length = 0;
+    uint32_t buffer_offset = 0;  // byte offset in the shared buffer (>= kBufferSize)
+  };
+  static bool VfetchRenameEnabled();
+  // RequestConsumedRange for a draw's vertex fetch: on a hazard the range is
+  // renamed (rename_out->length != 0) instead of uploaded, and is then NOT a
+  // consumed range of the open buffer (the arena is never rewritten while its
+  // submission is in flight).
+  bool RequestVertexFetchRange(uint32_t start, uint32_t length,
+                               VfetchRename* rename_out);
+  // Length the GPU may address through the shared-memory descriptors
+  // (kBufferSize, plus the rename arena when it exists).
+  uint32_t gpu_visible_length() const { return gpu_visible_length_; }
+  void SetCompletedSubmissionProvider(std::function<uint64_t()> provider) {
+    completed_submission_provider_ = std::move(provider);
+  }
+  uint64_t vfetch_renames() const { return vfetch_renames_; }
+  uint64_t vfetch_rename_bytes() const { return vfetch_rename_bytes_; }
+  uint64_t vfetch_rename_refusals() const { return vfetch_rename_refusals_; }
+
   void SetHazardCommitCallback(std::function<void()> callback) {
     hazard_commit_callback_ = std::move(callback);
   }
@@ -287,6 +322,22 @@ class MetalSharedMemory : public SharedMemory {
     uint64_t submission;
   };
   std::vector<ConsumedRange> consumed_ranges_;
+  bool NoteConsumed(uint32_t start, uint32_t length, bool result);
+  bool AllocateRename(uint32_t length, uint32_t* arena_offset_out);
+  struct RenameFence {
+    uint32_t start, end;
+    uint64_t submission;
+  };
+  std::deque<RenameFence> rename_fences_;
+  uint32_t rename_head_ = 0;
+  uint32_t gpu_visible_length_ = kBufferSize;
+  bool rename_context_ = false;
+  uint32_t rename_request_start_ = 0, rename_request_length_ = 0;
+  bool rename_happened_ = false;
+  VfetchRename rename_result_;
+  std::function<uint64_t()> completed_submission_provider_;
+  uint64_t vfetch_renames_ = 0, vfetch_rename_bytes_ = 0,
+           vfetch_rename_refusals_ = 0;
   std::function<uint64_t()> submission_provider_;
   std::function<void()> hazard_flush_callback_;
   std::function<void()> hazard_commit_callback_;
