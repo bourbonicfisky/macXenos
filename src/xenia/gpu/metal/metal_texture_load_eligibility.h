@@ -157,10 +157,19 @@ inline bool IsStrictRgba8SignedRouteEligible(
 //     per-level plan reads levels 1..max from there.
 //   - a nonzero fetch pitch, for the same reason the single-mip route requires
 //     it (the shared TextureKey carries the raw pitch).
+inline bool SharedRouteMinMipEnabled();
 inline bool IsStrictRgba8MipRouteEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
-  if (fetch.mip_min_level != 0 || fetch.mip_max_level == 0) {
+  // Minimum level above 0: the same mips-only class as the generic route
+  // (Red Dead gameplay, 2026-10-05: its 128x64 RGBA8 pyramids fetched one
+  // level at a time were the four blocking consumer waits per frame; the
+  // shared cache serves mips-only keys since 2026-10-04).
+  if (fetch.mip_max_level == 0 ||
+      fetch.mip_min_level > fetch.mip_max_level) {
+    return false;
+  }
+  if (fetch.mip_min_level != 0 && !SharedRouteMinMipEnabled()) {
     return false;
   }
   if (!fetch.mip_address || !fetch.pitch) {

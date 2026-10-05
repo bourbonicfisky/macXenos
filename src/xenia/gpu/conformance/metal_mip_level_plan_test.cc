@@ -89,11 +89,16 @@ TEST_CASE("Mipped eligibility requires an unshifted level set", "[mipplan]") {
   auto f = MippedFetch();
   CHECK(IsStrictRgba8MipRouteEligible(f, false, 256, 256, 256));
 
-  // mip_min != 0 means the guest samples a SHIFTED level set, which this slice
-  // does not express -- it must not be admitted.
+  // mip_min != 0 is the mips-only class (2026-10-05): the chain still loads
+  // whole from the mip pointer and the sampler clamps the LOD to [min, max],
+  // so a shifted level set IS admitted (Red Dead's RGBA8 pyramids fetched
+  // one level at a time). An inverted set (min above max) is not.
   auto shifted = f;
   shifted.mip_min_level = 1;
-  CHECK_FALSE(IsStrictRgba8MipRouteEligible(shifted, false, 256, 256, 256));
+  CHECK(IsStrictRgba8MipRouteEligible(shifted, false, 256, 256, 256));
+  auto inverted = f;
+  inverted.mip_min_level = 5;
+  CHECK_FALSE(IsStrictRgba8MipRouteEligible(inverted, false, 256, 256, 256));
 
   // No chain at all is the promoted single-mip class, not this one.
   auto flat = f;

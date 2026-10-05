@@ -1632,8 +1632,12 @@ uint32_t MetalTextureCache::GetTextureSlot(
         std::getenv("XE_METAL_UNTILE_TIMING") != nullptr;
     // Unique by (base, level range, signedness), bounded.
     static std::set<uint64_t> s_4444_shapes;
-    if (s_untile_diag && fetch.format == xenos::TextureFormat::k_4_4_4_4 &&
-        s_4444_shapes.size() < 64 &&
+    // XE_METAL_UNTILE_TIMING=1: the first resolve-backed (or 4:4:4:4)
+    // legacy misses with every eligibility field, unique by shape.
+    const bool diag_candidate =
+        fetch.format == xenos::TextureFormat::k_4_4_4_4 ||
+        resolved_targets_.count(base) != 0;
+    if (s_untile_diag && diag_candidate && s_4444_shapes.size() < 64 &&
         s_4444_shapes
             .insert((uint64_t(base) << 16) |
                     (uint64_t(fetch.mip_min_level) << 8) |
@@ -1641,13 +1645,14 @@ uint32_t MetalTextureCache::GetTextureSlot(
                     (is_signed ? 1u : 0u))
             .second) {
       XELOGW(
-          "MetalTexMiss4444 base={:08X} {}x{} pitch={} tiled={} dim={} "
+          "MetalTexMiss fmt={} base={:08X} {}x{} pitch={} tiled={} dim={} "
           "stacked={} mips={}..{} mip_addr={:08X} packed={} signs={}{}{}{} "
           "endian={} signed={} resolve_backed={} elig_base={} elig_mip={}",
-          base, width, height, pitch_texels, uint32_t(fetch.tiled),
-          uint32_t(fetch.dimension), uint32_t(fetch.stacked),
-          uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level),
-          uint32_t(fetch.mip_address) << 12, uint32_t(fetch.packed_mips),
+          uint32_t(fetch.format), base, width, height, pitch_texels,
+          uint32_t(fetch.tiled), uint32_t(fetch.dimension),
+          uint32_t(fetch.stacked), uint32_t(fetch.mip_min_level),
+          uint32_t(fetch.mip_max_level), uint32_t(fetch.mip_address) << 12,
+          uint32_t(fetch.packed_mips),
           uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
           uint32_t(fetch.sign_z), uint32_t(fetch.sign_w),
           uint32_t(fetch.endianness), is_signed ? 1 : 0,
