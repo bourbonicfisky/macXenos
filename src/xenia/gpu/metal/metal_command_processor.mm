@@ -4659,7 +4659,15 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   } else {
     // Bound the pipeline depth: cap in-flight submissions so a fast CPU
     // can't queue unbounded GPU work (memory + latency + ring pressure).
-    constexpr uint64_t kMaxInFlightSubmissions = 8;
+    // XE_METAL_MAX_IN_FLIGHT=<n> (diagnostic A/B lever): the depth cap. With
+    // ~18 commits per frame a cap of 8 holds the command processor within
+    // half a frame of the GPU (USF4 2026-10-04: 10 ms/frame of depth-cap
+    // wait at resolve-size-split boundaries in a 22.7 ms frame).
+    static const uint64_t kMaxInFlightSubmissions = [] {
+      const char* v = std::getenv("XE_METAL_MAX_IN_FLIGHT");
+      uint64_t n = v ? strtoull(v, nullptr, 10) : 0;
+      return n ? n : uint64_t(8);
+    }();
     if (submission > kMaxInFlightSubmissions) {
       // Under XE_METAL_ASYNC the depth-cap wait is this boundary's only
       // GPU-side stall; it lands in the same gpu_wait stage, disclosed by the

@@ -1157,40 +1157,64 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     uint32_t start_tiles = render_target->key().base_tiles;
     uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
+    // Tile rows covered by the draw's host scissor rows (whole rows). The
+    // raster views are real MSAA textures at PIXEL size (the scissor is in
+    // host pixels), and an EDRAM tile is 80x16 samples: 16 pixel rows at 1x,
+    // 8 at 2x and 4x (the same convention as RenderTargetKey::GetWidth for
+    // the tile width), times the draw resolution scale. An unknown extent
+    // (host_y1 == UINT32_MAX) covers everything.
+    const uint32_t pitch = render_target->key().GetPitchTiles();
+    const uint32_t rows_per_tile =
+        (xenos::kEdramTileHeightSamples >>
+         uint32_t(render_target->key().msaa_samples >=
+                  xenos::MsaaSamples::k2X)) *
+        draw_resolution_scale_y();
+    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d1 = host_y1 == UINT32_MAX
+                      ? end_tiles
+                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
+                                       rows_per_tile) * pitch;
+    d0 = std::max(d0, start_tiles);
+    d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
     if (census) {
-      // Dirty tile rows covered by the draw's host scissor rows (whole rows:
-      // a lower bound on redundancy). The raster view holds one pixel per
-      // sample, so a tile row is 16 x scale_y host rows.
+      // Census: a lower bound on pack redundancy.
       std::vector<uint8_t>& dirty = pack_dirty_tiles_[attachment];
       if (dirty.size() != xenos::kEdramTileCount) {
         dirty.assign(xenos::kEdramTileCount, 1);
       }
-      const uint32_t pitch = render_target->key().GetPitchTiles();
-      const uint32_t rows_per_tile =
-          xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
-      uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
-      uint32_t d1 = host_y1 == UINT32_MAX
-                        ? end_tiles
-                        : start_tiles + ((host_y1 + rows_per_tile - 1) /
-                                         rows_per_tile) * pitch;
-      d0 = std::max(d0, start_tiles);
-      d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
       for (uint32_t t = d0; t < d1; ++t) {
         dirty[t] = 1;
       }
+    }
+    // XE_METAL_MARK_DRAW_ROWS=1 (2026-10-04, USF4: 69% of GPU time in the
+    // canonical pack/resolve/materialize machinery): only the draw-covered
+    // tile rows become host-authoritative, so a later pack to canonical
+    // (before a resolve, or when another attachment takes a tile) moves the
+    // rows a draw could have written instead of the whole bound target. Tiles
+    // outside the draw's rows keep their previous state: canonical and clean
+    // for this attachment (materialized at bind) or already host-authoritative
+    // from an earlier draw. Default off until gated.
+    static const bool s_mark_draw_rows = [] {
+      const char* v = std::getenv("XE_METAL_MARK_DRAW_ROWS");
+      return v && v[0] == '1' && !v[1];
+    }();
+    const uint32_t mark_start = s_mark_draw_rows ? d0 : start_tiles;
+    const uint32_t mark_end = s_mark_draw_rows ? d1 : end_tiles;
+    if (mark_end <= mark_start) {
+      continue;
     }
     static const bool s_mark_skip =
         MetalSwitchEnabled(cvars::metal_raster_mark_skip,
                            std::getenv("XE_METAL_RASTER_MARK_SKIP"));
     RasterSyncMemo& memo = raster_mark_memo_[slot];
     if (s_mark_skip && memo.valid && memo.attachment == attachment &&
-        memo.start_tiles == start_tiles && memo.end_tiles == end_tiles &&
+        memo.start_tiles == mark_start && memo.end_tiles == mark_end &&
         memo.version == canonical_authority_.version()) {
       continue;
     }
-    canonical_authority_.MarkAttachment(attachment, start_tiles, end_tiles,
+    canonical_authority_.MarkAttachment(attachment, mark_start, mark_end,
                                         ++canonical_authority_order_);
-    memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
+    memo = {attachment, mark_start, mark_end, canonical_authority_.version(),
             true};
   }
 }
