@@ -1057,11 +1057,24 @@ class MetalCommandProcessor : public CommandProcessor {
     bool valid = false;
     std::vector<metal::PendingProducer> producers;
     std::array<uint64_t, 128> pages{};  // 512 MiB / 64 KiB = 8192 bits
-    uint64_t rebuilds = 0, queries = 0, fast_empty = 0;
+    // Per-page producer lists (CSR over the 8192 pages): every producer
+    // whose range shares a byte with a query range shares a page with it,
+    // so the candidate set for a seed scan or a closure step is the union of
+    // the touched pages' lists, never the whole queue.
+    std::vector<uint32_t> page_offsets;   // 8193 entries
+    std::vector<uint16_t> page_entries;   // producer indices
+    std::vector<uint32_t> candidate_stamp, selected_stamp;  // per producer
+    uint32_t query_stamp = 0;
+    uint64_t rebuilds = 0, queries = 0, fast_empty = 0, indexed_decisions = 0,
+             verify_mismatches = 0;
   };
   mutable ProducerIndex producer_index_;
   const std::vector<metal::PendingProducer>& IndexedPendingProducers(
       bool* any_page_hit, const metal::ConsumerRequest& request) const;
+  // DecideConsumer over the page index: identical result, O(candidates).
+  metal::ConsumerDecision DecideConsumerIndexed(
+      metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
+      uint64_t completed_submission) const;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,
   // default OFF until the counted gate). See metal_lazy_publication.h.

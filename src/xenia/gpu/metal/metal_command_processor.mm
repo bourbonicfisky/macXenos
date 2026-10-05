@@ -11986,6 +11986,7 @@ MetalCommandProcessor::IndexedPendingProducers(
       index.sequence != memory_authority_sequence_) {
     index.producers = SnapshotPendingProducers();
     index.pages.fill(0);
+    index.page_offsets.assign(8193, 0);
     for (const metal::PendingProducer& p : index.producers) {
       if (!p.range.length()) {
         continue;
@@ -11994,8 +11995,32 @@ MetalCommandProcessor::IndexedPendingProducers(
       const uint32_t last = (p.range.end() - 1u) >> 16;
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
         index.pages[page >> 6] |= uint64_t(1) << (page & 63u);
+        ++index.page_offsets[page + 1];
       }
     }
+    for (uint32_t page = 0; page < 8192u; ++page) {
+      index.page_offsets[page + 1] += index.page_offsets[page];
+    }
+    index.page_entries.assign(index.page_offsets[8192], 0);
+    {
+      std::vector<uint32_t> fill(index.page_offsets.begin(),
+                                 index.page_offsets.end() - 1);
+      const size_t count = std::min<size_t>(index.producers.size(), 65535);
+      for (size_t i = 0; i < count; ++i) {
+        const metal::PendingProducer& p = index.producers[i];
+        if (!p.range.length()) {
+          continue;
+        }
+        const uint32_t first = p.range.start() >> 16;
+        const uint32_t last = (p.range.end() - 1u) >> 16;
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          index.page_entries[fill[page]++] = uint16_t(i);
+        }
+      }
+    }
+    index.candidate_stamp.assign(index.producers.size(), 0);
+    index.selected_stamp.assign(index.producers.size(), 0);
+    index.query_stamp = 0;
     index.writebacks = pending_writebacks_.size();
     index.memexports = pending_memexports_.size();
     index.sequence = memory_authority_sequence_;
@@ -12025,12 +12050,132 @@ MetalCommandProcessor::IndexedPendingProducers(
     ++index.fast_empty;
   }
   if (SeamTimingEnabled() && (index.queries & 65535) == 0) {
-    XELOGI("MetalProducerIndex: queries={} fast-empty={} rebuilds={} pending={}",
-           index.queries, index.fast_empty, index.rebuilds,
-           index.producers.size());
+    XELOGI("MetalProducerIndex: queries={} fast-empty={} indexed={} rebuilds={} "
+           "pending={} verify-mismatches={}",
+           index.queries, index.fast_empty, index.indexed_decisions,
+           index.rebuilds, index.producers.size(), index.verify_mismatches);
   }
   *any_page_hit = hit;
   return index.producers;
+}
+
+metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
+    metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
+    uint64_t completed_submission) const {
+  ProducerIndex& index = producer_index_;
+  const std::vector<metal::PendingProducer>& producers = index.producers;
+  metal::ConsumerDecision decision;
+  decision.consumer = consumer;
+  decision.requested = request.Combined();
+  decision.revalidate_gpu_bytes = metal::ConsumerReadsSharedBuffer(consumer);
+  if (producers.empty()) {
+    return decision;
+  }
+  if (++index.query_stamp == 0) {
+    std::fill(index.candidate_stamp.begin(), index.candidate_stamp.end(), 0);
+    std::fill(index.selected_stamp.begin(), index.selected_stamp.end(), 0);
+    index.query_stamp = 1;
+  }
+  const uint32_t stamp = index.query_stamp;
+  // Producers sharing a page with [start, end): the superset of every
+  // producer whose range overlaps it.
+  auto for_each_candidate = [&](uint32_t start, uint32_t end, auto&& fn) {
+    if (end <= start) {
+      return;
+    }
+    const uint32_t first = start >> 16;
+    const uint32_t last = (end - 1u) >> 16;
+    for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+      for (uint32_t k = index.page_offsets[page];
+           k < index.page_offsets[page + 1]; ++k) {
+        fn(index.page_entries[k]);
+      }
+    }
+  };
+  std::vector<uint32_t> frontier;
+  // Seed: producers intersecting the request (state-specific ranges).
+  auto seed_from = [&](const metal::GuestRangeSet& set) {
+    for (const metal::GuestRange& r : set.ranges()) {
+      for_each_candidate(r.start(), r.end(), [&](uint32_t i) {
+        if (index.candidate_stamp[i] == stamp) {
+          return;  // already examined for this query
+        }
+        index.candidate_stamp[i] = stamp;
+        const metal::PendingProducer& producer = producers[i];
+        if (request.ForProducer(producer.state).OverlapsAny(producer.range)) {
+          index.selected_stamp[i] = stamp;
+          frontier.push_back(i);
+        }
+      });
+    }
+  };
+  seed_from(request.resolve_ranges);
+  seed_from(request.memexport_ranges);
+  if (frontier.empty()) {
+    return decision;
+  }
+  // Closure over older overlapping predecessors (same rule as DecideConsumer;
+  // the candidates for `newer` are the producers sharing its pages).
+  for (size_t f = 0; f < frontier.size(); ++f) {
+    const metal::PendingProducer& newer = producers[frontier[f]];
+    for_each_candidate(newer.range.start(), newer.range.end(), [&](uint32_t i) {
+      if (index.selected_stamp[i] == stamp) {
+        return;
+      }
+      const metal::PendingProducer& older = producers[i];
+      if (older.sequence >= newer.sequence ||
+          !older.range.Overlaps(newer.range)) {
+        return;
+      }
+      index.selected_stamp[i] = stamp;
+      frontier.push_back(i);
+    });
+  }
+  std::sort(frontier.begin(), frontier.end());  // producers are sequence-sorted
+  bool all_gpu_current = request.access == metal::ConsumerAccess::kSharedBuffer;
+  for (uint32_t i : frontier) {
+    if (!all_gpu_current) {
+      break;
+    }
+    const metal::PendingProducer& p = producers[i];
+    if (p.state == metal::TransitState::kGpuCurrentShared) {
+      continue;
+    }
+    if (p.state == metal::TransitState::kPendingMemexport &&
+        request.order_memexport_producers) {
+      continue;
+    }
+    all_gpu_current = false;
+  }
+  decision.selected.reserve(frontier.size());
+  for (uint32_t i : frontier) {
+    const metal::PendingProducer& producer = producers[i];
+    decision.selected.push_back(producer);
+    if (all_gpu_current) {
+      decision.requires_gpu_ordering = true;
+      if (producer.submission > decision.max_order_submission) {
+        decision.max_order_submission = producer.submission;
+      }
+      continue;
+    }
+    if (!metal::ProducerComplete(producer, completed_submission)) {
+      decision.await = true;
+      if (producer.submission > decision.max_wait_submission) {
+        decision.max_wait_submission = producer.submission;
+      }
+    }
+  }
+  if (all_gpu_current) {
+    decision.drain = false;
+    decision.action = metal::AuthorityAction::kOrderAgainstGpuProducers;
+  } else {
+    decision.drain = true;
+    decision.action = decision.await
+                          ? metal::AuthorityAction::kAwaitProducer
+                          : metal::AuthorityAction::kDrainMatchingRecords;
+  }
+  ++index.indexed_decisions;
+  return decision;
 }
 
 metal::ConsumerDecision
@@ -12054,15 +12199,42 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
       bool any_page_hit = false;
       const std::vector<metal::PendingProducer>& producers =
           IndexedPendingProducers(&any_page_hit, request);
+      const uint64_t completed =
+          completed_submission_.load(std::memory_order_acquire);
       if (!any_page_hit) {
         static const std::vector<metal::PendingProducer> s_none;
-        return metal::DecideConsumer(
-            consumer, request, s_none,
-            completed_submission_.load(std::memory_order_acquire));
+        return metal::DecideConsumer(consumer, request, s_none, completed);
       }
-      return metal::DecideConsumer(
-          consumer, request, producers,
-          completed_submission_.load(std::memory_order_acquire));
+      metal::ConsumerDecision indexed =
+          DecideConsumerIndexed(consumer, request, completed);
+      static const bool s_verify =
+          std::getenv("XE_METAL_PRODUCER_INDEX_VERIFY") != nullptr;
+      if (s_verify) {
+        metal::ConsumerDecision full =
+            metal::DecideConsumer(consumer, request, producers, completed);
+        bool same = full.selected.size() == indexed.selected.size() &&
+                    full.action == indexed.action &&
+                    full.await == indexed.await && full.drain == indexed.drain &&
+                    full.requires_gpu_ordering == indexed.requires_gpu_ordering &&
+                    full.max_wait_submission == indexed.max_wait_submission &&
+                    full.max_order_submission == indexed.max_order_submission;
+        for (size_t i = 0; same && i < full.selected.size(); ++i) {
+          same = full.selected[i].sequence == indexed.selected[i].sequence;
+        }
+        if (!same) {
+          ++producer_index_.verify_mismatches;
+          if (producer_index_.verify_mismatches <= 16) {
+            XELOGE("MetalProducerIndex VERIFY MISMATCH #{}: full {} sel action={} "
+                   "await={} | indexed {} sel action={} await={}",
+                   producer_index_.verify_mismatches, full.selected.size(),
+                   uint32_t(full.action), full.await ? 1 : 0,
+                   indexed.selected.size(), uint32_t(indexed.action),
+                   indexed.await ? 1 : 0);
+          }
+        }
+        return full;
+      }
+      return indexed;
     }
     return metal::DecideConsumer(
         consumer, request, SnapshotPendingProducers(),
