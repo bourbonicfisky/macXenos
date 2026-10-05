@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_COMMAND_PROCESSOR_H_
 
 #include <array>
+#include <map>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -1075,6 +1076,16 @@ class MetalCommandProcessor : public CommandProcessor {
   metal::ConsumerDecision DecideConsumerIndexed(
       metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
       uint64_t completed_submission) const;
+  // Exact "does [start, end) overlap a pending producer of this kind"
+  // through the index (page bitmap pre-check, then the page's candidates).
+  // kGpuCurrentShared writebacks or kPendingMemexport records; the per-
+  // binding texture classification asked this of the whole queue for the
+  // base and mip range of every binding of every draw (Red Dead gameplay:
+  // 21 ms of a 66 ms frame, 2026-10-05).
+  bool IndexRangeOverlapsProducers(uint32_t start, uint32_t end,
+                                   bool gpu_current_writebacks,
+                                   bool memexports) const;
+  void EnsureProducerIndex() const;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,
   // default OFF until the counted gate). See metal_lazy_publication.h.
@@ -1149,6 +1160,10 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t buffer_offset;
   };
   std::vector<DrawVfetchRename> draw_vfetch_renames_;
+  // XE_METAL_DRAW_PHASE_TIMING: per-milestone nanoseconds inside IssueDraw.
+  std::map<std::string, uint64_t> draw_phase_ns_;
+  uint64_t NoteDrawPhase(const char* label, uint64_t last_ns);
+  std::string FormatDrawPhases(uint32_t frames);
   // Residency set (macOS 15+, XE_METAL_RESIDENCY_SET=0 rollback to the
   // per-encoder sweep): every slot-reachable texture is added once (hooked at
   // the bindless slot descriptor write) and removed when its retired object

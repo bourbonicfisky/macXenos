@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <unordered_map>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -255,7 +256,10 @@ class MetalSharedMemory : public SharedMemory {
 
   // Forgets the consumed-range set (call after the frame command buffer has
   // been committed and waited on).
-  void ResetFrameRanges() { consumed_ranges_.clear(); }  // sync-mode/shutdown
+  void ResetFrameRanges() {  // sync-mode/shutdown
+    consumed_ranges_.clear();
+    consumed_index_.clear();
+  }
   // Post-clear evidence: submission-tagged hazard records still held. At a
   // quiesced boundary every submission has completed, so ReleaseConsumedRanges
   // (run by the pumped completion actions) should already have emptied this --
@@ -322,6 +326,13 @@ class MetalSharedMemory : public SharedMemory {
     uint64_t submission;
   };
   std::vector<ConsumedRange> consumed_ranges_;
+  // Exact-key lookup (start << 32 | end -> index) for the common case of a
+  // range consumed again by a later draw (the same vertex buffer): the
+  // containment scan over ~1,000 live ranges per vertex fetch was 5% of
+  // Red Dead's command-processor thread (2026-10-05). Rebuilt whenever the
+  // vector is compacted.
+  std::unordered_map<uint64_t, uint32_t> consumed_index_;
+  void RebuildConsumedIndex();
   bool NoteConsumed(uint32_t start, uint32_t length, bool result);
   bool AllocateRename(uint32_t length, uint32_t* arena_offset_out);
   struct RenameFence {

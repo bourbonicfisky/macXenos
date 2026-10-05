@@ -5030,6 +5030,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
 
+  // XE_METAL_DRAW_PHASE_TIMING=1: nanoseconds between consecutive milestones
+  // of IssueDraw, accumulated per label (plus "tail" from the last milestone
+  // to the function's exit), reported per stats tick as ms/frame. The
+  // attribution for the inlined body of IssueDraw that samplers cannot split.
+  static const bool s_phase_timing =
+      std::getenv("XE_METAL_DRAW_PHASE_TIMING") != nullptr;
+  struct PhaseTimer {
+    bool on;
+    uint64_t last;
+    MetalCommandProcessor* self;
+    ~PhaseTimer() {
+      if (on) {
+        self->NoteDrawPhase("tail", last);
+      }
+    }
+  } phase_timer{s_phase_timing,
+                s_phase_timing ? uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch()).count())
+                               : 0,
+                this};
   auto draw_trace_milestone = [&](const char* where) {
     static const int64_t s_draw_trace_ms = [] {
       const char* v = std::getenv("XE_METAL_DRAW_TRACE");
@@ -5037,6 +5057,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }();
     if (s_draw_trace_ms >= 0 && int64_t(trace_draw_index_) - 1 == s_draw_trace_ms) {
       XELOGW("MetalDrawTrace {} draw={}", where, s_draw_trace_ms);
+    }
+    if (phase_timer.on) {
+      phase_timer.last = NoteDrawPhase(where, phase_timer.last);
     }
   };
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
@@ -6437,6 +6460,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       return true;
     }
   }
+  draw_trace_milestone("after-vfetch");
   // Frame-trace recording: this backend reads guest indices directly from
   // RAM (not through shared memory), so record the range for replay. No-op
   // unless a trace file is open.
@@ -6890,6 +6914,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // CENSUS ONLY: the same request with GPU-served fetches omitting their
     // resolve range, so the decision the repair WOULD take can be compared
     // against the one taken. Never passed to the production path.
+  draw_trace_milestone("after-tex-ranges");
     metal::ConsumerRequest census_corrected_request;
     // Stage B endgame (reopen 4.1): true while every fetch that contributed
     // a resolve range is provably served by the shared-cache load route
@@ -6910,10 +6935,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // safety only needs RAM readers kept off GPU-current ranges, which
     // DecideConsumer's all-selected-gpu-current rule composes with this
     // per-fetch check to guarantee.
+    // Index-backed (exact): the queue walk per binding was 21 ms of a 66 ms
+    // frame on Red Dead gameplay (2026-10-05). XE_METAL_PRODUCER_INDEX=0
+    // restores the walk.
+    static const bool s_overlap_index = [] {
+      const char* v = std::getenv("XE_METAL_PRODUCER_INDEX");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
     auto overlaps_pending_gpu_current =
         [&](const std::optional<metal::GuestRange>& r) {
           if (!r) {
             return false;
+          }
+          if (s_overlap_index) {
+            return IndexRangeOverlapsProducers(r->start(), r->end(),
+                                               /*gpu_current_writebacks=*/true,
+                                               /*memexports=*/false);
           }
           for (const PendingWriteback& p : pending_writebacks_) {
             if (!p.gpu_current) {
@@ -6931,6 +6968,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         [&](const std::optional<metal::GuestRange>& r) {
           if (!r) {
             return false;
+          }
+          if (s_overlap_index) {
+            return IndexRangeOverlapsProducers(r->start(), r->end(),
+                                               /*gpu_current_writebacks=*/false,
+                                               /*memexports=*/true);
           }
           for (const PendingMemexport& p : pending_memexports_) {
             auto pr = metal::GuestRange::FromBaseLength(p.base_address,
@@ -7173,6 +7215,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
                                          texture_request);
+    draw_trace_milestone("after-tex-query");
     // Boundary-taker census (attribution follow-up): the seam data shows the
     // corridor's texture boundaries are memexport-only selections on draws
     // whose access was NEVER declared (resolve ranges empty or blocked).
@@ -7519,9 +7562,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
     };
+  draw_trace_milestone("after-tex-census");
     accumulate_eligible(vertex_shader);
     accumulate_eligible(pixel_shader);
     if (draw_shared_route_mask_) {
+  draw_trace_milestone("after-eligible");
       shared_texture_cache_->PrepareEligible(draw_shared_route_mask_);
       // Verify every routed fetch is actually servable now (its load may
       // have been refused: unmappable range, view or slot failure). A fetch
@@ -7579,6 +7624,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  draw_trace_milestone("after-texture-route");
   // PP1 + PP2-auto + PP3-auto + PP4-fixed: normalize the routed draws through
   // the shared
   // PrimitiveProcessor — the single normalization authority for the routed set.
@@ -8612,6 +8658,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    "boolloop-fetch-alloc");
     return true;
   }
+  draw_trace_milestone("after-marshal");
   // Vertex-fetch renames: point this draw's renamed fetch constants at the
   // arena copy (this draw's marshalled block only; the register file is
   // untouched).
@@ -9177,6 +9224,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   binding_addresses.system_constants = system_alloc.gpu_address;
   binding_addresses.float_vertex = float_vertex_alloc.gpu_address;
   binding_addresses.bool_loop = bool_loop_alloc.gpu_address;
+  draw_trace_milestone("after-descriptors");
   binding_addresses.fetch = fetch_alloc.gpu_address;
   binding_addresses.descriptor_indices_vertex = desc_idx_vertex_alloc.gpu_address;
   binding_addresses.float_pixel = float_pixel_alloc.gpu_address;
@@ -11977,9 +12025,36 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
   return producers;
 }
 
-const std::vector<metal::PendingProducer>&
-MetalCommandProcessor::IndexedPendingProducers(
-    bool* any_page_hit, const metal::ConsumerRequest& request) const {
+bool MetalCommandProcessor::IndexRangeOverlapsProducers(
+    uint32_t start, uint32_t end, bool gpu_current_writebacks,
+    bool memexports) const {
+  if (end <= start) {
+    return false;
+  }
+  EnsureProducerIndex();
+  const ProducerIndex& index = producer_index_;
+  const uint32_t first = start >> 16;
+  const uint32_t last = (end - 1u) >> 16;
+  for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+    if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+      continue;
+    }
+    for (uint32_t k = index.page_offsets[page];
+         k < index.page_offsets[page + 1]; ++k) {
+      const metal::PendingProducer& p = index.producers[index.page_entries[k]];
+      const bool kind_ok =
+          (gpu_current_writebacks &&
+           p.state == metal::TransitState::kGpuCurrentShared) ||
+          (memexports && p.state == metal::TransitState::kPendingMemexport);
+      if (kind_ok && p.range.start() < end && p.range.end() > start) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void MetalCommandProcessor::EnsureProducerIndex() const {
   ProducerIndex& index = producer_index_;
   if (!index.valid || index.writebacks != pending_writebacks_.size() ||
       index.memexports != pending_memexports_.size() ||
@@ -12027,6 +12102,13 @@ MetalCommandProcessor::IndexedPendingProducers(
     index.valid = true;
     ++index.rebuilds;
   }
+}
+
+const std::vector<metal::PendingProducer>&
+MetalCommandProcessor::IndexedPendingProducers(
+    bool* any_page_hit, const metal::ConsumerRequest& request) const {
+  EnsureProducerIndex();
+  ProducerIndex& index = producer_index_;
   ++index.queries;
   bool hit = false;
   auto scan = [&](const metal::GuestRangeSet& set) {
@@ -13920,6 +14002,31 @@ void MetalCommandProcessor::ShutdownResidencySet(void* queue_ptr) {
          residency_removes_, residency_commits_);
 }
 
+uint64_t MetalCommandProcessor::NoteDrawPhase(const char* label,
+                                              uint64_t last_ns) {
+  const uint64_t now = uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  draw_phase_ns_[label] += now - last_ns;
+  return now;
+}
+
+std::string MetalCommandProcessor::FormatDrawPhases(uint32_t frames) {
+  std::string out = "MetalDrawPhases ms/frame:";
+  uint64_t total = 0;
+  for (const auto& kv : draw_phase_ns_) {
+    total += kv.second;
+  }
+  for (const auto& kv : draw_phase_ns_) {
+    out += fmt::format(" {}={:.2f}", kv.first,
+                       double(kv.second) / 1e6 / std::max(1u, frames));
+  }
+  out += fmt::format(" | total={:.2f}", double(total) / 1e6 / std::max(1u, frames));
+  draw_phase_ns_.clear();
+  return out;
+}
+
 bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   // Completion notifications do not identify the range the guest CPU will
   // inspect next. Publish every existing deferred producer before exposing the
@@ -14267,6 +14374,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       if (texture_cache_) {
         XELOGI("{}", texture_cache_->FormatDimensionCensus());
         MetalTextureCache::ByteCensus bc = texture_cache_->CensusBytes();
+        if (!draw_phase_ns_.empty()) {
+          XELOGI("{}", FormatDrawPhases(128));
+        }
         if (shared_memory_ && MetalSharedMemory::VfetchRenameEnabled()) {
           XELOGI("MetalVfetchRename swap#{}: renames={} bytes={} refusals={}",
                  count, shared_memory_->vfetch_renames(),

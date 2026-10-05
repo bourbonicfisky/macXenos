@@ -296,10 +296,29 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   return NoteConsumed(start, length, result);
 }
 
+void MetalSharedMemory::RebuildConsumedIndex() {
+  consumed_index_.clear();
+  consumed_index_.reserve(consumed_ranges_.size() * 2);
+  for (uint32_t i = 0; i < consumed_ranges_.size(); ++i) {
+    const ConsumedRange& r = consumed_ranges_[i];
+    consumed_index_.emplace((uint64_t(r.first) << 32) | r.second, i);
+  }
+}
+
 bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
                                      bool result) {
   uint32_t end = start + length;
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  {
+    auto hit = consumed_index_.find((uint64_t(start) << 32) | end);
+    if (hit != consumed_index_.end() && hit->second < consumed_ranges_.size()) {
+      ConsumedRange& range = consumed_ranges_[hit->second];
+      if (range.first == start && range.second == end) {
+        range.submission = std::max(range.submission, submission);
+        return result;
+      }
+    }
+  }
   for (auto& range : consumed_ranges_) {
     if (start >= range.first && end <= range.second) {
       // Already covered — but the NEWER submission now also reads it; keep
@@ -308,6 +327,8 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
       return result;
     }
   }
+  consumed_index_[(uint64_t(start) << 32) | end] =
+      uint32_t(consumed_ranges_.size());
   consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   return result;
 }
@@ -384,12 +405,16 @@ bool MetalSharedMemory::AllocateRename(uint32_t length,
 }
 
 void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
+  const size_t before = consumed_ranges_.size();
   consumed_ranges_.erase(
       std::remove_if(consumed_ranges_.begin(), consumed_ranges_.end(),
                      [&](const ConsumedRange& range) {
                        return range.submission <= completed_submission;
                      }),
       consumed_ranges_.end());
+  if (consumed_ranges_.size() != before) {
+    RebuildConsumedIndex();
+  }
 }
 
 ZeroCopyOverlapSnapshot MetalSharedMemory::zero_copy_overlap_snapshot() const {
@@ -748,6 +773,9 @@ bool MetalSharedMemory::UploadRanges(
             // The blit's target is consumed by its submission: a later
             // direct memcpy over it before the blit executes would be undone
             // by the blit, so it must stage too (the overlap test sees it).
+            consumed_index_[(uint64_t(piece_start) << 32) |
+                            (piece_start + piece_length)] =
+                uint32_t(consumed_ranges_.size());
             consumed_ranges_.push_back(ConsumedRange{
                 piece_start, piece_start + piece_length, blit_submission});
             ++staged_uploads_;
