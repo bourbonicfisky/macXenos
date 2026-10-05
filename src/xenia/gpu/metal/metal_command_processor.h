@@ -1041,6 +1041,27 @@ class MetalCommandProcessor : public CommandProcessor {
   bool completion_exposure_valid_ = false;
   uint64_t completion_exposure_runs_ = 0;
   uint64_t completion_exposure_skips_ = 0;
+  // Pending-producer index (XE_METAL_PRODUCER_INDEX=0 rollback): the sorted
+  // snapshot the consumer decision reads, rebuilt only when the pending set
+  // changes (records are immutable after registration, so queue sizes plus
+  // the monotonic registration sequence identify the set exactly), plus a
+  // 64 KiB-page occupancy bitmap of every pending range. A per-draw query
+  // whose ranges touch no occupied page is decided against an empty producer
+  // list (the same default decision DecideConsumer's fast path returns)
+  // without snapshotting, sorting or scanning the records. Red Dead's
+  // gameplay (2026-10-05): ~17,000 queries per frame against ~350 pending
+  // records at 1.76 us each = 25-30 ms of a 100 ms command-processor-bound
+  // frame (the cinematic, wait-bound, showed no change from it).
+  struct ProducerIndex {
+    uint64_t writebacks = 0, memexports = 0, sequence = 0;
+    bool valid = false;
+    std::vector<metal::PendingProducer> producers;
+    std::array<uint64_t, 128> pages{};  // 512 MiB / 64 KiB = 8192 bits
+    uint64_t rebuilds = 0, queries = 0, fast_empty = 0;
+  };
+  mutable ProducerIndex producer_index_;
+  const std::vector<metal::PendingProducer>& IndexedPendingProducers(
+      bool* any_page_hit, const metal::ConsumerRequest& request) const;
 
   // Stage 2 demand-driven publication (XE_METAL_LAZY_PUBLISH, default on, exact-0 rollback,
   // default OFF until the counted gate). See metal_lazy_publication.h.

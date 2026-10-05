@@ -11977,6 +11977,62 @@ MetalCommandProcessor::SnapshotPendingProducers() const {
   return producers;
 }
 
+const std::vector<metal::PendingProducer>&
+MetalCommandProcessor::IndexedPendingProducers(
+    bool* any_page_hit, const metal::ConsumerRequest& request) const {
+  ProducerIndex& index = producer_index_;
+  if (!index.valid || index.writebacks != pending_writebacks_.size() ||
+      index.memexports != pending_memexports_.size() ||
+      index.sequence != memory_authority_sequence_) {
+    index.producers = SnapshotPendingProducers();
+    index.pages.fill(0);
+    for (const metal::PendingProducer& p : index.producers) {
+      if (!p.range.length()) {
+        continue;
+      }
+      const uint32_t first = p.range.start() >> 16;
+      const uint32_t last = (p.range.end() - 1u) >> 16;
+      for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+        index.pages[page >> 6] |= uint64_t(1) << (page & 63u);
+      }
+    }
+    index.writebacks = pending_writebacks_.size();
+    index.memexports = pending_memexports_.size();
+    index.sequence = memory_authority_sequence_;
+    index.valid = true;
+    ++index.rebuilds;
+  }
+  ++index.queries;
+  bool hit = false;
+  auto scan = [&](const metal::GuestRangeSet& set) {
+    for (const metal::GuestRange& r : set.ranges()) {
+      if (hit || !r.length()) {
+        continue;
+      }
+      const uint32_t first = r.start() >> 16;
+      const uint32_t last = (r.end() - 1u) >> 16;
+      for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+        if (index.pages[page >> 6] & (uint64_t(1) << (page & 63u))) {
+          hit = true;
+          break;
+        }
+      }
+    }
+  };
+  scan(request.resolve_ranges);
+  scan(request.memexport_ranges);
+  if (!hit) {
+    ++index.fast_empty;
+  }
+  if (SeamTimingEnabled() && (index.queries & 65535) == 0) {
+    XELOGI("MetalProducerIndex: queries={} fast-empty={} rebuilds={} pending={}",
+           index.queries, index.fast_empty, index.rebuilds,
+           index.producers.size());
+  }
+  *any_page_hit = hit;
+  return index.producers;
+}
+
 metal::ConsumerDecision
 MetalCommandProcessor::QueryPendingProducerDependencies(
     metal::ConsumerKind consumer,
@@ -11989,7 +12045,25 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
   // records selected, and time per consumer query.
   static const bool s_decide_census =
       std::getenv("XE_METAL_DECIDE_CENSUS") != nullptr;
+  static const bool s_index = [] {
+    const char* v = std::getenv("XE_METAL_PRODUCER_INDEX");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
   if (!s_decide_census) {
+    if (s_index) {
+      bool any_page_hit = false;
+      const std::vector<metal::PendingProducer>& producers =
+          IndexedPendingProducers(&any_page_hit, request);
+      if (!any_page_hit) {
+        static const std::vector<metal::PendingProducer> s_none;
+        return metal::DecideConsumer(
+            consumer, request, s_none,
+            completed_submission_.load(std::memory_order_acquire));
+      }
+      return metal::DecideConsumer(
+          consumer, request, producers,
+          completed_submission_.load(std::memory_order_acquire));
+    }
     return metal::DecideConsumer(
         consumer, request, SnapshotPendingProducers(),
         completed_submission_.load(std::memory_order_acquire));
