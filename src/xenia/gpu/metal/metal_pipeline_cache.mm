@@ -804,6 +804,17 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   // second, host-defined coverage filter and would incorrectly require alpha
   // state in the pipeline key.
   desc.alphaToCoverageEnabled = NO;
+  // Guest shader identities in the pipeline label: Instruments' Shader
+  // Timeline attributes GPU samples to the pipeline label (every translated
+  // function is named "main"), which is the only per-shader GPU-time
+  // attribution on Apple GPUs (no per-draw counter sampling).
+  desc.label = [NSString
+      stringWithFormat:@"xe vs=%016llX.%llX ps=%016llX.%llX s%u",
+                       (unsigned long long)key_bytes.vs.ucode_hash,
+                       (unsigned long long)key_bytes.vs.modification,
+                       (unsigned long long)key_bytes.ps.ucode_hash,
+                       (unsigned long long)key_bytes.ps.modification,
+                       raster_key.raster_sample_count];
   desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
   if (pixel && pixel->has_metal_function()) {
     desc.fragmentFunction = (__bridge id<MTLFunction>)pixel->metal_function();
