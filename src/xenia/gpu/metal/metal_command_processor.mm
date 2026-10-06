@@ -10267,6 +10267,62 @@ bool MetalCommandProcessor::IssueCopy() {
         resolve_info.copy_dest_extent_start,
         resolve_info.copy_dest_extent_length);
   }
+  // XE_METAL_RESOLVE_CLASS_CENSUS=1 (diagnostic, default off): resolves per
+  // frame by class -- depth/color, EDRAM format, MSAA, destination format,
+  // copy and clear, and whether the source span is an attachment of the open
+  // render pass (the in-pass / from-attachment resolve candidates).
+  static const bool s_resolve_class_census =
+      std::getenv("XE_METAL_RESOLVE_CLASS_CENSUS") != nullptr;
+  if (s_resolve_class_census && render_target_cache_) {
+    struct ClassStat {
+      uint64_t count = 0;
+      uint64_t bytes = 0;
+    };
+    static std::map<uint64_t, ClassStat> s_classes;
+    static uint32_t s_census_swap = 0;
+    const bool depth = resolve_info.IsCopyingDepth();
+    const draw_util::ResolveEdramInfo& edram =
+        depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+    uint32_t span_base, span_row_length, span_rows, span_pitch;
+    resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
+    const bool open_attached = frame_open_ && frame_render_encoder_ &&
+                               render_target_cache_->ResolveSpanTouchesCurrentAttachments(
+                                   span_base, span_row_length, span_rows, span_pitch);
+    const bool copies = resolve_info.copy_dest_extent_length != 0;
+    const bool clears = resolve_info.IsClearingColor() || resolve_info.IsClearingDepth();
+    const uint64_t key = uint64_t(depth) | (uint64_t(edram.format) << 1) |
+                         (uint64_t(uint32_t(edram.msaa_samples)) << 6) |
+                         (uint64_t(uint32_t(resolve_info.copy_dest_info.copy_dest_format)) << 8) |
+                         (uint64_t(copies) << 16) | (uint64_t(clears) << 17) |
+                         (uint64_t(open_attached) << 18);
+    ClassStat& stat = s_classes[key];
+    ++stat.count;
+    stat.bytes += resolve_info.copy_dest_extent_length;
+    if (!s_census_swap) {
+      s_census_swap = swap_count_;
+    }
+    const uint32_t frames = swap_count_ - s_census_swap;
+    if (frames >= 128) {
+      std::vector<std::pair<uint64_t, uint64_t>> ranked;
+      for (const auto& [k, v] : s_classes) {
+        ranked.emplace_back(v.count, k);
+      }
+      std::sort(ranked.rbegin(), ranked.rend());
+      std::string out;
+      for (size_t i = 0; i < ranked.size() && i < 14; ++i) {
+        const uint64_t k = ranked[i].second;
+        const ClassStat& v = s_classes[k];
+        out += fmt::format(" [{} fmt={} msaa={} dst={}{}{}{} {:.1f}/f {:.0f}KB/f]",
+                           (k & 1) ? "depth" : "color", (k >> 1) & 31, (k >> 6) & 3, (k >> 8) & 255,
+                           ((k >> 16) & 1) ? " copy" : "", ((k >> 17) & 1) ? " clear" : "",
+                           ((k >> 18) & 1) ? " open-attached" : "", double(v.count) / frames,
+                           double(v.bytes) / 1024.0 / frames);
+      }
+      XELOGI("MetalResolveClassCensus frames={}:{}", frames, out);
+      s_classes.clear();
+      s_census_swap = swap_count_;
+    }
+  }
   // Commit encoded draws BEFORE processing the resolve (default-on;
   // XE_METAL_NO_RESOLVE_COMMIT=1 restores the old whole-frame buffer for A/B).
   // Found via the resolve-owner probe: sessions WITHOUT a submission boundary
