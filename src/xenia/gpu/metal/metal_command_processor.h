@@ -325,6 +325,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // device-free authority vocabulary for the common dependency query.
   // Non-owning and side-effect free: it reads the existing queues, never
   // mutates them.
+  void SnapshotPendingProducersInto(
+      std::vector<metal::PendingProducer>& out,
+      std::vector<metal::PendingProducer>& scratch) const;
   std::vector<metal::PendingProducer> SnapshotPendingProducers() const;
   metal::ConsumerDecision QueryPendingProducerDependencies(
       metal::ConsumerKind consumer,
@@ -515,6 +518,21 @@ class MetalCommandProcessor : public CommandProcessor {
   void* encoder_depth_stencil_state_ = nullptr;
   uint32_t encoder_stencil_ref_front_ = ~0u;
   uint32_t encoder_stencil_ref_back_ = ~0u;
+  // Per-encoder elision of repeated useResource declarations and buffer
+  // binds (XE_METAL_ENCODER_DEDUPE=0 disables). A declaration covers the
+  // whole render pass, and the bindless heaps never change within one, yet
+  // every draw re-declared ~15 resources and re-bound both heaps on two
+  // stages (Red Dead gameplay: ~7,000 draws in ~170 passes per frame).
+  // resource -> usage bits | stage bits << 8 already declared on the encoder.
+  std::unordered_map<void*, uint32_t> encoder_declared_resources_;
+  struct EncoderBufferBind {
+    void* buffer = nullptr;
+    uint64_t offset = 0;
+  };
+  // [stage kind: vertex, fragment, object, mesh][bind point slot 0..2].
+  EncoderBufferBind encoder_buffer_binds_[4][3];
+  static bool EncoderDedupeEnabled();
+  void ResetEncoderDedupe();
   // Draw-pass census (XE_METAL_PASS_CENSUS=1): fed at every pass begin, draw
   // and pass end; reported on the frame-stats tick and at lifecycle sites.
   metal::MetalPassCensus pass_census_;
@@ -1068,6 +1086,11 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t query_stamp = 0;
     // Reused per query (capacity kept): the selection frontier.
     std::vector<uint32_t> frontier_scratch;
+    // Reused across rebuilds (capacity kept).
+    std::vector<uint32_t> fill_scratch;
+    std::vector<metal::PendingProducer> snapshot_scratch;
+    // Reused per query: page intervals of the request's two range sets.
+    std::vector<std::pair<uint32_t, uint32_t>> seed_spans;
     uint64_t rebuilds = 0, queries = 0, fast_empty = 0, indexed_decisions = 0,
              verify_mismatches = 0;
   };

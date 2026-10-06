@@ -317,6 +317,7 @@ class SharedMemory {
   // XE_GPU_WATCH_ONLY_WIDEN_BARRIER=0 restores the full widening.
   std::vector<uint64_t> system_page_flags_watch_only_;
   static bool WatchOnlyWidenBarrierEnabled();
+  static bool RequestRangeFastPathEnabled();
   struct GlobalWatch {
     GlobalWatchCallback callback;
     void* callback_context;

@@ -417,6 +417,32 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   uint32_t block_last = page_last >> 6;
   uint32_t range_start = UINT32_MAX;
 
+  // Lock-free fast path (XE_GPU_REQUEST_RANGE_FAST=0 disables): most requests
+  // find every page valid and upload nothing, but still took the global
+  // critical region that guest threads hold while handling CPU write faults
+  // (Red Dead gameplay: ~3% of the command processor blocked in this lock).
+  // Only this thread sets valid bits; guest faults only clear them. Seeing
+  // all of them set is therefore the outcome of taking the lock just before
+  // any concurrent clear, which the locked path below allows too.
+  if (RequestRangeFastPathEnabled()) {
+    bool all_valid = true;
+    for (uint32_t i = block_first; i <= block_last && all_valid; ++i) {
+      uint64_t mask = UINT64_MAX;
+      if (i == block_first) {
+        mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
+      }
+      if (i == block_last && (page_last & 63) != 63) {
+        mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+      }
+      const uint64_t valid =
+          __atomic_load_n(&system_page_flags_valid_[i], __ATOMIC_ACQUIRE);
+      all_valid = (valid & mask) == mask;
+    }
+    if (all_valid) {
+      return true;
+    }
+  }
+
   {
     auto global_lock = global_critical_region_.Acquire();
     TryFindUploadRange(block_first, block_last, page_first, page_last,
@@ -431,6 +457,14 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   }
 
   return UploadRanges(uploads, current_upload_range);
+}
+
+bool SharedMemory::RequestRangeFastPathEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_GPU_REQUEST_RANGE_FAST");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
 }
 
 bool SharedMemory::WatchOnlyWidenBarrierEnabled() {

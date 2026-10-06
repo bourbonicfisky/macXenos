@@ -26,15 +26,16 @@ extern "C" void objc_autoreleasePoolPop(void*);
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <set>
 #include <cstring>
+#include <exception>
+#include <iterator>
+#include <set>
+#include <string>
 #include <string_view>
 #include <unordered_map>
-#include <chrono>
-#include <exception>
-#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -2863,6 +2864,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     encoder_pass_signature_ = pending_pass_signature_;
     encoder_depth_stencil_state_ = nullptr;
     encoder_stencil_ref_front_ = encoder_stencil_ref_back_ = ~0u;
+    ResetEncoderDedupe();
     if (PassCensusEnabled()) {
       pass_census_.BeginPass(want_key, bound, attachment_bytes);
     }
@@ -9347,14 +9349,66 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the argument buffer + bindless heaps bind to object/mesh instead of
   // vertex. The fragment stage is unchanged.
   const bool use_mesh_path = use_geometry_emulation;
-  auto bind_arg_buffer = [&](id<MTLBuffer> buf, NSUInteger off, NSUInteger idx) {
-    if (use_mesh_path) {
-      [encoder setObjectBuffer:buf offset:off atIndex:idx];
-      [encoder setMeshBuffer:buf offset:off atIndex:idx];
-    } else {
-      [encoder setVertexBuffer:buf offset:off atIndex:idx];
+  // Stage kinds 0 vertex, 1 fragment, 2 object, 3 mesh; the three argument
+  // bind points map to slots 0..2. Same buffer and offset: skip; same buffer,
+  // new offset: the cheaper offset-only setter.
+  const bool encoder_dedupe = EncoderDedupeEnabled();
+  auto bind_stage = [&](uint32_t kind, uint32_t slot, id<MTLBuffer> buf, NSUInteger off,
+                        NSUInteger idx) {
+    if (encoder_dedupe && slot < 3) {
+      EncoderBufferBind& b = encoder_buffer_binds_[kind][slot];
+      void* raw = (__bridge void*)buf;
+      if (b.buffer == raw) {
+        if (b.offset == off) {
+          return;
+        }
+        b.offset = off;
+        switch (kind) {
+          case 0:
+            [encoder setVertexBufferOffset:off atIndex:idx];
+            break;
+          case 1:
+            [encoder setFragmentBufferOffset:off atIndex:idx];
+            break;
+          case 2:
+            [encoder setObjectBufferOffset:off atIndex:idx];
+            break;
+          default:
+            [encoder setMeshBufferOffset:off atIndex:idx];
+            break;
+        }
+        return;
+      }
+      b.buffer = raw;
+      b.offset = off;
     }
-    [encoder setFragmentBuffer:buf offset:off atIndex:idx];
+    switch (kind) {
+      case 0:
+        [encoder setVertexBuffer:buf offset:off atIndex:idx];
+        break;
+      case 1:
+        [encoder setFragmentBuffer:buf offset:off atIndex:idx];
+        break;
+      case 2:
+        [encoder setObjectBuffer:buf offset:off atIndex:idx];
+        break;
+      default:
+        [encoder setMeshBuffer:buf offset:off atIndex:idx];
+        break;
+    }
+  };
+  auto bind_arg_buffer = [&](id<MTLBuffer> buf, NSUInteger off, NSUInteger idx) {
+    const uint32_t slot = idx == kIRArgumentBufferBindPoint   ? 0u
+                          : idx == kIRDescriptorHeapBindPoint ? 1u
+                          : idx == kIRSamplerHeapBindPoint    ? 2u
+                                                              : 3u;
+    if (use_mesh_path) {
+      bind_stage(2, slot, buf, off, idx);
+      bind_stage(3, slot, buf, off, idx);
+    } else {
+      bind_stage(0, slot, buf, off, idx);
+    }
+    bind_stage(1, slot, buf, off, idx);
   };
   bind_arg_buffer(ab_buffer, ab_alloc.offset, kIRArgumentBufferBindPoint);
   bind_arg_buffer(view_heap, 0, kIRDescriptorHeapBindPoint);
@@ -9393,21 +9447,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // VS's eM# stores onto the vertex stage for a plain draw and the OBJECT
   // stage under geometry emulation (the mesh stage is the GENERATED GS, which
   // declares no UAV; see metal_memexport_raster_flags.h's D2 note).
-  [encoder useResource:shared_buffer
-                 usage:memexport_uav_bound
-                           ? (MTLResourceUsageRead | MTLResourceUsageWrite)
-                           : MTLResourceUsageRead
-                stages:stages];
-  [encoder useResource:ab_buffer usage:MTLResourceUsageRead stages:stages];
-  [encoder useResource:view_heap usage:MTLResourceUsageRead stages:stages];
-  [encoder useResource:sampler_heap usage:MTLResourceUsageRead stages:stages];
-  [encoder useResource:system_view usage:MTLResourceUsageRead stages:stages];
-  [encoder useResource:null_buffer usage:MTLResourceUsageRead stages:stages];
-  [encoder useResource:null_texture usage:MTLResourceUsageRead stages:stages];
+  // A declaration already made on this encoder with a superset of the usage
+  // and stages covers this draw too (useResource applies to the whole pass).
+  auto use_resource = [&](id<MTLResource> resource, MTLResourceUsage usage) {
+    if (encoder_dedupe) {
+      const uint32_t bits = uint32_t(usage) | (uint32_t(stages) << 8);
+      void* raw = (__bridge void*)resource;
+      auto [it, inserted] = encoder_declared_resources_.try_emplace(raw, bits);
+      if (!inserted) {
+        if ((it->second & bits) == bits) {
+          return;
+        }
+        it->second |= bits;
+      }
+    }
+    [encoder useResource:resource usage:usage stages:stages];
+  };
+  use_resource(shared_buffer, memexport_uav_bound ? (MTLResourceUsageRead | MTLResourceUsageWrite)
+                                                  : MTLResourceUsageRead);
+  use_resource(ab_buffer, MTLResourceUsageRead);
+  use_resource(view_heap, MTLResourceUsageRead);
+  use_resource(sampler_heap, MTLResourceUsageRead);
+  use_resource(system_view, MTLResourceUsageRead);
+  use_resource(null_buffer, MTLResourceUsageRead);
+  use_resource(null_texture, MTLResourceUsageRead);
   for (void* tex : texture_cache_->active_textures()) {
-    [encoder useResource:(__bridge id<MTLTexture>)tex
-                   usage:MTLResourceUsageRead
-                  stages:stages];
+    use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead);
   }
 
   auto mark_raster_targets_written = [&] {
@@ -12020,6 +12085,51 @@ bool MetalCommandProcessor::FetchOverlapsPendingGpuCurrent(
   return false;
 }
 
+void MetalCommandProcessor::SnapshotPendingProducersInto(
+    std::vector<metal::PendingProducer>& out, std::vector<metal::PendingProducer>& scratch) const {
+  // Same records and order as SnapshotPendingProducers, without allocating
+  // once the vectors have grown: each queue is appended in registration
+  // order, so a stable two-way merge by sequence reproduces the stable sort
+  // (which remains the fallback when a queue is out of order). `scratch`
+  // holds the writebacks, then the memexports after them.
+  scratch.clear();
+  bool sorted = true;
+  for (const PendingWriteback& wb : pending_writebacks_) {
+    auto range = metal::GuestRange::FromBaseLength(wb.guest_addr, wb.range_bytes());
+    if (range) {
+      if (!scratch.empty() && scratch.back().sequence > wb.authority_sequence) {
+        sorted = false;
+      }
+      scratch.push_back({*range,
+                         wb.gpu_current ? metal::TransitState::kGpuCurrentShared
+                                        : metal::TransitState::kPendingResolve,
+                         wb.submission, wb.authority_sequence});
+    }
+  }
+  const size_t writebacks = scratch.size();
+  for (const PendingMemexport& me : pending_memexports_) {
+    auto range = metal::GuestRange::FromBaseLength(me.base_address, me.size_bytes);
+    if (range) {
+      if (scratch.size() > writebacks && scratch.back().sequence > me.authority_sequence) {
+        sorted = false;
+      }
+      scratch.push_back(
+          {*range, metal::TransitState::kPendingMemexport, me.submission, me.authority_sequence});
+    }
+  }
+  auto by_sequence = [](const metal::PendingProducer& a, const metal::PendingProducer& b) {
+    return a.sequence < b.sequence;
+  };
+  out.clear();
+  if (sorted) {
+    std::merge(scratch.begin(), scratch.begin() + writebacks, scratch.begin() + writebacks,
+               scratch.end(), std::back_inserter(out), by_sequence);
+  } else {
+    out.assign(scratch.begin(), scratch.end());
+    std::stable_sort(out.begin(), out.end(), by_sequence);
+  }
+}
+
 std::vector<metal::PendingProducer>
 MetalCommandProcessor::SnapshotPendingProducers() const {
   // Non-owning read of the two existing pending-producer queues into the
@@ -12095,7 +12205,36 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
   if (!index.valid || index.writebacks != pending_writebacks_.size() ||
       index.memexports != pending_memexports_.size() ||
       index.sequence != memory_authority_sequence_) {
-    index.producers = SnapshotPendingProducers();
+    // XE_METAL_LEAN_INDEX_REBUILD=0 restores the allocating snapshot. The
+    // index rebuilds ~65 times per Red Dead frame (every registration and
+    // retirement); the lean path reuses the vectors and merges the two
+    // queues, each already in registration order, instead of stable-sorting
+    // a fresh copy. Sequences are unique, so the order is identical.
+    static const bool s_lean_rebuild = [] {
+      const char* v = std::getenv("XE_METAL_LEAN_INDEX_REBUILD");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    if (s_lean_rebuild) {
+      SnapshotPendingProducersInto(index.producers, index.snapshot_scratch);
+      static const bool s_verify = std::getenv("XE_METAL_PRODUCER_INDEX_VERIFY") != nullptr;
+      if (s_verify) {
+        const std::vector<metal::PendingProducer> reference = SnapshotPendingProducers();
+        bool same = reference.size() == index.producers.size();
+        for (size_t i = 0; same && i < reference.size(); ++i) {
+          const metal::PendingProducer& a = reference[i];
+          const metal::PendingProducer& b = index.producers[i];
+          same = a.sequence == b.sequence && a.state == b.state && a.submission == b.submission &&
+                 a.range.start() == b.range.start() && a.range.end() == b.range.end();
+        }
+        if (!same && ++index.verify_mismatches <= 16) {
+          XELOGE("MetalProducerIndex VERIFY MISMATCH: lean snapshot differs "
+                 "({} vs {} records)",
+                 index.producers.size(), reference.size());
+        }
+      }
+    } else {
+      index.producers = SnapshotPendingProducers();
+    }
     index.pages.fill(0);
     index.page_offsets.assign(8193, 0);
     for (const metal::PendingProducer& p : index.producers) {
@@ -12114,8 +12253,8 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
     }
     index.page_entries.assign(index.page_offsets[8192], 0);
     {
-      std::vector<uint32_t> fill(index.page_offsets.begin(),
-                                 index.page_offsets.end() - 1);
+      std::vector<uint32_t>& fill = index.fill_scratch;
+      fill.assign(index.page_offsets.begin(), index.page_offsets.end() - 1);
       const size_t count = std::min<size_t>(index.producers.size(), 65535);
       for (size_t i = 0; i < count; ++i) {
         const metal::PendingProducer& p = index.producers[i];
@@ -12175,6 +12314,23 @@ MetalCommandProcessor::IndexedPendingProducers(
   }
   *any_page_hit = hit;
   return index.producers;
+}
+
+bool MetalCommandProcessor::EncoderDedupeEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_ENCODER_DEDUPE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+void MetalCommandProcessor::ResetEncoderDedupe() {
+  encoder_declared_resources_.clear();
+  for (auto& stage : encoder_buffer_binds_) {
+    for (EncoderBufferBind& bind : stage) {
+      bind = EncoderBufferBind{};
+    }
+  }
 }
 
 bool MetalCommandProcessor::LeanDecisionEnabled() {
@@ -12241,8 +12397,68 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
       });
     }
   };
-  seed_from(request.resolve_ranges);
-  seed_from(request.memexport_ranges);
+  // Both range sets usually name the same pages (every RAM-backed fetch adds
+  // its ranges to both), so walk the page-interval union once instead of
+  // each set in turn: the page walk and the per-page "already examined"
+  // checks were ~6% of Red Dead's command-processor thread. Every candidate
+  // still meets the same state-specific overlap test, and the frontier is
+  // sorted below, so the decision is identical
+  // (XE_METAL_PRODUCER_INDEX_VERIFY=1 checks it). XE_METAL_SEED_PAGE_UNION=0
+  // walks the two sets separately.
+  static const bool s_seed_union = [] {
+    const char* v = std::getenv("XE_METAL_SEED_PAGE_UNION");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (s_seed_union) {
+    std::vector<std::pair<uint32_t, uint32_t>>& spans = index.seed_spans;
+    spans.clear();
+    auto add_spans = [&](const metal::GuestRangeSet& set) {
+      for (const metal::GuestRange& r : set.ranges()) {
+        if (r.end() > r.start()) {
+          spans.emplace_back(r.start() >> 16, (r.end() - 1u) >> 16);
+        }
+      }
+    };
+    add_spans(request.resolve_ranges);
+    add_spans(request.memexport_ranges);
+    std::sort(spans.begin(), spans.end());
+    uint32_t cur_first = 0, cur_last = 0;
+    bool have = false;
+    auto walk = [&](uint32_t first, uint32_t last) {
+      for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+        for (uint32_t k = index.page_offsets[page]; k < index.page_offsets[page + 1]; ++k) {
+          const uint32_t i = index.page_entries[k];
+          if (index.candidate_stamp[i] == stamp) {
+            continue;
+          }
+          index.candidate_stamp[i] = stamp;
+          const metal::PendingProducer& producer = producers[i];
+          if (request.ForProducer(producer.state).OverlapsAny(producer.range)) {
+            index.selected_stamp[i] = stamp;
+            frontier.push_back(i);
+          }
+        }
+      }
+    };
+    for (const auto& [first, last] : spans) {
+      if (have && first <= cur_last + 1) {
+        cur_last = std::max(cur_last, last);
+        continue;
+      }
+      if (have) {
+        walk(cur_first, cur_last);
+      }
+      cur_first = first;
+      cur_last = last;
+      have = true;
+    }
+    if (have) {
+      walk(cur_first, cur_last);
+    }
+  } else {
+    seed_from(request.resolve_ranges);
+    seed_from(request.memexport_ranges);
+  }
   if (frontier.empty()) {
     return decision;
   }
