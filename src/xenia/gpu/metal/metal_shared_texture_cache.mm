@@ -149,6 +149,9 @@ MetalSharedTextureCache::~MetalSharedTextureCache() {
 }
 
 bool MetalSharedTextureCache::Initialize() {
+  SharedTexturePacked16Supported().store(
+      [(__bridge id<MTLDevice>)device_ supportsFamily:MTLGPUFamilyApple1],
+      std::memory_order_relaxed);
   direct_pipeline_ = MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(device_);
   if (!direct_pipeline_) {
     return false;

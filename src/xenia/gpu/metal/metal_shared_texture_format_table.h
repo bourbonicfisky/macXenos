@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_SHARED_TEXTURE_FORMAT_TABLE_H_
 #define XENIA_GPU_METAL_METAL_SHARED_TEXTURE_FORMAT_TABLE_H_
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 
@@ -150,6 +151,16 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
   return kTable;
 }
 
+// Packed 16-bit pixel formats (ABGR4Unorm and the 5:6:5 / 1:5:5:5 family)
+// exist only on Apple GPU families: on an Intel/AMD Mac a texture descriptor
+// with one fails validation (Red Dead on the RX 6900 XT aborted at its first
+// 4:4:4:4 texture). The shared texture cache records the device's answer at
+// initialization; entries that need the formats are dropped without it.
+inline std::atomic<bool>& SharedTexturePacked16Supported() {
+  static std::atomic<bool> supported{true};
+  return supported;
+}
+
 // XE_METAL_TEX_ROUTE_FORMATS=0 restricts the table to the originally promoted
 // RGBA8 class (exact rollback of the stage-1 widening).
 inline bool SharedTextureRouteFormatsWidened() {
@@ -176,7 +187,8 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
         const char* v = std::getenv("XE_METAL_TEX_ROUTE_4444");
         return !(v && v[0] == '0' && !v[1]);
       }();
-      if (!s_4444) {
+      if (!s_4444 ||
+          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
         return nullptr;
       }
     }
