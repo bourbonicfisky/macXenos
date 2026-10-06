@@ -532,6 +532,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // [stage kind: vertex, fragment, object, mesh][bind point slot 0..2].
   EncoderBufferBind encoder_buffer_binds_[4][3];
   static bool EncoderDedupeEnabled();
+  static bool HostReadFastEnabled();
   void ResetEncoderDedupe();
   // Draw-pass census (XE_METAL_PASS_CENSUS=1): fed at every pass begin, draw
   // and pass end; reported on the frame-stats tick and at lifecycle sites.

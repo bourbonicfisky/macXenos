@@ -12337,6 +12337,14 @@ MetalCommandProcessor::IndexedPendingProducers(
   return index.producers;
 }
 
+bool MetalCommandProcessor::HostReadFastEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_HOSTREAD_FAST");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::EncoderDedupeEnabled() {
   static const bool s_enabled = [] {
     const char* v = std::getenv("XE_METAL_ENCODER_DEDUPE");
@@ -13761,6 +13769,17 @@ MetalCommandProcessor::DrainSelectedPendingProducers(
 MetalCommandProcessor::ProducerDependencyOutcome
 MetalCommandProcessor::ResolvePendingProducerDependencies(
     const metal::ConsumerDecision& decision_in) {
+  // An empty selection adds no commit, wait or drain (the early no-op below);
+  // answer it before copying the decision (XE_METAL_HOSTREAD_FAST=0 copies).
+  if (HostReadFastEnabled() && decision_in.selected.empty()) {
+    if (SeamTimingEnabled()) {
+      if (auto* seam_c = seam_timing_.ConsumerSlot(decision_in.consumer)) {
+        ++seam_c->consultations;
+        ++seam_c->empty_early_outs;
+      }
+    }
+    return ProducerDependencyOutcome{};
+  }
   // Stage 2: a swap / fence-packet full-domain publication arms its
   // GPU-current records for demand-driven publication instead of copying
   // them; only the rest (staging resolves, memexports, untagged records)
@@ -14140,6 +14159,30 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
         "MetalCommandProcessor: rejected out-of-domain host read {:08X}+{}",
         guest_address, length);
     return false;
+  }
+  // Fast path (XE_METAL_HOSTREAD_FAST, default on): a range on which no
+  // pending producer has a page has no dependency -- the indexed query's own
+  // fast-empty answer -- so skip building the request (Red Dead issues
+  // thousands of INDIRECT_BUFFER packets per frame, each preparing its
+  // command list for a host read). Not with the diagnostic log below.
+  static const bool s_hostread_log_fast = std::getenv("XE_METAL_HOSTREAD_LOG") != nullptr;
+  static const bool s_producer_index = [] {
+    const char* v = std::getenv("XE_METAL_PRODUCER_INDEX");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (HostReadFastEnabled() && s_producer_index && !s_hostread_log_fast &&
+      !lazy_full_domain_request_) {
+    EnsureProducerIndex();
+    const ProducerIndex& index = producer_index_;
+    bool any = false;
+    const uint32_t first = exact_range->start() >> 16;
+    const uint32_t last = (exact_range->end() - 1u) >> 16;
+    for (uint32_t page = first; page <= last && page < 8192u && !any; ++page) {
+      any = (index.pages[page >> 6] >> (page & 63u)) & 1u;
+    }
+    if (!any) {
+      return true;
+    }
   }
   metal::GuestRangeSet requested;
   requested.Add(exact_range);
