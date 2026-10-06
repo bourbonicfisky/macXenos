@@ -4644,6 +4644,9 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     }
   } reservation{&epoch_outstanding_[submit_epoch % kFaultEpochSlots]};
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    if (GpuBusyTimingEnabled()) {
+      NoteGpuBusyInterval(cb.GPUStartTime, cb.GPUEndTime);
+    }
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
       faulted_completions_.push_back(
@@ -5327,6 +5330,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   if (pixel_shader && !pixel_shader->is_ucode_analyzed()) {
     pixel_shader->AnalyzeUcode(ucode_disasm);
+  }
+  // The D3D12/Vulkan rule: the pixel shader runs only in kColorDepth and when
+  // it has an effect (colour written, kill, depth or memexport, or coverage
+  // from alpha); depth-only passes (shadow maps, depth pre-passes, depth
+  // clears in kDepth) draw with no fragment function, no interpolators and
+  // no pixel-shader textures. The normalized colour mask is already 0 for
+  // every such draw. XE_METAL_PS_DROP=0 keeps the pixel shader bound.
+  // Corpus: 40/40 traces 0 px; RDR 15297 moves 34 EDRAM bytes by 1-3 LSB at
+  // a 2x-MSAA draw after kDepth occlusion-style draws lose their fragment
+  // function (which wrote [[sample_mask]] = ~0) - the M4 MSAA LSB class, not
+  // a semantic change.
+  static const bool s_ps_drop = [] {
+    const char* value = std::getenv("XE_METAL_PS_DROP");
+    return !value || std::strcmp(value, "0") != 0;
+  }();
+  // Geometry-emulation draws keep theirs (that route was selected above with
+  // the pixel shader present).
+  if (s_ps_drop && pixel_shader && !use_geometry_emulation &&
+      !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
+    pixel_shader = nullptr;
   }
   // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
   // ucode disassembly to /tmp/xe_ps_<hash>.txt once, for single-shader
@@ -6720,6 +6743,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // MSC acceptance of both modes proven by task 1.1
     // (xenia-gpu-metal-float24-conformance); early-Z survival of the
     // truncating form is measured, not assumed (task 2.4).
+    static const bool s_early_hint = [] {
+      const char* value = std::getenv("XE_METAL_EARLY_HINT");
+      return value && std::strcmp(value, "1") == 0;
+    }();
     static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
       MetalF24PsMode mode = EffectiveMetalF24PsMode(
@@ -6753,6 +6780,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         XELOGI("MetalF24: engaged mode={} at draw {}",
                round_mode ? "round" : "trunc", trace_draw_index_);
       }
+    } else if (s_early_hint && pixel_shader->implicit_early_z_write_allowed() &&
+               (!pixel_shader->writes_color_target(0) ||
+                !draw_util::DoesCoverageDependOnAlpha(
+                    regs.Get<reg::RB_COLORCONTROL>()))) {
+      // The D3D12 rule (d3d12/pipeline_cache.cc): no kill, depth write,
+      // memexport or alpha-dependent coverage -> [earlydepthstencil], and the
+      // translator drops the dynamic alpha test and alpha-to-coverage code
+      // (a static discard and an SV_Coverage write in every colour-writing
+      // shader otherwise, which keeps Apple's hidden-surface removal and
+      // early depth off for the whole draw). Opt-in (XE_METAL_EARLY_HINT=1):
+      // it moves 4x-MSAA blend results by +-1 LSB on silhouettes (RDR 8111
+      // draw 104: blended 8888 samples round differently once the function
+      // stops writing [[sample_mask]]), and RDR gameplay showed no frame-rate
+      // gain from it on the M4 (2026-10-06).
+      ps_mod_decoded.pixel.depth_stencil_mode =
+          DxbcShaderTranslator::Modification::DepthStencilMode::kEarlyHint;
     }
     uint64_t ps_mod = ps_mod_decoded.value;
     ps_mod_value = ps_mod;
@@ -14275,6 +14318,51 @@ bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
                                         requested);
 }
 
+// XE_METAL_GPU_BUSY=1: GPU busy time of the frame submissions (union of the
+// command buffers' GPUStartTime..GPUEndTime; one queue, so the intervals are
+// ordered and only overlap at the edges), reported per frame with
+// MetalFrameStats. Lets an on/off arm read GPU ms/frame without a trace.
+namespace {
+struct GpuBusyAccumulator {
+  std::mutex mutex;
+  double last_end = 0.0;
+  double busy_s = 0.0;
+};
+GpuBusyAccumulator& GpuBusy() {
+  static GpuBusyAccumulator accumulator;
+  return accumulator;
+}
+}  // namespace
+
+bool MetalCommandProcessor::GpuBusyTimingEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_GPU_BUSY");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return enabled;
+}
+
+void MetalCommandProcessor::NoteGpuBusyInterval(double start, double end) {
+  if (!(end > start) || start <= 0.0) {
+    return;
+  }
+  GpuBusyAccumulator& accumulator = GpuBusy();
+  std::lock_guard<std::mutex> lock(accumulator.mutex);
+  double begin = std::max(start, accumulator.last_end);
+  if (end > begin) {
+    accumulator.busy_s += end - begin;
+  }
+  accumulator.last_end = std::max(accumulator.last_end, end);
+}
+
+double MetalCommandProcessor::ConsumeGpuBusySeconds() {
+  GpuBusyAccumulator& accumulator = GpuBusy();
+  std::lock_guard<std::mutex> lock(accumulator.mutex);
+  double busy = accumulator.busy_s;
+  accumulator.busy_s = 0.0;
+  return busy;
+}
+
 void MetalCommandProcessor::InitializeResidencySet(void* device_ptr,
                                                    void* queue_ptr) {
   static const bool s_enabled = [] {
@@ -14768,6 +14856,12 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0);
+      if (GpuBusyTimingEnabled()) {
+        double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
+        XELOGI("MetalGpuBusy swap#{}: {:.2f} ms/frame busy, {:.1f}% of wall",
+               count, busy_ms / 128.0,
+               100.0 * busy_ms / std::max(double(secs) * 1000.0, 0.001));
+      }
       if (texture_cache_) {
         XELOGI("{}", texture_cache_->FormatDimensionCensus());
         MetalTextureCache::ByteCensus bc = texture_cache_->CensusBytes();

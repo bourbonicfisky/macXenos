@@ -700,6 +700,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // (removing the hot-path waits) — arenas/slots/textures must not be
   // reclaimed while a submission that references them is in flight.
   uint64_t submission_counter_ = 0;
+  // XE_METAL_GPU_BUSY (see the .mm): GPU busy time of frame submissions.
+  static bool GpuBusyTimingEnabled();
+  static void NoteGpuBusyInterval(double start, double end);
+  static double ConsumeGpuBusySeconds();
   // Read lock-free (acquire) from everywhere; ADVANCED only by
   // PublishCompletedSubmission, and only while holding completion_mutex_. That
   // mutex is the truth boundary WaitForSubmission's locked re-check reads
