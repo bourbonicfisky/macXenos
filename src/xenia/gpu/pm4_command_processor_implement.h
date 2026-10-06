@@ -837,6 +837,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     static std::vector<AddrStat> s_addrs;
     static uint64_t s_packets = 0, s_missed = 0, s_sleeps = 0;
     static uint64_t s_wall_us = 0, s_requested_us = 0;
+    // Missed-wait wall time histogram, 2 ms buckets (the last is >= 16 ms):
+    // a flat 0-16 ms spread means the wait absorbs vblank alignment, a narrow
+    // peak means a fixed guest-side latency.
+    static uint32_t s_wait_hist[9] = {};
     static auto s_window_start = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     uint64_t wall_us =
@@ -849,6 +853,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
       s_sleeps += wait_iterations;
       s_wall_us += wall_us;
       s_requested_us += census_requested_us;
+      ++s_wait_hist[std::min<uint64_t>(wall_us / 2000, 8)];
     }
     AddrStat* stat = nullptr;
     for (AddrStat& a : s_addrs) {
@@ -897,6 +902,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
           window_us / 1000.0, s_packets, s_missed, s_sleeps, s_wall_us / 1000.0,
           s_requested_us / 1000.0,
           100.0 * double(s_wall_us) / double(window_us), top);
+      XELOGI(
+          "CpWaitCensus missed-wait ms histogram (2 ms buckets): {} {} {} {} "
+          "{} {} {} {} {}",
+          s_wait_hist[0], s_wait_hist[1], s_wait_hist[2], s_wait_hist[3],
+          s_wait_hist[4], s_wait_hist[5], s_wait_hist[6], s_wait_hist[7],
+          s_wait_hist[8]);
+      std::fill(std::begin(s_wait_hist), std::end(s_wait_hist), 0u);
       s_addrs.clear();
       s_packets = s_missed = s_sleeps = s_wall_us = s_requested_us = 0;
       s_window_start = now;
