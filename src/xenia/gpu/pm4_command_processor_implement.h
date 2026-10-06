@@ -771,6 +771,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   bool matched = false;
   uint32_t wait_iterations = 0;
 
+  // XE_CP_WAIT_CENSUS=1 (diagnostic, default off): per-window counts of
+  // WAIT_REG_MEM packets, the ones that had to sleep, the sleeps, the
+  // requested vs. actual sleep time, and the busiest poll addresses -- how
+  // much of the command processor's idle time is guest latency versus the
+  // whole-millisecond sleep quantum.
+  static const bool s_wait_census = std::getenv("XE_CP_WAIT_CENSUS") != nullptr;
+  std::chrono::steady_clock::time_point census_start;
+  uint64_t census_requested_us = 0;
+  if (s_wait_census) {
+    census_start = std::chrono::steady_clock::now();
+  }
+
   do {
     uint32_t value = value_ref;
     if (is_memory) {
@@ -804,6 +816,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
           // do nothing
         } else {
           xe::threading::Sleep(std::chrono::milliseconds(wait / 0x100));
+          census_requested_us += uint64_t(wait / 0x100) * 1000;
           ReturnFromWait();
         }
 
@@ -815,6 +828,80 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
       }
     }
   } while (!matched);
+
+  if (s_wait_census) {
+    struct AddrStat {
+      uint32_t addr = 0, ref = 0, mask = 0, cond = 0;
+      uint64_t packets = 0, missed = 0, sleeps = 0, wall_us = 0;
+    };
+    static std::vector<AddrStat> s_addrs;
+    static uint64_t s_packets = 0, s_missed = 0, s_sleeps = 0;
+    static uint64_t s_wall_us = 0, s_requested_us = 0;
+    static auto s_window_start = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    uint64_t wall_us =
+        uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                     now - census_start)
+                     .count());
+    ++s_packets;
+    if (wait_iterations) {
+      ++s_missed;
+      s_sleeps += wait_iterations;
+      s_wall_us += wall_us;
+      s_requested_us += census_requested_us;
+    }
+    AddrStat* stat = nullptr;
+    for (AddrStat& a : s_addrs) {
+      if (a.addr == poll_reg_addr && a.ref == ref && a.mask == mask) {
+        stat = &a;
+        break;
+      }
+    }
+    if (!stat && s_addrs.size() < 64) {
+      s_addrs.emplace_back();
+      stat = &s_addrs.back();
+      stat->addr = poll_reg_addr;
+      stat->ref = ref;
+      stat->mask = mask;
+      stat->cond = (wait_info & 0x7) | (is_memory ? 0x10 : 0);
+    }
+    if (stat) {
+      ++stat->packets;
+      if (wait_iterations) {
+        ++stat->missed;
+        stat->sleeps += wait_iterations;
+        stat->wall_us += wall_us;
+      }
+    }
+    uint64_t window_us =
+        uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                     now - s_window_start)
+                     .count());
+    if (window_us >= 5000000) {
+      std::sort(s_addrs.begin(), s_addrs.end(),
+                [](const AddrStat& a, const AddrStat& b) {
+                  return a.wall_us > b.wall_us;
+                });
+      std::string top;
+      for (size_t i = 0; i < s_addrs.size() && i < 4; ++i) {
+        const AddrStat& a = s_addrs[i];
+        top += fmt::format(
+            " [{}{:08X} ref={:08X} mask={:08X} cond={:X} packets={} "
+            "missed={} sleeps={} wall_ms={:.1f}]",
+            (a.cond & 0x10) ? "mem " : "reg ", a.addr, a.ref, a.mask,
+            a.cond & 0x7, a.packets, a.missed, a.sleeps, a.wall_us / 1000.0);
+      }
+      XELOGI(
+          "CpWaitCensus window_ms={:.0f}: packets={} missed={} sleeps={} "
+          "waited_ms={:.1f} requested_ms={:.1f} ({:.1f}% of window){}",
+          window_us / 1000.0, s_packets, s_missed, s_sleeps, s_wall_us / 1000.0,
+          s_requested_us / 1000.0,
+          100.0 * double(s_wall_us) / double(window_us), top);
+      s_addrs.clear();
+      s_packets = s_missed = s_sleeps = s_wall_us = s_requested_us = 0;
+      s_window_start = now;
+    }
+  }
 
   return true;
 }
