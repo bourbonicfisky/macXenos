@@ -1076,6 +1076,13 @@ class MetalCommandProcessor : public CommandProcessor {
     bool valid = false;
     std::vector<metal::PendingProducer> producers;
     std::array<uint64_t, 128> pages{};  // 512 MiB / 64 KiB = 8192 bits
+    // Per-kind occupancy for IndexRangeOverlapsProducers: the per-binding
+    // memexport / GPU-current overlap checks walked every producer on a
+    // texture's pages (mostly resolves of the other kind) to answer false
+    // (Red Dead: ~2.5% of the command-processor thread with no memexport
+    // pending). XE_METAL_KIND_PAGE_BITMAPS=0 uses the shared bitmap.
+    std::array<uint64_t, 128> pages_gpu_current{};
+    std::array<uint64_t, 128> pages_memexport{};
     // Per-page producer lists (CSR over the 8192 pages): every producer
     // whose range shares a byte with a query range shares a page with it,
     // so the candidate set for a seed scan or a closure step is the union of

@@ -12181,8 +12181,20 @@ bool MetalCommandProcessor::IndexRangeOverlapsProducers(
   const ProducerIndex& index = producer_index_;
   const uint32_t first = start >> 16;
   const uint32_t last = (end - 1u) >> 16;
+  static const bool s_kind_bitmaps = [] {
+    const char* v = std::getenv("XE_METAL_KIND_PAGE_BITMAPS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
   for (uint32_t page = first; page <= last && page < 8192u; ++page) {
-    if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+    const uint64_t bit = uint64_t(1) << (page & 63u);
+    uint64_t occupied;
+    if (s_kind_bitmaps) {
+      occupied = (gpu_current_writebacks ? index.pages_gpu_current[page >> 6] : 0) |
+                 (memexports ? index.pages_memexport[page >> 6] : 0);
+    } else {
+      occupied = index.pages[page >> 6];
+    }
+    if (!(occupied & bit)) {
       continue;
     }
     for (uint32_t k = index.page_offsets[page];
@@ -12236,6 +12248,8 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
       index.producers = SnapshotPendingProducers();
     }
     index.pages.fill(0);
+    index.pages_gpu_current.fill(0);
+    index.pages_memexport.fill(0);
     index.page_offsets.assign(8193, 0);
     for (const metal::PendingProducer& p : index.producers) {
       if (!p.range.length()) {
@@ -12243,8 +12257,15 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
       }
       const uint32_t first = p.range.start() >> 16;
       const uint32_t last = (p.range.end() - 1u) >> 16;
+      std::array<uint64_t, 128>* kind_pages =
+          p.state == metal::TransitState::kGpuCurrentShared   ? &index.pages_gpu_current
+          : p.state == metal::TransitState::kPendingMemexport ? &index.pages_memexport
+                                                              : nullptr;
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
         index.pages[page >> 6] |= uint64_t(1) << (page & 63u);
+        if (kind_pages) {
+          (*kind_pages)[page >> 6] |= uint64_t(1) << (page & 63u);
+        }
         ++index.page_offsets[page + 1];
       }
     }
