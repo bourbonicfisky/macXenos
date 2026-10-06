@@ -351,6 +351,7 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   cache_.clear();
+  ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
     (void)released;
@@ -481,6 +482,7 @@ void MetalTextureCache::ClearCache() {
     }
   }
   cache_.clear();
+  ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
     (void)released;
@@ -1110,6 +1112,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
   if (!trace_playback_) {
     DrainPendingInvalidations();
   }
+  EnforceSlotHeadroom();
   // Diagnostic: log why a fetch resolves to the null (gray) texture. The
   // gameplay gray screen is a composite pass sampling slot 0; this shows the
   // fetch (base/format/dimension) so we know whether it's an unsupported format,
@@ -1580,6 +1583,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
   }
   if (it != cache_.end()) {
+    it->second.last_use = ++use_clock_;
     active_textures_.push_back(it->second.texture);
     return it->second.slot;
   }
@@ -1600,9 +1604,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
         uint32_t slot = AllocateSlot();
         if (slot) {
           WriteSlotDescriptor(slot, parked.texture);
-          cache_.emplace(key, Entry{parked.texture, slot, parked.guest_base,
-                                    parked.guest_bytes, parked.mip_base,
-                                    parked.mip_bytes, parked.guest_hash});
+          EmplaceEntry(key, Entry{parked.texture, slot, parked.guest_base, parked.guest_bytes,
+                                  parked.mip_base, parked.mip_bytes, parked.guest_hash});
           // The write that parked it unwatched its region; watch again so a
           // later rewrite reaches this entry.
           if (!trace_playback_ && shared_memory_) {
@@ -2528,8 +2531,8 @@ uint32_t MetalTextureCache::FinalizeTexture(
       trace_writer_->WriteMemoryRead(mip_base, mip_bytes);
     }
   }
-  cache_.emplace(key, Entry{texture_ptr, slot, base, guest_bytes, mip_base,
-                            mip_bytes, pending_guest_hash_});
+  EmplaceEntry(
+      key, Entry{texture_ptr, slot, base, guest_bytes, mip_base, mip_bytes, pending_guest_hash_});
   pending_guest_hash_ = 0;
   active_textures_.push_back(texture_ptr);
   return slot;
@@ -3026,27 +3029,86 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
     ++census->calls;
     census->bytes += length;
   }
-  for (auto it = cache_.begin(); it != cache_.end();) {
-    const Entry& e = it->second;
+  auto overlaps_entry = [&](const Entry& e) {
     auto guest_range =
         metal::GuestRange::FromBaseLength(e.guest_base, e.guest_bytes);
     auto mip_range =
         metal::GuestRange::FromBaseLength(e.mip_base, e.mip_bytes);
-    if ((guest_range && invalidation->Overlaps(*guest_range)) ||
-        (mip_range && invalidation->Overlaps(*mip_range))) {
-      // Retire, don't free: in-flight draws may still reference the texture
-      // (bindless) and the slot; both drain once the submissions encoded
-      // against them complete.
-      if (RevalidateEnabled() && e.guest_hash && e.texture) {
-        ParkEvictedEntry(it->first, e);
-      } else {
-        retired_textures_.emplace_back(RetireSubmission(), e.texture);
-      }
-      stale_slots_.emplace_back(RetireSubmission(), e.slot);
-      it = cache_.erase(it);
-      ++evicted;
+    return (guest_range && invalidation->Overlaps(*guest_range)) ||
+           (mip_range && invalidation->Overlaps(*mip_range));
+  };
+  auto evict = [&](std::unordered_map<uint64_t, Entry>::iterator it) {
+    const Entry& e = it->second;
+    // Retire, don't free: in-flight draws may still reference the texture
+    // (bindless) and the slot; both drain once the submissions encoded
+    // against them complete.
+    if (RevalidateEnabled() && e.guest_hash && e.texture) {
+      ParkEvictedEntry(it->first, e);
     } else {
-      ++it;
+      retired_textures_.emplace_back(RetireSubmission(), e.texture);
+    }
+    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    UnindexEntry(it->first, e);
+    ++evicted;
+    return cache_.erase(it);
+  };
+  if (InvalidationIndexEnabled()) {
+    // Candidates: every key filed under a bucket the invalidation touches.
+    std::vector<uint64_t> candidates;
+    if (!entry_buckets_.empty()) {
+      const uint32_t bucket_first = uint32_t(invalidation->start() >> kEntryBucketShift);
+      const uint32_t bucket_last = uint32_t((invalidation->end() - 1) >> kEntryBucketShift);
+      for (uint32_t b = bucket_first; b <= bucket_last; ++b) {
+        const std::vector<uint64_t>& keys = entry_buckets_[b];
+        candidates.insert(candidates.end(), keys.begin(), keys.end());
+      }
+      if (bucket_first != bucket_last) {
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+      }
+    }
+    static const bool s_verify = std::getenv("XE_METAL_TEX_INVAL_INDEX_VERIFY") != nullptr;
+    if (s_verify) {
+      std::vector<uint64_t> scanned, indexed;
+      for (const auto& [key, e] : cache_) {
+        if (overlaps_entry(e)) {
+          scanned.push_back(key);
+        }
+      }
+      for (uint64_t key : candidates) {
+        auto it = cache_.find(key);
+        if (it != cache_.end() && overlaps_entry(it->second)) {
+          indexed.push_back(key);
+        }
+      }
+      std::sort(scanned.begin(), scanned.end());
+      std::sort(indexed.begin(), indexed.end());
+      ++inval_index_verify_calls_;
+      if (scanned != indexed) {
+        if (inval_index_verify_mismatches_++ < 16) {
+          XELOGW("MetalTexInvalIndexVerify MISMATCH {:08X}+{:X}: scan={} "
+                 "index={}",
+                 base, length, scanned.size(), indexed.size());
+        }
+      }
+      if ((inval_index_verify_calls_ & 4095) == 0) {
+        XELOGI("MetalTexInvalIndexVerify: calls={} mismatches={}", inval_index_verify_calls_,
+               inval_index_verify_mismatches_);
+      }
+    }
+    for (uint64_t key : candidates) {
+      auto it = cache_.find(key);
+      if (it != cache_.end() && overlaps_entry(it->second)) {
+        evict(it);
+      }
+    }
+  } else {
+    for (auto it = cache_.begin(); it != cache_.end();) {
+      if (overlaps_entry(it->second)) {
+        it = evict(it);
+      } else {
+        ++it;
+      }
     }
   }
   if (scope == InvalidationScope::kAllRepresentations) {
@@ -3082,6 +3144,143 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
     census->evicted += evicted;
   }
   return evicted;
+}
+
+bool MetalTextureCache::InvalidationIndexEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_INVAL_INDEX");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+namespace {
+// Calls fn(bucket) once for each 1 MiB bucket an entry's base or mip range
+// covers (a bucket shared by both ranges is visited once).
+template <typename Fn>
+void ForEachEntryBucket(uint32_t guest_base, uint32_t guest_bytes, uint32_t mip_base,
+                        uint32_t mip_bytes, uint32_t shift, Fn&& fn) {
+  auto base_range = metal::GuestRange::FromBaseLength(guest_base, guest_bytes);
+  auto mip_range = metal::GuestRange::FromBaseLength(mip_base, mip_bytes);
+  uint32_t first0 = 1, last0 = 0;
+  if (base_range) {
+    first0 = uint32_t(base_range->start() >> shift);
+    last0 = uint32_t((base_range->end() - 1) >> shift);
+    for (uint32_t b = first0; b <= last0; ++b) {
+      fn(b);
+    }
+  }
+  if (mip_range) {
+    const uint32_t first1 = uint32_t(mip_range->start() >> shift);
+    const uint32_t last1 = uint32_t((mip_range->end() - 1) >> shift);
+    for (uint32_t b = first1; b <= last1; ++b) {
+      if (!(base_range && b >= first0 && b <= last0)) {
+        fn(b);
+      }
+    }
+  }
+}
+}  // namespace
+
+void MetalTextureCache::IndexEntry(uint64_t key, const Entry& entry) {
+  if (!InvalidationIndexEnabled()) {
+    return;
+  }
+  if (entry_buckets_.empty()) {
+    entry_buckets_.resize(kEntryBucketCount);
+  }
+  ForEachEntryBucket(entry.guest_base, entry.guest_bytes, entry.mip_base, entry.mip_bytes,
+                     kEntryBucketShift, [&](uint32_t b) { entry_buckets_[b].push_back(key); });
+}
+
+void MetalTextureCache::UnindexEntry(uint64_t key, const Entry& entry) {
+  if (!InvalidationIndexEnabled() || entry_buckets_.empty()) {
+    return;
+  }
+  ForEachEntryBucket(entry.guest_base, entry.guest_bytes, entry.mip_base, entry.mip_bytes,
+                     kEntryBucketShift, [&](uint32_t b) {
+                       std::vector<uint64_t>& keys = entry_buckets_[b];
+                       auto it = std::find(keys.begin(), keys.end(), key);
+                       if (it != keys.end()) {
+                         *it = keys.back();
+                         keys.pop_back();
+                       }
+                     });
+}
+
+void MetalTextureCache::ClearEntryIndex() {
+  for (std::vector<uint64_t>& keys : entry_buckets_) {
+    keys.clear();
+  }
+}
+
+void MetalTextureCache::EmplaceEntry(uint64_t key, const Entry& entry) {
+  auto [it, inserted] = cache_.emplace(key, entry);
+  if (inserted) {
+    it->second.last_use = ++use_clock_;
+    IndexEntry(key, entry);
+  }
+}
+
+bool MetalTextureCache::SlotLruEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_SLOT_LRU");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+void MetalTextureCache::EnforceSlotHeadroom() {
+  if (!SlotLruEnabled()) {
+    return;
+  }
+  const size_t never_allocated =
+      view_heap_slots_ > next_slot_ ? size_t(view_heap_slots_ - next_slot_) : 0;
+  const size_t available = never_allocated + free_slots_.size();
+  const size_t headroom_low = size_t(view_heap_slots_) / 16;
+  const size_t headroom_target = size_t(view_heap_slots_) * 3 / 16;
+  if (available >= headroom_low) {
+    return;
+  }
+  // Slots retired under in-flight submissions come back at reclaim.
+  const size_t pending = stale_slots_.size();
+  if (available + pending >= headroom_target) {
+    return;
+  }
+  const size_t want = std::min(headroom_target - available - pending, cache_.size());
+  if (!want) {
+    return;
+  }
+  std::vector<std::pair<uint64_t, uint64_t>> ages;  // (last_use, key)
+  ages.reserve(cache_.size());
+  for (const auto& [key, entry] : cache_) {
+    ages.emplace_back(entry.last_use, key);
+  }
+  std::nth_element(ages.begin(), ages.begin() + (want - 1), ages.end());
+  for (size_t i = 0; i < want; ++i) {
+    auto it = cache_.find(ages[i].second);
+    if (it == cache_.end()) {
+      continue;
+    }
+    const Entry& e = it->second;
+    // Same retirement as an invalidation: in-flight draws may still read the
+    // texture and the slot until the encoding submission completes.
+    if (RevalidateEnabled() && e.guest_hash && e.texture) {
+      ParkEvictedEntry(it->first, e);
+    } else {
+      retired_textures_.emplace_back(RetireSubmission(), e.texture);
+    }
+    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    UnindexEntry(it->first, e);
+    cache_.erase(it);
+    ++lru_evictions_;
+  }
+  static uint32_t s_lru_logs = 0;
+  if (s_lru_logs++ < 8 || (s_lru_logs & 255) == 0) {
+    XELOGI("MetalTextureCache: slot headroom {} (pending {}), evicted {} LRU "
+           "entries (total {}, cache {})",
+           available, pending, want, lru_evictions_, cache_.size());
+  }
 }
 
 bool MetalTextureCache::RevalidateEnabled() {

@@ -304,6 +304,19 @@ class SharedMemory {
   uint64_t *system_page_flags_valid_ = nullptr,
            *system_page_flags_valid_and_gpu_written_ = nullptr;
   unsigned num_system_page_flags_ = 0;
+  // Pages admitted by RequestWatchOnlyRange (a cached texture reads them
+  // directly from RAM) and not invalidated since. The non-exact widening in
+  // MemoryInvalidationCallback stops at them like at GPU-written pages: with
+  // 16 KB host pages the widening reaches a 1 MB block, so one CPU write to a
+  // dynamic buffer unwatched -- and evicted -- every texture in the block
+  // (Red Dead gameplay: ~75 writes, ~440 evictions per frame, all but ~3 of
+  // them byte-identical on revalidation). A hint only: a stale bit narrows
+  // the widening, which can add a fault, never miss one. Needs the texture
+  // cache's capacity eviction (XE_METAL_TEX_SLOT_LRU): the churn was what
+  // kept its bindless heap from filling.
+  // XE_GPU_WATCH_ONLY_WIDEN_BARRIER=0 restores the full widening.
+  std::vector<uint64_t> system_page_flags_watch_only_;
+  static bool WatchOnlyWidenBarrierEnabled();
   struct GlobalWatch {
     GlobalWatchCallback callback;
     void* callback_context;

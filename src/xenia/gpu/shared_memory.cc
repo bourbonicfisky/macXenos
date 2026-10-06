@@ -47,6 +47,7 @@ bool SharedMemory::InitializeCommon() {
   memset(system_page_flags_valid_, 0, 8 * num_system_page_flags_entries);
   memset(system_page_flags_valid_and_gpu_written_, 0,
          8 * num_system_page_flags_entries);
+  system_page_flags_watch_only_.assign(num_system_page_flags_entries, 0);
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(
           MemoryInvalidationCallbackThunk, this);
@@ -432,6 +433,14 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   return UploadRanges(uploads, current_upload_range);
 }
 
+bool SharedMemory::WatchOnlyWidenBarrierEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_GPU_WATCH_ONLY_WIDEN_BARRIER");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 uint32_t SharedMemory::RequestWatchOnlyRange(uint32_t start, uint32_t length) {
   if (!length || !memory_invalidation_callback_handle_) {
     return 0;
@@ -462,6 +471,24 @@ uint32_t SharedMemory::RequestWatchOnlyRange(uint32_t start, uint32_t length) {
   for (const WatchAdmissionRun& run : watch_admission_runs_) {
     memory().EnablePhysicalMemoryAccessCallbacks(run.start, run.length, true,
                                                  false);
+  }
+  if (WatchOnlyWidenBarrierEnabled() && !watch_admission_runs_.empty() &&
+      !system_page_flags_watch_only_.empty()) {
+    auto global_lock = global_critical_region_.Acquire();
+    for (const WatchAdmissionRun& run : watch_admission_runs_) {
+      if (!run.length) {
+        continue;
+      }
+      const uint32_t page_first = run.start >> page_size_log2_;
+      const uint32_t page_last =
+          (run.start + run.length - 1) >> page_size_log2_;
+      for (uint32_t page = page_first; page <= page_last; ++page) {
+        if ((page >> 6) < system_page_flags_watch_only_.size()) {
+          system_page_flags_watch_only_[page >> 6] |= uint64_t(1)
+                                                      << (page & 63);
+        }
+      }
+    }
   }
   return admitted;
 }
@@ -595,6 +622,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
 
   auto global_lock = global_critical_region_.Acquire();
 
+  const bool watch_only_barrier =
+      WatchOnlyWidenBarrierEnabled() && !system_page_flags_watch_only_.empty();
   if (!exact_range) {
     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
     // invalidated - if no GPU-written data nearby that was not intended to be
@@ -607,6 +636,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     if (page_first & 63) {
       uint64_t gpu_written_start =
           system_page_flags_valid_and_gpu_written_[block_first];
+      if (watch_only_barrier) {
+        gpu_written_start |= system_page_flags_watch_only_[block_first];
+      }
       gpu_written_start &= (uint64_t(1) << (page_first & 63)) - 1;
       page_first =
           (page_first & ~uint32_t(63)) + (64 - xe::lzcnt(gpu_written_start));
@@ -614,6 +646,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     if ((page_last & 63) != 63) {
       uint64_t gpu_written_end =
           system_page_flags_valid_and_gpu_written_[block_last];
+      if (watch_only_barrier) {
+        gpu_written_end |= system_page_flags_watch_only_[block_last];
+      }
       gpu_written_end &= ~((uint64_t(1) << ((page_last & 63) + 1)) - 1);
       page_last = (page_last & ~uint32_t(63)) +
                   (std::max(xe::tzcnt(gpu_written_end), uint8_t(1)) - 1);
@@ -630,6 +665,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     }
     system_page_flags_valid_[i] &= ~invalidate_bits;
     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+    if (watch_only_barrier) {
+      system_page_flags_watch_only_[i] &= ~invalidate_bits;
+    }
   }
 
   FireWatches(page_first, page_last, false, fire_global_watches);

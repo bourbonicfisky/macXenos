@@ -1066,6 +1066,8 @@ class MetalCommandProcessor : public CommandProcessor {
     std::vector<uint16_t> page_entries;   // producer indices
     std::vector<uint32_t> candidate_stamp, selected_stamp;  // per producer
     uint32_t query_stamp = 0;
+    // Reused per query (capacity kept): the selection frontier.
+    std::vector<uint32_t> frontier_scratch;
     uint64_t rebuilds = 0, queries = 0, fast_empty = 0, indexed_decisions = 0,
              verify_mismatches = 0;
   };
@@ -1073,6 +1075,7 @@ class MetalCommandProcessor : public CommandProcessor {
   const std::vector<metal::PendingProducer>& IndexedPendingProducers(
       bool* any_page_hit, const metal::ConsumerRequest& request) const;
   // DecideConsumer over the page index: identical result, O(candidates).
+  static bool LeanDecisionEnabled();
   metal::ConsumerDecision DecideConsumerIndexed(
       metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
       uint64_t completed_submission) const;

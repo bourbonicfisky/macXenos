@@ -233,6 +233,8 @@ void MetalSharedMemory::Shutdown() {
   // destroyed (MetalCommandProcessor::ShutdownContext does).
   zero_copy_overlap_.Shutdown();
   consumed_ranges_.clear();
+  consumed_index_.clear();
+  ClearConsumedPages();
   if (buffer_) {
     id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)buffer_;
     (void)released;
@@ -296,12 +298,59 @@ bool MetalSharedMemory::RequestConsumedRange(uint32_t start, uint32_t length) {
   return NoteConsumed(start, length, result);
 }
 
+bool MetalSharedMemory::ConsumedPageIndexEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CONSUMED_PAGE_INDEX");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+void MetalSharedMemory::IndexConsumedRange(uint32_t index) {
+  if (!ConsumedPageIndexEnabled()) {
+    return;
+  }
+  const ConsumedRange& r = consumed_ranges_[index];
+  if (r.second <= r.first) {
+    return;
+  }
+  if (consumed_pages_.empty()) {
+    consumed_pages_.resize(size_t(kBufferSize >> kConsumedPageShift));
+  }
+  const uint32_t first = r.first >> kConsumedPageShift;
+  const uint32_t last = std::min(uint32_t((r.second - 1) >> kConsumedPageShift),
+                                 uint32_t(consumed_pages_.size() - 1));
+  for (uint32_t page = first; page <= last; ++page) {
+    std::vector<uint32_t>& list = consumed_pages_[page];
+    if (list.empty()) {
+      consumed_pages_touched_.push_back(page);
+    }
+    list.push_back(index);
+  }
+}
+
+void MetalSharedMemory::ClearConsumedPages() {
+  for (uint32_t page : consumed_pages_touched_) {
+    consumed_pages_[page].clear();
+  }
+  consumed_pages_touched_.clear();
+}
+
+void MetalSharedMemory::AppendConsumedRange(uint32_t start, uint32_t end, uint64_t submission) {
+  const uint32_t index = uint32_t(consumed_ranges_.size());
+  consumed_index_[(uint64_t(start) << 32) | end] = index;
+  consumed_ranges_.push_back(ConsumedRange{start, end, submission});
+  IndexConsumedRange(index);
+}
+
 void MetalSharedMemory::RebuildConsumedIndex() {
   consumed_index_.clear();
   consumed_index_.reserve(consumed_ranges_.size() * 2);
+  ClearConsumedPages();
   for (uint32_t i = 0; i < consumed_ranges_.size(); ++i) {
     const ConsumedRange& r = consumed_ranges_[i];
     consumed_index_.emplace((uint64_t(r.first) << 32) | r.second, i);
+    IndexConsumedRange(i);
   }
 }
 
@@ -319,17 +368,29 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
       }
     }
   }
-  for (auto& range : consumed_ranges_) {
-    if (start >= range.first && end <= range.second) {
-      // Already covered — but the NEWER submission now also reads it; keep
-      // the range protected until the newest reader completes.
-      range.submission = std::max(range.submission, submission);
-      return result;
+  if (ConsumedPageIndexEnabled()) {
+    // A containing range covers start's page; the list is ascending, so the
+    // first match is the one the scan below would find.
+    if (!consumed_pages_.empty() && (start >> kConsumedPageShift) < consumed_pages_.size()) {
+      for (uint32_t i : consumed_pages_[start >> kConsumedPageShift]) {
+        ConsumedRange& range = consumed_ranges_[i];
+        if (start >= range.first && end <= range.second) {
+          range.submission = std::max(range.submission, submission);
+          return result;
+        }
+      }
+    }
+  } else {
+    for (auto& range : consumed_ranges_) {
+      if (start >= range.first && end <= range.second) {
+        // Already covered — but the NEWER submission now also reads it; keep
+        // the range protected until the newest reader completes.
+        range.submission = std::max(range.submission, submission);
+        return result;
+      }
     }
   }
-  consumed_index_[(uint64_t(start) << 32) | end] =
-      uint32_t(consumed_ranges_.size());
-  consumed_ranges_.push_back(ConsumedRange{start, end, submission});
+  AppendConsumedRange(start, end, submission);
   return result;
 }
 
@@ -563,7 +624,7 @@ bool MetalSharedMemory::UploadRanges(
     uint32_t range_start = upload_page_ranges[i].first << page_size_log2();
     uint32_t range_end = range_start
                          + (upload_page_ranges[i].second << page_size_log2());
-    for (const auto& consumed : consumed_ranges_) {
+    auto test = [&](const ConsumedRange& consumed) {
       if (range_start < consumed.second && range_end > consumed.first) {
         if (!hazard) {
           hazard = true;
@@ -574,6 +635,38 @@ bool MetalSharedMemory::UploadRanges(
         }
         if (!open_submission || consumed.submission >= open_submission) {
           hazard_in_open_buffer = true;
+          return true;
+        }
+      }
+      return false;
+    };
+    if (ConsumedPageIndexEnabled()) {
+      // Candidates from the pages the upload covers, visited in ascending
+      // range order like the scan (first-hazard bookkeeping is identical).
+      if (!consumed_pages_.empty() && range_end > range_start) {
+        upload_candidates_.clear();
+        const uint32_t first = range_start >> kConsumedPageShift;
+        const uint32_t last = std::min(uint32_t((range_end - 1) >> kConsumedPageShift),
+                                       uint32_t(consumed_pages_.size() - 1));
+        for (uint32_t page = first; page <= last; ++page) {
+          const std::vector<uint32_t>& list = consumed_pages_[page];
+          upload_candidates_.insert(upload_candidates_.end(), list.begin(), list.end());
+        }
+        if (first != last) {
+          std::sort(upload_candidates_.begin(), upload_candidates_.end());
+          upload_candidates_.erase(
+              std::unique(upload_candidates_.begin(), upload_candidates_.end()),
+              upload_candidates_.end());
+        }
+        for (uint32_t c : upload_candidates_) {
+          if (test(consumed_ranges_[c])) {
+            break;
+          }
+        }
+      }
+    } else {
+      for (const auto& consumed : consumed_ranges_) {
+        if (test(consumed)) {
           break;
         }
       }
@@ -773,11 +866,7 @@ bool MetalSharedMemory::UploadRanges(
             // The blit's target is consumed by its submission: a later
             // direct memcpy over it before the blit executes would be undone
             // by the blit, so it must stage too (the overlap test sees it).
-            consumed_index_[(uint64_t(piece_start) << 32) |
-                            (piece_start + piece_length)] =
-                uint32_t(consumed_ranges_.size());
-            consumed_ranges_.push_back(ConsumedRange{
-                piece_start, piece_start + piece_length, blit_submission});
+            AppendConsumedRange(piece_start, piece_start + piece_length, blit_submission);
             ++staged_uploads_;
             staged_upload_bytes_ =
                 SaturatingAdd(staged_upload_bytes_, piece_length);

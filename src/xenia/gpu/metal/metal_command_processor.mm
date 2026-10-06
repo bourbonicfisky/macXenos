@@ -769,8 +769,44 @@ static void MetalOriginDumpExtent(const char* arm, uint32_t guest_addr,
 // shared GetGuestTextureLayout, so compressed/tiled/linear/packed-mip/dimension
 // semantics match the upload path exactly. Ends use 64-bit math clamped to
 // UINT32_MAX so no address arithmetic wraps.
+metal::FetchGuestRanges ComputeFetchGuestRangesUncached(const xenos::xe_gpu_texture_fetch_t& f);
+
+// A pure function of the six fetch-constant dwords, evaluated per binding at
+// up to five sites per draw (Red Dead gameplay: ~2% of the command-processor
+// thread in GetGuestTextureLayout). Direct-mapped memo keyed on all six
+// dwords; XE_METAL_FETCH_RANGE_MEMO=0 computes every time.
 metal::FetchGuestRanges ComputeFetchGuestRanges(
     const xenos::xe_gpu_texture_fetch_t& f) {
+  static const bool s_memo = [] {
+    const char* v = std::getenv("XE_METAL_FETCH_RANGE_MEMO");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_memo) {
+    return ComputeFetchGuestRangesUncached(f);
+  }
+  struct MemoEntry {
+    uint32_t key[6];
+    bool valid = false;
+    metal::FetchGuestRanges ranges;
+  };
+  static constexpr uint32_t kMemoEntries = 512;
+  thread_local std::vector<MemoEntry> memo(kMemoEntries);
+  const uint32_t key[6] = {f.dword_0, f.dword_1, f.dword_2, f.dword_3, f.dword_4, f.dword_5};
+  uint32_t h = 2166136261u;
+  for (uint32_t k : key) {
+    h = (h ^ k) * 16777619u;
+  }
+  MemoEntry& entry = memo[(h ^ (h >> 15)) & (kMemoEntries - 1)];
+  if (entry.valid && std::memcmp(entry.key, key, sizeof(key)) == 0) {
+    return entry.ranges;
+  }
+  entry.ranges = ComputeFetchGuestRangesUncached(f);
+  std::memcpy(entry.key, key, sizeof(key));
+  entry.valid = true;
+  return entry.ranges;
+}
+
+metal::FetchGuestRanges ComputeFetchGuestRangesUncached(const xenos::xe_gpu_texture_fetch_t& f) {
   metal::FetchGuestRanges r;
   uint32_t w = 1, h = 1, d = 1;
   switch (f.dimension) {
@@ -12141,6 +12177,14 @@ MetalCommandProcessor::IndexedPendingProducers(
   return index.producers;
 }
 
+bool MetalCommandProcessor::LeanDecisionEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_LEAN_DECISION");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
     metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
     uint64_t completed_submission) const {
@@ -12148,7 +12192,12 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
   const std::vector<metal::PendingProducer>& producers = index.producers;
   metal::ConsumerDecision decision;
   decision.consumer = consumer;
-  decision.requested = request.Combined();
+  // `requested` has no production reader (only the pure DecideConsumer's
+  // conformance cases inspect it); building it copied and sorted the
+  // request's ranges on every query. XE_METAL_LEAN_DECISION=0 restores it.
+  if (!LeanDecisionEnabled()) {
+    decision.requested = request.Combined();
+  }
   decision.revalidate_gpu_bytes = metal::ConsumerReadsSharedBuffer(consumer);
   if (producers.empty()) {
     return decision;
@@ -12174,7 +12223,8 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
       }
     }
   };
-  std::vector<uint32_t> frontier;
+  std::vector<uint32_t>& frontier = index.frontier_scratch;
+  frontier.clear();
   // Seed: producers intersecting the request (state-specific ranges).
   auto seed_from = [&](const metal::GuestRangeSet& set) {
     for (const metal::GuestRange& r : set.ranges()) {
@@ -12284,6 +12334,14 @@ MetalCommandProcessor::QueryPendingProducerDependencies(
       const uint64_t completed =
           completed_submission_.load(std::memory_order_acquire);
       if (!any_page_hit) {
+        if (LeanDecisionEnabled()) {
+          // The no-dependency decision DecideConsumer returns for an empty
+          // producer list, minus the unread `requested` copy.
+          metal::ConsumerDecision none;
+          none.consumer = consumer;
+          none.revalidate_gpu_bytes = metal::ConsumerReadsSharedBuffer(consumer);
+          return none;
+        }
         static const std::vector<metal::PendingProducer> s_none;
         return metal::DecideConsumer(consumer, request, s_none, completed);
       }

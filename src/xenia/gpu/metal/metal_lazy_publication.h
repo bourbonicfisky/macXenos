@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -95,7 +96,7 @@ class MetalLazyPublication {
     std::vector<uint32_t>& owned = owner_pages_[owner.authority_sequence];
     owned.reserve(owned.size() + (last - first + 1));
     for (uint32_t page = first; page <= last; ++page) {
-      std::vector<Owner>& owners = pages_[page];
+      std::vector<Owner>& owners = PageOwnersForWrite(page);
       if (owner.linear && owner.guest_addr <= (page << kPageShift) &&
           owner.guest_addr + owner.range_bytes >= ((page + 1) << kPageShift)) {
         for (const Owner& old : owners) {
@@ -158,14 +159,14 @@ class MetalLazyPublication {
     uint32_t last = (phys_start + length - 1) >> kPageShift;
     uint32_t dropped = 0;
     for (uint32_t page = first; page <= last; ++page) {
-      auto it = pages_.find(page);
-      if (it == pages_.end()) {
+      std::vector<Owner>* owners = FindPageOwners(page);
+      if (!owners) {
         continue;
       }
-      for (const Owner& old : it->second) {
+      for (const Owner& old : *owners) {
         ForgetPage(old.authority_sequence, page);
       }
-      pages_.erase(it);
+      ErasePage(page);
       ++dropped;
     }
     return dropped;
@@ -192,8 +193,8 @@ class MetalLazyPublication {
     uint32_t last = uint32_t((end - 1) >> kPageShift);
     uint64_t run_start = 0, run_end = 0;
     for (uint32_t page = first; page <= last; ++page) {
-      auto it = pages_.find(page);
-      if (it == pages_.end() || it->second.empty()) {
+      const std::vector<Owner>* owners = FindPageOwners(page);
+      if (!owners || owners->empty()) {
         continue;
       }
       uint64_t p0 = std::max<uint64_t>(uint64_t(page) << kPageShift,
@@ -229,11 +230,11 @@ class MetalLazyPublication {
     uint32_t first = phys_start >> kPageShift;
     uint32_t last = uint32_t((end - 1) >> kPageShift);
     for (uint32_t page = first; page <= last; ++page) {
-      auto it = pages_.find(page);
-      if (it == pages_.end()) {
+      const std::vector<Owner>* owners = FindPageOwners(page);
+      if (!owners) {
         continue;
       }
-      for (const Owner& owner : it->second) {
+      for (const Owner& owner : *owners) {
         if (owner.authority_sequence >= sequence ||
             (oldest && owner.authority_sequence >= oldest)) {
           continue;
@@ -272,9 +273,9 @@ class MetalLazyPublication {
       std::lock_guard<std::mutex> lock(mutex_);
       ++stats_.faults;
       for (uint32_t page = first; page <= last; ++page) {
-        auto it = pages_.find(page);
-        if (it != pages_.end() && !it->second.empty()) {
-          touched.emplace_back(page, it->second);
+        const std::vector<Owner>* owners = FindPageOwners(page);
+        if (owners && !owners->empty()) {
+          touched.emplace_back(page, *owners);
         }
       }
     }
@@ -320,18 +321,18 @@ class MetalLazyPublication {
 
   size_t armed_page_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return pages_.size();
+    return (FlatPagesEnabled() ? flat_armed_pages_ : 0) + pages_.size();
   }
 
  private:
   // Removes `authority_sequence` from `page`'s owner list; erases the page
   // when no owner remains. Returns true when the owner was present.
   bool RemoveOwnerFromPage(uint32_t page, uint64_t authority_sequence) {
-    auto it = pages_.find(page);
-    if (it == pages_.end()) {
+    std::vector<Owner>* found = FindPageOwners(page);
+    if (!found) {
       return false;
     }
-    std::vector<Owner>& owners = it->second;
+    std::vector<Owner>& owners = *found;
     bool removed = false;
     for (size_t i = 0; i < owners.size();) {
       if (owners[i].authority_sequence == authority_sequence) {
@@ -342,7 +343,12 @@ class MetalLazyPublication {
       }
     }
     if (owners.empty()) {
-      pages_.erase(it);
+      if (FlatPagesEnabled() && page < kFlatPageCount) {
+        // Found non-empty above, emptied by the loop: the page leaves.
+        --flat_armed_pages_;
+      } else {
+        pages_.erase(page);
+      }
     }
     return removed;
   }
@@ -452,7 +458,65 @@ class MetalLazyPublication {
     return copied;
   }
 
+  // Page owner storage. Default: a flat array indexed by page whose emptied
+  // lists keep their capacity -- arming and retiring a large resolve no
+  // longer hashes, allocates and frees once per 4 KB page (Red Dead
+  // gameplay: ~2% of the command-processor thread). A page "exists" exactly
+  // when its list is non-empty, as with the map, which a page also leaves
+  // when its last owner goes. XE_METAL_LAZY_FLAT_PAGES=0 restores the map.
+  static bool FlatPagesEnabled() {
+    static const bool s_enabled = [] {
+      const char* v = std::getenv("XE_METAL_LAZY_FLAT_PAGES");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    return s_enabled;
+  }
+  static constexpr uint32_t kFlatPageCount = uint32_t(1) << (29 - kPageShift);
+  std::vector<Owner>* FindPageOwners(uint32_t page) {
+    if (FlatPagesEnabled() && page < kFlatPageCount) {
+      if (page >= flat_pages_.size() || flat_pages_[page].empty()) {
+        return nullptr;
+      }
+      return &flat_pages_[page];
+    }
+    auto it = pages_.find(page);
+    return it == pages_.end() ? nullptr : &it->second;
+  }
+  const std::vector<Owner>* FindPageOwners(uint32_t page) const {
+    return const_cast<MetalLazyPublication*>(this)->FindPageOwners(page);
+  }
+  // The caller appends at least one owner (Arm), so a flat page that was
+  // empty becomes armed here.
+  std::vector<Owner>& PageOwnersForWrite(uint32_t page) {
+    if (FlatPagesEnabled() && page < kFlatPageCount) {
+      if (flat_pages_.empty()) {
+        flat_pages_.resize(kFlatPageCount);
+      }
+      std::vector<Owner>& owners = flat_pages_[page];
+      if (owners.empty()) {
+        ++flat_armed_pages_;
+      }
+      return owners;
+    }
+    return pages_[page];
+  }
+  void ErasePage(uint32_t page) {
+    if (FlatPagesEnabled() && page < kFlatPageCount) {
+      if (page >= flat_pages_.size()) {
+        return;
+      }
+      if (!flat_pages_[page].empty()) {
+        --flat_armed_pages_;
+      }
+      flat_pages_[page].clear();
+      return;
+    }
+    pages_.erase(page);
+  }
+
   mutable std::mutex mutex_;
+  std::vector<std::vector<Owner>> flat_pages_;
+  size_t flat_armed_pages_ = 0;
   std::unordered_map<uint32_t, std::vector<Owner>> pages_;
   // authority_sequence -> pages it still owns (O(1) retire).
   std::unordered_map<uint64_t, std::vector<uint32_t>> owner_pages_;

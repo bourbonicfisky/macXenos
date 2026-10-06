@@ -180,6 +180,9 @@ inline bool ConsumerReadsSharedBuffer(ConsumerKind consumer) {
 struct ConsumerDecision {
   ConsumerKind consumer = ConsumerKind::kTexture;
   AuthorityAction action = AuthorityAction::kNoDependency;
+  // Filled by DecideConsumer below. The command processor's indexed and
+  // fast-empty paths leave it empty (XE_METAL_LEAN_DECISION, default on):
+  // nothing in production reads it.
   GuestRangeSet requested;
   std::vector<PendingProducer> selected;
   bool await = false;                  // any selected producer incomplete.

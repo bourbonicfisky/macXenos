@@ -470,8 +470,40 @@ class MetalTextureCache {
     // XXH3 of the guest bytes (base extent, then mips) at upload time; 0 when
     // revalidation is disabled.
     uint64_t guest_hash = 0;
+    // use_clock_ value of the latest insert or hit (capacity eviction).
+    uint64_t last_use = 0;
   };
   std::unordered_map<uint64_t, Entry> cache_;
+  // Capacity eviction (XE_METAL_TEX_SLOT_LRU=0 disables): when fewer than
+  // 1/16 of the bindless slots remain (never-allocated + free; 256 of 4,096),
+  // the least-recently-used entries are evicted -- parked for hash revival
+  // like an invalidation -- until 3/16 (768) are available or pending
+  // reclaim. Without it the cache had no capacity bound: exhaustion handed
+  // out slot 0 (the null texture). Red Dead gameplay runs at ~3,980 of 4,096
+  // slots and stayed under only because CPU-watch invalidations evicted
+  // ~440 textures every frame.
+  uint64_t use_clock_ = 0;
+  uint64_t lru_evictions_ = 0;
+  static bool SlotLruEnabled();
+  void EnforceSlotHeadroom();
+  // Entry index by 1 MiB guest bucket (XE_METAL_TEX_INVAL_INDEX=0 restores
+  // the full scan). A CPU write watch widens to a 64-page block -- 1 MiB with
+  // 16 KB host pages -- and InvalidateRange scanned every cache entry for
+  // each one: Red Dead gameplay, ~75 invalidations x ~2,800 entries per
+  // frame. Every entry whose base or mip range overlaps an invalidation
+  // shares a bucket with it, so the candidate set is exact.
+  // XE_METAL_TEX_INVAL_INDEX_VERIFY=1 also runs the scan and compares.
+  static constexpr uint32_t kEntryBucketShift = 20;
+  static constexpr uint32_t kEntryBucketCount =
+      uint32_t(metal::GuestRange::kGuestPhysicalSize >> kEntryBucketShift);
+  std::vector<std::vector<uint64_t>> entry_buckets_;
+  static bool InvalidationIndexEnabled();
+  void IndexEntry(uint64_t key, const Entry& entry);
+  void UnindexEntry(uint64_t key, const Entry& entry);
+  void ClearEntryIndex();
+  void EmplaceEntry(uint64_t key, const Entry& entry);
+  uint64_t inval_index_verify_calls_ = 0;
+  uint64_t inval_index_verify_mismatches_ = 0;
 
   // Content revalidation (XE_METAL_TEX_REVALIDATE=0 disables): a CPU write
   // watch fires for the whole unwatched region (1 MB in Dead to Rights'

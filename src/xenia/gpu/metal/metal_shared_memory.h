@@ -259,6 +259,7 @@ class MetalSharedMemory : public SharedMemory {
   void ResetFrameRanges() {  // sync-mode/shutdown
     consumed_ranges_.clear();
     consumed_index_.clear();
+    ClearConsumedPages();
   }
   // Post-clear evidence: submission-tagged hazard records still held. At a
   // quiesced boundary every submission has completed, so ReleaseConsumedRanges
@@ -332,6 +333,19 @@ class MetalSharedMemory : public SharedMemory {
   // Red Dead's command-processor thread (2026-10-05). Rebuilt whenever the
   // vector is compacted.
   std::unordered_map<uint64_t, uint32_t> consumed_index_;
+  // 64 KiB page -> indices (ascending) of the consumed ranges covering it
+  // (XE_METAL_CONSUMED_PAGE_INDEX=0 restores the scans). A range containing
+  // [start, end) covers start's page, and a range overlapping an upload
+  // covers one of its pages, so the containment lookup and the upload hazard
+  // test visit only those candidates, in the same order as the scans.
+  static constexpr uint32_t kConsumedPageShift = 16;
+  std::vector<std::vector<uint32_t>> consumed_pages_;
+  std::vector<uint32_t> consumed_pages_touched_;
+  std::vector<uint32_t> upload_candidates_;  // scratch for UploadRanges
+  static bool ConsumedPageIndexEnabled();
+  void IndexConsumedRange(uint32_t index);
+  void ClearConsumedPages();
+  void AppendConsumedRange(uint32_t start, uint32_t end, uint64_t submission);
   void RebuildConsumedIndex();
   bool NoteConsumed(uint32_t start, uint32_t length, bool result);
   bool AllocateRename(uint32_t length, uint32_t* arena_offset_out);
