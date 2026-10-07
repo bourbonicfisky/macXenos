@@ -5324,12 +5324,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   // Analyze microcode (once) so constant maps / bindings are available.
-  StringBuffer ucode_disasm;
-  if (!vertex_shader->is_ucode_analyzed()) {
-    vertex_shader->AnalyzeUcode(ucode_disasm);
-  }
-  if (pixel_shader && !pixel_shader->is_ucode_analyzed()) {
-    pixel_shader->AnalyzeUcode(ucode_disasm);
+  // The disassembly buffer mallocs 16 KiB on construction: build it only for
+  // a shader's first draw (it used to be built and freed on every draw).
+  if (!vertex_shader->is_ucode_analyzed() ||
+      (pixel_shader && !pixel_shader->is_ucode_analyzed())) {
+    StringBuffer ucode_disasm;
+    if (!vertex_shader->is_ucode_analyzed()) {
+      vertex_shader->AnalyzeUcode(ucode_disasm);
+    }
+    if (pixel_shader && !pixel_shader->is_ucode_analyzed()) {
+      pixel_shader->AnalyzeUcode(ucode_disasm);
+    }
   }
   // The D3D12/Vulkan rule: the pixel shader runs only in kColorDepth and when
   // it has an effect (colour written, kill, depth or memexport, or coverage
@@ -6072,8 +6077,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     xenos::xe_gpu_vertex_fetch_t fetch;
     metal::GuestRange range;
   };
-  std::vector<VertexFetchDependency> vertex_fetch_dependencies;
-  metal::GuestRangeSet vertex_dependency_ranges;
+  // Per-draw scratch kept across draws so the command processor does not
+  // allocate and free them ~7,000 times a frame (IssueDraw is not reentrant).
+  static std::vector<VertexFetchDependency> vertex_fetch_dependencies;
+  static metal::GuestRangeSet vertex_dependency_ranges;
+  vertex_fetch_dependencies.clear();
+  vertex_dependency_ranges.Clear();
   draw_vfetch_renames_.clear();
   for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
     uint32_t bits = vs_map.vertex_fetch_bitmap[i];
@@ -11411,10 +11420,19 @@ bool MetalCommandProcessor::IssueCopy() {
           std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
       if (resolved && !s_no_writeback_d) {
         id<MTLDevice> wb_device = ((__bridge id<MTLTexture>)snap).device;
+        // The staging buffer is allocated only when the GPU-resident scatter
+        // below cannot take the resolve: a 720p depth resolve is a 3.6 MB
+        // shared buffer, ~15 per Red Dead frame, that used to be created and
+        // freed unused (~0.6% of the command-processor thread).
+        // XE_METAL_DEPTH_STAGING_EAGER=1 restores the up-front allocation.
+        static const bool s_depth_staging_eager =
+            std::getenv("XE_METAL_DEPTH_STAGING_EAGER") != nullptr;
         id<MTLBuffer> staging =
-            [wb_device newBufferWithLength:size_t(rw) * rh * 4u
-                                   options:MTLResourceStorageModeShared];
-        if (staging) {
+            s_depth_staging_eager
+                ? [wb_device newBufferWithLength:size_t(rw) * rh * 4u
+                                         options:MTLResourceStorageModeShared]
+                : nil;
+        if (staging || !s_depth_staging_eager) {
           const bool canonical_depth_writeback =
               render_target_cache_->sample_edram_raster_enabled();
           bool writeback_encoded = false;
@@ -11492,8 +11510,14 @@ bool MetalCommandProcessor::IssueCopy() {
               }
             }
           }
+          if (!depth_scatter && !staging) {
+            staging = [wb_device newBufferWithLength:size_t(rw) * rh * 4u
+                                             options:MTLResourceStorageModeShared];
+          }
           if (depth_scatter) {
             // Encoded above, straight into the shared buffer.
+          } else if (!staging) {
+            // Allocation failed: nothing to write back into.
           } else if (canonical_depth_writeback) {
             writeback_encoded =
                 render_target_cache_->ResolveCanonicalDepthToBuffer(

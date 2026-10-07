@@ -184,6 +184,8 @@ class GuestRangeSet {
   }
   void Add(const GuestRange& range) { ranges_.push_back(range); }
 
+  // Drops the ranges and keeps the capacity (per-draw scratch reuse).
+  void Clear() { ranges_.clear(); }
   bool empty() const { return ranges_.empty(); }
   size_t size() const { return ranges_.size(); }
   const std::vector<GuestRange>& ranges() const { return ranges_; }
