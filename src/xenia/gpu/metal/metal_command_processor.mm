@@ -4468,6 +4468,102 @@ bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
          (report->second.pending_segments == 0 && report->second.ended);
 }
 
+// XE_METAL_RESOLVE_CONSUMER_CENSUS=1 (diagnostic, default off): for each
+// resolve, the draw distance to the first texture fetch overlapping its
+// destination and how many render passes ended in between (the resolve's own
+// pass end makes 1 = the consumer sits in the pass resumed after the resolve,
+// the case an in-pass resolve could keep open). Resolves never fetched before
+// the swap count as unconsumed. Reported with MetalFrameStats.
+namespace {
+struct ResolveConsumerCensus {
+  struct Entry {
+    metal::GuestRange range;
+    uint64_t draw;
+    uint64_t pass_ends;
+    uint32_t cls;  // bit 0 depth, bit 1 >= 1 MB
+  };
+  std::vector<Entry> live;
+  uint64_t pass_ends = 0;
+  uint64_t resolves[4] = {};
+  uint64_t unconsumed[4] = {};
+  // Draw distance buckets: 0, 1, 2-9, 10-99, 100-999, 1000+.
+  uint64_t distance[4][6] = {};
+  // Pass ends in between: 0, 1, 2, 3+.
+  uint64_t passes[4][4] = {};
+};
+ResolveConsumerCensus& RcCensus() {
+  static ResolveConsumerCensus census;
+  return census;
+}
+bool RcCensusEnabled() {
+  static const bool enabled =
+      std::getenv("XE_METAL_RESOLVE_CONSUMER_CENSUS") != nullptr;
+  return enabled;
+}
+void RcCensusNoteResolve(uint32_t start, uint32_t length, uint64_t draw,
+                         bool depth) {
+  auto range = metal::GuestRange::FromBaseLength(start, length);
+  if (!range) {
+    return;
+  }
+  ResolveConsumerCensus& c = RcCensus();
+  uint32_t cls = (depth ? 1u : 0u) | (length >= 1024 * 1024 ? 2u : 0u);
+  ++c.resolves[cls];
+  c.live.push_back({*range, draw, c.pass_ends, cls});
+}
+void RcCensusNoteTextureRequest(const metal::GuestRangeSet& ranges,
+                                uint64_t draw) {
+  ResolveConsumerCensus& c = RcCensus();
+  if (c.live.empty() || ranges.empty()) {
+    return;
+  }
+  for (size_t i = 0; i < c.live.size();) {
+    const ResolveConsumerCensus::Entry& e = c.live[i];
+    if (!ranges.OverlapsAny(e.range)) {
+      ++i;
+      continue;
+    }
+    uint64_t d = draw - e.draw;
+    uint32_t db = d == 0 ? 0 : d == 1 ? 1 : d < 10 ? 2 : d < 100 ? 3
+                  : d < 1000 ? 4 : 5;
+    ++c.distance[e.cls][db];
+    ++c.passes[e.cls][std::min<uint64_t>(c.pass_ends - e.pass_ends, 3)];
+    c.live[i] = c.live.back();
+    c.live.pop_back();
+  }
+}
+void RcCensusNoteSwap(uint32_t swap) {
+  ResolveConsumerCensus& c = RcCensus();
+  for (const ResolveConsumerCensus::Entry& e : c.live) {
+    ++c.unconsumed[e.cls];
+  }
+  c.live.clear();
+  if ((swap & 127) || !swap) {
+    return;
+  }
+  static const char* const kNames[4] = {"color<1MB", "depth<1MB", "color>=1MB",
+                                        "depth>=1MB"};
+  for (uint32_t k = 0; k < 4; ++k) {
+    if (!c.resolves[k]) {
+      continue;
+    }
+    XELOGI(
+        "MetalResolveConsumers swap#{} {}: {:.1f}/frame unconsumed {:.1f} "
+        "dist[0,1,2-9,10-99,100-999,1000+]={},{},{},{},{},{} "
+        "pass_ends[0,1,2,3+]={},{},{},{}",
+        swap, kNames[k], double(c.resolves[k]) / 128.0,
+        double(c.unconsumed[k]) / 128.0, c.distance[k][0], c.distance[k][1],
+        c.distance[k][2], c.distance[k][3], c.distance[k][4],
+        c.distance[k][5], c.passes[k][0], c.passes[k][1], c.passes[k][2],
+        c.passes[k][3]);
+  }
+  ResolveConsumerCensus fresh;
+  std::swap(fresh.live, c.live);
+  fresh.pass_ends = c.pass_ends;
+  c = fresh;
+}
+}  // namespace
+
 void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
                                              uint32_t detail,
                                              bool resolve_touches_pass) {
@@ -4483,6 +4579,9 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   // visibility-carrying encoder.
   if (zpd_query_open_) {
     CloseQuerySegment();
+  }
+  if (RcCensusEnabled()) {
+    ++RcCensus().pass_ends;
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
@@ -7304,6 +7403,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         XELOGI("MetalGpuOrdering: buffer-read declared={} blocked={}",
                s_ord_eligible, s_ord_blocked);
       }
+    }
+    if (RcCensusEnabled()) {
+      RcCensusNoteTextureRequest(texture_request.resolve_ranges,
+                                 trace_draw_index_);
     }
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kTexture,
@@ -10375,6 +10478,11 @@ bool MetalCommandProcessor::IssueCopy() {
       s_census_swap = swap_count_;
     }
   }
+  if (RcCensusEnabled() && resolve_info.copy_dest_extent_length) {
+    RcCensusNoteResolve(resolve_info.copy_dest_extent_start,
+                        resolve_info.copy_dest_extent_length, trace_draw_index_,
+                        resolve_info.IsCopyingDepth());
+  }
   // Commit encoded draws BEFORE processing the resolve (default-on;
   // XE_METAL_NO_RESOLVE_COMMIT=1 restores the old whole-frame buffer for A/B).
   // Found via the resolve-owner probe: sessions WITHOUT a submission boundary
@@ -10390,9 +10498,23 @@ bool MetalCommandProcessor::IssueCopy() {
   // (1.9-3.7MB) from the pyramid/quarter chain (4-256KB).
   static const bool s_no_resolve_commit =
       std::getenv("XE_METAL_NO_RESOLVE_COMMIT") != nullptr;
-  constexpr uint32_t kResolveCommitMinBytes = 1024 * 1024;
+  // A/B knobs (defaults = the behavior above): XE_METAL_RESOLVE_COMMIT_MIN_BYTES
+  // moves the size threshold; XE_METAL_RESOLVE_COMMIT_MIN_DRAWS=N also commits
+  // at any resolve once N draws are encoded (resolves already end the pass,
+  // so this adds submissions without adding pass breaks; the GPU starts on
+  // the frame sooner and the command processor waits less at the flip).
+  static const uint32_t s_resolve_commit_min_bytes = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_COMMIT_MIN_BYTES");
+    return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 1024u * 1024u;
+  }();
+  static const uint32_t s_resolve_commit_min_draws = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_COMMIT_MIN_DRAWS");
+    return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 0u;
+  }();
   if (!s_no_resolve_commit && draws_since_commit_ > 0 &&
-      resolve_info.copy_dest_extent_length >= kResolveCommitMinBytes) {
+      (resolve_info.copy_dest_extent_length >= s_resolve_commit_min_bytes ||
+       (s_resolve_commit_min_draws &&
+        draws_since_commit_ >= s_resolve_commit_min_draws))) {
     EndFrameEncoder(metal::SeamBoundaryReason::kResolveSizeSplit);
   }
   // CRITICAL: the resolve paths below all guard on frame_command_buffer_. If
@@ -14836,6 +14958,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  if (RcCensusEnabled()) {
+    RcCensusNoteSwap(count);
+  }
   if (PassCensusEnabled()) {
     pass_census_.NoteFrame();
     if (render_target_cache_) {
