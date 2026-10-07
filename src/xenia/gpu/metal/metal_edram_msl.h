@@ -1494,6 +1494,52 @@ fragment float4 resolve_canonical_depth_fs(
   return float4(xe_depth_word_to_guest(word, p.surface.is_depth), 0.0, 0.0,
                 0.0);
 }
+// Compute twins of the two snapshot fragment functions above
+// (XE_METAL_SNAPSHOT_COMPUTE): one thread per host pixel of the clipped
+// destination rectangle, offset by `origin` (host pixels), the same
+// destination->source mapping and per-pixel value, written straight into the
+// snapshot instead of drawing a fullscreen triangle into a render pass that
+// loads and stores the whole snapshot texture.
+kernel void resolve_canonical_color_cs(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / xe_resolution_scale();
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  snapshot.write(xe_resolve_color_value(
+                     canonical, p,
+                     xe_resolve_snapshot_source(p, host_dest, dest)),
+                 host_dest, 0u);
+}
+kernel void resolve_canonical_depth_cs(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / xe_resolution_scale();
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
+  uint idx = xe_edram_offset_bytes(
+                 source.x, source.y, p.surface.base, p.surface.pitch,
+                 p.surface.msaa, p.surface.is_depth, 0u,
+                 p.sample_select) >>
+             2u;
+  uint word = canonical[idx % p.surface.words];
+  snapshot.write(float4(xe_depth_word_to_guest(word, p.surface.is_depth), 0.0,
+                        0.0, 0.0),
+                 host_dest, 0u);
+}
 kernel void resolve_canonical_depth_raw(
     device const uint* canonical [[buffer(0)]],
     device uint* destination [[buffer(1)]],

@@ -759,6 +759,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       canonical_color_msaa_materialize_pipelines_;
   std::unordered_map<uint64_t, void*> canonical_resolve_pipelines_;
   void* canonical_depth_raw_resolve_pipeline_ = nullptr;
+  // XE_METAL_SNAPSHOT_COMPUTE: compute twins of the snapshot resolve passes.
+  void* canonical_color_snapshot_cs_pipeline_ = nullptr;
+  void* canonical_depth_snapshot_cs_pipeline_ = nullptr;
   void* canonical_color_packed_resolve_pipeline_ = nullptr;
   void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
@@ -854,6 +857,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   static constexpr uint64_t kAssemblySnapshotKeyFlag = uint64_t(1) << 40;
   // The snapshot texture at `snap_key`, created or replaced (exact-size reuse,
   // in-flight-safe retirement) at the draw resolution scale.
+  static bool SnapshotComputeEnabled();
   void* EnsureSnapshotTexture(uint64_t snap_key, uint32_t width,
                               uint32_t height, uint64_t pixel_format);
 

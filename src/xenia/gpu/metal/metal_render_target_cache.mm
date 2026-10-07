@@ -4470,6 +4470,58 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   }
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
+  if (SnapshotComputeEnabled() &&
+      (destination.usage & MTLTextureUsageShaderWrite)) {
+    void*& cs_slot = is_depth ? canonical_depth_snapshot_cs_pipeline_
+                              : canonical_color_snapshot_cs_pipeline_;
+    if (!cs_slot) {
+      id<MTLLibrary> library =
+          (__bridge id<MTLLibrary>)canonical_materialize_library_;
+      id<MTLFunction> function = [library
+          newFunctionWithName:is_depth ? @"resolve_canonical_depth_cs"
+                                       : @"resolve_canonical_color_cs"];
+      NSError* error = nil;
+      id<MTLComputePipelineState> cs =
+          function ? [device newComputePipelineStateWithFunction:function
+                                                           error:&error]
+                   : nil;
+      if (cs) {
+        cs_slot = (__bridge_retained void*)cs;
+      } else {
+        XELOGE("MetalRenderTargetCache: snapshot compute pipeline failed: {}",
+               error ? error.localizedDescription.UTF8String : "?");
+      }
+    }
+    if (cs_slot) {
+      // The MSL parameter block is the full 26-word CanonicalResolveParams;
+      // the snapshot path uses its first 20 words.
+      struct {
+        ResolveParams params;
+        uint32_t scatter_unused[6];
+      } padded{params, {}};
+      const uint32_t origin[2] = {dest_x_offset * sx, dest_y_offset * sy};
+      id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+      compute.label = is_depth ? @"rtcache:canonical-depth-resolve-cs"
+                               : @"rtcache:canonical-color-resolve-cs";
+      id<MTLComputePipelineState> cs =
+          (__bridge id<MTLComputePipelineState>)cs_slot;
+      [compute setComputePipelineState:cs];
+      [compute setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+                  offset:0
+                 atIndex:0];
+      [compute setBytes:&padded length:sizeof(padded) atIndex:1];
+      [compute setBytes:origin length:sizeof(origin) atIndex:2];
+      [compute setTexture:destination atIndex:0];
+      MTLSize threads = MTLSizeMake(clipped_width * sx, clipped_height * sy, 1);
+      NSUInteger tw = cs.threadExecutionWidth;
+      NSUInteger th = std::max<NSUInteger>(
+          1, cs.maxTotalThreadsPerThreadgroup / tw);
+      [compute dispatchThreads:threads
+          threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+      [compute endEncoding];
+      return true;
+    }
+  }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = destination;
@@ -5039,6 +5091,19 @@ void* MetalRenderTargetCache::EnsureAssemblySnapshot(uint32_t base,
       width, height, pixel_format);
 }
 
+// Resolve snapshots are written by a compute dispatch over the resolve
+// rectangle (snapshot textures gain ShaderWrite) instead of a render pass
+// that loads and stores the whole snapshot texture per resolve (Red Dead
+// gameplay 27.2 -> 28.05 fps; 66 resolves/frame). Exact: corpus 40/40 0 px.
+// XE_METAL_SNAPSHOT_COMPUTE=0 restores the render pass.
+bool MetalRenderTargetCache::SnapshotComputeEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_SNAPSHOT_COMPUTE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
+
 void* MetalRenderTargetCache::EnsureSnapshotTexture(uint64_t snap_key,
                                                     uint32_t width,
                                                     uint32_t height,
@@ -5094,6 +5159,9 @@ void* MetalRenderTargetCache::EnsureSnapshotTexture(uint64_t snap_key,
   desc.arrayLength = 1;
   desc.mipmapLevelCount = 1;
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+  if (SnapshotComputeEnabled()) {
+    desc.usage |= MTLTextureUsageShaderWrite;
+  }
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
   if (!texture) {
