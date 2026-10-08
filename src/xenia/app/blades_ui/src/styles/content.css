@@ -980,3 +980,147 @@ button.tray {
     animation: none;
   }
 }
+
+/* --- All Games (all-games.tsx) -------------------------------------------
+   A sub-blade that slides out over the dashboard from the left, as the 360's
+   game library did: the blade's tone on a wide panel, its own tab at the
+   right edge with the player on it, and the dashboard dimmed behind. */
+.subblade-layer {
+  --sub-w: min(100%, calc(100% - clamp(110px, 24vw, 460px)));
+}
+
+@media (max-width: 860px) {
+  .subblade-layer {
+    --sub-w: 100%;
+  }
+}
+
+.subblade-dim {
+  background: rgba(0, 0, 0, 0.62);
+  opacity: 0;
+  transition: opacity var(--fade) ease;
+}
+
+.subblade-layer[data-entered] .subblade-dim {
+  opacity: 1;
+}
+
+.subblade {
+  width: var(--sub-w);
+  transform: translateX(-104%);
+  transition: transform var(--slide) var(--ease-blade);
+}
+
+.subblade-layer[data-entered] .subblade {
+  transform: none;
+}
+
+.subblade-shadow {
+  filter: drop-shadow(12px 0 30px rgba(0, 0, 0, 0.55));
+}
+
+.subblade-skin {
+  right: calc(var(--tab-w) - 4px);
+  border-radius: 0 24px 24px 0;
+}
+
+.subblade-tab-skin {
+  width: var(--tab-w);
+  border-radius: 0 30px 30px 0;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--b-lo) 40%, transparent) 0%, transparent 22%),
+    linear-gradient(180deg, var(--b-hi) 0%, var(--b-base) 38%, color-mix(in srgb, var(--b-lo) 50%, var(--b-base)) 100%);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3), inset 1px 0 0 var(--b-rim),
+    inset 0 1px 0 color-mix(in srgb, var(--b-rim) 90%, transparent);
+}
+
+.subblade-inner {
+  right: var(--tab-w);
+}
+
+.subblade-tab {
+  width: var(--tab-w);
+  color: var(--b-title);
+  text-shadow: var(--b-title-shadow);
+}
+
+.subblade-tab-label {
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.subblade-clock {
+  color: var(--b-title);
+  text-shadow: var(--b-title-shadow);
+}
+
+.subblade-scroll {
+  color: var(--b-ink);
+  scroll-padding-block: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--b-rim) 60%, transparent) transparent;
+}
+
+.subblade-empty {
+  color: var(--b-ink-soft);
+}
+
+.game-item + .game-item {
+  border-top: 1px solid color-mix(in srgb, var(--b-lo) 55%, transparent);
+  box-shadow: inset 0 1px 0 var(--groove-light);
+}
+
+.game-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.game-icon {
+  width: 2.7em;
+  height: 2.7em;
+  border-radius: 4px;
+  object-fit: cover;
+  background: #111;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.game-name {
+  font-weight: 600;
+}
+
+.game-sub {
+  color: var(--b-ink-soft);
+  font-size: 0.8em;
+}
+
+.game-score {
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.gamerscore-g {
+  display: inline-grid;
+  place-items: center;
+  width: 1.2em;
+  height: 1.2em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, #77777f 0%, #2a2a30 70%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  color: #fff;
+  font-size: 0.72em;
+  font-weight: 700;
+  text-shadow: none;
+}
+
+.subblade-more-arrow {
+  width: 0;
+  height: 0;
+  border-inline: 0.45em solid transparent;
+  border-top: 0.45em solid color-mix(in srgb, var(--b-rim) 85%, transparent);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+/* The stacked legend: B over A at the right, labels flush to the orbs. */
+.legend-stack--right {
+  justify-items: end;
+}

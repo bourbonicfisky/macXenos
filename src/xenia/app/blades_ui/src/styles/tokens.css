@@ -232,7 +232,8 @@
    -------------------------------------------------------------------------- */
 
 .blade[data-tone="green"],
-.deck-menu-item[data-tone="green"] {
+.deck-menu-item[data-tone="green"],
+.subblade[data-tone="green"] {
   --b-hi: #9ad189;
   --b-base: #5fbb4e;
   --b-lo: #3f8a33;
@@ -244,7 +245,8 @@
 }
 
 .blade[data-tone="orange"],
-.deck-menu-item[data-tone="orange"] {
+.deck-menu-item[data-tone="orange"],
+.subblade[data-tone="orange"] {
   --b-hi: #fbbe8a;
   --b-base: #f5913e;
   --b-lo: #c4652a;
@@ -256,7 +258,8 @@
 }
 
 .blade[data-tone="amber"],
-.deck-menu-item[data-tone="amber"] {
+.deck-menu-item[data-tone="amber"],
+.subblade[data-tone="amber"] {
   --b-hi: #f7c578;
   --b-base: #e0a22f;
   --b-lo: #a96f17;
@@ -268,7 +271,8 @@
 }
 
 .blade[data-tone="blue"],
-.deck-menu-item[data-tone="blue"] {
+.deck-menu-item[data-tone="blue"],
+.subblade[data-tone="blue"] {
   --b-hi: #9ec6ec;
   --b-base: #419be2;
   --b-lo: #2a6faa;
@@ -280,7 +284,8 @@
 }
 
 .blade[data-tone="purple"],
-.deck-menu-item[data-tone="purple"] {
+.deck-menu-item[data-tone="purple"],
+.subblade[data-tone="purple"] {
   --b-hi: #c9b6e5;
   --b-base: #a47fde;
   --b-lo: #6f53a0;
@@ -295,7 +300,8 @@
    grey-blue, so the blade of raw settings reads as the machine's own metal. */
 /* Teal: the Dashboard blade, the blades' own look and sound. */
 .blade[data-tone="teal"],
-.deck-menu-item[data-tone="teal"] {
+.deck-menu-item[data-tone="teal"],
+.subblade[data-tone="teal"] {
   --b-hi: #8fd6cc;
   --b-base: #3fb3a3;
   --b-lo: #26806f;
@@ -308,7 +314,8 @@
 
 /* Rose: the Profiles blade. */
 .blade[data-tone="rose"],
-.deck-menu-item[data-tone="rose"] {
+.deck-menu-item[data-tone="rose"],
+.subblade[data-tone="rose"] {
   --b-hi: #f2a7b9;
   --b-base: #d9607f;
   --b-lo: #a33a57;
@@ -320,7 +327,8 @@
 }
 
 .blade[data-tone="steel"],
-.deck-menu-item[data-tone="steel"] {
+.deck-menu-item[data-tone="steel"],
+.subblade[data-tone="steel"] {
   --b-hi: #c3ccd6;
   --b-base: #8d9aa8;
   --b-lo: #5d6a78;
@@ -332,7 +340,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="green"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="green"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="green"],
+:root[data-theme="dark"] .subblade[data-tone="green"] {
   --b-hi: #2f6b1c;
   --b-base: #1c4712;
   --b-lo: #0a1c06;
@@ -344,7 +353,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="orange"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="orange"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="orange"],
+:root[data-theme="dark"] .subblade[data-tone="orange"] {
   --b-hi: #94501c;
   --b-base: #61340f;
   --b-lo: #241203;
@@ -356,7 +366,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="amber"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="amber"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="amber"],
+:root[data-theme="dark"] .subblade[data-tone="amber"] {
   --b-hi: #8c5c12;
   --b-base: #5c3c0b;
   --b-lo: #221703;
@@ -368,7 +379,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="blue"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="blue"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="blue"],
+:root[data-theme="dark"] .subblade[data-tone="blue"] {
   --b-hi: #255d8a;
   --b-base: #173d5c;
   --b-lo: #08151f;
@@ -380,7 +392,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="purple"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="purple"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="purple"],
+:root[data-theme="dark"] .subblade[data-tone="purple"] {
   --b-hi: #4d3a72;
   --b-base: #33254c;
   --b-lo: #140e1f;
@@ -392,7 +405,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="teal"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="teal"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="teal"],
+:root[data-theme="dark"] .subblade[data-tone="teal"] {
   --b-hi: #1f6359;
   --b-base: #144540;
   --b-lo: #061a17;
@@ -404,7 +418,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="rose"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="rose"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="rose"],
+:root[data-theme="dark"] .subblade[data-tone="rose"] {
   --b-hi: #74304a;
   --b-base: #4f1d31;
   --b-lo: #1f0912;
@@ -416,7 +431,8 @@
 }
 
 :root[data-theme="dark"] .blade[data-tone="steel"],
-:root[data-theme="dark"] .deck-menu-item[data-tone="steel"] {
+:root[data-theme="dark"] .deck-menu-item[data-tone="steel"],
+:root[data-theme="dark"] .subblade[data-tone="steel"] {
   --b-hi: #4a5664;
   --b-base: #2e3742;
   --b-lo: #12171d;

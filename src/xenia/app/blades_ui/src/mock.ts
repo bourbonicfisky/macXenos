@@ -7,7 +7,7 @@ import type { Cvar, NativeMessage, NativeState } from "./native";
    DEFINE_* macros when settings change); the rest is a plausible console. */
 
 export function mockState(): NativeState {
-  return {
+  const state: NativeState = {
     connected: true,
     renderer: "metal",
     selectedRenderer: "metal",
@@ -81,17 +81,25 @@ export function mockState(): NativeState {
     },
     timeScalar: 1,
     recentTitles: [
-      { name: "Sonic Generations", path: "/Games/Sonic Generations (World).iso", lastPlayed: 1791530000, icon: "/macxenos-icon-dark.webp" },
-      { name: "Just Cause 2", path: "/Games/Just Cause 2.iso", lastPlayed: 1791440000, icon: "" },
-      { name: "Viva Piñata", path: "/Games/Viva Pinata.iso", lastPlayed: 1790900000, icon: "" }
+      { name: "Sonic Generations", path: "/Games/Sonic Generations (World).iso", lastPlayed: 1791530000, icon: "/macxenos-icon-dark.webp", achievements: { unlocked: 12, total: 50, score: 175, maxScore: 1000 } },
+      { name: "Just Cause 2", path: "/Games/Just Cause 2.iso", lastPlayed: 1791440000, icon: "", achievements: { unlocked: 3, total: 49, score: 45, maxScore: 1000 } },
+      { name: "Viva Piñata", path: "/Games/Viva Pinata.iso", lastPlayed: 1790900000, icon: "" },
+      { name: "Red Dead Redemption", path: "/Games/Red Dead Redemption.iso", lastPlayed: 1790500000, icon: "", achievements: { unlocked: 0, total: 50, score: 0, maxScore: 1000 } },
+      { name: "Gears of War 3", path: "/Games/Gears of War 3.iso", lastPlayed: 1790100000, icon: "", achievements: { unlocked: 7, total: 50, score: 80, maxScore: 1000 } },
+      { name: "Halo 3", path: "/Games/Halo 3.iso", lastPlayed: 1789900000, icon: "", achievements: { unlocked: 1, total: 49, score: 5, maxScore: 1000 } },
+      { name: "Assassin's Creed", path: "/Games/Assassins Creed.iso", lastPlayed: 1789000000, icon: "" },
+      { name: "Ultra Street Fighter IV", path: "/Games/USF4.iso", lastPlayed: 1788000000, icon: "", achievements: { unlocked: 20, total: 50, score: 310, maxScore: 1000 } },
+      { name: "LEGO Star Wars II", path: "/Games/LEGO Star Wars II.iso", lastPlayed: 1787000000, icon: "" }
     ],
+    gameFolders: { folders: ["/Volumes/Plex/Emulation/Xbox 360 Decompressed"], scanning: false },
     musicPlayer: { available: false, state: "idle", volume: 1 },
     // In the browser the sounds come from public/dash-sounds if a developer
-    // put them there (never committed); "missing" shows the first-run offer.
+    // put them there (never committed).
     dashSounds: {
       status: "missing",
       error: "",
-      asked: false,
+      // true skips the first-run offer; set false to see it.
+      asked: true,
       pack: "Xbox 360 Blades",
       author: "squabbled",
       site: "DeckThemes"
@@ -101,12 +109,31 @@ export function mockState(): NativeState {
       { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
     ],
     appVersion: "1.0 beta 3",
-    appBuild: "codex/metal-foundation-integration@4774abdb6 (dev)"
+    appBuild: "codex/metal-foundation-integration@4774abdb6 (dev)",
+    allGames: []
   };
+  // The folder holds a few games not played yet, besides the played ones.
+  state.allGames = [
+    ...state.recentTitles,
+    ...["Alan Wake", "Bayonetta", "Crackdown", "Dead Rising", "Fable II", "Mass Effect"].map((name) => ({
+      name,
+      path: `/Volumes/Plex/Emulation/Xbox 360 Decompressed/${name}.iso`,
+      lastPlayed: 0,
+      icon: ""
+    }))
+  ];
+  return state;
 }
 
 export function mockApply(state: NativeState, message: NativeMessage): NativeState {
   switch (message.op) {
+    case "gameFolderAdd":
+      return { ...state, gameFolders: { ...state.gameFolders, folders: [...state.gameFolders.folders, "/Volumes/Games"] } };
+    case "gameFolderRemove":
+      return {
+        ...state,
+        gameFolders: { ...state.gameFolders, folders: state.gameFolders.folders.filter((f) => f !== message.path) }
+      };
     case "dashSounds":
       return {
         ...state,

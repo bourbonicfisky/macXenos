@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -20,8 +22,10 @@
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
 #include "xenia/app/emulator_window.h"
+#include "xenia/app/game_library.h"
 #if XE_PLATFORM_MAC
 #include "xenia/app/controller_home_button_mac.h"
+#include "xenia/app/blades_overlay_mac.h"
 #include "xenia/app/dashboard_sounds_mac.h"
 #endif
 #include "xenia/apu/audio_media_player.h"
@@ -620,6 +624,12 @@ std::string BladesModel::BuildStateJson() {
   // don't have yet, and learn their title IDs by name for recent entries
   // recorded before IDs were kept.
   std::map<std::string, uint32_t> played_ids;
+  // The first signed-in player's record of each game, for All Games: its
+  // achievements and gamerscore, as the console listed them.
+  struct Progress {
+    uint32_t unlocked, total, score, max_score;
+  };
+  std::map<uint32_t, Progress> progress;
   if (kernel) {
     auto* profiles = kernel->xam_state()->profile_manager();
     auto* tracker = kernel->xam_state()->user_tracker();
@@ -632,6 +642,11 @@ std::string BladesModel::BuildStateJson() {
       for (const auto& title : tracker->GetPlayedTitles(profile->xuid())) {
         played_ids[xe::utf8::lower_ascii(xe::to_utf8(title.title_name))] =
             title.id;
+        progress.try_emplace(
+            title.id, Progress{title.unlocked_achievements_count,
+                               title.achievements_count,
+                               title.title_earned_gamerscore,
+                               title.gamerscore_amount});
         window_.SaveTitleIcon(title.id, title.icon);
       }
     }
@@ -664,9 +679,133 @@ std::string BladesModel::BuildStateJson() {
     w.Int64(int64_t(entry.last_run_time));
     w.Key("icon");
     w.String(icon.c_str());
+    auto played = progress.find(title_id);
+    if (played != progress.end() && played->second.total) {
+      w.Key("achievements");
+      w.StartObject();
+      w.Key("unlocked");
+      w.Uint(played->second.unlocked);
+      w.Key("total");
+      w.Uint(played->second.total);
+      w.Key("score");
+      w.Uint(played->second.score);
+      w.Key("maxScore");
+      w.Uint(played->second.max_score);
+      w.EndObject();
+    }
     w.EndObject();
   }
   w.EndArray();
+
+  // All Games: every game in the game folders and every game played here,
+  // each once. A played game found in a folder takes the name it gave itself
+  // and the time it was last played; played games outside the folders stay.
+  {
+    struct Row {
+      std::string name;
+      std::string path;
+      int64_t last_played = 0;
+      uint32_t title_id = 0;
+    };
+    auto key = [](const std::string& name) {
+      std::string out;
+      for (unsigned char c : name) {
+        if (std::isalnum(c)) out.push_back(char(std::tolower(c)));
+      }
+      return out;
+    };
+    std::vector<Row> rows;
+    std::map<std::string, size_t> by_path, by_name;
+    std::map<uint32_t, size_t> by_id;
+    GameLibrary& library = window_.game_library();
+    for (const GameLibrary::Game& game : library.games()) {
+      Row row{game.name, xe::path_to_utf8(game.path), 0, game.title_id};
+      const size_t index = rows.size();
+      by_path.emplace(row.path, index);
+      if (row.title_id) by_id.emplace(row.title_id, index);
+      by_name.emplace(key(row.name), index);
+      rows.push_back(std::move(row));
+    }
+    for (const RecentTitleEntry& entry : window_.recently_launched_titles_) {
+      const std::string path = xe::path_to_utf8(entry.path_to_file);
+      uint32_t title_id = entry.title_id;
+      if (!title_id) {
+        auto found = played_ids.find(xe::utf8::lower_ascii(entry.title_name));
+        if (found != played_ids.end()) title_id = found->second;
+      }
+      auto match = by_path.find(path);
+      size_t index = match != by_path.end() ? match->second : SIZE_MAX;
+      if (index == SIZE_MAX && title_id) {
+        auto id = by_id.find(title_id);
+        if (id != by_id.end()) index = id->second;
+      }
+      if (index == SIZE_MAX && !entry.title_name.empty()) {
+        auto name = by_name.find(key(entry.title_name));
+        if (name != by_name.end()) index = name->second;
+      }
+      if (index == SIZE_MAX) {
+        rows.push_back({entry.title_name.empty()
+                            ? xe::path_to_utf8(entry.path_to_file.stem())
+                            : entry.title_name,
+                        path, int64_t(entry.last_run_time), title_id});
+        continue;
+      }
+      Row& row = rows[index];
+      if (int64_t(entry.last_run_time) > row.last_played) {
+        row.last_played = int64_t(entry.last_run_time);
+        if (!entry.title_name.empty()) row.name = entry.title_name;
+      }
+      if (!row.title_id) row.title_id = title_id;
+    }
+
+    w.Key("allGames");
+    w.StartArray();
+    for (const Row& row : rows) {
+      std::string icon;
+      std::error_code ec;
+      if (row.title_id &&
+          std::filesystem::exists(window_.TitleIconPath(row.title_id), ec)) {
+        icon = fmt::format("/title-icons/{:08X}.png", row.title_id);
+      }
+      w.StartObject();
+      w.Key("name");
+      w.String(row.name.c_str());
+      w.Key("path");
+      w.String(row.path.c_str());
+      w.Key("lastPlayed");
+      w.Int64(row.last_played);
+      w.Key("icon");
+      w.String(icon.c_str());
+      auto played = progress.find(row.title_id);
+      if (row.title_id && played != progress.end() && played->second.total) {
+        w.Key("achievements");
+        w.StartObject();
+        w.Key("unlocked");
+        w.Uint(played->second.unlocked);
+        w.Key("total");
+        w.Uint(played->second.total);
+        w.Key("score");
+        w.Uint(played->second.score);
+        w.Key("maxScore");
+        w.Uint(played->second.max_score);
+        w.EndObject();
+      }
+      w.EndObject();
+    }
+    w.EndArray();
+
+    w.Key("gameFolders");
+    w.StartObject();
+    w.Key("folders");
+    w.StartArray();
+    for (const auto& folder : library.folders()) {
+      w.String(xe::path_to_utf8(folder).c_str());
+    }
+    w.EndArray();
+    w.Key("scanning");
+    w.Bool(library.scanning());
+    w.EndObject();
+  }
 
   // The console's music player (games hand it their playlists).
   w.Key("musicPlayer");
@@ -1057,6 +1196,29 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
       std::filesystem::create_directories(path, ec);
       LaunchFileExplorer(path);
     }
+    return Result::kPush;
+  }
+
+  if (op == "gameFolderAdd") {
+    // After this message returns: the folder picker runs its own loop.
+    EmulatorWindow* window = &window_;
+    window_.app_context().CallInUIThreadDeferred([window]() {
+      window->AddGameFolders();
+#if XE_PLATFORM_MAC
+      if (window->blades_overlay_ && window->blades_model_) {
+        window->blades_overlay_->PushState(
+            window->blades_model_->BuildStateJson());
+      }
+#endif
+    });
+    return Result::kNone;
+  }
+  if (op == "gameFolderRemove") {
+    window_.game_library().RemoveFolder(xe::to_path(string_member("path")));
+    return Result::kPush;
+  }
+  if (op == "gameFoldersRescan") {
+    window_.game_library().Rescan();
     return Result::kPush;
   }
 

@@ -31,6 +31,7 @@ namespace app {
 
 class BladesModel;
 class BladesOverlay;
+class GameLibrary;
 
 struct RecentTitleEntry {
   std::string title_name;
@@ -103,6 +104,11 @@ class EmulatorWindow {
   const char* DashboardSoundsStatus() const;
   // Starts the download in the background; the page hears when it ends.
   void DownloadDashboardSounds();
+  // The user's game folders and what is in them, created (and first scanned)
+  // on first use.
+  GameLibrary& game_library();
+  // Asks for folders to add to the game folders.
+  void AddGameFolders();
   void SaveTitleIcon(uint32_t title_id, std::span<const uint8_t> png) const;
   // Creates or removes the frame rate counter to match show_fps.
   void UpdateFpsOverlay();
@@ -381,6 +387,7 @@ class EmulatorWindow {
   std::atomic<bool> blades_visible_{false};
   bool game_frozen_ = false;
   bool dashboard_sounds_downloading_ = false;
+  std::unique_ptr<GameLibrary> game_library_;
   // Why the last download failed; empty when it hasn't.
   std::string dashboard_sounds_error_;
   bool mute_before_freeze_ = false;

@@ -1,8 +1,9 @@
 import type { BladeDef } from "../ui/blade";
 import type { MenuItem } from "../ui/blade-menu";
 import { AppIcon } from "../ui/app-icon";
-import { send, type NativeState } from "../native";
-import { Aside } from "./parts";
+import { openAllGames } from "../ui/all-games";
+import { send, useNative, type NativeState } from "../native";
+import { Aside, PaneAction } from "./parts";
 
 /* ==========================================================================
    Home: the dashboard you land on, as the console's own was. What is
@@ -10,7 +11,7 @@ import { Aside } from "./parts";
    here do something when chosen (A), rather than opening options.
    ========================================================================== */
 
-function whenPlayed(seconds: number): string {
+export function whenPlayed(seconds: number): string {
   if (!seconds) return "";
   const then = new Date(seconds * 1000);
   const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
@@ -27,6 +28,53 @@ function GameArt({ icon, name }: { icon: string; name: string }) {
       <img className="h-full w-full object-cover" src={icon} alt={`${name} icon`} />
       <span className="game-art-gloss pointer-events-none absolute inset-0" aria-hidden="true" />
     </div>
+  );
+}
+
+/** "2 folders", or that there are none yet. */
+function GameFoldersValue() {
+  const { gameFolders } = useNative();
+  const count = gameFolders.folders.length;
+  if (gameFolders.scanning) return <>Scanning</>;
+  return <>{count === 0 ? "None" : count === 1 ? "1 folder" : `${count} folders`}</>;
+}
+
+/** The folders All Games looks in: each with a way to take it out, and a
+    way to add more. */
+function GameFoldersPane() {
+  const { gameFolders, allGames } = useNative();
+  return (
+    <>
+      <p className="m-0">
+        Folders where your disc images, unpacked games and downloaded games are kept. Their games appear
+        in All games, including ones in folders inside them.
+      </p>
+      {gameFolders.folders.map((folder) => (
+        <div key={folder} className="game-folder grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[0.6em]">
+          <span className="menu-spec text-[0.8em] [overflow-wrap:anywhere]">{folder}</span>
+          <button
+            type="button"
+            className="pref-option rounded-row inline-flex min-h-[2em] cursor-pointer items-center px-[0.8em] text-[0.85em]"
+            onClick={() => send({ op: "gameFolderRemove", path: folder })}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <PaneAction onSelect={() => send({ op: "gameFolderAdd" })}>Add a folder</PaneAction>
+      {gameFolders.folders.length ? (
+        <>
+          <PaneAction disabled={gameFolders.scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
+            Look again
+          </PaneAction>
+          <Aside>
+            {gameFolders.scanning
+              ? "Looking for games."
+              : `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All games.`}
+          </Aside>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -115,8 +163,37 @@ export function home(state: NativeState): BladeDef {
 
   menu.push(
     {
+      id: "all-games",
+      section: "More",
+      label: "All games",
+      glyph: "blocks",
+      value: state.allGames.length ? <>{state.allGames.length}</> : undefined,
+      heading: "All games",
+      detail: (
+        <>
+          <p>Every game in your game folders and every game you have played here, with your achievements in each.</p>
+          {state.gameFolders.folders.length ? (
+            <Aside>X there sorts them A to Z or by when you last played.</Aside>
+          ) : (
+            <Aside>Add the folders that hold your games under Game folders, below.</Aside>
+          )}
+        </>
+      ),
+      onSelect: openAllGames
+    },
+    {
+      id: "game-folders",
+      label: "Game folders",
+      glyph: "folder",
+      value: <GameFoldersValue />,
+      heading: "Game folders",
+      detail: <GameFoldersPane />
+    }
+  );
+
+  menu.push(
+    {
       id: "open",
-      section: state.recentTitles.length || state.titleOpen ? "More" : undefined,
       label: "Open a game",
       glyph: "folder",
       heading: "Open a game",

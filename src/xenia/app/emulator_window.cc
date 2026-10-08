@@ -26,6 +26,7 @@
 #endif
 
 #include "xenia/app/blades_model.h"
+#include "xenia/app/game_library.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -180,8 +181,9 @@ DEFINE_bool(
     "Display");
 
 DEFINE_int32(recent_titles_entry_amount, 10,
-             "Allows user to define how many titles is saved in list of "
-             "recently played titles.",
+             "How many recently played titles the File menu lists. Every "
+             "title played is kept for the dashboard's All Games list; 0 "
+             "keeps none.",
              "General");
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
@@ -200,6 +202,8 @@ using namespace xe::hid;
 using namespace xe::gpu;
 
 constexpr std::string_view kRecentlyPlayedTitlesFilename = "recent.toml";
+// The most titles recent.toml keeps: the dashboard's All Games list.
+constexpr size_t kMaxPlayedTitles = 1000;
 constexpr std::string_view kBaseTitle = "macXenos";
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
@@ -2575,7 +2579,10 @@ void EmulatorWindow::RunPreviouslyPlayedTitle() {
 
 void EmulatorWindow::FillRecentlyLaunchedTitlesMenu(
     xe::ui::MenuItem* recent_menu) {
-  for (int i = 0; i < recently_launched_titles_.size(); ++i) {
+  const size_t count =
+      std::min(recently_launched_titles_.size(),
+               size_t(std::max(cvars::recent_titles_entry_amount, 0)));
+  for (size_t i = 0; i < count; ++i) {
     std::string hotkey = (i == 0) ? "F9" : "";
 
     const RecentTitleEntry& entry = recently_launched_titles_[i];
@@ -2662,7 +2669,7 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
   // Serialize to toml
   auto toml_table = toml::table();
 
-  uint8_t index = 0;
+  size_t index = 0;
   for (const RecentTitleEntry& entry : recently_launched_titles_) {
     auto entry_table = toml::table();
 
@@ -2677,7 +2684,7 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
 
     toml_table.insert(std::to_string(index++), entry_table);
 
-    if (index >= cvars::recent_titles_entry_amount) {
+    if (index >= kMaxPlayedTitles) {
       break;
     }
   }
@@ -2686,6 +2693,37 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
                      std::ofstream::trunc);
   file << toml_table;
   file.close();
+}
+
+GameLibrary& EmulatorWindow::game_library() {
+  if (!game_library_) {
+    game_library_ = std::make_unique<GameLibrary>(
+        emulator_->storage_root(), [this]() {
+          // A scan finished: the dashboard shows what it found.
+          app_context().CallInUIThread([this]() {
+#if XE_PLATFORM_MAC
+            if (blades_overlay_ && blades_model_) {
+              blades_overlay_->PushState(blades_model_->BuildStateJson());
+            }
+#endif
+          });
+        });
+    game_library_->Rescan();
+  }
+  return *game_library_;
+}
+
+void EmulatorWindow::AddGameFolders() {
+  auto file_picker = xe::ui::FilePicker::Create();
+  file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+  file_picker->set_type(ui::FilePicker::Type::kDirectory);
+  file_picker->set_multi_selection(true);
+  file_picker->set_title("Add Game Folders");
+  if (file_picker->Show(window_.get())) {
+    for (const auto& folder : file_picker->selected_files()) {
+      game_library().AddFolder(folder);
+    }
+  }
 }
 
 std::filesystem::path EmulatorWindow::DashboardSoundsPath() const {

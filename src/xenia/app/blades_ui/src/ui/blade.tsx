@@ -3,6 +3,7 @@ import { BladeMenu, MenuItem, Tray, TrayPill } from "./blade-menu";
 import { TabLabel } from "./tab-label";
 import { toggleTheme, useTheme } from "./theme";
 import { send } from "../native";
+import { LegendStack } from "./legend";
 
 export type BladeTone = "green" | "orange" | "amber" | "blue" | "purple" | "teal" | "rose" | "steel";
 
@@ -118,17 +119,10 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
             blade with. Y is live here: it flips day and night. */}
         <footer className="blade-legend flex min-h-[clamp(64px,16.5dvh,170px)] items-center justify-between gap-4 px-[var(--pad)] pt-[clamp(8px,1.6dvh,16px)] pb-[clamp(12px,3.4dvh,32px)] text-[clamp(0.9rem,2.6dvh,1.4rem)]">
           <span className="flex items-center gap-[clamp(14px,2vw,28px)]">
-            <button
-              type="button"
-              className="legend-toggle inline-flex cursor-pointer items-center gap-[0.4em] border-0 bg-transparent p-0 text-inherit"
-              onClick={toggleTheme}
-              aria-keyshortcuts="Y"
-            >
-              <span className="pad-key pad-key--y" aria-hidden="true">
-                Y
-              </span>
-              {theme === "dark" ? "Day" : "Night"}
-            </button>
+            <LegendStack
+              side="left"
+              entries={[{ button: "y", label: theme === "dark" ? "Day" : "Night", onClick: toggleTheme }]}
+            />
             <span className="legend-hint inline-flex items-center gap-1.5 text-[0.78em] max-[560px]:hidden">
               <kbd className="legend-key font-ui grid h-[1.4em] min-w-[1.4em] place-items-center rounded-[5px] px-1 leading-none">
                 ←
@@ -149,18 +143,13 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
               Hide menu
               <span className="pad-chip pad-chip--guide legend-guide" aria-label="Guide" />
             </button>
-            <span className="inline-flex items-center gap-[0.4em]">
-              Back
-              <span className="pad-key pad-key--b" aria-hidden="true">
-                B
-              </span>
-            </span>
-            <span className="inline-flex items-center gap-[0.4em]">
-              Select
-              <span className="pad-key pad-key--a" aria-hidden="true">
-                A
-              </span>
-            </span>
+            <LegendStack
+              side="right"
+              entries={[
+                { button: "b", label: "Back" },
+                { button: "a", label: "Select" }
+              ]}
+            />
           </span>
         </footer>
       </div>

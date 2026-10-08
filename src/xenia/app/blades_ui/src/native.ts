@@ -52,6 +52,15 @@ export type RecentTitle = {
   lastPlayed: number;
   /** The game's own icon (/title-icons/ID.png), or "" if not seen yet. */
   icon: string;
+  /** The first signed-in player's progress in it, when they have played it. */
+  achievements?: { unlocked: number; total: number; score: number; maxScore: number };
+};
+
+/** The folders the app looks in for games (game_library.h). */
+export type GameFolders = {
+  folders: string[];
+  /** A scan is running; the list fills in when it ends. */
+  scanning: boolean;
 };
 
 export type MusicPlayer = {
@@ -120,6 +129,10 @@ export type NativeState = {
   };
   timeScalar: number;
   recentTitles: RecentTitle[];
+  /** Every game in the game folders and every game played here, once each,
+      in no particular order (All Games sorts them). Never played: 0. */
+  allGames: RecentTitle[];
+  gameFolders: GameFolders;
   musicPlayer: MusicPlayer;
   profiles: Profile[];
   dashSounds: DashSounds;
@@ -144,6 +157,9 @@ export type NativeMessage =
   | { op: "action"; id: string; value?: number }
   | { op: "sound"; file: string; gain: number }
   | { op: "dashSounds"; action: "download" | "decline" }
+  | { op: "gameFolderAdd" }
+  | { op: "gameFolderRemove"; path: string }
+  | { op: "gameFoldersRescan" }
   | { op: "launch"; path: string }
   | { op: "openGame" }
   | { op: "installContent" }
@@ -266,6 +282,8 @@ function emptyState(): NativeState {
     console: { editable: true, fields: [] },
     timeScalar: 1,
     recentTitles: [],
+    allGames: [],
+    gameFolders: { folders: [], scanning: false },
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
     dashSounds: { status: "unavailable", error: "", asked: true },

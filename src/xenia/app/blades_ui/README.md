@@ -15,6 +15,27 @@ Controller and Console menus, which open it on their own blade. While it is
 open over a game the game is frozen and muted (`dashboard_freezes_game`). A
 hash picks the blade and, optionally, the row: `#controller/hotkeys`.
 
+## All Games and game folders
+
+Home's All games opens a sub-blade (`src/ui/all-games.tsx`) that slides out
+over the dashboard, as the 360's game library did: every game in the user's
+game folders plus every game played here, with icons, achievements and
+gamerscore from the signed-in profile. X sorts it alphabetically or by most
+recently played (remembered in the page's local storage); `#all-games` opens
+it directly. Home's Game folders row adds and removes the folders.
+
+The app side is `../game_library.{h,cc}`: folders live in
+`<storage_root>/game_folders.toml`; a background scan finds disc images,
+unpacked games (a folder with default.xex) and downloaded game packages,
+reads each one's title ID (and a package's name and icon) without starting
+it, and caches that in `game_index.toml`. `blades_model.cc` merges the scan
+with the play history (`recent.toml`, which now keeps every game played; the
+`recent_titles_entry_amount` setting only limits the File menu) into
+`allGames`.
+
+The legends stack their face buttons as the 360 did (`src/ui/legend.tsx`):
+Y over X on the left, B over A on the right, listing only the ones that apply.
+
 ## Sounds are downloaded, not shipped
 
 The dashboard's sounds are Microsoft's, so neither the repository nor the app

@@ -8,6 +8,7 @@ import { loadSounds, playSound, switchSound } from "./sound";
 import { toggleTheme } from "./theme";
 import { getNative, send } from "../native";
 import { Toast } from "./toast";
+import { AllGames } from "./all-games";
 
 /**
  * The dashboard's mechanism, and only the mechanism: which blade is open, how
@@ -138,6 +139,8 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
           />
         ))}
       </div>
+
+      <AllGames tone={blades[active].tone} />
     </>
   );
 }
