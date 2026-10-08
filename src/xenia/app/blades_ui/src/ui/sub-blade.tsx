@@ -278,7 +278,6 @@ export function SubBlade({
       >
         <span className="subblade-shadow pointer-events-none absolute inset-0" aria-hidden="true">
           <span className="blade-skin blade-skin--panel subblade-skin absolute inset-y-0" />
-          <span className="subblade-tab-skin absolute inset-y-0" />
         </span>
 
         <div className="subblade-inner absolute inset-y-0 grid grid-rows-[auto_minmax(0,1fr)_auto]">
@@ -322,6 +321,13 @@ export function SubBlade({
             />
           </footer>
         </div>
+
+        {/* The tab lies over the sheet's header and legend bars, which run
+            in under its curve, so it is painted after them with its own
+            shadow falling across them. */}
+        <span className="subblade-shadow subblade-tab-shadow pointer-events-none absolute inset-0" aria-hidden="true">
+          <span className="subblade-tab-skin absolute inset-y-0" />
+        </span>
 
         {/* The sub-blade's own tab, with the signed-in player on it. */}
         <span

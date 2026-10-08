@@ -1433,3 +1433,12 @@ button.tray {
     transform: translateX(calc(var(--bow) * -0.35));
   }
 }
+
+/* The tab's shadow falls inward, across the sheet it lies on. */
+.subblade[data-side="right"] .subblade-tab-shadow {
+  filter: drop-shadow(8px 0 14px rgba(0, 0, 0, 0.35));
+}
+
+.subblade[data-side="left"] .subblade-tab-shadow {
+  filter: drop-shadow(-8px 0 14px rgba(0, 0, 0, 0.35));
+}
