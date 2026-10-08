@@ -578,12 +578,15 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
           auto global_lock = global_critical_region_.AcquireDeferred();
           while (dispatch_thread_running_) {
             global_lock.lock();
-            if (dispatch_queue_.empty()) {
+            // Loop: a wait can return with the queue still empty (a spurious
+            // wakeup, or a debugger / dashboard suspend signal interrupting
+            // the wait), and popping an empty deque frees garbage.
+            while (dispatch_queue_.empty() && dispatch_thread_running_) {
               dispatch_cond_.wait(global_lock);
-              if (!dispatch_thread_running_) {
-                global_lock.unlock();
-                break;
-              }
+            }
+            if (!dispatch_thread_running_) {
+              global_lock.unlock();
+              break;
             }
             auto fn = std::move(dispatch_queue_.front());
             dispatch_queue_.pop_front();

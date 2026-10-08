@@ -17,6 +17,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <semaphore.h>
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/semaphore.h>
+#endif
 #include <signal.h>
 #include <sys/resource.h>
 #if XE_PLATFORM_MAC
@@ -164,6 +168,70 @@ std::array<std::atomic<bool>, static_cast<size_t>(SignalType::k_Count)>
     signal_handler_installed = {};
 
 static void signal_handler(int signal, siginfo_t* info, void* context);
+
+// The semaphore a suspended thread parks on inside the suspend signal handler.
+// macOS does not implement unnamed POSIX semaphores: sem_init fails with
+// ENOSYS and every sem_wait on the result fails at once, so a "suspended"
+// thread returned from the handler and kept running. Mach semaphores are
+// plain kernel traps, safe to use from a signal handler.
+class SuspendSemaphore {
+ public:
+  SuspendSemaphore() {
+#if XE_PLATFORM_MAC
+    valid_ = semaphore_create(mach_task_self(), &sem_, SYNC_POLICY_FIFO, 0) ==
+             KERN_SUCCESS;
+#else
+    valid_ = sem_init(&sem_, 0, 0) == 0;
+#endif
+  }
+  ~SuspendSemaphore() { Destroy(); }
+  SuspendSemaphore(const SuspendSemaphore&) = delete;
+  SuspendSemaphore& operator=(const SuspendSemaphore&) = delete;
+
+  void Post() {
+    if (!valid_) return;
+#if XE_PLATFORM_MAC
+    semaphore_signal(sem_);
+#else
+    sem_post(&sem_);
+#endif
+  }
+  // False when the semaphore is gone or broken; interruptions are retried.
+  bool Wait() {
+    if (!valid_) return false;
+#if XE_PLATFORM_MAC
+    kern_return_t kr;
+    do {
+      kr = semaphore_wait(sem_);
+    } while (kr == KERN_ABORTED);
+    return kr == KERN_SUCCESS;
+#else
+    int ret;
+    do {
+      ret = sem_wait(&sem_);
+    } while (ret == -1 && errno == EINTR);
+    return ret == 0;
+#endif
+  }
+  void Destroy() {
+    if (!valid_) return;
+    valid_ = false;
+#if XE_PLATFORM_MAC
+    semaphore_destroy(mach_task_self(), sem_);
+#else
+    sem_destroy(&sem_);
+#endif
+  }
+
+ private:
+#if XE_PLATFORM_MAC
+  semaphore_t sem_ = 0;
+#else
+  sem_t sem_;
+#endif
+  std::atomic<bool> valid_{false};
+};
+
 
 void install_signal_handler(SignalType type) {
   bool expected = false;
@@ -810,7 +878,6 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         exit_code_(0),
         state_(State::kUninitialized),
         suspend_count_(0) {
-    sem_init(&suspend_sem_, 0, 0);
 #if XE_PLATFORM_ANDROID
     android_pre_api_26_name_[0] = '\0';
 #endif
@@ -870,7 +937,6 @@ class PosixCondition<Thread> final : public PosixConditionBase {
         exit_code_(0),
         state_(State::kRunning),
         suspend_count_(0) {
-    sem_init(&suspend_sem_, 0, 0);
 #if XE_PLATFORM_ANDROID
     android_pre_api_26_name_[0] = '\0';
 #endif
@@ -1132,9 +1198,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     if (suspend_count_ == 0 && state_ == State::kSuspended) {
       state_ = State::kRunning;
       // Post to the semaphore to wake the thread from WaitSuspended.
-      // sem_post is async-signal-safe, so this is safe even if called
+      // Posting is async-signal-safe, so this is safe even if called
       // from unusual contexts.
-      sem_post(&suspend_sem_);
+      suspend_sem_.Post();
     }
     state_signal_.notify_all();
     return true;
@@ -1161,8 +1227,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     }
 
     // If already suspended, just increment the count — don't send another
-    // signal. A second pthread_kill while the thread is in sem_wait would
-    // nest signal handlers and create multiple outstanding sem_waits, but
+    // signal. A second pthread_kill while the thread is parked on the semaphore would
+    // nest signal handlers and create multiple outstanding waits, but
     // Resume only posts once when count reaches 0.
     if (already_suspended) {
       return true;
@@ -1247,21 +1313,17 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   }
 
   /// Set state to suspended and wait until it is reset by another thread.
-  /// Uses sem_wait which is async-signal-safe, allowing this to be called
+  /// Parks on SuspendSemaphore, which is async-signal-safe, allowing this to be called
   /// from a signal handler (e.g., the SIGRTMIN suspend signal handler)
   /// without risking deadlock or heap corruption from non-reentrant
   /// mutex/condvar operations.
   void WaitSuspended() {
-    // The suspend signal does not queue, and a Resume() whose sem_post lands
+    // The suspend signal does not queue, and a Resume() whose post lands
     // before the signal is delivered leaves a token behind. Re-check the
     // count rather than trusting one token, or that stale post releases the
     // next suspend immediately.
     while (suspend_count_.load(std::memory_order_acquire) > 0) {
-      int ret;
-      do {
-        ret = sem_wait(&suspend_sem_);
-      } while (ret == -1 && errno == EINTR);
-      if (ret == -1) {
+      if (!suspend_sem_.Wait()) {
         // The semaphore is gone (the thread has been joined). Do not spin.
         break;
       }
@@ -1283,7 +1345,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     bool expected = false;
     if (thread_ && joined_.compare_exchange_strong(expected, true)) {
       pthread_join(thread_, nullptr);
-      sem_destroy(&suspend_sem_);
+      suspend_sem_.Destroy();
     }
   }
   pthread_t thread_;
@@ -1297,7 +1359,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   // Written under state_mutex_, but read from the suspend signal handler.
   std::atomic<uint32_t> suspend_count_;
   std::atomic<bool> joined_{false};  // Prevents a second pthread_join
-  sem_t suspend_sem_;  // Async-signal-safe suspend/resume semaphore
+  SuspendSemaphore suspend_sem_;  // Async-signal-safe suspend/resume
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;
