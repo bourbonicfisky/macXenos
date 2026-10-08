@@ -752,7 +752,7 @@ button.tray {
 .pad-chip--guide {
   padding-inline: 0;
   width: 1.3em;
-  background: radial-gradient(circle at 50% 35%, #d8ffd0 0%, #6fd04f 45%, #2f7d18 100%);
+  background: radial-gradient(circle at 50% 28%, #a7d1ff 0%, #2f7fe0 52%, #164f9c 100%);
   color: #fff;
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
 }
@@ -905,8 +905,7 @@ button.tray {
 }
 
 
-/* The Guide button in the legend: the pad's green orb at the face buttons'
-   size. */
+/* The Guide button in the legend: a blue orb at the face buttons' size. */
 .legend-guide {
   width: 1.3em;
   height: 1.3em;
