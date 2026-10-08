@@ -84,6 +84,11 @@ export function FolderEditor() {
                   <span className="subblade-label truncate">Add a Folder</span>
                 </button>
               </li>
+              {folders.length ? (
+                <li className="menu-section subblade-section" aria-hidden="true">
+                  Folders
+                </li>
+              ) : null}
               {folders.map((path, index) => (
                 <li key={path} className="subblade-item">
                   <button type="button" {...rowProps(index + 1)} aria-label={`${path}, remove`}>

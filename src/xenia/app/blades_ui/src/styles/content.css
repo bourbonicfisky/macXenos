@@ -1442,3 +1442,34 @@ button.tray {
 .subblade[data-side="left"] .subblade-tab-shadow {
   filter: drop-shadow(-8px 0 14px rgba(0, 0, 0, 0.35));
 }
+
+/* A subhead in a sub-blade's menu: the blades' section label, standing on
+   its own divider. */
+.subblade .subblade-section {
+  padding-top: 1.3em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.subblade[data-tone="metal"] .subblade-section {
+  color: rgba(38, 41, 36, 0.62);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+/* The header and legend bars run square into the screen edge; only their
+   ends under the tab are rounded. */
+.subblade[data-side="right"] .blade-head {
+  border-radius: 0 0 0 22px;
+}
+
+.subblade[data-side="right"] .blade-legend {
+  border-radius: 28px 0 0 0;
+}
+
+.subblade[data-side="left"] .blade-head {
+  border-radius: 0 0 22px 0;
+}
+
+.subblade[data-side="left"] .blade-legend {
+  border-radius: 0 28px 0 0;
+}
