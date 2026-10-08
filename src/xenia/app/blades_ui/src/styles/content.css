@@ -363,6 +363,10 @@
   animation-name: toast-in-top;
 }
 
+.toast-region[data-position^="top"] .toast[data-leaving] {
+  animation-name: toast-out-top;
+}
+
 @media (max-width: 860px) {
   .toast-region {
     bottom: calc(16px + env(safe-area-inset-bottom, 0px));
@@ -390,7 +394,11 @@
   color: #f4f4f4;
   font-size: clamp(0.95rem, 2.4dvh, 1.3rem);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
-  animation: toast-in 420ms var(--ease-blade) both;
+  animation: toast-in 440ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+.toast[data-leaving] {
+  animation: toast-out 320ms cubic-bezier(0.4, 0, 0.8, 0.4) both;
 }
 
 .toast-orb {
@@ -410,25 +418,64 @@
   font-weight: 600;
 }
 
+/* In: rises from a little below, overshooting a touch past full size before
+   settling, so it lands with a pop. Out: sinks back and fades. Top positions
+   mirror both, coming down from the edge and going back up to it. */
 @keyframes toast-in {
-  from {
+  0% {
     opacity: 0;
-    transform: translateY(18px) scale(0.96);
+    transform: translateY(16px) scale(0.9);
   }
-  to {
+  55% {
+    opacity: 1;
+    transform: translateY(-3px) scale(1.035);
+  }
+  80% {
+    transform: translateY(1px) scale(0.995);
+  }
+  100% {
     opacity: 1;
     transform: none;
   }
 }
 
 @keyframes toast-in-top {
-  from {
+  0% {
     opacity: 0;
-    transform: translateY(-18px) scale(0.96);
+    transform: translateY(-16px) scale(0.9);
   }
-  to {
+  55% {
+    opacity: 1;
+    transform: translateY(3px) scale(1.035);
+  }
+  80% {
+    transform: translateY(-1px) scale(0.995);
+  }
+  100% {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+}
+
+@keyframes toast-out-top {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.96);
   }
 }
 
