@@ -1,14 +1,16 @@
-import { inApp, send } from "../native";
+import { getNative, inApp, send } from "../native";
 import { getPreferences, VolumePref } from "./preferences";
 
 /**
- * The Blades dashboard's own sounds (public/dash-sounds, AAC copies of the
- * pack in assets-source/dash-sounds). Nothing is fetched until sound is turned
- * on, and nothing plays while it is off.
+ * The Blades dashboard's sounds. They are not shipped: the app downloads a
+ * community pack on request (dashboard_sounds_mac.h) and plays the files
+ * natively, under the names below. Until they are there the dashboard is
+ * silent. In a browser (npm run dev) they are read from public/dash-sounds,
+ * if a developer copied them there; that folder is never committed.
  *
- * Web Audio rather than <audio>, so a focus tick lands on the keypress instead
- * of a beat later. Browsers keep the context suspended until the first click
- * or keypress; it resumes on that gesture.
+ * Web Audio rather than <audio> in the browser, so a focus tick lands on the
+ * keypress instead of a beat later. Browsers keep the context suspended until
+ * the first click or keypress; it resumes on that gesture.
  */
 
 export type SoundName =
@@ -24,25 +26,28 @@ export type SoundName =
   | "back"
   | "notify";
 
+// The installed files (without .wav). The pack has one blade-switch sound
+// where the dashboard had four, and no separate "nowhere further" tick: that
+// is the focus tick, quieter.
 const FILES: Record<SoundName, string> = {
-  // A blade slides open: the dashboard gave each blade position its own.
-  switch1: "dash_BladeSwitch_1",
-  switch2: "dash_BladeSwitch_2",
-  switch3: "dash_BladeSwitch_3",
-  switch4: "dash_BladeSwitch_4",
-  focus: "btn_Focus", // the cursor moves to another row
-  select: "btn_Focus", // A: a row, button or option is chosen
-  bump: "btn_InactiveFocus", // nowhere further to go
-  toggle: "tab_Switch", // day / night
-  open: "btn_Focus", // A opens a row's sub-menu
-  back: "btn_Back", // B leaves it
-  notify: "NotifyPopup" // the "Preference saved" toast
+  switch1: "blade",
+  switch2: "blade",
+  switch3: "blade",
+  switch4: "blade",
+  focus: "focus", // the cursor moves to another row
+  select: "select", // A: a row, button or option is chosen
+  bump: "focus", // nowhere further to go
+  toggle: "toggle", // day / night
+  open: "select", // A opens a row's sub-menu
+  back: "back", // B leaves it
+  notify: "notify" // the "Preference saved" toast
 };
+
+const LEVEL: Partial<Record<SoundName, number>> = { bump: 0.45 };
 
 const SWITCHES: SoundName[] = ["switch1", "switch2", "switch3", "switch4"];
 
-/** The switch sound for the blade at this position. There are four; blades
-    past the fourth reuse the last. */
+/** The switch sound for the blade at this position. */
 export function switchSound(index: number): SoundName {
   return SWITCHES[Math.min(Math.max(index, 0), SWITCHES.length - 1)];
 }
@@ -86,13 +91,12 @@ export function loadSounds(): Promise<void> {
   loading = Promise.all(
     [...new Set(Object.values(FILES))].map(async (file) => {
       try {
-        const response = await fetch(`/dash-sounds/${file}.m4a`);
+        const response = await fetch(`/dash-sounds/${file}.wav`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         buffers.set(file, await ctx.decodeAudioData(await response.arrayBuffer()));
-      } catch (error) {
-        // A missing sound stays silent rather than breaking the page, but
-        // says so (the app logs console.error as "Blades page:").
-        console.error(`dashboard sound ${file} did not load: ${error}`);
+      } catch {
+        // Not there: the dashboard stays silent, as in the app before the
+        // download.
       }
     })
   ).then(() => undefined);
@@ -102,8 +106,10 @@ export function loadSounds(): Promise<void> {
 export function playSound(name: SoundName) {
   const prefs = getPreferences();
   if (prefs.sound !== "on") return;
+  const gain = GAIN[prefs.volume] * (LEVEL[name] ?? 1);
   if (inApp()) {
-    send({ op: "sound", file: FILES[name], gain: GAIN[prefs.volume] });
+    if (getNative().dashSounds.status !== "ready") return;
+    send({ op: "sound", file: FILES[name], gain });
     return;
   }
   const ctx = audio();
@@ -114,19 +120,9 @@ export function playSound(name: SoundName) {
     void loadSounds();
     return;
   }
-  output.gain.value = GAIN[prefs.volume];
+  output.gain.value = gain;
   const source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(output);
   source.start();
 }
-
-// State for the app's debug log (blades_overlay_mac.mm logs it on close).
-(window as unknown as { __xeniaSoundDebug: () => unknown }).__xeniaSoundDebug = () => ({
-  context: context?.state ?? "none",
-  sampleRate: context?.sampleRate,
-  loaded: buffers.size,
-  loading: loading !== null,
-  sound: getPreferences().sound,
-  volume: getPreferences().volume
-});

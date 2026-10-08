@@ -22,6 +22,7 @@
 #include "xenia/app/emulator_window.h"
 #if XE_PLATFORM_MAC
 #include "xenia/app/controller_home_button_mac.h"
+#include "xenia/app/dashboard_sounds_mac.h"
 #endif
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/base/string_util.h"
@@ -45,6 +46,7 @@
 #include "version.h"
 
 DECLARE_bool(enable_xmp);
+DECLARE_bool(dashboard_sounds_asked);
 DECLARE_string(preferences_button);
 DECLARE_string(gpu);
 
@@ -709,6 +711,25 @@ std::string BladesModel::BuildStateJson() {
 
   // The release this build belongs to, as Preferences names it; the build
   // itself (branch, commit, date) goes beside it.
+  // The dashboard's sounds are downloaded on request, never shipped.
+  w.Key("dashSounds");
+  w.StartObject();
+  w.Key("status");
+  w.String(window_.DashboardSoundsStatus());
+  w.Key("error");
+  w.String(window_.dashboard_sounds_error_.c_str());
+  w.Key("asked");
+  w.Bool(cvars::dashboard_sounds_asked);
+#if XE_PLATFORM_MAC
+  w.Key("pack");
+  w.String(dashboard_sounds::kPackName);
+  w.Key("author");
+  w.String(dashboard_sounds::kPackAuthor);
+  w.Key("site");
+  w.String(dashboard_sounds::kPackSite);
+#endif
+  w.EndObject();
+
   w.Key("appVersion");
   w.String(kReleaseName);
   w.Key("appBuild");
@@ -1035,6 +1056,18 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
       std::error_code ec;
       std::filesystem::create_directories(path, ec);
       LaunchFileExplorer(path);
+    }
+    return Result::kPush;
+  }
+
+  if (op == "dashSounds") {
+    // Either answer to the first-run offer is final: it isn't asked again.
+    if (cvar::IConfigVar* var = FindSetting("dashboard_sounds_asked")) {
+      SetSetting(var, rapidjson::Value(true));
+      config::SaveConfig();
+    }
+    if (string_member("action") == "download") {
+      window_.DownloadDashboardSounds();
     }
     return Result::kPush;
   }

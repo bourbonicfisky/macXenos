@@ -22,8 +22,8 @@ namespace app {
 // A WKWebView sits above the window's Metal view in the same container and
 // loads the page from src/xenia/app/blades_ui/dist, which the build copies
 // beside the binary as blades/ (and the packager into Contents/Resources).
-// It is served from its own URL scheme, so the page's absolute paths (/fonts,
-// /dash-sounds) resolve against that folder. Messages from the page arrive
+// It is served from its own URL scheme, so the page's absolute paths (/fonts)
+// resolve against that folder. Messages from the page arrive
 // through `on_message`; PushState hands the page new state.
 //
 // Plain C++ interface (the .mm owns the Objective-C objects), so the
@@ -40,10 +40,11 @@ class BladesOverlay {
   // `container_view` is the window's content view (NSView*), `game_view` the
   // Metal view inside it that has keyboard focus when the overlay is hidden.
   // `title_icon_root` is served to the page as /title-icons/ (the games'
-  // icons, EmulatorWindow::TitleIconPath).
+  // icons, EmulatorWindow::TitleIconPath). `sound_root` holds the downloaded
+  // dashboard sounds (dashboard_sounds_mac.h); missing ones stay silent.
   BladesOverlay(void* container_view, void* game_view,
                 const std::filesystem::path& title_icon_root,
-                Callbacks callbacks);
+                const std::filesystem::path& sound_root, Callbacks callbacks);
   ~BladesOverlay();
 
   BladesOverlay(const BladesOverlay&) = delete;

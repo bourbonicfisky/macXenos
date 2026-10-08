@@ -86,6 +86,16 @@ export function mockState(): NativeState {
       { name: "Viva Piñata", path: "/Games/Viva Pinata.iso", lastPlayed: 1790900000, icon: "" }
     ],
     musicPlayer: { available: false, state: "idle", volume: 1 },
+    // In the browser the sounds come from public/dash-sounds if a developer
+    // put them there (never committed); "missing" shows the first-run offer.
+    dashSounds: {
+      status: "missing",
+      error: "",
+      asked: false,
+      pack: "Xbox 360 Blades",
+      author: "squabbled",
+      site: "DeckThemes"
+    },
     profiles: [
       { xuid: "E030000012345678", gamertag: "dmug", slot: 0 },
       { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
@@ -97,6 +107,15 @@ export function mockState(): NativeState {
 
 export function mockApply(state: NativeState, message: NativeMessage): NativeState {
   switch (message.op) {
+    case "dashSounds":
+      return {
+        ...state,
+        dashSounds: {
+          ...state.dashSounds,
+          asked: true,
+          status: message.action === "download" ? "ready" : state.dashSounds.status
+        }
+      };
     case "set": {
       const cvar = state.cvars[message.name];
       if (!cvar) return state;

@@ -15,6 +15,18 @@ Controller and Console menus, which open it on their own blade. While it is
 open over a game the game is frozen and muted (`dashboard_freezes_game`). A
 hash picks the blade and, optionally, the row: `#controller/hotkeys`.
 
+## Sounds are downloaded, not shipped
+
+The dashboard's sounds are Microsoft's, so neither the repository nor the app
+carries them. On first launch the page offers to download a fan-made pack
+("Xbox 360 Blades" by squabbled, published on DeckThemes); System > Dashboard
+sounds offers it again later. The app fetches the zip, checks it against a
+pinned SHA-256, and unpacks the six sounds it uses into
+`<storage_root>/dashboard_sounds` (`dashboard_sounds_mac.mm`, which also holds
+the by-ear mapping from the pack's Steam Deck names). Until then the dashboard
+is silent. For `npm run dev`, copy those files into `public/dash-sounds/`,
+which is git-ignored.
+
 ## How it fits together
 
 | Piece | Where |

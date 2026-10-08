@@ -97,6 +97,12 @@ class EmulatorWindow {
   // Where a game's icon is kept once seen (<storage>/title_icons/ID.png),
   // for the dashboard's Home blade.
   std::filesystem::path TitleIconPath(uint32_t title_id) const;
+  // The downloaded dashboard sounds (dashboard_sounds_mac.h).
+  std::filesystem::path DashboardSoundsPath() const;
+  // "missing", "downloading", "ready" or "failed" ("unavailable" off macOS).
+  const char* DashboardSoundsStatus() const;
+  // Starts the download in the background; the page hears when it ends.
+  void DownloadDashboardSounds();
   void SaveTitleIcon(uint32_t title_id, std::span<const uint8_t> png) const;
   // Creates or removes the frame rate counter to match show_fps.
   void UpdateFpsOverlay();
@@ -374,6 +380,9 @@ class EmulatorWindow {
   std::atomic<bool> preferences_button_stop_{false};
   std::atomic<bool> blades_visible_{false};
   bool game_frozen_ = false;
+  bool dashboard_sounds_downloading_ = false;
+  // Why the last download failed; empty when it hasn't.
+  std::string dashboard_sounds_error_;
   bool mute_before_freeze_ = false;
 
   // Declared after window_, so they go before the window they draw in.

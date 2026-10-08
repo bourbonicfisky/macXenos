@@ -60,6 +60,7 @@
 #include "xenia/ui/process_relaunch_mac.h"
 #include "xenia/app/blades_overlay_mac.h"
 #include "xenia/app/controller_home_button_mac.h"
+#include "xenia/app/dashboard_sounds_mac.h"
 #include "xenia/ui/window_mac.h"
 #endif  // XE_PLATFORM_MAC
 #include "xenia/ui/imgui_dialog.h"
@@ -94,6 +95,11 @@ DEFINE_string(disabled_controller_hotkeys, "",
               "Comma-separated controller-hotkey function ids the user has "
               "disabled (managed by the Controllers UI).",
               "HID");
+
+DEFINE_bool(dashboard_sounds_asked, false,
+            "Whether the dashboard has offered to download its sounds. They "
+            "are not included with the app.",
+            "UI");
 
 DEFINE_bool(dashboard_freezes_game, true,
             "Freeze the running game while the dashboard is open, so nothing "
@@ -1625,7 +1631,8 @@ void EmulatorWindow::ShowPreferences(const std::string& blade) {
     };
     blades_overlay_ = std::make_unique<BladesOverlay>(
         mac_window->native_container_view(), mac_window->native_game_view(),
-        TitleIconPath(0).parent_path(), std::move(callbacks));
+        TitleIconPath(0).parent_path(), DashboardSoundsPath(),
+        std::move(callbacks));
   }
   if (!blades_overlay_->visible()) {
     // Opening Preferences is opening the console's system UI: the running
@@ -2679,6 +2686,44 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
                      std::ofstream::trunc);
   file << toml_table;
   file.close();
+}
+
+std::filesystem::path EmulatorWindow::DashboardSoundsPath() const {
+  return emulator_->storage_root() / "dashboard_sounds";
+}
+
+const char* EmulatorWindow::DashboardSoundsStatus() const {
+#if XE_PLATFORM_MAC
+  if (dashboard_sounds_downloading_) {
+    return "downloading";
+  }
+  if (dashboard_sounds::Present(DashboardSoundsPath())) {
+    return "ready";
+  }
+  return dashboard_sounds_error_.empty() ? "missing" : "failed";
+#else
+  return "unavailable";
+#endif
+}
+
+void EmulatorWindow::DownloadDashboardSounds() {
+#if XE_PLATFORM_MAC
+  if (dashboard_sounds_downloading_) {
+    return;
+  }
+  dashboard_sounds_downloading_ = true;
+  dashboard_sounds_error_.clear();
+  dashboard_sounds::Download(
+      DashboardSoundsPath(), [this](std::string error) {
+        app_context().CallInUIThread([this, error]() {
+          dashboard_sounds_downloading_ = false;
+          dashboard_sounds_error_ = error;
+          if (blades_overlay_ && blades_model_) {
+            blades_overlay_->PushState(blades_model_->BuildStateJson());
+          }
+        });
+      });
+#endif
 }
 
 std::filesystem::path EmulatorWindow::TitleIconPath(uint32_t title_id) const {

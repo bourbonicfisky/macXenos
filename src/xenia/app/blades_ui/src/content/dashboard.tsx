@@ -1,15 +1,54 @@
 import type { BladeDef } from "../ui/blade";
 import { Bullets } from "../ui/blade-menu";
-import type { NativeState } from "../native";
+import { useNative, type NativeState } from "../native";
 import {
   PreferenceOptions,
   PreferenceValue,
   ReducedMotionOverride,
   SoundValue
 } from "../ui/preference-controls";
-import { Aside } from "./parts";
+import { Aside, PaneAction } from "./parts";
+import { downloadDashSounds, packCredit } from "../ui/sound-offer";
 import { Options, Value } from "../ui/settings-controls";
 import { dashboardShortcuts } from "./home";
+
+/** Where the sounds come from, and the way to get them if they aren't here. */
+function SoundSource() {
+  const { dashSounds } = useNative();
+  switch (dashSounds.status) {
+    case "ready":
+      return <Aside>Downloaded: {packCredit(dashSounds)}.</Aside>;
+    case "downloading":
+      return <Aside>Downloading {packCredit(dashSounds)} in the background.</Aside>;
+    case "missing":
+    case "failed":
+      return (
+        <>
+          <p className="pref-group m-0">Sounds</p>
+          <p className="m-0">
+            macXenos doesn&rsquo;t include the dashboard&rsquo;s sounds. Download a fan-made pack,{" "}
+            {packCredit(dashSounds)}, of about 1&nbsp;MB.
+          </p>
+          {dashSounds.status === "failed" ? (
+            <Aside>The last download failed{dashSounds.error ? `: ${dashSounds.error}` : ""}.</Aside>
+          ) : null}
+          <PaneAction onSelect={downloadDashSounds}>
+            {dashSounds.status === "failed" ? "Try again" : "Download sounds"}
+          </PaneAction>
+        </>
+      );
+    default:
+      return null;
+  }
+}
+
+/** The Sound row's value: what's playing, or why nothing is. */
+function SoundRowValue() {
+  const { dashSounds } = useNative();
+  if (dashSounds.status === "missing" || dashSounds.status === "failed") return <>Not downloaded</>;
+  if (dashSounds.status === "downloading") return <>Downloading</>;
+  return <SoundValue />;
+}
 
 /** The blades' own look and sound, as on the site's Preferences blade. They
     lead the System blade (system.tsx) under a "Dashboard" heading. */
@@ -51,7 +90,7 @@ export function dashboard(state: NativeState): BladeDef {
         id: "sound",
         label: "Dashboard sounds",
         glyph: "sound",
-        value: <SoundValue />,
+        value: <SoundRowValue />,
         heading: "Dashboard sounds",
         detail: (
           <>
@@ -59,6 +98,7 @@ export function dashboard(state: NativeState): BladeDef {
             <PreferenceOptions pref="sound" />
             <p className="pref-group">Volume</p>
             <PreferenceOptions pref="volume" />
+            <SoundSource />
           </>
         )
       },

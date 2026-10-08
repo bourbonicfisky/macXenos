@@ -111,7 +111,8 @@ NSString* MimeTypeFor(NSString* extension) {
   NSTimer* timer;
   BOOL loaded;
   // The dashboard sounds, played here rather than by the page's Web Audio so
-  // they don't depend on WebKit's autoplay and audio-session rules.
+  // they don't depend on WebKit's autoplay and audio-session rules. They are
+  // downloaded on request (dashboard_sounds_mac.h), never shipped.
   NSString* sound_root;
   NSMutableDictionary<NSString*, NSSound*>* sounds;
 }
@@ -120,7 +121,7 @@ NSString* MimeTypeFor(NSString* extension) {
 
 @implementation XeniaBladesHost
 - (void)playSound:(NSString*)file gain:(double)gain {
-  // Only the pack's own names: letters, digits and underscores.
+  // Only the installed sounds' names: letters, digits and underscores.
   NSCharacterSet* allowed = [NSCharacterSet
       characterSetWithCharactersInString:
           @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
@@ -134,7 +135,10 @@ NSString* MimeTypeFor(NSString* extension) {
   NSSound* sound = sounds[file];
   if (!sound) {
     NSString* path = [[sound_root stringByAppendingPathComponent:file]
-        stringByAppendingPathExtension:@"m4a"];
+        stringByAppendingPathExtension:@"wav"];
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+      return;  // Not downloaded (yet): the dashboard is silent.
+    }
     sound = [[NSSound alloc] initWithContentsOfFile:path byReference:YES];
     if (!sound) {
       XELOGW("Blades: dashboard sound {} did not load", file.UTF8String);
@@ -224,6 +228,7 @@ std::filesystem::path BladesOverlay::FindPageRoot() {
 
 BladesOverlay::BladesOverlay(void* container_view, void* game_view,
                              const std::filesystem::path& title_icon_root,
+                             const std::filesystem::path& sound_root,
                              Callbacks callbacks) {
   @autoreleasepool {
     XeniaBladesHost* host = [[XeniaBladesHost alloc] init];
@@ -287,7 +292,7 @@ BladesOverlay::BladesOverlay(void* container_view, void* game_view,
                relativeTo:host->game_view];
     host->web_view = web_view;
     host->sound_root = [NSString
-        stringWithUTF8String:xe::path_to_utf8(root / "dash-sounds").c_str()];
+        stringWithUTF8String:xe::path_to_utf8(sound_root).c_str()];
 
     impl_ = (__bridge_retained void*)host;
   }
@@ -344,13 +349,6 @@ void BladesOverlay::Show(const std::string& blade_id) {
 
 void BladesOverlay::Hide() {
   XeniaBladesHost* host = (__bridge XeniaBladesHost*)impl_;
-  [host->web_view evaluateJavaScript:
-          @"JSON.stringify(window.__xeniaSoundDebug ? window.__xeniaSoundDebug() : null)"
-                   completionHandler:^(id result, NSError* error) {
-                     XELOGD("Blades: sound state {}",
-                            error ? error.localizedDescription.UTF8String
-                                  : [[result description] UTF8String]);
-                   }];
   [host->timer invalidate];
   host->timer = nil;
   host->web_view.hidden = YES;

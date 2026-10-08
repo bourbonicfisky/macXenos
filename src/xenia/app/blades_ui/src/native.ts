@@ -81,6 +81,19 @@ export type ConsoleField = {
   readOnly?: boolean;
 };
 
+/** The dashboard's sounds: not shipped, downloaded on request from a
+    community pack (dashboard_sounds_mac.h), which the page credits. */
+export type DashSounds = {
+  status: "missing" | "downloading" | "ready" | "failed" | "unavailable";
+  /** Why the last download failed. */
+  error: string;
+  /** The first-run offer has been answered, either way. */
+  asked: boolean;
+  pack?: string;
+  author?: string;
+  site?: string;
+};
+
 export type NativeState = {
   /** False until the app has answered "ready"; the mock is always true. */
   connected: boolean;
@@ -109,6 +122,7 @@ export type NativeState = {
   recentTitles: RecentTitle[];
   musicPlayer: MusicPlayer;
   profiles: Profile[];
+  dashSounds: DashSounds;
   /** The release, "1.0 beta 3", for the Dashboard blade. */
   appVersion: string;
   /** The build: branch@commit (date). */
@@ -129,6 +143,7 @@ export type NativeMessage =
   | { op: "rebindReset" }
   | { op: "action"; id: string; value?: number }
   | { op: "sound"; file: string; gain: number }
+  | { op: "dashSounds"; action: "download" | "decline" }
   | { op: "launch"; path: string }
   | { op: "openGame" }
   | { op: "installContent" }
@@ -253,6 +268,7 @@ function emptyState(): NativeState {
     recentTitles: [],
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
+    dashSounds: { status: "unavailable", error: "", asked: true },
     appVersion: "",
     appBuild: ""
   };
