@@ -779,7 +779,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   static const bool s_wait_census = std::getenv("XE_CP_WAIT_CENSUS") != nullptr;
   std::chrono::steady_clock::time_point census_start;
   uint64_t census_requested_us = 0;
-  if (s_wait_census) {
+  const bool pacing_census = FramePacingCensusEnabled();
+  if (s_wait_census || pacing_census) {
     census_start = std::chrono::steady_clock::now();
   }
 
@@ -829,6 +830,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     }
   } while (!matched);
 
+  if (pacing_census && wait_iterations) {
+    GetFramePacingClock().cp_waited_ns.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - census_start)
+                     .count()),
+        std::memory_order_relaxed);
+  }
   if (s_wait_census) {
     struct AddrStat {
       uint32_t addr = 0, ref = 0, mask = 0, cond = 0;

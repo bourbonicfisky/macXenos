@@ -14958,6 +14958,65 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       (__bridge id<MTLCommandQueue>)provider->command_queue();
 
   uint32_t count = swap_count_++;
+  if (FramePacingCensusEnabled()) {
+    // Vblanks between swaps (1, 2, 3, 4, 5+), command-processor active time
+    // per frame (wall minus WAIT_REG_MEM sleep; 4 ms buckets, last >= 48 ms)
+    // and the swap's lateness after the latest vblank (2 ms buckets).
+    struct PacingWindow {
+      uint64_t last_vblank_index = 0;
+      int64_t last_swap_ns = 0;
+      uint32_t vblanks[5] = {};
+      uint32_t active[13] = {};
+      uint32_t phase[9] = {};
+      double active_ms_sum = 0.0, wall_ms_sum = 0.0;
+      uint32_t frames = 0;
+    };
+    static PacingWindow s_pacing;
+    FramePacingClock& clock = GetFramePacingClock();
+    const int64_t now_ns = FramePacingNowNs();
+    const uint64_t vblank_index =
+        clock.vblank_index.load(std::memory_order_acquire);
+    const uint64_t waited_ns =
+        clock.cp_waited_ns.exchange(0, std::memory_order_relaxed);
+    if (s_pacing.last_swap_ns) {
+      const double wall_ms = double(now_ns - s_pacing.last_swap_ns) * 1e-6;
+      const double active_ms =
+          std::max(0.0, wall_ms - double(waited_ns) * 1e-6);
+      const uint64_t vblanks = vblank_index - s_pacing.last_vblank_index;
+      ++s_pacing.vblanks[std::min<uint64_t>(vblanks ? vblanks - 1 : 0, 4)];
+      ++s_pacing.active[std::min<uint32_t>(uint32_t(active_ms / 4.0), 12)];
+      const double phase_ms =
+          double(now_ns - clock.last_vblank_ns.load(std::memory_order_relaxed)) *
+          1e-6;
+      ++s_pacing.phase[std::min<uint32_t>(
+          uint32_t(std::max(0.0, phase_ms) / 2.0), 8)];
+      s_pacing.active_ms_sum += active_ms;
+      s_pacing.wall_ms_sum += wall_ms;
+      ++s_pacing.frames;
+    }
+    s_pacing.last_swap_ns = now_ns;
+    s_pacing.last_vblank_index = vblank_index;
+    if (s_pacing.frames >= 128) {
+      auto join = [](const uint32_t* v, size_t n) {
+        std::string out;
+        for (size_t i = 0; i < n; ++i) {
+          out += fmt::format("{}{}", i ? " " : "", v[i]);
+        }
+        return out;
+      };
+      XELOGI(
+          "FramePacing swap#{}: wall {:.2f} ms/frame, cp active {:.2f} "
+          "ms/frame | vblanks/frame [1,2,3,4,5+] {} | cp active [4 ms "
+          "buckets] {} | swap after vblank [2 ms buckets] {}",
+          count, s_pacing.wall_ms_sum / s_pacing.frames,
+          s_pacing.active_ms_sum / s_pacing.frames, join(s_pacing.vblanks, 5),
+          join(s_pacing.active, 13), join(s_pacing.phase, 9));
+      PacingWindow fresh;
+      fresh.last_swap_ns = s_pacing.last_swap_ns;
+      fresh.last_vblank_index = s_pacing.last_vblank_index;
+      s_pacing = fresh;
+    }
+  }
   if (RcCensusEnabled()) {
     RcCensusNoteSwap(count);
   }

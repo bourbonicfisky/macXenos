@@ -23,6 +23,7 @@
 
 #include "xenia/base/math.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/gpu/frame_pacing_census.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"

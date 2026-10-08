@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/gpu/frame_pacing_census.h"
 #include "xenia/gpu/graphics_system.h"
 
 #include <algorithm>
@@ -388,6 +389,11 @@ void GraphicsSystem::MarkVblank() {
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
+  if (FramePacingCensusEnabled()) {
+    FramePacingClock& clock = GetFramePacingClock();
+    clock.last_vblank_ns.store(FramePacingNowNs(), std::memory_order_relaxed);
+    clock.vblank_index.fetch_add(1, std::memory_order_release);
+  }
 
   // The delivered rate is what guest pacing actually sees; log it so limiter
   // drift is measurable in any run without a title being frame-capped.
