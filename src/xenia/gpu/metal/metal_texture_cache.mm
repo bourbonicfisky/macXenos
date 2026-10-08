@@ -511,6 +511,7 @@ void MetalTextureCache::ClearCache() {
     // Queued guest-write invalidations describe entries that no longer exist.
     std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
     pending_invalidations_.clear();
+    pending_invalidations_nonempty_.store(false, std::memory_order_relaxed);
   }
 
   // Bridges surviving ReleaseDerivedResolveBridges are RETAINED because each
@@ -545,6 +546,7 @@ void MetalTextureCache::SetTracePlayback() {
   }
   std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
   pending_invalidations_.clear();
+  pending_invalidations_nonempty_.store(false, std::memory_order_relaxed);
 }
 
 void MetalTextureCache::SharedMemoryGlobalWatchCallback(
@@ -581,13 +583,22 @@ void MetalTextureCache::QueueInvalidation(uint32_t address_first,
   }
   pending_invalidations_.emplace_back(address_first,
                                       address_last - address_first + 1);
+  pending_invalidations_nonempty_.store(true, std::memory_order_release);
 }
 
 void MetalTextureCache::DrainPendingInvalidations() {
-  std::vector<std::pair<uint32_t, uint32_t>> invalidations;
+  // A range queued after this check is drained by the next call, as one
+  // queued after the swap below always was.
+  if (!pending_invalidations_nonempty_.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::vector<std::pair<uint32_t, uint32_t>>& invalidations =
+      draining_invalidations_;
+  invalidations.clear();
   {
     std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
     invalidations.swap(pending_invalidations_);
+    pending_invalidations_nonempty_.store(false, std::memory_order_relaxed);
   }
   uint32_t evicted = 0;
   static const bool s_census =

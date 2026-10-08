@@ -1092,14 +1092,18 @@ class MetalCommandProcessor : public CommandProcessor {
     // whose range shares a byte with a query range shares a page with it,
     // so the candidate set for a seed scan or a closure step is the union of
     // the touched pages' lists, never the whole queue.
-    std::vector<uint32_t> page_offsets;   // 8193 entries
+    // Each occupied page's list is page_entries[page_begin[page],
+    // page_end[page]); both are written only for pages set in `pages`, so
+    // every reader checks the bit first and a rebuild costs the producers'
+    // pages, not all 8192.
+    std::vector<uint32_t> page_begin;     // 8192 entries
+    std::vector<uint32_t> page_end;       // 8192 entries
     std::vector<uint16_t> page_entries;   // producer indices
     std::vector<uint32_t> candidate_stamp, selected_stamp;  // per producer
     uint32_t query_stamp = 0;
     // Reused per query (capacity kept): the selection frontier.
     std::vector<uint32_t> frontier_scratch;
     // Reused across rebuilds (capacity kept).
-    std::vector<uint32_t> fill_scratch;
     std::vector<metal::PendingProducer> snapshot_scratch;
     // Reused per query: page intervals of the request's two range sets.
     std::vector<std::pair<uint32_t, uint32_t>> seed_spans;

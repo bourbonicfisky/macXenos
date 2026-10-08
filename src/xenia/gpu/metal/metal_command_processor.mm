@@ -1846,6 +1846,32 @@ bool MetalCommandProcessor::SetupContext() {
       [this](uint32_t start, uint32_t length,
              std::vector<std::pair<uint32_t, uint32_t>>* out) {
         const uint64_t end = uint64_t(start) + length;
+        // The producer index's page bitmap holds every pending writeback and
+        // memexport range: no bit on the upload's 64 KiB pages means neither
+        // walk below can find an overlap (uploads with no pending producer
+        // nearby were walking both whole queues, ~1% of Red Dead's command
+        // processor).
+        static const bool s_index_early_out = [] {
+          const char* v = std::getenv("XE_METAL_PRODUCER_INDEX");
+          return !(v && v[0] == '0' && !v[1]);
+        }();
+        if (length && end <= (uint64_t(8192) << 16) && s_index_early_out) {
+          EnsureProducerIndex();
+          const uint32_t first = start >> 16;
+          const uint32_t last =
+              uint32_t(std::min<uint64_t>(end - 1u, 0xFFFFFFFFull) >> 16);
+          bool any = false;
+          for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+            if (producer_index_.pages[page >> 6] &
+                (uint64_t(1) << (page & 63u))) {
+              any = true;
+              break;
+            }
+          }
+          if (!any) {
+            return;
+          }
+        }
         for (const PendingWriteback& wb : pending_writebacks_) {
           if (!wb.gpu_current || wb.staging) {
             continue;
@@ -3515,6 +3541,30 @@ void MetalCommandProcessor::PublishCompletedSubmission(uint64_t submission) {
   completion_cv_.notify_all();
 }
 
+namespace {
+// XE_FRAME_PACING_CENSUS: the command-processor wait site of the current
+// WaitForSubmission (-1 = untagged, e.g. a guest thread's lazy read; not
+// counted), and the blocked time per site.
+enum PacingWaitSite : int {
+  kPacingInFlightCap,
+  kPacingSyncWait,
+  kPacingDrainNeed,
+  kPacingDrainRequired,
+  kPacingSwapRing,
+  kPacingSeamDirect,
+  kPacingWaitSiteCount,
+};
+thread_local int tls_pacing_wait_site = -1;
+std::atomic<uint64_t> g_pacing_wait_site_ns[kPacingWaitSiteCount];
+struct ScopedPacingWaitSite {
+  int previous;
+  explicit ScopedPacingWaitSite(int site) : previous(tls_pacing_wait_site) {
+    tls_pacing_wait_site = site;
+  }
+  ~ScopedPacingWaitSite() { tls_pacing_wait_site = previous; }
+};
+}  // namespace
+
 bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
                                               uint32_t timeout_ms,
                                               bool* out_did_block) {
@@ -3554,11 +3604,20 @@ bool MetalCommandProcessor::WaitForSubmission(uint64_t submission,
       *out_did_block = true;
     }
   }
+  const int64_t pacing_wait_start =
+      FramePacingCensusEnabled() ? FramePacingNowNs() : 0;
   bool ok = completion_cv_.wait_for(
       lock, std::chrono::milliseconds(timeout_ms), [&] {
         return completed_submission_.load(std::memory_order_acquire) >=
                submission;
       });
+  if (pacing_wait_start && tls_pacing_wait_site >= 0) {
+    const uint64_t waited = uint64_t(FramePacingNowNs() - pacing_wait_start);
+    GetFramePacingClock().gpu_waited_ns.fetch_add(waited,
+                                                  std::memory_order_relaxed);
+    g_pacing_wait_site_ns[tls_pacing_wait_site].fetch_add(
+        waited, std::memory_order_relaxed);
+  }
   if (!ok) {
     zero_copy_cost_.Count(
         metal::ZeroCopyCostCounter::kWaitForSubmissionTimeouts);
@@ -4626,6 +4685,7 @@ inline uint64_t SeamNowNs() {
 
 bool MetalCommandProcessor::SeamTimedDirectWait(metal::SeamDirectWait site,
                                                 uint64_t submission) {
+  ScopedPacingWaitSite pacing_site(kPacingSeamDirect);
   if (!SeamTimingEnabled()) {
     return WaitForSubmission(submission);
   }
@@ -4819,7 +4879,10 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
       // GPU-side stall; it lands in the same gpu_wait stage, disclosed by the
       // run's environment.
       const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
-      WaitForSubmission(submission - kMaxInFlightSubmissions);
+      {
+        ScopedPacingWaitSite pacing_site(kPacingInFlightCap);
+        WaitForSubmission(submission - kMaxInFlightSubmissions);
+      }
       if (seam_on) {
         seam_wait_ns = SeamNowNs() - seam_w0;
       }
@@ -4879,6 +4942,7 @@ void MetalCommandProcessor::EndFrameEncoderAndWait(
     // pre-check that races with completion.
     const uint64_t seam_w0 = seam_on ? SeamNowNs() : 0;
     bool did_block = false;
+    ScopedPacingWaitSite pacing_site(kPacingSyncWait);
     if (WaitForSubmission(submission_counter_, 4000,
                           seam_on ? &did_block : nullptr)) {
       PumpCompletedActions();
@@ -12445,8 +12509,7 @@ bool MetalCommandProcessor::IndexRangeOverlapsProducers(
     if (!(occupied & bit)) {
       continue;
     }
-    for (uint32_t k = index.page_offsets[page];
-         k < index.page_offsets[page + 1]; ++k) {
+    for (uint32_t k = index.page_begin[page]; k < index.page_end[page]; ++k) {
       const metal::PendingProducer& p = index.producers[index.page_entries[k]];
       const bool kind_ok =
           (gpu_current_writebacks &&
@@ -12498,7 +12561,12 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
     index.pages.fill(0);
     index.pages_gpu_current.fill(0);
     index.pages_memexport.fill(0);
-    index.page_offsets.assign(8193, 0);
+    if (index.page_begin.size() != 8192u) {
+      index.page_begin.assign(8192u, 0);
+      index.page_end.assign(8192u, 0);
+    }
+    // Count per occupied page (page_end is the counter, zeroed when the
+    // page's bit is first set in this rebuild).
     for (const metal::PendingProducer& p : index.producers) {
       if (!p.range.length()) {
         continue;
@@ -12510,20 +12578,33 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
           : p.state == metal::TransitState::kPendingMemexport ? &index.pages_memexport
                                                               : nullptr;
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
-        index.pages[page >> 6] |= uint64_t(1) << (page & 63u);
-        if (kind_pages) {
-          (*kind_pages)[page >> 6] |= uint64_t(1) << (page & 63u);
+        const uint64_t bit = uint64_t(1) << (page & 63u);
+        if (!(index.pages[page >> 6] & bit)) {
+          index.pages[page >> 6] |= bit;
+          index.page_end[page] = 0;
         }
-        ++index.page_offsets[page + 1];
+        if (kind_pages) {
+          (*kind_pages)[page >> 6] |= bit;
+        }
+        ++index.page_end[page];
       }
     }
-    for (uint32_t page = 0; page < 8192u; ++page) {
-      index.page_offsets[page + 1] += index.page_offsets[page];
+    // Ranges in ascending page order (the dense CSR's layout), then fill in
+    // producer order so each page's list keeps registration order.
+    uint32_t entry_count = 0;
+    for (uint32_t word = 0; word < 128u; ++word) {
+      uint64_t bits = index.pages[word];
+      while (bits) {
+        const uint32_t page = word * 64u + uint32_t(__builtin_ctzll(bits));
+        bits &= bits - 1u;
+        const uint32_t count = index.page_end[page];
+        index.page_begin[page] = entry_count;
+        index.page_end[page] = entry_count;
+        entry_count += count;
+      }
     }
-    index.page_entries.assign(index.page_offsets[8192], 0);
+    index.page_entries.assign(entry_count, 0);
     {
-      std::vector<uint32_t>& fill = index.fill_scratch;
-      fill.assign(index.page_offsets.begin(), index.page_offsets.end() - 1);
       const size_t count = std::min<size_t>(index.producers.size(), 65535);
       for (size_t i = 0; i < count; ++i) {
         const metal::PendingProducer& p = index.producers[i];
@@ -12533,7 +12614,7 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
         const uint32_t first = p.range.start() >> 16;
         const uint32_t last = (p.range.end() - 1u) >> 16;
         for (uint32_t page = first; page <= last && page < 8192u; ++page) {
-          index.page_entries[fill[page]++] = uint16_t(i);
+          index.page_entries[index.page_end[page]++] = uint16_t(i);
         }
       }
     }
@@ -12650,8 +12731,11 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
     const uint32_t first = start >> 16;
     const uint32_t last = (end - 1u) >> 16;
     for (uint32_t page = first; page <= last && page < 8192u; ++page) {
-      for (uint32_t k = index.page_offsets[page];
-           k < index.page_offsets[page + 1]; ++k) {
+      if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+        continue;
+      }
+      for (uint32_t k = index.page_begin[page]; k < index.page_end[page];
+           ++k) {
         fn(index.page_entries[k]);
       }
     }
@@ -12697,13 +12781,26 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
       }
     };
     add_spans(request.resolve_ranges);
+    const size_t first_set_end = spans.size();
     add_spans(request.memexport_ranges);
-    std::sort(spans.begin(), spans.end());
+    // Each set is usually already in ascending order (normalized ranges), so
+    // a linear merge of the two halves gives the sorted order without a sort
+    // per query; any unsorted half takes the full sort.
+    const auto middle = spans.begin() + ptrdiff_t(first_set_end);
+    if (std::is_sorted(spans.begin(), middle) &&
+        std::is_sorted(middle, spans.end())) {
+      std::inplace_merge(spans.begin(), middle, spans.end());
+    } else {
+      std::sort(spans.begin(), spans.end());
+    }
     uint32_t cur_first = 0, cur_last = 0;
     bool have = false;
     auto walk = [&](uint32_t first, uint32_t last) {
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
-        for (uint32_t k = index.page_offsets[page]; k < index.page_offsets[page + 1]; ++k) {
+        if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+          continue;
+        }
+        for (uint32_t k = index.page_begin[page]; k < index.page_end[page]; ++k) {
           const uint32_t i = index.page_entries[k];
           if (index.candidate_stamp[i] == stamp) {
             continue;
@@ -14224,6 +14321,7 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
       }
       const uint64_t wait_t0 = SeamNowNs();
       bool did_block = false;
+      ScopedPacingWaitSite pacing_site(kPacingDrainNeed);
       const bool waited =
           WaitForSubmission(need_class.wait_submission, 4000, &did_block);
       const uint64_t wait_ns = SeamNowNs() - wait_t0;
@@ -14316,6 +14414,7 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
       }
       const uint64_t seam_rw0 = seam_on ? SeamNowNs() : 0;
       bool did_block = false;
+      ScopedPacingWaitSite pacing_site(kPacingDrainRequired);
       bool waited = WaitForSubmission(required_submission, 4000,
                                       seam_c ? &did_block : nullptr);
       if (seam_c) {
@@ -14867,6 +14966,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     frame_lifetime_submissions_[slot] = submission_counter_;
     const uint64_t oldest =
         frame_lifetime_submissions_[(swap_count_ + 1) % kFrameLifetimeRing];
+    ScopedPacingWaitSite pacing_site(kPacingSwapRing);
     if (oldest && WaitForSubmission(oldest, 4000, nullptr)) {
       PumpCompletedActions();
     }
@@ -14968,8 +15068,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       uint32_t vblanks[5] = {};
       uint32_t active[13] = {};
       uint32_t phase[9] = {};
-      double active_ms_sum = 0.0, wall_ms_sum = 0.0;
+      double active_ms_sum = 0.0, wall_ms_sum = 0.0, gpu_wait_ms_sum = 0.0;
       uint32_t frames = 0;
+      uint64_t last_gpu_waited_ns = 0;
+      uint32_t last_draws = 0, last_commits = 0, last_uploads = 0;
+      uint64_t last_site_ns[kPacingWaitSiteCount] = {};
+      uint64_t last_ring_idle_ns = 0;
+      double ring_idle_ms_sum = 0.0;
+      double site_ms_sum[kPacingWaitSiteCount] = {};
     };
     static PacingWindow s_pacing;
     FramePacingClock& clock = GetFramePacingClock();
@@ -14993,9 +15099,58 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       s_pacing.active_ms_sum += active_ms;
       s_pacing.wall_ms_sum += wall_ms;
       ++s_pacing.frames;
+      // Slow frames: what a frame whose command-processor work passes 32 ms
+      // did that a normal one did not.
+      const double gpu_wait_ms =
+          double(clock.gpu_waited_ns.load(std::memory_order_relaxed) -
+                 s_pacing.last_gpu_waited_ns) *
+          1e-6;
+      double site_ms[kPacingWaitSiteCount];
+      for (int k = 0; k < kPacingWaitSiteCount; ++k) {
+        const uint64_t v =
+            g_pacing_wait_site_ns[k].load(std::memory_order_relaxed);
+        site_ms[k] = double(v - s_pacing.last_site_ns[k]) * 1e-6;
+        s_pacing.site_ms_sum[k] += site_ms[k];
+      }
+      const uint32_t frame_draws = draw_count_ - s_pacing.last_draws;
+      const uint32_t frame_commits = frame_commit_count_ - s_pacing.last_commits;
+      const uint32_t uploads =
+          texture_cache_ ? texture_cache_->upload_count() : 0u;
+      const uint32_t frame_uploads =
+          uploads >= s_pacing.last_uploads ? uploads - s_pacing.last_uploads
+                                           : uploads;
+      s_pacing.gpu_wait_ms_sum += gpu_wait_ms;
+      const double ring_idle_ms =
+          double(clock.ring_idle_ns.load(std::memory_order_relaxed) -
+                 s_pacing.last_ring_idle_ns) *
+          1e-6;
+      s_pacing.ring_idle_ms_sum += ring_idle_ms;
+      static uint32_t s_slow_logs = 0;
+      if (active_ms > 32.0 && count >= 12000 && s_slow_logs < 400) {
+        ++s_slow_logs;
+        XELOGI("FramePacingSlow swap#{}: cp active {:.2f} ms (ring idle {:.2f}, gpu wait {:.2f}: "
+               "cap {:.2f} sync {:.2f} drain {:.2f}/{:.2f} ring {:.2f} seam "
+               "{:.2f}) wall {:.2f} vblanks {} draws {} commits {} "
+               "tex-uploads {}",
+               count, active_ms, ring_idle_ms, gpu_wait_ms, site_ms[0], site_ms[1],
+               site_ms[2], site_ms[3], site_ms[4], site_ms[5], wall_ms,
+               vblanks, frame_draws, frame_commits, frame_uploads);
+      }
     }
     s_pacing.last_swap_ns = now_ns;
     s_pacing.last_vblank_index = vblank_index;
+    s_pacing.last_gpu_waited_ns =
+        clock.gpu_waited_ns.load(std::memory_order_relaxed);
+    s_pacing.last_ring_idle_ns =
+        clock.ring_idle_ns.load(std::memory_order_relaxed);
+    for (int k = 0; k < kPacingWaitSiteCount; ++k) {
+      s_pacing.last_site_ns[k] =
+          g_pacing_wait_site_ns[k].load(std::memory_order_relaxed);
+    }
+    s_pacing.last_draws = draw_count_;
+    s_pacing.last_commits = frame_commit_count_;
+    s_pacing.last_uploads =
+        texture_cache_ ? texture_cache_->upload_count() : 0u;
     if (s_pacing.frames >= 128) {
       auto join = [](const uint32_t* v, size_t n) {
         std::string out;
@@ -15006,14 +15161,31 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       };
       XELOGI(
           "FramePacing swap#{}: wall {:.2f} ms/frame, cp active {:.2f} "
-          "ms/frame | vblanks/frame [1,2,3,4,5+] {} | cp active [4 ms "
+          "ms/frame (ring idle {:.2f}, gpu wait {:.2f}: cap {:.2f} sync {:.2f} drain "
+          "{:.2f}/{:.2f} ring {:.2f} seam {:.2f}) | vblanks/frame [1,2,3,4,5+] {} | cp active [4 ms "
           "buckets] {} | swap after vblank [2 ms buckets] {}",
           count, s_pacing.wall_ms_sum / s_pacing.frames,
-          s_pacing.active_ms_sum / s_pacing.frames, join(s_pacing.vblanks, 5),
+          s_pacing.active_ms_sum / s_pacing.frames,
+          s_pacing.ring_idle_ms_sum / s_pacing.frames,
+          s_pacing.gpu_wait_ms_sum / s_pacing.frames,
+          s_pacing.site_ms_sum[0] / s_pacing.frames,
+          s_pacing.site_ms_sum[1] / s_pacing.frames,
+          s_pacing.site_ms_sum[2] / s_pacing.frames,
+          s_pacing.site_ms_sum[3] / s_pacing.frames,
+          s_pacing.site_ms_sum[4] / s_pacing.frames,
+          s_pacing.site_ms_sum[5] / s_pacing.frames, join(s_pacing.vblanks, 5),
           join(s_pacing.active, 13), join(s_pacing.phase, 9));
       PacingWindow fresh;
       fresh.last_swap_ns = s_pacing.last_swap_ns;
       fresh.last_vblank_index = s_pacing.last_vblank_index;
+      fresh.last_gpu_waited_ns = s_pacing.last_gpu_waited_ns;
+      fresh.last_draws = s_pacing.last_draws;
+      fresh.last_commits = s_pacing.last_commits;
+      fresh.last_uploads = s_pacing.last_uploads;
+      fresh.last_ring_idle_ns = s_pacing.last_ring_idle_ns;
+      for (int k = 0; k < kPacingWaitSiteCount; ++k) {
+        fresh.last_site_ns[k] = s_pacing.last_site_ns[k];
+      }
       s_pacing = fresh;
     }
   }

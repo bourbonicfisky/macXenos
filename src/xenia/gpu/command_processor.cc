@@ -1025,6 +1025,8 @@ void CommandProcessor::WorkerThreadMain() {
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
       PrepareForWait();
+      const int64_t pacing_idle_start =
+          FramePacingCensusEnabled() ? FramePacingNowNs() : 0;
       uint32_t loop_count = 0;
       do {
         // If we spin around too much, revert to a "low-power" state.
@@ -1040,6 +1042,11 @@ void CommandProcessor::WorkerThreadMain() {
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D ||
                 read_ptr_index_ == write_ptr_index));
+      if (pacing_idle_start) {
+        GetFramePacingClock().ring_idle_ns.fetch_add(
+            uint64_t(FramePacingNowNs() - pacing_idle_start),
+            std::memory_order_relaxed);
+      }
       ReturnFromWait();
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;

@@ -36,6 +36,10 @@ struct FramePacingClock {
   std::atomic<uint64_t> vblank_index{0};
   std::atomic<int64_t> last_vblank_ns{0};
   std::atomic<uint64_t> cp_waited_ns{0};
+  // Backend: time the command processor blocked waiting for GPU completion.
+  std::atomic<uint64_t> gpu_waited_ns{0};
+  // Command processor idle because the guest had not written more commands.
+  std::atomic<uint64_t> ring_idle_ns{0};
 };
 
 inline FramePacingClock& GetFramePacingClock() {

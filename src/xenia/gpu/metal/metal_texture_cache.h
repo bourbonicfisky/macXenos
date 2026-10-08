@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_TEXTURE_CACHE_H_
 #define XENIA_GPU_METAL_METAL_TEXTURE_CACHE_H_
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -333,6 +334,7 @@ class MetalTextureCache {
 
 
   // Telemetry: uploads performed since the last query (frame stats).
+  uint32_t upload_count() const { return upload_count_; }
   uint32_t ConsumeUploadCount() {
     uint32_t n = upload_count_;
     upload_count_ = 0;
@@ -401,6 +403,12 @@ class MetalTextureCache {
   // callback only queues their ranges; cache mutation and Metal object
   // retirement stay on the GPU thread in DrainPendingInvalidations.
   std::vector<std::pair<uint32_t, uint32_t>> pending_invalidations_;
+  // Set under the mutex whenever the queue gains a range and cleared with
+  // it: the GPU thread drains on every texture binding, and almost every
+  // drain finds the queue empty, so it checks this before taking the lock.
+  std::atomic<bool> pending_invalidations_nonempty_{false};
+  // The drain swaps the queue with this (capacity kept on both sides).
+  std::vector<std::pair<uint32_t, uint32_t>> draining_invalidations_;
   bool trace_playback_ = false;
   void* view_heap_;  // id<MTLBuffer>, not owned.
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).
