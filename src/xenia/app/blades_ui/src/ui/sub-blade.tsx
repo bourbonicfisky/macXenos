@@ -73,7 +73,14 @@ function useClock() {
 
 // --- The frame ----------------------------------------------------------------------
 
-const CLOSE_MS = 420;
+/** The blades' slide (tokens.css --slide, longer for slow motion): leaving
+    takes exactly as long as arriving, so going back is the same slide run in
+    reverse rather than a cut. */
+function slideMs(): number {
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--slide").trim();
+  const ms = value.endsWith("ms") ? parseFloat(value) : parseFloat(value) * 1000;
+  return Number.isFinite(ms) ? ms : 520;
+}
 
 export type RowProps = {
   ref: (element: HTMLButtonElement | null) => void;
@@ -148,10 +155,12 @@ export function SubBlade({
       return () => window.cancelAnimationFrame(frame);
     }
     setEntered(false);
+    // Unmounted once it is fully off screen. Reduced motion has no slide, so
+    // this is a timer rather than a wait for transitionend.
     const timer = window.setTimeout(() => {
       setShown(false);
       returnFocus.current?.focus({ preventScroll: true });
-    }, CLOSE_MS);
+    }, slideMs() + 40);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);

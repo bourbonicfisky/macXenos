@@ -995,10 +995,11 @@ button.tray {
   }
 }
 
+/* The dim follows the sheet, in and out, rather than leaving on its own. */
 .subblade-dim {
   background: rgba(0, 0, 0, 0.62);
   opacity: 0;
-  transition: opacity var(--fade) ease;
+  transition: opacity var(--slide) var(--ease-blade);
 }
 
 .subblade-layer[data-entered] .subblade-dim {
@@ -1023,6 +1024,13 @@ button.tray {
 
 .subblade-layer[data-entered] .subblade {
   transform: none;
+}
+
+/* Going back plays the arrival in reverse: the arrival decelerates into
+   place, so leaving accelerates away along the mirrored curve. */
+.subblade-layer:not([data-entered]) .subblade,
+.subblade-layer:not([data-entered]) .subblade-dim {
+  transition-timing-function: cubic-bezier(0.64, 0, 0.78, 0);
 }
 
 .subblade-shadow {

@@ -305,6 +305,25 @@
   opacity: 1;
 }
 
+/* A blade folding into a rail keeps its content inside its own shrinking
+   box. Overflow runs to the end of the line, so without this a blade going
+   back to the right rail (←) spilled its content across that rail's tabs as
+   it left, where one leaving for the left rail is simply covered by the
+   blade arriving over it. Content on the right rail is anchored to the box's
+   right edge, so the arriving blade sweeps across it from the left: the same
+   motion as going forward, mirrored. */
+.blade[data-state="tab"] .blade-inner {
+  overflow: hidden;
+}
+
+.blade[data-side="right"] .blade-inner {
+  direction: rtl;
+}
+
+.blade[data-side="right"] .blade-inner > * {
+  direction: ltr;
+}
+
 /* The header is a lighter cap, not a darker one: a glossy sheet whose rounded
    lower corners make a shelf the body tucks under. Only the title on it is
    white. */
