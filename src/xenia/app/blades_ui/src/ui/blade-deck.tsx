@@ -142,7 +142,7 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
       </div>
 
       <AllGames tone={blades[active].tone} />
-      <FolderEditor tone={blades[active].tone} />
+      <FolderEditor />
     </>
   );
 }

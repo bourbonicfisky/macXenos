@@ -1198,3 +1198,157 @@ button.tray {
 .legend-stack--right {
   justify-items: end;
 }
+
+/* --- Brushed metal (the console's system sub-blades) ----------------------
+   Game Folders wears the Profile sub-blade's look: a silver sheet brushed
+   side to side, olive-grey bars for the header and the legend, a pale metal
+   tab with the guide's ring and the player on it, plain menu rows on grooves
+   lit by a white sheen between two green glow lines, and inset cards. */
+.subblade[data-tone="metal"] {
+  --b-hi: #e3e5e0;
+  --b-base: #b9bcb5;
+  --b-lo: #7c8179;
+  --b-rim: #f6f7f4;
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --b-ink: #262924;
+  --b-ink-soft: rgba(38, 41, 36, 0.72);
+  --metal-bar-a: #8f958a;
+  --metal-bar-b: #697064;
+  --metal-glow: #86de55;
+}
+
+:root[data-theme="dark"] .subblade[data-tone="metal"] {
+  --b-hi: #c9ccc6;
+  --b-base: #9fa39c;
+  --b-lo: #666b63;
+  --metal-bar-a: #737a6e;
+  --metal-bar-b: #50564c;
+}
+
+.subblade[data-tone="metal"] .subblade-skin {
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.07) 0 1px,
+      rgba(0, 0, 0, 0.025) 1px 3px,
+      rgba(255, 255, 255, 0.04) 3px 4px
+    ),
+    radial-gradient(70% 55% at 30% 40%, rgba(255, 255, 255, 0.35), transparent 70%),
+    linear-gradient(180deg, var(--b-hi) 0%, var(--b-base) 45%, color-mix(in srgb, var(--b-lo) 35%, var(--b-base)) 100%);
+}
+
+.subblade[data-tone="metal"] .blade-head,
+.subblade[data-tone="metal"] .blade-legend {
+  background:
+    repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, var(--metal-bar-a) 0%, var(--metal-bar-b) 100%);
+}
+
+.subblade[data-tone="metal"] .subblade-tab-skin {
+  --tab-shade: 90deg;
+  background:
+    linear-gradient(var(--tab-shade), rgba(0, 0, 0, 0.28) 0%, transparent 18%, rgba(255, 255, 255, 0.5) 46%, transparent 70%),
+    linear-gradient(180deg, #e9ebe6 0%, #c3c6bf 50%, #a7aba3 100%);
+}
+
+.subblade[data-side="right"][data-tone="metal"] .subblade-tab-skin {
+  --tab-shade: 270deg;
+}
+
+.subblade[data-tone="metal"] .subblade-tab {
+  color: #2a2c29;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* The guide's ring on every sub-blade tab: grey, with player one's quarter
+   lit green. */
+.subblade-ring {
+  width: 1.5em;
+  height: 1.5em;
+  border-radius: 50%;
+  background: conic-gradient(from -90deg, var(--metal-glow, #86de55) 0 25%, rgba(150, 154, 147, 0.9) 25% 100%);
+  -webkit-mask: radial-gradient(circle, transparent 52%, #000 54%);
+  mask: radial-gradient(circle, transparent 52%, #000 54%);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+.subblade[data-tone="metal"] .subblade-label {
+  font-size: 1.05em;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.subblade[data-tone="metal"] .subblade-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 2.4em;
+  border-color: transparent;
+  border-radius: 0;
+}
+
+/* The focus: a white sheen brightest in the middle, between two thin green
+   glow lines that fade out at their ends. */
+.subblade[data-tone="metal"] .menu-row[data-focused="true"] {
+  border-color: transparent;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0.92) 48%, rgba(255, 255, 255, 0.3) 100%);
+  box-shadow: none;
+}
+
+.subblade[data-tone="metal"] .menu-row[data-focused="true"]::before,
+.subblade[data-tone="metal"] .menu-row[data-focused="true"]::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent 0%, var(--metal-glow) 35%, var(--metal-glow) 65%, transparent 100%);
+  filter: blur(0.6px) drop-shadow(0 0 4px var(--metal-glow));
+  pointer-events: none;
+}
+
+.subblade[data-tone="metal"] .menu-row[data-focused="true"]::before {
+  top: -2px;
+}
+
+.subblade[data-tone="metal"] .menu-row[data-focused="true"]::after {
+  bottom: -2px;
+}
+
+/* Inset cards beside the menu, as the gamercard and bio boxes sat. */
+.subblade-card {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.1) 100%);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18), 0 1px 0 rgba(255, 255, 255, 0.4);
+  color: var(--b-ink);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.subblade-card--tall {
+  min-height: 7em;
+}
+
+.subblade-card-head {
+  padding: 0.35em 0.7em;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.25) 100%);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.subblade-card-body {
+  padding: 0.5em 0.75em;
+  line-height: 1.35;
+}
+
+/* A sub-blade's highlight is its focus mark; no outline on top of it. */
+.subblade-row:focus-visible {
+  outline: none;
+}
+
+/* Metal menu rows sit on grooves: a dark cut with a lit edge under each. */
+.subblade[data-tone="metal"] .subblade-item,
+.subblade[data-tone="metal"] .subblade-item + .subblade-item {
+  border-top: 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}

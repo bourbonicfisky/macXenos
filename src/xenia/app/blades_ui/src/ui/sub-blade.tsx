@@ -94,7 +94,9 @@ export type RowProps = {
 type SubBladeProps = {
   id: SubBladeId;
   side: "left" | "right";
-  tone: BladeTone;
+  /** The blade's own colour, or "metal": the brushed silver of the
+      console's system sub-blades (Profile, Settings). */
+  tone: BladeTone | "metal";
   title: string;
   count: number;
   /** A, Return or a click on row `index`. */
@@ -243,7 +245,7 @@ export function SubBlade({
       rowRefs.current[index] = element;
     },
     className:
-      "menu-row subblade-row grid w-full items-center gap-x-[0.7em] rounded-row px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left",
+      "menu-row subblade-row relative grid w-full items-center gap-x-[0.7em] rounded-row px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left",
     "data-focused": index === clamped ? "true" : undefined,
     onMouseEnter: () => {
       if (index !== clamped) setFocus(index);
@@ -321,9 +323,11 @@ export function SubBlade({
 
         {/* The sub-blade's own tab, with the signed-in player on it. */}
         <span
-          className="subblade-tab absolute inset-y-0 flex justify-center pt-[21.5dvh] text-[clamp(1.05rem,3.2dvh,2.1rem)]"
+          className="subblade-tab absolute inset-y-0 flex flex-col items-center gap-[7dvh] pt-[9dvh] text-[clamp(1.05rem,3.2dvh,2.1rem)]"
           aria-hidden="true"
         >
+          {/* The guide's ring, lit in player one's quarter. */}
+          <span className="subblade-ring" />
           <span className="subblade-tab-label">{player?.gamertag ?? ""}</span>
         </span>
       </section>
