@@ -178,3 +178,23 @@ add_custom_command(TARGET xenia-app POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xenia-app>/game_configs"
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/docs/game_configs" "$<TARGET_FILE_DIR:xenia-app>/game_configs"
   COMMENT "Copying built-in per-title configs")
+
+# The Preferences blades (blades_model.cc reads and writes JSON; the overlay
+# hosts the page in WebKit).
+target_include_directories(xenia-app PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/rapidjson/include)
+if(APPLE)
+  target_link_libraries(xenia-app PRIVATE "-framework WebKit"
+                                          "-framework GameController")
+  # The page is built from src/xenia/app/blades_ui (npm run build) into its
+  # dist/, which is checked in so building the app needs no Node. It is read
+  # from blades/ beside the binary; the bundle packager copies the same folder
+  # into Contents/Resources.
+  # A target of its own that runs on every build: a rebuilt page alone does
+  # not relink the binary, so a POST_BUILD step would leave the old page.
+  add_custom_target(xenia-app-blades ALL
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:xenia-app>/blades"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/blades_ui/dist" "$<TARGET_FILE_DIR:xenia-app>/blades"
+    COMMENT "Copying the Preferences blades")
+  add_dependencies(xenia-app xenia-app-blades)
+endif()

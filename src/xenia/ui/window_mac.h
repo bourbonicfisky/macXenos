@@ -11,6 +11,7 @@
 #define XENIA_UI_WINDOW_MAC_H_
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -36,6 +37,23 @@ class MacWindow : public Window {
   // with a credits block of clickable links. Also invoked by the application
   // menu's About item.
   void ShowAboutDialog() override;
+
+  // The window's content view (NSView*): a plain container holding the game's
+  // Metal view, so other views (the Preferences overlay) can sit above it.
+  void* native_container_view() const { return container_view_; }
+  // The Metal view inside the container (NSView*), which has keyboard focus.
+  void* native_game_view() const { return metal_view_; }
+
+  // What the application menu's Settings… item (⌘,) does.
+  void SetSettingsHandler(std::function<void()> handler) {
+    settings_handler_ = std::move(handler);
+  }
+  void HandleSettingsRequested() {
+    if (settings_handler_) {
+      auto handler = settings_handler_;
+      handler();
+    }
+  }
 
   // Called by the Cocoa window delegate (defined in the .mm).
   void HandleResize();
@@ -94,6 +112,8 @@ class MacWindow : public Window {
   // Opaque Objective-C pointers (this header is included from plain C++ too).
   void* window_ = nullptr;     // NSWindow*
   void* metal_view_ = nullptr; // NSView* hosting a CAMetalLayer
+  void* container_view_ = nullptr;  // NSView*, the window's content view
+  std::function<void()> settings_handler_;
   void* delegate_ = nullptr;   // XeniaWindowDelegate*
 };
 

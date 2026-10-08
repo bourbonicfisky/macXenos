@@ -129,6 +129,16 @@ rm -rf "${SLICE_TMP}"
 # readable in both light and dark mode.
 [[ -f "${CREDITS_SRC}" ]] && cp "${CREDITS_SRC}" "${CONTENTS}/Resources/Credits.rtf" \
   || log "warning: no Credits.rtf at ${CREDITS_SRC}; About panel will show no credits"
+# The Preferences blades (src/xenia/app/blades_ui, built into its dist/) and
+# the built-in per-title configs, both read from Contents/Resources by the
+# binary (BladesOverlay::FindPageRoot, config::LoadGameConfig).
+BLADES_SRC="${REPO_ROOT}/src/xenia/app/blades_ui/dist"
+if [[ -f "${BLADES_SRC}/index.html" ]]; then
+  cp -R "${BLADES_SRC}" "${CONTENTS}/Resources/blades"
+else
+  log "warning: no built Preferences page at ${BLADES_SRC}; run npm run build in src/xenia/app/blades_ui"
+fi
+cp -R "${REPO_ROOT}/docs/game_configs" "${CONTENTS}/Resources/game_configs"
 
 # Info.plist from template with version substitution.
 sed -e "s/@SHORT_VERSION@/${SHORT_VERSION}/g" \

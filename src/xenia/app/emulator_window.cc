@@ -10,7 +10,9 @@
 #include "xenia/app/emulator_window.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <set>
+#include <span>
 
 #include "third_party/imgui/imgui.h"
 #include "third_party/stb/stb_image_write.h"
@@ -23,9 +25,7 @@
 #pragma clang diagnostic pop
 #endif
 
-#include "xenia/app/console_settings_dialog.h"
-#include "xenia/app/host_settings_dialog.h"
-#include "xenia/app/controller_config_dialog.h"
+#include "xenia/app/blades_model.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -38,19 +38,29 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/system.h"
 #include "xenia/base/threading.h"
+#include "xenia/apu/apu_flags.h"
+#include "xenia/apu/audio_system.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#if XE_GPU_METAL
+#include "xenia/gpu/metal/metal_graphics_system.h"
+#endif  // XE_GPU_METAL
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_state.h"
 #include "xenia/kernel/xconfig.h"
+#include "xenia/kernel/util/game_info_database.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
 #if XE_PLATFORM_MAC
 #include "xenia/ui/process_relaunch_mac.h"
+#include "xenia/app/blades_overlay_mac.h"
+#include "xenia/app/controller_home_button_mac.h"
+#include "xenia/ui/window_mac.h"
 #endif  // XE_PLATFORM_MAC
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
@@ -85,23 +95,22 @@ DEFINE_string(disabled_controller_hotkeys, "",
               "disabled (managed by the Controllers UI).",
               "HID");
 
-DEFINE_string(
-    postprocess_antialiasing, "",
-    "Post-processing anti-aliasing effect to apply to the image output of the "
-    "game.\n"
-    "Using post-process anti-aliasing is heavily recommended when AMD "
-    "FidelityFX Contrast Adaptive Sharpening or Super Resolution 1.0 is "
-    "active.\n"
-    "Use: [none, fxaa, fxaa_extreme]\n"
-    " none (or any value not listed here):\n"
-    "  Don't alter the original image.\n"
-    " fxaa:\n"
-    "  NVIDIA Fast Approximate Anti-Aliasing 3.11, normal quality preset (12)."
-    "\n"
-    " fxaa_extreme:\n"
-    "  NVIDIA Fast Approximate Anti-Aliasing 3.11, extreme quality preset "
-    "(39).",
-    "Display");
+DEFINE_bool(dashboard_freezes_game, true,
+            "Freeze the running game while the dashboard is open, so nothing "
+            "happens in it until you go back.",
+            "UI");
+DEFINE_bool(show_fps, false,
+            "Show the frame rate in a corner of the window while a game runs.",
+            "Display");
+DEFINE_string(preferences_key, "F6",
+              "Keyboard key that opens and closes Preferences: F6, F7, F8, F10 "
+              "or none. Command-comma always works.",
+              "UI");
+DEFINE_string(preferences_button, "guide",
+              "Controller button that opens Preferences: guide (a tap of "
+              "Guide on its own), back_start (Back and Start together) or "
+              "none.",
+              "UI");
 DEFINE_string(
     postprocess_scaling_and_sharpening, "",
     "Post-processing effect to use for resampling and/or sharpening of the "
@@ -229,6 +238,10 @@ std::unique_ptr<EmulatorWindow> EmulatorWindow::Create(
 }
 
 EmulatorWindow::~EmulatorWindow() {
+  if (preferences_button_listener_) {
+    preferences_button_stop_ = true;
+    xe::threading::Wait(preferences_button_listener_.get(), false);
+  }
   // Notify the ImGui drawer that the immediate drawer is being destroyed.
   ShutdownGraphicsSystemPresenterPainting();
 }
@@ -285,6 +298,14 @@ void EmulatorWindow::OnEmulatorInitialized() {
 
   emulator_initialized_ = true;
   window_->SetMainMenuEnabled(true);
+  UpdateFpsOverlay();
+#if XE_PLATFORM_MAC
+  if (!preferences_button_listener_) {
+    preferences_button_listener_ = threading::Thread::Create(
+        {}, [this] { PreferencesButtonListener(); });
+    preferences_button_listener_->set_name("Preferences Button Listener");
+  }
+#endif
   // Set the initial lifecycle item enable-state now that the menu is live.
   UpdateLifecycleMenuState();
   // When the user can see that the emulator isn't initializing anymore (the
@@ -311,6 +332,7 @@ void EmulatorWindow::OnEmulatorInitialized() {
 }
 
 void EmulatorWindow::EmulatorWindowListener::OnClosing(ui::UIEvent& e) {
+  emulator_window_.FreezeGame(false);
   emulator_window_.app_context_.QuitFromUIThread();
 }
 
@@ -354,278 +376,6 @@ void EmulatorWindow::EmulatorWindowListener::OnUsbDeviceChanged(
 
 void EmulatorWindow::DisplayConfigGameConfigLoadCallback::PostGameConfigLoad() {
   emulator_window_.ApplyDisplayConfigForCvars();
-}
-
-void EmulatorWindow::DisplayConfigDialog::OnDraw(ImGuiIO& io) {
-  gpu::GraphicsSystem* graphics_system =
-      emulator_window_.emulator_->graphics_system();
-  if (!graphics_system) {
-    return;
-  }
-
-  // In the top-left corner so it's close to the menu bar from where it was
-  // opened.
-  // Origin Y coordinate 20 was taken from the Dear ImGui demo.
-  ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-  // Alpha from Dear ImGui tooltips (0.35 from the overlay provides too low
-  // visibility). Translucent so some effect of the changes can still be seen
-  // through it.
-  ImGui::SetNextWindowBgAlpha(0.6f);
-  bool dialog_open = true;
-  if (!ImGui::Begin("Post-processing", &dialog_open,
-                    ImGuiWindowFlags_NoCollapse |
-                        ImGuiWindowFlags_AlwaysAutoResize |
-                        ImGuiWindowFlags_HorizontalScrollbar)) {
-    ImGui::End();
-    Close();
-    return;
-  }
-
-  // Even if the close button has been pressed, still paint everything not to
-  // have one frame with an empty window.
-
-  // Prevent user confusion which has been reported multiple times.
-  ImGui::TextUnformatted("All effects can be used on GPUs of any brand.");
-  ImGui::Spacing();
-
-  gpu::CommandProcessor* command_processor =
-      graphics_system->command_processor();
-  if (command_processor) {
-    if (ImGui::TreeNodeEx(
-            "Anti-aliasing",
-            ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_DefaultOpen)) {
-      gpu::CommandProcessor::SwapPostEffect current_swap_post_effect =
-          command_processor->GetDesiredSwapPostEffect();
-      int new_swap_post_effect_index = int(current_swap_post_effect);
-      ImGui::RadioButton("None", &new_swap_post_effect_index,
-                         int(gpu::CommandProcessor::SwapPostEffect::kNone));
-      ImGui::RadioButton(
-          "NVIDIA Fast Approximate Anti-Aliasing (FXAA) [Normal Quality]",
-          &new_swap_post_effect_index,
-          int(gpu::CommandProcessor::SwapPostEffect::kFxaa));
-      ImGui::RadioButton(
-          "NVIDIA Fast Approximate Anti-Aliasing (FXAA) [Extreme Quality]",
-          &new_swap_post_effect_index,
-          int(gpu::CommandProcessor::SwapPostEffect::kFxaaExtreme));
-      gpu::CommandProcessor::SwapPostEffect new_swap_post_effect =
-          gpu::CommandProcessor::SwapPostEffect(new_swap_post_effect_index);
-      if (current_swap_post_effect != new_swap_post_effect) {
-        command_processor->SetDesiredSwapPostEffect(new_swap_post_effect);
-      }
-
-      // Override the values in the cvars to save them to the config at exit if
-      // the user has set them to anything new.
-      if (GetSwapPostEffectForCvarValue(cvars::postprocess_antialiasing) !=
-          new_swap_post_effect) {
-        OVERRIDE_string(postprocess_antialiasing,
-                        GetCvarValueForSwapPostEffect(new_swap_post_effect));
-      }
-
-      ImGui::TreePop();
-    }
-  }
-
-  ui::Presenter* presenter = graphics_system->presenter();
-  if (presenter) {
-    const ui::Presenter::GuestOutputPaintConfig& current_presenter_config =
-        presenter->GetGuestOutputPaintConfigFromUIThread();
-    ui::Presenter::GuestOutputPaintConfig new_presenter_config =
-        current_presenter_config;
-
-    if (ImGui::TreeNodeEx(
-            "Resampling and sharpening",
-            ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_DefaultOpen)) {
-      // Filtering effect.
-      int new_effect_index = int(new_presenter_config.GetEffect());
-      ImGui::RadioButton(
-          "None / Bilinear", &new_effect_index,
-          int(ui::Presenter::GuestOutputPaintConfig::Effect::kBilinear));
-      ImGui::RadioButton(
-          "AMD FidelityFX Contrast Adaptive Sharpening (CAS)",
-          &new_effect_index,
-          int(ui::Presenter::GuestOutputPaintConfig::Effect::kCas));
-      ImGui::RadioButton(
-          "AMD FidelityFX Super Resolution 1.0 (FSR)", &new_effect_index,
-          int(ui::Presenter::GuestOutputPaintConfig::Effect::kFsr));
-      if (presenter->SupportsGuestOutputPaintEffect(
-              ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial)) {
-        ImGui::RadioButton(
-            "Apple MetalFX spatial upscaling", &new_effect_index,
-            int(ui::Presenter::GuestOutputPaintConfig::Effect::
-                    kMetalFxSpatial));
-      }
-      new_presenter_config.SetEffect(
-          ui::Presenter::GuestOutputPaintConfig::Effect(new_effect_index));
-
-      // effect_description must be one complete, but short enough, sentence per
-      // line, as TextWrapped doesn't work correctly in auto-resizing windows
-      // (in the initial frames, the window becomes extremely tall, and widgets
-      // added after the wrapped text have no effect on the width of the text).
-      const char* effect_description = nullptr;
-      switch (new_presenter_config.GetEffect()) {
-        case ui::Presenter::GuestOutputPaintConfig::Effect::kBilinear:
-          effect_description =
-              "Simple bilinear filtering is done if resampling is needed.\n"
-              "Otherwise, only anti-aliasing is done if enabled, or displaying "
-              "as is.";
-          break;
-        case ui::Presenter::GuestOutputPaintConfig::Effect::kCas:
-          effect_description =
-              "Sharpening and resampling to up to 2x2 to improve the fidelity "
-              "of details.\n"
-              "For scaling by more than 2x2, bilinear stretching is done "
-              "afterwards.";
-          break;
-        case ui::Presenter::GuestOutputPaintConfig::Effect::kFsr:
-          effect_description =
-              "High-quality edge-preserving upscaling to arbitrary target "
-              "resolutions.\n"
-              "For scaling by more than 2x2, multiple upsampling passes are "
-              "done.\n"
-              "If not upscaling, Contrast Adaptive Sharpening (CAS) is used "
-              "instead.";
-          break;
-        case ui::Presenter::GuestOutputPaintConfig::Effect::kMetalFxSpatial:
-          effect_description =
-              "Apple's edge-preserving upscaling, in one pass at any factor.\n"
-              "If not upscaling, bilinear filtering is done.";
-          break;
-      }
-      if (effect_description) {
-        ImGui::TextUnformatted(effect_description);
-      }
-
-      if (new_presenter_config.GetEffect() ==
-              ui::Presenter::GuestOutputPaintConfig::Effect::kCas ||
-          new_presenter_config.GetEffect() ==
-              ui::Presenter::GuestOutputPaintConfig::Effect::kFsr) {
-        if (effect_description) {
-          ImGui::Spacing();
-        }
-
-        ImGui::TextUnformatted(
-            "FXAA is highly recommended when using CAS or FSR.");
-
-        ImGui::Spacing();
-
-        // 2 decimal places is more or less enough precision for the sharpness
-        // given the minor visual effect of small changes, the width of the
-        // slider, and readability convenience (2 decimal places is like an
-        // integer percentage). However, because Dear ImGui parses the string
-        // representation of the number and snaps the value to it internally,
-        // 2 decimal places actually offer less precision than the slider itself
-        // does. This is especially prominent in the low range of the non-linear
-        // FSR sharpness reduction slider. 3 decimal places are optimal in this
-        // case.
-
-        if (new_presenter_config.GetEffect() ==
-            ui::Presenter::GuestOutputPaintConfig::Effect::kFsr) {
-          float fsr_sharpness_reduction =
-              new_presenter_config.GetFsrSharpnessReduction();
-          ImGui::TextUnformatted(
-              "FSR sharpness reduction when upscaling (lower is sharper):");
-          const auto label = fmt::format(
-              "{} %%", static_cast<int>(fsr_sharpness_reduction * 100));
-          // Power 2.0 scaling as the reduction is in stops, used in exp2.
-          fsr_sharpness_reduction = sqrt(2.f * fsr_sharpness_reduction);
-          ImGui::SliderFloat(
-              "##FSRSharpnessReduction", &fsr_sharpness_reduction,
-              ui::Presenter::GuestOutputPaintConfig::kFsrSharpnessReductionMin,
-              ui::Presenter::GuestOutputPaintConfig::kFsrSharpnessReductionMax,
-              label.c_str(), ImGuiSliderFlags_NoInput);
-          fsr_sharpness_reduction =
-              .5f * fsr_sharpness_reduction * fsr_sharpness_reduction;
-          ImGui::SameLine();
-          if (ImGui::Button("Reset##ResetFSRSharpnessReduction")) {
-            fsr_sharpness_reduction = ui::Presenter::GuestOutputPaintConfig ::
-                kFsrSharpnessReductionDefault;
-          }
-          new_presenter_config.SetFsrSharpnessReduction(
-              fsr_sharpness_reduction);
-        }
-
-        float cas_additional_sharpness =
-            new_presenter_config.GetCasAdditionalSharpness();
-        ImGui::TextUnformatted(
-            new_presenter_config.GetEffect() ==
-                    ui::Presenter::GuestOutputPaintConfig::Effect::kFsr
-                ? "CAS additional sharpness when not upscaling (higher is "
-                  "sharper):"
-                : "CAS additional sharpness (higher is sharper):");
-        const auto label = fmt::format(
-            "{} %%", static_cast<int>(cas_additional_sharpness * 100));
-        ImGui::SliderFloat(
-            "##CASAdditionalSharpness", &cas_additional_sharpness,
-            ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMin,
-            ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMax,
-            label.c_str(), ImGuiSliderFlags_NoInput);
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##ResetCASAdditionalSharpness")) {
-          cas_additional_sharpness = ui::Presenter::GuestOutputPaintConfig ::
-              kCasAdditionalSharpnessDefault;
-        }
-        new_presenter_config.SetCasAdditionalSharpness(
-            cas_additional_sharpness);
-
-        // There's no need to expose the setting for the maximum number of FSR
-        // EASU passes as it's largely meaningless if the user doesn't have a
-        // very high-resolution monitor compared to the original image size as
-        // most of the values of the slider will have no effect, and that's just
-        // very fine-grained performance control for a fixed-overhead pass only
-        // for huge screen resolutions.
-      }
-
-      ImGui::TreePop();
-    }
-
-    if (ImGui::TreeNodeEx("Dithering", ImGuiTreeNodeFlags_Framed |
-                                           ImGuiTreeNodeFlags_DefaultOpen)) {
-      bool dither = current_presenter_config.GetDither();
-      ImGui::Checkbox(
-          "Dither the final output to 8bpc to make gradients smoother",
-          &dither);
-      new_presenter_config.SetDither(dither);
-
-      ImGui::TreePop();
-    }
-
-    presenter->SetGuestOutputPaintConfigFromUIThread(new_presenter_config);
-
-    // Override the values in the cvars to save them to the config at exit if
-    // the user has set them to anything new.
-    ui::Presenter::GuestOutputPaintConfig cvars_presenter_config =
-        GetGuestOutputPaintConfigForCvars();
-    if (cvars_presenter_config.GetEffect() !=
-        new_presenter_config.GetEffect()) {
-      OVERRIDE_string(postprocess_scaling_and_sharpening,
-                      GetCvarValueForGuestOutputPaintEffect(
-                          new_presenter_config.GetEffect()));
-    }
-    if (cvars_presenter_config.GetCasAdditionalSharpness() !=
-        new_presenter_config.GetCasAdditionalSharpness()) {
-      OVERRIDE_double(postprocess_ffx_cas_additional_sharpness,
-                      new_presenter_config.GetCasAdditionalSharpness());
-    }
-    if (cvars_presenter_config.GetFsrSharpnessReduction() !=
-        new_presenter_config.GetFsrSharpnessReduction()) {
-      OVERRIDE_double(postprocess_ffx_fsr_sharpness_reduction,
-                      new_presenter_config.GetFsrSharpnessReduction());
-    }
-    if (cvars_presenter_config.GetDither() !=
-        new_presenter_config.GetDither()) {
-      OVERRIDE_bool(postprocess_dither, new_presenter_config.GetDither());
-    }
-  }
-
-  ImGui::End();
-
-  if (!dialog_open) {
-    Close();
-    emulator_window_.ToggleDisplayConfigDialog();
-    // `this` might have been destroyed by ToggleDisplayConfigDialog.
-    return;
-  }
 }
 
 void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
@@ -718,64 +468,112 @@ void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
   ImGui::End();
 }
 
-void EmulatorWindow::XMPConfigDialog::OnDraw(ImGuiIO& io) {
-  ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-
-  bool dialog_open = true;
-  if (!ImGui::Begin("Audio Player Menu", &dialog_open,
-                    ImGuiWindowFlags_NoCollapse |
-                        ImGuiWindowFlags_AlwaysAutoResize |
-                        ImGuiWindowFlags_HorizontalScrollbar)) {
-    Close();
-    ImGui::End();
+void EmulatorWindow::FpsOverlay::OnDraw(ImGuiIO& io) {
+  Emulator* emulator = emulator_window_.emulator_;
+  gpu::GraphicsSystem* graphics =
+      emulator ? emulator->graphics_system() : nullptr;
+  gpu::CommandProcessor* command_processor =
+      graphics ? graphics->command_processor() : nullptr;
+  if (!cvars::show_fps || !command_processor || !emulator->is_title_open()) {
+    last_time_ = 0.0;
     return;
   }
-
-  auto audio_player = emulator_window_.emulator_->audio_media_player();
-  using xmp_state = kernel::xam::apps::XmpApp::State;
-  if (audio_player) {
-    ImGui::Text("Audio player status:");
-    ImGui::SameLine();
-    switch (audio_player->GetState()) {
-      case xmp_state::kIdle:
-        ImGui::Text("Idle");
-        break;
-      case xmp_state::kPaused:
-        ImGui::Text("Paused");
-        break;
-      case xmp_state::kPlaying:
-        ImGui::Text("Playing");
-        break;
-      default:
-        break;
-    }
-
-    if (audio_player->IsPlaying()) {
-      if (ImGui::Button("Pause")) {
-        audio_player->Pause();
-      }
-    } else if (audio_player->IsPaused()) {
-      if (ImGui::Button("Resume")) {
-        audio_player->Continue();
-      }
-    }
-
-    volume_ =
-        emulator_window_.emulator_->audio_media_player()->GetVolume()->load();
-
-    if (ImGui::SliderFloat("Audio player volume", &volume_, 0.0f, 1.0f,
-                           "%.2f")) {
-      audio_player->SetVolume(volume_);
-    }
+  // Guest swaps per second, over half-second windows.
+  const double now = ImGui::GetTime();
+  const uint64_t count = command_processor->guest_swap_count();
+  if (last_time_ == 0.0) {
+    last_time_ = now;
+    last_count_ = count;
+  } else if (now - last_time_ >= 0.5) {
+    fps_ = double(count - last_count_) / (now - last_time_);
+    last_time_ = now;
+    last_count_ = count;
   }
-
+  ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, 12.0f),
+                          ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+  ImGui::SetNextWindowBgAlpha(0.55f);
+  if (ImGui::Begin("##fps", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                       ImGuiWindowFlags_AlwaysAutoResize |
+                       ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_NoFocusOnAppearing |
+                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
+    ImGui::Text("%.0f FPS", fps_);
+  }
   ImGui::End();
+}
 
-  if (!dialog_open) {
-    Close();
-    emulator_window_.xmp_config_dialog_.release();
-    return;
+void EmulatorWindow::UpdateFpsOverlay() {
+  if (cvars::show_fps && !fps_overlay_) {
+    fps_overlay_ = std::make_unique<FpsOverlay>(imgui_drawer_.get(), *this);
+  } else if (!cvars::show_fps && fps_overlay_) {
+    fps_overlay_.reset();
+  }
+}
+
+void EmulatorWindow::ShowStartScreen() {
+#if XE_PLATFORM_MAC
+  auto* profiles = emulator_->kernel_state()
+                       ? emulator_->kernel_state()->xam_state()->profile_manager()
+                       : nullptr;
+  ShowPreferences(profiles && profiles->GetAccountCount() == 0 ? "profiles"
+                                                               : "home");
+#endif
+}
+
+// Opens Preferences from a controller (preferences_button): a tap of Guide
+// (released without another button, so Guide + A and the other hotkeys don't
+// open it), or Back and Start together. While Preferences is open the page
+// takes the buttons itself (PumpPreferencesController), and Guide or Start
+// closes it.
+void EmulatorWindow::PreferencesButtonListener() {
+  bool guide_down = false;
+  bool guide_chord = false;
+  bool combo_down = false;
+  while (!preferences_button_stop_.load()) {
+    xe::threading::Sleep(std::chrono::milliseconds(30));
+    const std::string mode = cvars::preferences_button;
+    auto* input = emulator_->input_system();
+    if (mode == "none" || !input) {
+      continue;
+    }
+    uint16_t buttons = 0;
+    {
+      auto lock = input->lock();
+      for (uint32_t user = 0; user < XUserMaxUserCount; ++user) {
+        X_INPUT_STATE state;
+        if (input->GetStateSnapshot(user, X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD,
+                                    &state) == X_ERROR_SUCCESS) {
+          buttons |= state.gamepad.buttons;
+        }
+      }
+    }
+    bool open = false;
+    if (mode == "back_start") {
+      const uint16_t both = X_INPUT_GAMEPAD_BACK | X_INPUT_GAMEPAD_START;
+      const bool down = (buttons & both) == both;
+      open = down && !combo_down;
+      combo_down = down;
+    } else {
+      const bool guide = (buttons & X_INPUT_GAMEPAD_GUIDE) != 0;
+      if (guide) {
+        if (!guide_down) {
+          guide_down = true;
+          // A press while the dashboard is open closes it (the page does);
+          // the release must not open it again.
+          guide_chord = blades_visible_.load();
+        }
+        if (buttons & ~uint16_t(X_INPUT_GAMEPAD_GUIDE)) {
+          guide_chord = true;
+        }
+      } else if (guide_down) {
+        guide_down = false;
+        open = !guide_chord;
+      }
+    }
+    if (open && !blades_visible_.load()) {
+      app_context().CallInUIThread([this]() { ShowPreferences(""); });
+    }
   }
 }
 
@@ -784,6 +582,13 @@ bool EmulatorWindow::Initialize() {
   window_->AddInputListener(&window_listener_, kZOrderEmulatorWindowInput);
 
 #if XE_PLATFORM_MAC
+  // The application menu's Settings… (⌘,) opens the Preferences blades.
+  static_cast<ui::MacWindow*>(window_.get())
+      ->SetSettingsHandler([this]() { TogglePreferences(""); });
+  // The controller's Home button opens the dashboard rather than macOS's
+  // Games overlay, while the dashboard is set to use it.
+  SetControllerHomeButtonClaimed(cvars::preferences_button == "guide");
+
   // A title asking for another title (XamLoaderLaunchTitle) is served the way
   // the lifecycle Reboot is: flush config + the shader cache, then spawn a
   // fresh process on the new target with the loader data on its command line.
@@ -853,7 +658,6 @@ bool EmulatorWindow::Initialize() {
   auto main_menu = MenuItem::Create(MenuItem::Type::kNormal);
   auto file_menu = MenuItem::Create(MenuItem::Type::kPopup, "&File");
   auto recent_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Open Recent");
-  auto zar_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Zar Package");
   FillRecentlyLaunchedTitlesMenu(recent_menu.get());
   {
     file_menu->AddChild(
@@ -864,13 +668,6 @@ bool EmulatorWindow::Initialize() {
     file_menu->AddChild(
         MenuItem::Create(MenuItem::Type::kString, "Install Content...",
                          std::bind(&EmulatorWindow::InstallContent, this)));
-    zar_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Create",
-                         std::bind(&EmulatorWindow::CreateZarchive, this)));
-    zar_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Extract",
-                         std::bind(&EmulatorWindow::ExtractZarchive, this)));
-    file_menu->AddChild(std::move(zar_menu));
     file_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     {
       auto stop_item =
@@ -906,68 +703,17 @@ bool EmulatorWindow::Initialize() {
   auto profile_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Profile");
   {
     profile_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Show Profile Menu", "",
+        MenuItem::Type::kString, "&Profiles...", "",
         std::bind(&EmulatorWindow::ToggleProfilesConfigDialog, this)));
   }
   main_menu->AddChild(std::move(profile_menu));
 
-  // CPU menu.
-  auto cpu_menu = MenuItem::Create(MenuItem::Type::kPopup, "&CPU");
-  {
-    cpu_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Reset Time Scalar", "Numpad *",
-        std::bind(&EmulatorWindow::CpuTimeScalarReset, this)));
-    cpu_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Time Scalar /= 2", "Numpad -",
-        std::bind(&EmulatorWindow::CpuTimeScalarSetHalf, this)));
-    cpu_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Time Scalar *= 2", "Numpad +",
-        std::bind(&EmulatorWindow::CpuTimeScalarSetDouble, this)));
-  }
-#if XE_OPTION_PROFILING
-  cpu_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-  {
-    cpu_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
-                                        "Toggle Profiler &Display", "F3",
-                                        []() { Profiler::ToggleDisplay(); }));
-    cpu_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
-                                        "&Pause/Resume Profiler", "`",
-                                        []() { Profiler::TogglePause(); }));
-  }
-#endif
-  cpu_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-  {
-    cpu_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Break and Show Guest Debugger",
-        "Pause/Break", std::bind(&EmulatorWindow::CpuBreakIntoDebugger, this)));
-    cpu_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Break into Host Debugger",
-        "Ctrl+Pause/Break",
-        std::bind(&EmulatorWindow::CpuBreakIntoHostDebugger, this)));
-  }
-  main_menu->AddChild(std::move(cpu_menu));
-
-  // GPU menu.
-  auto gpu_menu = MenuItem::Create(MenuItem::Type::kPopup, "&GPU");
-  {
-    gpu_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "&Trace Frame", "F4",
-                         std::bind(&EmulatorWindow::GpuTraceFrame, this)));
-  }
-  gpu_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-  {
-    gpu_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "&Clear Runtime Caches", "F5",
-                         std::bind(&EmulatorWindow::GpuClearCaches, this)));
-  }
-  main_menu->AddChild(std::move(gpu_menu));
-
   // Display menu.
-  auto display_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Display");
+  auto display_menu = MenuItem::Create(MenuItem::Type::kPopup, "&View");
   {
     display_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Post-processing settings", "F6",
-        std::bind(&EmulatorWindow::ToggleDisplayConfigDialog, this)));
+        MenuItem::Type::kString, "&Graphics settings...", "F6",
+        [this]() { TogglePreferences("graphics"); }));
   }
   display_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
   {
@@ -981,7 +727,7 @@ bool EmulatorWindow::Initialize() {
   main_menu->AddChild(std::move(display_menu));
 
   // HID menu.
-  auto hid_menu = MenuItem::Create(MenuItem::Type::kPopup, "&HID");
+  auto hid_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Controller");
   {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Toggle controller vibration", "",
@@ -991,16 +737,16 @@ bool EmulatorWindow::Initialize() {
         std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Controller settings...", "",
-        std::bind(&EmulatorWindow::ToggleControllerConfigDialog, this)));
+        [this]() { ShowPreferences("controller"); }));
   }
   main_menu->AddChild(std::move(hid_menu));
 
   // XMP menu
-  auto xmp_menu = MenuItem::Create(MenuItem::Type::kPopup, "&XMP");
+  auto xmp_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Music Player");
   {
     xmp_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Show XMP Menu", "",
-        std::bind(&EmulatorWindow::ToggleXMPConfigDialog, this)));
+        MenuItem::Type::kString, "&Music Player...", "",
+        [this]() { ShowPreferences("audio/music"); }));
   }
   main_menu->AddChild(std::move(xmp_menu));
 
@@ -1008,13 +754,68 @@ bool EmulatorWindow::Initialize() {
   auto console_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Console");
   {
     console_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Open console settings", "",
-        std::bind(&EmulatorWindow::ToggleConsoleSettingsDialog, this)));
-    console_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Host / Advanced settings...", "",
-        std::bind(&EmulatorWindow::ToggleHostSettingsDialog, this)));
+        MenuItem::Type::kString, "&Console settings...", "",
+        [this]() { ShowPreferences("system"); }));
   }
   main_menu->AddChild(std::move(console_menu));
+
+  // Debug menu: tools for diagnosing the emulator rather than playing. The
+  // key shortcuts (F3-F5, the numpad time scalar) work whether or not the
+  // menu is open.
+  auto debug_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Debug");
+  {
+    debug_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "&Trace Frame", "F4",
+                         std::bind(&EmulatorWindow::GpuTraceFrame, this)));
+    debug_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "&Clear Runtime Caches", "F5",
+                         std::bind(&EmulatorWindow::GpuClearCaches, this)));
+  }
+  debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+  {
+    debug_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Reset Time Scalar", "Numpad *",
+        std::bind(&EmulatorWindow::CpuTimeScalarReset, this)));
+    debug_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Time Scalar /= 2", "Numpad -",
+        std::bind(&EmulatorWindow::CpuTimeScalarSetHalf, this)));
+    debug_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Time Scalar *= 2", "Numpad +",
+        std::bind(&EmulatorWindow::CpuTimeScalarSetDouble, this)));
+  }
+#if XE_OPTION_PROFILING
+  debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+  {
+    debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
+                                          "Toggle Profiler &Display", "F3",
+                                          []() { Profiler::ToggleDisplay(); }));
+    debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
+                                          "&Pause/Resume Profiler", "`",
+                                          []() { Profiler::TogglePause(); }));
+  }
+#endif
+  debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+  {
+    debug_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Break and Show Guest Debugger",
+        "Pause/Break", std::bind(&EmulatorWindow::CpuBreakIntoDebugger, this)));
+    debug_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Break into Host Debugger",
+        "Ctrl+Pause/Break",
+        std::bind(&EmulatorWindow::CpuBreakIntoHostDebugger, this)));
+  }
+  debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+  {
+    auto zar_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Zar Package");
+    zar_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Create",
+                         std::bind(&EmulatorWindow::CreateZarchive, this)));
+    zar_menu->AddChild(
+        MenuItem::Create(MenuItem::Type::kString, "Extract",
+                         std::bind(&EmulatorWindow::ExtractZarchive, this)));
+    debug_menu->AddChild(std::move(zar_menu));
+  }
+  main_menu->AddChild(std::move(debug_menu));
 
   // Help menu.
   auto help_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Help");
@@ -1057,31 +858,6 @@ bool EmulatorWindow::Initialize() {
   Profiler::SetUserIO(kZOrderProfiler, window_.get(), nullptr, nullptr);
 
   return true;
-}
-
-const char* EmulatorWindow::GetCvarValueForSwapPostEffect(
-    gpu::CommandProcessor::SwapPostEffect effect) {
-  switch (effect) {
-    case gpu::CommandProcessor::SwapPostEffect::kFxaa:
-      return "fxaa";
-    case gpu::CommandProcessor::SwapPostEffect::kFxaaExtreme:
-      return "fxaa_extreme";
-    default:
-      return "";
-  }
-}
-
-gpu::CommandProcessor::SwapPostEffect
-EmulatorWindow::GetSwapPostEffectForCvarValue(const std::string& cvar_value) {
-  if (cvar_value == GetCvarValueForSwapPostEffect(
-                        gpu::CommandProcessor::SwapPostEffect::kFxaa)) {
-    return gpu::CommandProcessor::SwapPostEffect::kFxaa;
-  }
-  if (cvar_value == GetCvarValueForSwapPostEffect(
-                        gpu::CommandProcessor::SwapPostEffect::kFxaaExtreme)) {
-    return gpu::CommandProcessor::SwapPostEffect::kFxaaExtreme;
-  }
-  return gpu::CommandProcessor::SwapPostEffect::kNone;
 }
 
 const char* EmulatorWindow::GetCvarValueForGuestOutputPaintEffect(
@@ -1133,17 +909,27 @@ EmulatorWindow::GetGuestOutputPaintConfigForCvars() {
   return paint_config;
 }
 
+uint32_t EmulatorWindow::ActiveRendererMask() const {
+  gpu::GraphicsSystem* graphics_system =
+      emulator_ ? emulator_->graphics_system() : nullptr;
+  if (!graphics_system) {
+    return 0;
+  }
+  if (dynamic_cast<gpu::vulkan::VulkanGraphicsSystem*>(graphics_system)) {
+    return kRendererVulkan;
+  }
+#if XE_GPU_METAL
+  if (dynamic_cast<gpu::metal::MetalGraphicsSystem*>(graphics_system)) {
+    return kRendererMetal;
+  }
+#endif  // XE_GPU_METAL
+  return 0;
+}
+
 void EmulatorWindow::ApplyDisplayConfigForCvars() {
   gpu::GraphicsSystem* graphics_system = emulator_->graphics_system();
   if (!graphics_system) {
     return;
-  }
-
-  gpu::CommandProcessor* command_processor =
-      graphics_system->command_processor();
-  if (command_processor) {
-    command_processor->SetDesiredSwapPostEffect(
-        GetSwapPostEffectForCvarValue(cvars::postprocess_antialiasing));
   }
 
   ui::Presenter* presenter = graphics_system->presenter();
@@ -1156,6 +942,21 @@ void EmulatorWindow::ApplyDisplayConfigForCvars() {
 void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
   if (!emulator_initialized_) {
     return;
+  }
+
+  // The Preferences key (preferences_key), checked before the fixed keys so
+  // it can take any of the free function keys.
+  {
+    const std::string& key = cvars::preferences_key;
+    const ui::VirtualKey vk = e.virtual_key();
+    if ((key == "F6" && vk == ui::VirtualKey::kF6) ||
+        (key == "F7" && vk == ui::VirtualKey::kF7) ||
+        (key == "F8" && vk == ui::VirtualKey::kF8) ||
+        (key == "F10" && vk == ui::VirtualKey::kF10)) {
+      TogglePreferences("");
+      e.set_handled(true);
+      return;
+    }
   }
 
   switch (e.virtual_key()) {
@@ -1186,9 +987,6 @@ void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
       GpuClearCaches();
     } break;
 
-    case ui::VirtualKey::kF6: {
-      ToggleDisplayConfigDialog();
-    } break;
     case ui::VirtualKey::kF11: {
       ToggleFullscreen();
     } break;
@@ -1399,7 +1197,10 @@ void EmulatorWindow::FileOpen() {
 }
 
 void EmulatorWindow::FileClose() {
+  FreezeGame(false);
   emulator_->TerminateTitle();
+  // Back to the dashboard, as the console went when a game was quit.
+  ShowStartScreen();
   // The guest has stopped producing frames, but the presenter still holds the
   // last one in its mailbox, so the window would look frozen/paused. Push an
   // inactive (0x0) guest-output frame to clear the screen to black - this is
@@ -1412,6 +1213,7 @@ void EmulatorWindow::FileClose() {
 }
 
 void EmulatorWindow::RelaunchLastTitle(bool warm) {
+  FreezeGame(false);
 #if XE_PLATFORM_MAC
   if (last_media_path_.empty()) {
     XELOGW("RelaunchLastTitle: no media loaded yet; ignoring.");
@@ -1793,20 +1595,220 @@ void EmulatorWindow::ToggleFullscreen() {
   SetFullscreen(!window_->IsFullscreen());
 }
 
-void EmulatorWindow::ToggleDisplayConfigDialog() {
-  if (!display_config_dialog_) {
-    display_config_dialog_ =
-        std::make_unique<DisplayConfigDialog>(imgui_drawer_.get(), *this);
-  } else {
-    if (display_config_dialog_->IsClosing()) {
-      display_config_dialog_.release();
-    } else {
-      display_config_dialog_.reset();
+// --- Preferences (the blades) ------------------------------------------------
+
+bool EmulatorWindow::IsPreferencesVisible() const {
+#if XE_PLATFORM_MAC
+  return blades_overlay_ && blades_overlay_->visible();
+#else
+  return false;
+#endif
+}
+
+void EmulatorWindow::ShowPreferences(const std::string& blade) {
+#if XE_PLATFORM_MAC
+  if (!blades_overlay_) {
+    auto* mac_window = static_cast<ui::MacWindow*>(window_.get());
+    if (!mac_window->native_container_view()) {
+      return;
     }
+    blades_model_ = std::make_unique<BladesModel>(*this);
+    BladesOverlay::Callbacks callbacks;
+    callbacks.on_message = [this](const std::string& json) {
+      HandlePreferencesMessage(json);
+    };
+    callbacks.on_tick = [this]() {
+      if (blades_model_ && blades_model_->Poll()) {
+        blades_overlay_->PushState(blades_model_->BuildStateJson());
+      }
+      PumpPreferencesController();
+    };
+    blades_overlay_ = std::make_unique<BladesOverlay>(
+        mac_window->native_container_view(), mac_window->native_game_view(),
+        TitleIconPath(0).parent_path(), std::move(callbacks));
+  }
+  if (!blades_overlay_->visible()) {
+    // Opening Preferences is opening the console's system UI: the running
+    // game is told (most pause, as under the 360 guide) and sees no input.
+    auto* xam_state = emulator_->kernel_state()
+                          ? emulator_->kernel_state()->xam_state()
+                          : nullptr;
+    if (xam_state && emulator_->is_title_open() && !xam_state->IsUIActive()) {
+      emulator_->kernel_state()->BroadcastNotification(kXNotificationSystemUI,
+                                                       true);
+      xam_state->is_xam_dialog_present_.store(true);
+      blades_raised_system_ui_ = true;
+    }
+    if (cvars::dashboard_freezes_game && emulator_->is_title_open()) {
+      FreezeGame(true);
+    }
+    blades_pad_buttons_ = 0;
+  }
+  blades_overlay_->Show(blade);
+  blades_visible_ = true;
+  // The page asks for state when it first loads; after that it is refreshed
+  // on every open (a title may have started or a controller arrived since).
+  blades_overlay_->PushState(blades_model_->BuildStateJson());
+#endif
+}
+
+void EmulatorWindow::HidePreferences() {
+#if XE_PLATFORM_MAC
+  if (!blades_overlay_ || !blades_overlay_->visible()) {
+    return;
+  }
+  blades_model_->CancelCapture();
+  blades_overlay_->Hide();
+  blades_visible_ = false;
+  FreezeGame(false);
+  if (blades_raised_system_ui_) {
+    blades_raised_system_ui_ = false;
+    if (emulator_->kernel_state()) {
+      emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(
+          false);
+      emulator_->kernel_state()->BroadcastNotification(kXNotificationSystemUI,
+                                                       false);
+    }
+  }
+#endif
+}
+
+void EmulatorWindow::FreezeGame(bool freeze) {
+  if (freeze == game_frozen_) {
+    return;
+  }
+  cpu::Processor* processor = emulator_->processor();
+  if (freeze) {
+    if (!processor || !emulator_->is_title_open()) {
+      return;
+    }
+    {
+      // Suspended while holding a host lock, a guest thread would keep it
+      // held; the dashboard reads controllers through the input system's,
+      // so it is held here while the threads stop and no guest thread can
+      // be inside it. (AudioSystem::Pause is not used: its handshake waits on
+      // a worker that, under steady audio, never sees the request.)
+      hid::InputSystem* input = emulator_->input_system();
+      std::unique_lock<xe_unlikely_mutex> input_lock;
+      if (input) {
+        input_lock = input->lock();
+      }
+      processor->SuspendGuestThreads();
+    }
+    // Some games mix on the host-side audio worker, which keeps running;
+    // silence the output (in memory only, never saved) until they resume.
+    mute_before_freeze_ = cvars::mute;
+    cvars::mute = true;
+    game_frozen_ = true;
+    XELOGI("Dashboard: game frozen");
+  } else {
+    if (processor) {
+      processor->ResumeGuestThreads();
+    }
+    cvars::mute = mute_before_freeze_;
+    game_frozen_ = false;
+    XELOGI("Dashboard: game resumed");
   }
 }
 
+void EmulatorWindow::TogglePreferences(const std::string& blade) {
+  if (IsPreferencesVisible()) {
+    HidePreferences();
+  } else {
+    ShowPreferences(blade);
+  }
+}
+
+void EmulatorWindow::HandlePreferencesMessage(const std::string& json) {
+#if XE_PLATFORM_MAC
+  if (!blades_model_) {
+    return;
+  }
+  XELOGD("Blades: message {}", json);
+  switch (blades_model_->HandleMessage(json)) {
+    case BladesModel::Result::kNone:
+      break;
+    case BladesModel::Result::kPush:
+      blades_overlay_->PushState(blades_model_->BuildStateJson());
+      break;
+    case BladesModel::Result::kClose:
+      HidePreferences();
+      break;
+    case BladesModel::Result::kCloseThen: {
+      std::function<void()> then = blades_model_->TakeDeferred();
+      HidePreferences();
+      if (then) {
+        // Not from inside the page's message: a picker or a launch can take
+        // a while, and a launch tears down state the page is using.
+        app_context().CallInUIThreadDeferred(std::move(then));
+      }
+    } break;
+    case BladesModel::Result::kRelaunch:
+      HidePreferences();
+      // Not from inside the page's message: relaunching tears the window down.
+      app_context().CallInUIThreadDeferred(
+          [this]() { RelaunchLastTitle(true); });
+      break;
+  }
+#endif
+}
+
+void EmulatorWindow::PumpPreferencesController() {
+#if XE_PLATFORM_MAC
+  // Any connected controller drives the blades. The page also reads the
+  // Gamepad API; it merges the two, so a press seen by both counts once.
+  auto* input = emulator_->input_system();
+  if (!input || !blades_overlay_) {
+    return;
+  }
+  uint32_t buttons = 0;
+  {
+    auto lock = input->lock();
+    for (uint32_t user = 0; user < XUserMaxUserCount; ++user) {
+      X_INPUT_STATE state;
+      if (input->GetStateSnapshot(user, X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD,
+                                  &state) != X_ERROR_SUCCESS) {
+        continue;
+      }
+      buttons |= state.gamepad.buttons;
+      // The left stick counts as the d-pad.
+      constexpr int16_t kStick = 18000;
+      const int16_t x = state.gamepad.thumb_lx, y = state.gamepad.thumb_ly;
+      if (y > kStick) buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+      if (y < -kStick) buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+      if (x < -kStick) buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+      if (x > kStick) buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+    }
+  }
+  static constexpr std::pair<uint32_t, const char*> kButtons[] = {
+      {X_INPUT_GAMEPAD_DPAD_UP, "up"},
+      {X_INPUT_GAMEPAD_DPAD_DOWN, "down"},
+      {X_INPUT_GAMEPAD_DPAD_LEFT, "left"},
+      {X_INPUT_GAMEPAD_DPAD_RIGHT, "right"},
+      {X_INPUT_GAMEPAD_A, "a"},
+      {X_INPUT_GAMEPAD_B, "b"},
+      {X_INPUT_GAMEPAD_Y, "y"},
+      {X_INPUT_GAMEPAD_LEFT_SHOULDER, "lb"},
+      {X_INPUT_GAMEPAD_RIGHT_SHOULDER, "rb"},
+      {X_INPUT_GAMEPAD_X, "x"},
+      {X_INPUT_GAMEPAD_GUIDE, "guide"},
+  };
+  const uint32_t changed = buttons ^ blades_pad_buttons_;
+  blades_pad_buttons_ = buttons;
+  for (const auto& [mask, name] : kButtons) {
+    if (changed & mask) {
+      blades_overlay_->PadButton(name, (buttons & mask) != 0);
+    }
+  }
+#endif
+}
+
 void EmulatorWindow::ToggleProfilesConfigDialog() {
+#if XE_PLATFORM_MAC
+  // Profiles live in the dashboard (Profiles blade).
+  ShowPreferences("profiles");
+  return;
+#endif
   if (!profile_config_dialog_) {
     disable_hotkeys_ = true;
 
@@ -1830,55 +1832,6 @@ void EmulatorWindow::ToggleProfilesConfigDialog() {
       profile_config_dialog_.reset();
     }
     emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-  }
-}
-
-void EmulatorWindow::ToggleXMPConfigDialog() {
-  if (!xmp_config_dialog_) {
-    xmp_config_dialog_ = std::unique_ptr<XMPConfigDialog>(
-        new XMPConfigDialog(imgui_drawer_.get(), *this));
-  } else {
-    xmp_config_dialog_.reset();
-  }
-}
-
-void EmulatorWindow::ToggleConsoleSettingsDialog() {
-  if (!console_settings_dialog_) {
-    console_settings_dialog_ =
-        std::unique_ptr<ConsoleSettingsDialog>(new ConsoleSettingsDialog(
-            imgui_drawer_.get(), *this, emulator_->kernel_state()->xconfig()));
-  } else {
-    if (console_settings_dialog_->IsClosing()) {
-      console_settings_dialog_.release();
-    } else {
-      console_settings_dialog_.reset();
-    }
-  }
-}
-
-void EmulatorWindow::ToggleHostSettingsDialog() {
-  if (!host_settings_dialog_) {
-    host_settings_dialog_ = std::unique_ptr<HostSettingsDialog>(
-        new HostSettingsDialog(imgui_drawer_.get(), *this));
-  } else {
-    if (host_settings_dialog_->IsClosing()) {
-      host_settings_dialog_.release();
-    } else {
-      host_settings_dialog_.reset();
-    }
-  }
-}
-
-void EmulatorWindow::ToggleControllerConfigDialog() {
-  if (!controller_config_dialog_) {
-    controller_config_dialog_ = std::unique_ptr<ControllerConfigDialog>(
-        new ControllerConfigDialog(imgui_drawer_.get(), *this));
-  } else {
-    if (controller_config_dialog_->IsClosing()) {
-      controller_config_dialog_.release();
-    } else {
-      controller_config_dialog_.reset();
-    }
   }
 }
 
@@ -2019,7 +1972,7 @@ const std::map<int, EmulatorWindow::ControllerHotKey> controller_hotkey_map = {
     {X_INPUT_GAMEPAD_A | X_INPUT_GAMEPAD_GUIDE,
      EmulatorWindow::ControllerHotKey(
          EmulatorWindow::ButtonFunctions::ReadbackResolve,
-         "A + Guide = Toggle Readback Resolve", true)},
+         "A + Guide = Toggle Readback Resolve (Vulkan only)", true)},
     {X_INPUT_GAMEPAD_B | X_INPUT_GAMEPAD_GUIDE,
      EmulatorWindow::ControllerHotKey(
          EmulatorWindow::ButtonFunctions::ToggleLogging,
@@ -2033,7 +1986,7 @@ const std::map<int, EmulatorWindow::ControllerHotKey> controller_hotkey_map = {
     {X_INPUT_GAMEPAD_X | X_INPUT_GAMEPAD_GUIDE,
      EmulatorWindow::ControllerHotKey(
          EmulatorWindow::ButtonFunctions::ClearMemoryPageState,
-         "X + Guide = Toggle Clear Memory Page State", true)},
+         "X + Guide = Toggle Clear Memory Page State (Vulkan only)", true)},
 
     {X_INPUT_GAMEPAD_RIGHT_SHOULDER | X_INPUT_GAMEPAD_GUIDE,
      EmulatorWindow::ControllerHotKey(
@@ -2117,8 +2070,9 @@ EmulatorWindow::GetControllerHotkeys() const {
     if (hotkey.pretty.empty() || !seen_functions.insert(function).second) {
       continue;
     }
-    hotkeys.push_back(
-        {function, hotkey.pretty, disabled.find(function) == disabled.end()});
+    hotkeys.push_back({function, hotkey.pretty,
+                       disabled.find(function) == disabled.end(),
+                       hotkey.title_passthru});
   }
   return hotkeys;
 }
@@ -2206,6 +2160,13 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
       }
     } break;
     case ButtonFunctions::ClearMemoryPageState:
+      // Only the Vulkan renderer reads this; elsewhere say so instead of
+      // silently flipping (and saving) a setting with no effect.
+      if (ActiveRendererMask() != kRendererVulkan) {
+        notificationTitle = "Toggle Clear Memory Page State";
+        notificationDesc = "Vulkan renderer only";
+        break;
+      }
       ToggleGPUSetting(GPUSetting::ClearMemoryPageState);
 
       // Assume the user wants ClearCaches as well
@@ -2221,6 +2182,12 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
       xe::threading::Sleep(delay);
       break;
     case ButtonFunctions::ReadbackResolve:
+      // Only the Vulkan renderer reads this (see ClearMemoryPageState).
+      if (ActiveRendererMask() != kRendererVulkan) {
+        notificationTitle = "Readback Resolve Mode";
+        notificationDesc = "Vulkan renderer only";
+        break;
+      }
       CycleReadbackResolve();
 
       notificationTitle = "Readback Resolve Mode";
@@ -2485,6 +2452,9 @@ std::string EmulatorWindow::CanonicalizeFileExtension(
 
 xe::X_STATUS EmulatorWindow::RunTitle(
     const std::filesystem::path& path_to_file) {
+  // However a game is started (Home, File > Open, the recent menu, F9, a
+  // dropped file), the dashboard steps aside for it.
+  HidePreferences();
   std::error_code ec = {};
   bool titleExists = std::filesystem::exists(path_to_file, ec);
 
@@ -2560,10 +2530,6 @@ xe::X_STATUS EmulatorWindow::RunTitle(
   if (profile_config_dialog_) {
     profile_config_dialog_.reset();
     emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
-  }
-
-  if (display_config_dialog_) {
-    display_config_dialog_.reset();
   }
 
   ClearDialogs();
@@ -2650,7 +2616,12 @@ void EmulatorWindow::LoadRecentlyLaunchedTitles() {
         continue;
       }
 
-      recently_launched_titles_.push_back({title_name, path, last_run_time});
+      uint32_t title_id = 0;
+      if (auto id = entry_table->get_as<int64_t>("title_id")) {
+        title_id = uint32_t(id->get());
+      }
+      recently_launched_titles_.push_back(
+          {title_name, path, last_run_time, title_id});
     }
   }
 }
@@ -2671,8 +2642,16 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
     recently_launched_titles_.erase(entry_index);
   }
 
-  recently_launched_titles_.insert(recently_launched_titles_.cbegin(),
-                                   {title_name, path_to_file, time(nullptr)});
+  const uint32_t title_id = emulator_->title_id();
+  recently_launched_titles_.insert(
+      recently_launched_titles_.cbegin(),
+      {title_name, path_to_file, time(nullptr), title_id});
+  // Keep the game's icon for the dashboard.
+  if (title_id && emulator_->game_info_database()) {
+    const std::vector<uint8_t> icon =
+        emulator_->game_info_database()->GetIcon();
+    SaveTitleIcon(title_id, icon);
+  }
   // Serialize to toml
   auto toml_table = toml::table();
 
@@ -2685,6 +2664,9 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
     entry_table.insert("title_name", entry.title_name);
     entry_table.insert("path", str_path);
     entry_table.insert("last_run_time", entry.last_run_time);
+    if (entry.title_id) {
+      entry_table.insert("title_id", int64_t(entry.title_id));
+    }
 
     toml_table.insert(std::to_string(index++), entry_table);
 
@@ -2699,25 +2681,40 @@ void EmulatorWindow::AddRecentlyLaunchedTitle(
   file.close();
 }
 
+std::filesystem::path EmulatorWindow::TitleIconPath(uint32_t title_id) const {
+  return emulator_->storage_root() / "title_icons" /
+         fmt::format("{:08X}.png", title_id);
+}
+
+void EmulatorWindow::SaveTitleIcon(uint32_t title_id,
+                                   std::span<const uint8_t> png) const {
+  // Only a PNG (the console's title icons are), and only once.
+  static constexpr uint8_t kPngSignature[] = {0x89, 'P', 'N', 'G'};
+  if (!title_id || png.size() < sizeof(kPngSignature) ||
+      std::memcmp(png.data(), kPngSignature, sizeof(kPngSignature)) != 0) {
+    return;
+  }
+  const std::filesystem::path path = TitleIconPath(title_id);
+  std::error_code ec;
+  if (std::filesystem::exists(path, ec)) {
+    return;
+  }
+  std::filesystem::create_directories(path.parent_path(), ec);
+  std::ofstream file(path, std::ofstream::binary | std::ofstream::trunc);
+  file.write(reinterpret_cast<const char*>(png.data()),
+             std::streamsize(png.size()));
+}
+
 void EmulatorWindow::ClearDialogs() {
   if (profile_config_dialog_) {
     profile_config_dialog_.reset();
   }
 
-  if (display_config_dialog_) {
-    display_config_dialog_.reset();
-  }
-
-  if (console_settings_dialog_) {
-    console_settings_dialog_.reset();
-  }
-
-  if (host_settings_dialog_) {
-    host_settings_dialog_.reset();
-  }
-
   imgui_drawer_.get()->ClearDialogs();
   emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+  // The frame rate counter is a dialog too; put it back if it is on.
+  fps_overlay_.reset();
+  UpdateFpsOverlay();
 }
 
 }  // namespace app

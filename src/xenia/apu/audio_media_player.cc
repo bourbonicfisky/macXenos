@@ -26,7 +26,8 @@ extern "C" {
 #endif
 }  // extern "C"
 
-DEFINE_bool(enable_xmp, true, "Enables Music Player playback.", "APU");
+DEFINE_bool(enable_xmp, false, "Enables Music Player playback.", "APU");
+UPDATE_from_bool(enable_xmp, 2026, 10, 8, 18, true);
 
 namespace xe {
 namespace apu {

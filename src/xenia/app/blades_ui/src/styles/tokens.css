@@ -1,0 +1,430 @@
+/* ==========================================================================
+   Faces, global tokens, and the per-blade tone matrix.
+   Blade colour lives here and nowhere else — components read --b-* only.
+   ========================================================================== */
+
+/* Selawik is Microsoft's metric-compatible Segoe UI — the face the Xbox 360
+   dashboard was actually set in. Michroma stands in for the squarish lettering
+   moulded into the console's chassis. */
+@font-face {
+  font-family: "Selawik";
+  src: url("/fonts/selawik-300.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Selawik";
+  src: url("/fonts/selawik-350.woff2") format("woff2");
+  font-weight: 350;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Selawik";
+  src: url("/fonts/selawik-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Selawik";
+  src: url("/fonts/selawik-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Selawik";
+  src: url("/fonts/selawik-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Michroma";
+  src: url("/fonts/michroma-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Exposed to Tailwind so `font-ui`, `text-ink`, `rounded-blade` and friends
+   resolve as utilities. */
+@theme {
+  --font-ui: "Selawik", "Segoe UI", "Avenir Next", system-ui, sans-serif;
+  --font-badge: "Michroma", "Eurostile", "Avenir Next", sans-serif;
+  --font-data: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+  --color-ink: #17220f;
+  --color-ember: #e7502a;
+  --color-gold: #b8801a;
+
+  --radius-blade: 26px;
+  --radius-slab: 12px;
+  --radius-row: 8px;
+
+  --ease-blade: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer components {
+
+:root {
+  --tab-w: clamp(84px, 6.7vw, 104px);
+
+  /* How far a vertical edge bows toward screen centre at mid-height, in real
+     pixels — see the curve note in blade.css. Control points sit at 4/3 of it
+     so the cubic's midpoint lands exactly on --bow. */
+  --bow: 30px;
+  --bow-ctl: calc(var(--bow) * 4 / 3);
+  /* The sheets run on past the top and bottom of the screen, as on the
+     console: every edge curve starts and ends this far outside the box, so
+     the screen edge crops it mid-curve and no blade shows an end. Pixels,
+     because tab-label.tsx reads it to draw the matching text path. */
+  --overrun: 48px;
+  /* The same cubic as before, stretched to run from -overrun to
+     100% + overrun: endpoints, and control points at 25% / 75% of the
+     stretched height. */
+  --edge-top: calc(0px - var(--overrun));
+  --edge-bot: calc(100% + var(--overrun));
+  --edge-c1: calc(25% - var(--overrun) / 2);
+  --edge-c2: calc(75% + var(--overrun) / 2);
+  /* How far neighbouring blades tuck under each other. Tab labels are biased
+     away from this edge so nothing gets covered. */
+  /* The ribbon sits --bow narrower than its box, so the overlap has to clear
+     the curve before it starts overlapping ribbons. Mockup pitch is 75 against
+     an 81 ribbon — a 6px tuck. */
+  --overlap: calc(var(--bow) + 6px);
+
+  /* The ribbon, and the highlight laid over it. Measured off the labelled SVG:
+     square shoulder to ~98% of the ribbon by 10% down, held to 74%, kinked
+     shut to ~22% by 79%, then a sliver to the foot. See blade.css. */
+  --ribbon: calc(var(--tab-w) - var(--bow));
+  --gw-cap: calc(var(--ribbon) * 0.2);
+  /* Slightly past full width: the highlight is clipped to the ribbon
+     (.blade-ribbon), so its widest stretch meets the outer edge exactly
+     instead of leaving a sliver of the pale sheet showing. */
+  --gw-full: calc(var(--ribbon) + 3px);
+  --gw-foot: calc(var(--ribbon) * 0.22);
+  /* Measured off the 1280×720 captures. Content sits ~53px (4.1vw) in from
+     the panel's edge, clear of the waist; ~6% of the screen shows bare metal
+     sheets beyond the outermost tabs. */
+  --pad: clamp(22px, 4.1vw, 84px);
+  --field-inset: clamp(0px, 6vw, 120px);
+  --measure: 64ch;
+  /* Animation speed (Preferences). "fast" is the dashboard's own pace;
+     "slow" is only a little gentler. "reduced" lives in globals.css. */
+  --slide: 520ms;
+  --fade: 260ms;
+  --fade-delay: 120ms;
+  --accordion: 280ms;
+
+  color-scheme: light;
+
+  --field: #cfcfd2;
+
+  /* Phones get no WebGL field, just brushed metal behind the panel: two
+     vertical grains on co-prime periods so the stripes never visibly repeat,
+     over a soft sheen from the top. */
+  --metal-grain:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.2) 0 1px,
+      transparent 1px 4px,
+      rgba(0, 0, 0, 0.04) 4px 5px,
+      transparent 5px 7px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 6px,
+      rgba(255, 255, 255, 0.14) 6px 7px,
+      transparent 7px 11px,
+      rgba(0, 0, 0, 0.03) 11px 13px
+    );
+  --metal-sheen:
+    radial-gradient(120% 55% at 50% 0%, rgba(255, 255, 255, 0.55), transparent 70%),
+    linear-gradient(180deg, #e2e1e6 0%, #cfcfd4 55%, #bdbcc3 100%);
+  --ink: #17220f;
+  --ink-soft: rgba(23, 34, 15, 0.72);
+  --ink-faint: rgba(23, 34, 15, 0.5);
+  --hair: rgba(23, 34, 15, 0.16);
+  --focus: #16330a;
+
+  /* Tabs are always a light surface — chrome, or a light slice of the open
+     blade's tone — so their label ink is set once, not per tone. */
+  --tab-ink: rgba(0, 0, 0, 0.66);
+  --tab-ink-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+
+  /* Dark ink on a blade sits on a 1px light lip, as if pressed into it. */
+  --emboss: 0 1px 0 rgba(255, 255, 255, 0.38);
+  --groove-light: rgba(255, 255, 255, 0.34);
+
+  /* The focus highlight: bright at the left, thinning to the right. */
+  --hl-a: rgba(255, 255, 255, 0.86);
+  --hl-b: rgba(255, 255, 255, 0.46);
+  --hl-c: rgba(255, 255, 255, 0.2);
+  --hl-gloss: rgba(255, 255, 255, 0.5);
+  --hl-rim: rgba(255, 255, 255, 0.8);
+  --hl-ring: rgba(0, 0, 0, 0.16);
+  --hl-drop: rgba(0, 0, 0, 0.16);
+}
+
+:root[data-motion="slow"] {
+  --slide: 720ms;
+  --fade: 340ms;
+  --fade-delay: 170ms;
+  --accordion: 420ms;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --field: #0a0d09;
+
+  --metal-grain:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.035) 0 1px,
+      transparent 1px 4px,
+      rgba(0, 0, 0, 0.25) 4px 5px,
+      transparent 5px 7px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 6px,
+      rgba(255, 255, 255, 0.025) 6px 7px,
+      transparent 7px 11px,
+      rgba(0, 0, 0, 0.2) 11px 13px
+    );
+  --metal-sheen:
+    radial-gradient(120% 55% at 50% 0%, rgba(255, 255, 255, 0.07), transparent 70%),
+    linear-gradient(180deg, #1d1c22 0%, #141318 55%, #0c0b0f 100%);
+  --ink: #e9f0e1;
+  --ink-soft: rgba(233, 240, 225, 0.74);
+  --ink-faint: rgba(233, 240, 225, 0.48);
+  --hair: rgba(233, 240, 225, 0.16);
+  --focus: #c6e877;
+
+  --tab-ink: rgba(255, 255, 255, 0.72);
+  --tab-ink-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+
+  --emboss: 0 1px 2px rgba(0, 0, 0, 0.6);
+  --groove-light: rgba(255, 255, 255, 0.08);
+
+  --hl-a: rgba(255, 255, 255, 0.26);
+  --hl-b: rgba(255, 255, 255, 0.12);
+  --hl-c: rgba(255, 255, 255, 0.05);
+  --hl-gloss: rgba(255, 255, 255, 0.16);
+  --hl-rim: rgba(255, 255, 255, 0.32);
+  --hl-ring: rgba(0, 0, 0, 0.5);
+  --hl-drop: rgba(0, 0, 0, 0.4);
+}
+
+/* --- Blade tones ---------------------------------------------------------
+   Also worn by the phone menu's rows (.deck-menu-item), so each reads as a
+   small blade in its own colour.
+   The dashboard's five colourways, sampled from full-screen captures of each
+   blade. Only the blade *title* is white; everything else on a blade is dark
+   ink, as it is in every one of those captures.
+
+   --b-title      the blade heading, and only that
+   --b-ink        all body text, on panels and on the blade alike
+   -------------------------------------------------------------------------- */
+
+.blade[data-tone="green"],
+.deck-menu-item[data-tone="green"] {
+  --b-hi: #9ad189;
+  --b-base: #5fbb4e;
+  --b-lo: #3f8a33;
+  --b-rim: color-mix(in srgb, #9ad189 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #15300e;
+  --b-ink-soft: color-mix(in srgb, #15300e 82%, transparent);
+}
+
+.blade[data-tone="orange"],
+.deck-menu-item[data-tone="orange"] {
+  --b-hi: #fbbe8a;
+  --b-base: #f5913e;
+  --b-lo: #c4652a;
+  --b-rim: color-mix(in srgb, #fbbe8a 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #3a1e06;
+  --b-ink-soft: color-mix(in srgb, #3a1e06 82%, transparent);
+}
+
+.blade[data-tone="amber"],
+.deck-menu-item[data-tone="amber"] {
+  --b-hi: #f7c578;
+  --b-base: #e0a22f;
+  --b-lo: #a96f17;
+  --b-rim: color-mix(in srgb, #f7c578 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #33200a;
+  --b-ink-soft: color-mix(in srgb, #33200a 82%, transparent);
+}
+
+.blade[data-tone="blue"],
+.deck-menu-item[data-tone="blue"] {
+  --b-hi: #9ec6ec;
+  --b-base: #419be2;
+  --b-lo: #2a6faa;
+  --b-rim: color-mix(in srgb, #9ec6ec 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #0e2740;
+  --b-ink-soft: color-mix(in srgb, #0e2740 82%, transparent);
+}
+
+.blade[data-tone="purple"],
+.deck-menu-item[data-tone="purple"] {
+  --b-hi: #c9b6e5;
+  --b-base: #a47fde;
+  --b-lo: #6f53a0;
+  --b-rim: color-mix(in srgb, #c9b6e5 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #251743;
+  --b-ink-soft: color-mix(in srgb, #251743 82%, transparent);
+}
+
+/* Steel: the Advanced blade. Not one of the console's five; a cool brushed
+   grey-blue, so the blade of raw settings reads as the machine's own metal. */
+/* Teal: the Dashboard blade, the blades' own look and sound. */
+.blade[data-tone="teal"],
+.deck-menu-item[data-tone="teal"] {
+  --b-hi: #8fd6cc;
+  --b-base: #3fb3a3;
+  --b-lo: #26806f;
+  --b-rim: color-mix(in srgb, #8fd6cc 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #0b2a25;
+  --b-ink-soft: color-mix(in srgb, #0b2a25 82%, transparent);
+}
+
+/* Rose: the Profiles blade. */
+.blade[data-tone="rose"],
+.deck-menu-item[data-tone="rose"] {
+  --b-hi: #f2a7b9;
+  --b-base: #d9607f;
+  --b-lo: #a33a57;
+  --b-rim: color-mix(in srgb, #f2a7b9 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #3a0b18;
+  --b-ink-soft: color-mix(in srgb, #3a0b18 82%, transparent);
+}
+
+.blade[data-tone="steel"],
+.deck-menu-item[data-tone="steel"] {
+  --b-hi: #c3ccd6;
+  --b-base: #8d9aa8;
+  --b-lo: #5d6a78;
+  --b-rim: color-mix(in srgb, #c3ccd6 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #141c25;
+  --b-ink-soft: color-mix(in srgb, #141c25 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="green"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="green"] {
+  --b-hi: #2f6b1c;
+  --b-base: #1c4712;
+  --b-lo: #0a1c06;
+  --b-rim: color-mix(in srgb, #2f6b1c 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #e9f7de;
+  --b-ink-soft: color-mix(in srgb, #e9f7de 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="orange"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="orange"] {
+  --b-hi: #94501c;
+  --b-base: #61340f;
+  --b-lo: #241203;
+  --b-rim: color-mix(in srgb, #94501c 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #fceadb;
+  --b-ink-soft: color-mix(in srgb, #fceadb 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="amber"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="amber"] {
+  --b-hi: #8c5c12;
+  --b-base: #5c3c0b;
+  --b-lo: #221703;
+  --b-rim: color-mix(in srgb, #8c5c12 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #fbeedd;
+  --b-ink-soft: color-mix(in srgb, #fbeedd 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="blue"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="blue"] {
+  --b-hi: #255d8a;
+  --b-base: #173d5c;
+  --b-lo: #08151f;
+  --b-rim: color-mix(in srgb, #255d8a 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #e2eefa;
+  --b-ink-soft: color-mix(in srgb, #e2eefa 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="purple"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="purple"] {
+  --b-hi: #4d3a72;
+  --b-base: #33254c;
+  --b-lo: #140e1f;
+  --b-rim: color-mix(in srgb, #4d3a72 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #efe7fb;
+  --b-ink-soft: color-mix(in srgb, #efe7fb 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="teal"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="teal"] {
+  --b-hi: #1f6359;
+  --b-base: #144540;
+  --b-lo: #061a17;
+  --b-rim: color-mix(in srgb, #1f6359 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #e1f6f2;
+  --b-ink-soft: color-mix(in srgb, #e1f6f2 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="rose"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="rose"] {
+  --b-hi: #74304a;
+  --b-base: #4f1d31;
+  --b-lo: #1f0912;
+  --b-rim: color-mix(in srgb, #74304a 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #fbe6ec;
+  --b-ink-soft: color-mix(in srgb, #fbe6ec 82%, transparent);
+}
+
+:root[data-theme="dark"] .blade[data-tone="steel"],
+:root[data-theme="dark"] .deck-menu-item[data-tone="steel"] {
+  --b-hi: #4a5664;
+  --b-base: #2e3742;
+  --b-lo: #12171d;
+  --b-rim: color-mix(in srgb, #4a5664 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #e6edf5;
+  --b-ink-soft: color-mix(in srgb, #e6edf5 82%, transparent);
+}
+
+} /* @layer components */

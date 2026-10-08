@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preferences</title>
+    <!-- Resolves the saved theme and animation speed before first paint, so
+         the blades never flash the wrong ground. Keys match src/ui/preferences.ts. -->
+    <script>
+      (function () {
+        var r = document.documentElement;
+        try {
+          var s = localStorage.getItem("macxenos-theme");
+          var d = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          r.dataset.theme = s === "dark" || s === "light" ? s : d ? "dark" : "light";
+          var m = localStorage.getItem("macxenos-motion");
+          r.dataset.motion = m === "slow" || m === "reduced" ? m : "fast";
+          r.dataset.motionOverride = localStorage.getItem("macxenos-motion-override") === "on" ? "on" : "off";
+        } catch (e) {
+          r.dataset.theme = "dark";
+          r.dataset.motion = "fast";
+          r.dataset.motionOverride = "off";
+        }
+      })();
+    </script>
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/selawik-300.woff2" crossorigin="anonymous" />
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/selawik-400.woff2" crossorigin="anonymous" />
+    <script type="module" crossorigin src="/assets/index-p5Si1iMM.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CIDUGg8k.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

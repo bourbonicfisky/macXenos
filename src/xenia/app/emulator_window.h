@@ -29,20 +29,21 @@
 namespace xe {
 namespace app {
 
-class ConsoleSettingsDialog;
-class ControllerConfigDialog;
-class HostSettingsDialog;
+class BladesModel;
+class BladesOverlay;
 
 struct RecentTitleEntry {
   std::string title_name;
   std::filesystem::path path_to_file;
   std::time_t last_run_time;
+  // 0 for entries recorded before title IDs were kept.
+  uint32_t title_id = 0;
 };
 
 class EmulatorWindow {
-  // The host settings dialog drives the macOS Apply & Relaunch action, which
-  // re-execs the current title via the private RelaunchLastTitle lifecycle path.
-  friend class HostSettingsDialog;
+  // The Preferences blades read and change emulator state through the same
+  // private members the dialogs use.
+  friend class BladesModel;
 
  public:
   using steady_clock = std::chrono::steady_clock;  // stdlib steady clock
@@ -90,6 +91,15 @@ class EmulatorWindow {
   void OnEmulatorInitialized();
 
   xe::X_STATUS RunTitle(const std::filesystem::path& path_to_file);
+  // With no game on the command line: Preferences on the Home blade (or
+  // Profiles, when there is no profile yet), as the dashboard was.
+  void ShowStartScreen();
+  // Where a game's icon is kept once seen (<storage>/title_icons/ID.png),
+  // for the dashboard's Home blade.
+  std::filesystem::path TitleIconPath(uint32_t title_id) const;
+  void SaveTitleIcon(uint32_t title_id, std::span<const uint8_t> png) const;
+  // Creates or removes the frame rate counter to match show_fps.
+  void UpdateFpsOverlay();
   // Grey the lifecycle menu items per current state (Stop when running, Reboot/
   // Full Reboot when media has been loaded). Must be called on the UI thread.
   void UpdateLifecycleMenuState();
@@ -104,16 +114,15 @@ class EmulatorWindow {
                  const xe::ui::RawImage& image);
 
   void ToggleProfilesConfigDialog();
-  void ToggleXMPConfigDialog();
-  void ToggleConsoleSettingsDialog();
-  void ToggleControllerConfigDialog();
-  void ToggleHostSettingsDialog();
 
   // A controller hotkey for display/toggling in the controller UI.
   struct ControllerHotkeyInfo {
     int function;  // ButtonFunctions value
     std::string description;
     bool enabled;
+    // Works while a game runs (and needs controller_hotkeys); otherwise it is
+    // a home-screen hotkey.
+    bool in_game;
   };
   // Controller hotkeys (deduplicated by function) for the controller UI.
   std::vector<ControllerHotkeyInfo> GetControllerHotkeys() const;
@@ -224,10 +233,11 @@ class EmulatorWindow {
         installation_entries_;
   };
 
-  class DisplayConfigDialog final : public ui::ImGuiDialog {
+  // The frame rate in a corner of the window while a game runs (show_fps).
+  // Exists only while the setting is on.
+  class FpsOverlay final : public ui::ImGuiDialog {
    public:
-    DisplayConfigDialog(ui::ImGuiDrawer* imgui_drawer,
-                        EmulatorWindow& emulator_window)
+    FpsOverlay(ui::ImGuiDrawer* imgui_drawer, EmulatorWindow& emulator_window)
         : ui::ImGuiDialog(imgui_drawer), emulator_window_(emulator_window) {}
 
    protected:
@@ -235,26 +245,9 @@ class EmulatorWindow {
 
    private:
     EmulatorWindow& emulator_window_;
-  };
-
-  class XMPConfigDialog final : public ui::ImGuiDialog {
-   public:
-    XMPConfigDialog(ui::ImGuiDrawer* imgui_drawer,
-                    EmulatorWindow& emulator_window)
-        : ui::ImGuiDialog(imgui_drawer), emulator_window_(emulator_window) {
-      if (emulator_window_.emulator_->audio_media_player()) {
-        volume_ = emulator_window_.emulator_->audio_media_player()
-                      ->GetVolume()
-                      ->load();
-      }
-    }
-
-   protected:
-    void OnDraw(ImGuiIO& io) override;
-
-   private:
-    EmulatorWindow& emulator_window_;
-    float volume_ = 0.0f;
+    uint64_t last_count_ = 0;
+    double last_time_ = 0.0;
+    double fps_ = 0.0;
   };
 
   explicit EmulatorWindow(Emulator* emulator,
@@ -263,12 +256,6 @@ class EmulatorWindow {
 
   bool Initialize();
 
-  // For comparisons, use GetSwapPostEffectForCvarValue instead as the default
-  // fallback may be used for multiple values.
-  static const char* GetCvarValueForSwapPostEffect(
-      gpu::CommandProcessor::SwapPostEffect effect);
-  static gpu::CommandProcessor::SwapPostEffect GetSwapPostEffectForCvarValue(
-      const std::string& cvar_value);
   // For comparisons, use GetGuestOutputPaintEffectForCvarValue instead as the
   // default fallback may be used for multiple values.
   static const char* GetCvarValueForGuestOutputPaintEffect(
@@ -278,6 +265,14 @@ class EmulatorWindow {
   static ui::Presenter::GuestOutputPaintConfig
   GetGuestOutputPaintConfigForCvars();
   void ApplyDisplayConfigForCvars();
+  // Renderers as bits, for settings only one of them reads.
+  enum RendererMask : uint32_t {
+    kRendererMetal = 1u << 0,
+    kRendererVulkan = 1u << 1,
+  };
+  // The running renderer as a RendererMask bit, or 0 when no graphics system
+  // is up.
+  uint32_t ActiveRendererMask() const;
 
   void OnKeyDown(ui::KeyEvent& e);
   void OnMouseDown(const ui::MouseEvent& e);
@@ -306,7 +301,19 @@ class EmulatorWindow {
   void CpuBreakIntoHostDebugger();
   void GpuTraceFrame();
   void GpuClearCaches();
-  void ToggleDisplayConfigDialog();
+  // The Preferences blades (blades_overlay_mac.h). `blade` picks the blade to
+  // open on ("graphics", "controller", "audio", "cpu", "system", "dashboard",
+  // "advanced"); empty keeps the last one.
+  void ShowPreferences(const std::string& blade);
+  void HidePreferences();
+  void TogglePreferences(const std::string& blade);
+  bool IsPreferencesVisible() const;
+  void HandlePreferencesMessage(const std::string& json);
+  void PumpPreferencesController();
+  // Suspends the running game's threads and audio while the dashboard is
+  // open (dashboard_freezes_game), and resumes them.
+  void FreezeGame(bool freeze);
+  void PreferencesButtonListener();
   void ToggleControllerVibration();
   void ShowCompatibility();
   void ShowFAQ();
@@ -355,16 +362,28 @@ class EmulatorWindow {
   std::string base_title_;
   bool initializing_shader_storage_ = false;
 
-  std::unique_ptr<DisplayConfigDialog> display_config_dialog_;
-  std::unique_ptr<ConsoleSettingsDialog> console_settings_dialog_;
-  std::unique_ptr<HostSettingsDialog> host_settings_dialog_;
-  std::unique_ptr<ControllerConfigDialog> controller_config_dialog_;
 
   // Storing pointers and toggling dialog state is useful for broadcasting
   // messages back to guest.
   std::unique_ptr<ProfileConfigDialog> profile_config_dialog_;
 
-  std::unique_ptr<XMPConfigDialog> xmp_config_dialog_;
+  std::unique_ptr<FpsOverlay> fps_overlay_;
+  // The controller button that opens Preferences (preferences_button), polled
+  // on its own thread so it works whether or not hotkeys are on.
+  std::unique_ptr<xe::threading::Thread> preferences_button_listener_;
+  std::atomic<bool> preferences_button_stop_{false};
+  std::atomic<bool> blades_visible_{false};
+  bool game_frozen_ = false;
+  bool mute_before_freeze_ = false;
+
+  // Declared after window_, so they go before the window they draw in.
+  std::unique_ptr<BladesModel> blades_model_;
+  std::unique_ptr<BladesOverlay> blades_overlay_;
+  // Whether opening Preferences raised the console's system-UI state (which
+  // pauses most games and hides input from them), so closing lowers it.
+  bool blades_raised_system_ui_ = false;
+  // Controller buttons last forwarded to the page.
+  uint32_t blades_pad_buttons_ = 0;
 
   std::vector<RecentTitleEntry> recently_launched_titles_;
 };

@@ -156,6 +156,11 @@ class CommandProcessor {
   // Counts a guest swap and logs the frame rate every 5 seconds when
   // --log_fps is set; called from the shared PM4 XE_SWAP handler.
   void LogFpsTick();
+  // Guest swaps since the command processor started (the on-screen frame
+  // rate counter samples this). Any thread.
+  uint64_t guest_swap_count() const {
+    return guest_swap_count_.load(std::memory_order_relaxed);
+  }
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
@@ -694,6 +699,8 @@ class CommandProcessor {
   std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
+
+  std::atomic<uint64_t> guest_swap_count_{0};
 
   // --log_fps window state (guest swaps since the window start).
   uint64_t fps_log_start_ticks_ = 0;

@@ -74,6 +74,7 @@ static void ShowMacAboutPanel() {
 // retained for the window's lifetime) so the app menu needs no extra owner.
 - (void)quit:(id)sender;
 - (void)openAbout:(id)sender;
+- (void)openSettings:(id)sender;
 @end
 
 @implementation XeniaWindowDelegate
@@ -91,6 +92,11 @@ static void ShowMacAboutPanel() {
   }
 }
 - (void)openAbout:(id)sender { ShowMacAboutPanel(); }
+- (void)openSettings:(id)sender {
+  if (window_) {
+    window_->HandleSettingsRequested();
+  }
+}
 - (void)windowDidResize:(NSNotification*)notification {
   window_->HandleResize();
 }
@@ -338,6 +344,14 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   [app_menu addItem:about];
   [app_menu addItem:[NSMenuItem separatorItem]];
 
+  // Preferences, as every Mac app has them: ⌘, opens the blades.
+  NSMenuItem* settings = [[NSMenuItem alloc] initWithTitle:@"Settings…"
+                                                    action:@selector(openSettings:)
+                                             keyEquivalent:@","];
+  settings.target = delegate;
+  [app_menu addItem:settings];
+  [app_menu addItem:[NSMenuItem separatorItem]];
+
   NSMenuItem* hide =
       [[NSMenuItem alloc] initWithTitle:[@"Hide " stringByAppendingString:app_name]
                                  action:@selector(hide:)
@@ -513,6 +527,7 @@ MacWindow::~MacWindow() {
         (__bridge_transfer XeniaWindowDelegate*)delegate_;
     delegate_ = nullptr;
     metal_view_ = nullptr;
+    container_view_ = nullptr;
     if (window) {
       [window setDelegate:nil];
       [window close];
@@ -555,8 +570,17 @@ bool MacWindow::OpenImpl() {
     metal_layer.contentsScale = [window backingScaleFactor];
     [view setLayer:metal_layer];
     [view setWantsLayer:YES];
+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    [window setContentView:view];
+    // The content view is a plain container with the Metal view filling it. A
+    // layer-hosting view must not have subviews of its own, so anything drawn
+    // over the game (the Preferences blades) is a sibling in this container.
+    NSView* container = [[NSView alloc] initWithFrame:content_rect];
+    container.wantsLayer = YES;
+    container.autoresizesSubviews = YES;
+    [container addSubview:view];
+
+    [window setContentView:container];
     [window setTitle:[NSString stringWithUTF8String:std::string(GetTitle())
                                                         .c_str()]];
     [window setReleasedWhenClosed:NO];
@@ -595,6 +619,7 @@ bool MacWindow::OpenImpl() {
 
     window_ = (__bridge_retained void*)window;
     metal_view_ = (__bridge void*)view;
+    container_view_ = (__bridge void*)container;
     delegate_ = (__bridge_retained void*)delegate;
 
     UpdateSizeFromView();

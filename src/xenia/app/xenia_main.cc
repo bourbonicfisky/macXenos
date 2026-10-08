@@ -80,7 +80,11 @@
 #define HID_OPTIONS "[any, nop, scripted, sdl, keyboard]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
+#if XE_GPU_METAL
+#define GPU_OPTIONS "[any, metal, vulkan, null]"
+#else
 #define GPU_OPTIONS "[any, vulkan, null]"
+#endif  // XE_GPU_METAL
 #define HID_OPTIONS "[any, nop, scripted, sdl, keyboard]"
 #endif
 
@@ -966,6 +970,10 @@ void EmulatorApp::EmulatorThread() {
       app_context().RequestDeferredQuit();
       return;
     }
+  } else {
+    // No game to start: open on the dashboard (Preferences > Home).
+    app_context().CallInUIThread(
+        [this]() { emulator_window_->ShowStartScreen(); });
   }
 
   // Now, we're going to use this thread to drive events related to emulation.

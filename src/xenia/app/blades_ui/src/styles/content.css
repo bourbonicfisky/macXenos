@@ -1,0 +1,869 @@
+/* ==========================================================================
+   Content sitting on a blade: the menu rows, the focus highlight, the
+   description pane, the tray pill, the controller glyphs, the app icon.
+   All colour comes from the --b-* tone the surrounding blade sets, plus the
+   emboss and highlight tokens in tokens.css.
+   ========================================================================== */
+
+@layer components {
+
+/* --- Menu rows -------------------------------------------------------------
+   The dashboard set its lists as plain text on the blade, divided by an
+   engraved groove: a dark line with a light one under it. No boxes until a
+   row takes focus.
+   -------------------------------------------------------------------------- */
+
+.menu-item {
+  position: relative;
+}
+
+.menu-item::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0.3em 0;
+  bottom: -1px;
+  height: 2px;
+  border-top: 1px solid color-mix(in srgb, var(--b-lo) 62%, transparent);
+  border-bottom: 1px solid var(--groove-light);
+  pointer-events: none;
+}
+
+.menu-row {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--b-ink);
+  font: inherit;
+  text-decoration: none;
+  text-shadow: var(--emboss);
+  cursor: pointer;
+}
+
+/* The focus highlight: a glossy white sheet, bright at the left and thinning
+   out to the right, with a hard light rim — the "Sign In" box and the
+   "Console Settings" bar. It follows the cursor, as focus did on the pad. */
+.menu-row[data-focused="true"] {
+  z-index: 1;
+  border-color: var(--hl-rim);
+  background:
+    linear-gradient(180deg, var(--hl-gloss) 0%, transparent 52%),
+    linear-gradient(90deg, var(--hl-a) 0%, var(--hl-b) 58%, var(--hl-c) 100%);
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 2px 6px var(--hl-drop);
+}
+
+.menu-row:focus-visible {
+  outline-offset: 2px;
+}
+
+/* With a sub-menu open, the row that opened it stays marked but steps back,
+   so the eye goes to the pane. */
+.menu-list:has(+ .menu-aside[data-submenu="on"]) .menu-row[data-focused="true"] {
+  opacity: 0.62;
+}
+
+.glyph {
+  width: 1.45em;
+  height: 1.45em;
+  fill: url(#glyph-sheen);
+  filter: drop-shadow(0 1px 0.6px rgba(0, 0, 0, 0.5));
+}
+
+.glyph .glyph-line {
+  stroke: #e2e2e8;
+}
+
+.glyph .glyph-cut {
+  fill: rgba(30, 30, 40, 0.42);
+}
+
+.glyph .glyph-cut-line {
+  stroke: rgba(30, 30, 40, 0.42);
+}
+
+/* --- Accordion (single column) --------------------------------------------
+   Each row opens its pane beneath it. The pane sits indented under the
+   row's label, and a chevron turns to show which row is open.
+   -------------------------------------------------------------------------- */
+
+.menu-chevron {
+  width: 0.5em;
+  height: 0.5em;
+  border-right: 2px solid var(--b-ink-soft);
+  border-bottom: 2px solid var(--b-ink-soft);
+  transform: translateY(-25%) rotate(45deg);
+  transition: transform var(--accordion) var(--ease-blade);
+}
+
+.menu-row[aria-expanded="true"] .menu-chevron {
+  transform: translateY(15%) rotate(-135deg);
+}
+
+/* Opening and closing: the pane's row of a one-row grid grows from 0fr to
+   1fr, so it animates to its natural height without measuring it. Paced by
+   --accordion, which follows the Animation speed preference; reduced motion
+   (Preferences or the OS) makes it instant, through globals.css. */
+.menu-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--accordion) var(--ease-blade),
+    opacity var(--accordion) ease;
+}
+
+.menu-collapse[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.menu-collapse-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.menu-collapse-inner > .menu-detail {
+  padding: 0.55em 0.4em 0.9em 2.65em;
+  font-size: 0.94em;
+}
+
+/* --- Description pane ----------------------------------------------------- */
+
+.menu-feature {
+  border-bottom: 1px solid color-mix(in srgb, var(--b-lo) 50%, transparent);
+  box-shadow: 0 1px 0 var(--groove-light);
+}
+
+.menu-detail {
+  color: var(--b-ink);
+  text-shadow: var(--emboss);
+  max-width: 34em;
+}
+
+.menu-detail p {
+  margin: 0;
+}
+
+.menu-detail-heading {
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.menu-detail-body {
+  font-size: 0.86em;
+  line-height: 1.5;
+}
+
+.pane-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--b-ink) 45%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.pane-link:hover {
+  text-decoration-color: currentColor;
+}
+
+/* A pane's one action: the same glossy sheet as the focus highlight, so it
+   reads as something you can select, with a firmer rim and a lip. */
+.pane-button {
+  border: 1px solid var(--hl-rim);
+  background:
+    linear-gradient(180deg, var(--hl-gloss) 0%, transparent 52%),
+    linear-gradient(180deg, var(--hl-a) 0%, var(--hl-b) 100%);
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 2px 0 var(--hl-drop);
+  color: var(--b-ink);
+  font-weight: 600;
+  text-decoration: none;
+  transition: filter 160ms ease, transform 120ms ease;
+}
+
+.pane-button:hover {
+  filter: brightness(1.06);
+}
+
+.pane-button:active {
+  transform: translateY(1px);
+}
+
+/* Step numbers: small round tokens, like the pad's face buttons at rest. */
+.menu-step {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.45em;
+  height: 1.45em;
+  margin-top: 0.05em;
+  border: 1px solid var(--hl-rim);
+  border-radius: 50%;
+  background: var(--hl-b);
+  font-size: 0.82em;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* A setting's current value at the right of its row (Preferences). */
+.menu-value {
+  color: var(--b-ink-soft);
+}
+
+/* Preference options: an outlined sheet, and the chosen one glossy like the
+   focus highlight, so the current choice reads at a glance. */
+.pref-option {
+  border: 1px solid var(--hl-rim);
+  background: transparent;
+  color: var(--b-ink);
+  font: inherit;
+  text-shadow: var(--emboss);
+  transition: background 160ms ease;
+}
+
+.pref-option:hover {
+  background: var(--hl-c);
+}
+
+.pref-option[aria-checked="true"] {
+  background:
+    linear-gradient(180deg, var(--hl-gloss) 0%, transparent 52%),
+    linear-gradient(180deg, var(--hl-a) 0%, var(--hl-b) 100%);
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 2px 0 var(--hl-drop);
+  font-weight: 600;
+}
+
+/* A second group of options inside one pane (Volume, under Sound). */
+.menu-detail .pref-group {
+  margin-top: 0.35em;
+  font-weight: 600;
+}
+
+/* The reduced-motion override: a native checkbox tinted to the blade. */
+.pref-check {
+  color: var(--b-ink);
+  text-shadow: var(--emboss);
+}
+
+.pref-check-box {
+  width: 1.05em;
+  height: 1.05em;
+  margin: 0;
+  accent-color: var(--b-lo);
+}
+
+.menu-spec,
+.menu-note {
+  color: var(--b-ink-soft);
+  letter-spacing: 0.02em;
+}
+
+/* --- Tray ------------------------------------------------------------------
+   The "Open Tray" pill: a long translucent capsule with a round button at its
+   head, sitting just above the legend.
+   -------------------------------------------------------------------------- */
+
+.tray {
+  border: 1px solid var(--hl-rim);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--b-hi) 45%, transparent) 0%,
+    color-mix(in srgb, var(--b-base) 30%, transparent) 100%
+  );
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--b-lo) 45%, transparent),
+    inset 0 1px 0 var(--hl-gloss);
+  color: var(--b-ink);
+  text-decoration: none;
+  text-shadow: var(--emboss);
+  transition: background 180ms ease;
+}
+
+.tray:hover {
+  background: linear-gradient(
+    180deg,
+    var(--hl-b) 0%,
+    color-mix(in srgb, var(--b-base) 30%, transparent) 100%
+  );
+}
+
+.tray-knob {
+  width: 1.9em;
+  height: 1.9em;
+  border: 1px solid var(--hl-rim);
+  background: radial-gradient(
+    circle at 50% 30%,
+    var(--hl-a),
+    color-mix(in srgb, var(--b-base) 40%, transparent) 75%
+  );
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--b-lo) 55%, transparent);
+}
+
+.tray-chevron {
+  width: 0.42em;
+  height: 0.42em;
+  border-top: 2px solid var(--b-ink-soft);
+  border-right: 2px solid var(--b-ink-soft);
+  transform: translateX(-12%) rotate(45deg);
+}
+
+/* --- Controller glyphs ---------------------------------------------------- */
+
+.pad-key {
+  display: inline-grid;
+  place-items: center;
+  width: 1.3em;
+  height: 1.3em;
+  border-radius: 50%;
+  font-size: 0.92em;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.32), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.pad-key--a {
+  background: radial-gradient(circle at 50% 28%, #b9ec85 0%, #5fb52f 52%, #357a14 100%);
+}
+
+.pad-key--b {
+  background: radial-gradient(circle at 50% 28%, #ffb0a0 0%, #e2391f 52%, #9c1a08 100%);
+}
+
+.pad-key--y {
+  background: radial-gradient(circle at 50% 28%, #fff1a0 0%, #f2c614 52%, #b08300 100%);
+}
+
+/* --- Toast ----------------------------------------------------------------
+   The achievement-style popup ("Preference saved"). Always the 360's dark
+   glossy capsule, whatever the theme, rising in above the legend.
+   -------------------------------------------------------------------------- */
+
+/* Placement follows the Notification position preference. The side gutter
+   keeps a corner toast inside the screen's title-safe area, as the 360 did;
+   bottom positions sit above the legend, top ones near the top edge. */
+.toast-region {
+  justify-content: center;
+  padding-inline: max(16px, var(--field-inset));
+  bottom: calc(clamp(64px, 16.5dvh, 170px) + 20px);
+}
+
+.toast-region[data-position$="left"] {
+  justify-content: flex-start;
+}
+
+.toast-region[data-position$="right"] {
+  justify-content: flex-end;
+}
+
+.toast-region[data-position^="top"] {
+  top: calc(env(safe-area-inset-top, 0px) + 3.5dvh);
+  bottom: auto;
+}
+
+.toast-region[data-position^="top"] .toast {
+  animation-name: toast-in-top;
+}
+
+@media (max-width: 860px) {
+  .toast-region {
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Clear of the sticky tab strip. */
+  .toast-region[data-position^="top"] {
+    top: calc(env(safe-area-inset-top, 0px) + 72px);
+  }
+}
+
+.toast {
+  padding: 0.45em 1.5em 0.45em 0.45em;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    #55555b 0%,
+    #2b2b30 46%,
+    #141416 52%,
+    #0c0c0e 100%
+  );
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 12px 30px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #f4f4f4;
+  font-size: clamp(0.95rem, 2.4dvh, 1.3rem);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  animation: toast-in 420ms var(--ease-blade) both;
+}
+
+.toast-orb {
+  width: 2.5em;
+  height: 2.5em;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35), 0 0 14px rgba(120, 220, 60, 0.45);
+}
+
+.toast-title {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.78em;
+}
+
+.toast-detail {
+  font-weight: 600;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes toast-in-top {
+  from {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --- App icon ------------------------------------------------------------- */
+
+.icon-bloom {
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--color-ember) 40%, transparent) 0%,
+    color-mix(in srgb, var(--color-ember) 16%, transparent) 46%,
+    transparent 68%
+  );
+  filter: blur(24px);
+  animation: bloom 7s ease-in-out infinite;
+}
+
+.icon-art {
+  border-radius: 23%;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+  animation: boot-in 800ms var(--ease-blade) both;
+}
+
+/* A specular that creeps around the icon, so it reads as a physical part. */
+/* The specular turns inside a frame clipped to the icon's own rounded square.
+   Rotating the rounded overlay itself swung its corners out past the icon. */
+.icon-specular-frame {
+  border-radius: 23%;
+}
+
+.icon-specular {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(255, 255, 255, 0.22) 26deg,
+    transparent 66deg,
+    transparent 360deg
+  );
+  mix-blend-mode: overlay;
+  animation: creep 18s linear infinite;
+}
+
+@keyframes bloom {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(0.97);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes boot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes creep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
+/* --- Setting controls (settings-controls.tsx) ------------------------------
+   The app's own settings in the same vocabulary as the options above: an
+   outlined sheet at rest, the glossy highlight when it has the cursor.
+   -------------------------------------------------------------------------- */
+
+/* A value on a track: a recessed groove, filled in the blade's own tone up to
+   a glossy knob. */
+.pref-slider {
+  border: 1px solid var(--hl-rim);
+  color: var(--b-ink);
+  text-shadow: var(--emboss);
+  cursor: pointer;
+  touch-action: none;
+  transition: background 160ms ease;
+}
+
+.pref-slider:hover,
+.pref-slider:focus-visible {
+  background: var(--hl-c);
+}
+
+.pref-slider-track {
+  background: color-mix(in srgb, var(--b-lo) 55%, transparent);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 0 var(--hl-c);
+}
+
+.pref-slider-fill {
+  background: linear-gradient(180deg, var(--b-hi), var(--b-base));
+}
+
+.pref-slider-knob {
+  width: 1.05em;
+  height: 1.05em;
+  border: 1px solid var(--hl-rim);
+  background: radial-gradient(circle at 50% 30%, #ffffff, var(--hl-a) 45%, var(--b-hi) 100%);
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 1px 2px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+/* A field typed into: an inset sheet, so it reads as a well rather than a
+   button. */
+.pref-text {
+  border: 1px solid var(--hl-rim);
+  background: color-mix(in srgb, var(--b-lo) 22%, transparent);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
+  color: var(--b-ink);
+  font: inherit;
+  font-size: 0.95em;
+  outline: none;
+}
+
+.pref-text:focus {
+  background: var(--hl-c);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25), 0 0 0 2px var(--hl-rim);
+}
+
+.pref-text::placeholder {
+  color: var(--b-ink-soft);
+}
+
+/* A tray that does something rather than going somewhere. */
+button.tray {
+  font: inherit;
+}
+
+/* Advanced: one setting per entry, its name over its explanation. */
+.setting-entry {
+  padding-block: 0.55em;
+  border-bottom: 1px solid color-mix(in srgb, var(--b-lo) 40%, transparent);
+  box-shadow: 0 1px 0 var(--hl-c);
+}
+
+.setting-entry:last-child {
+  border-bottom: 0;
+  box-shadow: none;
+}
+
+.setting-name {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.88em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.setting-changed {
+  color: var(--b-ink-soft);
+  font-size: 0.78em;
+}
+
+/* Status of a connected controller, or of a binding being captured. */
+.pad-status {
+  color: var(--b-ink-soft);
+  font-size: 0.85em;
+}
+
+.pad-capture {
+  animation: pad-capture 1s ease-in-out infinite alternate;
+}
+
+@keyframes pad-capture {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.45;
+  }
+}
+
+
+/* A drop-down (dropdown.tsx): the sheet at rest, and a list that opens over
+   the pane like a smaller blade — deep tone, glossy cursor row. */
+.pref-dropdown[aria-expanded="true"] {
+  background: var(--hl-c);
+}
+
+.pref-dropdown[aria-expanded="true"] .menu-chevron {
+  transform: translateY(15%) rotate(-135deg);
+}
+
+.pref-dropdown-list {
+  border: 1px solid var(--hl-rim);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--b-base) 92%, black) 0%,
+    color-mix(in srgb, var(--b-lo) 96%, black) 100%
+  );
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 10px 28px rgba(0, 0, 0, 0.45);
+  scrollbar-width: thin;
+}
+
+.pref-dropdown-item {
+  color: var(--b-ink);
+  text-shadow: var(--emboss);
+}
+
+.pref-dropdown-item[data-focused="true"] {
+  background:
+    linear-gradient(180deg, var(--hl-gloss) 0%, transparent 52%),
+    linear-gradient(90deg, var(--hl-a) 0%, var(--hl-b) 60%, var(--hl-c) 100%);
+  box-shadow: 0 0 0 1px var(--hl-rim);
+}
+
+.pref-dropdown-tick {
+  width: 1em;
+  font-weight: 700;
+}
+
+
+/* "Recommended", beside an option or a switch: a small engraved label. On a
+   switch it brightens while the switch is where it is recommended. */
+.pref-tag {
+  margin-inline-start: 0.6em;
+  padding: 0.05em 0.5em;
+  border: 1px solid color-mix(in srgb, var(--b-ink) 28%, transparent);
+  border-radius: 999px;
+  color: var(--b-ink-soft);
+  font-size: 0.68em;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pref-check .pref-tag:not([data-matches]) {
+  border-color: var(--b-ink-soft);
+  color: var(--b-ink);
+}
+
+/* Controller hotkeys: the buttons to hold, drawn as the pad's own. */
+.hotkey-row {
+  padding-block: 0.4em;
+  border-bottom: 1px solid color-mix(in srgb, var(--b-lo) 40%, transparent);
+  box-shadow: 0 1px 0 var(--hl-c);
+}
+
+.hotkey-row:last-child {
+  border-bottom: 0;
+  box-shadow: none;
+}
+
+.hotkey-row[data-off] .hotkey-combo,
+.hotkey-row[data-off] .hotkey-action {
+  opacity: 0.5;
+}
+
+.pad-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.3em;
+  height: 1.3em;
+  padding-inline: 0.45em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f4f4f7, #b9b9c2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.3),
+    0 1px 2px rgba(0, 0, 0, 0.3);
+  color: #2a2a30;
+  font-size: 0.72em;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.pad-chip--guide {
+  padding-inline: 0;
+  width: 1.3em;
+  background: radial-gradient(circle at 50% 35%, #d8ffd0 0%, #6fd04f 45%, #2f7d18 100%);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
+}
+
+.pad-key--x {
+  background: radial-gradient(circle at 50% 28%, #a7d1ff 0%, #2f7fe0 52%, #164f9c 100%);
+}
+
+
+/* What a switch is recommended at, under its label. It brightens when the
+   switch is set the other way. */
+.pref-recommended {
+  color: var(--b-ink-soft);
+  font-size: 0.7em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pref-recommended[data-differs] {
+  color: var(--b-ink);
+  font-weight: 600;
+}
+
+.pref-recommended[data-differs]::before {
+  content: "● ";
+}
+
+/* An on/off switch, for long lists (the hotkeys): a recessed track with a
+   glossy knob that slides to On, the track lit in the blade's tone. */
+.pref-switch {
+  position: relative;
+  width: 2.6em;
+  height: 1.45em;
+  padding: 0;
+  border: 1px solid var(--hl-rim);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--b-lo) 55%, transparent);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: background 160ms ease;
+}
+
+.pref-switch[aria-checked="true"] {
+  background: linear-gradient(180deg, var(--b-hi), var(--b-base));
+}
+
+.pref-switch-knob {
+  position: absolute;
+  top: 50%;
+  left: 0.15em;
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, #ffffff, var(--hl-a) 45%, #c9c9d1 100%);
+  box-shadow: 0 0 0 1px var(--hl-ring), 0 1px 2px rgba(0, 0, 0, 0.4);
+  transform: translateY(-50%);
+  transition: left 160ms ease;
+}
+
+.pref-switch[aria-checked="true"] .pref-switch-knob {
+  left: calc(100% - 1.25em);
+}
+
+.pref-switch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+
+/* Moving the cursor scrolls the blade only as far as needed; this margin
+   keeps the focused row's glow and rim clear of the scroll edge instead of
+   flush against it (and the same inside a drop-down's list). */
+.blade-scroll {
+  scroll-padding-block: 18px;
+}
+
+.pref-dropdown-list {
+  scroll-padding-block: 8px;
+}
+
+
+/* A caution at the top of the Advanced blade's panes: an amber-rimmed sheet
+   with a round mark, on any blade tone. */
+.pane-warning {
+  border: 1px solid color-mix(in srgb, #f2b81e 70%, var(--b-ink));
+  background: color-mix(in srgb, #f2b81e 16%, transparent);
+  color: var(--b-ink);
+  line-height: 1.4;
+}
+
+.pane-warning-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4em;
+  height: 1.4em;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 28%, #ffe9a0 0%, #f2b81e 52%, #a87708 100%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+  color: #2a1a00;
+  font-weight: 700;
+}
+
+/* A destructive action: the pane button, warming to red once armed. */
+.pane-button--danger[data-armed] {
+  border-color: #ff9f8f;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, transparent 52%),
+    linear-gradient(180deg, #ff8a72 0%, #d8361c 100%);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+}
+
+
+/* A heading over a group of rows (Dashboard, System): engraved small caps on
+   the blade, like a groove label, with room above it. */
+.menu-section {
+  padding: 0.9em 0.5em 0.25em;
+  color: var(--b-ink-soft);
+  font-size: 0.68em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-shadow: var(--emboss);
+}
+
+.menu-section:first-child {
+  padding-top: 0.1em;
+}
+
+
+/* A game's icon in place of a row's glyph: the same size, softly rounded. */
+.glyph-image {
+  border-radius: 4px;
+  object-fit: cover;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* A game's art in the feature spot: the icon as a lit tile, with the same
+   sweep of light the blades carry. */
+.game-art {
+  box-shadow: 0 0 0 1px var(--hl-rim), 0 8px 24px rgba(0, 0, 0, 0.45);
+  background: #000;
+}
+
+.game-art img {
+  image-rendering: auto;
+}
+
+.game-art-gloss {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.08) 38%, transparent 40%);
+}
+
+
+/* The Guide button in the legend: the pad's green orb at the face buttons'
+   size. */
+.legend-guide {
+  width: 1.3em;
+  height: 1.3em;
+  font-size: 0.92em;
+}
+
+} /* @layer components */

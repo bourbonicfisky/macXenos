@@ -971,6 +971,7 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
 }
 
 void CommandProcessor::LogFpsTick() {
+  guest_swap_count_.fetch_add(1, std::memory_order_relaxed);
   if (!cvars::log_fps) {
     return;
   }

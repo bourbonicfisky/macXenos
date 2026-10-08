@@ -23,6 +23,14 @@ specific claim.
 
 Agents must also follow [the documentation-specific instructions](AGENTS.md).
 
+## App interface
+
+The macXenos front end (start screen, settings, profiles and the in-game
+dashboard) is the Blades page in
+[`src/xenia/app/blades_ui`](../src/xenia/app/blades_ui/README.md), hosted in a
+WKWebView over the game. The ImGui settings dialogs it replaced are gone; add
+new user-facing settings there, not as dialogs.
+
 ## Deprecated archive
 
 Closed decisions, pre-gates, censuses, audits, investigations, and session

@@ -211,6 +211,13 @@ class Processor {
 
   uint8_t* AllocateFunctionTraceData(size_t size);
 
+ public:
+  // Suspends every guest thread (and resumes exactly those), as the
+  // debugger's pause does but without opening a debugger: the dashboard
+  // freezes a game with these while it is open.
+  bool SuspendGuestThreads() { return SuspendAllThreads(); }
+  bool ResumeGuestThreads() { return ResumeAllThreads(); }
+
  private:
   // Synchronously demands a debug listener.
   void DemandDebugListener();
