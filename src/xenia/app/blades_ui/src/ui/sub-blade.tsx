@@ -258,10 +258,12 @@ export function SubBlade({
   const { left, right } = legend(clamped);
   // Content sits clear of the screen edge on the open side and of the tab
   // on the other.
+  // The tab bows in over the sheet by --bow at mid-height, so that side
+  // keeps clear of it too.
   const inset =
     side === "left"
-      ? "pr-[var(--pad)] pl-[calc(var(--pad)+var(--field-inset))]"
-      : "pl-[var(--pad)] pr-[calc(var(--pad)+var(--field-inset))]";
+      ? "pr-[calc(var(--pad)+var(--bow))] pl-[calc(var(--pad)+var(--field-inset))]"
+      : "pl-[calc(var(--pad)+var(--bow))] pr-[calc(var(--pad)+var(--field-inset))]";
 
   return (
     <div className="subblade-layer fixed inset-0 z-40" data-entered={entered || undefined}>
@@ -327,8 +329,8 @@ export function SubBlade({
           aria-hidden="true"
         >
           {/* The guide's ring, lit in player one's quarter. */}
-          <span className="subblade-ring" />
-          <span className="subblade-tab-label">{player?.gamertag ?? ""}</span>
+          <span className="subblade-ring subblade-tab-ride--ring" />
+          <span className="subblade-tab-label subblade-tab-ride--label">{player?.gamertag ?? ""}</span>
         </span>
       </section>
     </div>

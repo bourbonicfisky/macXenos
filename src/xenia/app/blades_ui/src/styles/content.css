@@ -1352,3 +1352,84 @@ button.tray {
   border-bottom: 1px solid rgba(0, 0, 0, 0.2);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
 }
+
+/* --- Sub-blade curve ------------------------------------------------------
+   The sheet itself is plain (no waist): its tab is the curved part. The tab
+   is a ribbon of constant width bowing toward the screen's centre, as the
+   rail tabs do, only deeper, so the outer edge sweeps in at mid-height and
+   the dashboard shows past it. The sheet and its header and legend bars run
+   in under the tab to where the ribbon's inner edge starts, so nothing gaps
+   at the top and bottom. */
+.subblade {
+  --bow: 40px;
+  --bow-ctl: calc(var(--bow) * 4 / 3);
+  /* The ribbon gives up --bow of its box to the curve; the box is that much
+     wider so the ribbon keeps the rail tabs' width. */
+  --tab-w: clamp(124px, calc(6.7vw + 40px), 144px);
+}
+
+.subblade .subblade-skin {
+  clip-path: none;
+}
+
+.subblade[data-side="left"] .subblade-skin {
+  right: calc(var(--tab-w) - var(--bow) - 2px);
+  border-radius: 0;
+}
+
+.subblade[data-side="right"] .subblade-skin {
+  left: calc(var(--tab-w) - var(--bow) - 2px);
+  border-radius: 0;
+}
+
+.subblade[data-side="left"] .subblade-inner {
+  right: calc(var(--tab-w) - var(--bow) - 2px);
+}
+
+.subblade[data-side="right"] .subblade-inner {
+  left: calc(var(--tab-w) - var(--bow) - 2px);
+}
+
+@supports (clip-path: shape(from 0 0, line to 0 0)) {
+  /* From the right, the tab is on the sheet's left: a left-rail ribbon. */
+  .subblade[data-side="right"] .subblade-tab-skin {
+    border-radius: 0;
+    clip-path: shape(
+      from 0 var(--edge-top),
+      curve to 0 var(--edge-bot) with var(--bow-ctl) var(--edge-c1) / var(--bow-ctl) var(--edge-c2),
+      line to calc(100% - var(--bow)) var(--edge-bot),
+      curve to calc(100% - var(--bow)) var(--edge-top) with
+        calc(100% + var(--bow) / 3) var(--edge-c2) / calc(100% + var(--bow) / 3) var(--edge-c1),
+      close
+    );
+  }
+
+  /* From the left, it is on the sheet's right: a right-rail ribbon. */
+  .subblade[data-side="left"] .subblade-tab-skin {
+    border-radius: 0;
+    clip-path: shape(
+      from 100% var(--edge-top),
+      curve to 100% var(--edge-bot) with
+        calc(100% - var(--bow-ctl)) var(--edge-c1) / calc(100% - var(--bow-ctl)) var(--edge-c2),
+      line to var(--bow) var(--edge-bot),
+      curve to var(--bow) var(--edge-top) with
+        calc(0px - var(--bow) / 3) var(--edge-c2) / calc(0px - var(--bow) / 3) var(--edge-c1),
+      close
+    );
+  }
+
+  /* The ring and the name ride the ribbon where it has moved to at their
+     heights (4t(1-t) of --bow; the ring sits near t = 0.15, the name near
+     t = 0.35). */
+  .subblade[data-side="right"] .subblade-tab-ride--ring {
+    transform: translateX(calc(var(--bow) * 0.0));
+  }
+
+  .subblade[data-side="right"] .subblade-tab-ride--label {
+    transform: translateX(calc(var(--bow) * 0.35));
+  }
+
+  .subblade[data-side="left"] .subblade-tab-ride--label {
+    transform: translateX(calc(var(--bow) * -0.35));
+  }
+}
