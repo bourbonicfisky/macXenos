@@ -5,7 +5,6 @@ import type { BladeTone } from "./blade";
 import { isDashboardKey } from "./keys";
 import { LegendStack } from "./legend";
 import { playSound } from "./sound";
-import { toggleTheme, useTheme } from "./theme";
 import { showToast } from "./toast";
 
 /**
@@ -95,7 +94,6 @@ const CLOSE_MS = 420;
 export function AllGames({ tone }: { tone: BladeTone }) {
   const open = useAllGamesOpen();
   const { allGames, gameFolders, profiles } = useNative();
-  const theme = useTheme();
   const clock = useClock();
   const [sort, setSort] = useState<Sort>(savedSort);
   const [focus, setFocus] = useState(0);
@@ -198,7 +196,9 @@ export function AllGames({ tone }: { tone: BladeTone }) {
         } else playSound("bump");
       } else if ((key === "b" || key === "B" || key === "Escape") && !event.repeat) back();
       else if ((key === "x" || key === "X") && !event.repeat) changeSort();
-      else handled = false; // Y (day / night) and the dashboard key pass on.
+      else if (key === "y" || key === "Y") {
+        // Y is day / night on the blades, not here.
+      } else handled = false; // The dashboard key passes on.
       if (handled) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -302,15 +302,17 @@ export function AllGames({ tone }: { tone: BladeTone }) {
           <footer className="blade-legend relative flex min-h-[clamp(64px,16.5dvh,170px)] items-center justify-between gap-4 pr-[var(--pad)] pt-[clamp(8px,1.6dvh,16px)] pb-[clamp(12px,3.4dvh,32px)] pl-[calc(var(--pad)+var(--field-inset))] text-[clamp(0.9rem,2.6dvh,1.4rem)]">
             {/* More below: the dashboard's small arrow under the list. */}
             {moreBelow ? <span className="subblade-more-arrow absolute top-[0.45em] right-[calc(var(--pad)+0.35em)]" aria-hidden="true" /> : null}
-            <LegendStack
-              side="left"
-              entries={[
-                { button: "y", label: theme === "dark" ? "Day" : "Night", onClick: toggleTheme },
-                ...(games.length > 1
-                  ? [{ button: "x" as const, label: `Sort: ${SORT_LABEL[sort]}`, onClick: changeSort }]
-                  : [])
-              ]}
-            />
+            {/* Kept even when empty, so B and A stay at the right. */}
+            <span>
+              <LegendStack
+                side="left"
+                entries={
+                  games.length > 1
+                    ? [{ button: "x" as const, label: `Sort: ${SORT_LABEL[sort]}`, onClick: changeSort }]
+                    : []
+                }
+              />
+            </span>
             <LegendStack
               side="right"
               entries={[
