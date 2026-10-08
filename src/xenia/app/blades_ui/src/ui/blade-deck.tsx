@@ -9,6 +9,7 @@ import { toggleTheme } from "./theme";
 import { getNative, send } from "../native";
 import { Toast } from "./toast";
 import { AllGames } from "./all-games";
+import { FolderEditor } from "./folder-editor";
 
 /**
  * The dashboard's mechanism, and only the mechanism: which blade is open, how
@@ -141,6 +142,7 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
       </div>
 
       <AllGames tone={blades[active].tone} />
+      <FolderEditor tone={blades[active].tone} />
     </>
   );
 }

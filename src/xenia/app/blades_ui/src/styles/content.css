@@ -1007,8 +1007,18 @@ button.tray {
 
 .subblade {
   width: var(--sub-w);
-  transform: translateX(-104%);
   transition: transform var(--slide) var(--ease-blade);
+}
+
+.subblade[data-side="left"] {
+  left: 0;
+  transform: translateX(-104%);
+}
+
+/* From the right (Game Folders): the same sheet, mirrored. */
+.subblade[data-side="right"] {
+  right: 0;
+  transform: translateX(104%);
 }
 
 .subblade-layer[data-entered] .subblade {
@@ -1019,23 +1029,59 @@ button.tray {
   filter: drop-shadow(12px 0 30px rgba(0, 0, 0, 0.55));
 }
 
-.subblade-skin {
+.subblade[data-side="right"] .subblade-shadow {
+  filter: drop-shadow(-12px 0 30px rgba(0, 0, 0, 0.55));
+}
+
+.subblade[data-side="left"] .subblade-skin {
+  left: 0;
   right: calc(var(--tab-w) - 4px);
   border-radius: 0 24px 24px 0;
 }
 
+.subblade[data-side="right"] .subblade-skin {
+  right: 0;
+  left: calc(var(--tab-w) - 4px);
+  border-radius: 24px 0 0 24px;
+}
+
 .subblade-tab-skin {
   width: var(--tab-w);
-  border-radius: 0 30px 30px 0;
+  --tab-shade: 90deg;
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--b-lo) 40%, transparent) 0%, transparent 22%),
+    linear-gradient(var(--tab-shade), color-mix(in srgb, var(--b-lo) 40%, transparent) 0%, transparent 22%),
     linear-gradient(180deg, var(--b-hi) 0%, var(--b-base) 38%, color-mix(in srgb, var(--b-lo) 50%, var(--b-base)) 100%);
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3), inset 1px 0 0 var(--b-rim),
     inset 0 1px 0 color-mix(in srgb, var(--b-rim) 90%, transparent);
 }
 
-.subblade-inner {
+.subblade[data-side="left"] .subblade-tab-skin {
+  right: 0;
+  border-radius: 0 30px 30px 0;
+}
+
+.subblade[data-side="right"] .subblade-tab-skin {
+  left: 0;
+  border-radius: 30px 0 0 30px;
+  --tab-shade: 270deg;
+}
+
+.subblade[data-side="left"] .subblade-inner {
+  left: 0;
   right: var(--tab-w);
+}
+
+.subblade[data-side="right"] .subblade-inner {
+  left: var(--tab-w);
+  right: 0;
+}
+
+.subblade[data-side="left"] .subblade-tab {
+  right: 0;
+}
+
+.subblade[data-side="right"] .subblade-tab {
+  left: 0;
 }
 
 .subblade-tab {
@@ -1066,13 +1112,19 @@ button.tray {
   color: var(--b-ink-soft);
 }
 
-.game-item + .game-item {
+.subblade-item + .subblade-item {
   border-top: 1px solid color-mix(in srgb, var(--b-lo) 55%, transparent);
   box-shadow: inset 0 1px 0 var(--groove-light);
 }
 
-.game-row {
+.subblade-row {
   grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.subblade-row .glyph {
+  width: 2.1em;
+  height: 2.1em;
+  margin-inline: 0.3em;
 }
 
 .game-icon {
@@ -1084,11 +1136,11 @@ button.tray {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
-.game-name {
+.subblade-name {
   font-weight: 600;
 }
 
-.game-sub {
+.subblade-sub {
   color: var(--b-ink-soft);
   font-size: 0.8em;
 }
@@ -1118,6 +1170,20 @@ button.tray {
   border-inline: 0.45em solid transparent;
   border-top: 0.45em solid color-mix(in srgb, var(--b-rim) 85%, transparent);
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+/* A folder row's Remove, warming once a first A has armed it. */
+.subblade-action {
+  color: var(--b-ink-soft);
+}
+
+.subblade-action[data-armed] {
+  padding: 0.2em 0.6em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ff8a72 0%, #d8361c 100%);
+  color: #fff;
+  font-weight: 600;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
 }
 
 /* The stacked legend: B over A at the right, labels flush to the orbs. */

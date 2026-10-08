@@ -22,7 +22,10 @@ over the dashboard, as the 360's game library did: every game in the user's
 game folders plus every game played here, with icons, achievements and
 gamerscore from the signed-in profile. X sorts it alphabetically or by most
 recently played (remembered in the page's local storage); `#all-games` opens
-it directly. Home's Game folders row adds and removes the folders.
+it directly. Home's Game folders pane lists the folders and offers Edit
+folders, a second sub-blade from the right (`src/ui/folder-editor.tsx`,
+`#game-folders`) that adds them and removes them on a second A, and Refresh
+folders. Both sub-blades share `src/ui/sub-blade.tsx`.
 
 The app side is `../game_library.{h,cc}`: folders live in
 `<storage_root>/game_folders.toml`; a background scan finds disc images,

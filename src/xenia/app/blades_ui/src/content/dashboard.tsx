@@ -24,7 +24,6 @@ function SoundSource() {
     case "failed":
       return (
         <>
-          <p className="pref-group m-0">Sounds</p>
           <p className="m-0">
             macXenos doesn&rsquo;t include the dashboard&rsquo;s sounds. Download a fan-made pack,{" "}
             {packCredit(dashSounds)}, of about 1&nbsp;MB.
@@ -40,6 +39,36 @@ function SoundSource() {
     default:
       return null;
   }
+}
+
+/** The Sound pane. Until the sounds are downloaded, getting them comes first;
+    after that, the switch and volume, with the pack credited underneath. */
+function SoundDetail() {
+  const { dashSounds } = useNative();
+  const needed = dashSounds.status === "missing" || dashSounds.status === "failed";
+  const settings = (
+    <>
+      {needed ? <p className="pref-group m-0">Once downloaded</p> : null}
+      <PreferenceOptions pref="sound" />
+      <p className="pref-group">Volume</p>
+      <PreferenceOptions pref="volume" />
+    </>
+  );
+  if (needed) {
+    return (
+      <>
+        <SoundSource />
+        {settings}
+      </>
+    );
+  }
+  return (
+    <>
+      <p>The Xbox 360 dashboard&rsquo;s own sounds as you move through these blades.</p>
+      {settings}
+      <SoundSource />
+    </>
+  );
 }
 
 /** The Sound row's value: what's playing, or why nothing is. */
@@ -92,15 +121,7 @@ export function dashboard(state: NativeState): BladeDef {
         glyph: "sound",
         value: <SoundRowValue />,
         heading: "Dashboard sounds",
-        detail: (
-          <>
-            <p>The Xbox 360 dashboard&rsquo;s own sounds as you move through these blades.</p>
-            <PreferenceOptions pref="sound" />
-            <p className="pref-group">Volume</p>
-            <PreferenceOptions pref="volume" />
-            <SoundSource />
-          </>
-        )
+        detail: <SoundDetail />
       },
       {
         id: "freeze",

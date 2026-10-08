@@ -2,6 +2,7 @@ import type { BladeDef } from "../ui/blade";
 import type { MenuItem } from "../ui/blade-menu";
 import { AppIcon } from "../ui/app-icon";
 import { openAllGames } from "../ui/all-games";
+import { openFolderEditor } from "../ui/folder-editor";
 import { send, useNative, type NativeState } from "../native";
 import { Aside, PaneAction } from "./parts";
 
@@ -39,40 +40,36 @@ function GameFoldersValue() {
   return <>{count === 0 ? "None" : count === 1 ? "1 folder" : `${count} folders`}</>;
 }
 
-/** The folders All Games looks in: each with a way to take it out, and a
-    way to add more. */
+/** The folders All Games looks in, and the two things to do with them:
+    change the list (on its own sub-blade) or look through them again. */
 function GameFoldersPane() {
   const { gameFolders, allGames } = useNative();
+  const { folders, scanning } = gameFolders;
   return (
     <>
       <p className="m-0">
-        Folders where your disc images, unpacked games and downloaded games are kept. Their games appear
-        in All games, including ones in folders inside them.
+        Where your disc images, unpacked games and downloaded games are kept. Their games, and games in
+        folders inside them, appear in All games.
       </p>
-      {gameFolders.folders.map((folder) => (
-        <div key={folder} className="game-folder grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[0.6em]">
-          <span className="menu-spec text-[0.8em] [overflow-wrap:anywhere]">{folder}</span>
-          <button
-            type="button"
-            className="pref-option rounded-row inline-flex min-h-[2em] cursor-pointer items-center px-[0.8em] text-[0.85em]"
-            onClick={() => send({ op: "gameFolderRemove", path: folder })}
-          >
-            Remove
-          </button>
-        </div>
-      ))}
-      <PaneAction onSelect={() => send({ op: "gameFolderAdd" })}>Add a folder</PaneAction>
-      {gameFolders.folders.length ? (
-        <>
-          <PaneAction disabled={gameFolders.scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
-            Look again
-          </PaneAction>
-          <Aside>
-            {gameFolders.scanning
-              ? "Looking for games."
-              : `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All games.`}
-          </Aside>
-        </>
+      {folders.length ? (
+        <ul className="game-folder-list m-0 grid list-none gap-[0.2em] p-0">
+          {folders.map((folder) => (
+            <li key={folder} className="menu-spec text-[0.8em] [overflow-wrap:anywhere]">
+              {folder}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Aside>No folders yet.</Aside>
+      )}
+      <PaneAction onSelect={openFolderEditor}>Edit folders</PaneAction>
+      <PaneAction disabled={!folders.length || scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
+        Refresh folders
+      </PaneAction>
+      {folders.length ? (
+        <Aside>
+          {scanning ? "Looking for games." : `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All games.`}
+        </Aside>
       ) : null}
     </>
   );
