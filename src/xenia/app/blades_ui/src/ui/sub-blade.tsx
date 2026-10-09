@@ -342,8 +342,6 @@ export function SubBlade({
               <span className="blade-skin blade-skin--gloss absolute inset-0" />
             </span>
           </span>
-          {/* The guide's ring, lit in player one's quarter. */}
-          <span className="subblade-ring absolute" />
           <span className="blade-tab relative flex h-full items-start pt-[21.5dvh] pb-8 text-[clamp(1.05rem,3.2dvh,2.1rem)] font-normal tracking-[0.01em]">
             <TabLabel id={`sub-${id}`} label={player?.gamertag ?? ""} side={side === "right" ? "center" : "right"} />
           </span>

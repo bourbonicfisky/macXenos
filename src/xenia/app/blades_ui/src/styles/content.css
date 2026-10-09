@@ -1165,7 +1165,7 @@ button.tray {
 /* --- Brushed metal (the console's system sub-blades) ----------------------
    Game Folders wears the Profile sub-blade's look: a silver sheet brushed
    side to side, olive-grey bars for the header and the legend, a pale metal
-   tab with the guide's ring and the player on it, plain menu rows on grooves
+   tab with the player on it, plain menu rows on grooves
    lit by a white sheen between two green glow lines, and inset cards. */
 
 .subblade[data-tone="metal"] {
@@ -1209,18 +1209,6 @@ button.tray {
     linear-gradient(180deg, var(--metal-bar-a) 0%, var(--metal-bar-b) 100%);
 }
 
-/* The guide's ring on every sub-blade tab: grey, with player one's quarter
-   lit green. */
-
-.subblade-ring {
-  width: 1.5em;
-  height: 1.5em;
-  border-radius: 50%;
-  background: conic-gradient(from -90deg, var(--metal-glow, #86de55) 0 25%, rgba(150, 154, 147, 0.9) 25% 100%);
-  -webkit-mask: radial-gradient(circle, transparent 52%, #000 54%);
-  mask: radial-gradient(circle, transparent 52%, #000 54%);
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
-}
 
 .subblade[data-tone="metal"] .subblade-label {
   font-size: 1.05em;
@@ -1362,20 +1350,8 @@ button.tray {
   border-radius: 0;
 }
 
-/* The ring sits on the highlight above the name, centred on the ribbon
-   where it has bowed to at that height. */
-.subblade-tabblade .subblade-ring {
-  top: 12.5dvh;
-  font-size: clamp(1.05rem, 3.2dvh, 2.1rem);
-}
 
-.subblade-tabblade[data-side="center"] .subblade-ring {
-  left: calc((var(--tab-w) - var(--bow)) / 2 + var(--bow) * 0.5 - 0.75em);
-}
 
-.subblade-tabblade[data-side="right"] .subblade-ring {
-  right: calc((var(--tab-w) - var(--bow)) / 2 + var(--bow) * 0.5 - 0.75em);
-}
 
 /* The tab wears its sub-blade's colour, day and night, rather than the
    rails' brushed grey: the ribbon a shade deeper than the sheet, the
