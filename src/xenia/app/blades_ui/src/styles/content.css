@@ -237,6 +237,19 @@
   background: var(--hl-c);
 }
 
+/* The control the cursor is on in a pane. A controller drives the page with
+   key events the browser doesn't count as the keyboard, so :focus-visible
+   never shows for it; every focused control in a pane shows the highlight's
+   rim instead. */
+.menu-detail :is(button, a, input, [role="slider"]):focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.menu-detail .pref-dropdown:focus {
+  background: var(--hl-c);
+}
+
 .pref-option[aria-checked="true"] {
   background:
     linear-gradient(180deg, var(--hl-gloss) 0%, transparent 52%),

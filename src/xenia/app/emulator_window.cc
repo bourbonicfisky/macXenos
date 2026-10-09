@@ -607,6 +607,7 @@ bool EmulatorWindow::Initialize() {
       ->SetSettingsHandler([this]() { TogglePreferences(""); });
   // The controller's Home button opens the dashboard rather than macOS's
   // Games overlay, while the dashboard is set to use it.
+  SetControllerHomeButtonHandler([this]() { TogglePreferences(""); });
   SetControllerHomeButtonClaimed(cvars::preferences_button == "guide");
 
   // A title asking for another title (XamLoaderLaunchTitle) is served the way
@@ -1670,7 +1671,9 @@ void EmulatorWindow::ShowPreferences(const std::string& blade) {
     if (cvars::dashboard_freezes_game && emulator_->is_title_open()) {
       FreezeGame(true);
     }
-    blades_pad_buttons_ = 0;
+    // A Guide still held from the press that opened it isn't a new press
+    // (the page would close again).
+    blades_pad_buttons_ = X_INPUT_GAMEPAD_GUIDE;
   }
   blades_overlay_->Show(blade);
   blades_visible_ = true;

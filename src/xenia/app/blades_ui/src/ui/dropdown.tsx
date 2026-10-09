@@ -7,7 +7,8 @@ import { playSound } from "./sound";
    (language, country, time zone, resolution).
 
    At rest it is one sheet showing the current choice, so in a sub-menu it is
-   a single group like any button. A or a click opens the list over the pane:
+   a single group like any button. A or a click opens the list beneath it, in
+   the pane (so the pane, which scrolls on its own, never clips it):
    ↑ ↓ (or the d-pad) move, A picks, B or Escape closes without changing
    anything. While open it takes every key first, so the blade underneath
    does not move.
@@ -132,7 +133,7 @@ export function Dropdown<V extends string | number>({
           ref={listRef}
           role="listbox"
           aria-label={title}
-          className="pref-dropdown-list rounded-row absolute inset-x-0 top-[calc(100%+0.3em)] z-30 m-0 grid max-h-[44dvh] list-none overflow-y-auto p-[0.25em]"
+          className="pref-dropdown-list rounded-row mt-[0.3em] grid max-h-[44dvh] list-none overflow-y-auto p-[0.25em]"
         >
           {options.map((option, index) => (
             <li

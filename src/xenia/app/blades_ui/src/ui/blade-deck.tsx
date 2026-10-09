@@ -142,9 +142,10 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
         ))}
       </div>
 
-      <AllGames tone={blades[active].tone} />
+      {/* Sub-blades wear their own colours, not the blade they open from. */}
+      <AllGames tone="amber" />
       <FolderEditor />
-      <PicturePicker tone={blades[active].tone} />
+      <PicturePicker tone="indigo" />
     </>
   );
 }

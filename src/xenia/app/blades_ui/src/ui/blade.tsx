@@ -6,7 +6,7 @@ import { send } from "../native";
 import { LegendStack } from "./legend";
 import { t } from "../i18n";
 
-export type BladeTone = "green" | "orange" | "amber" | "blue" | "purple" | "teal" | "rose" | "steel";
+export type BladeTone = "green" | "orange" | "amber" | "blue" | "purple" | "teal" | "rose" | "steel" | "indigo";
 
 export type BladeDef = {
   id: string;

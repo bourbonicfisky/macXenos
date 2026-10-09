@@ -15,6 +15,7 @@ const STATES = {
   home: ["#home"],
   graphics: ["#graphics"],
   "graphics-resolution": ["#graphics/resolution"],
+  "graphics-resolution-open": ["#graphics/resolution", "Enter", "Enter", "ArrowDown"],
   profiles: ["#profiles"],
   "profiles-unsigned": ["#profiles", "ArrowDown"],
   "picker": ["#profiles", "Enter", "Enter"],

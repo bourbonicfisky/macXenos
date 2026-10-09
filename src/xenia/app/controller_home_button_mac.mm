@@ -20,6 +20,7 @@ namespace {
 
 bool g_claimed = false;
 id g_connect_observer = nil;
+std::function<void()> g_on_press;
 
 void Apply(GCController* controller) {
   if (@available(macOS 11.0, *)) {
@@ -38,6 +39,17 @@ void Apply(GCController* controller) {
                       : " (macOS)");
       }
     }
+    // Hear the press ourselves: SDL may never report it.
+    GCControllerButtonInput* home =
+        controller.physicalInputProfile.buttons[GCInputButtonHome];
+    home.pressedChangedHandler =
+        ^(GCControllerButtonInput* button, float value, BOOL pressed) {
+          if (!pressed) return;
+          XELOGI("Controller Home button: pressed ({})",
+                 g_claimed ? "opening or closing the dashboard"
+                           : "left to macOS");
+          if (g_claimed && g_on_press) g_on_press();
+        };
     XELOGI("Controller Home button: {}: {}",
            controller.vendorName ? controller.vendorName.UTF8String : "?",
            bound.empty() ? "no button bound to a system gesture" : bound);
@@ -48,6 +60,10 @@ void Apply(GCController* controller) {
 
 namespace xe {
 namespace app {
+
+void SetControllerHomeButtonHandler(std::function<void()> on_press) {
+  g_on_press = std::move(on_press);
+}
 
 void SetControllerHomeButtonClaimed(bool claimed) {
   @autoreleasepool {

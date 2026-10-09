@@ -378,6 +378,18 @@
   --b-ink-soft: color-mix(in srgb, #fbeedd 82%, transparent);
 }
 
+/* Indigo: the gamer picture picker, a sub-blade of its own. */
+.subblade[data-tone="indigo"] {
+  --b-hi: #b3b6f0;
+  --b-base: #6a6fd6;
+  --b-lo: #4549a3;
+  --b-rim: color-mix(in srgb, #b3b6f0 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #161842;
+  --b-ink-soft: color-mix(in srgb, #161842 82%, transparent);
+}
+
 :root[data-theme="dark"] .blade[data-tone="blue"],
 :root[data-theme="dark"] .deck-menu-item[data-tone="blue"],
 :root[data-theme="dark"] .subblade[data-tone="blue"] {
@@ -390,6 +402,18 @@
   --b-ink: #e2eefa;
   --b-ink-soft: color-mix(in srgb, #e2eefa 82%, transparent);
 }
+
+:root[data-theme="dark"] .subblade[data-tone="indigo"] {
+  --b-hi: #3b3f8c;
+  --b-base: #262a63;
+  --b-lo: #0c0d22;
+  --b-rim: color-mix(in srgb, #3b3f8c 62%, white);
+  --b-title: #ffffff;
+  --b-title-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --b-ink: #e6e7fb;
+  --b-ink-soft: color-mix(in srgb, #e6e7fb 82%, transparent);
+}
+
 
 :root[data-theme="dark"] .blade[data-tone="purple"],
 :root[data-theme="dark"] .deck-menu-item[data-tone="purple"],
