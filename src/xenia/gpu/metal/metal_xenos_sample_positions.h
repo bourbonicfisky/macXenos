@@ -46,13 +46,15 @@ inline constexpr MTLSamplePosition kMetalXenosSamplePositions4x[4] = {
     {0.875f, 0.125f},  // host 3 = guest 3 (6, -6)
 };
 
-// XE_METAL_XENOS_SAMPLE_POSITIONS=1 (adopt-xenos-msaa-sample-positions,
-// default off): every render pass on a 2x or 4x surface rasterizes at the
-// Xenos positions. Off is the exact rollback (positions never set).
+// Every render pass on a 2x or 4x surface rasterizes at the Xenos positions
+// (adopt-xenos-msaa-sample-positions, DEFAULT ON since 2026-10-09: the Gears
+// of War cell-door slot regains its shading pass; corpus diffs are edge
+// coverage only; perf-neutral on USF4/LEGO). XE_METAL_XENOS_SAMPLE_POSITIONS=0
+// is the exact rollback (positions never set).
 inline bool MetalXenosSamplePositionsEnabled() {
   static const bool enabled = [] {
     const char* value = std::getenv("XE_METAL_XENOS_SAMPLE_POSITIONS");
-    return value && value[0] == '1' && !value[1];
+    return !(value && value[0] == '0' && !value[1]);
   }();
   return enabled;
 }
