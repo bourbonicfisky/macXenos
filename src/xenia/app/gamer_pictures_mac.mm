@@ -150,18 +150,15 @@ std::string Install(const std::filesystem::path& zip,
     // The game is the package's folder; the packages themselves all carry
     // the same display name.
     const std::string folder_name = xe::path_to_utf8(it->path().parent_path().filename());
-    // Each picture is a pair: 64_<key> at 64x64 and 32_<key> at 32x32, as
-    // the console stored a profile's picture (tile_64 / tile_32). Only
-    // complete pairs of the right sizes are kept; the collection has a few
-    // large ones that are really 32x32, and small ones with no partner.
-    struct Pair {
-      std::vector<uint8_t> big, small;
-    };
-    std::map<std::string, Pair> pairs;
+    // Only each picture's 64x64 is kept. The packages also carry a 32x32 of
+    // each, but nothing reads those from here: a profile's small picture
+    // (tile_32) is made from the 64x64 when the picture is chosen. A "64"
+    // that isn't 64x64 (the collection has a few) is left out.
     for (const auto& child : root->children()) {
       std::smatch match;
       const std::string& name = child->name();
       if (!std::regex_match(name, match, picture_name)) continue;
+      if (match[1] != "64") continue;
       vfs::File* file = nullptr;
       if (child->Open(xe::filesystem::FileAccess::kGenericRead, &file) != 0 ||
           !file) {
@@ -171,32 +168,19 @@ std::string Install(const std::filesystem::path& zip,
       size_t read = 0;
       file->ReadSync(data, 0, &read);
       file->Destroy();
-      if (read != data.size()) continue;
-      const bool big = match[1] == "64";
-      const uint32_t want = big ? 64 : 32;
-      if (PngSize(data) != std::pair<uint32_t, uint32_t>(want, want)) {
+      if (read != data.size() ||
+          PngSize(data) != std::pair<uint32_t, uint32_t>(64, 64)) {
         ++skipped;
         continue;
       }
-      Pair& pair = pairs[Lower(match[2].str() + match[3].str())];
-      (big ? pair.big : pair.small) = std::move(data);
-    }
-    for (auto& [key, pair] : pairs) {
-      if (pair.big.empty() || pair.small.empty()) {
-        ++skipped;
-        continue;
-      }
+      const std::string key = Lower(match[2].str() + match[3].str());
       const std::string title_id = key.substr(0, 8);
       const std::filesystem::path folder = pictures_root / title_id;
       std::filesystem::create_directories(folder, ec);
-      const std::pair<const char*, const std::vector<uint8_t>*> sizes[] = {
-          {"64", &pair.big}, {"32", &pair.small}};
-      for (const auto& [prefix, data] : sizes) {
-        std::ofstream out(folder / fmt::format("{}_{}.png", prefix, key),
-                          std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(data->data()),
-                  std::streamsize(data->size()));
-      }
+      std::ofstream out(folder / fmt::format("64_{}.png", key),
+                        std::ios::binary | std::ios::trunc);
+      out.write(reinterpret_cast<const char*>(data.data()),
+                std::streamsize(data.size()));
       Title& title = titles[title_id];
       if (title.name.empty()) title.name = folder_name;
       title.keys.insert(key);
@@ -225,7 +209,7 @@ std::string Install(const std::filesystem::path& zip,
   std::ofstream(storage_root / kIndexFile, std::ios::trunc) << index;
   XELOGI(
       "Gamer pictures: installed {} pictures from {} titles ({} packages; {} "
-      "odd-sized or unpaired files left out)",
+      "odd-sized ones left out)",
       summary->pictures, summary->titles, packages, skipped);
   return std::string();
 }

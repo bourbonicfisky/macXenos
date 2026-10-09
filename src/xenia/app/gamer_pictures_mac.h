@@ -24,11 +24,11 @@ namespace app {
 // The Xbox 360's gamer pictures, as a one-time download on request: the
 // "Xbox 360 Profile Picture Collection" on the Internet Archive, a zip of the
 // console's gamer-picture packages (content type 0x00020000). Nothing of it
-// is shipped. Installing opens each package and keeps each picture that comes
-// as a complete pair of the right sizes (64_<key>.png at 64x64, 32_<key>.png
-// at 32x32, the two sizes a profile's picture is stored in), in the folder
-// where XAM puts gamer pictures a game awards (content/0000000000000000/
-// FFFE07D1/00020000/<title id>/, xam_user.cc). An index of what it installed
+// is shipped. Installing opens each package and keeps each picture's 64x64
+// (64_<key>.png) in the folder where XAM puts gamer pictures a game awards
+// (content/0000000000000000/FFFE07D1/00020000/<title id>/, xam_user.cc).
+// The packages' 32x32 copies are not kept: nothing reads them from there,
+// and a profile's small picture is made from the 64x64 when it is chosen. An index of what it installed
 // is kept in <storage_root>/gamer_pictures.toml, for choosing a profile's
 // picture from them.
 namespace gamer_pictures {
