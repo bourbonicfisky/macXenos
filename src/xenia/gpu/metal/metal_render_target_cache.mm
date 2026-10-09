@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/gpu/metal/metal_xenos_sample_positions.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_pass_census.h"
 
@@ -571,7 +572,7 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
   }
-  id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+  id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   enc.label = @"rtcache:clear-at-creation";
   [enc endEncoding];
 }
@@ -2317,7 +2318,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   pass.stencilAttachment.loadAction = MTLLoadActionLoad;
   pass.stencilAttachment.storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:pass];
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   encoder.label = @"rtcache:canonical-depth-materialize-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
@@ -2529,7 +2530,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   pass.stencilAttachment.loadAction = MTLLoadActionLoad;
   pass.stencilAttachment.storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:pass];
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
@@ -2777,7 +2778,7 @@ void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
     rp.stencilAttachment.clearStencil = 0;
     rp.stencilAttachment.storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e =
-        [cb renderCommandEncoderWithDescriptor:rp];
+        [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(rp)];
     e.label = label;
     [e setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   p->materialize_depth];
@@ -2921,7 +2922,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
   rpd.stencilAttachment.texture = dst_tex;
   rpd.stencilAttachment.loadAction = MTLLoadActionLoad;
   rpd.stencilAttachment.storeAction = MTLStoreActionStore;
-  id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rpd];
+  id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(rpd)];
   e.label = @"rtcache:canonical-depth-materialize";
   // Depth pass: write depth AND REPLACE stencil to 0 (so the bit-plane passes
   // fully replace instead of OR-ing over stale stencil -- the conformance lesson).
@@ -3180,7 +3181,7 @@ void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   }
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   enc.label = @"rtcache:transfer-crossmsaa";
   [enc setRenderPipelineState:pipeline];
   if (is_depth) {
@@ -3362,7 +3363,7 @@ void MetalRenderTargetCache::PerformColorConvertTransfer(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   enc.label = @"rtcache:transfer-convert";
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)it->second];
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
@@ -3580,7 +3581,7 @@ void MetalRenderTargetCache::PerformColorToDepthTransfer(
   pass.stencilAttachment.loadAction = MTLLoadActionLoad;
   pass.stencilAttachment.storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   transfer_c2d_pipeline_];
   enc.label = @"rtcache:transfer-c2d";
@@ -3747,7 +3748,7 @@ void MetalRenderTargetCache::PerformDepthToColorTransfer(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                   transfer_d2c_pipeline_];
   enc.label = @"rtcache:transfer-d2c";
@@ -3949,7 +3950,7 @@ void MetalRenderTargetCache::PerformColorReinterpretTransfer(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   enc.label = @"rtcache:transfer-reinterpret";
   [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
   [enc setFragmentTexture:(__bridge id<MTLTexture>)source->texture() atIndex:0];
@@ -4090,7 +4091,7 @@ bool MetalRenderTargetCache::ResolveDepthToSnapshot(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> enc =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   enc.label = @"rtcache:resolve-depth-snapshot";
   bool any = false;
   for (const ResolveCopyDumpRectangle& rect : resolve_dump_rectangles_) {
@@ -4330,7 +4331,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> enc =
-        [cb renderCommandEncoderWithDescriptor:pass];
+        [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
     enc.label = @"rtcache:resolve-color-snapshot";
     [enc setRenderPipelineState:pipeline];
     // Scissor to this rect's destination rows (the tile-range discard handles
@@ -4528,7 +4529,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:pass];
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   encoder.label = is_depth ? @"rtcache:canonical-depth-resolve"
                            : @"rtcache:canonical-color-resolve";
   [encoder setRenderPipelineState:
@@ -4983,7 +4984,7 @@ void MetalRenderTargetCache::PerformResolveClear(
       pass.stencilAttachment.loadAction = MTLLoadActionLoad;
       pass.stencilAttachment.storeAction = MTLStoreActionStore;
       id<MTLRenderCommandEncoder> enc =
-          [cb renderCommandEncoderWithDescriptor:pass];
+          [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       clear_depth_pipeline_];
       enc.label = @"rtcache:resolve-clear-depth";
@@ -5030,7 +5031,7 @@ void MetalRenderTargetCache::PerformResolveClear(
       pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
       pass.colorAttachments[0].storeAction = MTLStoreActionStore;
       id<MTLRenderCommandEncoder> enc =
-          [cb renderCommandEncoderWithDescriptor:pass];
+          [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
       [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       clear_pipeline];
       enc.label = @"rtcache:resolve-clear-color";
@@ -5774,7 +5775,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:pass];
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   const bool raw_view = IsCanonicalColorRawViewFormat(color_format);
   const bool is_64bpp = target->key().Is64bpp();
   encoder.label =

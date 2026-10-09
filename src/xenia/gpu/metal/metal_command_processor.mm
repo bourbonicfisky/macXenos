@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/gpu/metal/metal_xenos_sample_positions.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
@@ -2812,7 +2813,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   }
 
   id<MTLRenderCommandEncoder> encoder =
-      [command_buffer renderCommandEncoderWithDescriptor:pass];
+      [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   // Fault attribution: names this encoder in per-encoder execution status.
   encoder.label = [NSString
       stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
@@ -6848,7 +6849,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // light passes: out = src*srcA + dst — separating "src small" from
       // "alpha small" in the zero-contribution hunt).
       pd.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 0.0);
-      id<MTLRenderCommandEncoder> pe = [pcb renderCommandEncoderWithDescriptor:pd];
+      id<MTLRenderCommandEncoder> pe = [pcb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pd)];
       [pe endEncoding];
       [pcb commit];
       [pcb waitUntilCompleted];
@@ -10543,7 +10544,7 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
-      [cb renderCommandEncoderWithDescriptor:pass];
+      [cb renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   encoder.label = @"cp:depth-convert-snapshot";
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       depth_convert_pipeline_];
@@ -16125,7 +16126,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> enc =
-            [command_buffer renderCommandEncoderWithDescriptor:pass];
+            [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
         [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                         pipeline_slot];
         [enc setFragmentTexture:source_rt atIndex:0];
@@ -16188,7 +16189,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
         id<MTLRenderCommandEncoder> enc =
-            [command_buffer renderCommandEncoderWithDescriptor:pass];
+            [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
         [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                         use_convert ? s_convert_pipeline
                                                     : s_gray_pipeline)];
@@ -16336,7 +16337,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
           pass.colorAttachments[0].storeAction = MTLStoreActionStore;
           id<MTLRenderCommandEncoder> enc =
-              [command_buffer renderCommandEncoderWithDescriptor:pass];
+              [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
           [enc setRenderPipelineState:ramp_pipeline];
           [enc setFragmentTexture:pre_ramp atIndex:0];
           [enc setFragmentBuffer:ramp_buffer offset:0 atIndex:0];
@@ -16372,7 +16373,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       pass.colorAttachments[0].clearColor =
           MTLClearColorMake(pattern_r, pattern_g, pattern_b, 1.0);
       id<MTLRenderCommandEncoder> encoder =
-          [command_buffer renderCommandEncoderWithDescriptor:pass];
+          [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
       [encoder endEncoding];
     }
     [command_buffer commit];
