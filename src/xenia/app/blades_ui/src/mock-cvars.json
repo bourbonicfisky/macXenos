@@ -1223,6 +1223,15 @@
 "description": "See ps_debug_export_instr: -1 = export the register as-is; 0-3 = broadcast that component (x/y/z/w) to RGB, making the w component readable through the color output.",
 "changed": false
 },
+"mulsc_round_toward_zero": {
+"name": "mulsc_round_toward_zero",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Round mulsc products toward zero instead of to nearest even. This fixes bad geometry in several Volition Engine titles and possibly others. This rounding behavior hasn't been confirmed on real hardware, so it's disabled by default.",
+"changed": false
+},
 "point_sampling_extra_offset": {
 "name": "point_sampling_extra_offset",
 "category": "GPU",

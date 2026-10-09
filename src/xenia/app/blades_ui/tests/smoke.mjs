@@ -210,7 +210,7 @@ const tests = {
     await page.eval("new Promise((r) => setTimeout(r, 300))");
     expect((await page.eval("document.querySelector('.subblade h2')?.textContent")) === "Gamer Picture", "picker not open");
     await page.key("Enter");
-    expect((await page.eval("document.querySelectorAll('.subblade-tile').length")) === 95, "macXenos grid is not 95 pictures");
+    expect((await page.eval("document.querySelectorAll('.subblade-tile').length")) === 175, "macXenos grid is not 175 pictures");
     const index = "[...document.querySelectorAll('.subblade-tile')].findIndex((t) => t.dataset.focused === 'true')";
     const start = await page.eval(index);
     expect(
