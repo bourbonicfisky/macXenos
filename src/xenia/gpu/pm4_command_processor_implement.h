@@ -1364,6 +1364,37 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
   // we don't support yet.
   reader_.AdvanceRead(count_remaining * sizeof(uint32_t));
 
+  {
+    // Upstream-delta census (XE_GPU_DELTA_CENSUS, 2026-10-09, Canary
+    // 692cd59cf): viz_survey = coverage-only survey draws (dropped below),
+    // viz_conditional = draws whose token makes them conditional on a VIZ ID
+    // (currently always drawn).
+    static const bool s_viz_draw_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    static uint32_t s_viz_survey_lines = 0, s_viz_conditional_lines = 0;
+    static uint64_t s_viz_surveys = 0, s_viz_conditionals = 0;
+    if (s_viz_draw_census && draw_succeeded) {
+      auto census_viz = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
+      if (census_viz.viz_query_ena && census_viz.kill_pix_post_hi_z) {
+        ++s_viz_surveys;
+        if (s_viz_survey_lines < 4000 &&
+            (s_viz_surveys & (s_viz_surveys - 1)) == 0) {
+          ++s_viz_survey_lines;
+          XELOGI("DeltaCensus viz_survey id={} total={}",
+                 uint32_t(census_viz.viz_query_id), s_viz_surveys);
+        }
+      }
+      if (viz_query_condition & 0x100) {
+        ++s_viz_conditionals;
+        if (s_viz_conditional_lines < 4000 &&
+            (s_viz_conditionals & (s_viz_conditionals - 1)) == 0) {
+          ++s_viz_conditional_lines;
+          XELOGI("DeltaCensus viz_conditional id={} total={}",
+                 viz_query_condition & 0x3F, s_viz_conditionals);
+        }
+      }
+    }
+  }
   if (draw_succeeded) {
     auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
     if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
@@ -2274,6 +2305,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_VIZ_QUERY(
 
   uint32_t id = dword0 & 0x3F;
   uint32_t end = dword0 & 0x100;
+  {
+    // Upstream-delta census (XE_GPU_DELTA_CENSUS, 2026-10-09): VIZ_QUERY
+    // begin/end packets, which Canary 692cd59cf turns into visibility surveys.
+    static const bool s_viz_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    static uint32_t s_viz_census_lines = 0;
+    if (s_viz_census && s_viz_census_lines < 2000) {
+      ++s_viz_census_lines;
+      XELOGI("DeltaCensus viz_packet id={} end={}", dword0 & 0x3F,
+             (dword0 & 0x100) ? 1 : 0);
+    }
+  }
   if (!end) {
     // begin a new viz query @ id
     // On hardware this clears the internal state of the scan converter (which

@@ -191,6 +191,18 @@ namespace gpu {
 namespace metal {
 
 namespace {
+// Upstream-delta census (XE_GPU_DELTA_CENSUS): counts hits per (tag, key) and
+// returns the new count. Callers log when it is a power of two, so every
+// distinct shape is logged on its first hit and its volume stays visible
+// without a line per draw. Command processor thread only.
+uint64_t DeltaCensusKeyedCount(uint32_t tag, uint64_t key) {
+  static std::unordered_map<uint64_t, uint64_t> counts;
+  return ++counts[(uint64_t(tag) << 56) ^ key];
+}
+bool DeltaCensusLogCount(uint64_t count) { return (count & (count - 1)) == 0; }
+}  // namespace
+
+namespace {
 // Route-all (DEFAULT ON since 2026-09-29): the shared-buffer GPU load route
 // also serves fetches that are not resolve-backed (ordinary textures and
 // memexport-produced ones such as JC2's shadow map), the upstream D3D12 model
@@ -6302,6 +6314,67 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
   {
+    // Upstream-delta census, tier-3 candidates (2026-10-09):
+    //  viz_draw      - draws with a visibility query active (Canary 692cd59cf
+    //                  VIZ_QUERY; kill=1 are coverage-only surveys).
+    //  window_offset - draws with a nonzero PA_SC_WINDOW_OFFSET applied
+    //                  (Canary e1f4a0d00 / 6579cc2a4, predicated tiling).
+    //  msaa_draw     - multisampled draws by sample count and viewport offset
+    //                  fraction (Canary cc4981a46 Xenos sample positions; UE3
+    //                  offsets the viewport to align a sample with 1x depth).
+    static const bool s_tier3_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    if (s_tier3_census) {
+      auto viz = regs.Get<reg::PA_SC_VIZ_QUERY>();
+      if (viz.viz_query_ena) {
+        uint64_t n = DeltaCensusKeyedCount(
+            1, uint64_t(viz.viz_query_id) | (uint64_t(viz.kill_pix_post_hi_z) << 8));
+        if (DeltaCensusLogCount(n)) {
+          XELOGI("DeltaCensus viz_draw draw={} id={} kill={} count={}",
+                 trace_draw_index_, uint32_t(viz.viz_query_id),
+                 uint32_t(viz.kill_pix_post_hi_z), n);
+        }
+      }
+      auto sc_mode = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+      auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      if (sc_mode.vtx_window_offset_enable &&
+          (window_offset.window_x_offset || window_offset.window_y_offset)) {
+        uint64_t n = DeltaCensusKeyedCount(2, window_offset.value);
+        if (DeltaCensusLogCount(n)) {
+          XELOGI("DeltaCensus window_offset draw={} x={} y={} count={}",
+                 trace_draw_index_, int32_t(window_offset.window_x_offset),
+                 int32_t(window_offset.window_y_offset), n);
+        }
+      }
+      auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+      if (surface_info.msaa_samples != xenos::MsaaSamples::k1X) {
+        auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+        float xoffset = vte.vport_x_offset_ena
+                            ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET)
+                            : 0.0f;
+        float yoffset = vte.vport_y_offset_ena
+                            ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET)
+                            : 0.0f;
+        // Fraction in 1/16 pixel.
+        uint32_t frac_x =
+            uint32_t(std::lround((xoffset - std::floor(xoffset)) * 16.0f)) & 15;
+        uint32_t frac_y =
+            uint32_t(std::lround((yoffset - std::floor(yoffset)) * 16.0f)) & 15;
+        uint32_t depth_on = regs.Get<reg::RB_DEPTHCONTROL>().z_enable;
+        uint64_t n = DeltaCensusKeyedCount(
+            3, uint64_t(surface_info.msaa_samples) | (frac_x << 4) |
+                   (frac_y << 8) | (depth_on << 12));
+        if (DeltaCensusLogCount(n)) {
+          XELOGI(
+              "DeltaCensus msaa_draw draw={} samples={} vport_frac=({},{})/16 "
+              "z={} count={}",
+              trace_draw_index_, 1u << uint32_t(surface_info.msaa_samples),
+              frac_x, frac_y, depth_on, n);
+        }
+      }
+    }
+  }
+  {
     // Upstream-delta census (XE_GPU_DELTA_CENSUS=1, diagnostic): vertex
     // fetches whose last addressed word lies past the fetch constant's size.
     // Canary 9e9d3cdd3 masks such words to zero; the local translator reads
@@ -9164,6 +9237,47 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t an = sb.aniso_filter == xenos::AnisoFilter::kUseFetchConst
                           ? uint32_t(f.aniso_filter)
                           : uint32_t(sb.aniso_filter);
+        {
+          // Upstream-delta census (2026-10-09): point-sampled bindings, which
+          // Canary c3cd8617b snaps to guest texel values and centers. narrow=1
+          // marks a fixed format with a 4-7 bit unsigned component read as
+          // normalized, the class whose returned values change.
+          static const bool s_point_census =
+              std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+          if (s_point_census &&
+              mag == uint32_t(xenos::TextureFilter::kPoint) &&
+              mn == uint32_t(xenos::TextureFilter::kPoint) &&
+              (mip == uint32_t(xenos::TextureFilter::kPoint) ||
+               mip == uint32_t(xenos::TextureFilter::kBaseMap)) &&
+              an == uint32_t(xenos::AnisoFilter::kDisabled)) {
+            const FormatInfo* point_format = FormatInfo::Get(f.format);
+            uint32_t narrow = 0;
+            if (point_format && point_format->fixed && !f.num_format) {
+              for (uint32_t c = 0; c < 4; ++c) {
+                uint32_t bits = point_format->component_bits[c];
+                xenos::TextureSign sign =
+                    c == 0 ? f.sign_x : c == 1 ? f.sign_y
+                                      : c == 2 ? f.sign_z : f.sign_w;
+                if (bits >= 4 && bits <= 7 &&
+                    sign == xenos::TextureSign::kUnsigned) {
+                  narrow = 1;
+                }
+              }
+            }
+            uint64_t n = DeltaCensusKeyedCount(
+                4, uint64_t(f.format) | (uint64_t(f.dimension) << 8) |
+                       (uint64_t(f.num_format) << 12) |
+                       (uint64_t(narrow) << 13));
+            if (DeltaCensusLogCount(n)) {
+              XELOGI(
+                  "DeltaCensus point_snap draw={} fc={} fmt={} dim={} "
+                  "num_format={} narrow={} {}x{} count={}",
+                  trace_draw_index_, sb.fetch_constant, uint32_t(f.format),
+                  uint32_t(f.dimension), uint32_t(f.num_format), narrow,
+                  f.size_2d.width + 1, f.size_2d.height + 1, n);
+            }
+          }
+        }
         // Sampler parameters follow the shared D3D12/Vulkan contract
         // (D3D12TextureCache::GetSamplerParameters / WriteSampler):
         //  - clamp modes normalized per dimension (unused axes and every cube
@@ -10492,6 +10606,30 @@ bool MetalCommandProcessor::IssueCopy() {
       XELOGW("Metal: resolve copy command 2 (DXT3A as 1_1_1_1) skipped");
     }
     return true;
+  }
+  {
+    // Upstream-delta census (2026-10-09): depth resolved out of a
+    // multisampled surface (Canary cc4981a46: tiled MSAA titles resolve
+    // sample 0 depth and test against it again).
+    static const bool s_resolve_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    if (s_resolve_census && resolve_info.IsCopyingDepth() &&
+        resolve_info.depth_edram_info.msaa_samples !=
+            xenos::MsaaSamples::k1X) {
+      uint64_t n = DeltaCensusKeyedCount(
+          5, uint64_t(resolve_info.depth_edram_info.msaa_samples) |
+                 (uint64_t(resolve_info.copy_dest_coordinate_info
+                               .copy_sample_select)
+                  << 4));
+      if (DeltaCensusLogCount(n)) {
+        XELOGI(
+            "DeltaCensus msaa_depth_resolve samples={} sample_select={} "
+            "dest={:08X} count={}",
+            1u << uint32_t(resolve_info.depth_edram_info.msaa_samples),
+            uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
+            resolve_info.copy_dest_base, n);
+      }
+    }
   }
   if (ScaleCoverageCensusEnabled()) {
     metal::ScaleCoverageCensus::Get().RecordResolve(
