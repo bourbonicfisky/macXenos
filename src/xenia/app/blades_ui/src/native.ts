@@ -113,6 +113,21 @@ export type DashSounds = {
   site?: string;
 };
 
+/** The Xbox 360 gamer pictures (gamer_pictures_mac.h): a one-time download
+    on request from the Internet Archive, not shipped. */
+export type GamerPictures = {
+  status: "missing" | "downloading" | "installing" | "ready" | "failed" | "unavailable";
+  error: string;
+  /** Installed pictures and the titles they come from (when ready). */
+  pictures: number;
+  titles: number;
+  /** Bytes so far and in all, while downloading; `total` is the size before. */
+  received: number;
+  total: number;
+  collection?: string;
+  site?: string;
+};
+
 export type NativeState = {
   /** False until the app has answered "ready"; the mock is always true. */
   connected: boolean;
@@ -148,6 +163,7 @@ export type NativeState = {
   musicPlayer: MusicPlayer;
   profiles: Profile[];
   dashSounds: DashSounds;
+  gamerPictures: GamerPictures;
   /** The Mac's preferred languages, most preferred first (BCP 47); empty
       off macOS. The dashboard's "Same as my Mac" picks from these. */
   systemLanguages: string[];
@@ -172,6 +188,7 @@ export type NativeMessage =
   | { op: "action"; id: string; value?: number }
   | { op: "sound"; file: string; gain: number }
   | { op: "dashSounds"; action: "download" | "decline" }
+  | { op: "gamerPicturesDownload" }
   | { op: "gameFolderAdd" }
   | { op: "gameFolderRemove"; path: string }
   | { op: "gameFoldersRescan" }
@@ -323,6 +340,7 @@ function emptyState(): NativeState {
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
     dashSounds: { status: "unavailable", error: "", asked: true },
+    gamerPictures: { status: "unavailable", error: "", pictures: 0, titles: 0, received: 0, total: 0 },
     systemLanguages: [],
     appVersion: "",
     appBuild: ""

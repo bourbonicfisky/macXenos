@@ -108,6 +108,16 @@ export function mockState(): NativeState {
       { xuid: "E030000012345678", gamertag: "dmug", slot: 0, stats: { games: 10, gamerscore: 1250, achievements: 56 } },
       { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
     ],
+    gamerPictures: {
+      status: "missing",
+      error: "",
+      pictures: 0,
+      titles: 0,
+      received: 0,
+      total: 116904804,
+      collection: "Xbox 360 Profile Picture Collection",
+      site: "the Internet Archive"
+    },
     systemLanguages: [],
     appVersion: "1.0 beta 3",
     appBuild: "codex/metal-foundation-integration@4774abdb6 (dev)",
@@ -128,6 +138,8 @@ export function mockState(): NativeState {
 
 export function mockApply(state: NativeState, message: NativeMessage): NativeState {
   switch (message.op) {
+    case "gamerPicturesDownload":
+      return { ...state, gamerPictures: { ...state.gamerPictures, status: "downloading", received: 41_000_000 } };
     case "gameFolderAdd":
       return { ...state, gameFolders: { ...state.gameFolders, folders: [...state.gameFolders.folders, "/Volumes/Games"] } };
     case "gameFolderRemove":

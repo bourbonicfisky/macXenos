@@ -185,6 +185,17 @@ const tests = {
     expect((await card()) === "Player Two|–|–|–|note", `signed-out card: ${await card()}`);
   },
 
+  async "Gamer pictures offers its download and shows progress"(page, base) {
+    await page.open(base, "#profiles/gamer-pictures");
+    const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
+    expect((await page.eval(`${pane}.textContent`)).includes("about 117 MB"), "pane does not give the size");
+    await page.key("Enter");
+    expect((await page.eval("document.activeElement?.textContent")) === "Download gamer pictures", "no Download button");
+    await page.key("Enter");
+    expect(await page.eval(`!!${pane}.querySelector('[role=progressbar]')`), "no progress bar while downloading");
+    expect((await page.eval(`${pane}.textContent`)).includes("Downloading: 41 of 117 MB"), "progress text");
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

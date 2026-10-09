@@ -16,6 +16,8 @@ const STATES = {
   graphics: ["#graphics"],
   profiles: ["#profiles"],
   "profiles-unsigned": ["#profiles", "ArrowDown"],
+  "gamer-pictures": ["#profiles/gamer-pictures"],
+  "gamer-pictures-downloading": ["#profiles/gamer-pictures", "Enter", "Enter"],
   "system-sound": ["#system/sound"],
   "system-language": ["#system/language"],
   "system-about": ["#system/about"],

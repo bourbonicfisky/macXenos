@@ -104,6 +104,11 @@ class EmulatorWindow {
   const char* DashboardSoundsStatus() const;
   // Starts the download in the background; the page hears when it ends.
   void DownloadDashboardSounds();
+  // The gamer-picture collection (gamer_pictures_mac.h): "missing",
+  // "downloading", "installing", "ready" or "failed" ("unavailable" off
+  // macOS), and starting its one-time download.
+  const char* GamerPicturesStatus();
+  void DownloadGamerPictures();
   // The user's game folders and what is in them, created (and first scanned)
   // on first use.
   GameLibrary& game_library();
@@ -387,6 +392,13 @@ class EmulatorWindow {
   std::atomic<bool> blades_visible_{false};
   bool game_frozen_ = false;
   bool dashboard_sounds_downloading_ = false;
+  // The gamer-picture download, while one runs, and what the last left.
+  std::shared_ptr<void> gamer_pictures_progress_;
+  bool gamer_pictures_downloading_ = false;
+  std::string gamer_pictures_error_;
+  uint32_t gamer_pictures_count_ = 0;
+  uint32_t gamer_pictures_titles_ = 0;
+  bool gamer_pictures_checked_ = false;
   std::unique_ptr<GameLibrary> game_library_;
   // Why the last download failed; empty when it hasn't.
   std::string dashboard_sounds_error_;

@@ -62,6 +62,7 @@
 #include "xenia/app/blades_overlay_mac.h"
 #include "xenia/app/controller_home_button_mac.h"
 #include "xenia/app/dashboard_sounds_mac.h"
+#include "xenia/app/gamer_pictures_mac.h"
 #include "xenia/ui/window_mac.h"
 #endif  // XE_PLATFORM_MAC
 #include "xenia/ui/imgui_dialog.h"
@@ -2724,6 +2725,56 @@ void EmulatorWindow::AddGameFolders() {
       game_library().AddFolder(folder);
     }
   }
+}
+
+const char* EmulatorWindow::GamerPicturesStatus() {
+#if XE_PLATFORM_MAC
+  if (gamer_pictures_downloading_) {
+    auto progress = std::static_pointer_cast<gamer_pictures::Progress>(
+        gamer_pictures_progress_);
+    return progress && progress->installing ? "installing" : "downloading";
+  }
+  if (!gamer_pictures_checked_) {
+    gamer_pictures_checked_ = true;
+    if (auto summary = gamer_pictures::Installed(emulator_->storage_root())) {
+      gamer_pictures_count_ = summary->pictures;
+      gamer_pictures_titles_ = summary->titles;
+    }
+  }
+  if (gamer_pictures_count_) {
+    return "ready";
+  }
+  return gamer_pictures_error_.empty() ? "missing" : "failed";
+#else
+  return "unavailable";
+#endif
+}
+
+void EmulatorWindow::DownloadGamerPictures() {
+#if XE_PLATFORM_MAC
+  if (gamer_pictures_downloading_) {
+    return;
+  }
+  gamer_pictures_downloading_ = true;
+  gamer_pictures_error_.clear();
+  auto progress = std::make_shared<gamer_pictures::Progress>();
+  gamer_pictures_progress_ = progress;
+  gamer_pictures::Download(
+      emulator_->storage_root(), emulator_->content_root(), progress,
+      [this](std::string error, gamer_pictures::Summary summary) {
+        app_context().CallInUIThread([this, error, summary]() {
+          gamer_pictures_downloading_ = false;
+          gamer_pictures_error_ = error;
+          if (error.empty()) {
+            gamer_pictures_count_ = summary.pictures;
+            gamer_pictures_titles_ = summary.titles;
+          }
+          if (blades_overlay_ && blades_model_) {
+            blades_overlay_->PushState(blades_model_->BuildStateJson());
+          }
+        });
+      });
+#endif
 }
 
 std::filesystem::path EmulatorWindow::DashboardSoundsPath() const {

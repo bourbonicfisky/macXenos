@@ -30,6 +30,7 @@
 #include "xenia/app/controller_home_button_mac.h"
 #include "xenia/app/blades_overlay_mac.h"
 #include "xenia/app/dashboard_sounds_mac.h"
+#include "xenia/app/gamer_pictures_mac.h"
 #endif
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/base/string_util.h"
@@ -981,6 +982,38 @@ void BladesModel::WriteApp(StateWriter& w) {
 #endif
   w.EndObject();
 
+  // The gamer-picture collection: offered, coming in, or installed.
+  w.Key("gamerPictures");
+  w.StartObject();
+  w.Key("status");
+  w.String(window_.GamerPicturesStatus());
+  w.Key("error");
+  w.String(window_.gamer_pictures_error_.c_str());
+  w.Key("pictures");
+  w.Uint(window_.gamer_pictures_count_);
+  w.Key("titles");
+  w.Uint(window_.gamer_pictures_titles_);
+  int64_t received = 0, total = 0;
+#if XE_PLATFORM_MAC
+  total = gamer_pictures::kDownloadBytes;
+  if (auto progress = std::static_pointer_cast<gamer_pictures::Progress>(
+          window_.gamer_pictures_progress_)) {
+    received = progress->received;
+    total = progress->total ? progress->total.load() : total;
+  }
+  w.Key("collection");
+  w.String(gamer_pictures::kCollectionName);
+  w.Key("site");
+  w.String(gamer_pictures::kSite);
+#endif
+  w.Key("received");
+  w.Int64(received);
+  w.Key("total");
+  w.Int64(total);
+  w.EndObject();
+  gamer_pictures_progress_sent_ =
+      total ? int(received * 1000 / total) : -1;
+
   // The Mac's languages, for the dashboard's "Same as my Mac" (i18n/).
   w.Key("systemLanguages");
   w.StartArray();
@@ -1341,6 +1374,11 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
     return Result::kPush;
   }
 
+  if (op == "gamerPicturesDownload") {
+    window_.DownloadGamerPictures();
+    return Result::kPush;
+  }
+
   if (op == "gameFolderAdd") {
     // After this message returns: the folder picker runs its own loop.
     EmulatorWindow* window = &window_;
@@ -1431,6 +1469,20 @@ bool BladesModel::Poll() {
   if (ControllersFingerprint() != last_controllers_) {
     push = true;
   }
+#if XE_PLATFORM_MAC
+  // A gamer-picture download moving on (or turning to installing).
+  if (window_.gamer_pictures_downloading_) {
+    auto progress = std::static_pointer_cast<gamer_pictures::Progress>(
+        window_.gamer_pictures_progress_);
+    if (progress) {
+      const int64_t total = progress->total ? progress->total.load() : 1;
+      const int now = int(progress->received * 1000 / total);
+      if (now / 5 != gamer_pictures_progress_sent_ / 5 || progress->installing) {
+        push = true;
+      }
+    }
+  }
+#endif
   return push;
 }
 

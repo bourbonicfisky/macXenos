@@ -95,6 +95,9 @@ class BladesModel {
   void LoadProfileStats();
   void SaveProfileStats();
   std::map<uint64_t, ProfileStats> profile_stats_;
+  // The gamer-picture download's progress last sent to the page, in tenths
+  // of a percent, so Poll pushes as it moves.
+  int gamer_pictures_progress_sent_ = -1;
   bool profile_stats_loaded_ = false;
 
   EmulatorWindow& window_;

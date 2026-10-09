@@ -5,6 +5,8 @@ import { send, useNative, type NativeState, type Profile } from "../native";
 import { showToast } from "../ui/toast";
 import { Aside, PaneAction } from "./parts";
 import { Gamercard } from "../ui/gamercard";
+import { GamerPicturesPane, GamerPicturesValue } from "../ui/gamer-pictures";
+import { t } from "../i18n";
 
 /* ==========================================================================
    Profiles: the console's gamer profiles. Each holds its own saves and
@@ -192,6 +194,18 @@ export function profiles(state: NativeState): BladeDef {
       </>
     )
   });
+  if (state.gamerPictures.status !== "unavailable") {
+    menu.push({
+      id: "gamer-pictures",
+      section: t("profiles.pictures.section"),
+      label: t("profiles.pictures"),
+      glyph: "people",
+      value: <GamerPicturesValue />,
+      heading: t("profiles.pictures"),
+      detail: <GamerPicturesPane />
+    });
+  }
+
   // Otherwise the card of player one (or the first profile), as the
   // console's blade led with the signed-in player's.
   const player = state.profiles.find((profile) => profile.slot === 0) ?? state.profiles[0];
