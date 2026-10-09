@@ -31,6 +31,11 @@ dashboard) is the Blades page in
 WKWebView over the game. The ImGui settings dialogs it replaced are gone; add
 new user-facing settings there, not as dialogs.
 
+## Moonshots
+
+Ambitious features recorded for one day, with what is already known:
+[moonshots.md](moonshots.md) (custom soundtracks from the Mac's music).
+
 ## Deprecated archive
 
 Closed decisions, pre-gates, censuses, audits, investigations, and session
