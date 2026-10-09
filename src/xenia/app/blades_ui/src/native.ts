@@ -83,6 +83,8 @@ export type Profile = {
   gamertag: string;
   /** The player slot it is signed in to, or -1. */
   slot: number;
+  /** Its gamer picture (64x64, /content/...), or "" for none yet. */
+  picture: string;
   /** Its gamercard numbers: counted while it is signed in, remembered after.
       Missing for a profile not signed in since they were first kept. */
   stats?: { games: number; gamerscore: number; achievements: number };
@@ -189,6 +191,7 @@ export type NativeMessage =
   | { op: "sound"; file: string; gain: number }
   | { op: "dashSounds"; action: "download" | "decline" }
   | { op: "gamerPicturesDownload" }
+  | { op: "profilePicture"; xuid: string; picture: string }
   | { op: "gameFolderAdd" }
   | { op: "gameFolderRemove"; path: string }
   | { op: "gameFoldersRescan" }

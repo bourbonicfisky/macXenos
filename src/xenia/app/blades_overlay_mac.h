@@ -48,9 +48,14 @@ class BladesOverlay {
   // `title_icon_root` is served to the page as /title-icons/ (the games'
   // icons, EmulatorWindow::TitleIconPath). `sound_root` holds the downloaded
   // dashboard sounds (dashboard_sounds_mac.h); missing ones stay silent.
+  // PNGs under `content_root` are served as /content/... (profiles' and
+  // downloaded gamer pictures), and `data_root`'s gamer_pictures.json as
+  // /data/gamer_pictures.json.
   BladesOverlay(void* container_view, void* game_view,
                 const std::filesystem::path& title_icon_root,
-                const std::filesystem::path& sound_root, Callbacks callbacks);
+                const std::filesystem::path& sound_root,
+                const std::filesystem::path& content_root,
+                const std::filesystem::path& data_root, Callbacks callbacks);
   ~BladesOverlay();
 
   BladesOverlay(const BladesOverlay&) = delete;

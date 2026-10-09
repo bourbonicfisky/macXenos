@@ -399,4 +399,59 @@
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
+/* The gamer-picture grid (picture-picker.tsx): 64x64 tiles as many across
+   as fit, the one under the cursor lifted in the focus highlight's rim, the
+   profile's current one marked. */
+.picture-grid {
+  grid-template-columns: repeat(auto-fill, minmax(4.4em, 1fr));
+  gap: 0.55em;
+}
+
+.subblade-tile {
+  aspect-ratio: 1;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 120ms ease;
+}
+
+.subblade-tile:focus-visible {
+  outline: none;
+}
+
+.subblade-tile[aria-current] {
+  border-color: color-mix(in srgb, var(--b-rim) 70%, transparent);
+}
+
+.subblade-tile[data-focused="true"] {
+  z-index: 1;
+  border-color: var(--hl-rim);
+  box-shadow: 0 0 0 2px var(--hl-ring), 0 4px 12px rgba(0, 0, 0, 0.4);
+  transform: scale(1.08);
+}
+
+.picture-tile-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.picture-more {
+  display: inline-grid;
+  place-items: center;
+  color: var(--b-ink-soft);
+}
+
+.picture-more > span {
+  font-size: 1.6em;
+  font-weight: 300;
+  line-height: 1;
+}
+
 } /* @layer components */

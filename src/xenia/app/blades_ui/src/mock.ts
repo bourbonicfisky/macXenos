@@ -105,8 +105,14 @@ export function mockState(): NativeState {
       site: "DeckThemes"
     },
     profiles: [
-      { xuid: "E030000012345678", gamertag: "dmug", slot: 0, stats: { games: 10, gamerscore: 1250, achievements: 56 } },
-      { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
+      {
+        xuid: "E030000012345678",
+        gamertag: "dmug",
+        slot: 0,
+        picture: "/gamer-pictures/robot.png",
+        stats: { games: 10, gamerscore: 1250, achievements: 56 }
+      },
+      { xuid: "E030000087654321", gamertag: "Player Two", slot: -1, picture: "" }
     ],
     gamerPictures: {
       status: "missing",
@@ -138,6 +144,11 @@ export function mockState(): NativeState {
 
 export function mockApply(state: NativeState, message: NativeMessage): NativeState {
   switch (message.op) {
+    case "profilePicture":
+      return {
+        ...state,
+        profiles: state.profiles.map((p) => (p.xuid === message.xuid ? { ...p, picture: message.picture } : p))
+      };
     case "gamerPicturesDownload":
       return { ...state, gamerPictures: { ...state.gamerPictures, status: "downloading", received: 41_000_000 } };
     case "gameFolderAdd":
@@ -206,7 +217,10 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
     case "profileCreate":
       return {
         ...state,
-        profiles: [...state.profiles, { xuid: `E0300000${Date.now().toString(16).slice(-8).toUpperCase()}`, gamertag: message.gamertag, slot: -1 }]
+        profiles: [
+          ...state.profiles,
+          { xuid: `E0300000${Date.now().toString(16).slice(-8).toUpperCase()}`, gamertag: message.gamertag, slot: -1, picture: "" }
+        ]
       };
     case "hotkey":
       return { ...state, hotkeys: state.hotkeys.map((h) => (h.id === message.id ? { ...h, enabled: message.enabled } : h)) };

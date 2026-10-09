@@ -24,7 +24,7 @@ import { playSound } from "./sound";
 
 // --- Which one is open ------------------------------------------------------------
 
-export type SubBladeId = "all-games" | "game-folders";
+export type SubBladeId = "all-games" | "game-folders" | "gamer-picture";
 
 let openId: SubBladeId | null = null;
 const listeners = new Set<() => void>();
@@ -106,8 +106,15 @@ type SubBladeProps = {
   onX?: () => void;
   /** Called whenever the highlighted row changes. */
   onFocusChange?: (index: number) => void;
-  /** Starting over at the first row (a new sort order). */
+  /** Starting over (a new sort order, another level of the list) at
+      `resetFocus`, the first row unless given. */
   resetKey?: unknown;
+  resetFocus?: number;
+  /** A grid of tiles rather than a list: ← → move along a row and ↑ ↓
+      between rows, as many tiles across as the layout fits. */
+  grid?: boolean;
+  /** B, before the sub-blade closes: true when handled (a level back). */
+  onBack?: () => boolean;
   legend: (focus: number) => { left: LegendEntry[]; right: LegendEntry[] };
   empty?: ReactNode;
   children: (rowProps: (index: number) => RowProps, focus: number) => ReactNode;
@@ -123,6 +130,9 @@ export function SubBlade({
   onX,
   onFocusChange,
   resetKey,
+  resetFocus = 0,
+  grid = false,
+  onBack,
   legend,
   empty,
   children
@@ -169,7 +179,7 @@ export function SubBlade({
   }, [open]);
 
   useEffect(() => {
-    if (open) setFocus(0);
+    if (open) setFocus(resetFocus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
 
@@ -192,7 +202,16 @@ export function SubBlade({
 
   const back = () => {
     playSound("back");
+    if (onBack?.()) return;
     closeSubBlade();
+  };
+  // Tiles across, in a grid: those on the first tile's line.
+  const columns = () => {
+    if (!grid) return 1;
+    const tiles = rowRefs.current.slice(0, count);
+    const top = tiles[0]?.offsetTop;
+    const across = tiles.filter((tile) => tile && tile.offsetTop === top).length;
+    return Math.max(1, across);
   };
   const move = (to: number) => {
     const next = Math.max(0, Math.min(to, count - 1));
@@ -208,10 +227,13 @@ export function SubBlade({
       if (!isDashboardKey(event)) return;
       const key = event.key;
       let handled = true;
-      if (key === "ArrowUp") move(clamped - 1);
-      else if (key === "ArrowDown") move(clamped + 1);
-      else if (key === "PageUp") move(clamped - 6);
-      else if (key === "PageDown") move(clamped + 6);
+      const step = columns();
+      if (key === "ArrowUp") move(clamped - step);
+      else if (key === "ArrowDown") move(clamped + step);
+      else if (grid && key === "ArrowLeft") move(clamped - 1);
+      else if (grid && key === "ArrowRight") move(clamped + 1);
+      else if (key === "PageUp") move(clamped - 6 * step);
+      else if (key === "PageDown") move(clamped + 6 * step);
       else if (key === "Home") move(0);
       else if (key === "End") move(count - 1);
       else if (key === "ArrowLeft" || key === "ArrowRight" || key === "y" || key === "Y") {
@@ -245,11 +267,13 @@ export function SubBlade({
     ref: (element) => {
       rowRefs.current[index] = element;
     },
-    // Metal rows are square, on grooves; the coloured ones are rounded like
-    // the blades' rows.
-    className: `menu-row subblade-row relative grid w-full items-center gap-x-[0.7em] ${
-      tone === "metal" ? "" : "rounded-row "
-    }px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left`,
+    // Grid tiles; else rows: metal rows are square, on grooves, the
+    // coloured ones rounded like the blades' rows.
+    className: grid
+      ? "subblade-tile relative block"
+      : `menu-row subblade-row relative grid w-full items-center gap-x-[0.7em] ${
+          tone === "metal" ? "" : "rounded-row "
+        }px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left`,
     "data-focused": index === clamped ? "true" : undefined,
     onMouseEnter: () => {
       if (index !== clamped) setFocus(index);

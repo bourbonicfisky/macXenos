@@ -865,6 +865,19 @@ void BladesModel::WriteProfiles(StateWriter& w) {
       w.String(gamertag.c_str());
       w.Key("slot");
       w.Int(slot < XUserMaxUserCount ? int(slot) : -1);
+      // Its gamer picture (tile_64.png in the profile's folder), as the page
+      // reaches it, versioned so a new one shows at once.
+      {
+        const std::filesystem::path tile = ProfileFolder(xuid) / "tile_64.png";
+        std::error_code ec;
+        const auto time = std::filesystem::last_write_time(tile, ec);
+        w.Key("picture");
+        w.String(ec ? ""
+                    : fmt::format("/content/{0}/FFFE07D1/00010000/{0}/"
+                                  "tile_64.png?v={1}",
+                                  id, time.time_since_epoch().count())
+                          .c_str());
+      }
       if (const ProfileStats* stats = StatsFor(xuid)) {
         w.Key("stats");
         w.StartObject();
@@ -880,6 +893,75 @@ void BladesModel::WriteProfiles(StateWriter& w) {
     }
   }
   w.EndArray();
+}
+
+// --- Gamer pictures ------------------------------------------------------------
+
+std::filesystem::path BladesModel::ProfileFolder(uint64_t xuid) {
+  // Where ProfileManager keeps a profile (GetProfilePath): its package,
+  // unpacked, under the content root.
+  const std::string id = fmt::format("{:016X}", xuid);
+  return window_.emulator()->content_root() / id / "FFFE07D1" / "00010000" / id;
+}
+
+void BladesModel::SetProfilePicture(uint64_t xuid, const std::string& picture) {
+  Emulator* emulator = window_.emulator();
+  if (!emulator || !xuid) return;
+  // The picture as the page names it: one of the app's own
+  // (/gamer-pictures/<name>.png, in the page) or a downloaded one
+  // (/content/..., under the content root). Nothing outside either.
+  std::filesystem::path base, relative;
+  if (picture.rfind("/gamer-pictures/", 0) == 0) {
+#if XE_PLATFORM_MAC
+    base = BladesOverlay::FindPageRoot();
+#endif
+    relative = xe::to_path(picture.substr(1));
+  } else if (picture.rfind("/content/", 0) == 0) {
+    base = emulator->content_root();
+    relative = xe::to_path(picture.substr(std::strlen("/content/")));
+  }
+  if (base.empty() || relative.extension() != ".png") {
+    XELOGW("Blades: not a gamer picture: {}", picture);
+    return;
+  }
+  std::error_code ec;
+  const std::filesystem::path file =
+      std::filesystem::weakly_canonical(base / relative, ec);
+  const std::string base_text =
+      xe::path_to_utf8(std::filesystem::weakly_canonical(base, ec)) + "/";
+  if (xe::path_to_utf8(file).rfind(base_text, 0) != 0) {
+    XELOGW("Blades: not a gamer picture: {}", picture);
+    return;
+  }
+  std::ifstream in(file, std::ios::binary);
+  std::vector<uint8_t> big((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+#if XE_PLATFORM_MAC
+  // A profile keeps its picture in two sizes; the small one is made here.
+  std::vector<uint8_t> small = gamer_pictures::SmallPicture(big);
+#else
+  std::vector<uint8_t> small;
+#endif
+  if (small.empty()) {
+    XELOGW("Blades: {} is not a 64x64 picture", picture);
+    return;
+  }
+  kernel::KernelState* kernel = emulator->kernel_state();
+  if (kernel && kernel->xam_state()->GetUserProfile(xuid)) {
+    // Signed in: through the profile, which also keeps it for games asking.
+    auto* tracker = kernel->xam_state()->user_tracker();
+    tracker->UpdateUserIcon(xuid, big);
+    tracker->UpdateUserIcon(xuid, small);
+  } else {
+    const std::filesystem::path folder = ProfileFolder(xuid);
+    if (!std::filesystem::is_directory(folder, ec)) return;
+    std::ofstream(folder / "tile_64.png", std::ios::binary | std::ios::trunc)
+        .write(reinterpret_cast<const char*>(big.data()), std::streamsize(big.size()));
+    std::ofstream(folder / "tile_32.png", std::ios::binary | std::ios::trunc)
+        .write(reinterpret_cast<const char*>(small.data()),
+               std::streamsize(small.size()));
+  }
+  XELOGI("Blades: gamer picture of {:016X} is now {}", xuid, picture);
 }
 
 // --- Gamercard numbers ----------------------------------------------------------
@@ -1300,6 +1382,13 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
   }
 
   // Profiles.
+  // Before the other profile ops, which take every op named profile*.
+  if (op == "profilePicture") {
+    SetProfilePicture(std::stoull(string_member("xuid"), nullptr, 16),
+                      string_member("picture"));
+    return Result::kPush;
+  }
+
   if (op.rfind("profile", 0) == 0) {
     kernel::KernelState* kernel =
         emulator ? emulator->kernel_state() : nullptr;

@@ -6,6 +6,7 @@ import { showToast } from "../ui/toast";
 import { Aside, PaneAction } from "./parts";
 import { Gamercard } from "../ui/gamercard";
 import { GamerPicturesPane, GamerPicturesValue } from "../ui/gamer-pictures";
+import { openPicturePicker } from "../ui/picture-picker";
 import { t } from "../i18n";
 
 /* ==========================================================================
@@ -130,6 +131,7 @@ function ProfilePane({ xuid }: { xuid: string }) {
   if (!profile) return null;
   return (
     <>
+      <PaneAction onSelect={() => openPicturePicker(profile.xuid)}>{t("profiles.picker.change")}</PaneAction>
       <p className="pref-group m-0">Sign in as</p>
       <SignIn profile={profile} />
       <p className="pref-group m-0">Gamertag</p>

@@ -196,6 +196,40 @@ const tests = {
     expect((await page.eval(`${pane}.textContent`)).includes("Downloading: 41 of 117 MB"), "progress text");
   },
 
+  async "the picture picker sets a profile's gamer picture"(page, base) {
+    await page.open(base, "#profiles");
+    await page.key("Enter");
+    expect((await page.eval("document.activeElement?.textContent")) === "Change gamer picture", "no Change button");
+    await page.key("Enter");
+    await page.eval("new Promise((r) => setTimeout(r, 300))");
+    expect((await page.eval("document.querySelector('.subblade h2')?.textContent")) === "Gamer Picture", "picker not open");
+    await page.key("Enter");
+    expect((await page.eval("document.querySelectorAll('.subblade-tile').length")) === 95, "macXenos grid is not 95 pictures");
+    const index = "[...document.querySelectorAll('.subblade-tile')].findIndex((t) => t.dataset.focused === 'true')";
+    const start = await page.eval(index);
+    expect(
+      (await page.eval("document.querySelector('.subblade-tile[data-focused=true] img')?.getAttribute('src')")) ===
+        "/gamer-pictures/robot.png",
+      "the grid did not open on the profile's picture"
+    );
+    const across = await page.eval(
+      "(() => { const t = [...document.querySelectorAll('.subblade-tile')]; return t.filter((x) => x.offsetTop === t[0].offsetTop).length; })()"
+    );
+    await page.key("ArrowRight");
+    await page.key("ArrowDown");
+    expect((await page.eval(index)) === start + 1 + across, `→ ↓ moved from ${start} to ${await page.eval(index)} (${across} across)`);
+    await page.key("b");
+    expect((await page.eval("document.querySelector('.subblade h2')?.textContent")) === "Gamer Picture", "B did not go back a level");
+    await page.key("Enter");
+    await page.key("Home");
+    await page.key("ArrowRight");
+    await page.key("a");
+    await page.eval("new Promise((r) => setTimeout(r, 700))");
+    expect(!(await page.eval("!!document.querySelector('.subblade-layer')")), "choosing did not close the picker");
+    const card = await page.eval("document.querySelector('.blade[data-state=open] .gamercard-picture')?.getAttribute('src')");
+    expect(card === "/gamer-pictures/abstract.png", `gamercard shows ${card}`);
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

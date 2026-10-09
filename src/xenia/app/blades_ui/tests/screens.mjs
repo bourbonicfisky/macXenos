@@ -17,6 +17,8 @@ const STATES = {
   profiles: ["#profiles"],
   "profiles-unsigned": ["#profiles", "ArrowDown"],
   "gamer-pictures": ["#profiles/gamer-pictures"],
+  "picker": ["#profiles", "Enter", "Enter"],
+  "picker-grid": ["#profiles", "Enter", "Enter", "Enter", "ArrowRight", "ArrowDown"],
   "gamer-pictures-downloading": ["#profiles/gamer-pictures", "Enter", "Enter"],
   "system-sound": ["#system/sound"],
   "system-language": ["#system/language"],

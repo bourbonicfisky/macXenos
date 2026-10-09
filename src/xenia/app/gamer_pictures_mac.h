@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace xe {
 namespace app {
@@ -43,8 +44,17 @@ struct Summary {
   uint32_t titles = 0;    // Games and other titles they belong to.
 };
 
-// What an earlier install left, from its index.
+// What an earlier install left, from its index. Also writes the index as
+// gamer_pictures.json (titles, names, picture keys) for the page's picker,
+// if an install left only the TOML.
 std::optional<Summary> Installed(const std::filesystem::path& storage_root);
+
+// A PNG's width and height from its header, or 0x0 if it isn't one.
+std::pair<uint32_t, uint32_t> PngSize(const std::vector<uint8_t>& data);
+
+// The 32x32 of a 64x64 gamer picture, as the console stored a profile's
+// small picture (tile_32.png); empty if `png64` isn't a 64x64 PNG.
+std::vector<uint8_t> SmallPicture(const std::vector<uint8_t>& png64);
 
 // Shared with the page while a download runs.
 struct Progress {

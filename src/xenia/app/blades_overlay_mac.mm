@@ -43,18 +43,28 @@ NSString* MimeTypeFor(NSString* extension) {
 
 // Serves files from the page root, and nothing outside it.
 @interface XeniaBladesSchemeHandler : NSObject <WKURLSchemeHandler>
-- (instancetype)initWithRoot:(NSString*)root iconRoot:(NSString*)icon_root;
+- (instancetype)initWithRoot:(NSString*)root
+                    iconRoot:(NSString*)icon_root
+                 contentRoot:(NSString*)content_root
+                    dataRoot:(NSString*)data_root;
 @end
 
 @implementation XeniaBladesSchemeHandler {
   NSString* root_;
   NSString* icon_root_;
+  NSString* content_root_;
+  NSString* data_root_;
 }
-- (instancetype)initWithRoot:(NSString*)root iconRoot:(NSString*)icon_root {
+- (instancetype)initWithRoot:(NSString*)root
+                    iconRoot:(NSString*)icon_root
+                 contentRoot:(NSString*)content_root
+                    dataRoot:(NSString*)data_root {
   self = [super init];
   if (self) {
     root_ = root.stringByStandardizingPath;
     icon_root_ = icon_root.stringByStandardizingPath;
+    content_root_ = content_root.stringByStandardizingPath;
+    data_root_ = data_root.stringByStandardizingPath;
   }
   return self;
 }
@@ -64,12 +74,22 @@ NSString* MimeTypeFor(NSString* extension) {
   if (path.length == 0 || [path isEqualToString:@"/"]) {
     path = @"/index.html";
   }
-  // /title-icons/ID.png comes from the games' icon store, the rest from the
-  // page itself; nothing outside either.
+  // /title-icons/ID.png comes from the games' icon store; /content/...png
+  // from the content folder, PNGs only (profiles' pictures, downloaded gamer
+  // pictures; never saves); /data/gamer_pictures.json is the picker's index;
+  // the rest is the page itself. Nothing outside any of them.
   NSString* base = root_;
   if ([path hasPrefix:@"/title-icons/"] && icon_root_.length) {
     base = icon_root_;
     path = [path substringFromIndex:[@"/title-icons" length]];
+  } else if ([path hasPrefix:@"/content/"] && content_root_.length &&
+             [path.pathExtension.lowercaseString isEqualToString:@"png"]) {
+    base = content_root_;
+    path = [path substringFromIndex:[@"/content" length]];
+  } else if ([path isEqualToString:@"/data/gamer_pictures.json"] &&
+             data_root_.length) {
+    base = data_root_;
+    path = @"/gamer_pictures.json";
   }
   NSString* full =
       [base stringByAppendingPathComponent:path].stringByStandardizingPath;
@@ -256,6 +276,8 @@ std::filesystem::path BladesOverlay::FindPageRoot() {
 BladesOverlay::BladesOverlay(void* container_view, void* game_view,
                              const std::filesystem::path& title_icon_root,
                              const std::filesystem::path& sound_root,
+                             const std::filesystem::path& content_root,
+                             const std::filesystem::path& data_root,
                              Callbacks callbacks) {
   @autoreleasepool {
     XeniaBladesHost* host = [[XeniaBladesHost alloc] init];
@@ -280,7 +302,13 @@ BladesOverlay::BladesOverlay(void* container_view, void* game_view,
                         iconRoot:[NSString
                                      stringWithUTF8String:
                                          xe::path_to_utf8(title_icon_root)
-                                             .c_str()]]
+                                             .c_str()]
+                     contentRoot:[NSString
+                                     stringWithUTF8String:
+                                         xe::path_to_utf8(content_root).c_str()]
+                        dataRoot:[NSString
+                                     stringWithUTF8String:
+                                         xe::path_to_utf8(data_root).c_str()]]
                    forURLScheme:kScheme];
     [config.userContentController addScriptMessageHandler:host name:@"xenia"];
     [config.userContentController addScriptMessageHandler:host name:@"xeniaLog"];

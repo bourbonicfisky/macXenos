@@ -11,6 +11,7 @@
 #define XENIA_APP_BLADES_MODEL_H_
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <string>
@@ -92,6 +93,10 @@ class BladesModel {
     bool operator==(const ProfileStats&) const = default;
   };
   const ProfileStats* StatsFor(uint64_t xuid);
+  // A profile's folder, and setting its gamer picture (both sizes) from one
+  // the page names.
+  std::filesystem::path ProfileFolder(uint64_t xuid);
+  void SetProfilePicture(uint64_t xuid, const std::string& picture);
   void LoadProfileStats();
   void SaveProfileStats();
   std::map<uint64_t, ProfileStats> profile_stats_;

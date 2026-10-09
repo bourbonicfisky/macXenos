@@ -10,6 +10,7 @@
 #include "xenia/app/gamer_pictures_mac.h"
 
 #import <CommonCrypto/CommonDigest.h>
+#import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
@@ -74,17 +75,47 @@ std::string Sha1Hex(const std::filesystem::path& path) {
   return out;
 }
 
-// A PNG's width and height from its header, or 0x0 if it isn't one.
-std::pair<uint32_t, uint32_t> PngSize(const std::vector<uint8_t>& data) {
-  static constexpr uint8_t kSignature[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-  if (data.size() < 24 || std::memcmp(data.data(), kSignature, 8) != 0) {
-    return {0, 0};
+std::string JsonString(const std::string& text) {
+  std::string out = "\"";
+  for (unsigned char c : text) {
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += char(c);
+    } else if (c < 0x20) {
+      out += fmt::format("\\u{:04x}", c);
+    } else {
+      out += char(c);
+    }
   }
-  auto be32 = [&](size_t at) {
-    return uint32_t(data[at]) << 24 | uint32_t(data[at + 1]) << 16 |
-           uint32_t(data[at + 2]) << 8 | uint32_t(data[at + 3]);
-  };
-  return {be32(16), be32(20)};
+  return out + "\"";
+}
+
+// The index for the page (gamer_pictures.json), from the TOML one.
+void WriteJsonIndex(const std::filesystem::path& storage_root,
+                    const toml::table& index) {
+  std::string json = "[";
+  bool first = true;
+  if (auto* titles = index["title"].as_array()) {
+    for (const auto& item : *titles) {
+      const toml::table* title = item.as_table();
+      if (!title) continue;
+      json += first ? "\n" : ",\n";
+      first = false;
+      json += "{\"id\":" + JsonString((*title)["id"].value_or<std::string>("")) +
+              ",\"name\":" + JsonString((*title)["name"].value_or<std::string>("")) +
+              ",\"pictures\":[";
+      bool first_key = true;
+      if (auto* pictures = (*title)["pictures"].as_array()) {
+        for (const auto& key : *pictures) {
+          json += (first_key ? "" : ",") + JsonString(key.value_or<std::string>(""));
+          first_key = false;
+        }
+      }
+      json += "]}";
+    }
+  }
+  json += "\n]\n";
+  std::ofstream(storage_root / "gamer_pictures.json", std::ios::trunc) << json;
 }
 
 NSString* ToNS(const std::filesystem::path& path) {
@@ -207,6 +238,7 @@ std::string Install(const std::filesystem::path& zip,
   index.insert("source", kUrl);
   index.insert("title", std::move(list));
   std::ofstream(storage_root / kIndexFile, std::ios::trunc) << index;
+  WriteJsonIndex(storage_root, index);
   XELOGI(
       "Gamer pictures: installed {} pictures from {} titles ({} packages; {} "
       "odd-sized ones left out)",
@@ -216,11 +248,55 @@ std::string Install(const std::filesystem::path& zip,
 
 }  // namespace
 
+// A PNG's width and height from its header, or 0x0 if it isn't one.
+std::pair<uint32_t, uint32_t> PngSize(const std::vector<uint8_t>& data) {
+  static constexpr uint8_t kSignature[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  if (data.size() < 24 || std::memcmp(data.data(), kSignature, 8) != 0) {
+    return {0, 0};
+  }
+  auto be32 = [&](size_t at) {
+    return uint32_t(data[at]) << 24 | uint32_t(data[at + 1]) << 16 |
+           uint32_t(data[at + 2]) << 8 | uint32_t(data[at + 3]);
+  };
+  return {be32(16), be32(20)};
+}
+
+std::vector<uint8_t> SmallPicture(const std::vector<uint8_t>& png64) {
+  if (PngSize(png64) != std::pair<uint32_t, uint32_t>(64, 64)) return {};
+  std::vector<uint8_t> out;
+  @autoreleasepool {
+    NSData* data = [NSData dataWithBytes:png64.data() length:png64.size()];
+    NSBitmapImageRep* source = [NSBitmapImageRep imageRepWithData:data];
+    if (!source.CGImage) return {};
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        nullptr, 32, 32, 8, 32 * 4, space,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return {};
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, 32, 32), source.CGImage);
+    CGImageRef scaled = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    if (!scaled) return {};
+    NSBitmapImageRep* small = [[NSBitmapImageRep alloc] initWithCGImage:scaled];
+    CGImageRelease(scaled);
+    NSData* encoded = [small representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    out.assign(static_cast<const uint8_t*>(encoded.bytes),
+               static_cast<const uint8_t*>(encoded.bytes) + encoded.length);
+  }
+  return out;
+}
+
 std::optional<Summary> Installed(const std::filesystem::path& storage_root) {
   std::ifstream file(storage_root / kIndexFile);
   if (!file.is_open()) return std::nullopt;
   try {
     toml::table index = toml::parse(file);
+    std::error_code ec;
+    if (!std::filesystem::exists(storage_root / "gamer_pictures.json", ec)) {
+      WriteJsonIndex(storage_root, index);
+    }
     Summary summary;
     if (auto* titles = index["title"].as_array()) {
       for (const auto& item : *titles) {

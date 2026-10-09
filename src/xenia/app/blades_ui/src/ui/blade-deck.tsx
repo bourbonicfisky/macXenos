@@ -10,6 +10,7 @@ import { getNative, send } from "../native";
 import { Toast } from "./toast";
 import { AllGames } from "./all-games";
 import { FolderEditor } from "./folder-editor";
+import { PicturePicker } from "./picture-picker";
 
 /**
  * The dashboard's mechanism, and only the mechanism: which blade is open, how
@@ -143,6 +144,7 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
 
       <AllGames tone={blades[active].tone} />
       <FolderEditor />
+      <PicturePicker tone={blades[active].tone} />
     </>
   );
 }

@@ -1637,6 +1637,7 @@ void EmulatorWindow::ShowPreferences(const std::string& blade) {
     blades_overlay_ = std::make_unique<BladesOverlay>(
         mac_window->native_container_view(), mac_window->native_game_view(),
         TitleIconPath(0).parent_path(), DashboardSoundsPath(),
+        emulator_->content_root(), emulator_->storage_root(),
         std::move(callbacks));
   }
   if (!blades_overlay_->visible()) {
