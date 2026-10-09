@@ -83,6 +83,9 @@ export type Profile = {
   gamertag: string;
   /** The player slot it is signed in to, or -1. */
   slot: number;
+  /** Its gamercard numbers: counted while it is signed in, remembered after.
+      Missing for a profile not signed in since they were first kept. */
+  stats?: { games: number; gamerscore: number; achievements: number };
 };
 
 export type ConsoleOption = { value: number; label: string };

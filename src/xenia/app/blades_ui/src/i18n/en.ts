@@ -97,6 +97,15 @@ export const en = {
   "home.install.detail": "Add title updates, downloadable content or Xbox Live Arcade games from their package files.",
   "home.gameIcon": "{name} icon",
 
+  // --- Profiles ---------------------------------------------------------------
+  "profiles.card.label": "{gamertag}'s gamercard",
+  "profiles.card.picture": "Gamer picture",
+  "profiles.card.games": "Games",
+  "profiles.card.gamerscore": "Gamerscore",
+  "profiles.card.achievements": "Achievements",
+  "profiles.card.unknown": "–",
+  "profiles.card.signIn": "Sign in to count this profile's games and gamerscore.",
+
   // --- When a game was played ------------------------------------------------
   "played.today": "Played today",
   "played.yesterday": "Played yesterday",

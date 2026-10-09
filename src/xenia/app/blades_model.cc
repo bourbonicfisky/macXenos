@@ -23,6 +23,7 @@
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
+#include "third_party/tomlplusplus/toml.hpp"
 #include "xenia/app/emulator_window.h"
 #include "xenia/app/game_library.h"
 #if XE_PLATFORM_MAC
@@ -863,10 +864,96 @@ void BladesModel::WriteProfiles(StateWriter& w) {
       w.String(gamertag.c_str());
       w.Key("slot");
       w.Int(slot < XUserMaxUserCount ? int(slot) : -1);
+      if (const ProfileStats* stats = StatsFor(xuid)) {
+        w.Key("stats");
+        w.StartObject();
+        w.Key("games");
+        w.Uint(stats->games);
+        w.Key("gamerscore");
+        w.Uint(stats->gamerscore);
+        w.Key("achievements");
+        w.Uint(stats->achievements);
+        w.EndObject();
+      }
       w.EndObject();
     }
   }
   w.EndArray();
+}
+
+// --- Gamercard numbers ----------------------------------------------------------
+
+namespace {
+std::filesystem::path ProfileStatsPath(Emulator* emulator) {
+  return emulator->storage_root() / "profile_stats.toml";
+}
+}  // namespace
+
+const BladesModel::ProfileStats* BladesModel::StatsFor(uint64_t xuid) {
+  LoadProfileStats();
+  Emulator* emulator = window_.emulator();
+  kernel::KernelState* kernel = emulator ? emulator->kernel_state() : nullptr;
+  // Signed in: count it now, the way the console's gamercard did, and keep
+  // the result for when it isn't.
+  if (kernel && kernel->xam_state()->GetUserProfile(xuid)) {
+    ProfileStats stats;
+    for (const auto& title :
+         kernel->xam_state()->user_tracker()->GetPlayedTitles(xuid)) {
+      ++stats.games;
+      stats.gamerscore += title.title_earned_gamerscore;
+      stats.achievements += title.unlocked_achievements_count;
+    }
+    auto [it, inserted] = profile_stats_.try_emplace(xuid, stats);
+    if (inserted || !(it->second == stats)) {
+      it->second = stats;
+      SaveProfileStats();
+    }
+    return &it->second;
+  }
+  auto it = profile_stats_.find(xuid);
+  return it == profile_stats_.end() ? nullptr : &it->second;
+}
+
+void BladesModel::LoadProfileStats() {
+  if (profile_stats_loaded_ || !window_.emulator()) {
+    return;
+  }
+  profile_stats_loaded_ = true;
+  std::ifstream file(ProfileStatsPath(window_.emulator()));
+  if (!file.is_open()) {
+    return;
+  }
+  try {
+    toml::table table = toml::parse(file);
+    for (const auto& [key, value] : table) {
+      const toml::table* entry = value.as_table();
+      if (!entry) continue;
+      ProfileStats stats;
+      stats.games = uint32_t((*entry)["games"].value_or<int64_t>(0));
+      stats.gamerscore = uint32_t((*entry)["gamerscore"].value_or<int64_t>(0));
+      stats.achievements =
+          uint32_t((*entry)["achievements"].value_or<int64_t>(0));
+      profile_stats_[std::stoull(std::string(key.str()), nullptr, 16)] = stats;
+    }
+  } catch (const std::exception& error) {
+    XELOGW("Blades: cannot read profile_stats.toml: {}", error.what());
+  }
+}
+
+void BladesModel::SaveProfileStats() {
+  if (!window_.emulator()) {
+    return;
+  }
+  toml::table table;
+  for (const auto& [xuid, stats] : profile_stats_) {
+    toml::table entry;
+    entry.insert("games", int64_t(stats.games));
+    entry.insert("gamerscore", int64_t(stats.gamerscore));
+    entry.insert("achievements", int64_t(stats.achievements));
+    table.insert(fmt::format("{:016X}", xuid), std::move(entry));
+  }
+  std::ofstream file(ProfileStatsPath(window_.emulator()), std::ios::trunc);
+  file << table;
 }
 
 void BladesModel::WriteApp(StateWriter& w) {

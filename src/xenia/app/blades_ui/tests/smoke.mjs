@@ -171,6 +171,20 @@ const tests = {
     expect((await page.eval("document.documentElement.dataset.background")) === "still", "Still does not hold the light");
   },
 
+  async "Profiles shows each profile's gamercard"(page, base) {
+    await page.open(base, "#profiles");
+    const card = () =>
+      page.eval(`(() => {
+        const card = document.querySelector('.blade[data-state=open] .gamercard');
+        return card && [card.querySelector('.gamercard-head').textContent,
+          ...[...card.querySelectorAll('dd')].map((d) => d.textContent),
+          card.querySelector('.gamercard-note') ? 'note' : ''].join('|');
+      })()`);
+    expect((await card()) === "dmug|10|1250|56|", `player one's card: ${await card()}`);
+    await page.key("ArrowDown");
+    expect((await card()) === "Player Two|–|–|–|note", `signed-out card: ${await card()}`);
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

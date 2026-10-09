@@ -105,7 +105,7 @@ export function mockState(): NativeState {
       site: "DeckThemes"
     },
     profiles: [
-      { xuid: "E030000012345678", gamertag: "dmug", slot: 0 },
+      { xuid: "E030000012345678", gamertag: "dmug", slot: 0, stats: { games: 10, gamerscore: 1250, achievements: 56 } },
       { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
     ],
     systemLanguages: [],

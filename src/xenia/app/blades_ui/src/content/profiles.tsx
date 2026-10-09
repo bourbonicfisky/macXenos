@@ -4,6 +4,7 @@ import type { MenuItem } from "../ui/blade-menu";
 import { send, useNative, type NativeState, type Profile } from "../native";
 import { showToast } from "../ui/toast";
 import { Aside, PaneAction } from "./parts";
+import { Gamercard } from "../ui/gamercard";
 
 /* ==========================================================================
    Profiles: the console's gamer profiles. Each holds its own saves and
@@ -168,6 +169,8 @@ export function profiles(state: NativeState): BladeDef {
     glyph: "people",
     value: <>{slotName(profile.slot)}</>,
     heading: profile.gamertag,
+    // Each profile's gamercard heads the pane while its row is highlighted.
+    feature: <Gamercard profile={profile} />,
     detail: <ProfilePane xuid={profile.xuid} />
   }));
   menu.push({
@@ -189,5 +192,15 @@ export function profiles(state: NativeState): BladeDef {
       </>
     )
   });
-  return { id: "profiles", label: "profiles", title: "Profiles", tone: "rose", menu };
+  // Otherwise the card of player one (or the first profile), as the
+  // console's blade led with the signed-in player's.
+  const player = state.profiles.find((profile) => profile.slot === 0) ?? state.profiles[0];
+  return {
+    id: "profiles",
+    label: "profiles",
+    title: "Profiles",
+    tone: "rose",
+    feature: player ? <Gamercard profile={player} /> : undefined,
+    menu
+  };
 }

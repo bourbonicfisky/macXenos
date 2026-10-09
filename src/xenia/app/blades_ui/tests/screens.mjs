@@ -14,6 +14,8 @@ import { withBlades } from "./harness.mjs";
 const STATES = {
   home: ["#home"],
   graphics: ["#graphics"],
+  profiles: ["#profiles"],
+  "profiles-unsigned": ["#profiles", "ArrowDown"],
   "system-sound": ["#system/sound"],
   "system-language": ["#system/language"],
   "system-about": ["#system/about"],

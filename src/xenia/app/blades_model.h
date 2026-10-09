@@ -81,6 +81,22 @@ class BladesModel {
 
   std::string ControllersFingerprint();
 
+  // A profile's games, gamerscore and achievements, as its gamercard shows
+  // them. Read from the profile while it is signed in, and remembered
+  // (profile_stats.toml in the storage root) so a signed-out profile still
+  // shows its last ones.
+  struct ProfileStats {
+    uint32_t games = 0;
+    uint32_t gamerscore = 0;
+    uint32_t achievements = 0;
+    bool operator==(const ProfileStats&) const = default;
+  };
+  const ProfileStats* StatsFor(uint64_t xuid);
+  void LoadProfileStats();
+  void SaveProfileStats();
+  std::map<uint64_t, ProfileStats> profile_stats_;
+  bool profile_stats_loaded_ = false;
+
   EmulatorWindow& window_;
   // Each setting's saved form when Preferences first opened, so the page can
   // tell which next-launch settings have changed since (native.ts `changed`).
