@@ -764,15 +764,6 @@ bool EmulatorWindow::Initialize() {
   }
   main_menu->AddChild(std::move(hid_menu));
 
-  // XMP menu
-  auto xmp_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Music Player");
-  {
-    xmp_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&Music Player...", "",
-        [this]() { ShowPreferences("audio/music"); }));
-  }
-  main_menu->AddChild(std::move(xmp_menu));
-
   // Console menu
   auto console_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Console");
   {
