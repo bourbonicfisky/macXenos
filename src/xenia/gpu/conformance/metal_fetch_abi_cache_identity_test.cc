@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 
@@ -167,8 +168,10 @@ TEST_CASE("The production fetch ABI revision is the current one",
   //     (upstream Canary 9e9d3cdd3): identical ucode now emits different DXBC,
   //     and the metallib/pipeline records key on ucode + this schema, so a
   //     revision-5 cache would serve unmasked shaders.
+  // 7 = stacked-texture fetches clamp the layer index for Inf/NaN coordinates
+  //     (upstream Canary 04085efaa), again different DXBC for the same ucode.
   // Each boundary is pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 6);
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 7);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
@@ -460,6 +463,22 @@ TEST_CASE("The identity mirror matches the production packing",
   // is what a manifest written before the field existed holds, so a computed 0
   // would silently match every stale directory.
   CHECK(production.converter_options_hash != 0ull);
+}
+
+TEST_CASE("The mulsc rounding mode participates in the cache identity",
+          "[cache_identity]") {
+  // --mulsc_round_toward_zero changes the DXBC emitted for mulsc, so a cache
+  // written under one setting must not be served under the other.
+  const bool saved = cvars::mulsc_round_toward_zero;
+  cvars::mulsc_round_toward_zero = false;
+  const MetalPipelineStorageIdentity nearest =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr);
+  cvars::mulsc_round_toward_zero = true;
+  const MetalPipelineStorageIdentity toward_zero =
+      metal::ComputeMetalPipelineStorageIdentity(nullptr);
+  cvars::mulsc_round_toward_zero = saved;
+  CHECK(nearest.translator_schema != toward_zero.translator_schema);
+  CHECK(nearest != toward_zero);
 }
 
 TEST_CASE("The production dxilconv generation is the current one",

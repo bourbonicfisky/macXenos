@@ -114,7 +114,12 @@ struct MetalTranslatorConfig {
   //       failure shape as the dxilconv converter-reuse bug, where corrupt
   //       metallibs were served from caches keyed on hashes that could not see
   //       the fix.
-  static constexpr uint32_t kFetchAbiRevision = 6;
+  //   6 - vertex fetches mask words at or past the fetch constant's size to 0
+  //       (upstream Canary 9e9d3cdd3).
+  //   7 - stacked-texture fetches clamp the layer index for Inf/NaN
+  //       coordinates (upstream Canary 04085efaa): identical ucode now emits
+  //       different DXBC.
+  static constexpr uint32_t kFetchAbiRevision = 7;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is

@@ -32,6 +32,7 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_dxil_store.h"
 
@@ -247,7 +248,9 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
     // offset and memexport code. 0 at 1x, so 1x identities are unchanged.
     uint32_t draw_resolution_scale_x_minus_1 : 2;
     uint32_t draw_resolution_scale_y_minus_1 : 2;
-    uint32_t reserved : 11;
+    // --mulsc_round_toward_zero changes the emitted mulsc code.
+    uint32_t mulsc_round_toward_zero : 1;
+    uint32_t reserved : 10;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -283,6 +286,7 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
   // kFetchAbiRevision so the conformance mirror can name it rather than repeat
   // a literal that would drift silently.
   schema.dxilconv_generation = MetalTranslatorConfig::kDxilconvGeneration;
+  schema.mulsc_round_toward_zero = cvars::mulsc_round_toward_zero ? 1 : 0;
   schema.draw_resolution_scale_x_minus_1 =
       std::max(draw_resolution_scale_x, uint32_t(1)) - 1;
   schema.draw_resolution_scale_y_minus_1 =
