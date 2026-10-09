@@ -236,6 +236,23 @@ const tests = {
     expect(card === "/gamer-pictures/abstract.png", `gamercard shows ${card}`);
   },
 
+  async "a controller opens a drop-down, moves through it and picks"(page, base) {
+    // As the app forwards a pad: window.__xeniaPad(button, down).
+    const pad = (b) =>
+      page.eval(`new Promise((r) => { window.__xeniaPad("${b}", true);
+        setTimeout(() => { window.__xeniaPad("${b}", false); setTimeout(r, 120); }, 120); })`);
+    const value = "document.querySelector('.blade[data-state=open] .pref-dropdown span')?.textContent";
+    await page.open(base, "#graphics/resolution");
+    await pad("a");
+    expect(await page.eval("document.activeElement?.classList.contains('pref-dropdown')"), "A did not reach the drop-down");
+    await pad("a");
+    expect(await page.eval("!!document.querySelector('[role=listbox]')"), "A did not open the list");
+    await pad("down");
+    await pad("a");
+    expect(!(await page.eval("!!document.querySelector('[role=listbox]')")), "A did not close the list");
+    expect((await page.eval(value)) === "2x — 1440p", `picked ${await page.eval(value)}`);
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

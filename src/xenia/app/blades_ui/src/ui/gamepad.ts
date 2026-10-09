@@ -1,18 +1,19 @@
-import { send } from "../native";
+import { inApp, send } from "../native";
 
 /* ==========================================================================
    A controller drives the blades the way the keyboard does: every button
    becomes the key the menus already answer (blade-menu.tsx, blade-deck.tsx).
 
      d-pad / left stick   arrow keys, repeating while held
-     A  B  X  Y           a  b  x  y   (X hides the dashboard)
+     A  B  X  Y           a  b  x  y
      LB  RB               change blade (← →), even inside a sub-menu's pane
      Guide                hides the dashboard, from anywhere
 
-   Two sources feed it: the page's own Gamepad API, and the app, which reads
-   the emulator's controllers while Preferences is open and calls
-   window.__xeniaPad(button, down). Either is enough; a press from both within
-   one poll counts once.
+   One source feeds it: in the app, the app, which reads the emulator's
+   controllers while the dashboard is open and calls window.__xeniaPad(button,
+   down); in a browser, the page's own Gamepad API. Never both: in the app
+   WebKit sees the same controller, and a quick tap reaching the page twice,
+   a moment apart, pressed A twice (a drop-down opened and closed again).
    ========================================================================== */
 
 type Button = "up" | "down" | "left" | "right" | "a" | "b" | "x" | "y" | "lb" | "rb" | "guide";
@@ -76,7 +77,7 @@ const fromApp = new Set<Button>();
 
 function poll() {
   const down = new Set<Button>(fromApp);
-  for (const pad of navigator.getGamepads?.() ?? []) {
+  for (const pad of inApp() ? [] : (navigator.getGamepads?.() ?? [])) {
     if (!pad || pad.mapping !== "standard") continue;
     const b = (i: number) => pad.buttons[i]?.pressed === true;
     const [x = 0, y = 0] = pad.axes;
