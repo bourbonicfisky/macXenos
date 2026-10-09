@@ -245,8 +245,11 @@ export function SubBlade({
     ref: (element) => {
       rowRefs.current[index] = element;
     },
-    className:
-      "menu-row subblade-row relative grid w-full items-center gap-x-[0.7em] rounded-row px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left",
+    // Metal rows are square, on grooves; the coloured ones are rounded like
+    // the blades' rows.
+    className: `menu-row subblade-row relative grid w-full items-center gap-x-[0.7em] ${
+      tone === "metal" ? "" : "rounded-row "
+    }px-[0.4em] py-[clamp(4px,0.8dvh,8px)] text-left`,
     "data-focused": index === clamped ? "true" : undefined,
     onMouseEnter: () => {
       if (index !== clamped) setFocus(index);
@@ -327,13 +330,11 @@ export function SubBlade({
             highlight (the folder-tab profile measured off the console) and
             the same curved label, built from the blades' own parts. It
             reads as the open blade's tab, mirrored when the sub-blade comes
-            from the left. It lies over the sheet's header and legend bars,
-            which run in under its curve. */}
+            from the left (data-bend, as on the rails). It lies over the
+            sheet's header and legend bars, which run in under its curve. */}
         <span
-          className="blade subblade-tabblade absolute inset-y-0"
-          data-state="open"
-          data-side={side === "right" ? "center" : "right"}
-          data-tone={tone === "metal" ? undefined : tone}
+          className="subblade-tab absolute inset-y-0"
+          data-bend={side === "right" ? "left" : "right"}
           aria-hidden="true"
         >
           <span className="blade-shadow blade-shadow--tab pointer-events-none absolute inset-0">

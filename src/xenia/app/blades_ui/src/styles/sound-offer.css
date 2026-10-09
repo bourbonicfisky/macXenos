@@ -1,0 +1,71 @@
+/* The first-run offer to download the dashboard sounds (sound-offer.tsx). */
+@layer components {
+
+/* The first-run sound offer (sound-offer.tsx): the 360's own message box, a
+   dark glossy sheet over a dimmed dashboard, with a lit focus on one button. */
+.offer-backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  animation: offer-fade 220ms ease both;
+}
+
+.offer {
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: linear-gradient(180deg, #4a4a50 0%, #26262b 22%, #151518 60%, #0d0d0f 100%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 24px 60px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  color: #f2f2f2;
+  font-size: clamp(0.95rem, 2.3dvh, 1.25rem);
+  line-height: 1.4;
+  animation: offer-in 320ms var(--ease-blade) both;
+}
+
+.offer-title {
+  font-size: 1.35em;
+  font-weight: 600;
+}
+
+.offer-note {
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.82em;
+}
+
+.offer-button {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.03) 100%);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
+
+.offer-button[data-focused] {
+  border-color: #b9ec85;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, transparent 55%),
+    linear-gradient(180deg, #6cc23a 0%, #3c8a18 100%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 16px rgba(120, 220, 60, 0.45);
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes offer-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes offer-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .offer-backdrop,
+  .offer {
+    animation: none;
+  }
+}
+
+} /* @layer components */

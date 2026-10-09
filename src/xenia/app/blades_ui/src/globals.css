@@ -3,6 +3,8 @@
 @import "./styles/tokens.css";
 @import "./styles/blade.css";
 @import "./styles/content.css";
+@import "./styles/sound-offer.css";
+@import "./styles/sub-blade.css";
 
 /* In the app the deck carries seven blades in a game window, not five on a
    whole screen: slimmer margins around the deck and inside the blade keep the
@@ -15,9 +17,13 @@
 
 /* ==========================================================================
    Base — everything else is either a Tailwind utility in the components or a
-   surface class in app/styles/.
+   surface class in app/styles/. In the base layer, so any component's own
+   rule (a sub-blade row's focus, say) wins over these defaults; only the
+   overrides below (narrow windows, reduced motion) stay outside the layers,
+   on purpose, to beat everything.
    ========================================================================== */
 
+@layer base {
 html {
   -webkit-text-size-adjust: 100%;
 }
@@ -40,6 +46,7 @@ body {
   outline-offset: 3px;
   border-radius: 4px;
 }
+} /* @layer base */
 
 /* Below the rails' breakpoint the whole document scrolls again. */
 @media (max-width: 860px) {

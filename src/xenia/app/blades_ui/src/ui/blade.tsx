@@ -47,6 +47,7 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
       className="blade relative flex min-w-0"
       data-state={state}
       data-side={side}
+      data-bend={side === "right" ? "right" : "left"}
       data-tone={blade.tone}
       style={{ zIndex: 20 - depth }}
       aria-label={blade.label}

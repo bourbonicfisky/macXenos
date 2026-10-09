@@ -13,10 +13,16 @@ import { useSyncExternalStore } from "react";
    ========================================================================== */
 
 export type CvarType = "bool" | "int" | "uint" | "float" | "string" | "path";
+
+/** Every config setting the emulator defines, by name: the keys of
+    mock-cvars.json, which tools/gen-mock-cvars.py builds from the DEFINE_*
+    macros (npm run check fails if it is out of date). A name the emulator
+    doesn't have is a type error, not a row that silently shows nothing. */
+export type CvarName = keyof typeof import("./mock-cvars.json");
 export type CvarValue = boolean | number | string;
 
 export type Cvar = {
-  name: string;
+  name: CvarName;
   category: string;
   type: CvarType;
   value: CvarValue;
@@ -113,7 +119,9 @@ export type NativeState = {
   titleName: string;
   /** Upscalers the running presenter offers (MetalFX is Metal-only). */
   upscalers: string[];
-  cvars: Record<string, Cvar>;
+  /** Every setting the app reports; a few may be missing (another
+      platform's), so look them up rather than assume them. */
+  cvars: { [K in CvarName]?: Cvar };
   controllers: Controller[];
   hotkeys: Hotkey[];
   rebind: {
@@ -144,8 +152,8 @@ export type NativeState = {
 
 export type NativeMessage =
   | { op: "ready" }
-  | { op: "set"; name: string; value: CvarValue }
-  | { op: "reset"; name: string }
+  | { op: "set"; name: CvarName; value: CvarValue }
+  | { op: "reset"; name: CvarName }
   | { op: "resetAll" }
   | { op: "console"; id: string; value: number | boolean | string }
   | { op: "consoleReset" }
@@ -192,12 +200,32 @@ function emit() {
   for (const listener of listeners) listener();
 }
 
+/** The app's state and this page's NativeState are written by hand on both
+    sides (blades_model.cc, above). A field one side renamed shows up here,
+    once, as a "Blades page:" line in the app's log rather than as a blank
+    row nobody notices. */
+let contractChecked = false;
+function checkContract(received: Record<string, unknown>) {
+  if (contractChecked) return;
+  contractChecked = true;
+  const expected = Object.keys(emptyState()).filter((key) => key !== "connected");
+  const missing = expected.filter((key) => !(key in received));
+  const unknown = Object.keys(received).filter((key) => !expected.includes(key));
+  if (missing.length || unknown.length) {
+    console.error(
+      `state from the app does not match NativeState: missing ${missing.join(", ") || "none"}; unknown ${unknown.join(", ") || "none"}`
+    );
+  }
+}
+
 /** The app calls this with its whole state, as JSON. */
 (window as unknown as { __xeniaReceive: (json: string) => void }).__xeniaReceive = (
   json: string
 ) => {
   try {
-    state = { ...JSON.parse(json), connected: true } as NativeState;
+    const received = JSON.parse(json) as Record<string, unknown>;
+    checkContract(received);
+    state = { ...received, connected: true } as NativeState;
     emit();
   } catch (error) {
     console.error("xenia state", error);
@@ -255,7 +283,7 @@ export function getNative(): NativeState {
 
 /** Sets a setting right away in the page (so the UI answers at once) and
     tells the app, which applies and saves it and pushes the new state. */
-export function setCvar(name: string, value: CvarValue) {
+export function setCvar(name: CvarName, value: CvarValue) {
   const cvar = state.cvars[name];
   if (cvar) {
     state = {

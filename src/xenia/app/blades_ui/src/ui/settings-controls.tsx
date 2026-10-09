@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ADJUST_EVENT } from "./blade-menu";
-import { Cvar, CvarValue, setCvar, send, useNative } from "../native";
+import { Cvar, CvarName, CvarValue, setCvar, send, useNative } from "../native";
 import { Dropdown } from "./dropdown";
 import { showToast } from "./toast";
 
@@ -76,7 +76,7 @@ export function announceSetting(name: string, valueLabel: string) {
   showToast("Setting saved", `${name}: ${valueLabel}${later}`);
 }
 
-export function useCvar(name: string): Cvar | undefined {
+export function useCvar(name: CvarName): Cvar | undefined {
   return useNative().cvars[name];
 }
 
@@ -93,7 +93,7 @@ export function Options({
   onChoose,
   current
 }: {
-  name: string;
+  name: CvarName;
   /** For the toast and the screen reader: "VSync", "Upscaler". */
   title: string;
   options: Option[];
@@ -154,7 +154,7 @@ export function Toggle({
   on = "On",
   invert = false
 }: {
-  name: string;
+  name: CvarName;
   title: string;
   off?: string;
   on?: string;
@@ -185,7 +185,7 @@ export function Slider({
   step,
   format = (v) => v.toFixed(2)
 }: {
-  name: string;
+  name: CvarName;
   title: string;
   min: number;
   max: number;
@@ -268,7 +268,7 @@ export function TextField({
   placeholder,
   numeric = false
 }: {
-  name: string;
+  name: CvarName;
   title: string;
   placeholder?: string;
   numeric?: boolean;
@@ -343,7 +343,7 @@ export function Check({
   invert = false,
   recommended = false
 }: {
-  name: string;
+  name: CvarName;
   label: ReactNode;
   invert?: boolean;
   recommended?: boolean;
@@ -378,7 +378,7 @@ export function Check({
 
 /** Puts a group of settings back to the recommended ones (how the app
     ships), or says they already are. */
-export function UseRecommended({ names, title }: { names: string[]; title: string }) {
+export function UseRecommended({ names, title }: { names: CvarName[]; title: string }) {
   const { cvars } = useNative();
   const differing = names.filter((n) => cvars[n] && !same(cvars[n].value, cvars[n].defaultValue));
   if (differing.length === 0) {
@@ -405,7 +405,7 @@ export function Value({
   format,
   current
 }: {
-  name: string;
+  name: CvarName;
   options?: Option[];
   format?: (value: CvarValue) => string;
   current?: CvarValue;
@@ -422,7 +422,7 @@ export function Value({
 }
 
 /** Shown under a pane once one of its settings waits for the next launch. */
-export function NextLaunchNote({ names }: { names: string[] }) {
+export function NextLaunchNote({ names }: { names: CvarName[] }) {
   const { cvars, titleOpen } = useNative();
   const waiting = names.some((n) => NEXT_LAUNCH.has(n) && cvars[n]?.changed);
   if (!waiting) return null;
@@ -436,7 +436,7 @@ export function NextLaunchNote({ names }: { names: string[] }) {
 }
 
 /** Puts one setting back to how the app ships. */
-export function ResetButton({ name, title }: { name: string; title: string }) {
+export function ResetButton({ name, title }: { name: CvarName; title: string }) {
   const cvar = useCvar(name);
   if (!cvar || same(cvar.value, cvar.defaultValue)) return null;
   return (

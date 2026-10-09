@@ -1547,6 +1547,15 @@
 "description": "Comma-separated controller-hotkey function ids the user has disabled (managed by the Controllers UI).",
 "changed": false
 },
+"dashboard_sounds_asked": {
+"name": "dashboard_sounds_asked",
+"category": "UI",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Whether the dashboard has offered to download its sounds. They are not included with the app.",
+"changed": false
+},
 "dashboard_freezes_game": {
 "name": "dashboard_freezes_game",
 "category": "UI",
@@ -1634,7 +1643,7 @@
 "type": "int",
 "value": 10,
 "defaultValue": 10,
-"description": "Allows user to define how many titles is saved in list of recently played titles.",
+"description": "How many recently played titles the File menu lists. Every title played is kept for the dashboard's All Games list; 0 keeps none.",
 "changed": false
 },
 "disable_doubleclick_fullscreen": {

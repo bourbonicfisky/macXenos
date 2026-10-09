@@ -39,6 +39,36 @@ with the play history (`recent.toml`, which now keeps every game played; the
 The legends stack their face buttons as the 360 did (`src/ui/legend.tsx`):
 Y over X on the left, B over A on the right, listing only the ones that apply.
 
+## Checks and tests
+
+Run these before committing a change to the page (`dist/` is checked in and
+is what the app ships):
+
+| Command | What it does |
+|---|---|
+| `npm run build` | Type-checks and builds `dist/`. |
+| `npm run check` | Fails if `src/mock-cvars.json` no longer matches the emulator's `DEFINE_*` settings (fix: `npm run gen:cvars`), if the page doesn't type-check, or if `dist/` isn't what the sources build to (fix: `npm run build`). |
+| `npm test` | Smoke tests (`tests/smoke.mjs`): every blade opens, B and Y on the blades, the stacked legend, All Games (open, move, sort, back), Game Folders (add, two-press remove), the Game folders pane and the Dashboard sounds pane. |
+| `npm run screens -- record <dir>` then `compare <dir>` | Screenshots of a fixed set of states, byte for byte, for changes meant to look the same (a stylesheet refactor). Differing ones are written beside the originals. |
+
+The tests run the page on the mock in a headless Chromium (Chrome,
+Chromium, Helium, Brave or Edge, or `BLADES_BROWSER`) with the clock frozen
+and reduced motion on, so screenshots repeat exactly. Node 22 or later.
+
+Setting names are checked at compile time: `CvarName` (`src/native.ts`) is
+the keys of `mock-cvars.json`, so a name the emulator doesn't define is a type
+error. The state the app sends is checked once at runtime against
+`NativeState`; a mismatch is logged as a "Blades page:" line in the app log.
+`XE_BLADES_STATE_DUMP=<file>` makes the app write each state it sends to that
+file, for comparing two builds or capturing real state.
+
+Styles live in `src/styles/`, all inside Tailwind's cascade layers: `tokens`,
+`blade` (the deck, tabs and legend), `content` (rows, panes, controls),
+`sound-offer` and `sub-blade`. Only the narrow-window and reduced-motion
+overrides in `globals.css` sit outside the layers, on purpose. Tab shapes
+are keyed on `data-bend` (`left` or `right`), which deck blades and
+sub-blade tabs both set.
+
 ## Sounds are downloaded, not shipped
 
 The dashboard's sounds are Microsoft's, so neither the repository nor the app

@@ -10,6 +10,7 @@
 #ifndef XENIA_APP_BLADES_MODEL_H_
 #define XENIA_APP_BLADES_MODEL_H_
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -18,6 +19,7 @@ namespace xe {
 namespace app {
 
 class EmulatorWindow;
+class StateWriter;
 
 // The Preferences blades' view of the emulator (src/xenia/app/blades_ui).
 //
@@ -55,6 +57,28 @@ class BladesModel {
   std::function<void()> TakeDeferred() { return std::move(deferred_); }
 
  private:
+  // The games the signed-in profiles have played: their title IDs by
+  // lower-case name (for history recorded before IDs were kept) and the first
+  // player's achievements and gamerscore in each.
+  struct PlayedTitles {
+    struct Progress {
+      uint32_t unlocked, total, score, max_score;
+    };
+    std::map<std::string, uint32_t> ids_by_name;
+    std::map<uint32_t, Progress> progress;
+  };
+
+  // BuildStateJson's sections, each writing its own keys.
+  void WriteRenderer(StateWriter& w);
+  void WriteSettings(StateWriter& w);
+  void WriteControllers(StateWriter& w);
+  void WriteConsole(StateWriter& w);
+  PlayedTitles CollectPlayedTitles();
+  void WriteTitles(StateWriter& w, const PlayedTitles& played);
+  void WriteMusicPlayer(StateWriter& w);
+  void WriteProfiles(StateWriter& w);
+  void WriteApp(StateWriter& w);
+
   std::string ControllersFingerprint();
 
   EmulatorWindow& window_;

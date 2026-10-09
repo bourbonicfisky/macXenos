@@ -35,7 +35,9 @@
   }
 
   /* Tabs are ribbons: constant width, centreline bowing toward screen centre.
-     Which way depends on which rail they sit in. */
+     Which way is data-bend: "left" for the left rail and the open blade,
+     "right" for the right rail (Blade sets it from its side). A sub-blade's
+     tab (sub-blade.tsx) sets it too, and so takes the same shapes. */
   .blade-skin--tab,
   .blade-ribbon {
     clip-path: shape(
@@ -48,8 +50,8 @@
     );
   }
 
-  .blade[data-side="right"] .blade-skin--tab,
-  .blade[data-side="right"] .blade-ribbon {
+  [data-bend="right"] .blade-skin--tab,
+  [data-bend="right"] .blade-ribbon {
     clip-path: shape(
       from 100% var(--edge-top),
       curve to 100% var(--edge-bot) with
@@ -91,7 +93,7 @@
     );
   }
 
-  .blade[data-side="right"] .blade-skin--gloss {
+  [data-bend="right"] .blade-skin--gloss {
     clip-path: shape(
       from calc(var(--bow) + var(--gw-cap)) var(--edge-top),
       curve to calc(var(--bow) * 0.74 + var(--gw-cap)) 7% with
@@ -135,7 +137,7 @@
   filter: drop-shadow(9px 2px 26px rgba(0, 0, 0, 0.45));
 }
 
-.blade[data-side="right"] .blade-shadow {
+[data-bend="right"] .blade-shadow {
   filter: drop-shadow(-9px 2px 26px rgba(0, 0, 0, 0.45));
 }
 
@@ -225,7 +227,7 @@
     inset 16px 0 22px -14px rgba(0, 0, 0, 0.34);
 }
 
-.blade[data-side="right"] .blade-skin--tab {
+[data-bend="right"] .blade-skin--tab {
   box-shadow: inset 0 0 0 1px rgba(64, 60, 70, 0.2),
     inset -16px 0 22px -14px rgba(0, 0, 0, 0.34);
 }
@@ -261,13 +263,12 @@
 
 /* The label rides the highlight, which by its height covers nearly the whole
    ribbon — so it centres rather than hugging an edge. */
-.blade[data-side="left"] .blade-tab,
-.blade[data-side="center"] .blade-tab {
+[data-bend="left"] .blade-tab {
   justify-content: center;
   padding-inline: 2px var(--overlap);
 }
 
-.blade[data-side="right"] .blade-tab {
+[data-bend="right"] .blade-tab {
   justify-content: center;
   padding-inline: var(--overlap) 2px;
 }
@@ -280,7 +281,7 @@
   transform: translateX(calc(var(--bow) * 0.81));
 }
 
-.blade[data-side="right"] .tab-label {
+[data-bend="right"] .tab-label {
   transform: translateX(calc(var(--bow) * -0.81));
 }
 
@@ -381,6 +382,12 @@
 .legend-key {
   border: 1px solid color-mix(in srgb, var(--b-rim) 70%, transparent);
   background: color-mix(in srgb, var(--b-rim) 22%, transparent);
+}
+
+/* The stacked legend (legend.tsx): B over A at the right, labels flush to
+   the orbs. */
+.legend-stack--right {
+  justify-items: end;
 }
 
 .legend-toggle:hover .pad-key {

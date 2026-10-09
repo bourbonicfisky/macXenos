@@ -14,7 +14,9 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <map>
 
@@ -63,6 +65,16 @@ namespace {
 constexpr const char* kReleaseName = "1.0 beta 3";
 
 using Writer = rapidjson::Writer<rapidjson::StringBuffer>;
+
+}  // namespace
+
+// The state's JSON writer, named so blades_model.h can forward-declare it.
+class StateWriter : public Writer {
+ public:
+  using Writer::Writer;
+};
+
+namespace {
 
 // --- Config settings ---------------------------------------------------------
 
@@ -399,12 +411,12 @@ int FirstPresentSlot(hid::InputSystem* input) {
 
 BladesModel::BladesModel(EmulatorWindow& window) : window_(window) {}
 
-std::string BladesModel::BuildStateJson() {
-  Emulator* emulator = window_.emulator();
-  rapidjson::StringBuffer buffer;
-  Writer w(buffer);
-  w.StartObject();
+// --- The state, section by section -------------------------------------------
+// BuildStateJson writes one object; each of these writes its own keys of it,
+// in the order native.ts declares NativeState.
 
+void BladesModel::WriteRenderer(StateWriter& w) {
+  Emulator* emulator = window_.emulator();
   // Renderer: the one running, and the one `gpu` picks for the next launch.
   const uint32_t active = window_.ActiveRendererMask();
   w.Key("renderer");
@@ -419,7 +431,6 @@ std::string BladesModel::BuildStateJson() {
 #endif
 
   const bool title_open = emulator && emulator->is_title_open();
-  kernel::KernelState* kernel = emulator ? emulator->kernel_state() : nullptr;
   w.Key("titleOpen");
   w.Bool(title_open);
   w.Key("titleName");
@@ -439,7 +450,9 @@ std::string BladesModel::BuildStateJson() {
     w.String("metalfx");
   }
   w.EndArray();
+}
 
+void BladesModel::WriteSettings(StateWriter& w) {
   // Every config-file setting. The first state taken is the baseline the
   // page's "changed" (and so "applies next launch") is measured against.
   const bool first = baseline_.empty();
@@ -470,7 +483,10 @@ std::string BladesModel::BuildStateJson() {
     }
   }
   w.EndObject();
+}
 
+void BladesModel::WriteControllers(StateWriter& w) {
+  Emulator* emulator = window_.emulator();
   // Controllers, their remapping, and the controller hotkeys.
   hid::InputSystem* input = emulator ? emulator->input_system() : nullptr;
   w.Key("controllers");
@@ -543,7 +559,12 @@ std::string BladesModel::BuildStateJson() {
     w.EndObject();
   }
   w.EndArray();
+}
 
+void BladesModel::WriteConsole(StateWriter& w) {
+  Emulator* emulator = window_.emulator();
+  const bool title_open = emulator && emulator->is_title_open();
+  kernel::KernelState* kernel = emulator ? emulator->kernel_state() : nullptr;
   // The console's own settings.
   w.Key("console");
   w.StartObject();
@@ -619,17 +640,15 @@ std::string BladesModel::BuildStateJson() {
   }
   w.EndArray();
   w.EndObject();
+}
 
+BladesModel::PlayedTitles BladesModel::CollectPlayedTitles() {
+  Emulator* emulator = window_.emulator();
+  kernel::KernelState* kernel = emulator ? emulator->kernel_state() : nullptr;
   // Games the signed-in profiles have played carry their icons; keep any we
   // don't have yet, and learn their title IDs by name for recent entries
   // recorded before IDs were kept.
-  std::map<std::string, uint32_t> played_ids;
-  // The first signed-in player's record of each game, for All Games: its
-  // achievements and gamerscore, as the console listed them.
-  struct Progress {
-    uint32_t unlocked, total, score, max_score;
-  };
-  std::map<uint32_t, Progress> progress;
+  PlayedTitles played;
   if (kernel) {
     auto* profiles = kernel->xam_state()->profile_manager();
     auto* tracker = kernel->xam_state()->user_tracker();
@@ -640,10 +659,10 @@ std::string BladesModel::BuildStateJson() {
         continue;
       }
       for (const auto& title : tracker->GetPlayedTitles(profile->xuid())) {
-        played_ids[xe::utf8::lower_ascii(xe::to_utf8(title.title_name))] =
-            title.id;
-        progress.try_emplace(
-            title.id, Progress{title.unlocked_achievements_count,
+        played.ids_by_name[xe::utf8::lower_ascii(
+            xe::to_utf8(title.title_name))] = title.id;
+        played.progress.try_emplace(
+            title.id, PlayedTitles::Progress{title.unlocked_achievements_count,
                                title.achievements_count,
                                title.title_earned_gamerscore,
                                title.gamerscore_amount});
@@ -651,6 +670,38 @@ std::string BladesModel::BuildStateJson() {
       }
     }
   }
+  return played;
+}
+
+void BladesModel::WriteTitles(StateWriter& w, const PlayedTitles& played) {
+  // A game's icon, once it has one in title_icons.
+  auto icon_url = [this](uint32_t title_id) {
+    std::error_code ec;
+    if (title_id &&
+        std::filesystem::exists(window_.TitleIconPath(title_id), ec)) {
+      return fmt::format("/title-icons/{:08X}.png", title_id);
+    }
+    return std::string();
+  };
+  // A game's achievements and gamerscore, when the first player has played it.
+  auto write_progress = [&](uint32_t title_id) {
+    auto progress = played.progress.find(title_id);
+    if (!title_id || progress == played.progress.end() ||
+        !progress->second.total) {
+      return;
+    }
+    w.Key("achievements");
+    w.StartObject();
+    w.Key("unlocked");
+    w.Uint(progress->second.unlocked);
+    w.Key("total");
+    w.Uint(progress->second.total);
+    w.Key("score");
+    w.Uint(progress->second.score);
+    w.Key("maxScore");
+    w.Uint(progress->second.max_score);
+    w.EndObject();
+  };
 
   // Recently played games, most recent first, for the Home blade.
   w.Key("recentTitles");
@@ -659,17 +710,13 @@ std::string BladesModel::BuildStateJson() {
     std::string path = xe::path_to_utf8(entry.path_to_file);
     uint32_t title_id = entry.title_id;
     if (!title_id) {
-      auto found = played_ids.find(xe::utf8::lower_ascii(entry.title_name));
-      if (found != played_ids.end()) {
+      auto found =
+          played.ids_by_name.find(xe::utf8::lower_ascii(entry.title_name));
+      if (found != played.ids_by_name.end()) {
         title_id = found->second;
       }
     }
-    std::string icon;
-    std::error_code ec;
-    if (title_id &&
-        std::filesystem::exists(window_.TitleIconPath(title_id), ec)) {
-      icon = fmt::format("/title-icons/{:08X}.png", title_id);
-    }
+    const std::string icon = icon_url(title_id);
     w.StartObject();
     w.Key("name");
     w.String(entry.title_name.c_str());
@@ -679,20 +726,7 @@ std::string BladesModel::BuildStateJson() {
     w.Int64(int64_t(entry.last_run_time));
     w.Key("icon");
     w.String(icon.c_str());
-    auto played = progress.find(title_id);
-    if (played != progress.end() && played->second.total) {
-      w.Key("achievements");
-      w.StartObject();
-      w.Key("unlocked");
-      w.Uint(played->second.unlocked);
-      w.Key("total");
-      w.Uint(played->second.total);
-      w.Key("score");
-      w.Uint(played->second.score);
-      w.Key("maxScore");
-      w.Uint(played->second.max_score);
-      w.EndObject();
-    }
+    write_progress(title_id);
     w.EndObject();
   }
   w.EndArray();
@@ -730,8 +764,8 @@ std::string BladesModel::BuildStateJson() {
       const std::string path = xe::path_to_utf8(entry.path_to_file);
       uint32_t title_id = entry.title_id;
       if (!title_id) {
-        auto found = played_ids.find(xe::utf8::lower_ascii(entry.title_name));
-        if (found != played_ids.end()) title_id = found->second;
+        auto found = played.ids_by_name.find(xe::utf8::lower_ascii(entry.title_name));
+        if (found != played.ids_by_name.end()) title_id = found->second;
       }
       auto match = by_path.find(path);
       size_t index = match != by_path.end() ? match->second : SIZE_MAX;
@@ -761,12 +795,7 @@ std::string BladesModel::BuildStateJson() {
     w.Key("allGames");
     w.StartArray();
     for (const Row& row : rows) {
-      std::string icon;
-      std::error_code ec;
-      if (row.title_id &&
-          std::filesystem::exists(window_.TitleIconPath(row.title_id), ec)) {
-        icon = fmt::format("/title-icons/{:08X}.png", row.title_id);
-      }
+      const std::string icon = icon_url(row.title_id);
       w.StartObject();
       w.Key("name");
       w.String(row.name.c_str());
@@ -776,20 +805,7 @@ std::string BladesModel::BuildStateJson() {
       w.Int64(row.last_played);
       w.Key("icon");
       w.String(icon.c_str());
-      auto played = progress.find(row.title_id);
-      if (row.title_id && played != progress.end() && played->second.total) {
-        w.Key("achievements");
-        w.StartObject();
-        w.Key("unlocked");
-        w.Uint(played->second.unlocked);
-        w.Key("total");
-        w.Uint(played->second.total);
-        w.Key("score");
-        w.Uint(played->second.score);
-        w.Key("maxScore");
-        w.Uint(played->second.max_score);
-        w.EndObject();
-      }
+      write_progress(row.title_id);
       w.EndObject();
     }
     w.EndArray();
@@ -806,7 +822,10 @@ std::string BladesModel::BuildStateJson() {
     w.Bool(library.scanning());
     w.EndObject();
   }
+}
 
+void BladesModel::WriteMusicPlayer(StateWriter& w) {
+  Emulator* emulator = window_.emulator();
   // The console's music player (games hand it their playlists).
   w.Key("musicPlayer");
   w.StartObject();
@@ -822,7 +841,11 @@ std::string BladesModel::BuildStateJson() {
   w.Key("volume");
   w.Double(player ? double(player->GetVolume()->load()) : 1.0);
   w.EndObject();
+}
 
+void BladesModel::WriteProfiles(StateWriter& w) {
+  Emulator* emulator = window_.emulator();
+  kernel::KernelState* kernel = emulator ? emulator->kernel_state() : nullptr;
   // Profiles, and who is signed in where.
   w.Key("profiles");
   w.StartArray();
@@ -844,7 +867,9 @@ std::string BladesModel::BuildStateJson() {
     }
   }
   w.EndArray();
+}
 
+void BladesModel::WriteApp(StateWriter& w) {
   w.Key("timeScalar");
   w.Double(Clock::guest_time_scalar());
 
@@ -873,10 +898,30 @@ std::string BladesModel::BuildStateJson() {
   w.String(kReleaseName);
   w.Key("appBuild");
   w.String(XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
+}
 
+std::string BladesModel::BuildStateJson() {
+  rapidjson::StringBuffer buffer;
+  StateWriter w(buffer);
+  w.StartObject();
+  WriteRenderer(w);
+  WriteSettings(w);
+  WriteControllers(w);
+  WriteConsole(w);
+  WriteTitles(w, CollectPlayedTitles());
+  WriteMusicPlayer(w);
+  WriteProfiles(w);
+  WriteApp(w);
   w.EndObject();
   last_controllers_ = ControllersFingerprint();
-  return buffer.GetString();
+  std::string json = buffer.GetString();
+  // XE_BLADES_STATE_DUMP=<file>: keep the latest state the page was given,
+  // to compare two builds' output or to capture the real app's state as a
+  // fixture for the page's tests.
+  if (const char* dump = std::getenv("XE_BLADES_STATE_DUMP")) {
+    std::ofstream(dump, std::ios::trunc) << json;
+  }
+  return json;
 }
 
 BladesModel::Result BladesModel::HandleMessage(const std::string& json) {

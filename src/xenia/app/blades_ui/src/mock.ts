@@ -1,6 +1,6 @@
 import cvars from "./mock-cvars.json";
 import { keptByResetAll } from "./content/advanced";
-import type { Cvar, NativeMessage, NativeState } from "./native";
+import type { Cvar, CvarName, NativeMessage, NativeState } from "./native";
 
 /* A stand-in for the app, for `npm run dev` in a browser. mock-cvars.json is
    every config setting with its source default (regenerate it from the
@@ -162,7 +162,7 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
       const cvars = { ...state.cvars };
       for (const [name, cvar] of Object.entries(cvars)) {
         if (keptByResetAll(cvar)) continue;
-        if (cvar.value !== cvar.defaultValue) cvars[name] = { ...cvar, value: cvar.defaultValue, changed: true };
+        if (cvar.value !== cvar.defaultValue) cvars[name as CvarName] = { ...cvar, value: cvar.defaultValue, changed: true };
       }
       return { ...state, cvars };
     }
