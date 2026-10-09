@@ -2711,6 +2711,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
     pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
   }
+  // MSAA draw passes used to end with StoreAndMultisampleResolve into each
+  // target's 1-sample copy. In canonical mode nothing reads those copies:
+  // packs, materializes and resolves use the MSAA attachment and the
+  // canonical EDRAM. The one reader is the pre-resolve presentable fallback,
+  // which resolves its target on demand (ResolvePresentableMsaaCopy).
+  // USF4 fights 45.4 -> 49.4 fps (reduce-edram-pass-traffic).
+  const bool ms_resolve_store =
+      raster_sample_count > 1u && MsaaResolveOnStoreEnabled();
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     if (!color_targets[i]) {
       continue;
@@ -2720,7 +2728,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.colorAttachments[i].texture =
         (__bridge id<MTLTexture>)color_targets[i];
     pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
-    if (raster_sample_count > 1u) {
+    if (ms_resolve_store) {
       pass.colorAttachments[i].resolveTexture =
           (__bridge id<MTLTexture>)color_resolves[i];
       pass.colorAttachments[i].storeAction =
@@ -2736,7 +2744,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (depth && bind_depth_plane) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction = MTLLoadActionLoad;
-    if (raster_sample_count > 1u) {
+    if (ms_resolve_store) {
       pass.depthAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;
       pass.depthAttachment.depthResolveFilter =
@@ -2750,7 +2758,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (depth && bind_stencil_plane) {
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-    if (raster_sample_count > 1u) {
+    if (ms_resolve_store) {
       pass.stencilAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;
       pass.stencilAttachment.stencilResolveFilter =
@@ -3273,6 +3281,27 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
     return false;
   }();
   return s_enabled;
+}
+
+// Whether MSAA draw passes still resolve into their targets' 1-sample copies
+// on store. Off by default (the copies are unread in canonical mode);
+// XE_METAL_MS_RESOLVE_STORE=1 is the exact rollback. The diagnostics that read
+// a target's 1-sample contents keep it on.
+bool MetalCommandProcessor::MsaaResolveOnStoreEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("XE_METAL_MS_RESOLVE_STORE");
+    if (value && value[0] == '1' && !value[1]) {
+      return true;
+    }
+    for (const char* diag : {"XE_METAL_PROBE_RESOLVE", "XE_METAL_DUMP_DEPTH",
+                             "XE_METAL_DUMP_RT", "XE_METAL_PRECLEAR_RT"}) {
+      if (std::getenv(diag)) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  return enabled;
 }
 
 bool MetalCommandProcessor::SharedResolveShadersEnabled() {
@@ -15759,6 +15788,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // Pre-resolve fallback (splash/menus before any frontbuffer snapshot): the
     // most recent BGRA8 color target drawn into. Present the guest frontbuffer
     // extent, not the (taller, shadow-map-capable) texture extent.
+    if (!MsaaResolveOnStoreEnabled()) {
+      render_target_cache_->ResolvePresentableMsaaCopy(
+          PrepareTransferCommandBuffer(
+              uint32_t(metal::MetalTransferSite::kPresentResolve)));
+    }
     source_rt = (__bridge id<MTLTexture>)
                     render_target_cache_->presentable_color_target();
     present_width = frontbuffer_width ? frontbuffer_width : 1280;

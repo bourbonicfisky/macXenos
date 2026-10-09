@@ -152,6 +152,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // The most recent BGRA8-format color target drawn into (pre-resolve present
   // fallback for splash/menus).
   void* presentable_color_target() const { return presentable_color_target_; }
+  // When MSAA draw passes store without the multisample resolve, the
+  // presentable target's 1-sample copy is stale; resolve it from its MSAA
+  // attachment into `command_buffer` (id<MTLCommandBuffer>) before the
+  // presentable fallback reads it. No-op for a 1-sample target.
+  void ResolvePresentableMsaaCopy(void* command_buffer);
   uint32_t width() const { return 1280; }
   uint32_t height() const { return 720; }
 
@@ -802,6 +807,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                     uint32_t row_bytes);
 
   void* presentable_color_target_ = nullptr;  // borrowed from a render target.
+  // The render target presentable_color_target_ belongs to.
+  MetalRenderTarget* presentable_color_rt_ = nullptr;
 
   // Reinterpret transfer pipelines (lazily built; retained).
   void* transfer_c2d_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.

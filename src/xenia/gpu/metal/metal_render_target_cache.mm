@@ -540,6 +540,7 @@ void MetalRenderTargetCache::Shutdown() {
     canonical_materialize_library_ = nullptr;
   }
   presentable_color_target_ = nullptr;
+  presentable_color_rt_ = nullptr;
   // Destroys all MetalRenderTargets (retiring their textures to the deferred
   // list), then the common ownership state; drain LAST so those retirements
   // are actually freed.
@@ -823,6 +824,7 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
     auto* rt = static_cast<MetalRenderTarget*>(accumulated[i]);
     if (rt && rt->pixel_format() == kColorFormat) {
       presentable_color_target_ = rt->texture();
+      presentable_color_rt_ = rt;
       break;
     }
   }
@@ -3784,6 +3786,25 @@ bool MetalRenderTargetCache::ResolveSpanTouchesCurrentAttachments(
   return false;
 }
 
+void MetalRenderTargetCache::ResolvePresentableMsaaCopy(void* command_buffer) {
+  MetalRenderTarget* rt = presentable_color_rt_;
+  if (!command_buffer || !rt || rt->sample_count() <= 1 ||
+      !rt->msaa_texture() || rt->texture() != presentable_color_target_) {
+    return;
+  }
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)rt->msaa_texture();
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+  pass.colorAttachments[0].resolveTexture = (__bridge id<MTLTexture>)rt->texture();
+  id<MTLRenderCommandEncoder> encoder =
+      [(__bridge id<MTLCommandBuffer>)command_buffer
+          renderCommandEncoderWithDescriptor:
+              metal::MetalApplyXenosSamplePositions(pass)];
+  encoder.label = @"rtcache:present-msaa-resolve";
+  [encoder endEncoding];
+}
+
 void* MetalRenderTargetCache::GetResolveSourceTexture(
     uint32_t edram_base, uint32_t row_length_used, uint32_t rows,
     uint32_t pitch_tiles, bool is_depth, uint64_t* pixel_format_out) {
@@ -5336,6 +5357,7 @@ void MetalRenderTargetCache::ResetForReplayRestore() {
   // list), drain last -- the same shape Shutdown uses.
   d2c_lineage_.InvalidateAll();
   presentable_color_target_ = nullptr;  // borrowed from a render target.
+  presentable_color_rt_ = nullptr;
   // Destroys every pool render target regardless of EDRAM ownership --
   // ownership is re-seeded from scratch by the imminent restore
   // (PrepareFullEdram1280xRenderTargetForSnapshotRestoration) -- and re-seeds
@@ -5353,6 +5375,7 @@ void MetalRenderTargetCache::ClearCache() {
   // records, so dropping them costs nothing but a recomputation.
   d2c_lineage_.InvalidateAll();
   presentable_color_target_ = nullptr;  // borrowed from a render target.
+  presentable_color_rt_ = nullptr;
   // Deferred releases are held until the submissions encoded against them
   // complete. The clear runs only at a fully quiesced boundary, so every one
   // of them is now releasable, and leaving them queued against submissions

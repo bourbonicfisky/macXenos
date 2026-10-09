@@ -190,6 +190,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // guest tiled addresses exactly as D3D12 and Vulkan do
   // (docs/archive/evidence/metal_shared_resolve_port_assessment.md).
   static bool SharedResolveShadersEnabled();
+  static bool MsaaResolveOnStoreEnabled();
 
  private:
   // Shared cross-backend resolve-copy dispatch (task 4.2). Returns false when

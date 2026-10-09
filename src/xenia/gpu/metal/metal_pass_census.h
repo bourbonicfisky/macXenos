@@ -55,6 +55,7 @@ enum class MetalTransferSite : uint32_t {
   kOwnershipTransfer,   // PerformTransfers
   kSnapshotRestore,     // RestoreEdramSnapshot
   kSnapshotFit,         // texture cache: fetch-sized view of a bridge snapshot
+  kPresentResolve,      // presentable fallback: resolve a stale MSAA 1x copy
   kCount,
 };
 
@@ -68,6 +69,7 @@ inline const char* MetalTransferSiteName(uint32_t site) {
     case MetalTransferSite::kRasterViews: return "rasterviews";
     case MetalTransferSite::kCanonicalReadback: return "canonrb";
     case MetalTransferSite::kCanonicalResolve: return "canonres";
+    case MetalTransferSite::kPresentResolve: return "presres";
     case MetalTransferSite::kOwnershipTransfer: return "owner";
     case MetalTransferSite::kSnapshotRestore: return "snaprestore";
     case MetalTransferSite::kSnapshotFit: return "snapfit";
