@@ -62,10 +62,13 @@ function GameFoldersPane() {
       ) : (
         <Aside>No folders yet.</Aside>
       )}
-      <PaneAction onSelect={openFolderEditor}>Edit folders</PaneAction>
-      <PaneAction disabled={!folders.length || scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
-        Refresh folders
-      </PaneAction>
+      {/* Side by side: → steps from one to the other, as ↓ does. */}
+      <div className="flex flex-wrap gap-x-[0.6em]">
+        <PaneAction onSelect={openFolderEditor}>Edit folders</PaneAction>
+        <PaneAction disabled={!folders.length || scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
+          Refresh folders
+        </PaneAction>
+      </div>
       {folders.length ? (
         <Aside>
           {scanning ? "Looking for games." : `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All games.`}
