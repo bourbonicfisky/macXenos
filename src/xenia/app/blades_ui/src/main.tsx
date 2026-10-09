@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./globals.css";
 import { buildBlades } from "./content/blades";
 import { useNative } from "./native";
+import { useLanguage } from "./i18n";
 import { BladeDeck } from "./ui/blade-deck";
 import { DashboardField } from "./ui/dashboard-field";
 import { startGamepad } from "./ui/gamepad";
@@ -10,7 +11,10 @@ import { SoundOffer } from "./ui/sound-offer";
 
 function App() {
   const state = useNative();
-  const blades = useMemo(() => buildBlades(state), [state]);
+  // The blades' text is read when they are built: build them again when the
+  // language changes.
+  const language = useLanguage();
+  const blades = useMemo(() => buildBlades(state), [state, language]);
   if (!state.connected) return <DashboardField />;
   return (
     <>

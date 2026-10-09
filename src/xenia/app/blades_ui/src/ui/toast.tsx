@@ -6,6 +6,7 @@ import {
   usePreferences
 } from "./preferences";
 import { loadSounds, playSound } from "./sound";
+import { t } from "../i18n";
 
 /**
  * The 360's achievement-style toast: a dark glossy capsule that pops in with
@@ -45,7 +46,7 @@ export function announcePreference<K extends keyof Preferences>(
   value: Preferences[K],
   options?: { sound?: boolean }
 ) {
-  showToast("Preference saved", describePreference(key, value), options);
+  showToast(t("toast.preferenceSaved"), describePreference(key, value), options);
 }
 
 function subscribe(listener: () => void) {

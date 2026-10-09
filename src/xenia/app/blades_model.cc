@@ -894,6 +894,16 @@ void BladesModel::WriteApp(StateWriter& w) {
 #endif
   w.EndObject();
 
+  // The Mac's languages, for the dashboard's "Same as my Mac" (i18n/).
+  w.Key("systemLanguages");
+  w.StartArray();
+#if XE_PLATFORM_MAC
+  for (const std::string& tag : PreferredLanguages()) {
+    w.String(tag.c_str());
+  }
+#endif
+  w.EndArray();
+
   w.Key("appVersion");
   w.String(kReleaseName);
   w.Key("appBuild");

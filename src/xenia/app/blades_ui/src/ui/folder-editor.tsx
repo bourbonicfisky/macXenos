@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { send, useNative } from "../native";
 import { openSubBlade, SubBlade } from "./sub-blade";
 import { showToast } from "./toast";
+import { t } from "../i18n";
 
 /**
  * Game Folders: where All Games looks, edited on a brushed-metal sub-blade
@@ -48,7 +49,7 @@ export function FolderEditor() {
     }
     setArmed(null);
     send({ op: "gameFolderRemove", path: folder });
-    showToast("Game folder removed", lastPart(folder));
+    showToast(t("gameFolders.removed"), lastPart(folder));
   };
 
   return (
@@ -56,7 +57,7 @@ export function FolderEditor() {
       id="game-folders"
       side="right"
       tone="metal"
-      title="Game Folders"
+      title={t("gameFolders.title")}
       count={folders.length + 1}
       onActivate={activate}
       onFocusChange={(index) => {
@@ -65,10 +66,15 @@ export function FolderEditor() {
       legend={(focus) => ({
         left: [],
         right: [
-          { button: "b", label: "Back" },
+          { button: "b", label: t("legend.back") },
           {
             button: "a",
-            label: focus === 0 ? "Add" : armed === folders[focus - 1] ? "Confirm" : "Remove"
+            label:
+              focus === 0
+                ? t("legend.add")
+                : armed === folders[focus - 1]
+                  ? t("legend.confirm")
+                  : t("legend.remove")
           }
         ]
       })}
@@ -78,24 +84,24 @@ export function FolderEditor() {
         const count = folder ? gamesIn(folder) : 0;
         return (
           <div className="grid grid-cols-1 items-start gap-x-[clamp(16px,2.6%,40px)] gap-y-[1em] min-[860px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <ul className="subblade-list subblade-menu m-0 grid list-none p-0" aria-label="Game folders">
+            <ul className="subblade-list subblade-menu m-0 grid list-none p-0" aria-label={t("gameFolders.title")}>
               <li className="subblade-item">
                 <button type="button" {...rowProps(0)}>
-                  <span className="subblade-label truncate">Add a Folder</span>
+                  <span className="subblade-label truncate">{t("gameFolders.add")}</span>
                 </button>
               </li>
               {folders.length ? (
                 <li className="menu-section subblade-section" aria-hidden="true">
-                  Folders
+                  {t("gameFolders.folders")}
                 </li>
               ) : null}
               {folders.map((path, index) => (
                 <li key={path} className="subblade-item">
-                  <button type="button" {...rowProps(index + 1)} aria-label={`${path}, remove`}>
+                  <button type="button" {...rowProps(index + 1)} aria-label={t("gameFolders.removeLabel", { folder: path })}>
                     <span className="subblade-label truncate">{lastPart(path)}</span>
                     {armed === path ? (
                       <span className="subblade-action ml-auto text-[0.7em]" data-armed>
-                        Remove?
+                        {t("gameFolders.removePrompt")}
                       </span>
                     ) : null}
                   </button>
@@ -109,10 +115,10 @@ export function FolderEditor() {
                   <section className="subblade-card">
                     <h3 className="subblade-card-head m-0">{lastPart(folder)}</h3>
                     <dl className="subblade-card-body m-0 grid grid-cols-[auto_1fr] gap-x-[1em] gap-y-[0.25em]">
-                      <dt>Games</dt>
-                      <dd className="m-0 text-right">{gameFolders.scanning ? "Looking" : count}</dd>
-                      <dt>Includes</dt>
-                      <dd className="m-0 text-right">Folders inside it</dd>
+                      <dt>{t("gameFolders.games")}</dt>
+                      <dd className="m-0 text-right">{gameFolders.scanning ? t("gameFolders.looking") : count}</dd>
+                      <dt>{t("gameFolders.includes")}</dt>
+                      <dd className="m-0 text-right">{t("gameFolders.includesInside")}</dd>
                     </dl>
                   </section>
                   <section className="subblade-card">
@@ -120,26 +126,21 @@ export function FolderEditor() {
                   </section>
                   <section className="subblade-card subblade-card--tall">
                     <p className="subblade-card-body m-0">
-                      {armed === folder
-                        ? "Press A again to take this folder out of All Games. Nothing on your Mac is deleted."
-                        : "A takes this folder out of All Games. Its games stay on your Mac, and you can add it again."}
+                      {armed === folder ? t("gameFolders.armed") : t("gameFolders.removeHint")}
                     </p>
                   </section>
                 </>
               ) : (
                 <>
                   <section className="subblade-card">
-                    <h3 className="subblade-card-head m-0">Add a Folder</h3>
-                    <p className="subblade-card-body m-0">
-                      Pick a folder that holds disc images, unpacked games or downloaded games. Folders inside it are
-                      searched too.
-                    </p>
+                    <h3 className="subblade-card-head m-0">{t("gameFolders.add")}</h3>
+                    <p className="subblade-card-body m-0">{t("gameFolders.add.detail")}</p>
                   </section>
                   <section className="subblade-card subblade-card--tall">
                     <p className="subblade-card-body m-0">
                       {folders.length
-                        ? `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All Games from ${folders.length} ${folders.length === 1 ? "folder" : "folders"}.`
-                        : "No folders yet. Games you have played still appear in All Games."}
+                        ? t("gameFolders.summary", { games: allGames.length, folders: folders.length })
+                        : t("gameFolders.noFolders")}
                     </p>
                   </section>
                 </>

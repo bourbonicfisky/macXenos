@@ -10,8 +10,10 @@
     "preview": "vite preview",
     "gen:cvars": "python3 tools/gen-mock-cvars.py ../.. src/mock-cvars.json",
     "check": "node tools/check.mjs",
-    "test": "node tests/smoke.mjs",
-    "screens": "node tests/screens.mjs"
+    "test": "node --test tests/*.test.mjs && node tests/smoke.mjs",
+    "screens": "node tests/screens.mjs",
+    "i18n": "node tools/i18n.mjs",
+    "i18n:baseline": "node tools/i18n.mjs --update-baseline"
   },
   "dependencies": {
     "react": "^19.0.0",

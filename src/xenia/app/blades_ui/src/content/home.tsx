@@ -5,6 +5,7 @@ import { openAllGames } from "../ui/all-games";
 import { openFolderEditor } from "../ui/folder-editor";
 import { send, useNative, type NativeState } from "../native";
 import { Aside, PaneAction } from "./parts";
+import { getLanguage, t } from "../i18n";
 
 /* ==========================================================================
    Home: the dashboard you land on, as the console's own was. What is
@@ -16,17 +17,23 @@ export function whenPlayed(seconds: number): string {
   if (!seconds) return "";
   const then = new Date(seconds * 1000);
   const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
-  if (days <= 0) return "Played today";
-  if (days === 1) return "Played yesterday";
-  if (days < 7) return `Played ${days} days ago`;
-  return `Played ${then.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}`;
+  if (days <= 0) return t("played.today");
+  if (days === 1) return t("played.yesterday");
+  if (days < 7) return t("played.daysAgo", { days });
+  const language = getLanguage();
+  const date = then.toLocaleDateString(language === "en" || language === "en-XA" ? undefined : language, {
+    month: "long",
+    day: "numeric",
+    year: "numeric"
+  });
+  return t("played.on", { date });
 }
 
 /** A game's own icon, as a lit tile where the app icon otherwise stands. */
 function GameArt({ icon, name }: { icon: string; name: string }) {
   return (
     <div className="game-art relative grid aspect-square w-[min(17dvh,170px)] place-items-center overflow-hidden rounded-[14%]">
-      <img className="h-full w-full object-cover" src={icon} alt={`${name} icon`} />
+      <img className="h-full w-full object-cover" src={icon} alt={t("home.gameIcon", { name })} />
       <span className="game-art-gloss pointer-events-none absolute inset-0" aria-hidden="true" />
     </div>
   );
@@ -36,8 +43,8 @@ function GameArt({ icon, name }: { icon: string; name: string }) {
 function GameFoldersValue() {
   const { gameFolders } = useNative();
   const count = gameFolders.folders.length;
-  if (gameFolders.scanning) return <>Scanning</>;
-  return <>{count === 0 ? "None" : count === 1 ? "1 folder" : `${count} folders`}</>;
+  if (gameFolders.scanning) return <>{t("home.gameFolders.scanning")}</>;
+  return <>{count === 0 ? t("home.gameFolders.none") : t("home.gameFolders.count", { count })}</>;
 }
 
 /** The folders All Games looks in, and the two things to do with them:
@@ -47,10 +54,7 @@ function GameFoldersPane() {
   const { folders, scanning } = gameFolders;
   return (
     <>
-      <p className="m-0">
-        Where your disc images, unpacked games and downloaded games are kept. Their games, and games in
-        folders inside them, appear in All games.
-      </p>
+      <p className="m-0">{t("home.gameFolders.detail")}</p>
       {folders.length ? (
         <ul className="game-folder-list m-0 grid list-none gap-[0.2em] p-0">
           {folders.map((folder) => (
@@ -60,18 +64,18 @@ function GameFoldersPane() {
           ))}
         </ul>
       ) : (
-        <Aside>No folders yet.</Aside>
+        <Aside>{t("home.gameFolders.empty")}</Aside>
       )}
       {/* Side by side: → steps from one to the other, as ↓ does. */}
       <div className="flex flex-wrap gap-x-[0.6em]">
-        <PaneAction onSelect={openFolderEditor}>Edit folders</PaneAction>
+        <PaneAction onSelect={openFolderEditor}>{t("home.gameFolders.edit")}</PaneAction>
         <PaneAction disabled={!folders.length || scanning} onSelect={() => send({ op: "gameFoldersRescan" })}>
-          Refresh folders
+          {t("home.gameFolders.refresh")}
         </PaneAction>
       </div>
       {folders.length ? (
         <Aside>
-          {scanning ? "Looking for games." : `${allGames.length} ${allGames.length === 1 ? "game" : "games"} in All games.`}
+          {scanning ? t("home.gameFolders.looking") : t("home.gameFolders.games", { count: allGames.length })}
         </Aside>
       ) : null}
     </>
@@ -86,12 +90,14 @@ function fileName(path: string): string {
 export function dashboardShortcuts(state: NativeState): string {
   const ways: string[] = [];
   const button = String(state.cvars.preferences_button?.value ?? "guide");
-  if (button === "guide") ways.push("a tap of Guide on a controller");
-  else if (button === "back_start") ways.push("Back and Start together on a controller");
+  if (button === "guide") ways.push(t("shortcuts.guide"));
+  else if (button === "back_start") ways.push(t("shortcuts.backStart"));
   const key = String(state.cvars.preferences_key?.value ?? "F6");
   if (key && key !== "none") ways.push(key);
   ways.push("⌘,");
-  return ways.length > 1 ? `${ways.slice(0, -1).join(", ")} or ${ways[ways.length - 1]}` : ways[0];
+  return ways.length > 1
+    ? t("shortcuts.list", { first: ways.slice(0, -1).join(", "), last: ways[ways.length - 1] })
+    : ways[0];
 }
 
 export function home(state: NativeState): BladeDef {
@@ -101,35 +107,35 @@ export function home(state: NativeState): BladeDef {
     menu.push(
       {
         id: "resume",
-        section: "Now playing",
-        label: `Resume ${state.titleName || "game"}`,
+        section: t("home.nowPlaying"),
+        label: state.titleName ? t("home.resume", { title: state.titleName }) : t("home.resume.untitled"),
         glyph: "play",
-        heading: state.titleName || "Now playing",
-        detail: <p>Back to your game. It paused while the dashboard was open.</p>,
+        heading: state.titleName || t("home.nowPlaying"),
+        detail: <p>{t("home.resume.detail")}</p>,
         onSelect: () => send({ op: "close" })
       },
       {
         id: "restart",
-        label: "Restart game",
+        label: t("home.restart"),
         glyph: "branch",
-        heading: "Restart game",
+        heading: t("home.restart"),
         detail: (
           <>
-            <p>Starts the game again from its first screen, keeping any settings you changed.</p>
-            <Aside>Anything not saved in the game is lost.</Aside>
+            <p>{t("home.restart.detail")}</p>
+            <Aside>{t("home.unsavedLost")}</Aside>
           </>
         ),
         onSelect: () => send({ op: "action", id: "relaunch" })
       },
       {
         id: "quit",
-        label: "Quit game",
+        label: t("home.quit"),
         glyph: "console",
-        heading: "Quit game",
+        heading: t("home.quit"),
         detail: (
           <>
-            <p>Stops the game and comes back here.</p>
-            <Aside>Anything not saved in the game is lost.</Aside>
+            <p>{t("home.quit.detail")}</p>
+            <Aside>{t("home.unsavedLost")}</Aside>
           </>
         ),
         onSelect: () => send({ op: "stopGame" })
@@ -140,7 +146,7 @@ export function home(state: NativeState): BladeDef {
   state.recentTitles.slice(0, 8).forEach((title, index) => {
     menu.push({
       id: `recent-${index}`,
-      section: index === 0 ? "Recent games" : undefined,
+      section: index === 0 ? t("home.recentGames") : undefined,
       label: title.name || fileName(title.path),
       glyph: "disc",
       image: title.icon || undefined,
@@ -151,9 +157,7 @@ export function home(state: NativeState): BladeDef {
           <p>{whenPlayed(title.lastPlayed)}</p>
           <p className="menu-spec m-0 text-[0.78em] [overflow-wrap:anywhere]">{title.path}</p>
           <Aside>
-            {state.titleOpen
-              ? "Choose to quit the game that is running and start this one."
-              : "Choose to play."}
+            {state.titleOpen ? t("home.recent.switch") : t("home.recent.play")}
           </Aside>
         </>
       ),
@@ -164,18 +168,18 @@ export function home(state: NativeState): BladeDef {
   menu.push(
     {
       id: "all-games",
-      section: "More",
-      label: "All games",
+      section: t("home.more"),
+      label: t("home.allGames"),
       glyph: "blocks",
       value: state.allGames.length ? <>{state.allGames.length}</> : undefined,
-      heading: "All games",
+      heading: t("home.allGames"),
       detail: (
         <>
-          <p>Every game in your game folders and every game you have played here, with your achievements in each.</p>
+          <p>{t("home.allGames.detail")}</p>
           {state.gameFolders.folders.length ? (
-            <Aside>X there sorts them A to Z or by when you last played.</Aside>
+            <Aside>{t("home.allGames.sortHint")}</Aside>
           ) : (
-            <Aside>Add the folders that hold your games under Game folders, below.</Aside>
+            <Aside>{t("home.allGames.addHint")}</Aside>
           )}
         </>
       ),
@@ -183,10 +187,10 @@ export function home(state: NativeState): BladeDef {
     },
     {
       id: "game-folders",
-      label: "Game folders",
+      label: t("home.gameFolders"),
       glyph: "folder",
       value: <GameFoldersValue />,
-      heading: "Game folders",
+      heading: t("home.gameFolders"),
       detail: <GameFoldersPane />
     }
   );
@@ -194,41 +198,38 @@ export function home(state: NativeState): BladeDef {
   menu.push(
     {
       id: "open",
-      label: "Open a game",
+      label: t("home.open"),
       glyph: "folder",
-      heading: "Open a game",
+      heading: t("home.open"),
       detail: (
         <>
-          <p>Pick a disc image (.iso), a game folder or a downloaded game to play.</p>
-          <Aside>Games you play appear above for next time.</Aside>
+          <p>{t("home.open.detail")}</p>
+          <Aside>{t("home.open.hint")}</Aside>
         </>
       ),
       onSelect: () => send({ op: "openGame" })
     },
     {
       id: "install",
-      label: "Install content",
+      label: t("home.install"),
       glyph: "layers",
-      heading: "Install content",
-      detail: (
-        <p>
-          Add title updates, downloadable content or Xbox Live Arcade games from their package
-          files.
-        </p>
-      ),
+      heading: t("home.install"),
+      detail: <p>{t("home.install.detail")}</p>,
       onSelect: () => send({ op: "installContent" })
     },
   );
 
   return {
     id: "home",
-    label: "home",
+    label: t("home.tab"),
     title: "macXenos",
     tone: "green",
     feature: (
       <div className="grid justify-items-center gap-[0.4em]">
         <AppIcon />
-        <p className="menu-spec m-0 text-[0.85em]">macXenos {state.appVersion || "development build"}</p>
+        <p className="menu-spec m-0 text-[0.85em]">
+          {t("home.version", { version: state.appVersion || t("home.developmentBuild") })}
+        </p>
       </div>
     ),
     menu

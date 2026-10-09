@@ -108,6 +108,7 @@ export function mockState(): NativeState {
       { xuid: "E030000012345678", gamertag: "dmug", slot: 0 },
       { xuid: "E030000087654321", gamertag: "Player Two", slot: -1 }
     ],
+    systemLanguages: [],
     appVersion: "1.0 beta 3",
     appBuild: "codex/metal-foundation-integration@4774abdb6 (dev)",
     allGames: []

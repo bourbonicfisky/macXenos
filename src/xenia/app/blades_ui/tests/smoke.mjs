@@ -114,6 +114,36 @@ const tests = {
     expect(tops[0].split(":")[1] === tops[1].split(":")[1], "the buttons are not on one line");
   },
 
+  async "the language preference reaches translated text"(page, base) {
+    await page.open(base, "#home");
+    await page.eval("localStorage.setItem('macxenos-language', 'en-XA')");
+    await page.open(base, "#home");
+    const back = await page.eval(
+      "document.querySelector('.blade[data-state=open] .legend-stack--right .legend-entry')?.textContent"
+    );
+    expect(back === "[Ɓåçķ]B", `legend reads ${back}`);
+    const row = await page.eval(
+      "[...document.querySelectorAll('.blade[data-state=open] .menu-row span')].map((e) => e.textContent).find((x) => x.includes('ĝåɱéš'))"
+    );
+    expect(row === "[Åļļ ĝåɱéš]", `All games row reads ${row}`);
+    await page.eval("localStorage.removeItem('macxenos-language')");
+    await page.open(base, "#home");
+    expect((await page.eval(focusedRow)) !== undefined, "page did not come back");
+  },
+
+  async "Dashboard language offers Same as my Mac and English"(page, base) {
+    await page.open(base, "#system/language");
+    const row = await page.eval(
+      "[...document.querySelectorAll('.blade[data-state=open] .menu-row')].map((e) => e.textContent).find((x) => x.startsWith('Dashboard language'))"
+    );
+    expect(row === "Dashboard languageEnglish", `row reads ${row}`);
+    const options = await page.eval(
+      "[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].map((b) => b.textContent)"
+    );
+    expect(options[0] === "Same as my Mac" && options.includes("English"), `options ${options}`);
+    expect((await page.eval("document.documentElement.lang")) === "en", "lang is not en");
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

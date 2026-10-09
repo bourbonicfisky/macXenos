@@ -4,6 +4,7 @@ import { TabLabel } from "./tab-label";
 import { toggleTheme, useTheme } from "./theme";
 import { send } from "../native";
 import { LegendStack } from "./legend";
+import { t } from "../i18n";
 
 export type BladeTone = "green" | "orange" | "amber" | "blue" | "purple" | "teal" | "rose" | "steel";
 
@@ -122,7 +123,7 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
           <span className="flex items-center gap-[clamp(14px,2vw,28px)]">
             <LegendStack
               side="left"
-              entries={[{ button: "y", label: theme === "dark" ? "Day" : "Night", onClick: toggleTheme }]}
+              entries={[{ button: "y", label: t(theme === "dark" ? "legend.day" : "legend.night"), onClick: toggleTheme }]}
             />
             <span className="legend-hint inline-flex items-center gap-1.5 text-[0.78em] max-[560px]:hidden">
               <kbd className="legend-key font-ui grid h-[1.4em] min-w-[1.4em] place-items-center rounded-[5px] px-1 leading-none">
@@ -131,7 +132,7 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
               <kbd className="legend-key font-ui grid h-[1.4em] min-w-[1.4em] place-items-center rounded-[5px] px-1 leading-none">
                 →
               </kbd>
-              {submenu ? "Choose" : "Change blade"}
+              {submenu ? t("legend.choose") : t("legend.changeBlade")}
             </span>
           </span>
 
@@ -141,14 +142,14 @@ export function Blade({ blade, state, side, depth, onOpen }: BladeProps) {
               className="legend-toggle inline-flex cursor-pointer items-center gap-[0.4em] border-0 bg-transparent p-0 text-inherit"
               onClick={() => send({ op: "close" })}
             >
-              Hide menu
-              <span className="pad-chip pad-chip--guide legend-guide" aria-label="Guide" />
+              {t("legend.hideMenu")}
+              <span className="pad-chip pad-chip--guide legend-guide" aria-label={t("legend.guide")} />
             </button>
             <LegendStack
               side="right"
               entries={[
-                { button: "b", label: "Back" },
-                { button: "a", label: "Select" }
+                { button: "b", label: t("legend.back") },
+                { button: "a", label: t("legend.select") }
               ]}
             />
           </span>

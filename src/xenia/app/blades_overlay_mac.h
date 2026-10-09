@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace xe {
 namespace app {
@@ -28,6 +29,11 @@ namespace app {
 //
 // Plain C++ interface (the .mm owns the Objective-C objects), so the
 // emulator window can hold one without including AppKit.
+// The Mac's preferred languages, most preferred first (System Settings >
+// General > Language & Region), as BCP 47 tags: the dashboard's language
+// follows them unless the user picks one.
+std::vector<std::string> PreferredLanguages();
+
 class BladesOverlay {
  public:
   struct Callbacks {

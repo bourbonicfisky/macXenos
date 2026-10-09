@@ -11,28 +11,34 @@ import { Aside, PaneAction } from "./parts";
 import { downloadDashSounds, packCredit } from "../ui/sound-offer";
 import { Options, Value } from "../ui/settings-controls";
 import { dashboardShortcuts } from "./home";
+import { AVAILABLE, LOCALES, PSEUDO, t, useLanguage } from "../i18n";
+
+/** The official website, on About macXenos. */
+const WEBSITE = "https://macxenos.com";
 
 /** Where the sounds come from, and the way to get them if they aren't here. */
 function SoundSource() {
   const { dashSounds } = useNative();
+  const credit = packCredit(dashSounds);
   switch (dashSounds.status) {
     case "ready":
-      return <Aside>Downloaded: {packCredit(dashSounds)}.</Aside>;
+      return <Aside>{t("dashboard.sound.downloaded", { credit })}</Aside>;
     case "downloading":
-      return <Aside>Downloading {packCredit(dashSounds)} in the background.</Aside>;
+      return <Aside>{t("dashboard.sound.downloadingFrom", { credit })}</Aside>;
     case "missing":
     case "failed":
       return (
         <>
-          <p className="m-0">
-            macXenos doesn&rsquo;t include the dashboard&rsquo;s sounds. Download a fan-made pack,{" "}
-            {packCredit(dashSounds)}, of about 1&nbsp;MB.
-          </p>
+          <p className="m-0">{t("dashboard.sound.missing", { credit })}</p>
           {dashSounds.status === "failed" ? (
-            <Aside>The last download failed{dashSounds.error ? `: ${dashSounds.error}` : ""}.</Aside>
+            <Aside>
+              {dashSounds.error
+                ? t("dashboard.sound.failedBecause", { error: dashSounds.error })
+                : t("dashboard.sound.failed")}
+            </Aside>
           ) : null}
           <PaneAction onSelect={downloadDashSounds}>
-            {dashSounds.status === "failed" ? "Try again" : "Download sounds"}
+            {dashSounds.status === "failed" ? t("dashboard.sound.retry") : t("dashboard.sound.download")}
           </PaneAction>
         </>
       );
@@ -48,9 +54,9 @@ function SoundDetail() {
   const needed = dashSounds.status === "missing" || dashSounds.status === "failed";
   const settings = (
     <>
-      {needed ? <p className="pref-group m-0">Once downloaded</p> : null}
+      {needed ? <p className="pref-group m-0">{t("dashboard.sound.onceDownloaded")}</p> : null}
       <PreferenceOptions pref="sound" />
-      <p className="pref-group">Volume</p>
+      <p className="pref-group">{t("pref.volume")}</p>
       <PreferenceOptions pref="volume" />
     </>
   );
@@ -64,18 +70,26 @@ function SoundDetail() {
   }
   return (
     <>
-      <p>The Xbox 360 dashboard&rsquo;s own sounds as you move through these blades.</p>
+      <p>{t("dashboard.sound.detail")}</p>
       {settings}
       <SoundSource />
     </>
   );
 }
 
+/** The language the dashboard is in now, in its own words. */
+function LanguageValue() {
+  const language = useLanguage();
+  return <>{language === PSEUDO ? "Pseudo" : LOCALES.find((locale) => locale.code === language)?.name}</>;
+}
+
 /** The Sound row's value: what's playing, or why nothing is. */
 function SoundRowValue() {
   const { dashSounds } = useNative();
-  if (dashSounds.status === "missing" || dashSounds.status === "failed") return <>Not downloaded</>;
-  if (dashSounds.status === "downloading") return <>Downloading</>;
+  if (dashSounds.status === "missing" || dashSounds.status === "failed") {
+    return <>{t("dashboard.sound.notDownloaded")}</>;
+  }
+  if (dashSounds.status === "downloading") return <>{t("dashboard.sound.downloading")}</>;
   return <SoundValue />;
 }
 
@@ -84,32 +98,32 @@ function SoundRowValue() {
 export function dashboard(state: NativeState): BladeDef {
   return {
     id: "dashboard",
-    label: "dashboard",
-    title: "Dashboard",
+    label: t("dashboard.tab"),
+    title: t("dashboard.section"),
     tone: "teal",
     menu: [
       {
         id: "theme",
-        label: "Theme",
+        label: t("pref.theme"),
         glyph: "theme",
         value: <PreferenceValue pref="theme" />,
-        heading: "Day or night",
+        heading: t("dashboard.theme.heading"),
         detail: (
           <>
-            <p>Match your Mac&rsquo;s light or dark setting, or pick one. Y switches between them too.</p>
+            <p>{t("dashboard.theme.detail")}</p>
             <PreferenceOptions pref="theme" />
           </>
         )
       },
       {
         id: "motion",
-        label: "Animation speed",
+        label: t("pref.motion"),
         glyph: "motion",
         value: <PreferenceValue pref="motion" />,
-        heading: "Animation speed",
+        heading: t("pref.motion"),
         detail: (
           <>
-            <p>Fast is how the dashboard moved. Slow is gentler. Reduced motion switches blades instantly.</p>
+            <p>{t("dashboard.motion.detail")}</p>
             <PreferenceOptions pref="motion" />
             <ReducedMotionOverride />
           </>
@@ -117,31 +131,27 @@ export function dashboard(state: NativeState): BladeDef {
       },
       {
         id: "sound",
-        label: "Dashboard sounds",
+        label: t("dashboard.sound"),
         glyph: "sound",
         value: <SoundRowValue />,
-        heading: "Dashboard sounds",
+        heading: t("dashboard.sound"),
         detail: <SoundDetail />
       },
       {
         id: "freeze",
-        label: "Pause games",
+        label: t("dashboard.pause"),
         glyph: "play",
         value: <Value name="dashboard_freezes_game" />,
-        heading: "Pause games",
+        heading: t("dashboard.pause"),
         detail: (
           <>
-            <p>
-              Freezes the game while this dashboard is open, so nothing happens
-              in it until you go back. Games also get the console&rsquo;s own
-              notice, which most use to pause themselves.
-            </p>
+            <p>{t("dashboard.pause.detail")}</p>
             <Options
               name="dashboard_freezes_game"
-              title="Pause games"
+              title={t("dashboard.pause")}
               options={[
-                { value: true, label: "On", recommended: true },
-                { value: false, label: "Off" }
+                { value: true, label: t("common.on"), recommended: true },
+                { value: false, label: t("common.off") }
               ]}
             />
           </>
@@ -149,50 +159,72 @@ export function dashboard(state: NativeState): BladeDef {
       },
       {
         id: "notifications",
-        label: "Notifications",
+        label: t("dashboard.notifications"),
         glyph: "bell",
         value: <PreferenceValue pref="notifications" />,
-        heading: "Notification position",
+        heading: t("pref.notifications"),
         detail: (
           <>
-            <p>Where &ldquo;Setting saved&rdquo; appears. The Xbox 360 showed it at the bottom center.</p>
+            <p>{t("dashboard.notifications.detail")}</p>
             <PreferenceOptions pref="notifications" />
           </>
         )
       },
       {
+        id: "language",
+        label: t("pref.language"),
+        glyph: "globe",
+        value: <LanguageValue />,
+        heading: t("pref.language"),
+        detail: (
+          <>
+            <p>{t("dashboard.language.detail")}</p>
+            <PreferenceOptions pref="language" />
+            {AVAILABLE.length < 2 ? <Aside>{t("dashboard.language.more")}</Aside> : null}
+          </>
+        )
+      },
+      {
         id: "shortcuts",
-        label: "Shortcuts",
+        label: t("dashboard.shortcuts"),
         glyph: "keys",
-        heading: "Getting around",
+        heading: t("dashboard.shortcuts.heading"),
         detail: (
           <>
             <Bullets
               items={[
-                "← and →, or the d-pad, change blade",
-                "↑ and ↓ move through a menu",
-                "A or Return opens a setting's options",
-                "In the options, ↑ and ↓ move between groups and ← → choose",
-                "B goes back, to Home from the top of a blade",
-                "A tap of Guide (or Escape) hides the menu",
-                "Y switches day and night",
-                `${dashboardShortcuts(state)} opens the dashboard from anywhere`
+                t("dashboard.shortcuts.blades"),
+                t("dashboard.shortcuts.rows"),
+                t("dashboard.shortcuts.open"),
+                t("dashboard.shortcuts.options"),
+                t("dashboard.shortcuts.back"),
+                t("dashboard.shortcuts.hide"),
+                t("dashboard.shortcuts.theme"),
+                t("dashboard.shortcuts.show", { ways: dashboardShortcuts(state) })
               ]}
             />
-            <Aside>Settings save as you choose them.</Aside>
+            <Aside>{t("dashboard.shortcuts.saved")}</Aside>
           </>
         )
       },
       {
         id: "about",
-        label: "About macXenos",
+        label: t("dashboard.about"),
         glyph: "question",
         value: <>{state.appVersion ? state.appVersion.replace(/^1\.0 /, "") : ""}</>,
-        heading: `macXenos ${state.appVersion}`,
+        heading: t("dashboard.about.heading", { version: state.appVersion }),
         detail: (
           <>
-            <p>Xbox 360 games on your Mac, with a native Metal renderer.</p>
-            <p className="menu-spec m-0 text-[0.85em]">Build {state.appBuild || "unknown"}</p>
+            <p>{t("dashboard.about.detail")}</p>
+            {/* Opens in the Mac's browser (blades_overlay_mac.mm). */}
+            <p className="m-0">
+              <a className="pane-link" href={WEBSITE}>
+                macxenos.com
+              </a>
+            </p>
+            <p className="menu-spec m-0 text-[0.85em]">
+              {t("dashboard.about.build", { build: state.appBuild || t("dashboard.about.unknownBuild") })}
+            </p>
           </>
         )
       }

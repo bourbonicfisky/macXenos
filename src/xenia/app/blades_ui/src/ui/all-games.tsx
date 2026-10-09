@@ -5,6 +5,7 @@ import type { BladeTone } from "./blade";
 import { playSound } from "./sound";
 import { closeSubBlade, openSubBlade, SubBlade } from "./sub-blade";
 import { showToast } from "./toast";
+import { t, type MessageKey } from "../i18n";
 
 /**
  * All Games: every game in the game folders and every game played on this
@@ -17,7 +18,7 @@ export const openAllGames = () => openSubBlade("all-games");
 
 type Sort = "recent" | "alpha";
 const SORT_KEY = "macxenos.allGames.sort";
-const SORT_LABEL: Record<Sort, string> = { recent: "Most recently played", alpha: "Alphabetical" };
+const SORT_LABEL: Record<Sort, MessageKey> = { recent: "allGames.sort.recent", alpha: "allGames.sort.alpha" };
 
 function savedSort(): Sort {
   try {
@@ -59,7 +60,7 @@ export function AllGames({ tone }: { tone: BladeTone }) {
       // Remembering the order is a convenience.
     }
     playSound("toggle");
-    showToast("All Games", SORT_LABEL[next], { sound: false });
+    showToast(t("allGames.title"), t(SORT_LABEL[next]), { sound: false });
   };
 
   return (
@@ -67,7 +68,7 @@ export function AllGames({ tone }: { tone: BladeTone }) {
       id="all-games"
       side="left"
       tone={tone}
-      title="All Games"
+      title={t("allGames.title")}
       count={games.length}
       onActivate={play}
       onX={changeSort}
@@ -75,21 +76,24 @@ export function AllGames({ tone }: { tone: BladeTone }) {
       legend={() => ({
         left:
           games.length > 1
-            ? [{ button: "x", label: `Sort: ${SORT_LABEL[sort]}`, onClick: changeSort }]
+            ? [{ button: "x", label: t("allGames.sort", { order: t(SORT_LABEL[sort]) }), onClick: changeSort }]
             : [],
-        right: [{ button: "b", label: "Back" }, ...(games.length ? [{ button: "a" as const, label: "Select" }] : [])]
+        right: [
+          { button: "b", label: t("legend.back") },
+          ...(games.length ? [{ button: "a" as const, label: t("legend.select") }] : [])
+        ]
       })}
       empty={
         gameFolders.scanning
-          ? "Looking for games in your game folders."
+          ? t("allGames.looking")
           : gameFolders.folders.length
-            ? "No games were found in your game folders."
-            : "Add the folders that hold your games on Home, under Game folders."
+            ? t("allGames.noneFound")
+            : t("allGames.noFolders")
       }
     >
       {(rowProps) =>
         games.length ? (
-          <ul className="subblade-list m-0 grid list-none p-0" aria-label={`All Games, ${SORT_LABEL[sort]}`}>
+          <ul className="subblade-list m-0 grid list-none p-0" aria-label={`${t("allGames.title")}, ${t(SORT_LABEL[sort])}`}>
             {games.map((game, index) => (
               <li key={game.path} className="subblade-item">
                 <button type="button" {...rowProps(index)}>
@@ -98,16 +102,19 @@ export function AllGames({ tone }: { tone: BladeTone }) {
                     <span className="subblade-name truncate">{titleOf(game)}</span>
                     <span className="subblade-sub truncate">
                       {game.achievements
-                        ? `${game.achievements.unlocked} of ${game.achievements.total} Achievements`
+                        ? t("allGames.achievements", {
+                            unlocked: game.achievements.unlocked,
+                            total: game.achievements.total
+                          })
                         : game.lastPlayed
                           ? whenPlayed(game.lastPlayed)
-                          : "Not played yet"}
+                          : t("played.never")}
                     </span>
                   </span>
                   {game.achievements ? (
                     <span className="game-score inline-flex items-center gap-[0.25em]">
                       {game.achievements.score}
-                      <span className="gamerscore-g" aria-label="gamerscore">
+                      <span className="gamerscore-g" aria-label={t("allGames.gamerscore")}>
                         G
                       </span>
                     </span>

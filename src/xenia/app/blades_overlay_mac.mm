@@ -189,6 +189,23 @@ NSString* MimeTypeFor(NSString* extension) {
     on_tick();
   }
 }
+// The page lives on its own xenia-blades:// scheme; a link out of it (the
+// website on About macXenos) opens in the Mac's browser rather than
+// replacing the dashboard.
+- (void)webView:(WKWebView*)webView
+    decidePolicyForNavigationAction:(WKNavigationAction*)action
+                    decisionHandler:
+                        (void (^)(WKNavigationActionPolicy))decisionHandler {
+  NSURL* url = action.request.URL;
+  NSString* scheme = url.scheme.lowercaseString;
+  if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"] ||
+      [scheme isEqualToString:@"mailto"]) {
+    [[NSWorkspace sharedWorkspace] openURL:url];
+    decisionHandler(WKNavigationActionPolicyCancel);
+    return;
+  }
+  decisionHandler(WKNavigationActionPolicyAllow);
+}
 - (void)webView:(WKWebView*)webView
     didFinishNavigation:(WKNavigation*)navigation {
   XELOGI("Blades: Preferences page loaded");
@@ -213,6 +230,16 @@ NSString* MimeTypeFor(NSString* extension) {
 
 namespace xe {
 namespace app {
+
+std::vector<std::string> PreferredLanguages() {
+  std::vector<std::string> tags;
+  @autoreleasepool {
+    for (NSString* tag in [NSLocale preferredLanguages]) {
+      tags.emplace_back(tag.UTF8String);
+    }
+  }
+  return tags;
+}
 
 std::filesystem::path BladesOverlay::FindPageRoot() {
   const std::filesystem::path exe = xe::filesystem::GetExecutableFolder();

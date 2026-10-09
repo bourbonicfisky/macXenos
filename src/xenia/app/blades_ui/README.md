@@ -47,8 +47,8 @@ is what the app ships):
 | Command | What it does |
 |---|---|
 | `npm run build` | Type-checks and builds `dist/`. |
-| `npm run check` | Fails if `src/mock-cvars.json` no longer matches the emulator's `DEFINE_*` settings (fix: `npm run gen:cvars`), if the page doesn't type-check, or if `dist/` isn't what the sources build to (fix: `npm run build`). |
-| `npm test` | Smoke tests (`tests/smoke.mjs`): every blade opens, B and Y on the blades, the stacked legend, All Games (open, move, sort, back), Game Folders (add, two-press remove), the Game folders pane and the Dashboard sounds pane. |
+| `npm run check` | Fails if `src/mock-cvars.json` no longer matches the emulator's `DEFINE_*` settings (fix: `npm run gen:cvars`), if the page doesn't type-check, if the dashboard's text fails its checks (see Languages), or if `dist/` isn't what the sources build to (fix: `npm run build`). |
+| `npm test` | Unit tests (`tests/*.test.mjs`), then smoke tests (`tests/smoke.mjs`): every blade opens, B and Y on the blades, the stacked legend, All Games (open, move, sort, back), Game Folders (add, two-press remove), the Game folders pane and the Dashboard sounds pane. |
 | `npm run screens -- record <dir>` then `compare <dir>` | Screenshots of a fixed set of states, byte for byte, for changes meant to look the same (a stylesheet refactor). Differing ones are written beside the originals. |
 
 The tests run the page on the mock in a headless Chromium (Chrome,
@@ -68,6 +68,40 @@ Styles live in `src/styles/`, all inside Tailwind's cascade layers: `tokens`,
 overrides in `globals.css` sit outside the layers, on purpose. Tab shapes
 are keyed on `data-bend` (`left` or `right`), which deck blades and
 sub-blade tabs both set.
+
+## Languages
+
+The dashboard's text goes through `t()` (`src/i18n/`), so it can be
+translated into the console's sixteen languages. Only English exists today;
+the wiring, the checks and the tests are in place for the rest.
+
+- **The text.** `src/i18n/en.ts` is every message in English, keyed
+  `"area.thing"`, and the source for translators. Messages take `{name}`
+  placeholders and ICU plurals (`{count, plural, one {# game} other {# games}}`,
+  `src/i18n/format.ts`). `MessageKey` types every key, so a key that doesn't
+  exist fails the build.
+- **A translation** is `src/i18n/catalogs/<code>.ts` (`ja.ts`, `zh-Hant.ts`…,
+  the codes in `src/i18n/locales.ts`) exporting the messages it has translated:
+  `export default { "legend.back": "…" } satisfies Catalog`. It is picked up
+  without other wiring and appears under System > Dashboard language; missing
+  keys fall back to English.
+- **Which language.** Dashboard language defaults to Same as my Mac: the first
+  of the Mac's preferred languages (the app reports them; `NSLocale`) that has
+  a translation, else English. Taiwan, Hong Kong and Macau read Traditional
+  Chinese, other Chinese Simplified; Norwegian of any kind reads Bokmål.
+- **Checks** (`npm run check`, `tools/i18n.mjs`): every English key is used;
+  every translation keeps each message's placeholders and uses only English's
+  keys; and English written straight into a `.tsx` instead of through `t()`
+  never grows. `tools/i18n-baseline.json` holds each file's count of such
+  text (Home, the Dashboard rows, the legend, the sub-blades and the sound
+  offer are at zero; Graphics, Controller, Audio & CPU, Profiles, the rest of
+  System and Advanced are still to convert). Convert a file, then
+  `npm run i18n:baseline` to lock the lower count in. `npm run i18n` prints the
+  report, with each language's coverage.
+- **Tests**: `tests/i18n.test.mjs` (language matching, plurals, placeholders,
+  the scanner) and smoke tests that switch to the pseudo-locale (`en-XA`,
+  development only: every word accented, so untranslated text stands out) and
+  check the converted text follows.
 
 ## Sounds are downloaded, not shipped
 

@@ -15,6 +15,8 @@ const STATES = {
   home: ["#home"],
   graphics: ["#graphics"],
   "system-sound": ["#system/sound"],
+  "system-language": ["#system/language"],
+  "system-about": ["#system/about"],
   "home-folders": ["#home/game-folders"],
   "all-games": ["#all-games"],
   "all-games-alpha": ["#all-games", "x"],

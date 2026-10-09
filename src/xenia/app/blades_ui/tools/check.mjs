@@ -3,7 +3,10 @@
 //   1. src/mock-cvars.json matches the emulator's DEFINE_* settings (it is
 //      the list CvarName checks every setting name in the page against).
 //   2. The page type-checks.
-//   3. dist/, which is checked in and is what the app ships, is what the
+//   3. The dashboard's text (tools/i18n.mjs): every English key used, every
+//      translation keeps English's placeholders, and no file gains English
+//      written straight into it instead of through t().
+//   4. dist/, which is checked in and is what the app ships, is what the
 //      sources build to now.
 //
 // Each failure says how to fix it. Exit status 1 if any failed.
@@ -13,6 +16,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { report as textReport } from "./i18n.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCES = join(ROOT, "..", "..");
@@ -63,6 +67,14 @@ try {
   step("page type-checks", () => {
     execFileSync("npx", ["tsc", "--noEmit"], { cwd: ROOT, stdio: "pipe" });
   });
+
+  const textProblems = await textReport({ log: (line) => console.log(`      ${line}`) });
+  if (textProblems.length) {
+    failed++;
+    console.log(`FAIL  the dashboard's text\n      ${textProblems.join("\n      ")}`);
+  } else {
+    console.log("ok    the dashboard's text");
+  }
 
   step("dist/ is what the sources build to", () => {
     const out = join(scratch, "dist");

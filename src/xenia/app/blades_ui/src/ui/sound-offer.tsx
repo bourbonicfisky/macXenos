@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { send, useNative, type DashSounds } from "../native";
 import { showToast } from "./toast";
+import { t } from "../i18n";
 
 /**
  * The first-run offer to download the dashboard's sounds, which the app does
@@ -10,16 +11,17 @@ import { showToast } from "./toast";
  */
 
 export function packCredit(sounds: DashSounds): string {
-  const pack = sounds.pack ?? "a community sound pack";
-  const by = sounds.author ? ` by ${sounds.author}` : "";
-  const from = sounds.site ? `, from ${sounds.site}` : "";
-  return `${pack}${by}${from}`;
+  return t("soundOffer.credit", {
+    pack: sounds.pack ?? t("soundOffer.credit.pack"),
+    by: sounds.author ? t("soundOffer.credit.by", { author: sounds.author }) : "",
+    from: sounds.site ? t("soundOffer.credit.from", { site: sounds.site }) : ""
+  });
 }
 
 /** Starts the download and says so. */
 export function downloadDashSounds() {
   send({ op: "dashSounds", action: "download" });
-  showToast("Dashboard sounds", "Downloading in the background", { sound: false });
+  showToast(t("soundOffer.title"), t("soundOffer.toast"), { sound: false });
 }
 
 /** Toasts once a download finishes, wherever it was started. */
@@ -29,8 +31,10 @@ function useDownloadNotice(status: DashSounds["status"], error: string) {
     const was = last.current;
     last.current = status;
     if (was !== "downloading") return;
-    if (status === "ready") showToast("Dashboard sounds", "Ready");
-    else if (status === "failed") showToast("Sound download failed", error || "Try again in System", { sound: false });
+    if (status === "ready") showToast(t("soundOffer.title"), t("soundOffer.ready"));
+    else if (status === "failed") {
+      showToast(t("soundOffer.failed"), error || t("soundOffer.failedHint"), { sound: false });
+    }
   }, [status, error]);
 }
 
@@ -90,14 +94,11 @@ export function SoundOffer() {
         className="offer grid w-full max-w-[34em] gap-[0.8em] rounded-[14px] p-[1.4em_1.6em]"
       >
         <h2 id="offer-title" className="offer-title m-0">
-          Dashboard sounds
+          {t("soundOffer.title")}
         </h2>
         <div id="offer-text" className="grid gap-[0.6em]">
-          <p className="m-0">
-            macXenos doesn&rsquo;t include the Xbox 360 dashboard&rsquo;s sounds. It can download a
-            fan-made pack, {packCredit(dashSounds)}, in the background. It&rsquo;s about 1&nbsp;MB.
-          </p>
-          <p className="offer-note m-0">You can change your mind later in System, under Dashboard sounds.</p>
+          <p className="m-0">{t("soundOffer.detail", { credit: packCredit(dashSounds) })}</p>
+          <p className="offer-note m-0">{t("soundOffer.later")}</p>
         </div>
         <div className="mt-[0.4em] flex flex-wrap justify-end gap-[0.8em]">
           <button
@@ -111,7 +112,7 @@ export function SoundOffer() {
             <span className="pad-key pad-key--a" aria-hidden="true">
               A
             </span>
-            Download
+            {t("soundOffer.download")}
           </button>
           <button
             ref={buttons[1]}
@@ -124,7 +125,7 @@ export function SoundOffer() {
             <span className="pad-key pad-key--b" aria-hidden="true">
               B
             </span>
-            No thanks
+            {t("soundOffer.decline")}
           </button>
         </div>
       </div>

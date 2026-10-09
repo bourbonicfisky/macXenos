@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { setSystemLanguages } from "./i18n";
 
 /* ==========================================================================
    The bridge to the emulator (blades_overlay_mac.mm / blades_model.cc).
@@ -144,6 +145,9 @@ export type NativeState = {
   musicPlayer: MusicPlayer;
   profiles: Profile[];
   dashSounds: DashSounds;
+  /** The Mac's preferred languages, most preferred first (BCP 47); empty
+      off macOS. The dashboard's "Same as my Mac" picks from these. */
+  systemLanguages: string[];
   /** The release, "1.0 beta 3", for the Dashboard blade. */
   appVersion: string;
   /** The build: branch@commit (date). */
@@ -226,6 +230,7 @@ function checkContract(received: Record<string, unknown>) {
     const received = JSON.parse(json) as Record<string, unknown>;
     checkContract(received);
     state = { ...received, connected: true } as NativeState;
+    setSystemLanguages(state.systemLanguages ?? []);
     emit();
   } catch (error) {
     console.error("xenia state", error);
@@ -315,6 +320,7 @@ function emptyState(): NativeState {
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
     dashSounds: { status: "unavailable", error: "", asked: true },
+    systemLanguages: [],
     appVersion: "",
     appBuild: ""
   };

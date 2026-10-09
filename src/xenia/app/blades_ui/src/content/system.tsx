@@ -12,6 +12,7 @@ import { Check, NextLaunchNote, Options, TextField, Value, type Option } from ".
 import { Aside, PaneAction } from "./parts";
 import { showToast } from "../ui/toast";
 import { dashboard } from "./dashboard";
+import { t } from "../i18n";
 
 const LOG_LEVELS: Option[] = [
   { value: 0, label: "Errors", short: "Errors" },
@@ -23,7 +24,7 @@ const LOG_LEVELS: Option[] = [
 export function system(state: NativeState): BladeDef {
   // The dashboard's own settings first, then the console's.
   const dashboardRows = dashboard(state).menu.map((item, index) =>
-    index === 0 ? { ...item, section: "Dashboard" } : item
+    index === 0 ? { ...item, section: t("dashboard.section") } : item
   );
   return {
     id: "system",
