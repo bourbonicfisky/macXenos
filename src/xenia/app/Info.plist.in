@@ -30,6 +30,18 @@
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>macXenos — unofficial macOS port. Xenia Canary contributors. BSD license.</string>
+	<!-- A game played with a controller: lets the GameController framework
+	     treat it as one, including handing the Home button to the app when
+	     it claims it (controller_home_button_mac.mm). -->
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>ExtendedGamepad</string>
+		</dict>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
 </dict>

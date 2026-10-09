@@ -12,6 +12,8 @@
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
 
+#include <string>
+
 #include "xenia/base/logging.h"
 
 namespace {
@@ -21,6 +23,7 @@ id g_connect_observer = nil;
 
 void Apply(GCController* controller) {
   if (@available(macOS 11.0, *)) {
+    std::string bound;
     for (NSString* key in controller.physicalInputProfile.buttons) {
       GCControllerButtonInput* button =
           controller.physicalInputProfile.buttons[key];
@@ -28,8 +31,16 @@ void Apply(GCController* controller) {
         button.preferredSystemGestureState =
             g_claimed ? GCSystemGestureStateDisabled
                       : GCSystemGestureStateEnabled;
+        bound += std::string(bound.empty() ? "" : ", ") + key.UTF8String +
+                 (button.preferredSystemGestureState ==
+                          GCSystemGestureStateDisabled
+                      ? " (claimed)"
+                      : " (macOS)");
       }
     }
+    XELOGI("Controller Home button: {}: {}",
+           controller.vendorName ? controller.vendorName.UTF8String : "?",
+           bound.empty() ? "no button bound to a system gesture" : bound);
   }
 }
 
