@@ -14,6 +14,7 @@
 #endif  // XE_PLATFORM_WIN32
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 
 #include "xenia/base/clock.h"
@@ -612,6 +613,12 @@ bool SDLInputDriver::BeginInputCapture(uint32_t user_index) {
   capture_slot_ = static_cast<int>(user_index);
   capture_has_result_ = false;
   capture_result_.clear();
+  SDL_Joystick* joystick =
+      SDL_GameControllerGetJoystick(controllers_.at(user_index).sdl);
+  capture_rest_.assign(size_t(std::max(SDL_JoystickNumAxes(joystick), 0)), 0);
+  for (size_t axis = 0; axis < capture_rest_.size(); ++axis) {
+    capture_rest_[axis] = SDL_JoystickGetAxis(joystick, int(axis));
+  }
   return true;
 }
 
@@ -754,14 +761,38 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // Device-mapping rebind: capture the next physical button press on the
   // controller being rebound. Uses the raw joystick event (the physical button
   // index) rather than the translated controller event.
-  if (event.type == SDL_JOYBUTTONDOWN) {
+  // Buttons are "b<n>"; an analog trigger moved well off its rest is
+  // "a<n>" (the whole axis, as SDL maps triggers); a stick axis pushed one
+  // way is "+a<n>" / "-a<n>"; a d-pad hat is "h<hat>.<direction>".
+  if (event.type == SDL_JOYBUTTONDOWN || event.type == SDL_JOYAXISMOTION ||
+      event.type == SDL_JOYHATMOTION) {
     std::lock_guard<std::mutex> guard(capture_mutex_);
     if (capture_slot_ >= 0 && !capture_has_result_ &&
         capture_slot_ < static_cast<int>(controllers_.size())) {
       SDL_GameController* gc = controllers_.at(capture_slot_).sdl;
-      if (gc && event.jbutton.which ==
-                    SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc))) {
-        capture_result_ = "b" + std::to_string(event.jbutton.button);
+      const SDL_JoystickID id =
+          gc ? SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc)) : -1;
+      std::string binding;
+      if (event.type == SDL_JOYBUTTONDOWN && event.jbutton.which == id) {
+        binding = "b" + std::to_string(event.jbutton.button);
+      } else if (event.type == SDL_JOYAXISMOTION && event.jaxis.which == id) {
+        const size_t axis = event.jaxis.axis;
+        const int rest = axis < capture_rest_.size() ? capture_rest_[axis] : 0;
+        const int value = event.jaxis.value;
+        if (std::abs(value - rest) > 20000) {
+          if (rest < -20000 || rest > 20000) {
+            binding = "a" + std::to_string(axis);
+          } else {
+            binding = (value > 0 ? "+a" : "-a") + std::to_string(axis);
+          }
+        }
+      } else if (event.type == SDL_JOYHATMOTION && event.jhat.which == id &&
+                 event.jhat.value != SDL_HAT_CENTERED) {
+        binding = "h" + std::to_string(event.jhat.hat) + "." +
+                  std::to_string(event.jhat.value);
+      }
+      if (!binding.empty()) {
+        capture_result_ = binding;
         capture_has_result_ = true;
         capture_slot_ = -1;
       }

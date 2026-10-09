@@ -136,6 +136,8 @@ export const en = {
   "controller.map.choose": "{button}: remap",
   "controller.map.listening": "{button}: waiting for a button; choose again to stop",
   "controller.map.default": "Default",
+  "controller.map.waiting": "Press a button",
+  "controller.map.hat": "D-pad {direction}",
   "controller.map.button": "Button {n}",
   "controller.map.axis": "Axis {n}",
   "controller.map.reset": "Reset to default",

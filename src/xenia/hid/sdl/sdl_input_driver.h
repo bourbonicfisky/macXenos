@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 #include "SDL.h"
@@ -108,6 +109,9 @@ class SDLInputDriver final : public InputDriver {
   int capture_slot_ = -1;       // slot currently capturing, or -1
   bool capture_has_result_ = false;
   std::string capture_result_;  // SDL binding token, e.g. "b3"
+  // Each axis's value when the capture began, so a press is a move away from
+  // rest (a trigger rests fully off, a stick centred).
+  std::vector<int16_t> capture_rest_;
   // SDL mapping string captured before the first user rebind of a slot, so
   // ResetMapping can restore the as-loaded mapping.
   std::array<std::string, HID_SDL_USER_COUNT> original_mapping_ = {};

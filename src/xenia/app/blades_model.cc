@@ -389,15 +389,25 @@ struct Rebindable {
   const char* output;
   const char* label;
 };
+// Every button of the pad, in the order the page lists them (SDL's names).
 constexpr Rebindable kRebindable[] = {
     {"a", "A / Cross"},
     {"b", "B / Circle"},
     {"x", "X / Square"},
     {"y", "Y / Triangle"},
-    {"leftshoulder", "Left shoulder (LB / L1)"},
-    {"rightshoulder", "Right shoulder (RB / R1)"},
+    {"leftshoulder", "Left bumper (LB / L1)"},
+    {"rightshoulder", "Right bumper (RB / R1)"},
+    {"lefttrigger", "Left trigger (LT / L2)"},
+    {"righttrigger", "Right trigger (RT / R2)"},
     {"back", "Back / Share"},
     {"start", "Start / Options"},
+    {"guide", "Guide / Home"},
+    {"leftstick", "Left stick click (LS / L3)"},
+    {"rightstick", "Right stick click (RS / R3)"},
+    {"dpup", "D-pad up"},
+    {"dpdown", "D-pad down"},
+    {"dpleft", "D-pad left"},
+    {"dpright", "D-pad right"},
 };
 
 int FirstPresentSlot(hid::InputSystem* input) {

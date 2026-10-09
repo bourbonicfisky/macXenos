@@ -61,7 +61,8 @@ function stripComments(source) {
 
 const WORDS = /[A-Za-z]{2,}/;
 // Names that read the same in every language.
-const UNTRANSLATED = new Set(["macXenos", "macxenos.com", "Pseudo", "Metal", "Vulkan", "MoltenVK", "MetalFX", "FSR", "CAS"]);
+// (BACK and START are printed on the controller itself, as the drawing shows.)
+const UNTRANSLATED = new Set(["macXenos", "macxenos.com", "Pseudo", "Metal", "Vulkan", "MoltenVK", "MetalFX", "FSR", "CAS", "BACK", "START"]);
 // What code looks like, as opposed to words between tags.
 const CODE = /[=;()]|&&|\|\||[,:]\s*\n|^[,:.?]|\breturn\b|\bconst\b/;
 const looksLikeKey = (text) => /^[a-z][\w-]*(\.[\w-]+)+$/.test(text.trim());

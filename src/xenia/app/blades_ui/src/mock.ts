@@ -41,10 +41,19 @@ export function mockState(): NativeState {
         { output: "b", label: "B / Circle", binding: "b1" },
         { output: "x", label: "X / Square", binding: "b2" },
         { output: "y", label: "Y / Triangle", binding: "b3" },
-        { output: "leftshoulder", label: "Left shoulder", binding: "b9" },
-        { output: "rightshoulder", label: "Right shoulder", binding: "b10" },
-        { output: "back", label: "Back / Share", binding: "b4" },
-        { output: "start", label: "Start / Options", binding: "b6" }
+        { output: "leftshoulder", label: "Left bumper (LB / L1)", binding: "b4" },
+        { output: "rightshoulder", label: "Right bumper (RB / R1)", binding: "b5" },
+        { output: "lefttrigger", label: "Left trigger (LT / L2)", binding: "a2" },
+        { output: "righttrigger", label: "Right trigger (RT / R2)", binding: "a5" },
+        { output: "back", label: "Back / Share", binding: "b6" },
+        { output: "start", label: "Start / Options", binding: "b7" },
+        { output: "guide", label: "Guide / Home", binding: "b8" },
+        { output: "leftstick", label: "Left stick click (LS / L3)", binding: "b9" },
+        { output: "rightstick", label: "Right stick click (RS / R3)", binding: "b10" },
+        { output: "dpup", label: "D-pad up", binding: "h0.1" },
+        { output: "dpdown", label: "D-pad down", binding: "h0.4" },
+        { output: "dpleft", label: "D-pad left", binding: "h0.8" },
+        { output: "dpright", label: "D-pad right", binding: "h0.2" }
       ]
     },
     console: {

@@ -1028,6 +1028,23 @@ button.tray {
   font-size: 0.68em;
 }
 
+/* Back and Start: the arrow on the pad's own small pill. */
+.pad-spot.pad-spot--arrow {
+  min-width: 0;
+  width: 1.9em;
+  height: 1.3em;
+  padding: 0;
+  font-size: 0.62em;
+  color: #6b6e75;
+}
+
+.pad-drawing-label {
+  fill: #8a8d94;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
 .pad-spot:hover,
 .pad-spot:focus-visible {
   outline: none;
@@ -1045,8 +1062,34 @@ button.tray {
   }
 }
 
-.pad-bindings dt {
-  font-weight: 600;
+.pad-spot.pad-spot--guide {
+  width: 2.1em;
+  height: 2.1em;
+  opacity: 0;
+}
+
+.pad-spot.pad-spot--guide:hover,
+.pad-spot.pad-spot--guide:focus-visible,
+.pad-spot.pad-spot--guide[data-capturing] {
+  opacity: 1;
+}
+
+.pad-binding {
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.pad-binding:hover,
+.pad-binding:focus-visible {
+  outline: none;
+  border-color: var(--hl-rim);
+  background: linear-gradient(90deg, var(--hl-a) 0%, var(--hl-b) 100%);
+}
+
+.pad-binding[data-capturing] {
+  animation: pad-listen 900ms ease-in-out infinite;
 }
 
 } /* @layer components */
