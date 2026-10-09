@@ -136,6 +136,7 @@ export function graphics(state: NativeState): BladeDef {
             name="draw_resolution_scale_x"
             title="Internal resolution"
             options={SCALES}
+            dropdown
             current={scaleX === scaleY ? scaleX : -1}
             onChoose={(value) => {
               setCvar("draw_resolution_scale_x", value);

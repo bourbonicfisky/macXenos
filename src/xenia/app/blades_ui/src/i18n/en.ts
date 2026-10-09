@@ -127,6 +127,19 @@ export const en = {
   "profiles.pictures.toast.ready": "Installed",
   "profiles.pictures.toast.failed": "Gamer pictures failed",
 
+  // --- Controller > Button mapping -------------------------------------------------
+  "controller.map.title": "Button mapping",
+  "controller.map.none": "Connect a controller to remap its buttons.",
+  "controller.map.who": "Player {player}: {name}",
+  "controller.map.hint": "Choose a button on the controller, then press the button you want in its place.",
+  "controller.map.press": "Press the button to use for {button}, or choose it again to stop.",
+  "controller.map.choose": "{button}: remap",
+  "controller.map.listening": "{button}: waiting for a button; choose again to stop",
+  "controller.map.default": "Default",
+  "controller.map.button": "Button {n}",
+  "controller.map.axis": "Axis {n}",
+  "controller.map.reset": "Reset to default",
+
   // --- When a game was played ------------------------------------------------
   "played.today": "Played today",
   "played.yesterday": "Played yesterday",

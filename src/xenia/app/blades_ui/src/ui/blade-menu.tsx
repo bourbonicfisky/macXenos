@@ -72,6 +72,23 @@ export function BladeMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const asideRef = useRef<HTMLDivElement>(null);
+  // The pane stays at the top of the blade while a long list scrolls under
+  // it (sticky), so a game's art and heading are never scrolled away; a pane
+  // longer than the blade's scroll area scrolls on its own, inside it.
+  const [asideHeight, setAsideHeight] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const scroller = asideRef.current?.closest<HTMLElement>(".blade-scroll");
+    if (!scroller) return;
+    const measure = () => {
+      const style = getComputedStyle(scroller);
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      setAsideHeight(Math.max(0, scroller.clientHeight - padding));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
 
   const accordionRef = useRef(false);
   accordionRef.current = accordion;
@@ -425,6 +442,7 @@ export function BladeMenu({
         <div
           ref={asideRef}
           className="menu-aside grid content-start gap-[clamp(10px,1.8dvh,18px)]"
+          style={asideHeight ? { maxHeight: asideHeight } : undefined}
           data-submenu={submenu ? "on" : undefined}
         >
           {featureBlock}

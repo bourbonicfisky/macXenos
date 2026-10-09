@@ -11,6 +11,8 @@ import {
 } from "../ui/settings-controls";
 import { Aside, PaneAction } from "./parts";
 import { rendererShown } from "./visibility";
+import { ControllerMap } from "../ui/controller-map";
+import { t } from "../i18n";
 
 const PLAYERS = ["Player 1", "Player 2", "Player 3", "Player 4"];
 
@@ -88,44 +90,18 @@ function Controllers() {
   );
 }
 
-/** Button remapping for the first connected pad: Rebind, then press. */
+/** Button remapping for the first connected pad, on a drawing of it. */
 function Remap() {
-  const { rebind } = useNative();
-  if (rebind.slot < 0) {
-    return <p className="pad-status m-0">Connect a controller to remap its buttons.</p>;
-  }
   return (
     <>
-      <p className="pad-status m-0">
-        Remapping {PLAYERS[rebind.slot]} &mdash; {rebind.name}
-      </p>
-      {rebind.outputs.map((output) => {
-        const capturing = rebind.capturing === output.output;
-        return (
-          <div key={output.output} className="flex flex-wrap items-center gap-[0.6em]">
-            <span className="min-w-[9em]">{output.label}</span>
-            {capturing ? (
-              <span className="pad-capture">Press a button&hellip;</span>
-            ) : (
-              <span className="pad-status">{output.binding || "Default"}</span>
-            )}
-            <button
-              type="button"
-              className="pref-option rounded-row ml-auto inline-flex min-h-[2em] cursor-pointer items-center px-[0.8em]"
-              onClick={() => send(capturing ? { op: "rebindCancel" } : { op: "rebind", output: output.output })}
-            >
-              {capturing ? "Cancel" : "Rebind"}
-            </button>
-          </div>
-        );
-      })}
+      <ControllerMap />
       <PaneAction
         onSelect={() => {
           send({ op: "rebindReset" });
-          announceSetting("Button mapping", "Default");
+          announceSetting(t("controller.map.title"), t("controller.map.default"));
         }}
       >
-        Reset to default
+        {t("controller.map.reset")}
       </PaneAction>
     </>
   );
@@ -274,10 +250,6 @@ export function controller(_state: NativeState): BladeDef {
         heading: "Button mapping",
         detail: (
           <>
-            <p>
-              Choose Rebind beside a button, then press the button on your
-              controller you want for it.
-            </p>
             <Remap />
           </>
         )

@@ -303,8 +303,14 @@ void EmulatorWindow::OnEmulatorInitialized() {
            ->xam_state()
            ->profile_manager()
            ->GetAccountCount()) {
+#if XE_PLATFORM_MAC
+    // No profile yet: the dashboard opens on Profiles, where one is made
+    // (Create a profile), rather than the old message box.
+    app_context().CallInUIThread([this]() { ShowPreferences("profiles"); });
+#else
     new NoProfileDialog(imgui_drawer_.get(), this);
     disable_hotkeys_ = true;
+#endif
   }
 
   emulator_initialized_ = true;
@@ -746,9 +752,11 @@ bool EmulatorWindow::Initialize() {
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Toggle controller vibration", "",
         std::bind(&EmulatorWindow::ToggleControllerVibration, this)));
+    // The hotkey chart on the Controller blade (the old message box is
+    // gone from the menus).
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Display controller hotkeys", "",
-        std::bind(&EmulatorWindow::DisplayHotKeysConfig, this)));
+        [this]() { ShowPreferences("controller/hotkeys"); }));
     hid_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Controller settings...", "",
         [this]() { ShowPreferences("controller"); }));
@@ -767,6 +775,10 @@ bool EmulatorWindow::Initialize() {
   // Console menu
   auto console_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Console");
   {
+    // The dashboard over the game, as Guide, F6 or ⌘, bring it up.
+    console_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Show or Hide &Dashboard", "",
+        [this]() { TogglePreferences(""); }));
     console_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&Console settings...", "",
         [this]() { ShowPreferences("system"); }));

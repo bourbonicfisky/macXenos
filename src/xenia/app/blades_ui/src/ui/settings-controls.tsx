@@ -91,7 +91,8 @@ export function Options({
   title,
   options,
   onChoose,
-  current
+  current,
+  dropdown = false
 }: {
   name: CvarName;
   /** For the toast and the screen reader: "VSync", "Upscaler". */
@@ -102,6 +103,8 @@ export function Options({
   /** What counts as chosen, when it isn't the stored value as-is (an empty
       upscaler setting means bilinear). */
   current?: CvarValue;
+  /** A drop-down whatever the number of choices. */
+  dropdown?: boolean;
 }) {
   const cvar = useCvar(name);
   if (!cvar) return null;
@@ -113,7 +116,7 @@ export function Options({
     announceSetting(title, option.label);
   };
   // Too many to lay out as sheets: a drop-down.
-  if (options.length > 8 && options.every((o) => typeof o.value !== "boolean")) {
+  if ((dropdown || options.length > 8) && options.every((o) => typeof o.value !== "boolean")) {
     const keyed = options.map((o) => ({ value: String(o.value), label: o.label, option: o }));
     return (
       <Dropdown

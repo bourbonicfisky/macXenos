@@ -60,6 +60,21 @@
   opacity: 0.62;
 }
 
+/* Beside the list (two columns), the pane holds its place at the top of the
+   blade while the list scrolls; one taller than the blade scrolls itself
+   (blade-menu.tsx sets its max-height). */
+@container (min-width: 640px) {
+  .menu-aside {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--b-rim) 60%, transparent) transparent;
+  }
+}
+
 .glyph {
   width: 1.45em;
   height: 1.45em;
@@ -749,10 +764,15 @@ button.tray {
   white-space: nowrap;
 }
 
+/* The Guide button as the 360 drew it: a green orb inside the ring of light,
+   player one's quarter lit; no letter, so it never reads as a face button. */
 .pad-chip--guide {
   padding-inline: 0;
   width: 1.3em;
-  background: radial-gradient(circle at 50% 28%, #a7d1ff 0%, #2f7fe0 52%, #164f9c 100%);
+  background:
+    radial-gradient(circle at 50% 38%, #d8ffbf 0 12%, #6fd04f 30%, #2f7d18 44%, transparent 46%),
+    radial-gradient(circle, #202226 0 50%, transparent 52%),
+    conic-gradient(from -90deg, #a6f070 0 25%, #8a8e96 25% 100%);
   color: #fff;
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
 }
@@ -905,7 +925,7 @@ button.tray {
 }
 
 
-/* The Guide button in the legend: a blue orb at the face buttons' size. */
+/* The Guide button in the legend, at the face buttons' size. */
 .legend-guide {
   width: 1.3em;
   height: 1.3em;
@@ -980,6 +1000,53 @@ button.tray {
     linear-gradient(180deg, var(--hl-gloss) 0%, transparent 60%),
     linear-gradient(90deg, var(--hl-a) 0%, var(--hl-b) 100%);
   transition: width 400ms ease;
+}
+
+/* Button mapping (controller-map.tsx): the pad drawn in the pane, each
+   remappable button a hotspot where it sits, lifting when focused and
+   pulsing while it waits for a press. */
+.pad-map {
+  max-width: 23em;
+  margin: 0.3em auto 0;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.3));
+}
+
+.pad-spot {
+  translate: -50% -50%;
+  cursor: pointer;
+  border: 0;
+  font-size: 0.85em;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.pad-spot.pad-key {
+  width: 1.7em;
+  height: 1.7em;
+}
+
+.pad-spot.pad-spot--small {
+  font-size: 0.68em;
+}
+
+.pad-spot:hover,
+.pad-spot:focus-visible {
+  outline: none;
+  transform: scale(1.18);
+  box-shadow: 0 0 0 2px var(--hl-rim), 0 0 0 4px var(--hl-ring), 0 3px 8px rgba(0, 0, 0, 0.4);
+}
+
+.pad-spot[data-capturing] {
+  animation: pad-listen 900ms ease-in-out infinite;
+}
+
+@keyframes pad-listen {
+  50% {
+    box-shadow: 0 0 0 3px #fff, 0 0 14px 6px rgba(255, 255, 255, 0.7);
+  }
+}
+
+.pad-bindings dt {
+  font-weight: 600;
 }
 
 } /* @layer components */
