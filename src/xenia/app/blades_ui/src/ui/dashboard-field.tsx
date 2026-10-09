@@ -9,14 +9,17 @@ void main() {
 `;
 
 /**
- * The field the blades sit on: brushed grey with slow drifting light, washed by
- * whichever blade is currently open. It shows at the deck's outer edges and
- * between the blade shoulders, so it stays deliberately quiet.
+ * The field the blades sit on: brushed grey, washed by whichever blade is
+ * currently open, with a band of light drifting slowly over it when the
+ * Background preference is Shifting (drift eases to 0 when Still or motion
+ * is reduced). It shows at the deck's outer edges and between the blade
+ * shoulders, so it stays deliberately quiet.
  */
 const fragmentShader = `
 precision mediump float;
 uniform vec2 resolution;
 uniform float time;
+uniform float drift;
 uniform float dark;
 uniform vec3 tone;
 
@@ -57,6 +60,13 @@ void main() {
 
   // Brushed grain running down the sheets.
   col += (hash(vec2(floor(gl_FragCoord.x), 0.0)) - 0.5) * 0.035;
+
+  // Shifting: a soft band of light wanders up and down the sheets, brighter
+  // and dimmer as it goes, slow enough to be felt more than seen.
+  float t = time * 0.06;
+  float band = exp(-pow((uv.y - 0.5 - 0.34 * sin(t)) / 0.28, 2.0));
+  float swell = 0.5 + 0.5 * sin(t * 0.63 + x * 9.0);
+  col += drift * 0.08 * band * swell;
 
   // The open blade tints the metal it sits against.
   float wash = smoothstep(0.34, 0.02, x) * 0.0 + smoothstep(0.18, 0.5, x) * 0.5;
@@ -155,6 +165,7 @@ export function DashboardField() {
 
     const uResolution = gl.getUniformLocation(program, "resolution");
     const uTime = gl.getUniformLocation(program, "time");
+    const uDrift = gl.getUniformLocation(program, "drift");
     const uDark = gl.getUniformLocation(program, "dark");
     const uTone = gl.getUniformLocation(program, "tone");
 
@@ -163,7 +174,7 @@ export function DashboardField() {
     // field every frame.
     const narrow = window.matchMedia("(max-width: 860px)");
     let frame = 0;
-    const eased = { dark: targetRef.current.dark, tone: [...targetRef.current.tone] };
+    const eased = { dark: targetRef.current.dark, tone: [...targetRef.current.tone], drift: 0 };
 
     const resize = () => {
       // A soft gradient needs no detail; half resolution keeps this off the
@@ -181,12 +192,17 @@ export function DashboardField() {
         root.motion === "reduced" || (reduced && root.motionOverride !== "on");
       const k = still ? 1 : 0.06;
       eased.dark += (target.dark - eased.dark) * k;
+      // The light fades in and out over a few seconds when Background
+      // changes, rather than switching.
+      const driftTarget = root.background === "shifting" ? 1 : 0;
+      eased.drift += (driftTarget - eased.drift) * (still ? 1 : 0.02);
       for (let i = 0; i < 3; i += 1) {
         eased.tone[i] += (target.tone[i] - eased.tone[i]) * k;
       }
 
       gl.uniform2f(uResolution, canvas.width, canvas.height);
       gl.uniform1f(uTime, reduced ? 0 : now * 0.001);
+      gl.uniform1f(uDrift, eased.drift);
       gl.uniform1f(uDark, eased.dark);
       gl.uniform3f(uTone, eased.tone[0], eased.tone[1], eased.tone[2]);
       gl.drawArrays(gl.TRIANGLES, 0, 6);

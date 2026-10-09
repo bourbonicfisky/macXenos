@@ -17,10 +17,14 @@ import { AVAILABLE, LOCALES, PSEUDO, setLanguageChoice, t, type LanguageChoice, 
  *           reduce-motion setting (data-motion-override, globals.css)
  *   language  the dashboard's language (i18n/): "system" follows the Mac,
  *           or one of the languages with a translation
+ *   background  "shifting": the open blade's light drifts slowly, as the
+ *           Xbox 360's did; "still" holds it. Reduced motion always holds
+ *           it (data-background, blade.css and dashboard-field.tsx)
  */
 
 export type ThemePref = "system" | "light" | "dark";
 export type MotionPref = "fast" | "slow" | "reduced";
+export type BackgroundPref = "shifting" | "still";
 export type SoundPref = "off" | "on";
 export type VolumePref = "normal" | "soft" | "softer" | "quiet";
 export type OverridePref = "off" | "on";
@@ -36,6 +40,7 @@ export type Preferences = {
   language: LanguageChoice;
   theme: ThemePref;
   motion: MotionPref;
+  background: BackgroundPref;
   sound: SoundPref;
   volume: VolumePref;
   motionOverride: OverridePref;
@@ -46,6 +51,7 @@ export const PREFERENCE_KEYS: Record<keyof Preferences, string> = {
   language: "macxenos-language",
   theme: "macxenos-theme",
   motion: "macxenos-motion",
+  background: "macxenos-background",
   sound: "macxenos-sound",
   volume: "macxenos-volume",
   motionOverride: "macxenos-motion-override",
@@ -56,6 +62,7 @@ const DEFAULTS: Preferences = {
   language: "system",
   theme: "system",
   motion: "fast",
+  background: "shifting",
   sound: "on",
   volume: "soft",
   motionOverride: "off",
@@ -66,6 +73,7 @@ const ALLOWED: { [K in keyof Preferences]: readonly Preferences[K][] } = {
   language: ["system", ...LOCALES.map((locale) => locale.code), PSEUDO],
   theme: ["system", "light", "dark"],
   motion: ["fast", "slow", "reduced"],
+  background: ["shifting", "still"],
   sound: ["off", "on"],
   volume: ["normal", "soft", "softer", "quiet"],
   motionOverride: ["off", "on"],
@@ -108,6 +116,10 @@ export const PREFERENCE_CHOICES: { [K in ChoicePref]: Choice<K>[] } = {
     { value: "slow", label: "pref.motion.slow" },
     { value: "reduced", label: "pref.motion.reduced", short: "pref.motion.reduced.short" }
   ],
+  background: [
+    { value: "shifting", label: "pref.background.shifting" },
+    { value: "still", label: "pref.background.still" }
+  ],
   sound: [
     { value: "off", label: "common.off" },
     { value: "on", label: "common.on" }
@@ -132,6 +144,7 @@ export const PREFERENCE_NAMES: Record<keyof Preferences, MessageKey> = {
   language: "pref.language",
   theme: "pref.theme",
   motion: "pref.motion",
+  background: "pref.background",
   sound: "pref.sound",
   volume: "pref.volume",
   motionOverride: "pref.motionOverride",
@@ -180,6 +193,10 @@ function apply(prefs: Preferences) {
     prefs.theme === "system" ? (systemDark().matches ? "dark" : "light") : prefs.theme;
   root.dataset.motion = prefs.motion;
   root.dataset.motionOverride = prefs.motionOverride;
+  // The background drifts only when motion is allowed to.
+  const reduced =
+    prefs.motion === "reduced" || (systemReducedMotion().matches && prefs.motionOverride !== "on");
+  root.dataset.background = prefs.background === "shifting" && !reduced ? "shifting" : "still";
   setLanguageChoice(prefs.language);
 }
 
@@ -200,6 +217,8 @@ function start() {
   systemDark().addEventListener("change", () => {
     if (current.theme === "system") apply(current);
   });
+  // ...and the background stills or resumes with the OS's reduce-motion.
+  systemReducedMotion().addEventListener("change", () => apply(current));
   // Another tab changed a setting.
   window.addEventListener("storage", (event) => {
     if (event.key && Object.values(PREFERENCE_KEYS).includes(event.key)) {

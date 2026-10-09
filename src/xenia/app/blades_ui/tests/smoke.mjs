@@ -144,6 +144,33 @@ const tests = {
     expect((await page.eval("document.documentElement.lang")) === "en", "lang is not en");
   },
 
+  async "Animation holds speed and background; reduced motion holds the light still"(page, base) {
+    await page.open(base, "#system/motion");
+    const groups = await page.eval(
+      "[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) .pref-group')].map((e) => e.textContent)"
+    );
+    expect(groups.join() === "Speed,Background", `groups ${groups}`);
+    // The harness runs with the OS asking for reduced motion.
+    expect((await page.eval("document.documentElement.dataset.background")) === "still", "light drifts under reduced motion");
+    expect(
+      (await page.eval("document.querySelector('.blade[data-state=open] .menu-detail:not([hidden]) .menu-note')?.textContent")) ===
+        "Held still while motion is reduced.",
+      "no note that the light is held"
+    );
+    // Let the chosen speed win over the OS: the light drifts.
+    await page.eval("localStorage.setItem('macxenos-motion-override', 'on')");
+    await page.open(base, "#system/motion");
+    expect((await page.eval("document.documentElement.dataset.background")) === "shifting", "light does not drift");
+    const animation = await page.eval(
+      "getComputedStyle(document.querySelector('.blade[data-state=open] .blade-skin--panel'), '::before').animationName"
+    );
+    expect(animation === "blade-light-drift", `panel light animation is ${animation}`);
+    // Still holds it.
+    await page.eval("localStorage.setItem('macxenos-background', 'still')");
+    await page.open(base, "#system/motion");
+    expect((await page.eval("document.documentElement.dataset.background")) === "still", "Still does not hold the light");
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

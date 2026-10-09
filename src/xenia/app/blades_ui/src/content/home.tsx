@@ -184,14 +184,6 @@ export function home(state: NativeState): BladeDef {
         </>
       ),
       onSelect: openAllGames
-    },
-    {
-      id: "game-folders",
-      label: t("home.gameFolders"),
-      glyph: "folder",
-      value: <GameFoldersValue />,
-      heading: t("home.gameFolders"),
-      detail: <GameFoldersPane />
     }
   );
 
@@ -208,6 +200,14 @@ export function home(state: NativeState): BladeDef {
         </>
       ),
       onSelect: () => send({ op: "openGame" })
+    },
+    {
+      id: "game-folders",
+      label: t("home.gameFolders"),
+      glyph: "folder",
+      value: <GameFoldersValue />,
+      heading: t("home.gameFolders"),
+      detail: <GameFoldersPane />
     },
     {
       id: "install",

@@ -124,7 +124,15 @@ class Page {
   async open(base, hash = "") {
     await this.call("Page.navigate", { url: "about:blank" });
     await this.call("Page.navigate", { url: `${base}/${hash}` });
-    await waitFor(() => this.eval("!!document.querySelector('.deck .blade')"), "the blades to render", 45000);
+    const rendered = () => this.eval("!!document.querySelector('.deck .blade')");
+    try {
+      await waitFor(rendered, "the blades to render", 30000);
+    } catch {
+      // Vite's first page of a run can stall while it prepares dependencies
+      // and reloads; one more load gets the prepared page.
+      await this.call("Page.navigate", { url: `${base}/${hash}` });
+      await waitFor(rendered, "the blades to render", 60000);
+    }
     await sleep(400);
   }
 

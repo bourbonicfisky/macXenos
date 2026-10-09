@@ -12,6 +12,7 @@ import { downloadDashSounds, packCredit } from "../ui/sound-offer";
 import { Options, Value } from "../ui/settings-controls";
 import { dashboardShortcuts } from "./home";
 import { AVAILABLE, LOCALES, PSEUDO, t, useLanguage } from "../i18n";
+import { getPreferences, usePreferences } from "../ui/preferences";
 
 /** The official website, on About macXenos. */
 const WEBSITE = "https://macxenos.com";
@@ -77,6 +78,21 @@ function SoundDetail() {
   );
 }
 
+/** The Animation pane's Background group: the choice, and why it isn't
+    moving when motion is reduced. */
+function BackgroundDetail() {
+  usePreferences();
+  const held = document.documentElement.dataset.background === "still" && getPreferences().background === "shifting";
+  return (
+    <>
+      <p className="pref-group m-0">{t("pref.background")}</p>
+      <p className="m-0">{t("dashboard.background.detail")}</p>
+      <PreferenceOptions pref="background" />
+      {held ? <Aside>{t("dashboard.background.reduced")}</Aside> : null}
+    </>
+  );
+}
+
 /** The language the dashboard is in now, in its own words. */
 function LanguageValue() {
   const language = useLanguage();
@@ -116,16 +132,19 @@ export function dashboard(state: NativeState): BladeDef {
         )
       },
       {
+        // Speed, and whether the blades' light drifts: one row, two groups.
         id: "motion",
-        label: t("pref.motion"),
+        label: t("dashboard.animation"),
         glyph: "motion",
         value: <PreferenceValue pref="motion" />,
-        heading: t("pref.motion"),
+        heading: t("dashboard.animation"),
         detail: (
           <>
-            <p>{t("dashboard.motion.detail")}</p>
+            <p className="pref-group m-0">{t("dashboard.animation.speed")}</p>
+            <p className="m-0">{t("dashboard.motion.detail")}</p>
             <PreferenceOptions pref="motion" />
             <ReducedMotionOverride />
+            <BackgroundDetail />
           </>
         )
       },

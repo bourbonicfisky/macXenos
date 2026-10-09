@@ -185,6 +185,68 @@
     var(--b-base);
 }
 
+/* Background: Shifting (preferences.ts sets data-background only when motion
+   is allowed). The panel's two blooms move onto a layer half again the
+   panel's size, so at rest they sit exactly where the still panel has them,
+   and drift slowly around that, as the light on the console's blades did.
+   The diagonal sweep and the tone stay put. Brushed metal doesn't drift. */
+:root[data-background="shifting"] .blade[data-state="open"] .blade-skin--panel,
+:root[data-background="shifting"] .subblade:not([data-tone="metal"]) .blade-skin--panel {
+  overflow: hidden;
+  background:
+    linear-gradient(
+      118deg,
+      transparent 34%,
+      color-mix(in srgb, var(--b-hi) 34%, transparent) 48%,
+      transparent 62%
+    ),
+    var(--b-base);
+}
+
+:root[data-background="shifting"] .blade[data-state="open"] .blade-skin--panel::before,
+:root[data-background="shifting"] .subblade:not([data-tone="metal"]) .blade-skin--panel::before {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  background:
+    radial-gradient(
+      41.33% 28% at 32.67% 59.33%,
+      color-mix(in srgb, var(--b-hi) 52%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      33.33% 24% at 70% 42%,
+      color-mix(in srgb, var(--b-hi) 40%, transparent),
+      transparent 72%
+    );
+  animation: blade-light-drift 34s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+/* Wanders a tenth of the panel or so, brightening and dimming as it goes. */
+@keyframes blade-light-drift {
+  0% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  25% {
+    transform: translate(9%, -6%);
+    opacity: 0.7;
+  }
+  55% {
+    transform: translate(-8%, 4%);
+    opacity: 1;
+  }
+  80% {
+    transform: translate(4%, 7%);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(-3%, -4%);
+    opacity: 1;
+  }
+}
+
 .blade {
   /* Pull only on the leading side. On both sides each tab would lose twice the
      overlap from its layout width, and the rail collapses. */
