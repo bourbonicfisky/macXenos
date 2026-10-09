@@ -185,15 +185,21 @@ const tests = {
     expect((await card()) === "Player Two|–|–|–|note", `signed-out card: ${await card()}`);
   },
 
-  async "Gamer pictures offers its download and shows progress"(page, base) {
-    await page.open(base, "#profiles/gamer-pictures");
-    const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
-    expect((await page.eval(`${pane}.textContent`)).includes("about 117 MB"), "pane does not give the size");
+  async "Change gamer picture offers the official library and shows progress"(page, base) {
+    await page.open(base, "#profiles");
+    const rows = await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-row')].map((e) => e.textContent).join('|')");
+    expect(!rows.includes("Gamer pictures"), `Profiles still has a Gamer pictures row: ${rows}`);
     await page.key("Enter");
-    expect((await page.eval("document.activeElement?.textContent")) === "Download gamer pictures", "no Download button");
     await page.key("Enter");
-    expect(await page.eval(`!!${pane}.querySelector('[role=progressbar]')`), "no progress bar while downloading");
-    expect((await page.eval(`${pane}.textContent`)).includes("Downloading: 41 of 117 MB"), "progress text");
+    await page.eval("new Promise((r) => setTimeout(r, 300))");
+    const note = "document.querySelector('.subblade .menu-note')?.textContent ?? ''";
+    const text = await page.eval(note);
+    expect(text.includes("official gamer picture library") && text.includes("archive.org") && text.includes("117 MB"), `note: ${text}`);
+    await page.key("ArrowDown");
+    expect((await page.eval("document.querySelector('.subblade-row[data-focused=true] .subblade-name')?.textContent")) === "More pictures", "no More pictures row");
+    await page.key("Enter");
+    expect(await page.eval("!!document.querySelector('.subblade [role=progressbar]')"), "no progress bar while downloading");
+    expect((await page.eval("document.querySelector('.subblade-row[data-focused=true] .subblade-sub')?.textContent")) === "Downloading: 35%", "row does not show progress");
   },
 
   async "the picture picker sets a profile's gamer picture"(page, base) {

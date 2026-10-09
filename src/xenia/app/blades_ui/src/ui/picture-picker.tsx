@@ -3,7 +3,7 @@ import { send, useNative, type Profile } from "../native";
 import { DEFAULT_PICTURES, defaultPictureUrl } from "../default-pictures";
 import type { BladeTone } from "./blade";
 import { Gamercard } from "./gamercard";
-import { startGamerPicturesDownload } from "./gamer-pictures";
+import { MorePicturesNote, morePicturesValue, startGamerPicturesDownload, useDownloadNotice } from "./gamer-pictures";
 import { closeSubBlade, openSubBlade, SubBlade, useSubBladeOpen } from "./sub-blade";
 import { showToast } from "./toast";
 import { t } from "../i18n";
@@ -65,6 +65,7 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
   const isOpen = useSubBladeOpen("gamer-picture");
   const profile: Profile | undefined = isOpen || target ? profiles.find((p) => p.xuid === target) : undefined;
   const downloaded = useDownloaded(gamerPictures.status === "ready");
+  useDownloadNotice(gamerPictures);
   const collections = useMemo<Collection[]>(
     () => [
       { id: "macxenos", name: t("profiles.picker.macxenos"), pictures: DEFAULT_PICTURES.map(defaultPictureUrl) },
@@ -107,14 +108,7 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
     setOpen(null);
   };
 
-  const moreValue =
-    gamerPictures.status === "downloading"
-      ? t("profiles.picker.more.downloading", {
-          percent: Math.floor((100 * gamerPictures.received) / Math.max(gamerPictures.total, 1))
-        })
-      : gamerPictures.status === "installing"
-        ? t("profiles.picker.more.installing")
-        : t("profiles.picker.more.detail", { size: Math.round(gamerPictures.total / 1_000_000) });
+  const moreValue = morePicturesValue(gamerPictures);
 
   return (
     <SubBlade
@@ -159,6 +153,7 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
               ))}
             </ul>
           ) : (
+            <div className="grid gap-[0.8em]">
             <ul className="subblade-list m-0 grid list-none p-0" aria-label={t("profiles.picker")}>
               {collections.map((collection, index) => (
                 <li key={collection.id} className="subblade-item">
@@ -189,6 +184,8 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
                 </li>
               ) : null}
             </ul>
+            <MorePicturesNote />
+            </div>
           )}
           {/* Pinned while the grid scrolls, at a size its column fits. */}
           {profile ? (

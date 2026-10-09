@@ -570,6 +570,7 @@ void EmulatorWindow::PreferencesButtonListener() {
       if (guide) {
         if (!guide_down) {
           guide_down = true;
+          XELOGI("Controller: Guide pressed");
           // A press while the dashboard is open closes it (the page does);
           // the release must not open it again.
           guide_chord = blades_visible_.load();
@@ -580,6 +581,8 @@ void EmulatorWindow::PreferencesButtonListener() {
       } else if (guide_down) {
         guide_down = false;
         open = !guide_chord;
+        XELOGI("Controller: Guide released ({})",
+               open ? "opening the dashboard" : "not a tap on its own");
       }
     }
     if (open && !blades_visible_.load()) {

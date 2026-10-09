@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react";
 import { send, useNative, type GamerPictures } from "../native";
-import { PaneAction, Aside } from "../content/parts";
+import { Aside } from "../content/parts";
 import { showToast } from "./toast";
 import { t } from "../i18n";
 
 /**
- * The Xbox 360 gamer pictures, offered as a one-time download (Profiles >
- * Gamer pictures): what it is and costs, the download's progress, and what
- * was installed. The app does the work (gamer_pictures_mac.mm).
+ * The Xbox 360's official gamer pictures, offered in Change gamer picture as
+ * a one-time download from the Internet Archive (gamer_pictures_mac.mm does
+ * the work): starting it, its progress, and the explanation under the
+ * picker's collections.
  */
 
 const megabytes = (bytes: number) => Math.round(bytes / 1_000_000);
@@ -17,23 +18,24 @@ export function startGamerPicturesDownload() {
   showToast(t("profiles.pictures"), t("profiles.pictures.started"), { sound: false });
 }
 
-/** The row's value: how many are installed, how far along, or not yet. */
-export function GamerPicturesValue() {
-  const { gamerPictures: pictures } = useNative();
+/** The More pictures row's second line: what A does, or how far along. */
+export function morePicturesValue(pictures: GamerPictures): string {
   switch (pictures.status) {
-    case "ready":
-      return <>{t("profiles.pictures.value.count", { count: pictures.pictures })}</>;
     case "downloading":
-      return <>{`${Math.floor((100 * pictures.received) / Math.max(pictures.total, 1))}%`}</>;
+      return t("profiles.picker.more.downloading", {
+        percent: Math.floor((100 * pictures.received) / Math.max(pictures.total, 1))
+      });
     case "installing":
-      return <>{t("profiles.pictures.value.installing")}</>;
+      return t("profiles.picker.more.installing");
+    case "failed":
+      return t("profiles.picker.more.failed");
     default:
-      return <>{t("profiles.pictures.value.missing")}</>;
+      return t("profiles.picker.more.detail", { size: megabytes(pictures.total) });
   }
 }
 
-/** Toasts once a download finishes, wherever it was started. */
-function useDoneNotice(pictures: GamerPictures) {
+/** Toasts once a download finishes, wherever the picker is. */
+export function useDownloadNotice(pictures: GamerPictures) {
   const last = useRef(pictures.status);
   useEffect(() => {
     const was = last.current;
@@ -46,23 +48,25 @@ function useDoneNotice(pictures: GamerPictures) {
   }, [pictures.status, pictures.error]);
 }
 
-export function GamerPicturesPane() {
+/** Under the picker's collections: where the official library comes from,
+    and the download's progress while it runs. */
+export function MorePicturesNote() {
   const { gamerPictures: pictures } = useNative();
-  useDoneNotice(pictures);
-  const size = megabytes(pictures.total);
+  if (pictures.status === "unavailable") return null;
+  const source = { collection: pictures.collection ?? "", site: pictures.site ?? "" };
+  if (pictures.status === "ready") {
+    return (
+      <Aside>
+        {t("profiles.pictures.installed", { ...source, pictures: pictures.pictures, titles: pictures.titles })}
+      </Aside>
+    );
+  }
   const busy = pictures.status === "downloading" || pictures.status === "installing";
   const fraction = pictures.status === "installing" ? 1 : pictures.received / Math.max(pictures.total, 1);
   return (
-    <>
-      <p className="m-0">
-        {t("profiles.pictures.detail", {
-          collection: pictures.collection ?? "",
-          site: pictures.site ?? ""
-        })}
-      </p>
-      {pictures.status === "ready" ? (
-        <Aside>{t("profiles.pictures.ready", { pictures: pictures.pictures, titles: pictures.titles })}</Aside>
-      ) : busy ? (
+    <div className="grid gap-[0.3em]">
+      <Aside>{t("profiles.pictures.offer", { ...source, size: megabytes(pictures.total) })}</Aside>
+      {busy ? (
         <>
           <div
             className="pref-progress rounded-row"
@@ -76,20 +80,11 @@ export function GamerPicturesPane() {
           <Aside>
             {pictures.status === "installing"
               ? t("profiles.pictures.installing")
-              : t("profiles.pictures.downloading", { done: megabytes(pictures.received), size })}
+              : t("profiles.pictures.downloading", { done: megabytes(pictures.received), size: megabytes(pictures.total) })}
           </Aside>
         </>
-      ) : (
-        <>
-          <Aside>{t("profiles.pictures.size", { size })}</Aside>
-          {pictures.status === "failed" ? (
-            <Aside>{t("profiles.pictures.failed", { error: pictures.error })}</Aside>
-          ) : null}
-          <PaneAction onSelect={startGamerPicturesDownload}>
-            {pictures.status === "failed" ? t("profiles.pictures.retry") : t("profiles.pictures.download")}
-          </PaneAction>
-        </>
-      )}
-    </>
+      ) : null}
+      {pictures.status === "failed" ? <Aside>{t("profiles.pictures.failed", { error: pictures.error })}</Aside> : null}
+    </div>
   );
 }
