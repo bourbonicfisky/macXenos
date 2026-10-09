@@ -726,8 +726,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint64_t pack_ops[4] = {}, pack_tiles[4] = {}, pack_tiles_redundant[4] = {};
     uint64_t pack_ops_all_redundant[4] = {};
     uint64_t materialize_ops[4] = {}, materialize_tiles[4] = {};
+    // reduce-edram-pass-traffic Lever 2 census: canonical resolve clears, the
+    // tiles they cover, how many cover whole tiles (the pre-clear pack was
+    // redundant), and materialized tiles whose canonical content is still an
+    // untouched clear (a load-action clear could replace them).
+    uint64_t clears = 0, clear_tiles = 0, clears_whole_tiles = 0;
+    uint64_t materialize_tiles_from_clear = 0;
     uint64_t frames = 0;
   } pack_census_;
+  // Per EDRAM tile: the latest canonical producer is a resolve clear that no
+  // draw has written since (census only).
+  std::array<uint8_t, xenos::kEdramTileCount> census_clear_tiles_ = {};
   void NotePackCensusFrame() { ++pack_census_.frames; }
  public:
   void NotePackCensusSwap() { ++pack_census_.frames; }

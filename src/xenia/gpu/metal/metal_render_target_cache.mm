@@ -933,6 +933,10 @@ bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
     if (materialize) {
       ++pack_census_.materialize_ops[r];
       pack_census_.materialize_tiles[r] += tiles;
+      for (uint32_t t = operation.start_tiles;
+           t < operation.end_tiles && t < xenos::kEdramTileCount; ++t) {
+        pack_census_.materialize_tiles_from_clear += census_clear_tiles_[t];
+      }
     } else {
       std::vector<uint8_t>& dirty = pack_dirty_tiles_[operation.attachment];
       if (dirty.size() != xenos::kEdramTileCount) {
@@ -1217,6 +1221,12 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     }
     canonical_authority_.MarkAttachment(attachment, mark_start, mark_end,
                                         ++canonical_authority_order_);
+    if (census) {
+      for (uint32_t t = mark_start; t < mark_end && t < xenos::kEdramTileCount;
+           ++t) {
+        census_clear_tiles_[t] = 0;
+      }
+    }
     memo = {attachment, mark_start, mark_end, canonical_authority_.version(),
             true};
   }
@@ -1269,6 +1279,11 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
         double(c.materialize_ops[r]) / frames,
         double(c.materialize_tiles[r]) * tile_mb / frames);
   }
+  out += fmt::format(
+      " | clears={} clear_tiles={} whole_tile_clears={} "
+      "materialize_tiles_from_clear={}",
+      c.clears, c.clear_tiles, c.clears_whole_tiles,
+      c.materialize_tiles_from_clear);
   if (reset) {
     c = PackCensus{};
   }
@@ -4826,6 +4841,25 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
   // cached attachment over the exact (possibly wrapped) resolve rows. Without
   // this, reusing that attachment may skip materialization and expose its
   // pre-clear contents.
+  if (MetalCommandProcessor::PassCensusEnabled()) {
+    ++pack_census_.clears;
+    pack_census_.clear_tiles += uint64_t(row_length_used) * rows;
+    // Whole tiles: the guest rectangle starts and ends on tile edges (80x16
+    // samples; 8 pixel rows per tile with MSAA), so no tile keeps pre-clear
+    // samples and the pre-clear pack moved bytes the clear overwrote.
+    const uint32_t tile_h = msaa_samples ? 8u : 16u;
+    const uint32_t tile_w = msaa_samples >= 2 ? 40u : 80u;
+    if (!(source_x % tile_w) && !(width % tile_w) && !(source_y % tile_h) &&
+        !(height % tile_h)) {
+      ++pack_census_.clears_whole_tiles;
+    }
+    for (uint32_t row = 0; row < rows; ++row) {
+      for (uint32_t i = 0; i < row_length_used; ++i) {
+        census_clear_tiles_[(span_base + row * span_pitch + i) &
+                            (xenos::kEdramTileCount - 1u)] = 1;
+      }
+    }
+  }
   for (uint32_t row = 0; row < rows; ++row) {
     uint32_t start =
         (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
@@ -5995,6 +6029,7 @@ bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
   }
   canonical_authority_.MarkCanonical(0, xenos::kEdramTileCount,
                                      ++canonical_authority_order_);
+  census_clear_tiles_.fill(0);
   return true;
 }
 
