@@ -1473,3 +1473,106 @@ button.tray {
 .subblade[data-side="left"] .blade-legend {
   border-radius: 0 28px 0 0;
 }
+
+/* --- The manila tab -------------------------------------------------------
+   The console's sub-blade edge: a narrow rim (--rim) running the full height
+   along the sheet, and on it a flap the ribbon's full width from about 10%
+   to 78% of the height, rising off the rim and dropping back to it on
+   slanted shoulders, as a folder's tab does. The ring and the player ride
+   the flap. */
+.subblade {
+  --rim: 22px;
+}
+
+.subblade-tab-rim,
+.subblade-tab-flap {
+  width: var(--tab-w);
+}
+
+.subblade[data-side="right"] .subblade-tab-rim,
+.subblade[data-side="right"] .subblade-tab-flap {
+  left: 0;
+}
+
+.subblade[data-side="left"] .subblade-tab-rim,
+.subblade[data-side="left"] .subblade-tab-flap {
+  right: 0;
+}
+
+.subblade-tab-rim {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--b-base) 70%, #000) 0%, color-mix(in srgb, var(--b-lo) 85%, #000) 100%);
+}
+
+.subblade[data-tone="metal"] .subblade-tab-rim {
+  background: linear-gradient(90deg, #8d918a 0%, #c9ccc5 55%, #9a9e97 100%);
+}
+
+/* The flap's shoulders: the outer corner sits lower than the inner one. */
+.subblade[data-side="right"] .subblade-tab-flap {
+  clip-path: polygon(0 13%, 100% 9%, 100% 80%, 0 76%);
+}
+
+.subblade[data-side="left"] .subblade-tab-flap {
+  clip-path: polygon(0 9%, 100% 13%, 100% 76%, 0 80%);
+}
+
+.subblade-tab-flap .subblade-tab-skin {
+  width: auto;
+}
+
+@supports (clip-path: shape(from 0 0, line to 0 0)) {
+  /* The rim: the ribbon's inner edge, and a parallel curve --rim outside it. */
+  .subblade[data-side="right"] .subblade-tab-rim {
+    clip-path: shape(
+      from calc(100% - var(--bow) - var(--rim)) var(--edge-top),
+      curve to calc(100% - var(--bow) - var(--rim)) var(--edge-bot) with
+        calc(100% + var(--bow) / 3 - var(--rim)) var(--edge-c1) / calc(100% + var(--bow) / 3 - var(--rim)) var(--edge-c2),
+      line to calc(100% - var(--bow)) var(--edge-bot),
+      curve to calc(100% - var(--bow)) var(--edge-top) with
+        calc(100% + var(--bow) / 3) var(--edge-c2) / calc(100% + var(--bow) / 3) var(--edge-c1),
+      close
+    );
+  }
+
+  .subblade[data-side="left"] .subblade-tab-rim {
+    clip-path: shape(
+      from var(--bow) var(--edge-top),
+      curve to var(--bow) var(--edge-bot) with
+        calc(0px - var(--bow) / 3) var(--edge-c1) / calc(0px - var(--bow) / 3) var(--edge-c2),
+      line to calc(var(--bow) + var(--rim)) var(--edge-bot),
+      curve to calc(var(--bow) + var(--rim)) var(--edge-top) with
+        calc(var(--rim) - var(--bow) / 3) var(--edge-c2) / calc(var(--rim) - var(--bow) / 3) var(--edge-c1),
+      close
+    );
+  }
+}
+
+/* Narrower than the first cut, closer to the console's proportions. */
+.subblade {
+  --tab-w: clamp(108px, calc(5vw + 40px), 128px);
+  --rim: 18px;
+}
+
+@supports (clip-path: shape(from 0 0, line to 0 0)) {
+  /* The shoulders flow out of the rim and back into it as S-curves rather
+     than straight cuts. */
+  .subblade[data-side="right"] .subblade-tab-flap {
+    clip-path: shape(
+      from 0 14%,
+      curve to 100% 8% with 55% 14% / 45% 8%,
+      line to 100% 80%,
+      curve to 0 74% with 45% 80% / 55% 74%,
+      close
+    );
+  }
+
+  .subblade[data-side="left"] .subblade-tab-flap {
+    clip-path: shape(
+      from 0 8%,
+      curve to 100% 14% with 55% 8% / 45% 14%,
+      line to 100% 74%,
+      curve to 0 80% with 45% 74% / 55% 80%,
+      close
+    );
+  }
+}

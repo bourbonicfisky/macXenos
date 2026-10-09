@@ -326,12 +326,17 @@ export function SubBlade({
             in under its curve, so it is painted after them with its own
             shadow falling across them. */}
         <span className="subblade-shadow subblade-tab-shadow pointer-events-none absolute inset-0" aria-hidden="true">
-          <span className="subblade-tab-skin absolute inset-y-0" />
+          {/* A narrow rim the full height of the screen, and on it a wider
+              flap with slanted shoulders, like a manila folder's tab. */}
+          <span className="subblade-tab-rim absolute inset-y-0" />
+          <span className="subblade-tab-flap absolute inset-y-0">
+            <span className="subblade-tab-skin absolute inset-0" />
+          </span>
         </span>
 
         {/* The sub-blade's own tab, with the signed-in player on it. */}
         <span
-          className="subblade-tab absolute inset-y-0 flex flex-col items-center gap-[7dvh] pt-[9dvh] text-[clamp(1.05rem,3.2dvh,2.1rem)]"
+          className="subblade-tab absolute inset-y-0 flex flex-col items-center gap-[5dvh] pt-[16dvh] text-[clamp(1.05rem,3.2dvh,2.1rem)]"
           aria-hidden="true"
         >
           {/* The guide's ring, lit in player one's quarter. */}
