@@ -985,6 +985,7 @@ button.tray {
    A sub-blade that slides out over the dashboard from the left, as the 360's
    game library did: the blade's tone on a wide panel, its own tab at the
    right edge with the player on it, and the dashboard dimmed behind. */
+
 .subblade-layer {
   --sub-w: min(100%, calc(100% - clamp(110px, 24vw, 460px)));
 }
@@ -996,6 +997,7 @@ button.tray {
 }
 
 /* The dim follows the sheet, in and out, rather than leaving on its own. */
+
 .subblade-dim {
   background: rgba(0, 0, 0, 0.62);
   opacity: 0;
@@ -1017,6 +1019,7 @@ button.tray {
 }
 
 /* From the right (Game Folders): the same sheet, mirrored. */
+
 .subblade[data-side="right"] {
   right: 0;
   transform: translateX(104%);
@@ -1028,6 +1031,7 @@ button.tray {
 
 /* Going back plays the arrival in reverse: the arrival decelerates into
    place, so leaving accelerates away along the mirrored curve. */
+
 .subblade-layer:not([data-entered]) .subblade,
 .subblade-layer:not([data-entered]) .subblade-dim {
   transition-timing-function: cubic-bezier(0.64, 0, 0.78, 0);
@@ -1041,67 +1045,24 @@ button.tray {
   filter: drop-shadow(-12px 0 30px rgba(0, 0, 0, 0.55));
 }
 
-.subblade[data-side="left"] .subblade-skin {
-  left: 0;
-  right: calc(var(--tab-w) - 4px);
-  border-radius: 0 24px 24px 0;
+/* The sheet is plain (no waist) and runs in under its tab to where the
+   ribbon's inner edge starts at the top and bottom, so nothing gaps; the
+   header and legend bars do the same. */
+.subblade .subblade-skin {
+  clip-path: none;
+  border-radius: 0;
 }
 
-.subblade[data-side="right"] .subblade-skin {
-  right: 0;
-  left: calc(var(--tab-w) - 4px);
-  border-radius: 24px 0 0 24px;
-}
-
-.subblade-tab-skin {
-  width: var(--tab-w);
-  --tab-shade: 90deg;
-  background:
-    linear-gradient(var(--tab-shade), color-mix(in srgb, var(--b-lo) 40%, transparent) 0%, transparent 22%),
-    linear-gradient(180deg, var(--b-hi) 0%, var(--b-base) 38%, color-mix(in srgb, var(--b-lo) 50%, var(--b-base)) 100%);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3), inset 1px 0 0 var(--b-rim),
-    inset 0 1px 0 color-mix(in srgb, var(--b-rim) 90%, transparent);
-}
-
-.subblade[data-side="left"] .subblade-tab-skin {
-  right: 0;
-  border-radius: 0 30px 30px 0;
-}
-
-.subblade[data-side="right"] .subblade-tab-skin {
-  left: 0;
-  border-radius: 30px 0 0 30px;
-  --tab-shade: 270deg;
-}
-
+.subblade[data-side="left"] .subblade-skin,
 .subblade[data-side="left"] .subblade-inner {
   left: 0;
-  right: var(--tab-w);
+  right: calc(var(--tab-w) - var(--bow) - 2px);
 }
 
+.subblade[data-side="right"] .subblade-skin,
 .subblade[data-side="right"] .subblade-inner {
-  left: var(--tab-w);
   right: 0;
-}
-
-.subblade[data-side="left"] .subblade-tab {
-  right: 0;
-}
-
-.subblade[data-side="right"] .subblade-tab {
-  left: 0;
-}
-
-.subblade-tab {
-  width: var(--tab-w);
-  color: var(--b-title);
-  text-shadow: var(--b-title-shadow);
-}
-
-.subblade-tab-label {
-  writing-mode: vertical-rl;
-  white-space: nowrap;
-  letter-spacing: 0.02em;
+  left: calc(var(--tab-w) - var(--bow) - 2px);
 }
 
 .subblade-clock {
@@ -1181,6 +1142,7 @@ button.tray {
 }
 
 /* A folder row's Remove, warming once a first A has armed it. */
+
 .subblade-action {
   color: var(--b-ink-soft);
 }
@@ -1195,6 +1157,7 @@ button.tray {
 }
 
 /* The stacked legend: B over A at the right, labels flush to the orbs. */
+
 .legend-stack--right {
   justify-items: end;
 }
@@ -1204,6 +1167,7 @@ button.tray {
    side to side, olive-grey bars for the header and the legend, a pale metal
    tab with the guide's ring and the player on it, plain menu rows on grooves
    lit by a white sheen between two green glow lines, and inset cards. */
+
 .subblade[data-tone="metal"] {
   --b-hi: #e3e5e0;
   --b-base: #b9bcb5;
@@ -1245,24 +1209,9 @@ button.tray {
     linear-gradient(180deg, var(--metal-bar-a) 0%, var(--metal-bar-b) 100%);
 }
 
-.subblade[data-tone="metal"] .subblade-tab-skin {
-  --tab-shade: 90deg;
-  background:
-    linear-gradient(var(--tab-shade), rgba(0, 0, 0, 0.28) 0%, transparent 18%, rgba(255, 255, 255, 0.5) 46%, transparent 70%),
-    linear-gradient(180deg, #e9ebe6 0%, #c3c6bf 50%, #a7aba3 100%);
-}
-
-.subblade[data-side="right"][data-tone="metal"] .subblade-tab-skin {
-  --tab-shade: 270deg;
-}
-
-.subblade[data-tone="metal"] .subblade-tab {
-  color: #2a2c29;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
-}
-
 /* The guide's ring on every sub-blade tab: grey, with player one's quarter
    lit green. */
+
 .subblade-ring {
   width: 1.5em;
   height: 1.5em;
@@ -1287,6 +1236,7 @@ button.tray {
 
 /* The focus: a white sheen brightest in the middle, between two thin green
    glow lines that fade out at their ends. */
+
 .subblade[data-tone="metal"] .menu-row[data-focused="true"] {
   border-color: transparent;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0.92) 48%, rgba(255, 255, 255, 0.3) 100%);
@@ -1313,6 +1263,7 @@ button.tray {
 }
 
 /* Inset cards beside the menu, as the gamercard and bio boxes sat. */
+
 .subblade-card {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.7);
@@ -1341,11 +1292,13 @@ button.tray {
 }
 
 /* A sub-blade's highlight is its focus mark; no outline on top of it. */
+
 .subblade-row:focus-visible {
   outline: none;
 }
 
 /* Metal menu rows sit on grooves: a dark cut with a lit edge under each. */
+
 .subblade[data-tone="metal"] .subblade-item,
 .subblade[data-tone="metal"] .subblade-item + .subblade-item {
   border-top: 0;
@@ -1353,98 +1306,9 @@ button.tray {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
 }
 
-/* --- Sub-blade curve ------------------------------------------------------
-   The sheet itself is plain (no waist): its tab is the curved part. The tab
-   is a ribbon of constant width bowing toward the screen's centre, as the
-   rail tabs do, only deeper, so the outer edge sweeps in at mid-height and
-   the dashboard shows past it. The sheet and its header and legend bars run
-   in under the tab to where the ribbon's inner edge starts, so nothing gaps
-   at the top and bottom. */
-.subblade {
-  --bow: 40px;
-  --bow-ctl: calc(var(--bow) * 4 / 3);
-  /* The ribbon gives up --bow of its box to the curve; the box is that much
-     wider so the ribbon keeps the rail tabs' width. */
-  --tab-w: clamp(124px, calc(6.7vw + 40px), 144px);
-}
-
-.subblade .subblade-skin {
-  clip-path: none;
-}
-
-.subblade[data-side="left"] .subblade-skin {
-  right: calc(var(--tab-w) - var(--bow) - 2px);
-  border-radius: 0;
-}
-
-.subblade[data-side="right"] .subblade-skin {
-  left: calc(var(--tab-w) - var(--bow) - 2px);
-  border-radius: 0;
-}
-
-.subblade[data-side="left"] .subblade-inner {
-  right: calc(var(--tab-w) - var(--bow) - 2px);
-}
-
-.subblade[data-side="right"] .subblade-inner {
-  left: calc(var(--tab-w) - var(--bow) - 2px);
-}
-
-@supports (clip-path: shape(from 0 0, line to 0 0)) {
-  /* From the right, the tab is on the sheet's left: a left-rail ribbon. */
-  .subblade[data-side="right"] .subblade-tab-skin {
-    border-radius: 0;
-    clip-path: shape(
-      from 0 var(--edge-top),
-      curve to 0 var(--edge-bot) with var(--bow-ctl) var(--edge-c1) / var(--bow-ctl) var(--edge-c2),
-      line to calc(100% - var(--bow)) var(--edge-bot),
-      curve to calc(100% - var(--bow)) var(--edge-top) with
-        calc(100% + var(--bow) / 3) var(--edge-c2) / calc(100% + var(--bow) / 3) var(--edge-c1),
-      close
-    );
-  }
-
-  /* From the left, it is on the sheet's right: a right-rail ribbon. */
-  .subblade[data-side="left"] .subblade-tab-skin {
-    border-radius: 0;
-    clip-path: shape(
-      from 100% var(--edge-top),
-      curve to 100% var(--edge-bot) with
-        calc(100% - var(--bow-ctl)) var(--edge-c1) / calc(100% - var(--bow-ctl)) var(--edge-c2),
-      line to var(--bow) var(--edge-bot),
-      curve to var(--bow) var(--edge-top) with
-        calc(0px - var(--bow) / 3) var(--edge-c2) / calc(0px - var(--bow) / 3) var(--edge-c1),
-      close
-    );
-  }
-
-  /* The ring and the name ride the ribbon where it has moved to at their
-     heights (4t(1-t) of --bow; the ring sits near t = 0.15, the name near
-     t = 0.35). */
-  .subblade[data-side="right"] .subblade-tab-ride--ring {
-    transform: translateX(calc(var(--bow) * 0.0));
-  }
-
-  .subblade[data-side="right"] .subblade-tab-ride--label {
-    transform: translateX(calc(var(--bow) * 0.35));
-  }
-
-  .subblade[data-side="left"] .subblade-tab-ride--label {
-    transform: translateX(calc(var(--bow) * -0.35));
-  }
-}
-
-/* The tab's shadow falls inward, across the sheet it lies on. */
-.subblade[data-side="right"] .subblade-tab-shadow {
-  filter: drop-shadow(8px 0 14px rgba(0, 0, 0, 0.35));
-}
-
-.subblade[data-side="left"] .subblade-tab-shadow {
-  filter: drop-shadow(-8px 0 14px rgba(0, 0, 0, 0.35));
-}
-
 /* A subhead in a sub-blade's menu: the blades' section label, standing on
    its own divider. */
+
 .subblade .subblade-section {
   padding-top: 1.3em;
   border-bottom: 1px solid rgba(0, 0, 0, 0.2);
@@ -1458,6 +1322,7 @@ button.tray {
 
 /* The header and legend bars run square into the screen edge; only their
    ends under the tab are rounded. */
+
 .subblade[data-side="right"] .blade-head {
   border-radius: 0 0 0 22px;
 }
@@ -1474,105 +1339,40 @@ button.tray {
   border-radius: 0 28px 0 0;
 }
 
-/* --- The manila tab -------------------------------------------------------
-   The console's sub-blade edge: a narrow rim (--rim) running the full height
-   along the sheet, and on it a flap the ribbon's full width from about 10%
-   to 78% of the height, rising off the rim and dropping back to it on
-   slanted shoulders, as a folder's tab does. The ring and the player ride
-   the flap. */
-.subblade {
-  --rim: 22px;
-}
-
-.subblade-tab-rim,
-.subblade-tab-flap {
+/* The sub-blade's tab (sub-blade.tsx): a .blade wrapper so the blades' tab
+   shapes apply, pinned to the sheet's edge rather than laid out in the deck. */
+.subblade .blade.subblade-tabblade {
+  z-index: 1;
   width: var(--tab-w);
+  margin: 0;
+  transition: none;
 }
 
-.subblade[data-side="right"] .subblade-tab-rim,
-.subblade[data-side="right"] .subblade-tab-flap {
+.subblade[data-side="right"] .subblade-tabblade {
   left: 0;
 }
 
-.subblade[data-side="left"] .subblade-tab-rim,
-.subblade[data-side="left"] .subblade-tab-flap {
+.subblade[data-side="left"] .subblade-tabblade {
   right: 0;
 }
 
-.subblade-tab-rim {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--b-base) 70%, #000) 0%, color-mix(in srgb, var(--b-lo) 85%, #000) 100%);
+/* Outside the deck the skins keep their square ends (the deck sets this for
+   its own). */
+.subblade-tabblade .blade-skin {
+  border-radius: 0;
 }
 
-.subblade[data-tone="metal"] .subblade-tab-rim {
-  background: linear-gradient(90deg, #8d918a 0%, #c9ccc5 55%, #9a9e97 100%);
+/* The ring sits on the highlight above the name, centred on the ribbon
+   where it has bowed to at that height. */
+.subblade-tabblade .subblade-ring {
+  top: 12.5dvh;
+  font-size: clamp(1.05rem, 3.2dvh, 2.1rem);
 }
 
-/* The flap's shoulders: the outer corner sits lower than the inner one. */
-.subblade[data-side="right"] .subblade-tab-flap {
-  clip-path: polygon(0 13%, 100% 9%, 100% 80%, 0 76%);
+.subblade-tabblade[data-side="center"] .subblade-ring {
+  left: calc((var(--tab-w) - var(--bow)) / 2 + var(--bow) * 0.5 - 0.75em);
 }
 
-.subblade[data-side="left"] .subblade-tab-flap {
-  clip-path: polygon(0 9%, 100% 13%, 100% 76%, 0 80%);
-}
-
-.subblade-tab-flap .subblade-tab-skin {
-  width: auto;
-}
-
-@supports (clip-path: shape(from 0 0, line to 0 0)) {
-  /* The rim: the ribbon's inner edge, and a parallel curve --rim outside it. */
-  .subblade[data-side="right"] .subblade-tab-rim {
-    clip-path: shape(
-      from calc(100% - var(--bow) - var(--rim)) var(--edge-top),
-      curve to calc(100% - var(--bow) - var(--rim)) var(--edge-bot) with
-        calc(100% + var(--bow) / 3 - var(--rim)) var(--edge-c1) / calc(100% + var(--bow) / 3 - var(--rim)) var(--edge-c2),
-      line to calc(100% - var(--bow)) var(--edge-bot),
-      curve to calc(100% - var(--bow)) var(--edge-top) with
-        calc(100% + var(--bow) / 3) var(--edge-c2) / calc(100% + var(--bow) / 3) var(--edge-c1),
-      close
-    );
-  }
-
-  .subblade[data-side="left"] .subblade-tab-rim {
-    clip-path: shape(
-      from var(--bow) var(--edge-top),
-      curve to var(--bow) var(--edge-bot) with
-        calc(0px - var(--bow) / 3) var(--edge-c1) / calc(0px - var(--bow) / 3) var(--edge-c2),
-      line to calc(var(--bow) + var(--rim)) var(--edge-bot),
-      curve to calc(var(--bow) + var(--rim)) var(--edge-top) with
-        calc(var(--rim) - var(--bow) / 3) var(--edge-c2) / calc(var(--rim) - var(--bow) / 3) var(--edge-c1),
-      close
-    );
-  }
-}
-
-/* Narrower than the first cut, closer to the console's proportions. */
-.subblade {
-  --tab-w: clamp(108px, calc(5vw + 40px), 128px);
-  --rim: 18px;
-}
-
-@supports (clip-path: shape(from 0 0, line to 0 0)) {
-  /* The shoulders flow out of the rim and back into it as S-curves rather
-     than straight cuts. */
-  .subblade[data-side="right"] .subblade-tab-flap {
-    clip-path: shape(
-      from 0 14%,
-      curve to 100% 8% with 55% 14% / 45% 8%,
-      line to 100% 80%,
-      curve to 0 74% with 45% 80% / 55% 74%,
-      close
-    );
-  }
-
-  .subblade[data-side="left"] .subblade-tab-flap {
-    clip-path: shape(
-      from 0 8%,
-      curve to 100% 14% with 55% 8% / 45% 14%,
-      line to 100% 74%,
-      curve to 0 80% with 45% 74% / 55% 80%,
-      close
-    );
-  }
+.subblade-tabblade[data-side="right"] .subblade-ring {
+  right: calc((var(--tab-w) - var(--bow)) / 2 + var(--bow) * 0.5 - 0.75em);
 }

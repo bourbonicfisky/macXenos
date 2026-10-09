@@ -10,6 +10,7 @@ import { SHOWN_EVENT, useNative } from "../native";
 import type { BladeTone } from "./blade";
 import { isDashboardKey } from "./keys";
 import { LegendStack, type LegendEntry } from "./legend";
+import { TabLabel } from "./tab-label";
 import { playSound } from "./sound";
 
 /**
@@ -322,26 +323,30 @@ export function SubBlade({
           </footer>
         </div>
 
-        {/* The tab lies over the sheet's header and legend bars, which run
-            in under its curve, so it is painted after them with its own
-            shadow falling across them. */}
-        <span className="subblade-shadow subblade-tab-shadow pointer-events-none absolute inset-0" aria-hidden="true">
-          {/* A narrow rim the full height of the screen, and on it a wider
-              flap with slanted shoulders, like a manila folder's tab. */}
-          <span className="subblade-tab-rim absolute inset-y-0" />
-          <span className="subblade-tab-flap absolute inset-y-0">
-            <span className="subblade-tab-skin absolute inset-0" />
-          </span>
-        </span>
-
-        {/* The sub-blade's own tab, with the signed-in player on it. */}
+        {/* The sub-blade's tab is a blade tab: the same ribbon, the same
+            highlight (the folder-tab profile measured off the console) and
+            the same curved label, built from the blades' own parts. It
+            reads as the open blade's tab, mirrored when the sub-blade comes
+            from the left. It lies over the sheet's header and legend bars,
+            which run in under its curve. */}
         <span
-          className="subblade-tab absolute inset-y-0 flex flex-col items-center gap-[5dvh] pt-[16dvh] text-[clamp(1.05rem,3.2dvh,2.1rem)]"
+          className="blade subblade-tabblade absolute inset-y-0"
+          data-state="open"
+          data-side={side === "right" ? "center" : "right"}
+          data-tone={tone === "metal" ? undefined : tone}
           aria-hidden="true"
         >
+          <span className="blade-shadow blade-shadow--tab pointer-events-none absolute inset-0">
+            <span className="blade-skin blade-skin--tab absolute inset-0" />
+            <span className="blade-ribbon absolute inset-0">
+              <span className="blade-skin blade-skin--gloss absolute inset-0" />
+            </span>
+          </span>
           {/* The guide's ring, lit in player one's quarter. */}
-          <span className="subblade-ring subblade-tab-ride--ring" />
-          <span className="subblade-tab-label subblade-tab-ride--label">{player?.gamertag ?? ""}</span>
+          <span className="subblade-ring absolute" />
+          <span className="blade-tab relative flex h-full items-start pt-[21.5dvh] pb-8 text-[clamp(1.05rem,3.2dvh,2.1rem)] font-normal tracking-[0.01em]">
+            <TabLabel id={`sub-${id}`} label={player?.gamertag ?? ""} side={side === "right" ? "center" : "right"} />
+          </span>
         </span>
       </section>
     </div>
