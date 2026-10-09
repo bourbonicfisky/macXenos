@@ -5,11 +5,13 @@ import {
   Check,
   NextLaunchNote,
   Options,
+  ResetGroup,
   Slider,
   Value,
   type Option
 } from "../ui/settings-controls";
 import { Aside } from "./parts";
+import { t } from "../i18n";
 import {
   ConsoleCheck,
   ConsoleLockNote,
@@ -324,6 +326,18 @@ export function graphics(state: NativeState): BladeDef {
           </>
         ) : null}
         <NextLaunchNote
+          names={[
+            "metal_msaa_clear_fold",
+            "metal_stencil_export",
+            "metal_resolve_span_coalesce",
+            "metal_raster_sync_skip",
+            "metal_raster_mark_skip",
+            "metal_fsr_half_precision",
+            "mvk_config_defaults"
+          ]}
+        />
+        <ResetGroup
+          title={t("graphics.switches")}
           names={[
             "metal_msaa_clear_fold",
             "metal_stencil_export",

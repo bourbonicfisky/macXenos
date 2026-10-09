@@ -2755,9 +2755,11 @@ const char* EmulatorWindow::GamerPicturesStatus() {
   }
   if (!gamer_pictures_checked_) {
     gamer_pictures_checked_ = true;
-    if (auto summary = gamer_pictures::Installed(emulator_->storage_root())) {
+    if (auto summary = gamer_pictures::Installed(emulator_->storage_root(),
+                                                 emulator_->content_root())) {
       gamer_pictures_count_ = summary->pictures;
       gamer_pictures_titles_ = summary->titles;
+      gamer_pictures_bytes_ = summary->bytes;
     }
   }
   if (gamer_pictures_count_) {
@@ -2787,12 +2789,32 @@ void EmulatorWindow::DownloadGamerPictures() {
           if (error.empty()) {
             gamer_pictures_count_ = summary.pictures;
             gamer_pictures_titles_ = summary.titles;
+            gamer_pictures_bytes_ = summary.bytes;
           }
           if (blades_overlay_ && blades_model_) {
             blades_overlay_->PushState(blades_model_->BuildStateJson());
           }
         });
       });
+#endif
+}
+
+void EmulatorWindow::RevealGamerPictures() {
+#if XE_PLATFORM_MAC
+  LaunchFileExplorer(gamer_pictures::Folder(emulator_->content_root()));
+#endif
+}
+
+void EmulatorWindow::DeleteGamerPictures() {
+#if XE_PLATFORM_MAC
+  if (gamer_pictures_downloading_) return;
+  gamer_pictures_error_ = gamer_pictures::Remove(emulator_->storage_root(),
+                                                 emulator_->content_root());
+  if (gamer_pictures_error_.empty()) {
+    gamer_pictures_count_ = 0;
+    gamer_pictures_titles_ = 0;
+    gamer_pictures_bytes_ = 0;
+  }
 #endif
 }
 

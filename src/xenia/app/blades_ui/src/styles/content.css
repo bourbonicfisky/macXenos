@@ -201,6 +201,15 @@
   transform: translateY(1px);
 }
 
+/* A pane action with nothing to do yet (Refresh with no folders, Reset when
+   all are default): still reachable, visibly resting. */
+.pane-button[aria-disabled] {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+  transform: none;
+}
+
 /* Step numbers: small round tokens, like the pad's face buttons at rest. */
 .menu-step {
   display: inline-grid;

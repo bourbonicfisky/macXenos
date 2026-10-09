@@ -117,6 +117,16 @@ export const en = {
   "profiles.picker.choose": "Choose",
   "profiles.picker.item": "Picture {index} of {count}",
   "profiles.picker.changed": "Gamer picture changed",
+  "profiles.picker.manage": "Manage pictures",
+  "profiles.picker.manage.size": "Xbox 360 library, {size} MB",
+  "profiles.picker.manage.reveal": "Show in Finder",
+  "profiles.picker.manage.reveal.detail": "The folder the pictures are in",
+  "profiles.picker.manage.delete": "Delete the Xbox 360 library",
+  "profiles.picker.manage.delete.short": "Delete",
+  "profiles.picker.manage.delete.detail": "Frees {size} MB; you can download it again",
+  "profiles.picker.manage.again": "Press A again",
+  "profiles.picker.manage.note": "Deleting removes only the downloaded library. Pictures already chosen for a profile stay, and macXenos’s own pictures are not affected.",
+  "profiles.picker.manage.deleted": "Library deleted",
   "profiles.pictures": "Gamer pictures",
   "profiles.pictures.failed": "The download failed: {error}.",
   "profiles.pictures.offer": "More pictures is the Xbox 360’s official gamer picture library, kept as the {collection} on {site} (archive.org). It downloads once, about {size} MB.",
@@ -126,6 +136,11 @@ export const en = {
   "profiles.pictures.started": "Downloading in the background",
   "profiles.pictures.toast.ready": "Installed",
   "profiles.pictures.toast.failed": "Gamer pictures failed",
+
+  // --- Settings controls -----------------------------------------------------------
+  "settings.resetDefaults": "Reset to defaults",
+  "settings.defaults": "Defaults",
+  "graphics.switches": "Renderer switches",
 
   // --- Controller > Button mapping -------------------------------------------------
   "controller.map.title": "Button mapping",

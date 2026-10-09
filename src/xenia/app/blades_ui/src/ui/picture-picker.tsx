@@ -75,6 +75,9 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
   );
   // The collection open in the grid, or null for the list of collections.
   const [open, setOpen] = useState<number | null>(null);
+  // Managing the downloaded library (Show in Finder, Delete) instead.
+  const [manage, setManage] = useState(false);
+  const [deleteArmed, setDeleteArmed] = useState(false);
   const [lastCollection, setLastCollection] = useState(0);
   const [focus, setFocus] = useState(0);
 
@@ -82,19 +85,46 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
   useEffect(() => {
     if (isOpen) {
       setOpen(null);
+      setManage(false);
       setLastCollection(0);
     }
   }, [isOpen]);
 
-  const offerMore = gamerPictures.status !== "ready" && gamerPictures.status !== "unavailable";
-  const rows = collections.length + (offerMore ? 1 : 0);
+  // A delete that isn't confirmed lapses.
+  useEffect(() => {
+    if (!deleteArmed) return;
+    const timer = window.setTimeout(() => setDeleteArmed(false), 5000);
+    return () => window.clearTimeout(timer);
+  }, [deleteArmed]);
+
+  const installed = gamerPictures.status === "ready";
+  const offerMore = !installed && gamerPictures.status !== "unavailable";
+  const rows = collections.length + (offerMore || installed ? 1 : 0);
   const grid = open !== null ? collections[open] : null;
+  const megabytes = Math.round(gamerPictures.bytes / 1_000_000);
 
   const activate = (index: number) => {
+    if (manage) {
+      if (index === 0) {
+        send({ op: "gamerPicturesReveal" });
+      } else if (!deleteArmed) {
+        setDeleteArmed(true);
+      } else {
+        setDeleteArmed(false);
+        send({ op: "gamerPicturesDelete" });
+        showToast(t("profiles.pictures"), t("profiles.picker.manage.deleted"));
+        setManage(false);
+        setLastCollection(0);
+      }
+      return;
+    }
     if (!grid) {
       if (index < collections.length) {
         setLastCollection(index);
         setOpen(index);
+      } else if (installed) {
+        setLastCollection(index);
+        setManage(true);
       } else if (gamerPictures.status === "missing" || gamerPictures.status === "failed") {
         startGamerPicturesDownload();
       }
@@ -115,29 +145,88 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
       id="gamer-picture"
       side="right"
       tone={tone}
-      title={grid ? grid.name : t("profiles.picker")}
-      count={grid ? grid.pictures.length : rows}
+      title={manage ? t("profiles.picker.manage") : grid ? grid.name : t("profiles.picker")}
+      count={manage ? 2 : grid ? grid.pictures.length : rows}
       grid={grid !== null}
-      resetKey={open}
-      resetFocus={open === null ? lastCollection : Math.max(0, grid?.pictures.indexOf(profile?.picture ?? "") ?? 0)}
-      onFocusChange={setFocus}
+      resetKey={manage ? "manage" : open}
+      resetFocus={
+        manage ? 0 : open === null ? lastCollection : Math.max(0, grid?.pictures.indexOf(profile?.picture ?? "") ?? 0)
+      }
+      onFocusChange={(index) => {
+        setFocus(index);
+        if (index !== 1) setDeleteArmed(false);
+      }}
       onActivate={activate}
       onBack={() => {
+        if (manage) {
+          setManage(false);
+          setDeleteArmed(false);
+          return true;
+        }
         if (open === null) return false;
         setOpen(null);
         return true;
       }}
-      legend={() => ({
+      legend={(at) => ({
         left: [],
         right: [
           { button: "b", label: t("legend.back") },
-          { button: "a", label: grid ? t("profiles.picker.choose") : t("legend.select") }
+          {
+            button: "a",
+            label: manage
+              ? at === 1
+                ? deleteArmed
+                  ? t("legend.confirm")
+                  : t("profiles.picker.manage.delete.short")
+                : t("legend.select")
+              : grid
+                ? t("profiles.picker.choose")
+                : t("legend.select")
+          }
         ]
       })}
     >
       {(rowProps, current) => (
         <div className="grid grid-cols-1 items-start gap-x-[clamp(16px,2.6%,40px)] gap-y-[1em] min-[860px]:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-          {grid ? (
+          {manage ? (
+            <div className="grid gap-[0.8em]">
+              <ul className="subblade-list m-0 grid list-none p-0" aria-label={t("profiles.picker.manage")}>
+                <li className="subblade-item">
+                  <button type="button" {...rowProps(0)}>
+                    <span className="game-icon picture-more" aria-hidden="true">
+                      <span>↗</span>
+                    </span>
+                    <span className="grid min-w-0">
+                      <span className="subblade-name truncate">{t("profiles.picker.manage.reveal")}</span>
+                      <span className="subblade-sub truncate">{t("profiles.picker.manage.reveal.detail")}</span>
+                    </span>
+                    <span />
+                  </button>
+                </li>
+                <li className="subblade-item">
+                  <button type="button" {...rowProps(1)}>
+                    <span className="game-icon picture-more" aria-hidden="true">
+                      <span>×</span>
+                    </span>
+                    <span className="grid min-w-0">
+                      <span className="subblade-name truncate">{t("profiles.picker.manage.delete")}</span>
+                      <span className="subblade-sub truncate">
+                        {t("profiles.picker.manage.delete.detail", { size: megabytes })}
+                      </span>
+                    </span>
+                    {deleteArmed ? (
+                      <span className="subblade-action text-[0.7em]" data-armed>
+                        {t("profiles.picker.manage.again")}
+                      </span>
+                    ) : (
+                      <span />
+                    )}
+                  </button>
+                </li>
+              </ul>
+              <p className="menu-note m-0 text-[0.78em]">{t("profiles.picker.manage.note")}</p>
+            </div>
+          ) : grid ? (
             <ul className="picture-grid m-0 grid list-none p-0" aria-label={grid.name}>
               {grid.pictures.map((picture, index) => (
                 <li key={picture}>
@@ -178,6 +267,21 @@ export function PicturePicker({ tone }: { tone: BladeTone }) {
                     <span className="grid min-w-0">
                       <span className="subblade-name truncate">{t("profiles.picker.more")}</span>
                       <span className="subblade-sub truncate">{moreValue}</span>
+                    </span>
+                    <span />
+                  </button>
+                </li>
+              ) : installed ? (
+                <li className="subblade-item">
+                  <button type="button" {...rowProps(collections.length)}>
+                    <span className="game-icon picture-more" aria-hidden="true">
+                      <span>⋯</span>
+                    </span>
+                    <span className="grid min-w-0">
+                      <span className="subblade-name truncate">{t("profiles.picker.manage")}</span>
+                      <span className="subblade-sub truncate">
+                        {t("profiles.picker.manage.size", { size: megabytes })}
+                      </span>
                     </span>
                     <span />
                   </button>

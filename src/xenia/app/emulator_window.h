@@ -109,6 +109,8 @@ class EmulatorWindow {
   // macOS), and starting its one-time download.
   const char* GamerPicturesStatus();
   void DownloadGamerPictures();
+  void RevealGamerPictures();
+  void DeleteGamerPictures();
   // The user's game folders and what is in them, created (and first scanned)
   // on first use.
   GameLibrary& game_library();
@@ -398,6 +400,7 @@ class EmulatorWindow {
   std::string gamer_pictures_error_;
   uint32_t gamer_pictures_count_ = 0;
   uint32_t gamer_pictures_titles_ = 0;
+  uint64_t gamer_pictures_bytes_ = 0;
   bool gamer_pictures_checked_ = false;
   std::unique_ptr<GameLibrary> game_library_;
   // Why the last download failed; empty when it hasn't.

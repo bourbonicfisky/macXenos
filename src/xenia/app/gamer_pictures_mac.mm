@@ -212,6 +212,7 @@ std::string Install(const std::filesystem::path& zip,
                         std::ios::binary | std::ios::trunc);
       out.write(reinterpret_cast<const char*>(data.data()),
                 std::streamsize(data.size()));
+      summary->bytes += data.size();
       Title& title = titles[title_id];
       if (title.name.empty()) title.name = folder_name;
       title.keys.insert(key);
@@ -271,7 +272,7 @@ std::vector<uint8_t> SmallPicture(const std::vector<uint8_t>& png64) {
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
     CGContextRef context = CGBitmapContextCreate(
         nullptr, 32, 32, 8, 32 * 4, space,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        uint32_t(kCGImageAlphaPremultipliedLast) | uint32_t(kCGBitmapByteOrder32Big));
     CGColorSpaceRelease(space);
     if (!context) return {};
     CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
@@ -288,7 +289,67 @@ std::vector<uint8_t> SmallPicture(const std::vector<uint8_t>& png64) {
   return out;
 }
 
-std::optional<Summary> Installed(const std::filesystem::path& storage_root) {
+std::filesystem::path Folder(const std::filesystem::path& content_root) {
+  return content_root / "0000000000000000" / "FFFE07D1" / "00020000";
+}
+
+namespace {
+// Each picture an install recorded: its file, by title.
+template <typename Visit>
+bool ForEachIndexed(const std::filesystem::path& storage_root,
+                    const std::filesystem::path& content_root, Visit visit) {
+  std::ifstream file(storage_root / kIndexFile);
+  if (!file.is_open()) return false;
+  try {
+    toml::table index = toml::parse(file);
+    if (auto* titles = index["title"].as_array()) {
+      for (const auto& item : *titles) {
+        const toml::table* title = item.as_table();
+        if (!title) continue;
+        const std::string id = (*title)["id"].value_or<std::string>("");
+        if (id.size() != 8) continue;
+        if (auto* pictures = (*title)["pictures"].as_array()) {
+          for (const auto& key : *pictures) {
+            const std::string k = key.value_or<std::string>("");
+            if (k.empty()) continue;
+            visit(id, Folder(content_root) / id / fmt::format("64_{}.png", k));
+          }
+        }
+      }
+    }
+    return true;
+  } catch (const toml::parse_error&) {
+    return false;
+  }
+}
+}  // namespace
+
+std::string Remove(const std::filesystem::path& storage_root,
+                   const std::filesystem::path& content_root) {
+  std::set<std::string> titles;
+  std::error_code ec;
+  size_t removed = 0;
+  const bool read = ForEachIndexed(
+      storage_root, content_root,
+      [&](const std::string& id, const std::filesystem::path& path) {
+        titles.insert(id);
+        if (std::filesystem::remove(path, ec)) ++removed;
+      });
+  if (!read) return "there is no download to delete";
+  // Title folders left empty go too; ones holding awarded pictures stay.
+  for (const auto& id : titles) {
+    const std::filesystem::path folder = Folder(content_root) / id;
+    if (std::filesystem::is_empty(folder, ec)) std::filesystem::remove(folder, ec);
+  }
+  std::filesystem::remove(storage_root / kIndexFile, ec);
+  std::filesystem::remove(storage_root / "gamer_pictures.json", ec);
+  XELOGI("Gamer pictures: deleted {} pictures from {} titles", removed,
+         titles.size());
+  return std::string();
+}
+
+std::optional<Summary> Installed(const std::filesystem::path& storage_root,
+                                 const std::filesystem::path& content_root) {
   std::ifstream file(storage_root / kIndexFile);
   if (!file.is_open()) return std::nullopt;
   try {
@@ -308,6 +369,11 @@ std::optional<Summary> Installed(const std::filesystem::path& storage_root) {
         }
       }
     }
+    ForEachIndexed(storage_root, content_root,
+                   [&](const std::string&, const std::filesystem::path& path) {
+                     const auto size = std::filesystem::file_size(path, ec);
+                     if (!ec) summary.bytes += size;
+                   });
     return summary.titles ? std::optional<Summary>(summary) : std::nullopt;
   } catch (const toml::parse_error&) {
     return std::nullopt;

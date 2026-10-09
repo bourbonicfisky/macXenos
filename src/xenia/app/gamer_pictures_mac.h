@@ -40,14 +40,24 @@ extern const char* const kSite;
 extern const int64_t kDownloadBytes;
 
 struct Summary {
-  uint32_t pictures = 0;  // Distinct gamer pictures (each in two sizes).
+  uint32_t pictures = 0;  // Distinct gamer pictures.
   uint32_t titles = 0;    // Games and other titles they belong to.
+  uint64_t bytes = 0;     // What they take on disk.
 };
 
 // What an earlier install left, from its index. Also writes the index as
 // gamer_pictures.json (titles, names, picture keys) for the page's picker,
 // if an install left only the TOML.
-std::optional<Summary> Installed(const std::filesystem::path& storage_root);
+std::optional<Summary> Installed(const std::filesystem::path& storage_root,
+                                 const std::filesystem::path& content_root);
+
+// The folder the pictures are in (XAM's gamer-picture folder).
+std::filesystem::path Folder(const std::filesystem::path& content_root);
+
+// Deletes what an install put there (only the pictures its index lists, so
+// pictures a game awarded stay) and the index. Empty when done, else why not.
+std::string Remove(const std::filesystem::path& storage_root,
+                   const std::filesystem::path& content_root);
 
 // A PNG's width and height from its header, or 0x0 if it isn't one.
 std::pair<uint32_t, uint32_t> PngSize(const std::vector<uint8_t>& data);

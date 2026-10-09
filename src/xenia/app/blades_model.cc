@@ -1085,6 +1085,8 @@ void BladesModel::WriteApp(StateWriter& w) {
   w.Uint(window_.gamer_pictures_count_);
   w.Key("titles");
   w.Uint(window_.gamer_pictures_titles_);
+  w.Key("bytes");
+  w.Uint64(window_.gamer_pictures_bytes_);
   int64_t received = 0, total = 0;
 #if XE_PLATFORM_MAC
   total = gamer_pictures::kDownloadBytes;
@@ -1475,6 +1477,14 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
 
   if (op == "gamerPicturesDownload") {
     window_.DownloadGamerPictures();
+    return Result::kPush;
+  }
+  if (op == "gamerPicturesReveal") {
+    window_.RevealGamerPictures();
+    return Result::kNone;
+  }
+  if (op == "gamerPicturesDelete") {
+    window_.DeleteGamerPictures();
     return Result::kPush;
   }
 

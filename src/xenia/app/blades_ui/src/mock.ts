@@ -128,6 +128,7 @@ export function mockState(): NativeState {
       error: "",
       pictures: 0,
       titles: 0,
+      bytes: 0,
       received: 0,
       total: 116904804,
       collection: "Xbox 360 Profile Picture Collection",
@@ -158,6 +159,10 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
         ...state,
         profiles: state.profiles.map((p) => (p.xuid === message.xuid ? { ...p, picture: message.picture } : p))
       };
+    case "gamerPicturesDelete":
+      return { ...state, gamerPictures: { ...state.gamerPictures, status: "missing", pictures: 0, titles: 0, bytes: 0 } };
+    case "gamerPicturesReveal":
+      return state;
     case "gamerPicturesDownload":
       return { ...state, gamerPictures: { ...state.gamerPictures, status: "downloading", received: 41_000_000 } };
     case "gameFolderAdd":

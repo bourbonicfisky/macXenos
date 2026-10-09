@@ -123,6 +123,8 @@ export type GamerPictures = {
   /** Installed pictures and the titles they come from (when ready). */
   pictures: number;
   titles: number;
+  /** What the installed pictures take on disk. */
+  bytes: number;
   /** Bytes so far and in all, while downloading; `total` is the size before. */
   received: number;
   total: number;
@@ -191,6 +193,8 @@ export type NativeMessage =
   | { op: "sound"; file: string; gain: number }
   | { op: "dashSounds"; action: "download" | "decline" }
   | { op: "gamerPicturesDownload" }
+  | { op: "gamerPicturesReveal" }
+  | { op: "gamerPicturesDelete" }
   | { op: "profilePicture"; xuid: string; picture: string }
   | { op: "gameFolderAdd" }
   | { op: "gameFolderRemove"; path: string }
@@ -343,7 +347,7 @@ function emptyState(): NativeState {
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
     dashSounds: { status: "unavailable", error: "", asked: true },
-    gamerPictures: { status: "unavailable", error: "", pictures: 0, titles: 0, received: 0, total: 0 },
+    gamerPictures: { status: "unavailable", error: "", pictures: 0, titles: 0, bytes: 0, received: 0, total: 0 },
     systemLanguages: [],
     appVersion: "",
     appBuild: ""

@@ -253,6 +253,32 @@ const tests = {
     expect((await page.eval(value)) === "2x — 1440p", `picked ${await page.eval(value)}`);
   },
 
+  async "Manage pictures shows the folder and deletes the library on a second A"(page, base) {
+    await page.open(base, "#profiles");
+    await page.eval(`import("/src/mock.ts").then(({ mockState }) => {
+      const state = mockState();
+      Object.assign(state.gamerPictures, { status: "ready", pictures: 10964, titles: 313, bytes: 87_300_000 });
+      window.__xeniaReceive(JSON.stringify(state));
+    })`);
+    await page.key("Enter");
+    await page.key("Enter");
+    await page.eval("new Promise((r) => setTimeout(r, 300))");
+    const row = "document.querySelector('.subblade-row[data-focused=true] .subblade-name')?.textContent";
+    await page.key("End");
+    expect((await page.eval(row)) === "Manage pictures", `last row is ${await page.eval(row)}`);
+    await page.key("Enter");
+    expect((await page.eval("document.querySelector('.subblade h2')?.textContent")) === "Manage pictures", "Manage did not open");
+    expect((await page.eval(row)) === "Show in Finder", "first choice is not Show in Finder");
+    await page.key("ArrowDown");
+    await page.key("a");
+    expect((await page.eval("document.querySelector('.subblade-action[data-armed]')?.textContent")) === "Press A again", "first A did not arm");
+    await page.key("a");
+    await page.eval("new Promise((r) => setTimeout(r, 200))");
+    expect((await page.eval("document.querySelector('.subblade h2')?.textContent")) === "Gamer Picture", "did not return to the collections");
+    await page.key("End");
+    expect((await page.eval(row)) === "More pictures", "library still installed after delete");
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

@@ -3,6 +3,7 @@ import { ADJUST_EVENT } from "./blade-menu";
 import { Cvar, CvarName, CvarValue, setCvar, send, useNative } from "../native";
 import { Dropdown } from "./dropdown";
 import { showToast } from "./toast";
+import { t } from "../i18n";
 
 /* ==========================================================================
    The controls a pane offers for one emulator setting. They read the app's
@@ -439,6 +440,30 @@ export function NextLaunchNote({ names }: { names: CvarName[] }) {
 }
 
 /** Puts one setting back to how the app ships. */
+/** Every setting in `names` back to its default: the foot of a pane of
+    switches. Dimmed while all already are. */
+export function ResetGroup({ names, title }: { names: CvarName[]; title: string }) {
+  const { cvars } = useNative();
+  const changed = names.filter((name) => {
+    const cvar = cvars[name];
+    return cvar && !same(cvar.value, cvar.defaultValue);
+  });
+  return (
+    <button
+      type="button"
+      aria-disabled={changed.length === 0 || undefined}
+      className="pane-button rounded-row mt-[0.6em] inline-flex min-h-[2.2em] cursor-pointer items-center justify-self-start px-[0.9em]"
+      onClick={() => {
+        if (!changed.length) return;
+        for (const name of changed) send({ op: "reset", name });
+        announceSetting(title, t("settings.defaults"));
+      }}
+    >
+      {t("settings.resetDefaults")}
+    </button>
+  );
+}
+
 export function ResetButton({ name, title }: { name: CvarName; title: string }) {
   const cvar = useCvar(name);
   if (!cvar || same(cvar.value, cvar.defaultValue)) return null;
