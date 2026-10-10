@@ -1975,9 +1975,18 @@ bool MetalCommandProcessor::SetupContext() {
   // auto-indexed triangle fans. Depends on shared_memory_ (constructed above).
   // A failure leaves primitive_processor_ null and every draw falls back to the
   // inline path (behavior-preserving), including auto fans.
+  {
+    const char* v = std::getenv("XE_METAL_QUAD_CONVERT");
+    convert_auto_quads_ =
+        v ? (v[0] == '1')
+          : ![(__bridge id<MTLDevice>)device supportsFamily:MTLGPUFamilyApple7];
+    XELOGI("MetalCommandProcessor: auto-indexed quad lists via {}",
+           convert_auto_quads_ ? "triangle-list conversion"
+                               : "geometry emulation");
+  }
   primitive_processor_ = std::make_unique<MetalPrimitiveProcessor>(*register_file_, *memory_,
                                                                    trace_writer_, *shared_memory_);
-  if (!primitive_processor_->Initialize()) {
+  if (!primitive_processor_->Initialize(convert_auto_quads_)) {
     XELOGE("MetalCommandProcessor: primitive processor init failed; routing "
            "disabled, all draws stay on the inline path");
     primitive_processor_.reset();
@@ -5302,6 +5311,34 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       xenos::EdramMode::kCopy) {
     return IssueCopy();
   }
+  // Diagnostic (XE_METAL_SKIP_DRAWS=<first>-<last>): drop the geometry draws
+  // with trace draw indices in the range (as XE_METAL_DRAW_TRACE counts), for
+  // bisecting which draw produces a defect in a replayed frame.
+  {
+    static const std::pair<int64_t, int64_t> s_skip_draws = [] {
+      const char* v = std::getenv("XE_METAL_SKIP_DRAWS");
+      if (!v) {
+        return std::pair<int64_t, int64_t>(-1, -2);
+      }
+      char* end;
+      int64_t first = strtoll(v, &end, 10);
+      int64_t last = *end == '-' ? strtoll(end + 1, nullptr, 10) : first;
+      XELOGW("MetalSkipDraws: dropping draws {}..{}", first, last);
+      return std::pair<int64_t, int64_t>(first, last);
+    }();
+    const int64_t draw = int64_t(trace_draw_index_) - 1;
+    if (draw >= s_skip_draws.first && draw <= s_skip_draws.second) {
+      return true;
+    }
+    // XE_METAL_SKIP_PRIM=<xenos primitive type>: drop every draw of one type.
+    static const int s_skip_prim = [] {
+      const char* v = std::getenv("XE_METAL_SKIP_PRIM");
+      return v ? std::atoi(v) : -1;
+    }();
+    if (int(prim_type) == s_skip_prim) {
+      return true;
+    }
+  }
 
 
   // XE_METAL_DRAW_PHASE_TIMING=1: nanoseconds between consecutive milestones
@@ -5493,11 +5530,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // drawn directly; expand them via MSC geometry emulation, which needs a
   // mesh-shader-capable device and a pixel shader for the fragment stage.
   PipelineGeometryShader geometry_type = PipelineGeometryShader::kNone;
+  // Auto-indexed quad lists on convert_auto_quads_ devices are triangle lists
+  // from the shared built-in table instead (routed below).
+  const bool auto_quad_route =
+      convert_auto_quads_ && primitive_processor_ &&
+      IsAutoQuadRoutable(*register_file_, prim_type);
+  const bool dma_quad_route =
+      convert_auto_quads_ && index_buffer_info &&
+      index_buffer_info->guest_base &&
+      IsDmaQuadRoutable(*register_file_, prim_type);
   if (prim_type == xenos::PrimitiveType::kRectangleList) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList) {
     geometry_type = PipelineGeometryShader::kPointList;
-  } else if (prim_type == xenos::PrimitiveType::kQuadList) {
+  } else if (prim_type == xenos::PrimitiveType::kQuadList &&
+             !auto_quad_route && !dma_quad_route) {
     geometry_type = PipelineGeometryShader::kQuadList;
   }
   // A tessellated draw never classifies into geometry emulation (design D5b:
@@ -5534,7 +5581,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // have no MTLPrimitiveType — the IR runtime's patch dispatch owns the
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
-      !auto_line_loop_route && !MapPrimitiveType(prim_type, &mtl_prim)) {
+      !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
+      !MapPrimitiveType(prim_type, &mtl_prim)) {
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "prim-unmappable");
     return true;
@@ -8040,7 +8088,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
-       auto_line_loop_route || fixed_reset_strip_route) &&
+       auto_quad_route || auto_line_loop_route || fixed_reset_strip_route) &&
       IsPp1DrawViewConsistent(
           regs, index_count, index_buffer_info != nullptr,
           index_buffer_info ? index_buffer_info->guest_base : 0,
@@ -8099,6 +8147,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  uint32_t(pp_result.host_vertex_shader_type), pp_result.host_draw_vertex_count,
                  expected_count, pp_result.line_loop_closing_index, expected_closing_index,
                  pp_result.host_primitive_reset_enabled, uint32_t(pp_result.index_buffer_type));
+          assert_always();
+        }
+      } else if (auto_quad_route) {
+        // The shared built-in quad table: (0,1,2),(0,2,3) per quad, 16-bit,
+        // 6 indices per 4 vertices (0 for fewer than 4 -> no-draw below).
+        bool builtin_quad_shape =
+            pp_result.host_primitive_type == xenos::PrimitiveType::kTriangleList &&
+            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
+            !pp_result.host_primitive_reset_enabled &&
+            pp_result.index_buffer_type ==
+                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto &&
+            pp_result.host_draw_vertex_count ==
+                (index_count / 4) * 6;
+        if (builtin_quad_shape) {
+          pp_routed = true;
+        } else {
+          XELOGE("MetalPrimitiveProcessor: routed auto quad list did not "
+                 "produce the kHostBuiltinForAuto shape (host_prim {} vs_type "
+                 "{} count {}/{} reset {} ibt {}); skipping.",
+                 uint32_t(pp_result.host_primitive_type),
+                 uint32_t(pp_result.host_vertex_shader_type),
+                 pp_result.host_draw_vertex_count,
+                 (index_count / 4) * 6,
+                 pp_result.host_primitive_reset_enabled,
+                 uint32_t(pp_result.index_buffer_type));
           assert_always();
         }
       } else if (auto_fan_route) {
@@ -8164,6 +8237,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (auto_line_loop_route && !pp_routed) {
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "line-loop-route");
+    return true;
+  }
+  // Likewise a quad list taken off geometry emulation has no inline path.
+  if (auto_quad_route && !pp_routed) {
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability, "quad-route");
     return true;
   }
   // A degenerate loop is a successful no-draw. Skip before opening an encoder
@@ -10218,12 +10296,47 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
                     index_buffer_info->format, index_buffer_info->endianness);
+    uint32_t host_index_count = index_count;
+    if (dma_quad_route) {
+      // Quad list -> triangle list: (0,1,2),(0,2,3) per quad.
+      const uint32_t quads = index_count / 4;
+      host_index_count = quads * 6;
+      if (!host_index_count) {
+        RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                       "quad-degenerate");
+        return true;
+      }
+      MetalUploadAllocation tri_alloc{};
+      if (!upload_arena_->Allocate(host_index_count * index_size, 16,
+                                   &tri_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "quad-index-alloc");
+        return true;
+      }
+      auto expand = [&](auto* src, auto* dst) {
+        for (uint32_t q = 0; q < quads; ++q) {
+          const auto* v = src + q * 4;
+          auto* o = dst + q * 6;
+          o[0] = v[0]; o[1] = v[1]; o[2] = v[2];
+          o[3] = v[0]; o[4] = v[2]; o[5] = v[3];
+        }
+      };
+      if (index_size == 4) {
+        expand(static_cast<const uint32_t*>(index_alloc.cpu_ptr),
+               static_cast<uint32_t*>(tri_alloc.cpu_ptr));
+      } else {
+        expand(static_cast<const uint16_t*>(index_alloc.cpu_ptr),
+               static_cast<uint16_t*>(tri_alloc.cpu_ptr));
+      }
+      index_alloc = tri_alloc;
+      mtl_prim = MTLPrimitiveTypeTriangle;
+    }
     id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
     MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32
                                               : MTLIndexTypeUInt16;
-    IRRuntimeDrawIndexedPrimitives(encoder, mtl_prim, index_count, index_type,
-                                   index_buffer, index_alloc.offset,
+    IRRuntimeDrawIndexedPrimitives(encoder, mtl_prim, host_index_count,
+                                   index_type, index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
   } else {

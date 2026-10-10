@@ -468,6 +468,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // prerequisite for the MSC geometry-emulation path that expands
   // rectangle/point/quad lists. Set in InitializeDrawResources.
   bool mesh_shader_supported_ = false;
+  // Auto-indexed quad lists become triangle lists through the shared
+  // primitive processor instead of MSC geometry emulation: the mesh-shader
+  // quad expansion streaks Red Dead's foliage on AMD (RX 6900 XT, 2026-10-10).
+  // Default: non-Apple GPUs. XE_METAL_QUAD_CONVERT=1/0 forces it on/off.
+  bool convert_auto_quads_ = false;
 
   // Host tessellation route (implement-metal-host-tessellation task 3.4): the
   // D3D11 reference tessellator + pattern cache, and a reusable host-order

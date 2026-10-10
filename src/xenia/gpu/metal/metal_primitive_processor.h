@@ -233,6 +233,48 @@ inline bool IsAutoFanRoutable(const RegisterFile& regs,
   return true;
 }
 
+// Auto-indexed quad lists, for GPUs where MSC geometry emulation of quads is
+// not used (MetalCommandProcessor::convert_auto_quads_): routed to the shared
+// built-in quad -> triangle-list table. Same exclusions as the fan route.
+inline bool IsAutoQuadRoutable(const RegisterFile& regs,
+                               xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kQuadList) {
+    return false;
+  }
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (prim_type != vgt_draw_initiator.prim_type ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  return true;
+}
+
+// DMA-indexed quad lists on the same devices: the command processor expands
+// the swapped guest indices to a triangle list inline ((0,1,2),(0,2,3) per
+// quad, the shared table's order). Same exclusions as above.
+inline bool IsDmaQuadRoutable(const RegisterFile& regs,
+                              xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kQuadList) {
+    return false;
+  }
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (prim_type != vgt_draw_initiator.prim_type ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  return true;
+}
+
 // PP3-auto routing predicate. Returns true for exactly auto-indexed,
 // restart-disabled, non-tessellated line loops. The shared PrimitiveProcessor
 // converts these to a non-indexed host line strip and reports the synthetic
@@ -319,7 +361,9 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
   }
   // No explicit destructor: ~PrimitiveProcessor already calls ShutdownCommon().
 
-  bool Initialize();
+  // convert_quad_lists: provision the shared quad-list -> triangle-list
+  // built-in table so auto-indexed quad lists can route (IsAutoQuadRoutable).
+  bool Initialize(bool convert_quad_lists = false);
 
   // Copies `byte_count` bytes of the immutable built-in index data starting at
   // `handle` (a shared byte offset, i.e. the ProcessingResult

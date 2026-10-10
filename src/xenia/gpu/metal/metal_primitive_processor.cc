@@ -18,7 +18,7 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
-bool MetalPrimitiveProcessor::Initialize() {
+bool MetalPrimitiveProcessor::Initialize(bool convert_quad_lists) {
   // PP1 configuration (see the class comment):
   //   full_32bit_vertex_indices_supported = true
   //     Metal supports full 32-bit indices; keeps 32-bit guest DMA indices as
@@ -29,7 +29,9 @@ bool MetalPrimitiveProcessor::Initialize() {
   //     PP3-auto activates the shared auto line-loop -> line-strip result. Only
   //     auto-indexed reset-disabled loops are routed by the command processor,
   //     so the DMA kHostConverted path remains unreachable.
-  //   quad_lists supported = true,
+  //   quad_lists supported = !convert_quad_lists (true on Apple GPUs, where
+  //     MSC geometry emulation draws them; false elsewhere provisions the
+  //     shared quad -> triangle-list table for IsAutoQuadRoutable draws),
   //   point_sprites/rectangle_lists native (no VS expansion) = true
   //     None of the routed classes depend on these flags, and the routing
   //     predicates keep expanded classes on the MSC path. PP2-auto's fan table
@@ -49,7 +51,7 @@ bool MetalPrimitiveProcessor::Initialize() {
       /*full_32bit_vertex_indices_supported=*/true,
       /*triangle_fans_supported=*/false,
       /*line_loops_supported=*/false,
-      /*quad_lists_supported=*/true,
+      /*quad_lists_supported=*/!convert_quad_lists,
       /*point_sprites_supported_without_vs_expansion=*/true,
       /*rectangle_lists_supported_without_vs_expansion=*/true,
       /*host_primitive_reset_always_enabled=*/false,
