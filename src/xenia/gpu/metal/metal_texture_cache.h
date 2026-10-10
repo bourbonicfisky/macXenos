@@ -464,6 +464,8 @@ class MetalTextureCache {
   uint32_t untile_total_count_ = 0;
   TraceWriter* trace_writer_ = nullptr;  // not owned; may be null.
   bool bc_supported_ = false;  // Apple Silicon Metal decodes BC1/2/3 in HW.
+  // B5G6R5Unorm and the other packed 16-bit formats (Apple GPU families).
+  bool packed16_supported_ = true;
 
   struct Entry {
     void* texture;  // id<MTLTexture>, retained.

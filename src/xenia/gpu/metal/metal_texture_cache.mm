@@ -85,6 +85,9 @@ struct FormatPlan {
   // DXT3 alpha block alone) 4x4 block, CPU-expanded to R8 (host_format
   // R8Unorm), as Vulkan's texture_load_dxt3a.cs.xesl does.
   bool decode_dxt3a = false;
+  // If true, the untiled 16bpp k_5_6_5 texels are CPU-expanded to RGBA8
+  // (host_format RGBA8Unorm): the fallback where B5G6R5Unorm is unavailable.
+  bool decode_565 = false;
 };
 
 // Shared-table channel replication for host formats narrower than RGBA. The
@@ -102,7 +105,8 @@ FormatPlan ReplicateNarrowHostChannels(FormatPlan plan, uint32_t swizzle) {
   return plan;
 }
 
-FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
+FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
+                         bool packed16_supported) {
   switch (format) {
     case xenos::TextureFormat::k_8_8_8_8:
     // AS_16_16_16_16 (fmt 50): a memory-layout alias of 8888 — same bytes,
@@ -179,6 +183,17 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported) {
       // contract's alpha reads blue, i.e. host R). Engaged by Skate 2
       // (4541087F) boot, 2026-09-18: 300 null serves/frame of an 8x8 fmt-4
       // texture before this plan existed.
+      //
+      // B5G6R5Unorm exists only on Apple GPU families; Intel/AMD Macs abort
+      // on the descriptor (Skate 2 on the RX 6900 XT, 2026-10-10). There the
+      // texels are expanded to RGBA8 on the CPU (decode_565) in guest
+      // channel order, so the host swizzle is the shared table's RGBB.
+      if (!packed16_supported) {
+        FormatPlan plan = {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm};
+        plan.decode_565 = true;
+        return ReplicateNarrowHostChannels(
+            plan, XE_GPU_MAKE_TEXTURE_SWIZZLE(R, G, B, B));
+      }
       return ReplicateNarrowHostChannels(
           {true, false, 2, 1, 1, MTLPixelFormatB5G6R5Unorm, false, false},
           XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R));
@@ -331,12 +346,19 @@ MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
   view_heap_contents_ = [heap contents];
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device_;
   bc_supported_ = [mtl_device supportsBCTextureCompression];
+  // XE_METAL_PACKED16_FALLBACK=1 takes the non-Apple path on Apple GPUs too
+  // (to check the CPU expansion against the native format).
+  packed16_supported_ = [mtl_device supportsFamily:MTLGPUFamilyApple1] &&
+                        !std::getenv("XE_METAL_PACKED16_FALLBACK");
   if (shared_memory_) {
     shared_memory_watch_ = shared_memory_->RegisterGlobalWatch(
         SharedMemoryGlobalWatchCallback, this);
   }
   XELOGI("MetalTextureCache: BC (DXT) texture compression {}",
          bc_supported_ ? "supported" : "UNSUPPORTED (DXT stays gray)");
+  XELOGI("MetalTextureCache: packed 16-bit formats {}",
+         packed16_supported_ ? "supported"
+                             : "unavailable (5:6:5 expanded on the CPU)");
 }
 
 MetalTextureCache::~MetalTextureCache() {
@@ -1467,7 +1489,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
     log_null("dim");
     return 0;
   }
-  FormatPlan plan = PlanForFormat(fetch.format, bc_supported_);
+  FormatPlan plan =
+      PlanForFormat(fetch.format, bc_supported_, packed16_supported_);
   // Diagnostic (XE_METAL_DISABLE_FMT=<n>): serve the null texture for one
   // guest format, to attribute a defect to that format's content.
   static const int s_disable_fmt = [] {
@@ -1485,7 +1508,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
     plan.host_format = plan.host_format_signed;
   }
   if ((is_3d || depth > 1) &&
-      (plan.decode_4444 || plan.decode_r16 || plan.decode_depth_unorm ||
+      (plan.decode_4444 || plan.decode_565 || plan.decode_r16 ||
+       plan.decode_depth_unorm ||
        plan.decode_depth_float || plan.decode_ctx1 || plan.decode_dxt3a)) {
     // The CPU-decoded plans are written per 2D level; no 3D/stacked consumer
     // of them has been measured. Fail closed to the null slot, observably.
@@ -1999,7 +2023,7 @@ uint32_t MetalTextureCache::GetTextureSlot(
     }
     upload_data = decoded.data();
     upload_bytes_per_row = width * 4;
-  } else if (plan.decode_4444 || plan.decode_r16) {
+  } else if (plan.decode_4444 || plan.decode_565 || plan.decode_r16) {
     decoded.resize(size_t(width) * height * 4);
     for (uint32_t y = 0; y < height; ++y) {
       for (uint32_t x = 0; x < width; ++x) {
@@ -2009,6 +2033,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
         if (plan.decode_r16) {
           uint8_t r = uint8_t(v >> 8);  // high byte, unorm
           o[0] = o[1] = o[2] = r;
+          o[3] = 255;
+        } else if (plan.decode_565) {
+          // R5 (bits 0-4) G6 (5-10) B5 (11-15), rounded to the nearest
+          // 8-bit unorm, as the native format's float conversion would be.
+          o[0] = uint8_t((((v >> 0) & 0x1F) * 255 + 15) / 31);
+          o[1] = uint8_t((((v >> 5) & 0x3F) * 255 + 31) / 63);
+          o[2] = uint8_t((((v >> 11) & 0x1F) * 255 + 15) / 31);
           o[3] = 255;
         } else {  // decode_4444
           o[0] = uint8_t(((v >> 0) & 0xF) * 17);
@@ -2097,7 +2128,8 @@ uint32_t MetalTextureCache::GetTextureSlot(
   // and MSC is compiled with IRCompatibilityFlagForceTextureArray, so a plain
   // 2D texture sampled through an array read returns garbage (flat sampling).
   // Cubes likewise must be CUBE ARRAYS (texturecube_array in the MSL).
-  const bool plan_cpu_decoded = plan.decode_4444 || plan.decode_r16 ||
+  const bool plan_cpu_decoded = plan.decode_4444 || plan.decode_565 ||
+                                plan.decode_r16 ||
                                 plan.decode_depth_unorm ||
                                 plan.decode_depth_float || plan.decode_ctx1 ||
                                 plan.decode_dxt3a;
