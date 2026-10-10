@@ -128,7 +128,8 @@ class EmulatorWindow {
   void SetInitializingShaderStorage(bool initializing);
 
   void TakeScreenshot();
-  void ExportScreenshot(const xe::ui::RawImage& image);
+  void ExportScreenshot(const xe::ui::RawImage& image, bool notify = true);
+  void AutoScreenshotLoop();
   void SaveImage(const std::filesystem::path& path,
                  const xe::ui::RawImage& image);
 
@@ -391,6 +392,9 @@ class EmulatorWindow {
   // on its own thread so it works whether or not hotkeys are on.
   std::unique_ptr<xe::threading::Thread> preferences_button_listener_;
   std::atomic<bool> preferences_button_stop_{false};
+  // screenshot_interval.
+  std::unique_ptr<xe::threading::Thread> auto_screenshot_thread_;
+  std::atomic<bool> auto_screenshot_stop_{false};
   std::atomic<bool> blades_visible_{false};
   bool game_frozen_ = false;
   bool dashboard_sounds_downloading_ = false;

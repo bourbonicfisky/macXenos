@@ -186,6 +186,15 @@ DEFINE_int32(recent_titles_entry_amount, 10,
              "title played is kept for the dashboard's All Games list; 0 "
              "keeps none.",
              "General");
+DEFINE_path(screenshot_path, "",
+            "Folder for screenshots (F12 and screenshot_interval). Empty: a "
+            "screenshots folder beside the executable.",
+            "General");
+DEFINE_int32(screenshot_interval, 0,
+             "Seconds between automatic screenshots of the guest output, for "
+             "unattended test runs (no screen-recording permission needed). "
+             "0 = off.",
+             "General");
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
             "causes Xenia to enter fullscreen mode.",
@@ -252,6 +261,10 @@ EmulatorWindow::~EmulatorWindow() {
   if (preferences_button_listener_) {
     preferences_button_stop_ = true;
     xe::threading::Wait(preferences_button_listener_.get(), false);
+  }
+  if (auto_screenshot_thread_) {
+    auto_screenshot_stop_ = true;
+    xe::threading::Wait(auto_screenshot_thread_.get(), false);
   }
   // Notify the ImGui drawer that the immediate drawer is being destroyed.
   ShutdownGraphicsSystemPresenterPainting();
@@ -323,6 +336,11 @@ void EmulatorWindow::OnEmulatorInitialized() {
     preferences_button_listener_->set_name("Preferences Button Listener");
   }
 #endif
+  if (cvars::screenshot_interval > 0 && !auto_screenshot_thread_) {
+    auto_screenshot_thread_ =
+        threading::Thread::Create({}, [this] { AutoScreenshotLoop(); });
+    auto_screenshot_thread_->set_name("Auto Screenshot");
+  }
   // Set the initial lifecycle item enable-state now that the menu is live.
   UpdateLifecycleMenuState();
   // When the user can see that the emulator isn't initializing anymore (the
@@ -1090,7 +1108,32 @@ void EmulatorWindow::TakeScreenshot() {
   ExportScreenshot(image);
 }
 
-void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image) {
+// screenshot_interval: captures the guest output on the UI thread every
+// interval, silently (no notification), once a title is running.
+void EmulatorWindow::AutoScreenshotLoop() {
+  const auto interval = std::chrono::seconds(cvars::screenshot_interval);
+  auto next = std::chrono::steady_clock::now() + interval;
+  while (!auto_screenshot_stop_.load()) {
+    xe::threading::Sleep(std::chrono::milliseconds(100));
+    if (std::chrono::steady_clock::now() < next) {
+      continue;
+    }
+    next += interval;
+    if (!emulator_->title_id()) {
+      continue;
+    }
+    app_context().CallInUIThread([this]() {
+      ui::Presenter* presenter = GetGraphicsSystemPresenter();
+      xe::ui::RawImage image;
+      if (presenter && presenter->CaptureGuestOutput(image)) {
+        ExportScreenshot(image, /*notify=*/false);
+      }
+    });
+  }
+}
+
+void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image,
+                                      bool notify) {
   auto t = std::time(nullptr);
 
   // The format is: Year-Month-DayTHours-Minutes-Seconds based off ISO 8601
@@ -1110,7 +1153,10 @@ void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image) {
   // Find where xenia.exe or xenia_canary.exe is located and create a
   // screenshots folder
   auto screenshot_path =
-      (xe::filesystem::GetExecutableFolder() / "screenshots" / title_id);
+      (cvars::screenshot_path.empty()
+           ? xe::filesystem::GetExecutableFolder() / "screenshots"
+           : cvars::screenshot_path) /
+      title_id;
 
   if (!std::filesystem::exists(screenshot_path)) {
     std::filesystem::create_directories(screenshot_path);
@@ -1118,6 +1164,11 @@ void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image) {
 
   std::string filename = fmt::format("{} - {}.png", title_id, datetime);
   SaveImage(screenshot_path / filename, image);
+  if (!notify) {
+    XELOGI("Screenshot saved: {}",
+           xe::path_to_utf8(screenshot_path / filename));
+    return;
+  }
 
   const std::string notification_text =
       fmt::format("Screenshot saved: {}", filename);
