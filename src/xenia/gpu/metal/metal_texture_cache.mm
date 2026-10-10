@@ -2007,29 +2007,17 @@ uint32_t MetalTextureCache::GetTextureSlot(
       }
     }
   }
-  std::vector<uint8_t> decoded;
-  if (plan.decode_depth_unorm || plan.decode_depth_float) {
-    // k_24_8 / k_24_8_FLOAT: one float per texel, the shared load-shader rule.
-    decoded.resize(size_t(width) * height * 4);
+  // The 16bpp CPU expansions (4:4:4:4, 5:6:5, k_16) to RGBA8, from one
+  // untiled level/face in `src` (blocks_w texels per row) into `out`.
+  const bool plan_decode16 =
+      plan.decode_4444 || plan.decode_565 || plan.decode_r16;
+  auto decode16 = [&](const uint8_t* src, std::vector<uint8_t>& out) {
+    out.resize(size_t(width) * height * 4);
     for (uint32_t y = 0; y < height; ++y) {
       for (uint32_t x = 0; x < width; ++x) {
         size_t si = (size_t(y) * blocks_w + x) * bpb;
-        uint32_t word;
-        std::memcpy(&word, &linear[si], sizeof(word));
-        float f = plan.decode_depth_unorm ? DecodeDepthUnormTexel(word)
-                                          : DecodeDepthFloatTexel(word);
-        std::memcpy(&decoded[(size_t(y) * width + x) * 4], &f, sizeof(f));
-      }
-    }
-    upload_data = decoded.data();
-    upload_bytes_per_row = width * 4;
-  } else if (plan.decode_4444 || plan.decode_565 || plan.decode_r16) {
-    decoded.resize(size_t(width) * height * 4);
-    for (uint32_t y = 0; y < height; ++y) {
-      for (uint32_t x = 0; x < width; ++x) {
-        size_t si = (size_t(y) * blocks_w + x) * bpb;
-        uint16_t v = uint16_t(linear[si] | (linear[si + 1] << 8));
-        uint8_t* o = &decoded[(size_t(y) * width + x) * 4];
+        uint16_t v = uint16_t(src[si] | (src[si + 1] << 8));
+        uint8_t* o = &out[(size_t(y) * width + x) * 4];
         if (plan.decode_r16) {
           uint8_t r = uint8_t(v >> 8);  // high byte, unorm
           o[0] = o[1] = o[2] = r;
@@ -2049,6 +2037,25 @@ uint32_t MetalTextureCache::GetTextureSlot(
         }
       }
     }
+  };
+  std::vector<uint8_t> decoded;
+  if (plan.decode_depth_unorm || plan.decode_depth_float) {
+    // k_24_8 / k_24_8_FLOAT: one float per texel, the shared load-shader rule.
+    decoded.resize(size_t(width) * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        size_t si = (size_t(y) * blocks_w + x) * bpb;
+        uint32_t word;
+        std::memcpy(&word, &linear[si], sizeof(word));
+        float f = plan.decode_depth_unorm ? DecodeDepthUnormTexel(word)
+                                          : DecodeDepthFloatTexel(word);
+        std::memcpy(&decoded[(size_t(y) * width + x) * 4], &f, sizeof(f));
+      }
+    }
+    upload_data = decoded.data();
+    upload_bytes_per_row = width * 4;
+  } else if (plan_decode16) {
+    decode16(linear.data(), decoded);
     upload_data = decoded.data();
     upload_bytes_per_row = width * 4;
   } else if (plan.decode_ctx1) {
@@ -2133,7 +2140,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
                                 plan.decode_depth_unorm ||
                                 plan.decode_depth_float || plan.decode_ctx1 ||
                                 plan.decode_dxt3a;
-  if (is_cube && (width != height || plan_cpu_decoded)) {
+  // The 16bpp expansions decode each cube face below; the other CPU decodes
+  // have no cube consumer and stay refused.
+  if (is_cube && (width != height || (plan_cpu_decoded && !plan_decode16))) {
     log_null("cube-shape");
     return 0;
   }
@@ -2314,10 +2323,15 @@ uint32_t MetalTextureCache::GetTextureSlot(
           }
         }
       }
+      const uint8_t* face_data = linear.data();
+      if (plan_decode16) {
+        decode16(linear.data(), decoded);
+        face_data = decoded.data();
+      }
       [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
                  mipmapLevel:0
                        slice:face
-                   withBytes:linear.data()
+                   withBytes:face_data
                  bytesPerRow:upload_bytes_per_row
                bytesPerImage:0];
     }
