@@ -9,6 +9,8 @@
 
 #include "xenia/base/clock.h"
 
+#include <cstdlib>
+
 #include <mutex>
 
 #include "xenia/base/assert.h"
@@ -46,6 +48,9 @@ std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
 
 // Native guest ticks.
 uint64_t last_guest_tick_count_ = 0;
+// Guest-tick remainder (in units of 1/guest_tick_ratio_.second) carried
+// between updates, so converting many small host deltas loses no time.
+uint64_t guest_tick_remainder_ = 0;
 // Last sampled host tick count.
 uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 
@@ -73,6 +78,7 @@ void RecomputeGuestTickScalar() {
 
   std::lock_guard<tick_mutex_type> lock(tick_mutex_);
   guest_tick_ratio_ = frac;
+  guest_tick_remainder_ = 0;
 }
 
 // Update the guest timer for all threads.
@@ -87,14 +93,32 @@ uint64_t UpdateGuestClock() {
 
   std::unique_lock<tick_mutex_type> lock(tick_mutex_, std::defer_lock);
   if (lock.try_lock()) {
-    // Translate host tick count to guest tick count.
-    uint64_t host_tick_delta = host_tick_count > last_host_tick_count_
-                                   ? host_tick_count - last_host_tick_count_
-                                   : 0;
-    last_host_tick_count_ = host_tick_count;
-    uint64_t guest_tick_delta =
-        host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
-    last_guest_tick_count_ += guest_tick_delta;
+    // Translate host tick count to guest tick count. The fractional guest tick
+    // of each update is carried, not truncated: with a ratio such as 25/12
+    // (50 MHz guest, 24 MHz mach_absolute_time) every call used to drop up to
+    // 11/12 of a tick, and a title polling the counter a million times a
+    // second ran its clock (and the vblank deadline built on it) ~1.6% slow.
+    // A thread holding an older host sample must not move the anchor back
+    // either. XE_CLOCK_TRUNCATE_LEGACY=1 restores the old arithmetic.
+    static const bool s_legacy =
+        std::getenv("XE_CLOCK_TRUNCATE_LEGACY") != nullptr;
+    if (s_legacy) {
+      uint64_t host_tick_delta = host_tick_count > last_host_tick_count_
+                                     ? host_tick_count - last_host_tick_count_
+                                     : 0;
+      last_host_tick_count_ = host_tick_count;
+      last_guest_tick_count_ +=
+          host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
+      return last_guest_tick_count_;
+    }
+    if (host_tick_count > last_host_tick_count_) {
+      const uint64_t scaled =
+          (host_tick_count - last_host_tick_count_) * guest_tick_ratio_.first +
+          guest_tick_remainder_;
+      last_guest_tick_count_ += scaled / guest_tick_ratio_.second;
+      guest_tick_remainder_ = scaled % guest_tick_ratio_.second;
+      last_host_tick_count_ = host_tick_count;
+    }
     return last_guest_tick_count_;
   } else {
     // Wait until another thread has finished updating the clock.
