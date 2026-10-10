@@ -83,7 +83,7 @@ bool SDLAudioDriver::Initialize() {
     sdl_device_id_ = SDL_OpenAudioDevice(nullptr, 0, &desired_spec,
                                          &obtained_spec, allowed_change);
     if (sdl_device_id_ <= 0) {
-      XELOGE("SDL_OpenAudioDevice() failed.");
+      XELOGE("SDL_OpenAudioDevice() failed: {}", SDL_GetError());
       return false;
     }
     if (obtained_spec.channels == 2 || obtained_spec.channels == 6) {

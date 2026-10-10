@@ -10,7 +10,9 @@
 #include "xenia/apu/sdl/sdl_audio_system.h"
 
 #include "xenia/apu/apu_flags.h"
+#include "xenia/apu/nop/nop_audio_driver.h"
 #include "xenia/apu/sdl/sdl_audio_driver.h"
+#include "xenia/base/logging.h"
 
 namespace xe {
 namespace apu {
@@ -32,12 +34,22 @@ X_STATUS SDLAudioSystem::CreateDriver(size_t index,
                                       AudioDriver** out_driver) {
   assert_not_null(out_driver);
   auto driver = std::make_unique<SDLAudioDriver>(semaphore);
-  if (!driver->Initialize()) {
-    driver->Shutdown();
+  if (driver->Initialize()) {
+    *out_driver = driver.release();
+    return X_STATUS_SUCCESS;
+  }
+  driver->Shutdown();
+  // No host audio device (SDL_OpenAudioDevice failed): register a silent,
+  // paced driver instead. A failed registration crashed Viva Pinata, which
+  // dereferences the client it never got (Mac Pro, 2026-10-10).
+  auto silent = std::make_unique<nop::NopAudioDriver>(semaphore);
+  if (!silent->Initialize()) {
+    silent->Shutdown();
     return X_STATUS_UNSUCCESSFUL;
   }
-
-  *out_driver = driver.release();
+  XELOGW("SDLAudioSystem: no audio device for client {}; running silent",
+         index);
+  *out_driver = silent.release();
   return X_STATUS_SUCCESS;
 }
 
@@ -50,10 +62,9 @@ AudioDriver* SDLAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
 
 void SDLAudioSystem::DestroyDriver(AudioDriver* driver) {
   assert_not_null(driver);
-  auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver);
-  assert_not_null(sdldriver);
-  sdldriver->Shutdown();
-  delete sdldriver;
+  // The silent fallback (CreateDriver) is an AudioDriver of another type.
+  driver->Shutdown();
+  delete driver;
 }
 
 }  // namespace sdl
