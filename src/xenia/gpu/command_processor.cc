@@ -1255,6 +1255,35 @@ void CommandProcessor::LogRegisterSets(uint32_t base_register_index,
 #endif
 }
 
+namespace {
+// Gamma census (XE_GAMMA_CENSUS=1, default off): the guest's display-LUT
+// programming, so the Xenos PWL contract can be audited across titles
+// (docs/metal_pwl_gamma_audit.md section 7): every distinct value written to
+// DC_LUT_RW_MODE, DC_LUTA_CONTROL and the black/white offsets, and a summary of
+// each completed 256-entry or PWL table.
+bool GammaCensusEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_GAMMA_CENSUS");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return enabled;
+}
+void GammaCensusNoteRegister(uint32_t index, uint32_t value) {
+  static uint32_t last[0x1937 - 0x1921];
+  static bool seen[0x1937 - 0x1921];
+  static uint32_t logs = 0;
+  const uint32_t slot = index - 0x1921;
+  if (seen[slot] && last[slot] == value) {
+    return;
+  }
+  seen[slot] = true;
+  last[slot] = value;
+  if (logs++ < 256) {
+    XELOGI("GammaCensus reg {:04X} = {:08X}", index, value);
+  }
+}
+}  // namespace
+
 void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
                                                   uint32_t value) {
   RegisterFile& regs = *register_file_;
@@ -1359,6 +1388,32 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
         if (write_gamma_ramp_component) {
           OnGammaRampPWLValueWritten();
         }
+        if (GammaCensusEnabled() && gamma_ramp_rw_component_ == 0 &&
+            gamma_ramp_rw_index_pwl == 127) {
+          // A full 128-entry PWL table was written: are the channels the same?
+          uint32_t differ_gr = 0, differ_br = 0;
+          for (uint32_t i = 0; i < 128; ++i) {
+            const auto& e = gamma_ramp_pwl_rgb_[i];
+            differ_gr += (e[1].base != e[0].base || e[1].delta != e[0].delta);
+            differ_br += (e[2].base != e[0].base || e[2].delta != e[0].delta);
+          }
+          static uint32_t pwl_logs = 0;
+          if (pwl_logs++ < 32) {
+            const auto* t = gamma_ramp_pwl_rgb_;
+            XELOGI("GammaCensus PWL table: control={:08X} rw_mode={:08X} "
+                   "wmask={:X} entries G!=R {} B!=R {} | R[0]={:04X}+{:04X} "
+                   "R[64]={:04X}+{:04X} R[127]={:04X}+{:04X} G[64]={:04X}+{:04X} "
+                   "B[64]={:04X}+{:04X}",
+                   regs[XE_GPU_REG_DC_LUTA_CONTROL],
+                   regs[XE_GPU_REG_DC_LUT_RW_MODE],
+                   regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK], differ_gr, differ_br,
+                   uint32_t(t[0][0].base), uint32_t(t[0][0].delta),
+                   uint32_t(t[64][0].base), uint32_t(t[64][0].delta),
+                   uint32_t(t[127][0].base), uint32_t(t[127][0].delta),
+                   uint32_t(t[64][1].base), uint32_t(t[64][1].delta),
+                   uint32_t(t[64][2].base), uint32_t(t[64][2].delta));
+          }
+        }
       } break;
 
       case XE_GPU_REG_DC_LUT_30_COLOR: {
@@ -1432,6 +1487,16 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
       uint32_t& word = register_file_->values[index];
       word = s_force_bool.one ? (word | s_force_bool.mask)
                               : (word & ~s_force_bool.mask);
+    }
+
+    if (XE_UNLIKELY(index - XE_GPU_REG_DC_LUT_RW_MODE <=
+                    XE_GPU_REG_DC_LUTA_WHITE_OFFSET_RED -
+                        XE_GPU_REG_DC_LUT_RW_MODE) &&
+        index != XE_GPU_REG_DC_LUT_PWL_DATA &&
+        index != XE_GPU_REG_DC_LUT_SEQ_COLOR &&
+        index != XE_GPU_REG_DC_LUT_30_COLOR &&
+        index != XE_GPU_REG_DC_LUT_RW_INDEX && GammaCensusEnabled()) {
+      GammaCensusNoteRegister(index, value);
     }
 
     // quick pre-test
