@@ -11,6 +11,7 @@
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
+#include "xenia/gpu/metal/metal_pwl_gamma.h"
 #include "xenia/gpu/metal/metal_present_convert_shader.h"
 #include "xenia/gpu/metal/metal_present_swizzle_shader.h"
 #include "xenia/gpu/metal/metal_fetch_constant_type.h"
@@ -186,6 +187,12 @@ DEFINE_bool(
 // experimental also adopt the promoted default; a value a user set on purpose
 // is still preserved.
 UPDATE_from_bool(metal_guest_gamma_ramp, 2026, 7, 29, 14, false);
+DEFINE_bool(
+    metal_pwl_gamma, true,
+    "Apply the guest's piecewise-linear gamma ramp when DC_LUTA_CONTROL selects "
+    "it (value 3, an 8-step increment over a 10-bit input; Halo 3). false "
+    "presents those titles without a ramp, the pre-2026-10-10 behavior.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -12298,6 +12305,83 @@ void MetalCommandProcessor::OnGammaRampPWLValueWritten() {
   ++gamma_pwl_writes_;
 }
 
+bool MetalCommandProcessor::PwlGammaSelected() {
+  if (!cvars::metal_pwl_gamma) {
+    return false;
+  }
+  const uint32_t control = (*register_file_)[XE_GPU_REG_DC_LUTA_CONTROL];
+  if (control == kPwlGammaControlIncrement3) {
+    return true;
+  }
+  if (control) {
+    // Never observed (docs/metal_pwl_gamma_audit.md): present through the
+    // 256-entry table rather than guess the field layout.
+    static bool s_logged = false;
+    if (!s_logged) {
+      s_logged = true;
+      XELOGW("MetalPwlGamma: DC_LUTA_CONTROL {:08X} is not the observed "
+             "increment-3 PWL encoding; using the 256-entry table",
+             control);
+    }
+  }
+  return false;
+}
+
+void* MetalCommandProcessor::PwlRampBufferForSwap(void* device_opaque) {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_opaque;
+  void*& slot = pwl_ramp_ring_[swap_count_ % kGammaRampRing];
+  if (!slot) {
+    id<MTLBuffer> buf =
+        [device newBufferWithLength:kPwlGammaTableBytes
+                            options:MTLResourceStorageModeShared];
+    if (!buf) {
+      return nullptr;
+    }
+    buf.label = @"cp:gamma-pwl";
+    slot = (__bridge_retained void*)buf;
+  }
+  id<MTLBuffer> buf = (__bridge id<MTLBuffer>)slot;
+  // A ring slot is reused only after the swaps that could read it retired.
+  std::memcpy(buf.contents, gamma_ramp_pwl_rgb(), kPwlGammaTableBytes);
+  return slot;
+}
+
+void* MetalCommandProcessor::PwlGammaPipeline(void* device_opaque,
+                                              uint64_t pixel_format,
+                                              bool array) {
+  void*& slot = array ? pwl_pipeline_array_ : pwl_pipeline_2d_;
+  if (slot) {
+    id<MTLRenderPipelineState> ps = (__bridge id<MTLRenderPipelineState>)slot;
+    (void)ps;
+    return slot;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_opaque;
+  NSError* err = nil;
+  id<MTLLibrary> lib =
+      [device newLibraryWithSource:kMetalPwlGammaShader
+                           options:MetalPwlGammaCompileOptions()
+                             error:&err];
+  if (!lib) {
+    XELOGE("MetalPwlGamma: library failed: {}",
+           err ? err.localizedDescription.UTF8String : "unknown");
+    return nullptr;
+  }
+  MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+  d.vertexFunction = [lib newFunctionWithName:@"xe_pwl_vs"];
+  d.fragmentFunction =
+      [lib newFunctionWithName:array ? @"xe_pwl_fs_array" : @"xe_pwl_fs_2d"];
+  d.colorAttachments[0].pixelFormat = MTLPixelFormat(pixel_format);
+  id<MTLRenderPipelineState> ps =
+      [device newRenderPipelineStateWithDescriptor:d error:&err];
+  if (!ps) {
+    XELOGE("MetalPwlGamma: pipeline failed: {}",
+           err ? err.localizedDescription.UTF8String : "unknown");
+    return nullptr;
+  }
+  slot = (__bridge_retained void*)ps;
+  return slot;
+}
+
 // Guest gamma-state census — implement-metal-pwl-gamma-ramp task 1.5, and the
 // instrument that would LIFT that change's NO-GO. Bounded: logs only when the
 // structured signature below changes.
@@ -16327,6 +16411,19 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       }
       const bool use_convert =
           cvars::metal_present_format_convert && s_convert_pipeline;
+      // The guest's PWL ramp, applied in the same pass so the 10-bit index
+      // comes from the full-precision source (metal_pwl_gamma.h).
+      void* pwl_pipeline = nullptr;
+      void* pwl_buffer = nullptr;
+      if (use_convert && cvars::metal_guest_gamma_ramp && PwlGammaSelected() &&
+          source_rt.textureType == MTLTextureType2DArray) {
+        pwl_pipeline =
+            PwlGammaPipeline((__bridge void*)mailbox.device,
+                             uint64_t(mailbox.pixelFormat), /*array=*/true);
+        pwl_buffer = pwl_pipeline
+                         ? PwlRampBufferForSwap((__bridge void*)mailbox.device)
+                         : nullptr;
+      }
       if (s_gray_pipeline || use_convert) {
         MTLRenderPassDescriptor* pass =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -16336,9 +16433,18 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
         id<MTLRenderCommandEncoder> enc =
             [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
-        [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
-                                        use_convert ? s_convert_pipeline
-                                                    : s_gray_pipeline)];
+        if (pwl_pipeline && pwl_buffer) {
+          [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                          pwl_pipeline];
+          [enc setFragmentBuffer:(__bridge id<MTLBuffer>)pwl_buffer
+                          offset:0
+                         atIndex:0];
+          ++pwl_gamma_applications_;
+        } else {
+          [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
+                                          use_convert ? s_convert_pipeline
+                                                      : s_gray_pipeline)];
+        }
         [enc setFragmentTexture:source_rt atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
@@ -16484,9 +16590,27 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           pass.colorAttachments[0].storeAction = MTLStoreActionStore;
           id<MTLRenderCommandEncoder> enc =
               [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
-          [enc setRenderPipelineState:ramp_pipeline];
+          void* pwl_pipeline =
+              PwlGammaSelected()
+                  ? PwlGammaPipeline((__bridge void*)gamma_device,
+                                     uint64_t(mailbox.pixelFormat),
+                                     /*array=*/false)
+                  : nullptr;
+          void* pwl_buffer =
+              pwl_pipeline ? PwlRampBufferForSwap((__bridge void*)gamma_device)
+                           : nullptr;
+          if (pwl_pipeline && pwl_buffer) {
+            [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                            pwl_pipeline];
+            [enc setFragmentBuffer:(__bridge id<MTLBuffer>)pwl_buffer
+                            offset:0
+                           atIndex:0];
+            ++pwl_gamma_applications_;
+          } else {
+            [enc setRenderPipelineState:ramp_pipeline];
+            [enc setFragmentBuffer:ramp_buffer offset:0 atIndex:0];
+          }
           [enc setFragmentTexture:pre_ramp atIndex:0];
-          [enc setFragmentBuffer:ramp_buffer offset:0 atIndex:0];
           [enc drawPrimitives:MTLPrimitiveTypeTriangle
                   vertexStart:0
                   vertexCount:3];

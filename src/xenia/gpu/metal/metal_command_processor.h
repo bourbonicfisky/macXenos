@@ -693,6 +693,19 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t frame_lifetime_submissions_[kFrameLifetimeRing] = {};
   static constexpr uint32_t kGammaRampRing = 9;  // > max in-flight (8)
   void* gamma_ramp_ring_[kGammaRampRing] = {};
+  // PWL guest gamma (metal_pwl_gamma.h): a per-swap ring of 128x3-dword
+  // tables and the pipelines for one-slice-array and 2D sources.
+  void* pwl_ramp_ring_[kGammaRampRing] = {};
+  void* pwl_pipeline_array_ = nullptr;  // id<MTLRenderPipelineState>
+  void* pwl_pipeline_2d_ = nullptr;     // id<MTLRenderPipelineState>
+  uint64_t pwl_gamma_applications_ = 0;
+  // True when the guest selected the PWL ramp this swap (metal_pwl_gamma.h).
+  bool PwlGammaSelected();
+  // This swap's PWL table (id<MTLBuffer>), filled from the guest registers.
+  void* PwlRampBufferForSwap(void* device);
+  // id<MTLRenderPipelineState> drawing into `pixel_format` from an array or
+  // 2D source; nullptr if it cannot be created.
+  void* PwlGammaPipeline(void* device, uint64_t pixel_format, bool array);
   // Frame command buffers committed (each = commit + waitUntilCompleted);
   // per-frame average logged by MetalFrameStats at IssueSwap.
   uint32_t frame_commit_count_ = 0;
