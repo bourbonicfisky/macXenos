@@ -9,6 +9,11 @@
 
 #include "xenia/kernel/xthread.h"
 
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/thread_switch.h>
+#endif
+
 #if !XE_PLATFORM_WIN32
 #include <pthread.h>
 #include <signal.h>
@@ -128,6 +133,17 @@ DEFINE_int64(
     "yields, a runaway Sleep(0) spinner instead sleeps this many microseconds so "
     "the dispatcher gets the core. 0 disables (pure sched_yield, pre-fix "
     "behavior). 250 is the validated value; tune via 100/250/500.",
+    "Kernel");
+
+DEFINE_bool(
+    macos_spin0_depress, true,
+    "macOS-only: the Sleep(0) backoff gives the core away with a "
+    "priority-depressing thread_switch (any runnable thread runs first, and "
+    "the spinner resumes at once when none is waiting) instead of sleeping "
+    "macos_spin0_backoff_us. A fixed sleep wakes a guest frame limiter that "
+    "polls the performance counter between Sleep(0)s up to one slice late, "
+    "and limiters that restart from the late time (Ultra Street Fighter IV) "
+    "drift below 60 fps. false restores the sleep.",
     "Kernel");
 
 #if XE_PLATFORM_MAC
@@ -1239,6 +1255,13 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
           spin0_last_ms = now_ms;
           if (++spin0_run <= kSpin0YieldBurst) {
             xe::threading::MaybeYield();
+            NoteYield();
+          } else if (cvars::macos_spin0_depress) {
+            // Depress this thread's priority for up to 1 ms and switch: the
+            // starved dispatcher (or any other runnable thread) gets the core,
+            // and with nothing waiting the spinner continues immediately, as
+            // Sleep(0) does on the console.
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
             NoteYield();
           } else {
             xe::threading::NanoSleep(backoff_us * 1000);
