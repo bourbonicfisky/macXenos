@@ -202,6 +202,25 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       uint32_t dest_y_offset, float exp_bias_scale,
       uint32_t dest_x_offset = 0);
   struct CanonicalScatterDest;
+  // Direct colour resolve (reduce-edram-pass-traffic Lever 4, default on;
+  // XE_METAL_DIRECT_COLOR_RESOLVE=0 rolls back): between Begin
+  // returning true and End, the colour ResolveCanonicalToSnapshot and
+  // ResolveCanonicalColorToBuffer read the open 32bpp colour attachment
+  // instead of canonical EDRAM, and the caller skips
+  // PrepareCanonicalEdramForResolve. Begin succeeds only when that attachment
+  // (same base, pitch, format and MSAA as the resolve; not a raw-view format;
+  // no draw scale) holds the newest value of every tile of the span and
+  // contains every pixel the resolve's samples read; the tracker is left
+  // untouched.
+  bool BeginDirectColorResolve(uint32_t base_tiles, uint32_t pitch_tiles,
+                               uint32_t msaa_samples, uint32_t format,
+                               bool is_64bpp, uint32_t span_base,
+                               uint32_t span_row_length, uint32_t span_rows,
+                               uint32_t span_pitch, uint32_t source_x,
+                               uint32_t source_y, uint32_t width,
+                               uint32_t height, uint32_t sample_select,
+                               const void* snapshot);
+  void EndDirectColorResolve() { direct_color_source_ = nullptr; }
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
@@ -241,6 +260,22 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       uint32_t msaa_samples, bool is_depth, bool is_64bpp,
       uint32_t source_x, uint32_t source_y, uint32_t width, uint32_t height,
       uint32_t clear_lo, uint32_t clear_hi);
+
+  // Colour resolve clear drawn straight into the attachment that holds the
+  // newest value of every span tile, which stays the authority: no pack, no
+  // canonical clear, no materialize before the next draw. Returns false (the
+  // caller falls back to PerformCanonicalResolveClear) when no single
+  // non-raw-view attachment with the surface's exact key holds every tile,
+  // the span wraps, or the rectangle leaves the texture.
+  // Default on (reduce-edram-pass-traffic Lever 2);
+  // XE_METAL_ATTACHMENT_CLEAR=0 rolls back.
+  bool PerformAttachmentColorResolveClear(
+      const void* command_buffer, uint32_t span_base,
+      uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
+      uint32_t base_tiles, uint32_t surface_pitch_tiles,
+      uint32_t msaa_samples, bool is_64bpp, uint32_t source_x,
+      uint32_t source_y, uint32_t width, uint32_t height, uint32_t clear_lo,
+      uint32_t clear_hi);
 
   // Resolve CLEAR: writes the guest clear value into every render target
   // owning the span's tiles (fullscreen draw, in-shader tile-range discard).
@@ -732,6 +767,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // untouched clear (a load-action clear could replace them).
     uint64_t clears = 0, clear_tiles = 0, clears_whole_tiles = 0;
     uint64_t materialize_tiles_from_clear = 0;
+    // Resolve clears drawn into the attachment instead (Lever 2).
+    uint64_t attachment_clears = 0;
     uint64_t frames = 0;
   } pack_census_;
   // Per EDRAM tile: the latest canonical producer is a resolve clear that no
@@ -772,10 +809,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   std::unordered_map<uint64_t, void*>
       canonical_color_msaa_materialize_pipelines_;
   std::unordered_map<uint64_t, void*> canonical_resolve_pipelines_;
+  // Lever 2 attachment clear PSOs keyed by host pixel format and samples.
+  std::unordered_map<uint64_t, void*> attachment_clear_pipelines_;
   void* canonical_depth_raw_resolve_pipeline_ = nullptr;
   // XE_METAL_SNAPSHOT_COMPUTE: compute twins of the snapshot resolve passes.
   void* canonical_color_snapshot_cs_pipeline_ = nullptr;
   void* canonical_depth_snapshot_cs_pipeline_ = nullptr;
+  // Direct colour resolve: the source attachment and texture while a scope
+  // is open, and the 1x / multisample kernels.
+  void* direct_color_source_ = nullptr;   // MetalRenderTarget*
+  void* direct_color_texture_ = nullptr;  // id<MTLTexture>, unretained
+  bool direct_color_ms_ = false;
+  uint32_t direct_color_rt_format_ = 0;
+  void* direct_color_cs_pipelines_[2] = {};
+  void* direct_color_packed_pipelines_[2] = {};
   void* canonical_color_packed_resolve_pipeline_ = nullptr;
   void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;

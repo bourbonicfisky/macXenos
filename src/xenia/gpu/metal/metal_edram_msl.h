@@ -1172,6 +1172,28 @@ inline float4 xe_resolve_read_color(device const uint* canonical,
   uint word = idx < p.surface.words ? canonical[idx] : 0u;
   return xe_unpack_color32(word, p.color_format);
 }
+inline float4 xe_resolve_color_finish(float4 value,
+                                      constant CanonicalResolveParams& p) {
+  value *= p.exp_bias_scale;
+  if (p.dest_swap == 0u) {
+    return value;
+  }
+  if (p.dest_red_only != 0u) {
+    // The resolve red-only packing path selects blue on swap only when the
+    // source format actually stores a blue component. R/RG sources retain R.
+    if (p.color_format == 0u || p.color_format == 2u ||
+        p.color_format == 3u || p.color_format == 5u ||
+        p.color_format == 7u) {
+      value.r = value.b;
+    } else if (p.color_format == 15u) {
+      // Swapped 64bpp red-only resolves advance to the second stored dword;
+      // for 32_32_FLOAT that is the G component.
+      value.r = value.g;
+    }
+    return value;
+  }
+  return value.bgra;
+}
 inline float4 xe_resolve_color_value(device const uint* canonical,
                                      constant CanonicalResolveParams& p,
                                      uint2 source) {
@@ -1203,25 +1225,7 @@ inline float4 xe_resolve_color_value(device const uint* canonical,
       value = xe_resolve_read_color(canonical, p, source, 0u);
       break;
   }
-  value *= p.exp_bias_scale;
-  if (p.dest_swap == 0u) {
-    return value;
-  }
-  if (p.dest_red_only != 0u) {
-    // The resolve red-only packing path selects blue on swap only when the
-    // source format actually stores a blue component. R/RG sources retain R.
-    if (p.color_format == 0u || p.color_format == 2u ||
-        p.color_format == 3u || p.color_format == 5u ||
-        p.color_format == 7u) {
-      value.r = value.b;
-    } else if (p.color_format == 15u) {
-      // Swapped 64bpp red-only resolves advance to the second stored dword;
-      // for 32_32_FLOAT that is the G component.
-      value.r = value.g;
-    }
-    return value;
-  }
-  return value.bgra;
+  return xe_resolve_color_finish(value, p);
 }
 
 // Guest resolve destination packing. Keep these switches in lockstep with
@@ -1359,18 +1363,8 @@ inline uint xe_tiled2d_offset(uint x, uint y, uint pitch_aligned,
   return xe_tiled_combine(outer_inner_bytes, bank, pipe, y & 1u);
 }
 
-inline uint4 xe_resolve_read_raw(device const uint* canonical,
-                                 constant CanonicalResolveParams& p,
-                                 uint2 source) {
-  uint sample = min(p.sample_select, 3u);
-  uint idx = xe_edram_offset_bytes(
-                 source.x, source.y, p.surface.base, p.surface.pitch,
-                 p.surface.msaa, 0u, p.surface.fmt_log2, sample) >> 2u;
-  idx %= p.surface.words;
-  uint4 value = uint4(canonical[idx], 0u, 0u, 0u);
-  if (p.surface.fmt_log2 != 0u) {
-    value.y = canonical[(idx + 1u) % p.surface.words];
-  }
+inline uint4 xe_resolve_raw_swap(uint4 value,
+                                 constant CanonicalResolveParams& p) {
   if (p.dest_swap != 0u) {
     if (p.surface.fmt_log2 == 0u) {
       if (p.color_format == 0u) {
@@ -1389,43 +1383,35 @@ inline uint4 xe_resolve_read_raw(device const uint* canonical,
   }
   return value;
 }
+inline uint4 xe_resolve_read_raw(device const uint* canonical,
+                                 constant CanonicalResolveParams& p,
+                                 uint2 source) {
+  uint sample = min(p.sample_select, 3u);
+  uint idx = xe_edram_offset_bytes(
+                 source.x, source.y, p.surface.base, p.surface.pitch,
+                 p.surface.msaa, 0u, p.surface.fmt_log2, sample) >> 2u;
+  idx %= p.surface.words;
+  uint4 value = uint4(canonical[idx], 0u, 0u, 0u);
+  if (p.surface.fmt_log2 != 0u) {
+    value.y = canonical[(idx + 1u) % p.surface.words];
+  }
+  return xe_resolve_raw_swap(value, p);
+}
 
-kernel void resolve_canonical_color_packed(
-    device const uint* canonical [[buffer(0)]],
-    device uchar* destination [[buffer(1)]],
-    constant CanonicalResolveParams& p [[buffer(2)]],
-    uint2 gid [[thread_position_in_grid]]) {
-  if (gid.x >= p.width || gid.y >= p.height) return;
-  // Guest memory takes the representative host pixel of each guest pixel.
-  uint2 source =
-      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
-  uint byte_offset = (gid.y * p.width + gid.x) << p.dest_bpp_log2;
-  if (p.scatter_enable != 0u) {
-    // Same texel, guest tiled address. Mirrors the CPU scatter exactly: the
-    // destination offsets are added before tiling, the bpp comes from
-    // dest_bpp_log2, and an out-of-extent texel is DROPPED rather than
-    // clamped (writing it would corrupt a neighbouring guest allocation).
-    uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,
-                                 p.dest_offset_y + gid.y,
-                                 p.dest_pitch_aligned, p.dest_bpp_log2);
-    uint bpp = 1u << p.dest_bpp_log2;
-    if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {
-      return;
-    }
-    byte_offset = p.dest_base + off;
+inline void xe_resolve_store_raw(device uchar* destination, uint byte_offset,
+                                 uint4 raw,
+                                 constant CanonicalResolveParams& p) {
+  if (p.dest_bpp_log2 == 2u) {
+    *reinterpret_cast<device uint*>(destination + byte_offset) =
+        xe_resolve_endian32(raw.x, p.dest_endian);
+  } else {
+    *reinterpret_cast<device uint2*>(destination + byte_offset) =
+        xe_resolve_endian64(raw.xy, p.dest_endian);
   }
-  if (p.raw_copy != 0u) {
-    uint4 raw = xe_resolve_read_raw(canonical, p, source);
-    if (p.dest_bpp_log2 == 2u) {
-      *reinterpret_cast<device uint*>(destination + byte_offset) =
-          xe_resolve_endian32(raw.x, p.dest_endian);
-    } else {
-      *reinterpret_cast<device uint2*>(destination + byte_offset) =
-          xe_resolve_endian64(raw.xy, p.dest_endian);
-    }
-    return;
-  }
-  float4 value = xe_resolve_color_value(canonical, p, source);
+}
+inline void xe_resolve_store_value(device uchar* destination,
+                                   uint byte_offset, float4 value,
+                                   constant CanonicalResolveParams& p) {
   switch (p.dest_bpp_log2) {
     case 0u:
       destination[byte_offset] = uchar(saturate(value.r) * 255.0 + 0.5);
@@ -1451,6 +1437,38 @@ kernel void resolve_canonical_color_packed(
           xe_resolve_endian128(as_type<uint4>(value), p.dest_endian);
       break;
   }
+}
+kernel void resolve_canonical_color_packed(
+    device const uint* canonical [[buffer(0)]],
+    device uchar* destination [[buffer(1)]],
+    constant CanonicalResolveParams& p [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= p.width || gid.y >= p.height) return;
+  // Guest memory takes the representative host pixel of each guest pixel.
+  uint2 source =
+      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
+  uint byte_offset = (gid.y * p.width + gid.x) << p.dest_bpp_log2;
+  if (p.scatter_enable != 0u) {
+    // Same texel, guest tiled address. Mirrors the CPU scatter exactly: the
+    // destination offsets are added before tiling, the bpp comes from
+    // dest_bpp_log2, and an out-of-extent texel is DROPPED rather than
+    // clamped (writing it would corrupt a neighbouring guest allocation).
+    uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,
+                                 p.dest_offset_y + gid.y,
+                                 p.dest_pitch_aligned, p.dest_bpp_log2);
+    uint bpp = 1u << p.dest_bpp_log2;
+    if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {
+      return;
+    }
+    byte_offset = p.dest_base + off;
+  }
+  if (p.raw_copy != 0u) {
+    xe_resolve_store_raw(destination, byte_offset,
+                         xe_resolve_read_raw(canonical, p, source), p);
+    return;
+  }
+  xe_resolve_store_value(destination, byte_offset,
+                         xe_resolve_color_value(canonical, p, source), p);
 }
 // The snapshot is at the draw resolution scale: each of its host pixels copies
 // the same host pixel of the source block (dest/source/width/height are guest
@@ -1575,6 +1593,139 @@ kernel void resolve_canonical_depth_raw(
   }
   destination[gid.y * p.width + gid.x] = word;
 }
+#define XE_COMMA ,
+// Direct colour resolves (XE_METAL_DIRECT_COLOR_RESOLVE): the canonical
+// colour resolve kernels with the canonical word replaced by the word the pack
+// would have written from the open 32bpp attachment. The canonical slot of a
+// resolve read (pixel, sample) is inverted to the attachment's (pixel, guest
+// sample) exactly as xe_edram_offset_bytes forms it (MSAA shift, then the
+// sample's x/y sub-offset), and the guest sample to the host one with
+// xe_metal_sample_to_guest (its own inverse). The caller proves the attachment
+// holds the newest value of every tile, shares the resolve's base and pitch,
+// and contains every pixel read (no ring wrap, no draw scale).
+inline uint2 xe_direct_slot(constant CanonicalResolveParams& p, uint2 pixel,
+                            uint sample, thread uint& guest_sample) {
+  uint2 shifts = xe_edram_msaa_shifts(p.surface.msaa);
+  uint2 s = (pixel << shifts) + ((uint2(sample, sample) >> uint2(1u, 0u)) & 1u);
+  uint2 low = s & ((uint2(1u) << shifts) - 1u);
+  guest_sample = (low.x << 1u) | low.y;
+  return s >> shifts;
+}
+inline uint xe_direct_word_1x(texture2d<float, access::read> t,
+                              constant CanonicalResolveParams& p,
+                              uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color32_working(t.read(px), rt_format);
+}
+inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
+                              constant CanonicalResolveParams& p,
+                              uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color32_working(
+      t.read(px, xe_metal_sample_to_guest(p.surface.msaa, guest_sample)),
+      rt_format);
+}
+#define XE_DIRECT_COLOR_KERNELS(SUFFIX, TEX_T)                                 \
+  inline float4 xe_direct_read_color_##SUFFIX(                                 \
+      TEX_T t, constant CanonicalResolveParams& p, uint rt_format,             \
+      uint2 pixel, uint sample) {                                              \
+    return xe_unpack_color32(                                                  \
+        xe_direct_word_##SUFFIX(t, p, rt_format, pixel, sample),               \
+        p.color_format);                                                       \
+  }                                                                            \
+  inline float4 xe_direct_color_value_##SUFFIX(                                \
+      TEX_T t, constant CanonicalResolveParams& p, uint rt_format,             \
+      uint2 source) {                                                          \
+    float4 value;                                                              \
+    switch (p.sample_select) {                                                 \
+      case 1u:                                                                 \
+      case 2u:                                                                 \
+      case 3u:                                                                 \
+        value = xe_direct_read_color_##SUFFIX(t, p, rt_format, source,         \
+                                              p.sample_select);                \
+        break;                                                                 \
+      case 4u:                                                                 \
+        value = (xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u) +  \
+                 xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 1u)) * \
+                0.5;                                                           \
+        break;                                                                 \
+      case 5u:                                                                 \
+        value = (xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 2u) +  \
+                 xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 3u)) * \
+                0.5;                                                           \
+        break;                                                                 \
+      case 6u:                                                                 \
+        value = (xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u) +  \
+                 xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 1u) +  \
+                 xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 2u) +  \
+                 xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 3u)) * \
+                0.25;                                                          \
+        break;                                                                 \
+      default:                                                                 \
+        value = xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u);    \
+        break;                                                                 \
+    }                                                                          \
+    return xe_resolve_color_finish(value, p);                                  \
+  }                                                                            \
+  kernel void resolve_direct_color_cs_##SUFFIX(                                \
+      TEX_T source_texture [[texture(1)]],                                     \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      constant uint& rt_format [[buffer(3)]],                                  \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / xe_resolution_scale();                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    snapshot.write(xe_direct_color_value_##SUFFIX(                             \
+                       source_texture, p, rt_format,                           \
+                       xe_resolve_snapshot_source(p, host_dest, dest)),        \
+                   host_dest, 0u);                                             \
+  }                                                                            \
+  kernel void resolve_direct_color_packed_##SUFFIX(                            \
+      TEX_T source_texture [[texture(0)]],                                     \
+      device uchar* destination [[buffer(1)]],                                 \
+      constant CanonicalResolveParams& p [[buffer(2)]],                        \
+      constant uint& rt_format [[buffer(3)]],                                  \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    if (gid.x >= p.width || gid.y >= p.height) return;                         \
+    uint2 source =                                                             \
+        xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));  \
+    uint byte_offset = (gid.y * p.width + gid.x) << p.dest_bpp_log2;           \
+    if (p.scatter_enable != 0u) {                                              \
+      uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,                    \
+                                   p.dest_offset_y + gid.y,                    \
+                                   p.dest_pitch_aligned, p.dest_bpp_log2);     \
+      uint bpp = 1u << p.dest_bpp_log2;                                        \
+      if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {      \
+        return;                                                                \
+      }                                                                        \
+      byte_offset = p.dest_base + off;                                         \
+    }                                                                          \
+    if (p.raw_copy != 0u) {                                                    \
+      xe_resolve_store_raw(                                                    \
+          destination, byte_offset,                                            \
+          xe_resolve_raw_swap(                                                 \
+              uint4(xe_direct_word_##SUFFIX(source_texture, p, rt_format,      \
+                                            source,                            \
+                                            min(p.sample_select, 3u)),         \
+                    0u, 0u, 0u),                                               \
+              p),                                                              \
+          p);                                                                  \
+      return;                                                                  \
+    }                                                                          \
+    xe_resolve_store_value(                                                    \
+        destination, byte_offset,                                              \
+        xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, source),  \
+        p);                                                                    \
+  }
+XE_DIRECT_COLOR_KERNELS(1x, texture2d<float XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(ms, texture2d_ms<float XE_COMMA access::read>)
 // Canonical clear scatter. One gid is one host pixel and one physical MSAA
 // sample; it writes the clear word(s) straight into the surface's own sample
 // layout (including depth's 40-column swap via surface.is_depth), so a cleared
@@ -1590,6 +1741,18 @@ struct CanonicalClearParams {
   uint clear_lo;
   uint clear_hi;
 };
+// Resolve clear written straight into the colour attachment
+// (reduce-edram-pass-traffic Lever 2): the value is exactly what
+// materialize would produce from the canonical clear words, so the
+// attachment holds the same texels without the canonical round trip.
+// clear = (lo, hi, format, is_64bpp), lo/hi as resolve_canonical_clear writes
+// them.
+fragment float4 clear_color_attachment_fs(ColorVOut in [[stage_in]],
+                                          constant uint4& clear
+                                          [[buffer(0)]]) {
+  return clear.w != 0u ? xe_unpack_color64(uint2(clear.x, clear.y), clear.z)
+                       : xe_unpack_color32_working(clear.x, clear.z);
+}
 kernel void resolve_canonical_clear(
     device uint* canonical [[buffer(0)]],
     constant CanonicalClearParams& p [[buffer(1)]],

@@ -11035,7 +11035,31 @@ bool MetalCommandProcessor::IssueCopy() {
         bool resolved = false;
         bool canonical_prepared = false;
         if (canonical_resolve) {
+          // Direct colour resolve: read the open colour attachment instead of
+          // packing it into canonical EDRAM first (scope closed at the end of
+          // this colour branch). The shared resolve route reads canonical, so
+          // it keeps the pack.
+          // Resolves without a snapshot (Lever 3) take it too: the guest
+          // write-back reads the attachment the same way.
+          const bool direct_color =
+              !SharedResolveShadersEnabled() &&
+              render_target_cache_->BeginDirectColorResolve(
+                  resolve_info.color_edram_info.base_tiles,
+                  resolve_info.color_edram_info.pitch_tiles,
+                  uint32_t(resolve_info.color_edram_info.msaa_samples),
+                  resolve_info.color_edram_info.format,
+                  resolve_info.color_edram_info.format_is_64bpp != 0,
+                  span_base, span_row_length, span_rows, span_pitch,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                      << 3,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                      << 3,
+                  rw, rh,
+                  uint32_t(resolve_info.copy_dest_coordinate_info
+                               .copy_sample_select),
+                  snap);
           canonical_prepared =
+              direct_color ||
               render_target_cache_->PrepareCanonicalEdramForResolve(
                   span_base, span_row_length, span_rows, span_pitch);
           if (snap && canonical_prepared) {
@@ -11659,6 +11683,9 @@ bool MetalCommandProcessor::IssueCopy() {
         }
       }
     }
+    if (render_target_cache_) {
+      render_target_cache_->EndDirectColorResolve();
+    }
   } else if (resolve_info.IsCopyingDepth() &&
              resolve_info.copy_dest_extent_length) {
     // Depth resolve: deferred lighting samples the depth buffer as a texture to
@@ -12122,6 +12149,19 @@ bool MetalCommandProcessor::IssueCopy() {
                                          resolve_info.height_div_8, cbase,
                                          crowlen, crows);
       bool cleared = canonical_clear &&
+                     render_target_cache_->PerformAttachmentColorResolveClear(
+                         frame_command_buffer_, cbase, crowlen, crows,
+                         resolve_info.color_edram_info.pitch_tiles,
+                         resolve_info.color_edram_info.base_tiles,
+                         resolve_info.color_edram_info.pitch_tiles,
+                         uint32_t(
+                             resolve_info.color_edram_info.msaa_samples),
+                         resolve_info.color_edram_info.format_is_64bpp != 0,
+                         clear_source_x, clear_source_y, clear_width,
+                         clear_height, resolve_info.rb_color_clear,
+                         resolve_info.rb_color_clear_lo);
+      cleared = cleared ||
+                (canonical_clear &&
                      render_target_cache_->PerformCanonicalResolveClear(
                          frame_command_buffer_, cbase, crowlen, crows,
                          resolve_info.color_edram_info.pitch_tiles,
@@ -12133,7 +12173,7 @@ bool MetalCommandProcessor::IssueCopy() {
                          resolve_info.color_edram_info.format_is_64bpp != 0,
                          clear_source_x, clear_source_y, clear_width,
                          clear_height, resolve_info.rb_color_clear,
-                         resolve_info.rb_color_clear_lo);
+                         resolve_info.rb_color_clear_lo));
       if (!cleared) {
         render_target_cache_->PerformResolveClear(
             frame_command_buffer_, cbase, crowlen, crows,
