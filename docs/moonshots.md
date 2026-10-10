@@ -85,3 +85,68 @@ it, and the game library would list those games as themselves.
 path, not a port, and the whole series is days old upstream and still
 changing (its POSIX side landed on 2026-10-08). Revisit once Edge's POSIX
 support has settled.
+
+## Frame generation (MetalFX frame interpolation, Metal 4)
+
+Recorded 2026-10-09.
+
+**Goal:** show games that are capped at 30 fps at 60 (or 60 at 120 on
+ProMotion displays) by having MetalFX generate a frame between each pair the
+game renders. This targets macOS 27 and its Metal 4 MetalFX, as an opt-in
+setting on the Graphics blade, per title.
+
+**State (checked 2026-10-09: this tree 1ba0158be, macOS 26.5 SDK, Edge
+417b37dfe, Canary 6e2caa5c6, XeniOS 87b176a07, Xendroid 779680ade):**
+- The API already exists in the macOS 26 SDK: `MTLFXFrameInterpolator` and
+  its Metal 4 twin `MTL4FXFrameInterpolator` (`MetalFX/MTLFXFrameInterpolator.h`,
+  `API_AVAILABLE(macos(26.0))`, `+supportsDevice:` / `+supportsMetal4FX:`;
+  Metal 4 needs M1 or later).
+  - Inputs: the current and previous colour, depth, per-pixel motion
+    vectors, the time between frames, the camera's near plane, far plane,
+    field of view and aspect ratio, and the jitter offset.
+  - Also an optional UI texture, so the HUD is overlaid on the generated
+    frame instead of being interpolated.
+- What macOS 27 adds on top: not verified. Search results (2026-10-09)
+  covered only the WWDC 2025 / macOS 26 release. Check the macOS 27 SDK
+  headers first.
+- This tree already uses MetalFX: the spatial scaler is a presenter output
+  option (`metal_presenter.mm`, `postprocess_scaling_and_sharpening =
+  metalfx`). Nothing interpolates frames.
+- No Xenia fork has frame generation, so this would be a first.
+
+**Why it is hard for an emulator:** the interpolator wants what a game
+engine knows and the Xbox 360 never hands us.
+1. **Motion vectors.** 360 games don't produce them. Options:
+   - optical flow between consecutive frontbuffers (a GPU block-matching
+     pass, or Vision's optical-flow request if fast enough);
+   - reprojection from depth plus camera matrices read from vertex-shader
+     constants (title-specific);
+   - flow at reduced resolution, refined by depth edges.
+2. **Depth and camera.** The scene depth is one of several EDRAM depth
+   surfaces (some titles resolve depth several times a frame, in predicated
+   tiles), and near/far/FOV are unknown. These need a per-title
+   configuration or a heuristic (the largest depth surface before the final
+   composite).
+3. **UI.** The HUD is drawn into the same frame, and interpolating it
+   smears text and meters. Separating it needs a per-title cut point (for
+   example, draws after the last 3D pass).
+4. **Pacing.** Presentation follows the guest's vblank swaps. A generated
+   frame has to be presented halfway between two guest frames, so
+   presentation must come off the guest swap (a present thread or
+   `CAMetalDisplayLink`). That adds about one guest frame of input latency.
+
+**Rough shape:**
+1. **Gate 0, offline with a ground truth.** Take titles that already hold
+   60 fps (Ultra Street Fighter IV, Dead or Alive 4, Call of Duty 2). Drop
+   every other frame, interpolate it back from its neighbours, and compare
+   against the real frame. Run this once per motion-vector option above.
+   If flow-based vectors don't beat a plain blend clearly, stop here.
+2. Present-path decoupling and a pacing census (frame-time variance, added
+   latency).
+3. A per-title opt-in config (depth surface, camera hints, UI cut) and a
+   Graphics blade switch, off by default.
+
+**Risk:** items 1 to 3 of the hard part. A generic solution may never match
+engine-integrated frame generation, so it should ship per title where it
+looks right. GPU headroom also matters: titles at their 30 cap on an M4
+have room, while Red Dead's ~31.5 ms of GPU time per frame does not.
