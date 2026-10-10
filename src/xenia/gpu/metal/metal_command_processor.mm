@@ -3283,6 +3283,24 @@ bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::ResolveSnapshotsForAllEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("XE_METAL_SNAPSHOT_ALL");
+    return value && value[0] == '1' && !value[1];
+  }();
+  return enabled;
+}
+
+bool MetalCommandProcessor::ResolveOverlapsRecentFrontbuffer(
+    uint32_t start, uint32_t length) const {
+  for (const auto& [base, bytes] : recent_frontbuffers_) {
+    if (bytes && start < base + bytes && start + std::max(length, 1u) > base) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Whether MSAA draw passes still resolve into their targets' 1-sample copies
 // on store. Off by default (the copies are unread in canonical mode);
 // XE_METAL_MS_RESOLVE_STORE=1 is the exact rollback. The diagnostics that read
@@ -10693,7 +10711,14 @@ bool MetalCommandProcessor::IssueCopy() {
                          (uint64_t(uint32_t(edram.msaa_samples)) << 6) |
                          (uint64_t(uint32_t(resolve_info.copy_dest_info.copy_dest_format)) << 8) |
                          (uint64_t(copies) << 16) | (uint64_t(clears) << 17) |
-                         (uint64_t(open_attached) << 18);
+                         (uint64_t(open_attached) << 18) |
+                         (uint64_t(copies && last_frontbuffer_bytes_ &&
+                                   resolve_info.copy_dest_extent_start <
+                                       last_frontbuffer_base_ + last_frontbuffer_bytes_ &&
+                                   resolve_info.copy_dest_extent_start +
+                                           resolve_info.copy_dest_extent_length >
+                                       last_frontbuffer_base_)
+                          << 19);
     ClassStat& stat = s_classes[key];
     ++stat.count;
     stat.bytes += resolve_info.copy_dest_extent_length;
@@ -10711,10 +10736,11 @@ bool MetalCommandProcessor::IssueCopy() {
       for (size_t i = 0; i < ranked.size() && i < 14; ++i) {
         const uint64_t k = ranked[i].second;
         const ClassStat& v = s_classes[k];
-        out += fmt::format(" [{} fmt={} msaa={} dst={}{}{}{} {:.1f}/f {:.0f}KB/f]",
+        out += fmt::format(" [{} fmt={} msaa={} dst={}{}{}{}{} {:.1f}/f {:.0f}KB/f]",
                            (k & 1) ? "depth" : "color", (k >> 1) & 31, (k >> 6) & 3, (k >> 8) & 255,
                            ((k >> 16) & 1) ? " copy" : "", ((k >> 17) & 1) ? " clear" : "",
-                           ((k >> 18) & 1) ? " open-attached" : "", double(v.count) / frames,
+                           ((k >> 18) & 1) ? " open-attached" : "",
+                           ((k >> 19) & 1) ? " FRONTBUFFER" : "", double(v.count) / frames,
                            double(v.bytes) / 1024.0 / frames);
       }
       XELOGI("MetalResolveClassCensus frames={}:{}", frames, out);
@@ -10955,7 +10981,39 @@ bool MetalCommandProcessor::IssueCopy() {
         }
         void* snap = parent_snap;
         bool is_new_snapshot = false;
-        if (!snap) {
+        // Colour snapshots are only read by presentation (the frontbuffer),
+        // exact-cover fetches (guest RAM holds the same bytes) and bridges of
+        // resolves that wrote no guest copy. With the canonical write-back on
+        // at 1x, a resolve that does not overlap a recent frontbuffer and has
+        // no snapshot yet skips creating one: its write-back is the only copy
+        // anything needs, and fetches load it from guest memory. USF4 does 38
+        // colour resolves a frame, 1 into the frontbuffer
+        // (reduce-edram-pass-traffic Lever 3). XE_METAL_SNAPSHOT_ALL=1 is the
+        // exact rollback.
+        static const bool s_snapshot_writeback = [] {
+          const char* v = std::getenv("XE_METAL_STAGE3");
+          return (!v || v[0] != '0') && !std::getenv("XE_METAL_NO_WRITEBACK");
+        }();
+        const bool skip_snapshot =
+            !snap && last_frontbuffer_bytes_ && !ResolveSnapshotsForAllEnabled() &&
+            canonical_resolve &&
+            s_snapshot_writeback && draw_resolution_scale_x_ == 1 &&
+            draw_resolution_scale_y_ == 1 &&
+            !ResolveOverlapsRecentFrontbuffer(
+                resolve_info.copy_dest_extent_start,
+                resolve_info.copy_dest_extent_length) &&
+            !render_target_cache_->GetResolveSnapshot(
+                resolve_info.copy_dest_base);
+        if (skip_snapshot) {
+          static uint64_t s_snapshots_skipped = 0;
+          ++s_snapshots_skipped;
+          if ((s_snapshots_skipped & (s_snapshots_skipped - 1)) == 0) {
+            XELOGI("MetalSnapshotPolicy: {} colour snapshots skipped (latest "
+                   "dest {:08X} {}x{})",
+                   s_snapshots_skipped, resolve_info.copy_dest_base, rw, rh);
+          }
+        }
+        if (!snap && !skip_snapshot) {
           snap = render_target_cache_->EnsureResolveSnapshot(
               resolve_info.copy_dest_base, rw, rh, dest_pixel_format);
           is_new_snapshot = snap != nullptr;
@@ -15007,6 +15065,20 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  last_frontbuffer_base_ = frontbuffer_ptr;
+  last_frontbuffer_bytes_ =
+      ((frontbuffer_width ? frontbuffer_width : 1280) + 31u & ~31u) *
+      (frontbuffer_height ? frontbuffer_height : 720) * 4u;
+  if (frontbuffer_ptr &&
+      std::none_of(recent_frontbuffers_.begin(), recent_frontbuffers_.end(),
+                   [&](const auto& fb) {
+                     return fb.first == frontbuffer_ptr &&
+                            fb.second == last_frontbuffer_bytes_;
+                   })) {
+    std::rotate(recent_frontbuffers_.rbegin(), recent_frontbuffers_.rbegin() + 1,
+                recent_frontbuffers_.rend());
+    recent_frontbuffers_[0] = {frontbuffer_ptr, last_frontbuffer_bytes_};
+  }
   // XE_METAL_BUFDUMP=<hexbase>,<hexlen>: at every swap, after waiting for the
   // GPU, write the shared-buffer bytes and the guest-RAM bytes of that range
   // to /tmp/bufdump_<swap>.{buf,ram} (scatter-vs-RAM oracle for a fixture).

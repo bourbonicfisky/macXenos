@@ -579,6 +579,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // Number of swaps issued; drives the bring-up test pattern color so on-device
   // it's visually obvious that frames are flowing through the guest-output path.
   uint32_t swap_count_ = 0;
+  // The previous swap's frontbuffer (guest base, bytes): resolve census and
+  // the snapshot policy use it to tell frontbuffer resolves apart.
+  uint32_t last_frontbuffer_base_ = 0;
+  uint32_t last_frontbuffer_bytes_ = 0;
+  // The last few DISTINCT frontbuffer ranges (double/triple buffering), for
+  // the snapshot policy: resolves overlapping one keep their snapshot, which
+  // presentation reads.
+  std::array<std::pair<uint32_t, uint32_t>, 4> recent_frontbuffers_ = {};
+  bool ResolveOverlapsRecentFrontbuffer(uint32_t start, uint32_t length) const;
+  static bool ResolveSnapshotsForAllEnabled();
   // Draws successfully encoded (across the whole run) — logged periodically so
   // on-device we can tell real geometry submission from the clear-only path.
   uint32_t draw_count_ = 0;
