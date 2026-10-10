@@ -92,8 +92,9 @@ Recorded 2026-10-09.
 
 **Goal:** show games that are capped at 30 fps at 60 (or 60 at 120 on
 ProMotion displays) by having MetalFX generate a frame between each pair the
-game renders. This targets macOS 27 and its Metal 4 MetalFX, as an opt-in
-setting on the Graphics blade, per title.
+game renders. This targets macOS 26 (Tahoe), where Metal 4's MetalFX frame
+interpolation first shipped, as an opt-in setting on the Graphics blade, per
+title. Older macOS versions keep presenting guest frames as today.
 
 **State (checked 2026-10-09: this tree 1ba0158be, macOS 26.5 SDK, Edge
 417b37dfe, Canary 6e2caa5c6, XeniOS 87b176a07, Xendroid 779680ade):**
@@ -106,9 +107,10 @@ setting on the Graphics blade, per title.
     field of view and aspect ratio, and the jitter offset.
   - Also an optional UI texture, so the HUD is overlaid on the generated
     frame instead of being interpolated.
-- What macOS 27 adds on top: not verified. Search results (2026-10-09)
-  covered only the WWDC 2025 / macOS 26 release. Check the macOS 27 SDK
-  headers first.
+- macOS 26 is enough: the deployment check is `@available(macOS 26.0, *)`
+  plus `+supportsDevice:`. Anything macOS 27 adds on top is unverified
+  (2026-10-09 search results covered only the WWDC 2025 release) and is a
+  bonus, not a requirement.
 - This tree already uses MetalFX: the spatial scaler is a presenter output
   option (`metal_presenter.mm`, `postprocess_scaling_and_sharpening =
   metalfx`). Nothing interpolates frames.
