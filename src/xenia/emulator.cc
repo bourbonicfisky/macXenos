@@ -67,6 +67,11 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #endif  // XE_ARCH
 
+#if XE_PLATFORM_MAC
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif  // XE_PLATFORM_MAC
+
 DECLARE_bool(headless);
 
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
@@ -1375,6 +1380,31 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   } else if (ex->code() == Exception::Code::kIllegalInstruction) {
     crash_msg.append("Illegal Instruction\n");
   }
+#if XE_PLATFORM_MAC
+  // Host frames, for faults in host code (PC <unmapped>): image + offset per
+  // frame, symbolizable with `atos -o <unstripped binary> -l <image base>`.
+  if (!guest_function) {
+    void* frames[48];
+    int frame_count = backtrace(frames, 48);
+    crash_msg.append("Host backtrace:\n");
+    for (int i = 0; i < frame_count; ++i) {
+      Dl_info info = {};
+      if (dladdr(frames[i], &info) && info.dli_fname) {
+        const char* image = std::strrchr(info.dli_fname, '/');
+        crash_msg.append(fmt::format(
+            "  #{:<2} {} base=0x{:X} +0x{:X} {}\n", i,
+            image ? image + 1 : info.dli_fname,
+            reinterpret_cast<uintptr_t>(info.dli_fbase),
+            reinterpret_cast<uintptr_t>(frames[i]) -
+                reinterpret_cast<uintptr_t>(info.dli_fbase),
+            info.dli_sname ? info.dli_sname : "?"));
+      } else {
+        crash_msg.append(fmt::format("  #{:<2} 0x{:X}\n", i,
+                                     reinterpret_cast<uintptr_t>(frames[i])));
+      }
+    }
+  }
+#endif  // XE_PLATFORM_MAC
   crash_msg.append("Registers:\n");
   for (int i = 0; i < 32; i++) {
     crash_msg.append(fmt::format(" r{:<3} = {:016X}\n", i, context->r[i]));
