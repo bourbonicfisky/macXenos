@@ -2107,6 +2107,20 @@ uint32_t MetalTextureCache::GetTextureSlot(
     upload_bytes_per_row = width;
   }
 
+  // XE_METAL_DUMP_FETCH: the CPU-decoded upload (CTX1, DXT3A, depth, 16bpp
+  // expansions) to /tmp/xe_fetchdec_<base>_<n>.bin, the byte oracle for the
+  // GPU route's XE_METAL_DUMP_ROUTE level dumps.
+  if (s_dump_fetch && base == s_dump_fetch && !decoded.empty()) {
+    static uint32_t s_dec_n = 0;
+    std::string path =
+        fmt::format("/tmp/xe_fetchdec_{:08X}_{}.bin", base, s_dec_n++);
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+      fwrite(decoded.data(), 1, decoded.size(), f);
+      fclose(f);
+      XELOGW("MetalFetchDump wrote {} {}x{} row_bytes={}", path, width, height,
+             upload_bytes_per_row);
+    }
+  }
   // Bring-up diagnostic: a texture that decodes to all-zero bytes renders pure
   // black. The most likely source is a render-target-backed surface (e.g. the
   // resolved scene) whose guest memory we never populated because IssueCopy is

@@ -43,6 +43,10 @@ enum class SharedLoadFamily : uint32_t {
   // 16bpp 5:6:5 expanded to opaque RGBA8 (texture_load_r5g6b5_r8g8b8a8), for
   // GPUs without B5G6R5Unorm. Apple GPUs keep 5:6:5 on the legacy cache.
   k16bpbR5G6B5ToRgba8,
+  // CTX1 (Xenos two-channel normal-map compression, 8-byte 4x4 blocks)
+  // decoded to RG8 texels (texture_load_ctx1). The legacy cache decodes it on
+  // the CPU at the base level only.
+  kCtx1ToRg8,
 };
 
 struct SharedTextureFormatEntry {
@@ -170,6 +174,13 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_5_6_5, SharedLoadFamily::k16bpbR5G6B5ToRgba8,
        kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
        XE_GPU_MAKE_TEXTURE_SWIZZLE(R, G, B, B), 2, false},
+      // CTX1 decoded to RG8 on the GPU, mips included (Halo 3 materials: 134
+      // mipped uploads in a 40 s sweep served base-only by the legacy CPU
+      // decode, on every GPU). RGGG like the legacy plan; no snorm sibling,
+      // as in the legacy plan. XE_METAL_TEX_ROUTE_CTX1=0 drops this entry.
+      {xenos::TextureFormat::k_CTX1, SharedLoadFamily::kCtx1ToRg8,
+       kMtlPixelFormatRG8Unorm, kMtlPixelFormatRG8Unorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG, 8, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -183,12 +194,25 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
 // 4:4:4:4 texture). The shared texture cache records the device's answer at
 // initialization; entries that need the formats are dropped without it.
 // Host bytes per block of an entry's textures.
+// For the block-decoding families (CTX1) this is bytes per host TEXEL, the
+// unit their load shaders write and the shared LoadShaderInfo reports.
 inline uint32_t SharedTextureHostBytesPerBlock(
     const SharedTextureFormatEntry& entry) {
-  return entry.load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8 ||
-                 entry.load_shader == SharedLoadFamily::k16bpbR5G6B5ToRgba8
-             ? 4u
-             : entry.bytes_per_block;
+  switch (entry.load_shader) {
+    case SharedLoadFamily::k16bpbRgba4ToRgba8:
+    case SharedLoadFamily::k16bpbR5G6B5ToRgba8:
+      return 4u;
+    case SharedLoadFamily::kCtx1ToRg8:
+      return 2u;
+    default:
+      return entry.bytes_per_block;
+  }
+}
+
+// Guest block edge in texels: 4 for the 4x4 block-compressed families, 1 for
+// everything else.
+inline uint32_t SharedTextureBlockDim(const SharedTextureFormatEntry& entry) {
+  return entry.load_shader == SharedLoadFamily::kCtx1ToRg8 ? 4u : 1u;
 }
 
 // Mipped 4:4:4:4 keys take the RGBA4 -> RGBA8 expansion (non-Apple GPUs):
@@ -245,6 +269,15 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
           table[i].load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8;
       if (packed16 == expands) {
         continue;
+      }
+    }
+    if (table[i].format == xenos::TextureFormat::k_CTX1) {
+      static const bool s_ctx1 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_CTX1");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_ctx1) {
+        return nullptr;
       }
     }
     if (table[i].format == xenos::TextureFormat::k_5_6_5) {

@@ -408,9 +408,12 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     // The planner's exact range scan is the 32bpp tiled walk; for the other
     // block sizes register the conservative whole tiled extent of each level
     // (32-row aligned) as consumed. A superset can only add a hazard flush.
+    const uint32_t block_dim = SharedTextureBlockDim(*entry);
     for (const MipLevelPlan& p : plan) {
       uint32_t pitch_blocks = (p.pitch_blocks * 4u) / entry->bytes_per_block;
-      uint64_t rows = uint64_t(((p.py + p.height) + 31u) & ~31u);
+      uint32_t block_rows =
+          (p.py + p.height + block_dim - 1u) / block_dim;
+      uint64_t rows = uint64_t((block_rows + 31u) & ~31u);
       uint64_t bytes = rows * pitch_blocks * entry->bytes_per_block;
       uint64_t end = std::min<uint64_t>(uint64_t(p.guest_offset) + bytes,
                                         SharedMemory::kBufferSize);
@@ -698,6 +701,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_r5g6b5_r8g8b8a8_cs";
         load_shader_index = kLoadShaderIndexR5G6B5ToRGBA8;
         break;
+      case SharedLoadFamily::kCtx1ToRg8:
+        wanted = "texture_load_ctx1_cs";
+        load_shader_index = kLoadShaderIndexCTX1;
+        break;
     }
     if (!wanted) {
       return false;
@@ -721,6 +728,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     return false;
   }
   const uint32_t blocks_per_thread = 1u << info.guest_x_blocks_per_thread_log2;
+  // 4x4 block-compressed families dispatch over guest blocks but write host
+  // texel rows (block_dim of them per block row); everything else is 1.
+  const uint32_t block_dim = SharedTextureBlockDim(entry);
 
   // Plan every level's scratch region before encoding anything (atomic
   // fallback, like the direct path).
@@ -729,9 +739,11 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     void* scratch = nullptr;
     uint32_t scratch_offset = 0;
     uint32_t host_pitch = 0;
-    uint32_t region_w = 0;
+    uint32_t region_w = 0;  // guest blocks
     uint32_t region_h = 0;
     uint32_t threads_x = 0;
+    uint32_t src_x = 0;     // level origin in the scratch region, texels
+    uint32_t src_y = 0;
   };
   std::vector<LevelDispatch> dispatches;
   dispatches.reserve(plan.size());
@@ -741,13 +753,20 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     // The shader reads blocks [0, region) relative to the level's guest
     // offset; a packed sub-tile origin (px, py) is covered by dispatching the
     // enclosing region and blitting the sub-rectangle out of it.
-    d.region_w = p.px + p.width;
-    d.region_h = p.py + p.height;
+    // Packed origins come from the planner in texels; block-compressed
+    // packed levels sit on whole blocks.
+    const uint32_t px_blocks = p.px / block_dim;
+    const uint32_t py_blocks = p.py / block_dim;
+    d.region_w = px_blocks + (p.width + block_dim - 1u) / block_dim;
+    d.region_h = py_blocks + (p.height + block_dim - 1u) / block_dim;
+    d.src_x = px_blocks * block_dim;
+    d.src_y = py_blocks * block_dim;
     uint32_t written_row =
         ((d.region_w + blocks_per_thread - 1u) / blocks_per_thread) *
-        blocks_per_thread * bpb;
+        blocks_per_thread * block_dim * bpb;
     d.host_pitch = (written_row + 255u) & ~255u;
-    uint64_t dest_bytes = uint64_t(d.host_pitch) * d.region_h + 256u;
+    uint64_t dest_bytes =
+        uint64_t(d.host_pitch) * d.region_h * block_dim + 256u;
     if (dest_bytes > kScratchBufferSize) {
       return false;
     }
@@ -768,7 +787,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     d.constants.size_blocks[2] = 1;
     d.constants.host_offset = 0;
     d.constants.host_pitch = d.host_pitch;
-    d.constants.height_texels = d.region_h;
+    d.constants.height_texels = d.region_h * block_dim;
     d.threads_x = (d.region_w + blocks_per_thread - 1u) / blocks_per_thread;
     dispatches.push_back(d);
   }
@@ -822,8 +841,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   for (size_t i = 0; i < plan.size(); ++i) {
     const MipLevelPlan& p = plan[i];
     const LevelDispatch& d = dispatches[i];
-    NSUInteger source_offset =
-        d.scratch_offset + NSUInteger(p.py) * d.host_pitch + NSUInteger(p.px) * bpb;
+    NSUInteger source_offset = d.scratch_offset +
+                               NSUInteger(d.src_y) * d.host_pitch +
+                               NSUInteger(d.src_x) * bpb;
     [blit copyFromBuffer:(__bridge id<MTLBuffer>)d.scratch
                sourceOffset:source_offset
           sourceBytesPerRow:d.host_pitch
@@ -834,15 +854,16 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
            destinationLevel:p.host_level
           destinationOrigin:MTLOriginMake(0, 0, 0)];
   }
-  // XE_METAL_DUMP_ROUTE=<hex base>: read every loaded level of this routed
-  // texture back after the load (host rows, bpb bytes per texel) to
+  // XE_METAL_DUMP_ROUTE=<hex base or mip address>: read every loaded level of
+  // this routed texture back after the load (host rows, bpb bytes per texel) to
   // /tmp/xe_route_<base>_L<level>_<n>.bin -- the texel-level oracle against
   // the legacy decode's XE_METAL_DUMP_FETCH dumps of the same base.
   static const uint32_t s_dump_route = [] {
     const char* v = std::getenv("XE_METAL_DUMP_ROUTE");
     return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
   }();
-  if (s_dump_route && (uint32_t(key.base_page) << 12) == s_dump_route) {
+  if (s_dump_route && ((uint32_t(key.base_page) << 12) == s_dump_route ||
+                       (uint32_t(key.mip_page) << 12) == s_dump_route)) {
     static uint32_t s_n = 0;
     const uint32_t n = s_n++;
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
