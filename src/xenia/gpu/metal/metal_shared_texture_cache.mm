@@ -71,6 +71,17 @@ static MTLTextureSwizzle HostSwizzleComponentToMetal(uint32_t component) {
   }
 }
 
+// Per-texture view cache (default). XE_METAL_ROUTE_VIEW_CACHE=0 returns to a
+// view and slot per binding, re-created whenever a fetch constant changes
+// texture.
+static bool RouteViewCacheEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_ROUTE_VIEW_CACHE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 class MetalSharedTextureCache::MetalTexture final
     : public TextureCache::Texture {
  public:
@@ -91,6 +102,16 @@ class MetalSharedTextureCache::MetalTexture final
   }
   ~MetalTexture() override {
     auto& cache = static_cast<MetalSharedTextureCache&>(texture_cache());
+    cache.ForgetTextureBindings(this);
+    for (const CachedView& cached : views) {
+      if (cache.legacy_) {
+        cache.legacy_->RetireExternalSlot(cached.slot);
+        cache.legacy_->RetireExternalTexture(cached.view);
+      } else {
+        id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)cached.view;
+        (void)released;
+      }
+    }
     // Submission-gated release through the single legacy retirement pool:
     // the load encoder referenced this texture directly and views bound in
     // descriptor slots retain it; destruction is LRU/completion-gated, but
@@ -108,6 +129,18 @@ class MetalSharedTextureCache::MetalTexture final
   // reload of one region cannot hide an earlier faulted load of the other.
   uint64_t last_load_submission = 0;      // base region
   uint64_t last_mip_load_submission = 0;  // mip chain
+
+  // Views of this texture in bindless slots, one per (host swizzle,
+  // signedness), kept for the texture's lifetime. Re-creating a view and slot
+  // each time a fetch constant switched textures cost Skate 2 ~17 ms of CP
+  // time a frame on the AMD driver (view init/dealloc, residency, retires).
+  struct CachedView {
+    uint32_t host_swizzle;
+    bool is_signed;
+    void* view;     // id<MTLTexture>, retained.
+    uint32_t slot;  // Legacy bindless slot holding `view`.
+  };
+  std::vector<CachedView> views;
 
  private:
   void* mtl_texture_;  // id<MTLTexture>, 2D base, retained.
@@ -877,44 +910,87 @@ void MetalSharedTextureCache::UpdateTextureBindingsImpl(
       continue;  // Descriptor already expresses this binding.
     }
     ReleaseBindingSlot(binding_slot);
-    const MetalTexture* metal_texture =
-        static_cast<const MetalTexture*>(texture);
-    id<MTLTexture> base_texture =
-        (__bridge id<MTLTexture>)metal_texture->mtl_texture();
-    // Always a view: the 2D->2DArray type change is required even for the
-    // identity swizzle (guest shaders sample texture2d_array).
     uint32_t swizzle = binding->host_swizzle;
-    MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
-        HostSwizzleComponentToMetal((swizzle >> 0) & 0b111),
-        HostSwizzleComponentToMetal((swizzle >> 3) & 0b111),
-        HostSwizzleComponentToMetal((swizzle >> 6) & 0b111),
-        HostSwizzleComponentToMetal((swizzle >> 9) & 0b111));
-    // FULL mip range: a mipped texture served through a single-level view
-    // samples only mip 0, which would silently break guest LOD selection.
-    NSUInteger level_count = base_texture.mipmapLevelCount;
-    const SharedTextureFormatEntry* entry =
-        FindSharedTextureFormat(texture->key().format);
-    MTLPixelFormat view_format =
-        entry ? MTLPixelFormat(entry->host_format) : MTLPixelFormatRGBA8Unorm;
-    id<MTLTexture> view = [base_texture
-        newTextureViewWithPixelFormat:view_format
-                          textureType:MTLTextureType2DArray
-                               levels:NSMakeRange(0, level_count)
-                              slices:NSMakeRange(0, 1)
-                             swizzle:channels];
-    if (!view || !legacy_) {
+    void* view_ptr = nullptr;
+    uint32_t slot = 0;
+    if (!AcquireView(*static_cast<MetalTexture*>(
+                         const_cast<Texture*>(texture)),
+                     swizzle, false, &view_ptr, &slot)) {
       continue;  // Unserved; the legacy path serves this index.
     }
-    uint32_t slot = legacy_->AllocateExternalSlot();
-    if (!slot) {
-      continue;  // Heap exhausted; fall back rather than corrupt slot 0.
-    }
-    void* view_ptr = (__bridge_retained void*)view;
-    legacy_->BindExternalSlot(slot, view_ptr);
     binding_slot.texture = texture;
     binding_slot.host_swizzle = swizzle;
     binding_slot.sampled_view = view_ptr;
     binding_slot.slot = slot;
+    binding_slot.owns_views = !RouteViewCacheEnabled();
+  }
+}
+
+bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
+                                          uint32_t host_swizzle,
+                                          bool is_signed, void** view_out,
+                                          uint32_t* slot_out) {
+  const bool cached = RouteViewCacheEnabled();
+  if (cached) {
+    for (const MetalTexture::CachedView& view : texture.views) {
+      if (view.host_swizzle == host_swizzle && view.is_signed == is_signed) {
+        *view_out = view.view;
+        *slot_out = view.slot;
+        return true;
+      }
+    }
+  }
+  if (!legacy_) {
+    return false;
+  }
+  id<MTLTexture> base_texture = (__bridge id<MTLTexture>)texture.mtl_texture();
+  // Always a view: the 2D->2DArray type change is required even for the
+  // identity swizzle (guest shaders sample texture2d_array).
+  MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
+      HostSwizzleComponentToMetal((host_swizzle >> 0) & 0b111),
+      HostSwizzleComponentToMetal((host_swizzle >> 3) & 0b111),
+      HostSwizzleComponentToMetal((host_swizzle >> 6) & 0b111),
+      HostSwizzleComponentToMetal((host_swizzle >> 9) & 0b111));
+  const SharedTextureFormatEntry* entry =
+      FindSharedTextureFormat(texture.key().format);
+  // Signed bindings: an RGBA8Snorm (or the entry's signed format) view of the
+  // SAME loaded bytes, with the same swizzle/type/levels.
+  MTLPixelFormat view_format =
+      is_signed ? (entry && entry->host_format_signed
+                       ? MTLPixelFormat(entry->host_format_signed)
+                       : MTLPixelFormatRGBA8Snorm)
+                : (entry ? MTLPixelFormat(entry->host_format)
+                         : MTLPixelFormatRGBA8Unorm);
+  // FULL mip range: a mipped texture served through a single-level view
+  // samples only mip 0, which would silently break guest LOD selection.
+  id<MTLTexture> view = [base_texture
+      newTextureViewWithPixelFormat:view_format
+                        textureType:MTLTextureType2DArray
+                             levels:NSMakeRange(0, base_texture.mipmapLevelCount)
+                            slices:NSMakeRange(0, 1)
+                           swizzle:channels];
+  if (!view) {
+    return false;
+  }
+  uint32_t slot = legacy_->AllocateExternalSlot();
+  if (!slot) {
+    return false;  // Heap exhausted; fall back rather than corrupt slot 0.
+  }
+  void* view_ptr = (__bridge_retained void*)view;
+  legacy_->BindExternalSlot(slot, view_ptr);
+  if (cached) {
+    texture.views.push_back({host_swizzle, is_signed, view_ptr, slot});
+  }
+  *view_out = view_ptr;
+  *slot_out = slot;
+  return true;
+}
+
+void MetalSharedTextureCache::ForgetTextureBindings(const Texture* texture) {
+  for (BindingSlot& binding_slot : binding_slots_) {
+    if (binding_slot.texture == texture) {
+      ReleaseBindingSlot(binding_slot);
+    }
   }
 }
 
@@ -935,6 +1011,11 @@ void MetalSharedTextureCache::ClearCache() {
 
 void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
   if (!binding_slot.slot && !binding_slot.sampled_view) {
+    binding_slot = BindingSlot{};
+    return;
+  }
+  if (!binding_slot.owns_views) {
+    // The texture's view cache owns them.
     binding_slot = BindingSlot{};
     return;
   }
@@ -1026,38 +1107,14 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
   if (is_signed) {
     // Lazy signed serve: an RGBA8Snorm view of the SAME loaded bytes, with
     // the SAME swizzle/type/levels as the unsigned view. Created on first
-    // signed use; retired with the binding slot.
+    // signed use, in the texture's view cache.
     if (!binding_slot.signed_slot) {
-      const MetalTexture* mt = static_cast<const MetalTexture*>(texture);
-      id<MTLTexture> base_texture = (__bridge id<MTLTexture>)mt->mtl_texture();
-      uint32_t swizzle = binding_slot.host_swizzle;
-      MTLTextureSwizzleChannels channels = MTLTextureSwizzleChannelsMake(
-          HostSwizzleComponentToMetal((swizzle >> 0) & 0b111),
-          HostSwizzleComponentToMetal((swizzle >> 3) & 0b111),
-          HostSwizzleComponentToMetal((swizzle >> 6) & 0b111),
-          HostSwizzleComponentToMetal((swizzle >> 9) & 0b111));
-      const SharedTextureFormatEntry* entry =
-          FindSharedTextureFormat(texture->key().format);
-      MTLPixelFormat signed_format =
-          entry && entry->host_format_signed
-              ? MTLPixelFormat(entry->host_format_signed)
-              : MTLPixelFormatRGBA8Snorm;
-      id<MTLTexture> view = [base_texture
-          newTextureViewWithPixelFormat:signed_format
-                            textureType:MTLTextureType2DArray
-                                 levels:NSMakeRange(
-                                            0, base_texture.mipmapLevelCount)
-                                 slices:NSMakeRange(0, 1)
-                                swizzle:channels];
-      if (!view || !legacy_) {
+      void* view_ptr = nullptr;
+      uint32_t slot = 0;
+      if (!AcquireView(*metal_texture, binding_slot.host_swizzle, true,
+                       &view_ptr, &slot)) {
         return 0;  // Unserved; legacy path handles the signed binding.
       }
-      uint32_t slot = legacy_->AllocateExternalSlot();
-      if (!slot) {
-        return 0;
-      }
-      void* view_ptr = (__bridge_retained void*)view;
-      legacy_->BindExternalSlot(slot, view_ptr);
       binding_slot.signed_view = view_ptr;
       binding_slot.signed_slot = slot;
       static uint32_t s_signed_serve_logs = 0;

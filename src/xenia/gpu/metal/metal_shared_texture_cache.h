@@ -191,8 +191,20 @@ class MetalSharedTextureCache : public TextureCache {
     // Lazy RGBA8Snorm view of the same texture for SIGNED bindings.
     void* signed_view = nullptr;   // retained id<MTLTexture>, or null.
     uint32_t signed_slot = 0;      // 0 = not yet created.
+    // True when this binding owns its views and slots (the per-binding mode,
+    // XE_METAL_ROUTE_VIEW_CACHE=0); otherwise they belong to the texture's
+    // view cache and the binding only refers to them.
+    bool owns_views = false;
   };
   void ReleaseBindingSlot(BindingSlot& binding_slot);
+  // A 2DArray view (full mip range, host swizzle) of `texture` in a bindless
+  // slot: from the texture's view cache, or created into it. In the
+  // per-binding mode the view is created unowned and the caller owns it.
+  bool AcquireView(MetalTexture& texture, uint32_t host_swizzle,
+                   bool is_signed, void** view_out, uint32_t* slot_out);
+  // Forgets every binding slot that refers to `texture` (it is being
+  // destroyed; its cached views are retired with it).
+  void ForgetTextureBindings(const Texture* texture);
 
   void* device_;                        // id<MTLDevice>, not owned.
   MetalTextureCache* legacy_;           // slot/residency adapter, not owned.
