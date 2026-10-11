@@ -695,10 +695,19 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(
     }
 
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)command_queue_;
-    // Per-encoder execution status so a present-path GPU fault is attributed.
+    // Per-encoder execution status so a present-path GPU fault is attributed
+    // (Apple GPUs; see MetalEncoderExecutionStatusEnabled for the AMD cost).
     MTLCommandBufferDescriptor* cb_desc =
         [[MTLCommandBufferDescriptor alloc] init];
-    cb_desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    static const bool s_encoder_status = [queue] {
+      if (const char* v = std::getenv("XE_METAL_ENCODER_STATUS")) {
+        return v[0] == '1';
+      }
+      return bool([queue.device supportsFamily:MTLGPUFamilyApple7]);
+    }();
+    if (s_encoder_status) {
+      cb_desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    }
     id<MTLCommandBuffer> command_buffer =
         [queue commandBufferWithDescriptor:cb_desc];
     command_buffer.label = @"presenter:paint";

@@ -1439,11 +1439,49 @@ bool MetalCommandProcessor::DumpEdramToBuffer(
 // names the encoder that caused it (labels are set at each encoder open). The
 // alternative — a bare [queue commandBuffer] — reports only "Caused GPU
 // Address Fault Error" with no attribution.
+//
+// Apple GPUs only by default: on the AMD driver every encoder of such a
+// command buffer also opens a progress-tracking encoder whose pooled status
+// resource costs a kernel round trip (IOAccelResourceSetPurgeable) -- 62% of
+// the command-processor thread in Skate 2 on the Mac Pro, 2026-10-10.
+// XE_METAL_ENCODER_STATUS=1/0 forces it on/off.
+static bool MetalEncoderExecutionStatusEnabled(id<MTLDevice> device) {
+  static const bool s_enabled = [device] {
+    if (const char* v = std::getenv("XE_METAL_ENCODER_STATUS")) {
+      return v[0] == '1';
+    }
+    return bool([device supportsFamily:MTLGPUFamilyApple7]);
+  }();
+  return s_enabled;
+}
+
 static id<MTLCommandBuffer> MakeAttributedCommandBuffer(
     id<MTLCommandQueue> queue) {
+  if (!MetalEncoderExecutionStatusEnabled(queue.device)) {
+    return [queue commandBuffer];
+  }
   MTLCommandBufferDescriptor* desc = [[MTLCommandBufferDescriptor alloc] init];
   desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
   return [queue commandBufferWithDescriptor:desc];
+}
+
+// Per-encoder residency sweep for devices without an MTLResidencySet. On AMD
+// (no residency sets) the sweep re-declared every cached texture on every
+// render encoder -- ~1200 textures x 44 passes/frame in Skate 2, a third of the
+// command-processor thread in amdMtl_HwCmdBufAddIndirectRsrc -- and skipping
+// it doubled Skate 2 (10.3 -> 20.0 fps) with 0 faults across six titles. Its
+// stale-slot guard dates from the sparse-b4 descriptor-index fault storm,
+// fixed since. Default: on for Apple GPUs only (macOS 14, where residency sets
+// are unavailable); per-draw useResource still covers each draw's fetches.
+// XE_METAL_RESIDENT_SWEEP=1/0 overrides.
+static bool ResidentSweepEnabled(id<MTLDevice> device) {
+  static const bool s_enabled = [device] {
+    if (const char* v = std::getenv("XE_METAL_RESIDENT_SWEEP")) {
+      return v[0] == '1';
+    }
+    return bool([device supportsFamily:MTLGPUFamilyApple7]);
+  }();
+  return s_enabled;
 }
 
 // Logs the per-encoder execution status carried by a faulted command buffer
@@ -2873,7 +2911,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       residency_set_dirty_ = false;
       ++residency_commits_;
     }
-  } else if (texture_cache_) {
+  } else if (texture_cache_ && ResidentSweepEnabled(encoder.device)) {
     resident_sweep_scratch_.clear();
     texture_cache_->AppendAllTextures(resident_sweep_scratch_);
     if (shared_texture_cache_) {
