@@ -23,6 +23,15 @@ using namespace ucode;
 void DxbcShaderTranslator::KillPixel(
     bool condition, const dxbc::Src& condition_src,
     uint8_t memexport_eM_potentially_written_before) {
+  if (IsDeferredKillUsed()) {
+    // Discarded in CompletePixelShader; the lane stays fully active until
+    // then.
+    a_.OpIf(condition, condition_src);
+    a_.OpMov(dxbc::Dest::R(system_temp_kill_, 0b0001),
+             dxbc::Src::LU(UINT32_MAX));
+    a_.OpEndIf();
+    return;
+  }
   a_.OpIf(condition, condition_src);
   // Perform outstanding memory exports before the invocation becomes inactive
   // and UAV writes are disabled.

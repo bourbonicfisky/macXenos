@@ -1010,6 +1010,9 @@ void DxbcShaderTranslator::StartTranslation() {
         system_temps_color_[i] = PushSystemTemp(0b1111);
       }
     }
+    if (IsDeferredKillUsed()) {
+      system_temp_kill_ = PushSystemTemp(0b0001);
+    }
   }
 
   // Allocate temporary registers for memexport.
@@ -1241,6 +1244,10 @@ void DxbcShaderTranslator::CompleteShaderCode() {
     // system_temp_point_size_edge_flag_kill_vertex_.
     PopSystemTemp(2);
   } else if (is_pixel_shader()) {
+    if (IsDeferredKillUsed()) {
+      // Release system_temp_kill_.
+      PopSystemTemp();
+    }
     // Release system_temps_color_.
     uint32_t shader_writes_color_targets =
         current_shader().writes_color_targets();

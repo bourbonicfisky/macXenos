@@ -67,6 +67,16 @@ class DxbcShaderTranslator : public ShaderTranslator {
   void SetExactScaledPixelPosition(bool exact) {
     exact_scaled_pixel_position_ = exact;
   }
+  // Deferred kill (the Metal backend on non-Apple GPUs): a guest kill sets a
+  // flag and the pixel is discarded once, at the end of the shader, instead of
+  // with a discard in the middle. D3D keeps a discarded lane running as a
+  // helper for its quad's derivatives; the AMD Metal driver evidently does not,
+  // so implicit-LOD fetches after a kill sample wild mips in quads straddling
+  // triangle edges (the Gears of War 3 character lattice). Not applied to
+  // shaders with memory export, which must not export after a kill.
+  // Default off - upstream behavior.
+  void SetDeferredKill(bool deferred) { deferred_kill_ = deferred; }
+
   // Half a host pixel on even-scale axes, zero on odd ones (where the
   // representative pixel's center already is the guest pixel's center).
   static float ScaledPixelShiftHostPixels(uint32_t draw_resolution_scale) {
@@ -834,6 +844,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
     assert_true(is_pixel_shader());
     return DSV_IsWritingFloat24Depth() && !current_shader().writes_depth();
   }
+  bool IsDeferredKillUsed() const {
+    return deferred_kill_ && is_pixel_shader() &&
+           !is_depth_only_pixel_shader_ && !edram_rov_used_ &&
+           current_shader().kills_pixels() &&
+           !current_shader().memexport_eM_written();
+  }
   bool IsDepthStencilSystemTempUsed() const {
     // See system_temp_depth_stencil_ documentation for explanation of cases.
     if (edram_rov_used_) {
@@ -1115,6 +1131,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
   bool exact_scaled_pixel_position_ = false;
+  bool deferred_kill_ = false;
 
   // Is currently writing the empty depth-only pixel shader, for
   // CompleteTranslation.
@@ -1261,6 +1278,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // alpha test, alpha to coverage, exponent bias, gamma, and also for ROV
   // writing).
   uint32_t system_temps_color_[4];
+  // Deferred kill flag (X, 0 or UINT32_MAX), allocated when
+  // IsDeferredKillUsed().
+  uint32_t system_temp_kill_;
 
   // Memory export temporary registers are allocated if the shader writes any
   // eM# (current_shader().memexport_eM_written() != 0).

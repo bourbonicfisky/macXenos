@@ -3248,6 +3248,10 @@ void DxbcShaderTranslator::CompletePixelShader() {
     return;
   }
 
+  if (IsDeferredKillUsed()) {
+    a_.OpDiscard(true, dxbc::Src::R(system_temp_kill_, dxbc::Src::kXXXX));
+  }
+
   if (current_shader().writes_color_target(0) &&
       !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
     if (edram_rov_used_) {

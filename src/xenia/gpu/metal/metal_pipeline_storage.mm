@@ -227,6 +227,17 @@ std::string MetalPipelineStorageIdentity::DescribeMismatch(
   return out.empty() ? "none" : out;
 }
 
+bool MetalDeferredKillEnabled() {
+  static const bool s_enabled = [] {
+    if (const char* v = std::getenv("XE_METAL_DEFERRED_KILL")) {
+      return v[0] == '1';
+    }
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    return device && ![device supportsFamily:MTLGPUFamilyApple7];
+  }();
+  return s_enabled;
+}
+
 MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
     void* device, uint32_t draw_resolution_scale_x,
     uint32_t draw_resolution_scale_y) {
@@ -250,7 +261,9 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
     uint32_t draw_resolution_scale_y_minus_1 : 2;
     // --mulsc_round_toward_zero changes the emitted mulsc code.
     uint32_t mulsc_round_toward_zero : 1;
-    uint32_t reserved : 10;
+    // Deferred pixel-shader kill changes the emitted kill code.
+    uint32_t deferred_kill : 1;
+    uint32_t reserved : 9;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -287,6 +300,7 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
   // a literal that would drift silently.
   schema.dxilconv_generation = MetalTranslatorConfig::kDxilconvGeneration;
   schema.mulsc_round_toward_zero = cvars::mulsc_round_toward_zero ? 1 : 0;
+  schema.deferred_kill = MetalDeferredKillEnabled() ? 1 : 0;
   schema.draw_resolution_scale_x_minus_1 =
       std::max(draw_resolution_scale_x, uint32_t(1)) - 1;
   schema.draw_resolution_scale_y_minus_1 =

@@ -76,6 +76,7 @@ bool MetalPipelineCache::Initialize() {
       draw_resolution_scale_y_);
   shader_translator_->SetExactScaledPixelPosition(
       MetalExactScaledPixelPositionEnabled());
+  shader_translator_->SetDeferredKill(MetalDeferredKillEnabled());
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {

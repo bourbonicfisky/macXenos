@@ -248,6 +248,14 @@ struct MetalGeometryVertexStageKey {
 // Never fails: an unavailable input hashes to 0, which still participates in
 // equality, so an entry written when it was unavailable is not served once it
 // becomes available.
+// Whether pixel shaders are translated with a deferred kill
+// (DxbcShaderTranslator::SetDeferredKill): default on for GPUs outside the
+// Apple7 family (AMD), whose Metal driver ends a discarded lane instead of
+// keeping it as a helper for derivatives. XE_METAL_DEFERRED_KILL=1/0
+// overrides. Read from the system default device so the translator and every
+// storage identity agree without a device in hand.
+bool MetalDeferredKillEnabled();
+
 // The draw resolution scale changes the translated code, so it is part of the
 // identity (1x encodes as before scaling existed).
 MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
