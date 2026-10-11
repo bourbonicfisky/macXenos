@@ -331,6 +331,11 @@ class MetalTextureCache {
   // CPU-decoded uploads whose guest fetch has a mip chain the legacy path
   // drops (base level only), indexed by guest format (6 bits).
   uint32_t mips_dropped_census_[64] = {};
+  // Real 1D textures (texture-typed constant with data) served null, and
+  // empty constants that only read as 1D; 3D / stacked uploads whose mip
+  // chain is dropped (base level only).
+  uint32_t census_1d_real_ = 0, census_1d_empty_ = 0;
+  uint32_t census_3d_mips_dropped_ = 0, census_stacked_mips_dropped_ = 0;
   uint32_t slots_free() const { return uint32_t(free_slots_.size()); }
   uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
   uint32_t slots_capacity() const { return view_heap_slots_; }

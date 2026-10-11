@@ -879,6 +879,10 @@ std::string MetalTextureCache::FormatDimensionCensus() const {
   out += fmt::format(" | null: dim={} fmt={} volume_decoded={} other={}",
                      null_census_dim_, null_census_fmt_,
                      null_census_volume_decoded_, null_census_other_);
+  out += fmt::format(" | 1d: real={} empty={} | volume_mips_dropped: 3d={} "
+                     "stacked={}",
+                     census_1d_real_, census_1d_empty_,
+                     census_3d_mips_dropped_, census_stacked_mips_dropped_);
   bool any_dropped = false;
   for (uint32_t f = 0; f < 64; ++f) {
     if (mips_dropped_census_[f]) {
@@ -1492,6 +1496,21 @@ uint32_t MetalTextureCache::GetTextureSlot(
       : is_3d            ? uint32_t(fetch.size_3d.depth) + 1u
       : is_stacked       ? uint32_t(fetch.size_2d.stack_depth) + 1u
                          : 1u;
+  if (fetch.dimension == xenos::DataDimension::k1D) {
+    if (fetch.type == xenos::FetchConstantType::kTexture &&
+        (fetch.base_address || fetch.mip_address)) {
+      if (census_1d_real_++ < 16) {
+        XELOGW("MetalTex1D fmt={} base={:08X} width={} tiled={} mips={}..{} "
+               "mip_addr={:08X} signed={}",
+               uint32_t(fetch.format), fetch.base_address << 12,
+               fetch.size_1d.width + 1, uint32_t(fetch.tiled),
+               uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level),
+               fetch.mip_address << 12, is_signed ? 1 : 0);
+      }
+    } else {
+      ++census_1d_empty_;
+    }
+  }
   if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d &&
       !is_cube) {
     log_null("dim");
@@ -2202,6 +2221,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
   }();
   if (plan_cpu_decoded && mip_addr && normalized_mip_max > 0) {
     ++mips_dropped_census_[uint32_t(fetch.format) & 63];
+  }
+  if (mip_addr && normalized_mip_max > 0) {
+    if (is_3d) {
+      ++census_3d_mips_dropped_;
+    } else if (depth > 1) {
+      ++census_stacked_mips_dropped_;
+    }
   }
   if (!s_no_mips && mip_format_allowed && (!is_cube || s_cube_mips) &&
       !is_3d && depth == 1 && mip_addr &&

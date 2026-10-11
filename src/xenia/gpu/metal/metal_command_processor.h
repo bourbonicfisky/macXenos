@@ -956,6 +956,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;
+  // Draws by guest primitive type and the path that issued them (census):
+  // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,
+  // 4 geometry emulation, 5 tessellation, 6 unmappable (skipped).
+  uint32_t prim_census_[32][7] = {};
   uint32_t geo_pipeline_fail_count_ = 0;
   // How many indexed triangle-list draws we've dumped diagnostics for.
   uint32_t tri_log_count_ = 0;

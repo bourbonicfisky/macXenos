@@ -5621,10 +5621,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
       !MapPrimitiveType(prim_type, &mtl_prim)) {
+    ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "prim-unmappable");
     return true;
   }
+  ++prim_census_[uint32_t(prim_type) & 31]
+                [use_tessellation_emulation ? 5
+                 : use_geometry_emulation   ? 4
+                 : auto_line_loop_route     ? 3
+                 : dma_quad_route           ? 2
+                 : auto_quad_route          ? 1
+                                            : 0];
 
   if (!AreMetalConstantBankBasesSupported(regs[XE_GPU_REG_SQ_VS_CONST],
                                           regs[XE_GPU_REG_SQ_PS_CONST])) {
@@ -16242,6 +16250,19 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         frontbuffer_height, frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
+    {
+      static const char* const kPath[] = {"native", "quad",  "dmaquad", "loop",
+                                          "geo",    "tess",  "skip"};
+      std::string prims;
+      for (uint32_t p = 0; p < 32; ++p) {
+        for (uint32_t k = 0; k < 7; ++k) {
+          if (prim_census_[p][k]) {
+            prims += fmt::format(" p{}:{}={}", p, kPath[k], prim_census_[p][k]);
+          }
+        }
+      }
+      XELOGI("MetalPrimCensus swap#{}:{}", count, prims);
+    }
     // Session-scope reason breakdown, actionable sites only: harmless pruning
     // (kInfo) never earns a periodic line — that separation is what lets a
     // trace trigger arm on "actionable skips this frame" without firing on
