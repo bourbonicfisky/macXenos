@@ -10320,23 +10320,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   } else if (index_buffer_info && index_buffer_info->guest_base) {
     uint32_t index_size =
         index_buffer_info->format == xenos::IndexFormat::kInt32 ? 4 : 2;
-    uint32_t total = index_count * index_size;
     const void* guest_indices =
         memory_->TranslatePhysical(index_buffer_info->guest_base);
-    MetalUploadAllocation index_alloc{};
-    if (!guest_indices ||
-        !upload_arena_->Allocate(total, 16, &index_alloc)) {
-      RecordDrawSkip(!guest_indices ? MetalDrawSkipReason::kInvalidGuestState
-                                    : MetalDrawSkipReason::kResourceFailure,
-                     !guest_indices ? "dma-index-guest-null"
-                                    : "dma-index-alloc");
+    if (!guest_indices) {
+      RecordDrawSkip(MetalDrawSkipReason::kInvalidGuestState,
+                     "dma-index-guest-null");
       return true;
     }
-    SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
-                    index_buffer_info->format, index_buffer_info->endianness);
     uint32_t host_index_count = index_count;
+    MetalUploadAllocation index_alloc{};
     if (dma_quad_route) {
-      // Quad list -> triangle list: (0,1,2),(0,2,3) per quad.
+      // Quad list -> triangle list: (0,1,2),(0,2,3) per quad. The arena is
+      // write-combined, so never read it back: swap guest indices in cached
+      // stack chunks and only write the expanded triangles to the arena.
       const uint32_t quads = index_count / 4;
       host_index_count = quads * 6;
       if (!host_index_count) {
@@ -10344,30 +10340,47 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                        "quad-degenerate");
         return true;
       }
-      MetalUploadAllocation tri_alloc{};
       if (!upload_arena_->Allocate(host_index_count * index_size, 16,
-                                   &tri_alloc)) {
+                                   &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "quad-index-alloc");
         return true;
       }
       auto expand = [&](auto* src, auto* dst) {
-        for (uint32_t q = 0; q < quads; ++q) {
-          const auto* v = src + q * 4;
-          auto* o = dst + q * 6;
-          o[0] = v[0]; o[1] = v[1]; o[2] = v[2];
-          o[3] = v[0]; o[4] = v[2]; o[5] = v[3];
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(src)>>;
+        constexpr uint32_t kChunkQuads = 256;
+        T chunk[kChunkQuads * 4];
+        for (uint32_t q0 = 0; q0 < quads; q0 += kChunkQuads) {
+          const uint32_t n = std::min(kChunkQuads, quads - q0);
+          SwapIndicesInto(chunk, src + q0 * 4, n * 4,
+                          index_buffer_info->format,
+                          index_buffer_info->endianness);
+          for (uint32_t q = 0; q < n; ++q) {
+            const T* v = chunk + q * 4;
+            T* o = dst + (q0 + q) * 6;
+            o[0] = v[0]; o[1] = v[1]; o[2] = v[2];
+            o[3] = v[0]; o[4] = v[2]; o[5] = v[3];
+          }
         }
       };
       if (index_size == 4) {
-        expand(static_cast<const uint32_t*>(index_alloc.cpu_ptr),
-               static_cast<uint32_t*>(tri_alloc.cpu_ptr));
+        expand(static_cast<const uint32_t*>(guest_indices),
+               static_cast<uint32_t*>(index_alloc.cpu_ptr));
       } else {
-        expand(static_cast<const uint16_t*>(index_alloc.cpu_ptr),
-               static_cast<uint16_t*>(tri_alloc.cpu_ptr));
+        expand(static_cast<const uint16_t*>(guest_indices),
+               static_cast<uint16_t*>(index_alloc.cpu_ptr));
       }
-      index_alloc = tri_alloc;
       mtl_prim = MTLPrimitiveTypeTriangle;
+    } else {
+      if (!upload_arena_->Allocate(index_count * index_size, 16,
+                                   &index_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "dma-index-alloc");
+        return true;
+      }
+      SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
+                      index_buffer_info->format,
+                      index_buffer_info->endianness);
     }
     id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
