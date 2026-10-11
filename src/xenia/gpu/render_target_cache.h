@@ -769,7 +769,8 @@ class RenderTargetCache {
   // Only valid for non-pixel-shader-interlock paths.
   RenderTarget*
       last_update_accumulated_render_targets_[1 +
-                                              xenos::kMaxColorRenderTargets];
+                                              xenos::kMaxColorRenderTargets] =
+          {};
   // If false, the next update must copy last_update_used_render_targets_ to
   // last_update_accumulated_render_targets_ - it's not beneficial or even
   // incorrect to keep the previously bound render targets.
