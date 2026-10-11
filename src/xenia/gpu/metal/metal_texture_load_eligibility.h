@@ -207,11 +207,25 @@ inline bool IsSharedRouteFormat(xenos::TextureFormat format) {
   return FindSharedTextureFormat(format) != nullptr;
 }
 
+// Stacked 2D textures (2D arrays, every slice at the level's array stride)
+// load through the family loaders into a 2DArray host texture. Gears of War 3
+// samples a stacked 16x16 RGBA8 texture in the draws that read its bloom
+// chain: unrouted, it forced each such draw to wait for the GPU (5-7k waits a
+// run). XE_METAL_TEX_ROUTE_STACKED=0 keeps stacked textures on the legacy
+// cache.
+inline bool SharedRouteStackedEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_STACKED");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool IsSharedRouteShapeEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
   if (!fetch.tiled || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
-      fetch.stacked) {
+      (fetch.stacked && !SharedRouteStackedEnabled())) {
     return false;
   }
   if (!fetch.base_address || !width || !height || !pitch_texels) {

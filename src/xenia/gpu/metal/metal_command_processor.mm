@@ -12852,7 +12852,9 @@ bool MetalCommandProcessor::SharedRouteEligible(
   if (corridor_required_out) {
     *corridor_required_out = rgba8_class && is_signed && !s_signed_all;
   }
-  if (rgba8_class) {
+  // Stacked RGBA8 is outside the strict class (single-slice direct loads)
+  // and takes the generic family route like every other stacked format.
+  if (rgba8_class && !(fetch.stacked && metal::SharedRouteStackedEnabled())) {
     if (is_signed) {
       if (metal::IsStrictRgba8SignedRouteEligible(fetch, width, height,
                                                   pitch_texels)) {

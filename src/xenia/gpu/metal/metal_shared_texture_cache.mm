@@ -98,7 +98,7 @@ class MetalSharedTextureCache::MetalTexture final
       bytes += uint64_t(std::max(key.GetWidth() >> level, 1u)) *
                std::max(key.GetHeight() >> level, 1u) * bpb;
     }
-    SetHostMemoryUsage(bytes);
+    SetHostMemoryUsage(bytes * (key.depth_or_array_size_minus_1 + 1));
   }
   ~MetalTexture() override {
     auto& cache = static_cast<MetalSharedTextureCache&>(texture_cache());
@@ -212,6 +212,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
   in.width = key.GetWidth();
   in.height = key.GetHeight();
   in.mip_max_level = key.mip_max_level;
+  in.array_size = key.depth_or_array_size_minus_1 + 1;
   in.guest_buffer_size = SharedMemory::kBufferSize;
   in.load_base = load_base;
   in.load_mips = load_mips;
@@ -233,10 +234,11 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
     return nullptr;
   }
   if (key.dimension != xenos::DataDimension::k2DOrStacked || !key.tiled ||
-      key.signed_separate || key.scaled_resolve ||
-      key.depth_or_array_size_minus_1 != 0 || key.pitch == 0) {
+      key.signed_separate || key.scaled_resolve || key.pitch == 0 ||
+      (key.depth_or_array_size_minus_1 != 0 && !SharedRouteStackedEnabled())) {
     return nullptr;
   }
+  const uint32_t array_size = key.depth_or_array_size_minus_1 + 1;
   // The strict MIPPED sibling is served whenever the chain has its own guest
   // pointer; the single-mip class stays exactly base-only. Each class refuses
   // the other's mip_page shape, so they remain mutually exclusive.
@@ -268,6 +270,10 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
                                    width:width
                                   height:height
                                mipmapped:mipped ? YES : NO];
+  if (array_size > 1) {
+    desc.textureType = MTLTextureType2DArray;
+    desc.arrayLength = array_size;
+  }
   desc.storageMode = MTLStorageModePrivate;
   // PixelFormatView: the signed serve creates an RGBA8Snorm view of this
   // Unorm texture — a FORMAT-CASTING view, which Metal only defines when the
@@ -434,7 +440,9 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     NoteDecline("expanding-family-mips", key);
     return false;
   }
-  if (entry->direct) {
+  // The direct pipeline writes single-slice level views; stacked textures
+  // take the family loader of the same format (bit copy for RGBA8).
+  if (entry->direct && key.depth_or_array_size_minus_1 == 0) {
     if (!LoadLevelsDirect(texture, plan, mipped)) {
       NoteDecline("direct-load-failed", key);
       return false;
@@ -854,7 +862,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         sourceBytesPerImage:NSUInteger(d.host_pitch) * p.height
                  sourceSize:MTLSizeMake(p.width, p.height, 1)
                   toTexture:base_texture
-           destinationSlice:0
+           destinationSlice:p.slice
            destinationLevel:p.host_level
           destinationOrigin:MTLOriginMake(0, 0, 0)];
   }
@@ -992,7 +1000,7 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
       newTextureViewWithPixelFormat:view_format
                         textureType:MTLTextureType2DArray
                              levels:NSMakeRange(0, base_texture.mipmapLevelCount)
-                            slices:NSMakeRange(0, 1)
+                            slices:NSMakeRange(0, base_texture.arrayLength)
                            swizzle:channels];
   if (!view) {
     return false;

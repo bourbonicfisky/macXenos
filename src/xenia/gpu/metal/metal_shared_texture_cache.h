@@ -19,6 +19,7 @@
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_mip_level_plan.h"
 #include "xenia/gpu/metal/metal_shared_texture_format_table.h"
+#include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/xenos.h"
 
@@ -171,7 +172,12 @@ class MetalSharedTextureCache : public TextureCache {
   }
   uint32_t GetMaxHostTextureDepthOrArraySize(
       xenos::DataDimension dimension) const override {
-    return 1;  // Routed class is plain 2D only.
+    // Plain and stacked 2D (Metal's 2D array limit); everything else, and
+    // stacked textures under XE_METAL_TEX_ROUTE_STACKED=0, single-slice.
+    return dimension == xenos::DataDimension::k2DOrStacked &&
+                   SharedRouteStackedEnabled()
+               ? 2048u
+               : 1u;
   }
   std::unique_ptr<Texture> CreateTexture(TextureKey key) override;
   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,

@@ -36,6 +36,7 @@ namespace metal {
 
 struct MipLevelPlan {
   uint32_t host_level = 0;
+  uint32_t slice = 0;           // array slice (stacked textures), else 0
   uint32_t guest_offset = 0;    // absolute guest byte address of the level
   uint32_t pitch_blocks = 0;    // row pitch in blocks (== texels at 32bpp)
   uint32_t width = 0;           // level texels
@@ -114,6 +115,7 @@ struct MipLevelPlanInputs {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t mip_max_level = 0;  // from the KEY
+  uint32_t array_size = 1;     // stacked 2D: slices, each at the level's stride
   uint32_t guest_buffer_size = 0;
   bool load_base = false;
   bool load_mips = false;
@@ -145,10 +147,11 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
   }
   uint32_t packed = layout.packed_level;
 
-  auto plan_one = [&](uint32_t level, uint64_t guest_offset,
+  auto plan_one = [&](uint32_t level, uint32_t slice, uint64_t guest_offset,
                       uint32_t pitch_bytes, bool is_packed) -> bool {
     MipLevelPlan p;
     p.host_level = level;
+    p.slice = slice;
     p.pitch_blocks = pitch_bytes / 4u;  // 32bpp: block == texel == 4 bytes
     p.width = std::max(in.width >> level, 1u);
     p.height = std::max(in.height >> level, 1u);
@@ -196,9 +199,13 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
     // at the base address; the shared loader keeps a SEPARATE mips tail at the
     // mip address. Level 0 is the tail's largest level, so its sub-tile origin
     // is whatever GetPackedMipOffset reports for level 0.
-    if (!plan_one(0, uint64_t(in.base_address), layout.base.row_pitch_bytes,
-                  packed == 0)) {
-      return false;
+    for (uint32_t slice = 0; slice < in.array_size; ++slice) {
+      if (!plan_one(0, slice,
+                    uint64_t(in.base_address) +
+                        uint64_t(slice) * layout.base.array_slice_stride_bytes,
+                    layout.base.row_pitch_bytes, packed == 0)) {
+        return false;
+      }
     }
   }
   if (in.load_mips) {
@@ -214,11 +221,15 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
         return false;
       }
       bool is_packed = packed != UINT32_MAX && level >= packed;
-      if (!plan_one(level,
-                    uint64_t(in.mip_address) +
-                        uint64_t(layout.mip_offsets_bytes[store]),
-                    layout.mips[store].row_pitch_bytes, is_packed)) {
-        return false;
+      for (uint32_t slice = 0; slice < in.array_size; ++slice) {
+        if (!plan_one(level, slice,
+                      uint64_t(in.mip_address) +
+                          uint64_t(layout.mip_offsets_bytes[store]) +
+                          uint64_t(slice) *
+                              layout.mips[store].array_slice_stride_bytes,
+                      layout.mips[store].row_pitch_bytes, is_packed)) {
+          return false;
+        }
       }
     }
   }
