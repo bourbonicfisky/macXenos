@@ -328,6 +328,9 @@ class MetalTextureCache {
   uint32_t dim_census_signed_[16] = {};
   uint32_t null_census_dim_ = 0, null_census_fmt_ = 0,
            null_census_volume_decoded_ = 0, null_census_other_ = 0;
+  // CPU-decoded uploads whose guest fetch has a mip chain the legacy path
+  // drops (base level only), indexed by guest format (6 bits).
+  uint32_t mips_dropped_census_[64] = {};
   uint32_t slots_free() const { return uint32_t(free_slots_.size()); }
   uint32_t slots_stale() const { return uint32_t(stale_slots_.size()); }
   uint32_t slots_capacity() const { return view_heap_slots_; }

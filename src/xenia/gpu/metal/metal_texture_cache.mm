@@ -879,6 +879,14 @@ std::string MetalTextureCache::FormatDimensionCensus() const {
   out += fmt::format(" | null: dim={} fmt={} volume_decoded={} other={}",
                      null_census_dim_, null_census_fmt_,
                      null_census_volume_decoded_, null_census_other_);
+  bool any_dropped = false;
+  for (uint32_t f = 0; f < 64; ++f) {
+    if (mips_dropped_census_[f]) {
+      out += fmt::format("{}fmt{}={}", any_dropped ? " " : " | mips_dropped: ",
+                         f, mips_dropped_census_[f]);
+      any_dropped = true;
+    }
+  }
   return out;
 }
 
@@ -2178,6 +2186,9 @@ uint32_t MetalTextureCache::GetTextureSlot(
     const char* v = std::getenv("XE_METAL_CUBE_MIPS");
     return !(v && v[0] == '0' && !v[1]);
   }();
+  if (plan_cpu_decoded && mip_addr && normalized_mip_max > 0) {
+    ++mips_dropped_census_[uint32_t(fetch.format) & 63];
+  }
   if (!s_no_mips && mip_format_allowed && (!is_cube || s_cube_mips) &&
       !is_3d && depth == 1 && mip_addr &&
       mip_addr < kPhysicalSize && normalized_mip_max > 0 &&
