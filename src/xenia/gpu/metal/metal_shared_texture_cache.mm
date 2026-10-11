@@ -390,11 +390,11 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
 
-  // The RGBA4 -> RGBA8 expansion serves level 0 only: its mip levels did not
-  // match guest memory (see IsSharedRouteMipEligible); the legacy decode
-  // takes mipped keys, atomically (nothing is encoded yet).
+  // XE_METAL_RGBA4_EXPAND_MIPS=0: the RGBA4 -> RGBA8 expansion serves level 0
+  // only and the legacy decode takes mipped keys, atomically (nothing is
+  // encoded yet).
   if (entry->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8 &&
-      plan.size() > 1) {
+      plan.size() > 1 && !SharedRgba4ExpandMipsEnabled()) {
     NoteDecline("expanding-family-mips", key);
     return false;
   }

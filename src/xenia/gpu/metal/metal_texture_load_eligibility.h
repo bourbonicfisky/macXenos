@@ -175,13 +175,12 @@ inline bool IsStrictRgba8MipRouteEligible(
   if (!fetch.mip_address || !fetch.pitch) {
     return false;
   }
-  // The RGBA4 -> RGBA8 expansion (non-Apple GPUs) serves level 0 exactly,
-  // but its mip levels did not match guest memory (Red Dead title trace,
-  // 2026-10-10, 645 of 1024 texels at level 1, cause not found): mipped
-  // 4:4:4:4 stays on the legacy decode there.
+  // The RGBA4 -> RGBA8 expansion (non-Apple GPUs) serves mips unless
+  // XE_METAL_RGBA4_EXPAND_MIPS=0 (see SharedRgba4ExpandMipsEnabled).
   if (const SharedTextureFormatEntry* entry =
           FindSharedTextureFormat(fetch.format)) {
-    if (entry->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8) {
+    if (entry->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8 &&
+        !SharedRgba4ExpandMipsEnabled()) {
       return false;
     }
   }

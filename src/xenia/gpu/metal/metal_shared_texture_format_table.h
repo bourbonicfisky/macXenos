@@ -178,6 +178,19 @@ inline uint32_t SharedTextureHostBytesPerBlock(
              : entry.bytes_per_block;
 }
 
+// Mipped 4:4:4:4 keys take the RGBA4 -> RGBA8 expansion (non-Apple GPUs):
+// on three Red Dead traces it is pixel-identical to the ABGR4 route, while the
+// legacy CPU decode (base level only) differs by up to 139. An earlier
+// level-1 mismatch against guest memory was a bad oracle, not the shader.
+// XE_METAL_RGBA4_EXPAND_MIPS=0 returns mipped keys to the legacy decode.
+inline bool SharedRgba4ExpandMipsEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_RGBA4_EXPAND_MIPS");
+    return !(v && v[0] == '0');
+  }();
+  return s_enabled;
+}
+
 inline std::atomic<bool>& SharedTexturePacked16Supported() {
   static std::atomic<bool> supported{true};
   return supported;
