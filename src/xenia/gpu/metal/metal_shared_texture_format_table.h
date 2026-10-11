@@ -37,6 +37,9 @@ enum class SharedLoadFamily : uint32_t {
   k16bpb,
   k32bpb,
   k64bpb,
+  // 16bpp 4:4:4:4 expanded to RGBA8 (texture_load_r4g4b4a4_r8g8b8a8): the
+  // host block is 4 bytes, twice the guest's. For GPUs without ABGR4Unorm.
+  k16bpbRgba4ToRgba8,
 };
 
 struct SharedTextureFormatEntry {
@@ -47,7 +50,8 @@ struct SharedTextureFormatEntry {
   uint32_t host_format;         // MTLPixelFormat for unsigned/float bindings.
   uint32_t host_format_signed;  // MTLPixelFormat view for signed bindings, or 0.
   uint32_t host_swizzle;        // xenos XE_GPU_TEXTURE_SWIZZLE_* composition.
-  uint32_t bytes_per_block;     // Guest bytes per block == host bytes here.
+  uint32_t bytes_per_block;     // Guest bytes per block (== host bytes
+                                // except for the expanding families).
   bool direct;                  // texture_load_32bpb_direct (writes texture).
 };
 
@@ -144,6 +148,16 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_4_4_4_4, SharedLoadFamily::k16bpb,
        kMtlPixelFormatABGR4Unorm, kMtlPixelFormatABGR4Unorm,
        XE_GPU_MAKE_TEXTURE_SWIZZLE(A, B, G, R), 2, false},
+      // The same texels expanded to RGBA8 on the GPU where ABGR4Unorm does
+      // not exist (Intel/AMD): without it Red Dead's ~34 resolve-backed
+      // 4:4:4:4 fetches a frame fell back to blocking CPU decodes (Mac Pro
+      // cinematic 2.7 fps, 2026-10-10). Selected only without packed16.
+      {xenos::TextureFormat::k_4_4_4_4, SharedLoadFamily::k16bpbRgba4ToRgba8,
+       kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
+       // The shader's nibble order (R = bits 4-7, G = 0-3, B = 12-15,
+       // A = 8-11 of the swapped word) to guest X/Y/Z/W = bits 0-3 ... 12-15,
+       // the order the ABGR4 entry and the legacy decode use.
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(G, R, A, B), 2, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -156,6 +170,14 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
 // with one fails validation (Red Dead on the RX 6900 XT aborted at its first
 // 4:4:4:4 texture). The shared texture cache records the device's answer at
 // initialization; entries that need the formats are dropped without it.
+// Host bytes per block of an entry's textures.
+inline uint32_t SharedTextureHostBytesPerBlock(
+    const SharedTextureFormatEntry& entry) {
+  return entry.load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8
+             ? 4u
+             : entry.bytes_per_block;
+}
+
 inline std::atomic<bool>& SharedTexturePacked16Supported() {
   static std::atomic<bool> supported{true};
   return supported;
@@ -187,9 +209,16 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
         const char* v = std::getenv("XE_METAL_TEX_ROUTE_4444");
         return !(v && v[0] == '0' && !v[1]);
       }();
-      if (!s_4444 ||
-          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+      if (!s_4444) {
         return nullptr;
+      }
+      // ABGR4Unorm with packed16, the RGBA8 expansion entry without.
+      const bool packed16 =
+          SharedTexturePacked16Supported().load(std::memory_order_relaxed);
+      const bool expands =
+          table[i].load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8;
+      if (packed16 == expands) {
+        continue;
       }
     }
     return &table[i];

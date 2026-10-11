@@ -175,6 +175,16 @@ inline bool IsStrictRgba8MipRouteEligible(
   if (!fetch.mip_address || !fetch.pitch) {
     return false;
   }
+  // The RGBA4 -> RGBA8 expansion (non-Apple GPUs) serves level 0 exactly,
+  // but its mip levels did not match guest memory (Red Dead title trace,
+  // 2026-10-10, 645 of 1024 texels at level 1, cause not found): mipped
+  // 4:4:4:4 stays on the legacy decode there.
+  if (const SharedTextureFormatEntry* entry =
+          FindSharedTextureFormat(fetch.format)) {
+    if (entry->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8) {
+      return false;
+    }
+  }
   xenos::xe_gpu_texture_fetch_t as_base = fetch;
   as_base.mip_min_level = 0;
   as_base.mip_max_level = 0;

@@ -82,7 +82,7 @@ class MetalSharedTextureCache::MetalTexture final
     uint64_t bytes = 0;
     uint32_t levels = key.mip_max_level + 1;
     const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
-    const uint32_t bpb = entry ? entry->bytes_per_block : 4u;
+    const uint32_t bpb = entry ? SharedTextureHostBytesPerBlock(*entry) : 4u;
     for (uint32_t level = 0; level < levels; ++level) {
       bytes += uint64_t(std::max(key.GetWidth() >> level, 1u)) *
                std::max(key.GetHeight() >> level, 1u) * bpb;
@@ -149,8 +149,11 @@ MetalSharedTextureCache::~MetalSharedTextureCache() {
 }
 
 bool MetalSharedTextureCache::Initialize() {
+  // XE_METAL_PACKED16_FALLBACK=1 takes the non-Apple routes on Apple GPUs
+  // too (A/B of the expansions against the packed formats).
   SharedTexturePacked16Supported().store(
-      [(__bridge id<MTLDevice>)device_ supportsFamily:MTLGPUFamilyApple1],
+      [(__bridge id<MTLDevice>)device_ supportsFamily:MTLGPUFamilyApple1] &&
+          !std::getenv("XE_METAL_PACKED16_FALLBACK"),
       std::memory_order_relaxed);
   direct_pipeline_ = MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(device_);
   if (!direct_pipeline_) {
@@ -387,6 +390,14 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
 
+  // The RGBA4 -> RGBA8 expansion serves level 0 only: its mip levels did not
+  // match guest memory (see IsSharedRouteMipEligible); the legacy decode
+  // takes mipped keys, atomically (nothing is encoded yet).
+  if (entry->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8 &&
+      plan.size() > 1) {
+    NoteDecline("expanding-family-mips", key);
+    return false;
+  }
   if (entry->direct) {
     if (!LoadLevelsDirect(texture, plan, mipped)) {
       NoteDecline("direct-load-failed", key);
@@ -646,6 +657,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_64bpb_cs";
         load_shader_index = kLoadShaderIndex64bpb;
         break;
+      case SharedLoadFamily::k16bpbRgba4ToRgba8:
+        wanted = "texture_load_r4g4b4a4_r8g8b8a8_cs";
+        load_shader_index = kLoadShaderIndexRGBA4ToRGBA8;
+        break;
     }
     if (!wanted) {
       return false;
@@ -661,9 +676,12 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   }
   const TextureCache::LoadShaderInfo& info =
       GetLoadShaderInfo(load_shader_index);
-  const uint32_t bpb = entry.bytes_per_block;
+  // Guest and host block sizes: equal for the bit-copy families, 2 -> 4 for
+  // the RGBA4 -> RGBA8 expansion.
+  const uint32_t guest_bpb = entry.bytes_per_block;
+  const uint32_t bpb = SharedTextureHostBytesPerBlock(entry);
   if (info.bytes_per_host_block != bpb) {
-    return false;  // Tranche-1 families are bit copies: guest block == host.
+    return false;
   }
   const uint32_t blocks_per_thread = 1u << info.guest_x_blocks_per_thread_log2;
 
@@ -702,7 +720,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     }
     // The planner derives pitch_blocks at 32bpp; rescale to this format's
     // block size (pitch_bytes == pitch_blocks * 4 by construction).
-    uint32_t pitch_blocks = (p.pitch_blocks * 4u) / bpb;
+    uint32_t pitch_blocks = (p.pitch_blocks * 4u) / guest_bpb;
     d.constants = {};
     d.constants.is_tiled_3d_endian_scale =
         1u | (uint32_t(key.endianness) << 2);
