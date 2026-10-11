@@ -11,6 +11,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_binding_layout.h"
+#include "xenia/gpu/metal/metal_converter_options.h"
 
 #include "metal_irconverter.h"
 
@@ -249,7 +250,10 @@ bool MetalShaderConverter::Convert(Stage stage,
       compiler, static_cast<IRCompatibilityFlags>(
                     IRCompatibilityFlagForceTextureArray |
                     IRCompatibilityFlagBoundsCheck |
-                    IRCompatibilityFlagVertexPositionInfToNan));
+                    IRCompatibilityFlagVertexPositionInfToNan |
+                    (MetalPositionInvarianceEnabled()
+                         ? IRCompatibilityFlagPositionInvariance
+                         : IRCompatibilityFlagNone)));
   // We supply our own root signature; ignore any embedded in the DXIL.
   IRCompilerIgnoreRootSignature(compiler, true);
   IRCompilerSetFunctionConstantResourceSpace(
@@ -340,7 +344,10 @@ bool MetalShaderConverter::ConvertForGeometryEmulation(
       compiler, static_cast<IRCompatibilityFlags>(
                     IRCompatibilityFlagForceTextureArray |
                     IRCompatibilityFlagBoundsCheck |
-                    IRCompatibilityFlagVertexPositionInfToNan));
+                    IRCompatibilityFlagVertexPositionInfToNan |
+                    (MetalPositionInvarianceEnabled()
+                         ? IRCompatibilityFlagPositionInvariance
+                         : IRCompatibilityFlagNone)));
   IRCompilerIgnoreRootSignature(compiler, true);
   IRCompilerSetFunctionConstantResourceSpace(
       compiler, kMetalFunctionConstantRegisterSpace);

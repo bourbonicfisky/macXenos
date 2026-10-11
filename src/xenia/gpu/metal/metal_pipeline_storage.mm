@@ -339,7 +339,7 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
   // through its own encoding. With it, no option value can hash to 0, so a
   // pre-field manifest always mismatches and is discarded exactly once.
   identity.converter_options_hash =
-      HashString("dxilconv-options:" + MetalDxbcToDxilEffectiveOptions());
+      HashString("dxilconv-options:" + MetalConverterIdentityOptions());
 
   if (device) {
     id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;

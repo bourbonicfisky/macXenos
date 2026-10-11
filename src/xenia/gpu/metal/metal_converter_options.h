@@ -63,6 +63,27 @@ inline std::string MetalDxbcToDxilEffectiveOptions() {
   return std::string(kMetalDxbcToDxilDefaultOptions);
 }
 
+// Metal Shader Converter IRCompatibilityFlagPositionInvariance: marks the
+// vertex position output invariant so separately compiled shaders computing the
+// same position produce bit-identical depth (multi-pass depth EQUAL). Changes
+// the metallib, so it is part of the durable-storage identity.
+// XE_METAL_POSITION_INVARIANCE=1 enables it.
+inline bool MetalPositionInvarianceEnabled() {
+  const char* v = std::getenv("XE_METAL_POSITION_INVARIANCE");
+  return v && v[0] == '1';
+}
+
+// The metallib-affecting converter options, as fingerprinted by the durable
+// pipeline storage identity. Unchanged from the dxilconv string by default so
+// the default identity (and cache) is unaffected.
+inline std::string MetalConverterIdentityOptions() {
+  std::string options = MetalDxbcToDxilEffectiveOptions();
+  if (MetalPositionInvarianceEnabled()) {
+    options += "|msc-position-invariance";
+  }
+  return options;
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe
