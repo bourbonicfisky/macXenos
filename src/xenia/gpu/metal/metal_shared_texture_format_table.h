@@ -40,6 +40,9 @@ enum class SharedLoadFamily : uint32_t {
   // 16bpp 4:4:4:4 expanded to RGBA8 (texture_load_r4g4b4a4_r8g8b8a8): the
   // host block is 4 bytes, twice the guest's. For GPUs without ABGR4Unorm.
   k16bpbRgba4ToRgba8,
+  // 16bpp 5:6:5 expanded to opaque RGBA8 (texture_load_r5g6b5_r8g8b8a8), for
+  // GPUs without B5G6R5Unorm. Apple GPUs keep 5:6:5 on the legacy cache.
+  k16bpbR5G6B5ToRgba8,
 };
 
 struct SharedTextureFormatEntry {
@@ -158,6 +161,15 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
        // A = 8-11 of the swapped word) to guest X/Y/Z/W = bits 0-3 ... 12-15,
        // the order the ABGR4 entry and the legacy decode use.
        XE_GPU_MAKE_TEXTURE_SWIZZLE(G, R, A, B), 2, false},
+      // 5:6:5 expanded to RGBA8 on the GPU where B5G6R5Unorm does not exist
+      // (Intel/AMD). The legacy CPU decode served it at the base level only
+      // (Skate 2 on the Mac Pro). The shader writes guest R/G/B to host R/G/B
+      // with alpha 1; the shared table reads alpha from blue (RGBB), as the
+      // legacy decode does. Selected only without packed16.
+      // XE_METAL_TEX_ROUTE_565=0 drops this entry (legacy CPU decode).
+      {xenos::TextureFormat::k_5_6_5, SharedLoadFamily::k16bpbR5G6B5ToRgba8,
+       kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(R, G, B, B), 2, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -173,7 +185,8 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
 // Host bytes per block of an entry's textures.
 inline uint32_t SharedTextureHostBytesPerBlock(
     const SharedTextureFormatEntry& entry) {
-  return entry.load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8
+  return entry.load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8 ||
+                 entry.load_shader == SharedLoadFamily::k16bpbR5G6B5ToRgba8
              ? 4u
              : entry.bytes_per_block;
 }
@@ -232,6 +245,16 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
           table[i].load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8;
       if (packed16 == expands) {
         continue;
+      }
+    }
+    if (table[i].format == xenos::TextureFormat::k_5_6_5) {
+      static const bool s_565 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_565");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_565 ||
+          SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+        return nullptr;
       }
     }
     return &table[i];

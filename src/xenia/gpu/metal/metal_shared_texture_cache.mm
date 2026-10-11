@@ -661,6 +661,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_r4g4b4a4_r8g8b8a8_cs";
         load_shader_index = kLoadShaderIndexRGBA4ToRGBA8;
         break;
+      case SharedLoadFamily::k16bpbR5G6B5ToRgba8:
+        wanted = "texture_load_r5g6b5_r8g8b8a8_cs";
+        load_shader_index = kLoadShaderIndexR5G6B5ToRGBA8;
+        break;
     }
     if (!wanted) {
       return false;
@@ -677,7 +681,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   const TextureCache::LoadShaderInfo& info =
       GetLoadShaderInfo(load_shader_index);
   // Guest and host block sizes: equal for the bit-copy families, 2 -> 4 for
-  // the RGBA4 -> RGBA8 expansion.
+  // the RGBA4 / R5G6B5 -> RGBA8 expansions.
   const uint32_t guest_bpb = entry.bytes_per_block;
   const uint32_t bpb = SharedTextureHostBytesPerBlock(entry);
   if (info.bytes_per_host_block != bpb) {
