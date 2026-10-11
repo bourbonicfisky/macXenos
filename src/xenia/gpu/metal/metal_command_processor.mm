@@ -5577,6 +5577,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       convert_auto_quads_ && index_buffer_info &&
       index_buffer_info->guest_base &&
       IsDmaQuadRoutable(*register_file_, prim_type);
+  const bool dma_line_loop_route =
+      index_buffer_info && index_buffer_info->guest_base &&
+      IsDmaLineLoopRoutable(*register_file_, prim_type);
   if (prim_type == xenos::PrimitiveType::kRectangleList) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList) {
@@ -5620,7 +5623,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
-      !MapPrimitiveType(prim_type, &mtl_prim)) {
+      !dma_line_loop_route && !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "prim-unmappable");
@@ -5629,7 +5632,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   ++prim_census_[uint32_t(prim_type) & 31]
                 [use_tessellation_emulation ? 5
                  : use_geometry_emulation   ? 4
-                 : auto_line_loop_route     ? 3
+                 : auto_line_loop_route ||
+                           dma_line_loop_route
+                                            ? 3
                  : dma_quad_route           ? 2
                  : auto_quad_route          ? 1
                                             : 0];
@@ -10379,6 +10384,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                static_cast<uint16_t*>(index_alloc.cpu_ptr));
       }
       mtl_prim = MTLPrimitiveTypeTriangle;
+    } else if (dma_line_loop_route) {
+      // Line loop -> line strip: the guest indices, then the first again to
+      // close the loop. The closing index is swapped from guest RAM, never
+      // read back from the write-combined arena.
+      if (index_count < 2) {
+        RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                       "line-loop-degenerate");
+        return true;
+      }
+      host_index_count = index_count + 1;
+      if (!upload_arena_->Allocate(host_index_count * index_size, 16,
+                                   &index_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "line-loop-index-alloc");
+        return true;
+      }
+      SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
+                      index_buffer_info->format,
+                      index_buffer_info->endianness);
+      SwapIndicesInto(static_cast<uint8_t*>(index_alloc.cpu_ptr) +
+                          size_t(index_count) * index_size,
+                      guest_indices, 1, index_buffer_info->format,
+                      index_buffer_info->endianness);
+      mtl_prim = MTLPrimitiveTypeLineStrip;
     } else {
       if (!upload_arena_->Allocate(index_count * index_size, 16,
                                    &index_alloc)) {

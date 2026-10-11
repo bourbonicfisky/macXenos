@@ -275,6 +275,32 @@ inline bool IsDmaQuadRoutable(const RegisterFile& regs,
   return true;
 }
 
+// DMA-indexed line loops without primitive reset: the command processor swaps
+// the guest indices into the arena and appends the first one, drawing a host
+// line strip (the closing segment), as the shared processor does for its own
+// converted loops. Loops with primitive reset need a closing index per segment
+// and stay unrouted (skipped, counted by the primitive census).
+inline bool IsDmaLineLoopRoutable(const RegisterFile& regs,
+                                  xenos::PrimitiveType prim_type) {
+  if (prim_type != xenos::PrimitiveType::kLineLoop) {
+    return false;
+  }
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (prim_type != vgt_draw_initiator.prim_type ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA) {
+    return false;
+  }
+  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  return true;
+}
+
 // PP3-auto routing predicate. Returns true for exactly auto-indexed,
 // restart-disabled, non-tessellated line loops. The shared PrimitiveProcessor
 // converts these to a non-indexed host line strip and reports the synthetic
