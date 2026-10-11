@@ -195,6 +195,10 @@ DEFINE_int32(screenshot_interval, 0,
              "unattended test runs (no screen-recording permission needed). "
              "0 = off.",
              "General");
+DEFINE_int32(log_fps_interval, 0,
+             "Seconds between GuestFps log lines (guest swaps per second, any "
+             "GPU backend), for unattended test runs. 0 = off.",
+             "General");
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
             "causes Xenia to enter fullscreen mode.",
@@ -336,7 +340,8 @@ void EmulatorWindow::OnEmulatorInitialized() {
     preferences_button_listener_->set_name("Preferences Button Listener");
   }
 #endif
-  if (cvars::screenshot_interval > 0 && !auto_screenshot_thread_) {
+  if ((cvars::screenshot_interval > 0 || cvars::log_fps_interval > 0) &&
+      !auto_screenshot_thread_) {
     auto_screenshot_thread_ =
         threading::Thread::Create({}, [this] { AutoScreenshotLoop(); });
     auto_screenshot_thread_->set_name("Auto Screenshot");
@@ -1110,15 +1115,41 @@ void EmulatorWindow::TakeScreenshot() {
 
 // screenshot_interval: captures the guest output on the UI thread every
 // interval, silently (no notification), once a title is running.
+// log_fps_interval: logs the guest swap rate every interval.
 void EmulatorWindow::AutoScreenshotLoop() {
-  const auto interval = std::chrono::seconds(cvars::screenshot_interval);
-  auto next = std::chrono::steady_clock::now() + interval;
+  using clock = std::chrono::steady_clock;
+  const auto shot_interval = std::chrono::seconds(cvars::screenshot_interval);
+  const auto fps_interval = std::chrono::seconds(cvars::log_fps_interval);
+  auto next_shot = clock::now() + shot_interval;
+  auto fps_time = clock::now();
+  uint64_t fps_count = 0;
+  bool fps_started = false;
   while (!auto_screenshot_stop_.load()) {
     xe::threading::Sleep(std::chrono::milliseconds(100));
-    if (std::chrono::steady_clock::now() < next) {
+    const auto now = clock::now();
+    if (cvars::log_fps_interval > 0 && emulator_->title_id()) {
+      gpu::GraphicsSystem* graphics = emulator_->graphics_system();
+      gpu::CommandProcessor* command_processor =
+          graphics ? graphics->command_processor() : nullptr;
+      if (command_processor) {
+        const uint64_t count = command_processor->guest_swap_count();
+        if (!fps_started) {
+          fps_started = true;
+          fps_time = now;
+          fps_count = count;
+        } else if (now - fps_time >= fps_interval) {
+          const double seconds =
+              std::chrono::duration<double>(now - fps_time).count();
+          XELOGI("GuestFps: {:.1f} fps", double(count - fps_count) / seconds);
+          fps_time = now;
+          fps_count = count;
+        }
+      }
+    }
+    if (cvars::screenshot_interval <= 0 || now < next_shot) {
       continue;
     }
-    next += interval;
+    next_shot += shot_interval;
     if (!emulator_->title_id()) {
       continue;
     }

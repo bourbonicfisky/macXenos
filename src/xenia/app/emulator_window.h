@@ -392,7 +392,7 @@ class EmulatorWindow {
   // on its own thread so it works whether or not hotkeys are on.
   std::unique_ptr<xe::threading::Thread> preferences_button_listener_;
   std::atomic<bool> preferences_button_stop_{false};
-  // screenshot_interval.
+  // screenshot_interval and log_fps_interval.
   std::unique_ptr<xe::threading::Thread> auto_screenshot_thread_;
   std::atomic<bool> auto_screenshot_stop_{false};
   std::atomic<bool> blades_visible_{false};
