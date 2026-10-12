@@ -182,6 +182,43 @@ class MetalLazyPublication {
     return dropped;
   }
 
+  // Appends the page-granular ranges `authority_sequence` still owns
+  // (coalesced, ascending). An eager drain of an armed record copies only
+  // these: its other pages were published on first touch or discarded by the
+  // host, and RAM there may already hold newer CPU data.
+  void OwnedRangesOf(uint64_t authority_sequence,
+                     std::vector<std::pair<uint32_t, uint32_t>>* out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = owner_pages_.find(authority_sequence);
+    if (it == owner_pages_.end()) {
+      return;
+    }
+    std::vector<uint32_t> pages = it->second;
+    std::sort(pages.begin(), pages.end());
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+    for (uint32_t page : pages) {
+      const std::vector<Owner>* owners = FindPageOwners(page);
+      bool held = false;
+      if (owners) {
+        for (const Owner& o : *owners) {
+          if (o.authority_sequence == authority_sequence) {
+            held = true;
+            break;
+          }
+        }
+      }
+      if (!held) {
+        continue;
+      }
+      uint32_t start = page << kPageShift;
+      if (!out->empty() && out->back().first + out->back().second == start) {
+        out->back().second += kPageSize;
+      } else {
+        out->emplace_back(start, kPageSize);
+      }
+    }
+  }
+
   bool Owns(uint64_t authority_sequence) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = owner_pages_.find(authority_sequence);

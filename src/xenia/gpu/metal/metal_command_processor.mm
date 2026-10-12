@@ -14018,6 +14018,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       uint64_t sentinel_survivors = 0;
       uint64_t sentinel_examined = 0;
       uint64_t clipped_texels = 0;
+      std::vector<std::pair<uint32_t, uint32_t>> owned;
+      if (wb.lazy_armed) {
+        lazy_publication_.OwnedRangesOf(wb.authority_sequence, &owned);
+      }
       if (!aliased) {
         // Per-row copy, parallelized exactly like the CPU scatter (rows
         // publish disjoint tiled addresses). The 4.2 probes measured the
@@ -14032,6 +14036,30 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         // bit 3 set unpublished (metal_tiled_publish_run.h). Runs are aligned
         // on the TILED x (destination offset included).
         const uint32_t run_texels = metal::TiledPublishRunTexels(wb.bpp);
+        // An armed record may already have published some pages on first
+        // touch, and the host may have discarded others; RAM there can hold
+        // newer CPU data (Halo 4's prologue Bink buffer, read from disc into
+        // pages a menu resolve at 02B22000 had published, was zeroed by this
+        // drain at the next swap and the decoder looped forever). Copy only
+        // the pages the record still owns.
+        const bool owned_only = wb.lazy_armed != 0;
+        auto copy_run = [&](uint32_t off, uint32_t len) -> uint32_t {
+          if (!owned_only) {
+            std::memcpy(dest + off, src_base + off, len);
+            return len;
+          }
+          uint32_t copied = 0;
+          const uint32_t a0 = wb.guest_addr + off, a1 = a0 + len;
+          for (const auto& [r0, rlen] : owned) {
+            uint32_t c0 = std::max(a0, r0), c1 = std::min(a1, r0 + rlen);
+            if (c0 < c1) {
+              std::memcpy(dest + (c0 - wb.guest_addr),
+                          src_base + (c0 - wb.guest_addr), c1 - c0);
+              copied += c1 - c0;
+            }
+          }
+          return copied;
+        };
         auto publish_row = [&](size_t y, uint64_t& row_bytes,
                                uint64_t& row_clipped, uint64_t& row_sent,
                                uint64_t& row_seen) {
@@ -14055,8 +14083,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
               run_bytes = fit * wb.bpp;
             }
             if (run_bytes) {
-              std::memcpy(dest + off, src_base + off, run_bytes);
-              row_bytes += run_bytes;
+              row_bytes += copy_run(off, run_bytes);
               if (sentinel_check && wb.bpp >= 4u) {
                 for (uint32_t w = 0; w < run_bytes / 4u; ++w) {
                   uint32_t word;
@@ -14156,8 +14183,21 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
           // measured +45% tex uploads/frame from the blanket invalidation.
           // The publication's watches already fired for the content change,
           // and the scoped straddler re-assert below still runs after this.
-          shared_memory_->MarkRangeRamEqual(wb.guest_addr,
-                                            wb.dest_extent_bytes);
+          if (!wb.lazy_armed) {
+            shared_memory_->MarkRangeRamEqual(wb.guest_addr,
+                                              wb.dest_extent_bytes);
+          } else {
+            // Only the pages copied above are equal; the rest of RAM may
+            // hold newer CPU data than the buffer.
+            const uint32_t extent_end = wb.guest_addr + wb.dest_extent_bytes;
+            for (const auto& [r0, rlen] : owned) {
+              uint32_t c0 = std::max(r0, wb.guest_addr);
+              uint32_t c1 = std::min(r0 + rlen, extent_end);
+              if (c0 < c1) {
+                shared_memory_->MarkRangeRamEqual(c0, c1 - c0);
+              }
+            }
+          }
         }
       }
     } else if (dest && staging) {
