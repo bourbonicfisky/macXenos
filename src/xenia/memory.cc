@@ -2018,6 +2018,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   // irrelevant now (kDiscard); unwatched pages are untouched.
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
                    false, true);
+  ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
 }
@@ -2066,6 +2067,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
                    false, true);
+  ReconcileHostProtection(address, size);
   return true;
 }
 
@@ -2119,6 +2121,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
                    false, true);
+  ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
 }
@@ -2188,7 +2191,18 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
     return false;
   }
 
-  return BaseHeap::Protect(address, size, protect);
+  if (!BaseHeap::Protect(address, size, protect)) {
+    return false;
+  }
+
+  // BaseHeap::Protect changes host protection only when the heap's host
+  // offset is aligned to the host page, which the E0000000 heap's 0x1000 is
+  // not on a 16 KB-page host (Apple Silicon): there the guest's change never
+  // reached the host, and the invalidation above has already dropped the
+  // write watches (Banjo-Kazooie: Nuts & Bolts re-faulted forever on E0
+  // pages from F2438000).
+  ReconcileHostProtection(address, size);
+  return true;
 }
 
 void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
@@ -2503,6 +2517,55 @@ void PhysicalHeap::ProvideReadWatchedEdgePages(uint32_t virtual_address,
   }
 }
 
+void PhysicalHeap::ReconcileHostProtection(uint32_t address, uint32_t size) {
+  // On a host whose page is larger than the guest page, BaseHeap skips host
+  // commits and protection changes for this heap (ShouldSkipHostCommit, the
+  // Protect alignment check), so a host page a watch made read-only keeps
+  // that protection after its watch is dropped. Bring each host page in the
+  // range to its guest protection, keeping what remaining watches need.
+  if (!size || (page_size_ >= system_page_size_ &&
+                 !(host_address_offset() & (system_page_size_ - 1)))) {
+    // BaseHeap applies this heap's protection on the host itself.
+    return;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  uint32_t heap_relative = address - heap_base_;
+  uint32_t heap_relative_end =
+      std::min(heap_relative + (size - 1), heap_size_ - 1);
+  uint32_t system_page_first =
+      (heap_relative + host_address_offset()) >> system_page_shift_;
+  uint32_t system_page_last = std::min(
+      (heap_relative_end + host_address_offset()) >> system_page_shift_,
+      system_page_count_ - 1);
+  for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+    RestoreUnwatchedSystemPage(i, false);
+  }
+}
+
+void PhysicalHeap::RestoreUnwatchedSystemPage(uint32_t system_page,
+                                              bool from_fault) {
+  // Called with the global lock held, for a page without a read watch: the
+  // host protection is the guest's, or read-only under a write watch.
+  uint64_t bit = uint64_t(1) << (system_page & 63);
+  const SystemPageFlagsBlock& flags = system_page_flags_[system_page >> 6];
+  if (flags.notify_on_read & bit) {
+    return;
+  }
+  xe::memory::PageAccess target = SystemPageGuestAccess(system_page);
+  if ((flags.notify_on_invalidation & bit) &&
+      target == xe::memory::PageAccess::kReadWrite) {
+    target = xe::memory::PageAccess::kReadOnly;
+  }
+  static std::atomic<uint32_t> restored{0};
+  if (from_fault && restored.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGW("PhysicalHeap: restored host protection of unwatched system page "
+           "{} (heap {:08X})",
+           system_page, heap_base_);
+  }
+  xe::memory::Protect(membase_ + heap_base_ + (system_page << system_page_shift_),
+                      system_page_size_, target);
+}
+
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect,
@@ -2555,8 +2618,16 @@ bool PhysicalHeap::TriggerCallbacks(
       // No read watch here. If the guest mapping is accessible this is a race
       // with another thread that cleared the watch, so retry. If it is
       // no-access it is a genuine access violation, so propagate.
-      return SystemPageGuestAccess(system_page_first) !=
-             xe::memory::PageAccess::kNoAccess;
+      if (SystemPageGuestAccess(system_page_first) ==
+          xe::memory::PageAccess::kNoAccess) {
+        return false;
+      }
+      // A faulting read must also find the host page readable (see the
+      // write path below).
+      if (length == 1) {
+        RestoreUnwatchedSystemPage(system_page_first, true);
+      }
+      return true;
     }
     uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
     uint32_t physical_address_start =
@@ -2634,8 +2705,18 @@ bool PhysicalHeap::TriggerCallbacks(
     // MMIOHandler::ExceptionCallback. If the guest doesn't permit the write
     // either, retrying it faults forever, so report it unhandled and let the
     // violation surface.
-    return SystemPageGuestAccess(system_page_first) ==
-           xe::memory::PageAccess::kReadWrite;
+    if (SystemPageGuestAccess(system_page_first) !=
+        xe::memory::PageAccess::kReadWrite) {
+      return false;
+    }
+    // With no watch left the host protection must be the guest's. A faulting
+    // access (length 1) on a page still host-protected would retry forever:
+    // Banjo-Kazooie: Nuts & Bolts spun on a write fault at F2438000 (flags
+    // clear, guest read-write, host read-only) at its first level load.
+    if (length == 1) {
+      RestoreUnwatchedSystemPage(system_page_first, true);
+    }
+    return true;
   }
 
   // Trigger callbacks.

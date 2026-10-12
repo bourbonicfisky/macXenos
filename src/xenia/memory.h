@@ -316,6 +316,12 @@ class PhysicalHeap : public BaseHeap {
 
   // The most permissive guest access of any guest page inside a host page
   // (host pages are 16 KiB on arm64 macOS, guest pages 4 KiB in the E0 heap).
+  // Sets every host page of a guest range to its guest protection (see
+  // RestoreUnwatchedSystemPage); for hosts that skip heap host protection.
+  void ReconcileHostProtection(uint32_t address, uint32_t size);
+  // Sets a system page without a read watch to its guest protection
+  // (read-only under a write watch). from_fault: logged as a repair.
+  void RestoreUnwatchedSystemPage(uint32_t system_page, bool from_fault);
   xe::memory::PageAccess SystemPageGuestAccess(
       uint32_t system_page_number) const;
 
