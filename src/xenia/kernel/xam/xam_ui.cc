@@ -381,6 +381,10 @@ static dword_result_t XamShowMessageBoxUi(
     buttons.push_back("OK");
   }
 
+  XELOGI("XamShowMessageBoxUI: '{}' ({} buttons, focused {}){}", title,
+         buttons.size(), uint32_t(active_button),
+         cvars::headless ? "; headless, answering the focused button" : "");
+
   X_RESULT result;
   if (cvars::headless) {
     // Auto-pick the focused button.
