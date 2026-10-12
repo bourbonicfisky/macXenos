@@ -278,10 +278,16 @@ void AudioSystem::SubmitFrame(size_t index, float* samples) {
 void AudioSystem::UnregisterClient(size_t index) {
   SCOPE_profile_cpu_f("apu");
 
-  auto global_lock = global_critical_region_.Acquire();
   assert_true(index < kMaximumClientCount);
+  // Lock order is the client's lock, then the global lock: the worker holds
+  // the client lock across the guest callback, and the callback's
+  // XAudioSubmitRenderDriverFrame takes the global lock in SubmitFrame.
+  // Taking them the other way round here deadlocked a title that unregisters
+  // while its callback runs (Banjo-Kazooie: Nuts & Bolts, at boot and at its
+  // first level load).
+  std::lock_guard<std::recursive_mutex> client_guard(client_locks_[index]);
+  auto global_lock = global_critical_region_.Acquire();
   {
-    std::lock_guard<std::recursive_mutex> guard(client_locks_[index]);
     DestroyDriver(clients_[index].driver);
     memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
     clients_[index].driver = nullptr;
