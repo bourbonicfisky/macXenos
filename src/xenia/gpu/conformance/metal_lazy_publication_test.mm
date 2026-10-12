@@ -184,6 +184,55 @@ TEST_CASE("lazy publication: OnAccess copies the touched page of a tiled owner",
   CHECK(!table.Owns(7));
 }
 
+TEST_CASE("lazy publication: OnAccess publishes the completed older owners",
+          "[l0][metal][lazypub]") {
+  // Two linear owners sharing page 0x20: A (completed, submission 1) covers
+  // [0x20000, 0x20800), B (uncommitted, submission 2) covers [0x20400,
+  // 0x20C00). A read must see A's output (the newest finished producer, as
+  // hardware would before B executes) and leave the page armed for B.
+  MetalLazyPublication table;
+  MetalLazyPublication::Owner a;
+  a.authority_sequence = 11;
+  a.submission = 1;
+  a.guest_addr = 0x20000;
+  a.range_bytes = 0x800;
+  a.linear = true;
+  MetalLazyPublication::Owner b = a;
+  b.authority_sequence = 12;
+  b.submission = 2;
+  b.guest_addr = 0x20400;
+  table.Arm(a, nullptr, nullptr);
+  table.Arm(b, nullptr, nullptr);
+
+  const uint32_t image_bytes = 0x21000;
+  std::vector<uint8_t> shared(image_bytes), ram(image_bytes, 0);
+  for (uint32_t i = 0; i < image_bytes; ++i) {
+    shared[i] = uint8_t(i * 7 + 1);
+  }
+  uint32_t remaining = table.OnAccess(
+      0x20100, 4, [&](uint64_t submission) { return submission == 1; },
+      shared.data(), [&](uint32_t address) { return ram.data() + address; });
+  CHECK(remaining == 1);
+  CHECK(std::memcmp(ram.data() + 0x20000, shared.data() + 0x20000, 0x800) ==
+        0);
+  for (uint32_t i = 0x20800; i < 0x20C00; ++i) {
+    REQUIRE(ram[i] == 0);  // B's own bytes are not published yet.
+  }
+  CHECK(!table.Owns(11));
+  CHECK(table.Owns(12));
+  CHECK(table.stats().stale_reads == 1);
+  CHECK(table.stats().stale_partial_pages == 1);
+
+  // B completes: the next read publishes it.
+  remaining = table.OnAccess(
+      0x20100, 4, [&](uint64_t) { return true; }, shared.data(),
+      [&](uint32_t address) { return ram.data() + address; });
+  CHECK(remaining == 0);
+  CHECK(std::memcmp(ram.data() + 0x20400, shared.data() + 0x20400, 0x800) ==
+        0);
+  CHECK(!table.Owns(12));
+}
+
 TEST_CASE("lazy publication: OldestOwnerBefore finds older overlapping owners",
           "[l0][metal][lazypub]") {
   MetalLazyPublication table;

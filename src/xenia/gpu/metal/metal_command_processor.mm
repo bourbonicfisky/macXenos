@@ -3134,6 +3134,10 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
       });
   if (remaining) {
     lazy_rearm_needed_.store(true, std::memory_order_release);
+    stale_by_signal_[std::min<uint32_t>(
+                         signal_since_commit_.load(std::memory_order_acquire),
+                         5)]
+        .fetch_add(remaining, std::memory_order_relaxed);
   }
 }
 
@@ -4895,6 +4899,7 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  signal_since_commit_.store(0, std::memory_order_release);
   // Epoch AT SUBMISSION: a late callback must still join its original episode.
   //
   // CONCURRENCY INVARIANT (GPU THREAD ONLY): reading the epoch and reserving
@@ -15361,6 +15366,7 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
+  signal_since_commit_.store(5, std::memory_order_release);
   CommitOpenFaultableWork();
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
@@ -15404,13 +15410,18 @@ void MetalCommandProcessor::CommitOpenFaultableWork() {
   }
 }
 
-void MetalCommandProcessor::PrepareGuestMemoryForFenceWrite() {
+void MetalCommandProcessor::PrepareGuestMemoryForFenceWrite(
+    GuestSignalKind kind) {
+  signal_since_commit_.store(uint32_t(kind) + 1, std::memory_order_release);
   // MEM_WRITE / memory COND_WRITE fences: Halo 3 polls such a fence and then
   // reads the GPU-written pages behind it; with the producing work still in
   // the open command buffer every fault read prior contents (~46k stale reads
   // in 3 minutes of its intro, white exposure frames on the pod descent).
-  // XE_METAL_FENCE_COMMIT=0 restores the previous behavior.
-  if (FenceCommitEnabled()) {
+  // XE_METAL_FENCE_COMMIT=0 restores the previous behavior. Scratch and
+  // read-pointer writebacks are attributed only (stale_by_signal_): committing
+  // at scratch writebacks did not reduce Dead to Rights' stale reads.
+  if (FenceCommitEnabled() && (kind == GuestSignalKind::kMemWrite ||
+                               kind == GuestSignalKind::kCondWrite)) {
     CommitOpenFaultableWork();
   }
 }
@@ -15916,6 +15927,13 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             pending_writebacks_.size(), armed_pending, staging_depth,
             staging_color, untagged, lazy_publication_.armed_page_count(),
             pending_memexports_.size());
+        XELOGI(
+            "MetalStaleBySignal (cumulative): none={} memwrite={} condwrite={} "
+            "scratch={} rptr={} exposure={} | partial pages {}",
+            stale_by_signal_[0].load(), stale_by_signal_[1].load(),
+            stale_by_signal_[2].load(), stale_by_signal_[3].load(),
+            stale_by_signal_[4].load(), stale_by_signal_[5].load(),
+            st.stale_partial_pages);
         s_last_lazy = st;
       }
       static const bool s_untile_timing =

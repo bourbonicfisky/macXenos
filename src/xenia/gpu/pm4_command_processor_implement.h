@@ -984,7 +984,8 @@ XE_NOINLINE
 bool COMMAND_PROCESSOR::ExecutePacketType3_MEM_WRITE(
     uint32_t packet, uint32_t count) XE_RESTRICT {
   uint32_t write_addr = reader_.ReadAndSwap<uint32_t>();
-  COMMAND_PROCESSOR::PrepareGuestMemoryForFenceWrite();
+  COMMAND_PROCESSOR::PrepareGuestMemoryForFenceWrite(
+      GuestSignalKind::kMemWrite);
   for (uint32_t i = 0; i < count - 1; i++) {
     uint32_t write_data = reader_.ReadAndSwap<uint32_t>();
 
@@ -1037,7 +1038,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
     // Write.
     if (wait_info & 0x100) {
       // Memory.
-      COMMAND_PROCESSOR::PrepareGuestMemoryForFenceWrite();
+      COMMAND_PROCESSOR::PrepareGuestMemoryForFenceWrite(
+          GuestSignalKind::kCondWrite);
       auto endianness = static_cast<xenos::Endian>(write_reg_addr & 0x3);
       write_reg_addr &= ~0x3;
       write_data = GpuSwap(write_data, endianness);

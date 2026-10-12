@@ -314,7 +314,7 @@ class MetalCommandProcessor : public CommandProcessor {
   bool PrepareGuestMemoryForHostRead(uint32_t guest_address,
                                      uint32_t length) override;
   bool PrepareGuestMemoryForCompletionExposure() override;
-  void PrepareGuestMemoryForFenceWrite() override;
+  void PrepareGuestMemoryForFenceWrite(GuestSignalKind kind) override;
   // Closes the open command buffer (no wait) when it holds a GPU-current
   // resolve or memexport record armed for CPU faults, so a fault behind the
   // fence the guest is about to see can wait for committed work.
@@ -1173,6 +1173,11 @@ class MetalCommandProcessor : public CommandProcessor {
   metal::MetalLazyPublication lazy_publication_;
   void* lazy_read_callback_handle_ = nullptr;
   std::atomic<bool> lazy_rearm_needed_{false};
+  // Stale-read attribution: the last guest-visible signal since the open
+  // command buffer began (0 = none, else GuestSignalKind + 1; 5 = completion
+  // exposure), and stale fault reads counted by that signal.
+  std::atomic<uint32_t> signal_since_commit_{0};
+  std::atomic<uint64_t> stale_by_signal_[6] = {};
   // Set only around the swap / fence-packet full-domain publications: those
   // are the requests whose GPU-current records may be armed instead of
   // copied. Ranged host reads, waits, cache clears and trace capture stay

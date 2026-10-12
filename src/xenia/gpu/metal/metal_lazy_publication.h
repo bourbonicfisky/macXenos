@@ -53,6 +53,13 @@ namespace metal {
 // which the watch does not protect.
 class MetalLazyPublication {
  public:
+  static bool PartialPublishEnabled() {
+    static const bool s_enabled = [] {
+      const char* v = std::getenv("XE_METAL_LAZY_PARTIAL");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    return s_enabled;
+  }
   static constexpr uint32_t kPageShift = 12;
   static constexpr uint32_t kPageSize = 1u << kPageShift;
 
@@ -81,6 +88,9 @@ class MetalLazyPublication {
     uint64_t fault_pages_copied = 0;
     uint64_t fault_bytes_copied = 0;
     uint64_t stale_reads = 0;  // owner not yet committed at fault time
+    // Stale pages whose older, completed owners were still published (the
+    // read sees the newest finished producer, as on hardware).
+    uint64_t stale_partial_pages = 0;
     uint64_t retired_records = 0;
   };
 
@@ -284,32 +294,42 @@ class MetalLazyPublication {
     }
     uint32_t remaining = 0;
     for (const auto& [page, owners] : touched) {
-      // Every owner's submission must be complete before any coverage is
-      // copied: a newer owner may have overwritten an older one's bytes.
-      bool waitable = true;
+      // Owners are in arm (producer) order. Publish the completed prefix:
+      // a newer owner that cannot be waited for is still uncommitted, so the
+      // GPU has not run it and the shared buffer holds exactly the completed
+      // owners' results -- what hardware would show a CPU read issued before
+      // the newer producer executes. The page stays armed for the rest.
+      size_t done = 0;
       for (const Owner& owner : owners) {
         if (!owner.submission || !wait_for_submission(owner.submission)) {
-          waitable = false;
           break;
         }
+        ++done;
       }
-      if (!waitable) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.stale_reads;
-        ++remaining;
-        continue;
+      // XE_METAL_LAZY_PARTIAL=0: all-or-nothing (the previous behavior).
+      if (done != owners.size() && !PartialPublishEnabled()) {
+        done = 0;
       }
       uint64_t bytes = 0;
-      for (const Owner& owner : owners) {
-        bytes += CopyPage(owner, page, shared_contents, translate_physical);
+      for (size_t i = 0; i < done; ++i) {
+        bytes += CopyPage(owners[i], page, shared_contents, translate_physical);
       }
       std::lock_guard<std::mutex> lock(mutex_);
-      for (const Owner& owner : owners) {
-        RemoveOwnerFromPage(page, owner.authority_sequence);
-        ForgetPage(owner.authority_sequence, page);
+      for (size_t i = 0; i < done; ++i) {
+        RemoveOwnerFromPage(page, owners[i].authority_sequence);
+        ForgetPage(owners[i].authority_sequence, page);
       }
-      ++stats_.fault_pages_copied;
-      stats_.fault_bytes_copied += bytes;
+      if (done) {
+        ++stats_.fault_pages_copied;
+        stats_.fault_bytes_copied += bytes;
+      }
+      if (done != owners.size()) {
+        ++stats_.stale_reads;
+        if (done) {
+          ++stats_.stale_partial_pages;
+        }
+        ++remaining;
+      }
     }
     return remaining;
   }

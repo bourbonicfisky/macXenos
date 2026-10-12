@@ -300,11 +300,17 @@ class CommandProcessor {
   // the CPU may read next, so backends with deferred producers must publish
   // their complete pending domain. Backends without such producers are no-op.
   virtual bool PrepareGuestMemoryForCompletionExposure() { return true; }
-  // Called before a packet writes a guest-visible memory value the CPU may poll
-  // as a fence (MEM_WRITE, memory COND_WRITE). Backends that defer GPU writes
-  // to guest RAM until the CPU touches them can make the work behind the fence
-  // waitable here; no-op elsewhere.
-  virtual void PrepareGuestMemoryForFenceWrite() {}
+  // Called before the command processor writes a guest-visible value the CPU
+  // may poll as a fence. Backends that defer GPU writes to guest RAM until the
+  // CPU touches them can make the work behind the fence waitable here; no-op
+  // elsewhere.
+  enum class GuestSignalKind : uint32_t {
+    kMemWrite,     // MEM_WRITE packet
+    kCondWrite,    // COND_WRITE to memory
+    kScratch,      // SCRATCH_REG writeback to SCRATCH_ADDR
+    kReadPointer,  // CP_RB_RPTR writeback after a ring-buffer batch
+  };
+  virtual void PrepareGuestMemoryForFenceWrite(GuestSignalKind kind) {}
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,

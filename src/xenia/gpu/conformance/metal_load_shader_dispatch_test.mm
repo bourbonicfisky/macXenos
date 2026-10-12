@@ -109,7 +109,7 @@ TEST_CASE("load shaders: full family builds libraries and compute pipelines "
   REQUIRE(h.ok);
   size_t declared_count;
   MetalLoadShaderPipelines::shaders(&declared_count);
-  REQUIRE(declared_count == 59);  // Complete texture_load_*.cs.xesl family.
+  REQUIRE(declared_count == 61);  // Complete texture_load_*.cs.xesl family.
   REQUIRE(h.pipelines.count() == declared_count);
   for (size_t i = 0; i < declared_count; ++i) {
     INFO("shader index " << i);
