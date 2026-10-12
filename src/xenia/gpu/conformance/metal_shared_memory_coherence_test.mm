@@ -42,7 +42,10 @@
 #include "xenia/gpu/metal/metal_memory_authority.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/base/cvar.h"
 #include "xenia/memory.h"
+
+DECLARE_bool(protect_on_release);
 
 namespace xe {
 namespace gpu {
@@ -611,11 +614,17 @@ TEST_CASE("SM coherence: physical-memory boundary is checked", "[l1][metal][shar
   auto& h = H();
   const uint32_t end = 512u * 1024 * 1024;
   // Clamp safety at the literal top: an invalidation whose length overshoots
-  // the end of physical space must neither crash nor wrap. (The topmost
-  // pages themselves are heap-reserved and not allocatable, which
-  // RequestRange correctly refuses — verified below.)
+  // the end of physical space must neither crash nor wrap. The topmost pages
+  // are heap-reserved and never allocated; since 6d0fe6c0d a guest-unallocated
+  // range is uploaded as hardware would read it unless the host page may be
+  // unreadable (--protect_on_release), where RequestRange still refuses.
   h.shared->MemoryInvalidationCallback(end - kPage, kPage * 4, true);
-  REQUIRE_FALSE(h.shared->RequestRange(end - kPage, kPage));
+  const bool protect_on_release = cvars::protect_on_release;
+  cvars::protect_on_release = true;
+  const bool refused_when_protected = !h.shared->RequestRange(end - kPage, kPage);
+  cvars::protect_on_release = protect_on_release;
+  REQUIRE(refused_when_protected);
+  REQUIRE(h.shared->RequestRange(end - kPage, kPage));
   // Full validate/invalidate/revalidate round at a high allocatable address,
   // with an overshooting invalidation length that must clamp to the extent
   // end without touching unrelated pages.
