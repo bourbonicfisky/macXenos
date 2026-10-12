@@ -40,10 +40,10 @@ constexpr std::array<ExpectedProfile, 5> kExpectedProfiles = {{
      "gameplay_expected", 17, 29, 48000ms},
     {"534307E7-just-cause-2.toml", "534307E7", "gameplay_expected", 5, 11,
      70000ms},
-    {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", "gameplay_expected", 3,
-     4, 12800ms},
-    {"5454082B-red-dead-redemption.toml", "5454082B", "intro_expected", 5,
-     7, 35000ms},
+    {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", "gameplay_expected", 7,
+     10, 35400ms},
+    {"5454082B-red-dead-redemption.toml", "5454082B", "cinematic_expected", 8,
+     11, 640000ms},
 }};
 
 }  // namespace
@@ -73,8 +73,13 @@ TEST_CASE("every committed scripted-input profile parses and ends neutral",
       REQUIRE(result.script->nominal_duration() == expected.duration);
       REQUIRE(result.script->nominal_duration() <= kMaximumNominalDuration);
 
-      const auto* final_marker =
-          std::get_if<MarkerStep>(&result.script->steps().back());
+      // The last marker; sweep profiles follow it with an idle wait.
+      const MarkerStep* final_marker = nullptr;
+      for (const auto& step : result.script->steps()) {
+        if (const auto* marker = std::get_if<MarkerStep>(&step)) {
+          final_marker = marker;
+        }
+      }
       REQUIRE(final_marker != nullptr);
       REQUIRE(final_marker->name == expected.final_marker);
 

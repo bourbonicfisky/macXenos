@@ -88,6 +88,8 @@ class ScriptedInputDriver final : public InputDriver {
   uint32_t logged_transitions_ = 0;
   uint32_t logged_summaries_ = 0;
   uint32_t last_transition_ordinal_ = 0;
+  // Keystroke bits already reported to the guest (see GetKeystroke).
+  uint32_t keystroke_bits_ = 0;
 };
 
 }  // namespace xe::hid::scripted

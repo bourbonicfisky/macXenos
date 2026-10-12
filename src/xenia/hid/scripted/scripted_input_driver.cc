@@ -10,6 +10,7 @@
 #include "xenia/hid/scripted/scripted_input_driver.h"
 
 #include <algorithm>
+#include <bit>
 #include <fstream>
 #include <limits>
 #include <utility>
@@ -17,8 +18,44 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
+#include "xenia/ui/virtual_key.h"
 
 namespace xe::hid::scripted {
+
+namespace {
+
+// Keystroke bit i reports kKeystrokeVirtualKeys[i]. Bits 0-15 are the XInput
+// button field (bit 11 is unused and never set); 16-19 are the left stick's
+// four directions and 20-21 the triggers, as the SDL driver derives them.
+constexpr ui::VirtualKey kKeystrokeVirtualKeys[] = {
+    ui::VirtualKey::kXInputPadDpadUp,      ui::VirtualKey::kXInputPadDpadDown,
+    ui::VirtualKey::kXInputPadDpadLeft,    ui::VirtualKey::kXInputPadDpadRight,
+    ui::VirtualKey::kXInputPadStart,       ui::VirtualKey::kXInputPadBack,
+    ui::VirtualKey::kXInputPadLThumbPress, ui::VirtualKey::kXInputPadRThumbPress,
+    ui::VirtualKey::kXInputPadLShoulder,   ui::VirtualKey::kXInputPadRShoulder,
+    ui::VirtualKey::kXInputPadGuide,       ui::VirtualKey::kNone,
+    ui::VirtualKey::kXInputPadA,           ui::VirtualKey::kXInputPadB,
+    ui::VirtualKey::kXInputPadX,           ui::VirtualKey::kXInputPadY,
+    ui::VirtualKey::kXInputPadLThumbUp,    ui::VirtualKey::kXInputPadLThumbDown,
+    ui::VirtualKey::kXInputPadLThumbRight, ui::VirtualKey::kXInputPadLThumbLeft,
+    ui::VirtualKey::kXInputPadLTrigger,    ui::VirtualKey::kXInputPadRTrigger,
+};
+
+uint32_t KeystrokeBits(const GamepadState& state) {
+  // XInput's left-stick dead zone and trigger threshold.
+  constexpr int32_t kStick = 7849;
+  constexpr uint8_t kTrigger = 30;
+  uint32_t bits = state.buttons & ~uint32_t(0x0800);
+  bits |= state.left_stick_y > kStick ? uint32_t(1) << 16 : 0;
+  bits |= state.left_stick_y < -kStick ? uint32_t(1) << 17 : 0;
+  bits |= state.left_stick_x > kStick ? uint32_t(1) << 18 : 0;
+  bits |= state.left_stick_x < -kStick ? uint32_t(1) << 19 : 0;
+  bits |= state.left_trigger > kTrigger ? uint32_t(1) << 20 : 0;
+  bits |= state.right_trigger > kTrigger ? uint32_t(1) << 21 : 0;
+  return bits;
+}
+
+}  // namespace
 
 namespace {
 
@@ -193,7 +230,39 @@ X_RESULT ScriptedInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     *out_keystroke = {};
     out_keystroke->user_index = static_cast<uint8_t>(script_->player());
   }
-  return X_ERROR_EMPTY;
+  std::lock_guard<std::mutex> lock(mutex_);
+  // Keystrokes never start the timeline (the first GetState does), but once
+  // it runs they follow it: some menus read only keystrokes
+  // (XamInputGetKeystrokeEx; Banjo-Kazooie: Nuts & Bolts).
+  if (timeline_->started()) {
+    if (!timeline_->completed()) {
+      CacheState(timeline_->Poll());
+    } else if (!live_file_.empty()) {
+      CacheState(PollLive(now_function_()));
+    }
+    if (transition_telemetry_) {
+      LogTransitionObservation();
+    }
+  }
+  if (!out_keystroke) {
+    return X_ERROR_EMPTY;
+  }
+  // One event per call: releases before presses, lowest bit first (the SDL
+  // driver's order). No auto-repeat, so a timeline replays identically.
+  const uint32_t current = KeystrokeBits(gamepad_state_);
+  const uint32_t changed = current ^ keystroke_bits_;
+  if (!changed) {
+    return X_ERROR_EMPTY;
+  }
+  const uint32_t released = changed & ~current;
+  const uint32_t pick = released ? released : changed;
+  const uint32_t index = static_cast<uint32_t>(std::countr_zero(pick));
+  const uint32_t bit = uint32_t(1) << index;
+  keystroke_bits_ ^= bit;
+  out_keystroke->virtual_key = uint16_t(kKeystrokeVirtualKeys[index]);
+  out_keystroke->flags = (current & bit) ? X_INPUT_KEYSTROKE_KEYDOWN
+                                         : X_INPUT_KEYSTROKE_KEYUP;
+  return X_ERROR_SUCCESS;
 }
 
 InputType ScriptedInputDriver::GetInputType() const {

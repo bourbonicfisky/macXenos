@@ -19,6 +19,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/hid/input_system.h"
+#include "xenia/ui/virtual_key.h"
 
 namespace xe::hid::scripted::test {
 namespace {
@@ -239,6 +240,44 @@ TEST_CASE("scripted driver exposes the standard connected gamepad contract",
   REQUIRE_FALSE(driver.GetControllerIdentity(1, nullptr));
 }
 
+TEST_CASE("scripted keystrokes follow a started timeline",
+          "[hid][scripted][driver]") {
+  FakeClock clock;
+  ScriptedInputDriver driver(nullptr, 0, ParseDriverScript(),
+                             [&clock] { return clock.Now(); });
+  X_INPUT_KEYSTROKE keystroke = {};
+  auto next = [&](ui::VirtualKey key, uint16_t flags) {
+    REQUIRE(driver.GetKeystroke(XUserIndexAny, 0, &keystroke) ==
+            X_ERROR_SUCCESS);
+    REQUIRE(keystroke.virtual_key == uint16_t(key));
+    REQUIRE(keystroke.flags == flags);
+    REQUIRE(keystroke.user_index == 1);
+  };
+
+  // A keystroke query neither starts nor reads an unstarted timeline.
+  clock.Advance(1s);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+  X_INPUT_STATE state = {};
+  REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
+  REQUIRE(state.gamepad.buttons == (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_A));
+
+  // Hold: START, A and the right trigger (239) go down in bit order; the left
+  // trigger (17) and the sticks (111, -222) stay under their thresholds.
+  next(ui::VirtualKey::kXInputPadStart, X_INPUT_KEYSTROKE_KEYDOWN);
+  next(ui::VirtualKey::kXInputPadA, X_INPUT_KEYSTROKE_KEYDOWN);
+  next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYDOWN);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+
+  // Release, read through keystrokes alone: no GetState in between.
+  clock.Advance(200ms);
+  next(ui::VirtualKey::kXInputPadStart, X_INPUT_KEYSTROKE_KEYUP);
+  next(ui::VirtualKey::kXInputPadA, X_INPUT_KEYSTROKE_KEYUP);
+  next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYUP);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+  clock.Advance(1s);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+}
+
 TEST_CASE("real InputSystem preserves exact scripted states and packets",
           "[hid][scripted][driver][integration]") {
   FakeClock clock;
@@ -423,10 +462,13 @@ TEST_CASE("real InputSystem reports non-scripted slots disconnected",
   REQUIRE(first_eligible_state.gamepad.buttons ==
           (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_A));
 
+  // The started timeline reports its held buttons as keystrokes.
   X_INPUT_KEYSTROKE keystroke = {};
   REQUIRE(input_system.GetKeystroke(2, InputType::Controller, &keystroke) ==
-          X_ERROR_EMPTY);
+          X_ERROR_SUCCESS);
   REQUIRE(keystroke.user_index == 2);
+  REQUIRE(keystroke.virtual_key == uint16_t(ui::VirtualKey::kXInputPadStart));
+  REQUIRE(keystroke.flags == X_INPUT_KEYSTROKE_KEYDOWN);
 }
 
 TEST_CASE("scripted transition telemetry is silent unless it is selected",
