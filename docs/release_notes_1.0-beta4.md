@@ -92,7 +92,7 @@ second/install disc.
   Silicon. Set `gpu = vulkan` for MoltenVK if a title misbehaves.
 - **Higher internal resolutions.** 2x2 runs well below 1x on an M4 (Just
   Cause 2 18.4 fps); 3x3 is playable only on lighter titles.
-- **Ultra Street Fighter IV** occasionally stalls or crashes during the boot intro.
+- **Ultra Street Fighter IV** occasionally stalls or crashes during the boot intro (crash fixed on the trunk after beta 4).
   Restarting the game clears it.
 - **Multi-disc titles.** Disc swaps open a file picker; install discs (GTA V,
   Forza 4 content disc) do not run on their own.

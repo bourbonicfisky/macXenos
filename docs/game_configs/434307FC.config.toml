@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Ultra Street Fighter IV (434307FC).
+# The game builds a global object through a pre-C++11 function-local static
+# whose guard bit is set before the constructor (827A0C60) runs, and two of
+# its boot threads reach it at nearly the same time. On hardware the window
+# is a few instructions; under the JIT the first call also compiles the
+# constructor, so the second thread got the unconstructed object and called
+# through a null vtable (intermittent boot crash, LR 829A87E4 / 829A85C0).
+# Compiling the constructor when the title loads closes the window.
+[CPU]
+jit_precompile_functions = "827A0C60"

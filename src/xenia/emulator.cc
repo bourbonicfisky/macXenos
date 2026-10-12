@@ -29,6 +29,7 @@
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
+#include "xenia/base/string_util.h"
 #include "xenia/base/system.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
@@ -76,6 +77,14 @@ DECLARE_bool(headless);
 
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
 UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
+DEFINE_string(
+    jit_precompile_functions, "",
+    "Comma-separated guest function addresses (hex) to compile when the title "
+    "loads, before its first thread runs. For titles whose non-thread-safe "
+    "static initialization sets its guard before calling a constructor: the "
+    "first call compiles the constructor, which widens a nanosecond race into "
+    "milliseconds (Ultra Street Fighter IV's boot crash).",
+    "CPU");
 
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
@@ -1645,6 +1654,26 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           ->PostGameConfigLoad();
     }
     game_config_load_callback_loop_next_index_ = SIZE_MAX;
+
+    // Per-title ahead-of-time compiles (jit_precompile_functions).
+    if (!cvars::jit_precompile_functions.empty()) {
+      uint32_t compiled = 0, requested = 0;
+      for (std::string_view entry :
+           xe::utf8::split(cvars::jit_precompile_functions, ", ")) {
+        if (entry.empty()) {
+          continue;
+        }
+        ++requested;
+        uint32_t address = xe::string_util::from_string<uint32_t>(entry, true);
+        if (processor()->ResolveFunction(address)) {
+          ++compiled;
+        } else {
+          XELOGW("jit_precompile_functions: {:08X} did not compile", address);
+        }
+      }
+      XELOGI("jit_precompile_functions: compiled {} of {} for title {}",
+             compiled, requested, title_id);
+    }
 
     // Per-title cache mount policy. The cache devices are mounted before the
     // title is known (xenia_main), so a game config that sets
