@@ -2074,7 +2074,15 @@ void KernelState::InitializeKernelGuestGlobals() {
       {XObject::Type::Device,
        kernel_guest_globals_ +
            offsetof32(KernelGuestGlobals, IoDeviceObjectType)}};
-  xboxkrnl::xeKeSetEvent(&block->UsbdBootEnumerationDoneEvent, 1, 0);
+  // Signal by writing the dispatcher header, not xeKeSetEvent: nothing waits
+  // yet, and KeSetEvent would wrap the kernel's own event in an XEvent with a
+  // title handle (F8000000) that the console never allocates. The first
+  // title handle must be the module's, then the main thread's, or every
+  // later handle is one slot high: Burnout Paradise derives a job-thread
+  // slot from (handle - F8000088) / 4 and its third job thread overran a
+  // six-slot array into static data. A wait on the event later creates the
+  // XEvent from this header, signalled (XEvent::InitializeNative).
+  block->UsbdBootEnumerationDoneEvent.header.signal_state = 1;
 }
 
 void KernelState::InitializeXbdmCpuCounters() {
