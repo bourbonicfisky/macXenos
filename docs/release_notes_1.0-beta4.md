@@ -83,15 +83,16 @@ second/install disc.
   `preferences_button = back_start` to open the dashboard with Back + Start,
   or use F6 / Cmd-comma.
 - **Intel Macs with AMD GPUs.** Metal on Intel/AMD is new and lightly
-  tested. Red Dead Redemption shows corrupted title-screen geometry and GPU
-  timeouts in gameplay on a Mac Pro (AMD). Set `gpu = vulkan` for MoltenVK
-  if a title misbehaves.
+  tested. In this build Red Dead Redemption shows corrupted title-screen
+  geometry and GPU timeouts in gameplay on a Mac Pro (AMD). Fixed on the
+  trunk after beta 4 (the next build): the corrupted geometry (quad lists
+  drawn through mesh-shader emulation), the Viva Piñata crash and its 6 fps
+  (now 30), and Gears of War 3's GPU timeout (20 -> 28 fps). Red Dead runs
+  at 21-26 fps there and Skate 2 at 20; both are still slower than on Apple
+  Silicon. Set `gpu = vulkan` for MoltenVK if a title misbehaves.
 - **Higher internal resolutions.** 2x2 runs well below 1x on an M4 (Just
   Cause 2 18.4 fps); 3x3 is playable only on lighter titles.
-- **Tessellated geometry.** Hardware tessellation runs on a CPU tessellator.
-  A small class of quad-patch draws is still skipped (missing fragments in
-  the Viva Piñata start-screen logo).
-- **Ultra Street Fighter IV** occasionally stalls during the boot intro.
+- **Ultra Street Fighter IV** occasionally stalls or crashes during the boot intro.
   Restarting the game clears it.
 - **Multi-disc titles.** Disc swaps open a file picker; install discs (GTA V,
   Forza 4 content disc) do not run on their own.
