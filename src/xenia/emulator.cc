@@ -1432,6 +1432,19 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
   XELOGE("{}", crash_msg);
 
+  // A fault in emulator code on a host thread (GPU command processor, audio
+  // worker outside its guest callback) is a host bug, not a guest crash.
+  // Pausing would suspend this thread from inside its own handler (the GPU
+  // thread's Pause runs inline and never returns: Banjo-Kazooie froze with
+  // the dump as the only trace), and resuming would re-fault. Let the
+  // process crash so the OS writes a crash report.
+  if (current_thread->is_host_object() && !pc_in_code) {
+    XELOGE("Host fault on emulator thread {:08X}; not pausing, crashing.",
+           current_thread->handle());
+    xe::FlushLog();
+    return false;
+  }
+
   // Crash dump is out; now pause the emulator and eat the exception (freezes
   // other guest threads for the dialog below).
   Pause();
