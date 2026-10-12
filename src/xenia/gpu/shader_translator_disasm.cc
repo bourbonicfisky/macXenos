@@ -344,9 +344,16 @@ void ParsedVertexFetchInstruction::Disassemble(StringBuffer* out) const {
     out->AppendFormat(", Offset={}", attributes.offset);
   }
   if (attributes.data_format != xenos::VertexFormat::kUndefined) {
-    out->AppendFormat(
-        ", DataFormat={}",
-        kVertexFetchDataFormats[static_cast<int>(attributes.data_format)].name);
+    // The table names only the formats the GPU documents; print any other
+    // raw (a null name threw from fmt and aborted Banjo-Kazooie: Nuts & Bolts).
+    const char* format_name =
+        kVertexFetchDataFormats[static_cast<int>(attributes.data_format)].name;
+    if (format_name) {
+      out->AppendFormat(", DataFormat={}", format_name);
+    } else {
+      out->AppendFormat(", DataFormat={}",
+                        static_cast<uint32_t>(attributes.data_format));
+    }
   }
   if (!is_mini_fetch && attributes.stride) {
     out->AppendFormat(", Stride={}", attributes.stride);

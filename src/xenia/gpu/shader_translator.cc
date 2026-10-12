@@ -1118,9 +1118,25 @@ void ParseTextureFetchInstruction(const TextureFetchInstruction& op,
     case FetchOpcode::kSetTextureGradientsVert:
       opcode_info = {"setGradientV", false, false, false, 3};
       break;
-    default:
-      assert_unhandled_case(fetch_opcode);
+    default: {
+      // Not a texture fetch opcode the GPU documents. Keep the instruction a
+      // result-less no-op that every translator skips, but give it a name and
+      // an initialized opcode: disassembly used to append the null name and
+      // crash the GPU thread (Banjo-Kazooie: Nuts & Bolts at its first level
+      // load), which then froze in the crash handler's own Pause().
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        XELOGW("Shader: unknown texture fetch opcode {}, treated as a no-op",
+               static_cast<uint32_t>(op.opcode()));
+      }
+      instr.opcode = op.opcode();
+      instr.opcode_name = "unknown_tfetch";
+      instr.dimension = op.dimension();
+      instr.is_predicated = op.is_predicated();
+      instr.predicate_condition = op.predicate_condition();
       return;
+    }
   }
 
   instr.opcode = op.opcode();
