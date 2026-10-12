@@ -3060,6 +3060,14 @@ bool MetalCommandProcessor::SwapLifetimeEnabled() {
   return s_enabled;
 }
 
+static bool FenceCommitEnabled() {
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_FENCE_COMMIT");
+    return !(value && value[0] == '0' && !value[1]);
+  }();
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::LazyPublishEnabled() {
   // DEFAULT ON since the 2026-09-27 counted gate; XE_METAL_LAZY_PUBLISH=0 is
   // the exact-0 rollback to eager swap / fence-packet publication.
@@ -15353,20 +15361,7 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   metal::GuestRangeSet requested;
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
-  if (LazyPublishEnabled() && lazy_read_callback_handle_ &&
-      !trace_writer_.is_open() && !trace_playback_context() &&
-      frame_command_buffer_) {
-    // A fault can only wait on committed work: close the open command buffer
-    // (no wait) when it holds a GPU-current record, so the completion the
-    // guest is about to observe is also one its reads can converge on.
-    const uint64_t encoding = CurrentEncodingSubmission();
-    for (const PendingWriteback& wb : pending_writebacks_) {
-      if (wb.gpu_current && wb.submission == encoding) {
-        EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
-        break;
-      }
-    }
-  }
+  CommitOpenFaultableWork();
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);
@@ -15376,6 +15371,48 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   completion_exposure_last_ = fingerprint();
   completion_exposure_valid_ = ok;
   return ok;
+}
+
+void MetalCommandProcessor::CommitOpenFaultableWork() {
+  if (!LazyPublishEnabled() || !lazy_read_callback_handle_ ||
+      trace_writer_.is_open() || trace_playback_context() ||
+      !frame_command_buffer_) {
+    return;
+  }
+  // A fault can only wait on committed work: close the open command buffer
+  // (no wait) when it holds a GPU-current record, so the completion the guest
+  // is about to observe is also one its reads can converge on. Memexport
+  // records are armed for faults the same way as resolve writebacks.
+  const uint64_t encoding = CurrentEncodingSubmission();
+  bool open_record = false;
+  for (const PendingWriteback& wb : pending_writebacks_) {
+    if (wb.gpu_current && wb.submission == encoding) {
+      open_record = true;
+      break;
+    }
+  }
+  if (!open_record && FenceCommitEnabled()) {
+    for (const PendingMemexport& me : pending_memexports_) {
+      if (me.lazy_armed && me.submission == encoding) {
+        open_record = true;
+        break;
+      }
+    }
+  }
+  if (open_record) {
+    EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+  }
+}
+
+void MetalCommandProcessor::PrepareGuestMemoryForFenceWrite() {
+  // MEM_WRITE / memory COND_WRITE fences: Halo 3 polls such a fence and then
+  // reads the GPU-written pages behind it; with the producing work still in
+  // the open command buffer every fault read prior contents (~46k stale reads
+  // in 3 minutes of its intro, white exposure frames on the pod descent).
+  // XE_METAL_FENCE_COMMIT=0 restores the previous behavior.
+  if (FenceCommitEnabled()) {
+    CommitOpenFaultableWork();
+  }
 }
 
 bool MetalCommandProcessor::FlushPendingWritebacksForWait(
