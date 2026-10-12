@@ -107,6 +107,42 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   Xbyak_aarch64::Label& epilog_label() { return *epilog_label_; }
 
+  // Branches to a HIR block, the epilog or tail code. cbz, cbnz and b.cond
+  // reach only +-1 MiB; with far_branches_ (a function re-emitted because its
+  // code is larger) each becomes an inverted skip over a b (+-128 MiB).
+  template <typename R>
+  void BranchIfZero(const R& r, Xbyak_aarch64::Label& target) {
+    if (!far_branches_) {
+      cbz(r, target);
+      return;
+    }
+    auto& skip = NewCachedLabel();
+    cbnz(r, skip);
+    b(target);
+    L(skip);
+  }
+  template <typename R>
+  void BranchIfNotZero(const R& r, Xbyak_aarch64::Label& target) {
+    if (!far_branches_) {
+      cbnz(r, target);
+      return;
+    }
+    auto& skip = NewCachedLabel();
+    cbz(r, skip);
+    b(target);
+    L(skip);
+  }
+  void BranchIf(Xbyak_aarch64::Cond cond, Xbyak_aarch64::Label& target) {
+    if (!far_branches_) {
+      b(cond, target);
+      return;
+    }
+    auto& skip = NewCachedLabel();
+    b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1), skip);
+    b(target);
+    L(skip);
+  }
+
   FunctionDebugInfo* debug_info() const { return debug_info_; }
   size_t stack_size() const { return stack_size_; }
 
@@ -163,6 +199,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void* Emplace(const EmitFunctionInfo& func_info,
                 GuestFunction* function = nullptr);
   bool Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info);
+  // Discards the emitted code, labels and tail code.
+  void ResetCodegenState();
 
  protected:
   Processor* processor_ = nullptr;
@@ -210,6 +248,7 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;
+  bool far_branches_ = false;
 };
 
 }  // namespace a64

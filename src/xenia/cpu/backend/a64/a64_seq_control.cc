@@ -39,7 +39,7 @@ struct BRANCH_TRUE_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Only the low 8 bits define truthiness; an I8 value may carry dirty bits.
     e.uxtb(e.w0, i.src1);
-    e.cbnz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_I16
@@ -47,33 +47,33 @@ struct BRANCH_TRUE_I16
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Only the low 16 bits define truthiness; an I16 value may carry dirty bits.
     e.uxth(e.w0, i.src1);
-    e.cbnz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_I32
     : Sequence<BRANCH_TRUE_I32, I<OPCODE_BRANCH_TRUE, VoidOp, I32Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(i.src1, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_I64
     : Sequence<BRANCH_TRUE_I64, I<OPCODE_BRANCH_TRUE, VoidOp, I64Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(i.src1, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_F32
     : Sequence<BRANCH_TRUE_F32, I<OPCODE_BRANCH_TRUE, VoidOp, F32Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.fmov(e.w0, i.src1);
-    e.cbnz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_TRUE_F64
     : Sequence<BRANCH_TRUE_F64, I<OPCODE_BRANCH_TRUE, VoidOp, F64Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.fmov(e.x0, i.src1);
-    e.cbnz(e.x0, e.GetLabel(i.src2.value->id));
+    e.BranchIfNotZero(e.x0, e.GetLabel(i.src2.value->id));
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_BRANCH_TRUE, BRANCH_TRUE_I8, BRANCH_TRUE_I16,
@@ -88,7 +88,7 @@ struct BRANCH_FALSE_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Only the low 8 bits define truthiness; an I8 value may carry dirty bits.
     e.uxtb(e.w0, i.src1);
-    e.cbz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_I16
@@ -97,21 +97,21 @@ struct BRANCH_FALSE_I16
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Only the low 16 bits define truthiness; an I16 value may carry dirty bits.
     e.uxth(e.w0, i.src1);
-    e.cbz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_I32
     : Sequence<BRANCH_FALSE_I32,
                I<OPCODE_BRANCH_FALSE, VoidOp, I32Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbz(i.src1, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(i.src1, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_I64
     : Sequence<BRANCH_FALSE_I64,
                I<OPCODE_BRANCH_FALSE, VoidOp, I64Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbz(i.src1, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(i.src1, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_F32
@@ -119,7 +119,7 @@ struct BRANCH_FALSE_F32
                I<OPCODE_BRANCH_FALSE, VoidOp, F32Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.fmov(e.w0, i.src1);
-    e.cbz(e.w0, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(e.w0, e.GetLabel(i.src2.value->id));
   }
 };
 struct BRANCH_FALSE_F64
@@ -127,7 +127,7 @@ struct BRANCH_FALSE_F64
                I<OPCODE_BRANCH_FALSE, VoidOp, F64Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.fmov(e.x0, i.src1);
-    e.cbz(e.x0, e.GetLabel(i.src2.value->id));
+    e.BranchIfZero(e.x0, e.GetLabel(i.src2.value->id));
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_BRANCH_FALSE, BRANCH_FALSE_I8, BRANCH_FALSE_I16,
@@ -294,25 +294,25 @@ EMITTER_OPCODE_TABLE(OPCODE_TRAP_TRUE, TRAP_TRUE_I8, TRAP_TRUE_I16,
 struct RETURN_TRUE_I8
     : Sequence<RETURN_TRUE_I8, I<OPCODE_RETURN_TRUE, VoidOp, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.epilog_label());
+    e.BranchIfNotZero(i.src1, e.epilog_label());
   }
 };
 struct RETURN_TRUE_I16
     : Sequence<RETURN_TRUE_I16, I<OPCODE_RETURN_TRUE, VoidOp, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.epilog_label());
+    e.BranchIfNotZero(i.src1, e.epilog_label());
   }
 };
 struct RETURN_TRUE_I32
     : Sequence<RETURN_TRUE_I32, I<OPCODE_RETURN_TRUE, VoidOp, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.epilog_label());
+    e.BranchIfNotZero(i.src1, e.epilog_label());
   }
 };
 struct RETURN_TRUE_I64
     : Sequence<RETURN_TRUE_I64, I<OPCODE_RETURN_TRUE, VoidOp, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    e.cbnz(i.src1, e.epilog_label());
+    e.BranchIfNotZero(i.src1, e.epilog_label());
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RETURN_TRUE, RETURN_TRUE_I8, RETURN_TRUE_I16,

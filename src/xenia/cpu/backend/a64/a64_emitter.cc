@@ -70,7 +70,7 @@ const uint32_t A64Emitter::vec_reg_map_[VEC_COUNT] = {
 };
 
 A64Emitter::A64Emitter(A64Backend* backend, XbyakA64Allocator* allocator)
-    : CodeGenerator(kMaxCodeSize, Xbyak_aarch64::DontSetProtectRWE, allocator),
+    : CodeGenerator(kMaxCodeSize, Xbyak_aarch64::AutoGrow, allocator),
       processor_(backend->processor()),
       backend_(backend),
       code_cache_(backend->code_cache()),
@@ -93,16 +93,32 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   current_guest_function_ = function->address();
 
-  // Reset state.
-  stack_size_ = StackLayout::GUEST_STACK_SIZE;
-  source_map_arena_.Reset();
-  tail_code_.clear();
-  fpcr_mode_ = FPCRMode::Unknown;
-
-  // Try to emit.
+  // Try to emit. cbz/cbnz/b.cond reach only +-1 MiB, so a function whose
+  // code is larger (Halo 4 has a 143 KB guest function, ~1.3 MB of host
+  // code) fails with "label is too far"; emit it again with far branches.
   EmitFunctionInfo func_info = {};
-  if (!Emit(builder, func_info)) {
-    return false;
+  far_branches_ = false;
+  while (true) {
+    stack_size_ = StackLayout::GUEST_STACK_SIZE;
+    source_map_arena_.Reset();
+    fpcr_mode_ = FPCRMode::Unknown;
+    try {
+      if (!Emit(builder, func_info)) {
+        ResetCodegenState();
+        return false;
+      }
+      break;
+    } catch (const Xbyak_aarch64::Error& e) {
+      if (far_branches_ || int(e) != Xbyak_aarch64::ERR_LABEL_IS_TOO_FAR) {
+        throw;
+      }
+      XELOGI("A64: function {:08X} exceeds the conditional branch range ({} "
+             "bytes emitted); re-emitting with far branches",
+             function->address(), getSize());
+      ResetCodegenState();
+      far_branches_ = true;
+      func_info = {};
+    }
   }
 
   // Emplace the code into the code cache.
@@ -294,6 +310,12 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
   // In xbyak_aarch64, labels are resolved at define time (backpatching),
   // so all relative offsets are already correct. We just need to reset
   // the codegen state for the next function.
+  ResetCodegenState();
+
+  return new_execute_address;
+}
+
+void A64Emitter::ResetCodegenState() {
   reset();
   tail_code_.clear();
 
@@ -308,8 +330,6 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
     delete pair.second;
   }
   label_map_.clear();
-
-  return new_execute_address;
 }
 
 void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
@@ -414,7 +434,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     // Compare target guest address with our function's return address.
     ldr(w0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
     cmp(target_w, w0);
-    b(EQ, epilog_label());
+    BranchIf(EQ, epilog_label());
   }
 
   // Load host code address from indirection table.
@@ -624,7 +644,7 @@ void A64Emitter::PushStackpoint() {
     e.CallNativeSafe(
         reinterpret_cast<void*>(A64Emitter::HandleStackpointOverflowError));
   });
-  b(GE, overflow_label);
+  BranchIf(GE, overflow_label);
 }
 
 void A64Emitter::PopStackpoint() {
@@ -654,7 +674,7 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
                        StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
   cmp(w17, w16);
 
-  auto& sync_label = AddToTail([&return_from_sync](A64Emitter& e, Label& lbl) {
+  auto emit_sync = [&return_from_sync](A64Emitter& e) {
     // Set up arguments for the sync helper:
     //   x8 = return address (where to resume after fixup)
     //   x9 = this function's stack size
@@ -663,8 +683,16 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
     e.mov(e.x10, reinterpret_cast<uint64_t>(
                      e.backend()->synchronize_guest_and_host_stack_helper()));
     e.br(e.x10);
-  });
-  b(NE, sync_label);
+  };
+  if (far_branches_) {
+    // The tail may be more than 1 MiB away, out of the adr's reach back.
+    b(EQ, return_from_sync);
+    emit_sync(*this);
+  } else {
+    auto& sync_label = AddToTail(
+        [emit_sync](A64Emitter& e, Label& lbl) { emit_sync(e); });
+    b(NE, sync_label);
+  }
 
   L(return_from_sync);
 }
