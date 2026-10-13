@@ -104,6 +104,15 @@ export type ConsoleField = {
 
 /** The dashboard's sounds: not shipped, downloaded on request from a
     community pack (dashboard_sounds_mac.h), which the page credits. */
+/** App updates (updater_mac.h). */
+export type Updater = {
+  /** This copy can update itself: a release bundle carrying Sparkle. False
+      for a development build. */
+  available: boolean;
+  /** The first-launch question about update checks has been answered. */
+  asked: boolean;
+};
+
 export type DashSounds = {
   status: "missing" | "downloading" | "ready" | "failed" | "unavailable";
   /** Why the last download failed. */
@@ -175,6 +184,7 @@ export type NativeState = {
   appVersion: string;
   /** The build: branch@commit (date). */
   appBuild: string;
+  updater: Updater;
 };
 
 export type NativeMessage =
@@ -192,6 +202,7 @@ export type NativeMessage =
   | { op: "action"; id: string; value?: number }
   | { op: "sound"; file: string; gain: number }
   | { op: "dashSounds"; action: "download" | "decline" }
+  | { op: "updateOffer"; schedule: "launch" | "weekly" | "monthly" | "never" }
   | { op: "gamerPicturesDownload" }
   | { op: "gamerPicturesReveal" }
   | { op: "gamerPicturesDelete" }
@@ -350,6 +361,7 @@ function emptyState(): NativeState {
     gamerPictures: { status: "unavailable", error: "", pictures: 0, titles: 0, bytes: 0, received: 0, total: 0 },
     systemLanguages: [],
     appVersion: "",
-    appBuild: ""
+    appBuild: "",
+    updater: { available: false, asked: true }
   };
 }

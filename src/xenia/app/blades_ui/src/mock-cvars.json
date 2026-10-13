@@ -152,6 +152,24 @@
 "description": "Allows user to set custom font size.",
 "changed": false
 },
+"check_for_updates": {
+"name": "check_for_updates",
+"category": "UI",
+"type": "string",
+"value": "launch",
+"defaultValue": "launch",
+"description": "When to look on macxenos.com for a newer macXenos (Sparkle): launch (each time the app starts), weekly, monthly or never. It offers the update and installs nothing without asking. Checking by hand from the app menu works whatever this is.",
+"changed": false
+},
+"check_for_updates_asked": {
+"name": "check_for_updates_asked",
+"category": "UI",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Whether the first-launch question about update checks has been answered. Until it is, the app does not look for updates on its own.",
+"changed": false
+},
 "host_present_from_non_ui_thread": {
 "name": "host_present_from_non_ui_thread",
 "category": "Display",

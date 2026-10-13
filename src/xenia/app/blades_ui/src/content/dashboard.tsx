@@ -1,6 +1,6 @@
 import type { BladeDef } from "../ui/blade";
 import { Bullets } from "../ui/blade-menu";
-import { useNative, type NativeState } from "../native";
+import { send, useNative, type NativeState } from "../native";
 import {
   PreferenceOptions,
   PreferenceValue,
@@ -10,6 +10,8 @@ import {
 import { Aside, PaneAction } from "./parts";
 import { downloadDashSounds, packCredit } from "../ui/sound-offer";
 import { Options, Value } from "../ui/settings-controls";
+import { updateSchedule } from "../ui/update-offer";
+import { openAcknowledgements } from "../ui/acknowledgements";
 import { dashboardShortcuts } from "./home";
 import { AVAILABLE, LOCALES, PSEUDO, t, useLanguage } from "../i18n";
 import { getPreferences, usePreferences } from "../ui/preferences";
@@ -227,6 +229,33 @@ export function dashboard(state: NativeState): BladeDef {
         )
       },
       {
+        id: "software-update",
+        label: t("dashboard.update"),
+        glyph: "clock",
+        value: state.updater.available ? (
+          <Value name="check_for_updates" options={updateSchedule()} />
+        ) : (
+          <>{t("dashboard.update.unavailableShort")}</>
+        ),
+        heading: t("dashboard.update"),
+        detail: state.updater.available ? (
+          <>
+            <p>{t("dashboard.update.detail")}</p>
+            <PaneAction onSelect={() => send({ op: "action", id: "checkForUpdates" })}>
+              {t("dashboard.update.check")}
+            </PaneAction>
+            <p className="pref-group">{t("dashboard.update.when")}</p>
+            <Options
+              name="check_for_updates"
+              title={t("dashboard.update.when")}
+              options={updateSchedule()}
+            />
+          </>
+        ) : (
+          <p>{t("dashboard.update.unavailable")}</p>
+        )
+      },
+      {
         id: "about",
         label: t("dashboard.about"),
         glyph: "question",
@@ -244,6 +273,7 @@ export function dashboard(state: NativeState): BladeDef {
             <p className="menu-spec m-0 text-[0.85em]">
               {t("dashboard.about.build", { build: state.appBuild || t("dashboard.about.unknownBuild") })}
             </p>
+            <PaneAction onSelect={openAcknowledgements}>{t("dashboard.about.acknowledgements")}</PaneAction>
           </>
         )
       }

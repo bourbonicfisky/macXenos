@@ -10,9 +10,16 @@
 # Usage:
 #   tools/build/package_mac.sh [--config Release|Checked|Debug] [--notarize] [--adhoc]
 #                              [--version <str>] [--x86_64 <bin>] [--x86_64-libs <prefix>]
+#                              [--feed-url <url>] [--no-sparkle]
 #
 #   --config       Build config to package (default: Release).
 #   --version      CFBundleShortVersionString (default: 1.0-canary), e.g. 1.0-rc1.
+#                  CFBundleVersion is the built commit's count (git rev-list
+#                  --count): Sparkle orders releases by it, so it only grows.
+#   --feed-url     The Sparkle appcast the app checks for updates (default:
+#                  https://macxenos.com/appcast.xml). See sparkle_appcast.sh.
+#   --no-sparkle   Leave the updater out (no Sparkle.framework, no feed): the
+#                  app then has no Check for Updates and never looks.
 #   --notarize     Submit to Apple notarytool + staple (default: OFF). Uses
 #                  APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from .env.
 #   --adhoc        Sign ad-hoc instead of Developer ID (no .env identity required).
@@ -41,6 +48,8 @@ DO_NOTARIZE=0
 ADHOC=0
 X86_BIN=""
 X86_LIB_PREFIX="/usr/local"
+FEED_URL="https://macxenos.com/appcast.xml"
+WITH_SPARKLE=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --config) CONFIG="$2"; shift 2 ;;
@@ -49,6 +58,8 @@ while [[ $# -gt 0 ]]; do
     --version) SHORT_VERSION_OVERRIDE="$2"; shift 2 ;;
     --x86_64) X86_BIN="$2"; shift 2 ;;
     --x86_64-libs) X86_LIB_PREFIX="$2"; shift 2 ;;
+    --feed-url) FEED_URL="$2"; shift 2 ;;
+    --no-sparkle) WITH_SPARKLE=0; shift ;;
     *) echo "error: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
@@ -87,8 +98,13 @@ fi
 get_define() { sed -n "s/^#define $1 \"\\(.*\\)\"/\\1/p" "${VERSION_H}" 2>/dev/null | head -1; }
 COMMIT_SHORT="$(get_define XE_BUILD_COMMIT_SHORT)"; COMMIT_SHORT="${COMMIT_SHORT:-unknown}"
 BRANCH="$(get_define XE_BUILD_BRANCH)"; BRANCH="${BRANCH:-unknown}"
+COMMIT_FULL="$(get_define XE_BUILD_COMMIT)"
 SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-1.0-canary}"
-BUILD_VERSION="${COMMIT_SHORT}"
+# Sparkle compares CFBundleVersion to decide what is newer, so it must grow
+# with every release: the built commit's position in history. (It was the
+# short hash, which has no order.)
+BUILD_VERSION="$(git -C "${REPO_ROOT}" rev-list --count "${COMMIT_FULL:-HEAD}" 2>/dev/null)" \
+  || die "cannot count commits up to ${COMMIT_FULL:-HEAD} for CFBundleVersion"
 
 # ===========================================================================
 # 1. Assemble the bundle skeleton
@@ -144,6 +160,31 @@ cp -R "${REPO_ROOT}/docs/game_configs" "${CONTENTS}/Resources/game_configs"
 sed -e "s/@SHORT_VERSION@/${SHORT_VERSION}/g" \
     -e "s/@BUILD_VERSION@/${BUILD_VERSION}/g" \
     "${PLIST_IN}" > "${CONTENTS}/Info.plist"
+
+# ===========================================================================
+# 1b. App updates: Sparkle.framework and its feed. The app loads the framework
+#     at run time (src/xenia/ui/updater_mac.mm) only when the bundle carries
+#     it and names a feed. Sparkle's own first-check prompt is off: the
+#     dashboard asks on first launch instead (check_for_updates_asked).
+# ===========================================================================
+if [[ "${WITH_SPARKLE}" -eq 1 ]]; then
+  SPARKLE_DIR="$("${SCRIPT_DIR}/fetch_sparkle.sh")" || die "could not fetch Sparkle"
+  ED_KEY_FILE="${SCRIPT_DIR}/sparkle_public_ed_key.txt"
+  ED_KEY="$(tr -d '[:space:]' < "${ED_KEY_FILE}" 2>/dev/null)"
+  [[ -n "${ED_KEY}" ]] || die "no Sparkle public key in ${ED_KEY_FILE}"
+  log "Bundling Sparkle ($(basename "$(dirname "${SPARKLE_DIR}")")), feed ${FEED_URL}"
+  ditto "${SPARKLE_DIR}/Sparkle.framework" "${CONTENTS}/Frameworks/Sparkle.framework"
+  # The XPC services exist for sandboxed apps; this one is not sandboxed.
+  rm -rf "${CONTENTS}/Frameworks/Sparkle.framework/Versions/B/XPCServices" \
+         "${CONTENTS}/Frameworks/Sparkle.framework/XPCServices"
+  PB=/usr/libexec/PlistBuddy
+  "${PB}" -c "Add :SUFeedURL string ${FEED_URL}" "${CONTENTS}/Info.plist"
+  "${PB}" -c "Add :SUPublicEDKey string ${ED_KEY}" "${CONTENTS}/Info.plist"
+  "${PB}" -c "Add :SUEnableAutomaticChecks bool false" "${CONTENTS}/Info.plist"
+  "${PB}" -c "Add :SUVerifyUpdateBeforeExtraction bool true" "${CONTENTS}/Info.plist"
+else
+  log "Leaving out Sparkle (--no-sparkle): no app updates"
+fi
 
 # ===========================================================================
 # 2. Bundle the runtime Vulkan stack (the only non-system runtime dep)
@@ -237,12 +278,36 @@ macXenos (unofficial macOS port) — Xenia Canary ${SHORT_VERSION} (${BRANCH} ${
 Bundled MoltenVK : ${MVK_SRC} (${MVK_VER})
 Bundled loader   : ${VK_LOADER_SRC} (${VKL_VER})
 EOF
+if [[ "${WITH_SPARKLE}" -eq 1 ]]; then
+  echo "Bundled Sparkle  : ${SPARKLE_DIR} (feed ${FEED_URL})" >> "${CONTENTS}/Resources/VERSIONS.txt"
+fi
 if [[ ${#METAL_LIBS[@]} -gt 0 ]]; then
   cat >> "${CONTENTS}/Resources/VERSIONS.txt" <<EOF
 Bundled dxilconv : ${DXILCONV_ARM64}$([[ "${UNIVERSAL}" -eq 1 ]] && echo " + ${DXILCONV_X86}")
 Bundled MSC      : ${MSC_SRC}
 EOF
 fi
+
+# Third-party notices for System > About > Acknowledgements, beside the page.
+# Strict: every license must be readable, and every third-party library on
+# the executable's link line and every bundled binary must have an entry in
+# docs/acknowledgements/manifest.json.
+log "Collecting third-party notices"
+BUNDLED_NAMES=()
+for f in "${CONTENTS}/Frameworks/"*; do BUNDLED_NAMES+=("$(basename "$f")"); done
+# The Homebrew whose MoltenVK and loader were bundled (their license files).
+HB_PREFIX=""
+for p in /opt/homebrew /usr/local; do
+  [[ -d "${p}/opt/molten-vk" ]] && { HB_PREFIX="${p}"; break; }
+done
+[[ -n "${HB_PREFIX}" ]] || die "no Homebrew molten-vk found for its license file"
+ACK_ARGS=(--out "${CONTENTS}/Resources/blades/acknowledgements.json" --strict
+          --link-ninja "${REPO_ROOT}/build/CMakeFiles/impl-${CONFIG}.ninja"
+          --homebrew-prefix "${HB_PREFIX}"
+          --bundled "${BUNDLED_NAMES[@]}")
+[[ "${WITH_SPARKLE}" -eq 1 ]] && ACK_ARGS+=(--sparkle-dir "${SPARKLE_DIR}")
+python3 "${SCRIPT_DIR}/collect_licenses.py" "${ACK_ARGS[@]}" \
+  || die "third-party notices incomplete (see above)"
 
 # Confirm nothing in the bundle points back at an absolute Cellar/host path.
 log "Verifying in-bundle dylib references"
@@ -284,12 +349,20 @@ else
   log "Signing with: ${IDENTITY}"
 fi
 
-# Sign nested dylibs first.
+# Sign nested code inside out, then the app. Not --deep: that would give
+# Sparkle's helpers the app's JIT entitlements.
 for f in "${CONTENTS}/Frameworks/"*.dylib; do
   codesign "${SIGN_ARGS[@]}" -s "${IDENTITY}" "${f}"
 done
-# Then deep-sign the app.
-codesign "${SIGN_ARGS[@]}" --deep -s "${IDENTITY}" "${APP_DIR}"
+if [[ "${WITH_SPARKLE}" -eq 1 ]]; then
+  # Sparkle's documented order, with hardened runtime and no entitlements.
+  SPARKLE_FW="${CONTENTS}/Frameworks/Sparkle.framework"
+  SPARKLE_SIGN=(--force --timestamp --options runtime -s "${IDENTITY}")
+  codesign "${SPARKLE_SIGN[@]}" "${SPARKLE_FW}/Versions/B/Autoupdate"
+  codesign "${SPARKLE_SIGN[@]}" "${SPARKLE_FW}/Versions/B/Updater.app"
+  codesign "${SPARKLE_SIGN[@]}" "${SPARKLE_FW}"
+fi
+codesign "${SIGN_ARGS[@]}" -s "${IDENTITY}" "${APP_DIR}"
 
 log "Verifying signature"
 codesign --verify --deep --strict --verbose=2 "${APP_DIR}"

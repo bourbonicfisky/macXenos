@@ -31,6 +31,7 @@
 #include "xenia/app/blades_overlay_mac.h"
 #include "xenia/app/dashboard_sounds_mac.h"
 #include "xenia/app/gamer_pictures_mac.h"
+#include "xenia/ui/updater_mac.h"
 #endif
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/base/string_util.h"
@@ -57,6 +58,9 @@ DECLARE_bool(enable_xmp);
 DECLARE_bool(dashboard_sounds_asked);
 DECLARE_string(preferences_button);
 DECLARE_string(gpu);
+#if XE_PLATFORM_MAC
+DECLARE_bool(check_for_updates_asked);
+#endif
 
 namespace xe {
 namespace app {
@@ -1122,6 +1126,21 @@ void BladesModel::WriteApp(StateWriter& w) {
   w.String(kReleaseName);
   w.Key("appBuild");
   w.String(XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
+  // Whether this copy can update itself (a release bundle carrying Sparkle),
+  // and whether the first-launch question about checking has been answered.
+  w.Key("updater");
+  w.StartObject();
+  w.Key("available");
+#if XE_PLATFORM_MAC
+  w.Bool(ui::IsMacUpdaterAvailable());
+  w.Key("asked");
+  w.Bool(cvars::check_for_updates_asked);
+#else
+  w.Bool(false);
+  w.Key("asked");
+  w.Bool(true);
+#endif
+  w.EndObject();
 }
 
 std::string BladesModel::BuildStateJson() {
@@ -1200,6 +1219,9 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
 #if XE_PLATFORM_MAC
     if (name == "preferences_button") {
       SetControllerHomeButtonClaimed(cvars::preferences_button == "guide");
+    }
+    if (name == "check_for_updates") {
+      ui::ApplyMacUpdaterSettings();
     }
 #endif
     config::SaveConfig();
@@ -1511,6 +1533,29 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
     return Result::kPush;
   }
 
+#if XE_PLATFORM_MAC
+  if (op == "updateOffer") {
+    // The first-launch answer: a schedule, final (System > Software update
+    // changes it later). Choosing "launch" checks now, as a launch would.
+    const std::string when = string_member("schedule");
+    if (when == "launch" || when == "weekly" || when == "monthly" ||
+        when == "never") {
+      if (cvar::IConfigVar* var = FindSetting("check_for_updates")) {
+        SetSetting(var, rapidjson::Value(rapidjson::StringRef(when.c_str())));
+      }
+      if (cvar::IConfigVar* var = FindSetting("check_for_updates_asked")) {
+        SetSetting(var, rapidjson::Value(true));
+      }
+      config::SaveConfig();
+      ui::ApplyMacUpdaterSettings();
+      if (when == "launch") {
+        ui::CheckForMacUpdatesInBackground();
+      }
+    }
+    return Result::kPush;
+  }
+#endif
+
   if (op == "dashSounds") {
     // Either answer to the first-run offer is final: it isn't asked again.
     if (cvar::IConfigVar* var = FindSetting("dashboard_sounds_asked")) {
@@ -1538,6 +1583,13 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
       config::SaveConfig();
       return Result::kRelaunch;
     }
+#if XE_PLATFORM_MAC
+    if (id == "checkForUpdates") {
+      // Sparkle's window opens once Preferences has closed, not under it.
+      deferred_ = []() { ui::CheckForMacUpdates(); };
+      return Result::kCloseThen;
+    }
+#endif
   }
 
   XELOGW("Blades: unknown message {}", json);

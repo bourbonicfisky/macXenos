@@ -27,6 +27,9 @@ const STATES = {
   "system-sound": ["#system/sound"],
   "system-language": ["#system/language"],
   "system-about": ["#system/about"],
+  "system-update": ["#system/software-update"],
+  acknowledgements: ["#acknowledgements", "ArrowDown"],
+  "acknowledgements-read": ["#acknowledgements", "Enter"],
   "system-animation": ["#system/motion"],
   "home-folders": ["#home/game-folders"],
   "home-more": ["#home", ...Array(12).fill("ArrowDown")],
@@ -44,6 +47,16 @@ const STATES = {
       state.dashSounds.asked = false;
       window.__xeniaReceive(JSON.stringify(state));
     })`
+  ],
+  // The first-launch update question, its second choice focused.
+  "update-offer": [
+    "#home",
+    `eval:import("/src/mock.ts").then(({ mockState }) => {
+      const state = mockState();
+      state.updater.asked = false;
+      window.__xeniaReceive(JSON.stringify(state));
+    })`,
+    "ArrowDown"
   ]
 };
 

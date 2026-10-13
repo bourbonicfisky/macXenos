@@ -137,6 +137,7 @@ export function mockState(): NativeState {
     systemLanguages: [],
     appVersion: "1.0 beta 3",
     appBuild: "codex/metal-foundation-integration@4774abdb6 (dev)",
+    updater: { available: true, asked: true },
     allGames: []
   };
   // The folder holds a few games not played yet, besides the played ones.
@@ -171,6 +172,17 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
       return {
         ...state,
         gameFolders: { ...state.gameFolders, folders: state.gameFolders.folders.filter((f) => f !== message.path) }
+      };
+    case "updateOffer":
+      return {
+        ...state,
+        updater: { ...state.updater, asked: true },
+        cvars: state.cvars.check_for_updates
+          ? {
+              ...state.cvars,
+              check_for_updates: { ...state.cvars.check_for_updates, value: message.schedule }
+            }
+          : state.cvars
       };
     case "dashSounds":
       return {
@@ -251,3 +263,29 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
       return state;
   }
 }
+
+/** A few entries for the Acknowledgements sub-blade on the dev server, which
+    has no collected acknowledgements.json. */
+export const mockAcknowledgements = [
+  {
+    name: "Xenia",
+    license: "BSD-3-Clause",
+    url: "https://github.com/xenia-canary/xenia-canary",
+    note: "macXenos is a macOS port of Xenia Canary.",
+    text: "Copyright (c) 2015, Ben Vanik.\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n* Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer."
+  },
+  {
+    name: "SDL2",
+    license: "Zlib",
+    url: "https://www.libsdl.org",
+    note: "",
+    text: "Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>\n\nThis software is provided 'as-is', without any express or implied warranty."
+  },
+  {
+    name: "Sparkle",
+    license: "MIT",
+    url: "https://sparkle-project.org",
+    note: "",
+    text: "Copyright (c) 2006-2013 Andy Matuschak.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software."
+  }
+];

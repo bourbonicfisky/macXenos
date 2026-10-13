@@ -1,0 +1,9 @@
+Metal Shader Converter (libmetalirconverter.dylib)
+Copyright (c) 2023-2025 Apple Inc. All rights reserved.
+
+macXenos includes Apple's Metal Shader Converter dynamic library, redistributed
+under the Metal Shader Converter license agreement, which permits distributing
+it solely for shader conversion. It remains subject to Apple's terms.
+https://developer.apple.com/metal/shader-converter/
+
+Apple's acknowledgements for the Metal Shader Converter follow.

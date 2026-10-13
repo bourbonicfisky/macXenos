@@ -10,6 +10,7 @@ import { getNative, send } from "../native";
 import { Toast } from "./toast";
 import { AllGames } from "./all-games";
 import { FolderEditor } from "./folder-editor";
+import { Acknowledgements } from "./acknowledgements";
 import { PicturePicker } from "./picture-picker";
 
 /**
@@ -145,6 +146,7 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
       {/* Sub-blades wear their own colours, not the blade they open from. */}
       <AllGames tone="amber" />
       <FolderEditor />
+      <Acknowledgements />
       <PicturePicker tone="indigo" />
     </>
   );

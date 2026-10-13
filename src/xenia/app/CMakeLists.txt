@@ -195,9 +195,15 @@ if(APPLE)
   # into Contents/Resources.
   # A target of its own that runs on every build: a rebuilt page alone does
   # not relink the binary, so a POST_BUILD step would leave the old page.
+  # Beside it, the third-party notices the page shows under About >
+  # Acknowledgements (docs/acknowledgements/manifest.json). Lenient here: a
+  # development build may lack Sparkle; package_mac.sh collects them strictly.
   add_custom_target(xenia-app-blades ALL
     COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:xenia-app>/blades"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/blades_ui/dist" "$<TARGET_FILE_DIR:xenia-app>/blades"
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/build/collect_licenses.py"
+            --out "$<TARGET_FILE_DIR:xenia-app>/blades/acknowledgements.json"
+            --sparkle-dir "${PROJECT_BINARY_DIR}/sparkle/Sparkle-2.10.0/x"
     COMMENT "Copying the Preferences blades")
   add_dependencies(xenia-app xenia-app-blades)
 endif()

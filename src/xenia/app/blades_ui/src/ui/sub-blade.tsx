@@ -24,7 +24,7 @@ import { playSound } from "./sound";
 
 // --- Which one is open ------------------------------------------------------------
 
-export type SubBladeId = "all-games" | "game-folders" | "gamer-picture";
+export type SubBladeId = "all-games" | "game-folders" | "gamer-picture" | "acknowledgements";
 
 let openId: SubBladeId | null = null;
 const listeners = new Set<() => void>();
@@ -52,11 +52,11 @@ export function useSubBladeOpen(id: SubBladeId) {
   );
 }
 
-// A deep link opens one too (#all-games, #game-folders).
+// A deep link opens one too (#all-games, #game-folders, #acknowledgements).
 if (typeof window !== "undefined") {
   const fromHash = () => {
     const id = window.location.hash.replace("#", "");
-    if (id === "all-games" || id === "game-folders") openSubBlade(id);
+    if (id === "all-games" || id === "game-folders" || id === "acknowledgements") openSubBlade(id);
   };
   window.addEventListener("hashchange", fromHash);
   window.setTimeout(fromHash, 0);

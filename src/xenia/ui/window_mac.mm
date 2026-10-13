@@ -16,6 +16,7 @@
 
 #include "xenia/ui/surface_mac.h"
 #include "xenia/ui/ui_event.h"
+#include "xenia/ui/updater_mac.h"
 #include "xenia/ui/virtual_key.h"
 
 // Shows the standard macOS About panel. The app icon and version come from the
@@ -75,6 +76,7 @@ static void ShowMacAboutPanel() {
 - (void)quit:(id)sender;
 - (void)openAbout:(id)sender;
 - (void)openSettings:(id)sender;
+- (void)checkForUpdates:(id)sender;
 @end
 
 @implementation XeniaWindowDelegate
@@ -92,6 +94,7 @@ static void ShowMacAboutPanel() {
   }
 }
 - (void)openAbout:(id)sender { ShowMacAboutPanel(); }
+- (void)checkForUpdates:(id)sender { xe::ui::CheckForMacUpdates(); }
 - (void)openSettings:(id)sender {
   if (window_) {
     window_->HandleSettingsRequested();
@@ -342,6 +345,15 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
                           keyEquivalent:@""];
   about.target = delegate;
   [app_menu addItem:about];
+  // Only in a bundle packaged with Sparkle and a feed (updater_mac.h).
+  if (xe::ui::StartMacUpdater()) {
+    NSMenuItem* updates =
+        [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+                                   action:@selector(checkForUpdates:)
+                            keyEquivalent:@""];
+    updates.target = delegate;
+    [app_menu addItem:updates];
+  }
   [app_menu addItem:[NSMenuItem separatorItem]];
 
   // Preferences, as every Mac app has them: ⌘, opens the blades.

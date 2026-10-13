@@ -8,6 +8,7 @@ import { BladeDeck } from "./ui/blade-deck";
 import { DashboardField } from "./ui/dashboard-field";
 import { startGamepad } from "./ui/gamepad";
 import { SoundOffer } from "./ui/sound-offer";
+import { UpdateOffer } from "./ui/update-offer";
 
 function App() {
   const state = useNative();
@@ -21,6 +22,7 @@ function App() {
       <DashboardField />
       <BladeDeck blades={blades} />
       <SoundOffer />
+      <UpdateOffer />
     </>
   );
 }

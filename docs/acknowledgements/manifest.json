@@ -1,0 +1,332 @@
+{
+  "_comment": [
+    "What macXenos redistributes and the notices it carries (System > About >",
+    "Acknowledgements). tools/build/collect_licenses.py turns this into",
+    "acknowledgements.json beside the Preferences page. Each entry's files are",
+    "repo paths (optionally a 'lines' [first, last] range of a source header that",
+    "holds the license, or 'rtf' to convert), 'homebrew:<formula>/<file>' or",
+    "'sparkle:<file>'. 'libs' are the third-party static libraries and dylibs",
+    "the entry accounts for: the collector fails if the app links one that no",
+    "entry names."
+  ],
+  "components": [
+    {
+      "name": "Xenia",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/xenia-canary/xenia-canary",
+      "note": "macXenos is a macOS port of Xenia Canary.",
+      "files": [{ "path": "LICENSE" }]
+    },
+    {
+      "name": "FFmpeg",
+      "license": "LGPL-2.1-or-later",
+      "url": "https://ffmpeg.org",
+      "note": "libavcodec, libavformat and libavutil, built from source in third_party/FFmpeg without GPL parts.",
+      "libs": ["liblibavcodec.a", "liblibavformat.a", "liblibavutil.a"],
+      "files": [{ "path": "third_party/FFmpeg/LICENSE.md" }, { "path": "third_party/FFmpeg/COPYING.LGPLv2.1" }]
+    },
+    {
+      "name": "SDL2",
+      "license": "Zlib",
+      "url": "https://www.libsdl.org",
+      "libs": ["libSDL2.a"],
+      "files": [{ "path": "third_party/SDL2/LICENSE.txt" }]
+    },
+    {
+      "name": "DirectX Shader Compiler (dxilconv)",
+      "license": "NCSA AND Apache-2.0 WITH LLVM-exception",
+      "url": "https://github.com/microsoft/DirectXShaderCompiler",
+      "libs": ["libdxilconv.dylib"],
+      "files": [{ "path": "third_party/DirectXShaderCompiler/LICENSE.TXT" }]
+    },
+    {
+      "name": "Metal Shader Converter",
+      "license": "Apple license agreement",
+      "url": "https://developer.apple.com/metal/shader-converter/",
+      "libs": ["libmetalirconverter.dylib"],
+      "files": [
+        { "path": "docs/acknowledgements/metal-shader-converter.txt" },
+        { "path": "third_party/metal-shader-converter/include/Acknowledgements.rtf", "rtf": true }
+      ]
+    },
+    {
+      "name": "MoltenVK",
+      "license": "Apache-2.0",
+      "url": "https://github.com/KhronosGroup/MoltenVK",
+      "libs": ["libMoltenVK.dylib"],
+      "files": [{ "homebrew": "molten-vk/LICENSE" }]
+    },
+    {
+      "name": "Vulkan Loader",
+      "license": "Apache-2.0",
+      "url": "https://github.com/KhronosGroup/Vulkan-Loader",
+      "libs": ["libvulkan.1.dylib"],
+      "files": [{ "homebrew": "vulkan-loader/LICENSE.txt" }]
+    },
+    {
+      "name": "Sparkle",
+      "license": "MIT",
+      "url": "https://sparkle-project.org",
+      "libs": ["Sparkle.framework"],
+      "files": [{ "sparkle": "LICENSE" }]
+    },
+    {
+      "name": "Capstone",
+      "license": "BSD-3-Clause",
+      "url": "https://www.capstone-engine.org",
+      "libs": ["libcapstone.a"],
+      "files": [
+        { "path": "third_party/capstone/LICENSES/LICENSE.TXT" },
+        { "path": "third_party/capstone/LICENSES/LICENSE_LLVM.TXT" }
+      ]
+    },
+    {
+      "name": "{fmt}",
+      "license": "MIT",
+      "url": "https://github.com/fmtlib/fmt",
+      "libs": ["libfmt.a"],
+      "files": [{ "path": "third_party/fmt/LICENSE" }]
+    },
+    {
+      "name": "glslang",
+      "license": "BSD-3-Clause and others",
+      "url": "https://github.com/KhronosGroup/glslang",
+      "libs": ["libglslang-spirv.a"],
+      "files": [{ "path": "third_party/glslang/LICENSE.txt" }]
+    },
+    {
+      "name": "Dear ImGui",
+      "license": "MIT",
+      "url": "https://github.com/ocornut/imgui",
+      "libs": ["libimgui.a"],
+      "files": [{ "path": "third_party/imgui/LICENSE.txt" }]
+    },
+    {
+      "name": "libmspack",
+      "license": "LGPL-2.1-only",
+      "url": "https://www.cabextract.org.uk/libmspack/",
+      "libs": ["libmspack.a"],
+      "files": [{ "path": "third_party/mspack/COPYING.LIB" }]
+    },
+    {
+      "name": "pugixml",
+      "license": "MIT",
+      "url": "https://pugixml.org",
+      "libs": ["libpugixml.a"],
+      "files": [{ "path": "third_party/pugixml/LICENSE.md" }]
+    },
+    {
+      "name": "Snappy",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/google/snappy",
+      "libs": ["libsnappy.a"],
+      "files": [{ "path": "third_party/snappy/COPYING" }]
+    },
+    {
+      "name": "Zstandard",
+      "license": "BSD-3-Clause",
+      "url": "https://facebook.github.io/zstd/",
+      "libs": ["libzstd.a"],
+      "files": [{ "path": "third_party/zstd/LICENSE" }]
+    },
+    {
+      "name": "zlib-ng",
+      "license": "Zlib",
+      "url": "https://github.com/zlib-ng/zlib-ng",
+      "libs": ["libzlib-ng.a"],
+      "files": [{ "path": "third_party/zlib-ng/LICENSE.md" }]
+    },
+    {
+      "name": "xxHash",
+      "license": "BSD-2-Clause",
+      "url": "https://github.com/Cyan4973/xxHash",
+      "libs": ["libxxhash.a"],
+      "files": [{ "path": "third_party/xxhash/LICENSE" }]
+    },
+    {
+      "name": "ZArchive",
+      "license": "MIT-0",
+      "url": "https://github.com/Exzap/ZArchive",
+      "libs": ["libzarchive.a"],
+      "files": [{ "path": "third_party/zarchive/LICENSE" }]
+    },
+    {
+      "name": "Xbyak_aarch64",
+      "license": "Apache-2.0",
+      "url": "https://github.com/fujitsu/xbyak_aarch64",
+      "libs": ["libxbyak_aarch64.a"],
+      "files": [{ "path": "third_party/xbyak_aarch64/LICENSE" }]
+    },
+    {
+      "name": "Xbyak",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/herumi/xbyak",
+      "files": [{ "path": "third_party/xbyak/COPYRIGHT" }]
+    },
+    {
+      "name": "Discord RPC",
+      "license": "MIT",
+      "url": "https://github.com/discord/discord-rpc",
+      "libs": ["libdiscord-rpc.a"],
+      "files": [{ "path": "third_party/discord-rpc/LICENSE" }]
+    },
+    {
+      "name": "AES-128",
+      "license": "MIT",
+      "url": "https://github.com/openluopworld/aes_128",
+      "libs": ["libaes_128.a"],
+      "files": [{ "path": "third_party/aes_128/LICENSE" }]
+    },
+    {
+      "name": "Direct3D 11 reference tessellator",
+      "license": "MIT",
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/auxiliary/tessellator",
+      "libs": ["libd3d11-tessellator.a"],
+      "files": [{ "path": "third_party/d3d11-tessellator/tessellator.hpp", "lines": [1, 18] }]
+    },
+    {
+      "name": "DXBC checksum",
+      "license": "Copyright notice",
+      "url": "https://gpuopen.com",
+      "libs": ["libdxbc.a"],
+      "files": [{ "path": "third_party/dxbc/DXBCChecksum.h", "lines": [3, 10] }]
+    },
+    {
+      "name": "Cryptography routines (SHA-256, SHA-1, AES, DES)",
+      "license": "Zlib, ISC, public domain, MIT",
+      "url": "https://github.com/xenia-canary/xenia-canary/tree/canary_experimental/third_party/crypto",
+      "files": [
+        { "path": "third_party/crypto/sha256.h", "lines": [1, 6] },
+        { "path": "third_party/crypto/TinySHA1.hpp", "lines": [1, 24] },
+        { "path": "third_party/crypto/rijndael-alg-fst.h", "lines": [1, 25] },
+        { "path": "third_party/crypto/des/LICENSE" }
+      ]
+    },
+    {
+      "name": "LLVM support headers",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "url": "https://llvm.org",
+      "files": [{ "path": "third_party/llvm/LICENSE.txt" }]
+    },
+    {
+      "name": "stb",
+      "license": "MIT or public domain",
+      "url": "https://github.com/nothings/stb",
+      "files": [{ "path": "third_party/stb/stb_image.h", "lines": [7950, 7988] }]
+    },
+    {
+      "name": "half",
+      "license": "MIT",
+      "url": "https://half.sourceforge.net",
+      "files": [{ "path": "third_party/half/LICENSE.txt" }]
+    },
+    {
+      "name": "UTF8-CPP",
+      "license": "BSL-1.0",
+      "url": "https://github.com/nemtrif/utfcpp",
+      "files": [{ "path": "third_party/utfcpp/LICENSE" }]
+    },
+    {
+      "name": "microprofile",
+      "license": "Unlicense",
+      "url": "https://github.com/jonasmr/microprofile",
+      "files": [{ "path": "third_party/microprofile/microprofile.h", "lines": [2, 21] }]
+    },
+    {
+      "name": "RenderDoc in-application API",
+      "license": "MIT",
+      "url": "https://renderdoc.org",
+      "files": [{ "path": "third_party/renderdoc/renderdoc_app.h", "lines": [1, 24] }]
+    },
+    {
+      "name": "tabulate",
+      "license": "MIT, BSL-1.0, BSD-3-Clause",
+      "url": "https://github.com/p-ranav/tabulate",
+      "files": [
+        { "path": "third_party/tabulate/LICENSE" },
+        { "path": "third_party/tabulate/LICENSE.optional-lite" },
+        { "path": "third_party/tabulate/LICENSE.termcolor" },
+        { "path": "third_party/tabulate/LICENSE.variant-lite" }
+      ]
+    },
+    {
+      "name": "rapidcsv",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/d99kris/rapidcsv",
+      "files": [{ "path": "third_party/rapidcsv/LICENSE" }]
+    },
+    {
+      "name": "RapidJSON",
+      "license": "MIT",
+      "url": "https://rapidjson.org",
+      "files": [{ "path": "third_party/rapidjson/license.txt" }]
+    },
+    {
+      "name": "toml++",
+      "license": "MIT",
+      "url": "https://marzer.github.io/tomlplusplus/",
+      "files": [{ "path": "third_party/tomlplusplus/LICENSE" }]
+    },
+    {
+      "name": "cxxopts",
+      "license": "MIT",
+      "url": "https://github.com/jarro2783/cxxopts",
+      "files": [{ "path": "third_party/cxxopts/LICENSE" }]
+    },
+    {
+      "name": "date",
+      "license": "MIT",
+      "url": "https://github.com/HowardHinnant/date",
+      "files": [{ "path": "third_party/date/LICENSE.txt" }]
+    },
+    {
+      "name": "disruptorplus",
+      "license": "MIT",
+      "url": "https://github.com/lewissbaker/disruptorplus",
+      "files": [{ "path": "third_party/disruptorplus/LICENSE.txt" }]
+    },
+    {
+      "name": "Vulkan Headers",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers",
+      "files": [{ "path": "third_party/Vulkan-Headers/LICENSE.md" }]
+    },
+    {
+      "name": "Vulkan Memory Allocator",
+      "license": "MIT",
+      "url": "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator",
+      "files": [{ "path": "third_party/VulkanMemoryAllocator/LICENSE.txt" }]
+    },
+    {
+      "name": "AMD FidelityFX CAS",
+      "license": "MIT",
+      "url": "https://github.com/GPUOpen-Effects/FidelityFX-CAS",
+      "files": [{ "path": "third_party/FidelityFX-CAS/LICENSE.txt" }]
+    },
+    {
+      "name": "AMD FidelityFX Super Resolution 1.0",
+      "license": "MIT",
+      "url": "https://github.com/GPUOpen-Effects/FidelityFX-FSR",
+      "files": [{ "path": "third_party/FidelityFX-FSR/license.txt" }]
+    },
+    {
+      "name": "React",
+      "license": "MIT",
+      "url": "https://react.dev",
+      "note": "react, react-dom and scheduler, in the Preferences page.",
+      "files": [{ "path": "docs/acknowledgements/react-LICENSE.txt" }]
+    },
+    {
+      "name": "Michroma (font)",
+      "license": "OFL-1.1",
+      "url": "https://github.com/googlefonts/Michroma-font",
+      "files": [{ "path": "docs/acknowledgements/michroma-OFL.txt" }]
+    },
+    {
+      "name": "Selawik (font)",
+      "license": "OFL-1.1",
+      "url": "https://github.com/microsoft/Selawik",
+      "files": [{ "path": "docs/acknowledgements/selawik-LICENSE.txt" }]
+    }
+  ]
+}
