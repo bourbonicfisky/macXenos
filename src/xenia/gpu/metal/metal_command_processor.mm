@@ -7120,6 +7120,59 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(),
                           ps_param_gen_pos))
                    : 0;
+  // Unwritten-interpolator census (XE_GPU_INTERP_CENSUS=1, default off):
+  // draws whose PS input range covers interpolators the VS never writes. The
+  // translator feeds those zero (Canary D3D12 semantics); hardware leaves them
+  // undefined. Logged per (VS, PS, masks) at power-of-two counts; each flagged
+  // PS's disassembly is written once to XE_GPU_INTERP_CENSUS_DIR when set, so
+  // reads-before-writes can be checked offline (the input range is register
+  // count based, not a read set).
+  {
+    static const bool s_interp_census =
+        std::getenv("XE_GPU_INTERP_CENSUS") != nullptr;
+    if (s_interp_census && pixel_shader) {
+      uint32_t census_pgp = UINT32_MAX;
+      uint32_t ps_inputs = pixel_shader->GetInterpolatorInputMask(
+          sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(), census_pgp);
+      uint32_t unwritten = ps_inputs & ~vertex_shader->writes_interpolators();
+      if (unwritten) {
+        uint64_t key = vertex_shader->ucode_data_hash() ^
+                       (pixel_shader->ucode_data_hash() * 31) ^
+                       (uint64_t(ps_inputs) << 40) ^ unwritten;
+        uint64_t count = DeltaCensusKeyedCount(0x7F, key);
+        if (DeltaCensusLogCount(count)) {
+          auto colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+          auto depthcontrol = regs.Get<reg::RB_DEPTHCONTROL>();
+          XELOGI(
+              "InterpCensus draw={} count={} vs={:016X} ps={:016X} "
+              "vs_writes={:X} ps_inputs={:X} unwritten={:X} kill={} "
+              "tfetch={} alpha_test={} alpha_func={} z_write={} "
+              "color_mask={:08X} prim={}",
+              trace_draw_index_, count, vertex_shader->ucode_data_hash(),
+              pixel_shader->ucode_data_hash(),
+              vertex_shader->writes_interpolators(), ps_inputs, unwritten,
+              uint32_t(pixel_shader->kills_pixels()),
+              pixel_shader->texture_bindings().size(),
+              uint32_t(colorcontrol.alpha_test_enable),
+              uint32_t(colorcontrol.alpha_func),
+              uint32_t(depthcontrol.z_enable && depthcontrol.z_write_enable),
+              regs[XE_GPU_REG_RB_COLOR_MASK], uint32_t(prim_type));
+          static const char* s_census_dir =
+              std::getenv("XE_GPU_INTERP_CENSUS_DIR");
+          static std::unordered_set<uint64_t> s_dumped;
+          if (s_census_dir &&
+              s_dumped.insert(pixel_shader->ucode_data_hash()).second) {
+            std::string path = fmt::format("{}/ps_{:016X}.txt", s_census_dir,
+                                           pixel_shader->ucode_data_hash());
+            if (FILE* f = std::fopen(path.c_str(), "w")) {
+              std::fputs(pixel_shader->ucode_disassembly().c_str(), f);
+              std::fclose(f);
+            }
+          }
+        }
+      }
+    }
+  }
   // Diagnostic (2026-09-19): XE_METAL_IMASK_PS_ONLY=1 keeps every
   // interpolator the pixel shader reads even when the vertex shader writes
   // none (the VS declares and zero-fills them), so the PS variant matches
