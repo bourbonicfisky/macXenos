@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Gears of War: Judgment (4D530A26).
+# Some of the title's draws export data to memory from vertex shaders that
+# also rasterize (geometry-emulated draws), and later frames read it back.
+# With those exports dropped (the default, for their cost elsewhere) gameplay
+# renders bleached and inverted, with striped bars and noise-covered
+# characters, on Metal and on Vulkan alike; with them routed it renders
+# correctly at the same 30 fps.
+# (xenia-mac-evidence gears-judgment-alias-20261013, runs 5 and 11)
+[GPU]
+metal_memexport_raster = true
