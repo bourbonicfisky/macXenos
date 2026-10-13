@@ -2556,14 +2556,28 @@ void PhysicalHeap::RestoreUnwatchedSystemPage(uint32_t system_page,
       target == xe::memory::PageAccess::kReadWrite) {
     target = xe::memory::PageAccess::kReadOnly;
   }
-  static std::atomic<uint32_t> restored{0};
-  if (from_fault && restored.fetch_add(1, std::memory_order_relaxed) < 8) {
-    XELOGW("PhysicalHeap: restored host protection of unwatched system page "
-           "{} (heap {:08X})",
-           system_page, heap_base_);
+  uint8_t* host_page =
+      membase_ + heap_base_ + (system_page << system_page_shift_);
+  if (from_fault) {
+    // Two threads faulting on one watched page is ordinary: the first
+    // unprotects it and clears the watch, and the second then finds no watch
+    // on a page that is already writable. Only a page still protected is a
+    // repair (Banjo-Kazooie: Nuts & Bolts logged that race as a repair on
+    // every run, which hid whether any real case remained).
+    size_t query_length = system_page_size_;
+    xe::memory::PageAccess current;
+    if (xe::memory::QueryProtect(host_page, query_length, current) &&
+        current == target) {
+      return;
+    }
+    static std::atomic<uint32_t> restored{0};
+    if (restored.fetch_add(1, std::memory_order_relaxed) < 8) {
+      XELOGW("PhysicalHeap: restored host protection of unwatched system page "
+             "{} (heap {:08X})",
+             system_page, heap_base_);
+    }
   }
-  xe::memory::Protect(membase_ + heap_base_ + (system_page << system_page_shift_),
-                      system_page_size_, target);
+  xe::memory::Protect(host_page, system_page_size_, target);
 }
 
 bool PhysicalHeap::TriggerCallbacks(
