@@ -152,3 +152,81 @@ engine knows and the Xbox 360 never hands us.
 engine-integrated frame generation, so it should ship per title where it
 looks right. GPU headroom also matters: titles at their 30 cap on an M4
 have room, while Red Dead's ~31.5 ms of GPU time per frame does not.
+
+## Exact EDRAM output merging (ROV-style, in the pixel shader)
+
+Recorded 2026-10-12.
+
+**Goal:** draw the way the Xenos EDRAM does, bit for bit. Instead of host
+render targets with fixed-function blending and depth/stencil, the
+translated pixel shader reads and writes the 10 MiB EDRAM directly, in
+primitive order, and does the depth/stencil test, blend, guest format
+packing and per-sample MSAA coverage itself. Every guest render-target
+format then works exactly, including those with no host equivalent:
+7e3 float colour, the −32…32 `16_16` range and float24 depth. Changing a
+surface's format or MSAA mode becomes free, as it is on the console.
+It would be an opt-in accuracy path beside host render targets, not a
+replacement for them.
+
+**State (checked 2026-10-12: this tree b231a03db, Canary 2372a5410,
+vendored Metal Shader Converter 3.1.1):**
+- Canary D3D12 has this as its ROV path (`render_target_path_d3d12 = rov`,
+  output merger in `dxbc_shader_translator_om.cc`); Vulkan has the same idea
+  over fragment shader interlock (`render_target_path_vulkan = fsi`,
+  `spirv_shader_translator_rb.cc`). Canary's own help text calls it the
+  highest-accuracy path, "performance limited primarily by overdraw", and
+  its automatic choice is the host render-target path everywhere except
+  pre-Arc Intel GPUs (a stencil bug there breaks Direct3D 9 clears).
+- This tree's shared DXBC translator still carries the ROV output-merger
+  code (`dxbc_shader_translator_om.cc`, 3,749 lines against Canary's 4,158,
+  so it is behind upstream), but the Metal back end never enables it and
+  nothing in `src/xenia/gpu/metal/` uses raster order groups. Metal always
+  draws to host render targets backed by the canonical EDRAM buffer.
+- Measured negative: Vulkan FSI through MoltenVK on an M4 (2026-07) was
+  slower than host render targets (USF4 fights ~33–40 vs ~44 fps) and showed
+  artifacts. That was interlock over a device-memory EDRAM buffer with no
+  tile-memory benefit; it does not test native raster order groups or tile
+  memory.
+- Related study: the 2026-10-09 tile-memory RT-cache study rejected a full
+  tile-memory redesign. Metal exposes no depth to tile functions or
+  framebuffer fetch, format and MSAA aliasing across passes still needs
+  memory, and an Apple-only path cannot serve AMD/Intel Macs (archived change
+  `openspec/changes/archive/2026-10-09-design-metal-tile-memory-edram/`).
+  It also found a new premise: Metal Shader Converter 3.1.1 has
+  `IRCompilerSetFramebufferFetchResourceSpace`, which maps a DXIL texture to
+  a framebuffer-fetch input.
+- No Xenia fork has an exact output merger on Metal.
+
+**Why it matters:**
+1. **Accuracy.** Every remaining host-format approximation (blend precision
+   on 7e3 and 16-bit targets, float24 depth compares, reinterpretation
+   between formats) disappears by construction. Red Dead Redemption's
+   float24 speckle and the rejected global float24 pixel-shader mode
+   (it fixed RDR and darkened JC2) are examples of what the host path has
+   to handle case by case.
+2. **The EDRAM machinery.** Ownership transfers, packs and materializes
+   exist because host textures cannot alias. At 2×2 scale they cost JC2
+   ~43 ms of a 93 ms GPU frame. An exact output merger would not need
+   most of them, though it pays per fragment instead.
+
+**Rough shape:**
+1. **Gate 0, mechanism.** Find out whether the Metal Shader Converter
+   lowers DXIL rasterizer-ordered resources (`RasterizerOrderedByteAddress
+   Buffer`) to Metal raster order groups, and on which GPUs (Apple Silicon;
+   AMD/Intel Macs report raster-order-group support separately). If it does
+   not, decide between patching the DXIL, an MSL output-merger epilogue, or
+   framebuffer fetch.
+2. **Gate 1, cost, before writing the path.** A device microbenchmark of
+   ordered EDRAM read-modify-write against host blending at real overdraw
+   (USF4 fight, RDR, JC2 depth prepass), 1× and 4× MSAA. Stop if it cannot
+   come within reach of the host path on an M-series GPU.
+3. Enable the shared translator's ROV output merger for Metal behind a
+   setting, after bringing `dxbc_shader_translator_om.cc` up to Canary,
+   with resolves reading the EDRAM buffer directly.
+4. Per-title opt-in where the host path is visibly wrong; the default
+   stays host render targets.
+
+**Risk:** cost. ROV is the slow path even on desktop D3D12, and Apple's
+tile-based GPUs pay for ordered device-memory writes in a way the FSI
+experiment already showed. The accuracy gain is in edge cases, so it
+has to be cheap enough to turn on for the titles that need it.

@@ -34,7 +34,7 @@ new user-facing settings there, not as dialogs.
 ## Moonshots
 
 Ambitious features recorded for one day, with what is already known:
-[moonshots.md](moonshots.md) (custom soundtracks, original Xbox games through XeFu, frame generation through MetalFX).
+[moonshots.md](moonshots.md) (custom soundtracks, original Xbox games through XeFu, frame generation through MetalFX, exact EDRAM output merging).
 
 ## Deprecated archive
 
