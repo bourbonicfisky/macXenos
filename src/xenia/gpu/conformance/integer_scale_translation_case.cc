@@ -22,11 +22,12 @@
 //
 //   1. the scale metadata is read from the right constant-buffer slot, computed
 //      from the ABI offset and the fetch index rather than assumed;
-//   2. the whole block is guarded so zero metadata leaves the sample untouched;
-//   3. non-zero metadata unpacks a PER-COMPONENT field and forms the multiplier
-//      before the guest's own use of the result;
-//   4. the block contains EXACTLY the expected arithmetic — no unsigned-biased
-//      half-scale or -0.5 offset path may appear.
+//   2. the conversion block is guarded by the packed value with the texel
+//      snap bit (26) masked off, so zero metadata leaves the sample untouched;
+//   3. inside it, the normalized (bit 24) and integer num_format paths are
+//      separate branches, and rounding is emitted;
+//   4. the unsigned-biased decode unpacks a PER-COMPONENT field (fetch ABI 8,
+//      Canary's packed fixed conversion, d11950528..c3cd8617b).
 //
 // The microcode is assembled here rather than pinned as a byte blob so the
 // assertions read against named fields, and the disassembly is checked first so
@@ -282,7 +283,7 @@ TEST_CASE("The fetch reads its scale from the correct constant slot",
   CHECK(reads_expected);
 }
 
-TEST_CASE("The scale block is guarded, exact, and free of a biased path",
+TEST_CASE("The conversion block is guarded without the snap bit",
           "[integer_scale][translation]") {
   std::string disasm;
   std::vector<DxbcInstruction> instructions =
@@ -290,47 +291,92 @@ TEST_CASE("The scale block is guarded, exact, and free of a biased path",
   INFO(disasm);
 
   const uint32_t expected_register = ScaleConstantRegister(kFetchConstant);
+  const uint32_t kNoSnapMask = (UINT32_C(1) << 26) - 1;
 
-  // Find the guard: an `if` whose condition reads the scale slot. Zero metadata
-  // must leave the sampled value untouched, which is what makes an unengaged
-  // fetch free.
+  // The guard: `and` of the scale slot with every bit below the snap bit,
+  // immediately followed by the `if` on that result. Zero metadata (or only
+  // the snap bit) must leave the sampled value untouched.
   size_t guard_index = SIZE_MAX;
-  for (size_t i = 0; i < instructions.size(); ++i) {
-    if (instructions[i].opcode == dxbc::Opcode::kIf &&
-        ReadsConstantBufferRegister(instructions[i], expected_register)) {
-      guard_index = i;
+  for (size_t i = 0; i + 1 < instructions.size(); ++i) {
+    const DxbcInstruction& instruction = instructions[i];
+    if (instruction.opcode != dxbc::Opcode::kAnd ||
+        !ReadsConstantBufferRegister(instruction, expected_register)) {
+      continue;
+    }
+    bool masks_snap = false;
+    for (uint32_t dword : instruction.dwords) {
+      masks_snap |= dword == kNoSnapMask;
+    }
+    if (masks_snap && instructions[i + 1].opcode == dxbc::Opcode::kIf) {
+      guard_index = i + 1;
       break;
     }
   }
   REQUIRE(guard_index != SIZE_MAX);
 
-  // The guarded body must be EXACTLY the documented arithmetic:
-  //   ubfe  - unpack the 5-bit field of each component (per-component)
-  //   and   - width - 1
-  //   iadd  - width
-  //   ushr  - signed flag
-  //   iadd  - width - signed
-  //   ishl  - 1 << (width - signed)
-  //   iadd  - minus one
-  //   utof  - to float
-  //   mul   - apply to the sampled result
-  // Anything extra would be a second codepath. In particular, upstream
-  // 2ddc5ef73's unsigned-biased handling (half scale plus a -0.5 offset) cannot
-  // be present without adding instructions here.
-  const std::vector<dxbc::Opcode> expected = {
-      dxbc::Opcode::kUBFE, dxbc::Opcode::kAnd,  dxbc::Opcode::kIAdd,
-      dxbc::Opcode::kUShR, dxbc::Opcode::kIAdd, dxbc::Opcode::kIShL,
-      dxbc::Opcode::kIAdd, dxbc::Opcode::kUToF, dxbc::Opcode::kMul,
-  };
   std::vector<dxbc::Opcode> body =
       OpcodesBetweenScaleGuard(instructions, guard_index);
-
   INFO("guarded body size " << body.size());
-  REQUIRE(body.size() == expected.size());
-  for (size_t i = 0; i < expected.size(); ++i) {
-    INFO("body position " << i);
-    CHECK(body[i] == expected[i]);
+  auto count = [&](dxbc::Opcode op) {
+    size_t n = 0;
+    for (dxbc::Opcode b : body) {
+      n += b == op;
+    }
+    return n;
+  };
+  // Normalized (bit 24) and integer num_format are two branches of one `if`.
+  CHECK(count(dxbc::Opcode::kElse) >= 1);
+  // Q16 rounding and point sampled integer rounding.
+  CHECK(count(dxbc::Opcode::kRoundNE) >= 2);
+  // Per-component width and sign fields.
+  CHECK(count(dxbc::Opcode::kUBFE) >= 2);
+  CHECK(count(dxbc::Opcode::kUToF) >= 1);
+}
+
+TEST_CASE("The unsigned-biased decode reads each component's field",
+          "[integer_scale][translation][biased]") {
+  std::string disasm;
+  std::vector<DxbcInstruction> instructions =
+      TranslateFetchShader(kFetchConstant, &disasm);
+  INFO(disasm);
+
+  const uint32_t expected_register = ScaleConstantRegister(kFetchConstant);
+  // One `ubfe` of the slot per written component inside the sign switch (the
+  // offset-binary width), before the conversion block's own unpacks.
+  size_t switch_index = SIZE_MAX;
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    if (instructions[i].opcode == dxbc::Opcode::kSwitch) {
+      switch_index = i;
+      break;
+    }
   }
+  REQUIRE(switch_index != SIZE_MAX);
+  size_t biased_unpacks = 0;
+  size_t divides = 0;
+  for (size_t i = switch_index; i < instructions.size(); ++i) {
+    const DxbcInstruction& instruction = instructions[i];
+    if (instruction.opcode == dxbc::Opcode::kUBFE &&
+        ReadsConstantBufferRegister(instruction, expected_register)) {
+      ++biased_unpacks;
+    }
+    if (instruction.opcode == dxbc::Opcode::kDiv) {
+      ++divides;
+    }
+    if (instruction.opcode == dxbc::Opcode::kAnd &&
+        ReadsConstantBufferRegister(instruction, expected_register)) {
+      // The point snap tests bit 26 with its own `and` before sampling; stop
+      // only at the conversion block guard, which masks every bit below it.
+      bool is_guard = false;
+      for (uint32_t dword : instruction.dwords) {
+        is_guard |= dword == (UINT32_C(1) << 26) - 1;
+      }
+      if (is_guard) {
+        break;
+      }
+    }
+  }
+  CHECK(biased_unpacks == 4);
+  CHECK(divides >= 4);
 }
 
 }  // namespace test

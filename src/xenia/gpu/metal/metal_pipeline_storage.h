@@ -119,7 +119,13 @@ struct MetalTranslatorConfig {
   //   7 - stacked-texture fetches clamp the layer index for Inf/NaN
   //       coordinates (upstream Canary 04085efaa): identical ucode now emits
   //       different DXBC.
-  static constexpr uint32_t kFetchAbiRevision = 7;
+  //   8 - texture_integer_scale_bits takes Canary's packed fixed conversion
+  //       (6-bit fields with TextureSign, normalized and point-sampled bits,
+  //       upstream d11950528..c3cd8617b): offset-binary unsigned-biased decode,
+  //       Q16 rounding, point-sampled narrow reconstruction and texel-center
+  //       snap. Identical ucode emits different DXBC, and the system constant
+  //       means something else for the same bytes.
+  static constexpr uint32_t kFetchAbiRevision = 8;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is

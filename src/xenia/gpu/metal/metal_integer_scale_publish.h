@@ -53,10 +53,10 @@ inline void ResetIntegerScaleBits(uint32_t* scale_bits, size_t count) {
   }
 }
 
-// Publishes one bound texture's scale at its own fetch-constant index.
+// Publishes one bound texture's packed fixed conversion
+// (texture_util::IntegerScaleBits) at its own fetch-constant index.
 //
-// Returns the value written, or 0 when the binding needs no rescaling — which
-// is every fetch except an integer num_format on a fixed-point format. Out-of-
+// Returns the value written, 0 when the binding needs no conversion. Out-of-
 // range fetch constants are ignored rather than clamped: clamping would write a
 // real scale onto an unrelated slot, which is worse than dropping it.
 inline uint32_t PublishIntegerScaleBits(
@@ -65,8 +65,7 @@ inline uint32_t PublishIntegerScaleBits(
   if (fetch_constant >= count) {
     return 0;
   }
-  uint32_t scale = texture_util::IntegerScaleBits(
-      fetch.format, uint32_t(fetch.num_format), fetch.swizzle, swizzled_signs);
+  uint32_t scale = texture_util::IntegerScaleBits(fetch, swizzled_signs);
   scale_bits[fetch_constant] = scale;
   return scale;
 }

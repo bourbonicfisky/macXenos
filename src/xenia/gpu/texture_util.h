@@ -345,35 +345,41 @@ constexpr bool IsAnySignSigned(uint8_t packed_signs) {
   return ((xor_signed | (xor_signed >> 1)) & 0b01010101) != 0b01010101;
 }
 
-// Number of bits each output component occupies in a packed integer scale, and
-// the layout within one component's field.
-constexpr uint32_t kIntegerScaleBitsPerComponent = 5;
+// Layout of the packed fixed texture conversion (Canary
+// TextureCache::GetIntegerScaleBits, c3cd8617b): four 6-bit fields in bits
+// 0:23, one per OUTPUT component, each holding the component bit count minus 1
+// in bits 0:3 and the xenos::TextureSign in bits 4:5; bit 24 marks a
+// normalized num_format and bit 26 a point sampled fetch constant.
+constexpr uint32_t kIntegerScaleBitsPerComponent = 6;
 constexpr uint32_t kIntegerScaleWidthMask = 0xF;
-constexpr uint32_t kIntegerScaleSignedBit = 1u << 4;
+constexpr uint32_t kIntegerScaleSignShift = 4;
+constexpr uint32_t kIntegerScaleNormalizedBit = UINT32_C(1) << 24;
+constexpr uint32_t kIntegerScalePointSampledBit = UINT32_C(1) << 26;
 
-// Returns the packed per-OUTPUT-component integer scale for a texture fetch, or
-// 0 meaning "the sample needs no rescaling".
+// Returns the packed conversion the translator applies to normalized host
+// samples of fixed formats, after signs/gamma and before exp_adjust. Zero means
+// no conversion. Constant 0/1 components and non-fixed formats have no field.
+// Gamma components only store their TextureSign for a normalized num_format.
 //
-// A fetch constant declaring an integer num_format on a fixed-point format asks
-// for unnormalized guest units, but the host view samples normalized. This
-// packs, for each output component, the information the shader needs to restore
-// the guest range: bits 0:3 are (source width - 1) and bit 4 is the signed flag,
-// from which the shader forms (1 << (width - signed)) - 1.
+// The width w comes from FormatInfo for the source selected by the guest
+// swizzle, clamped to the last stored component as the host swizzle does.
 //
-// The scale is applied AFTER swizzling, so each output component is resolved
-// back through the host swizzle to its source component's width. Components
-// that carry nothing to rescale contribute zero: constant 0/1 swizzle lanes,
-// gamma components, zero or over-wide source widths, non-fixed formats, and any
-// fractional num_format (which returns 0 outright).
+// Integer num_format: unsigned components are scaled by 2^w - 1, signed and
+// unsigned-biased ones by 2^(w - 1) - 1. Signedness conversion decodes
+// unsigned-biased components as offset binary, (n - 2^(w - 1)) /
+// (2^(w - 1) - 1), so the signed scale needs no offset. 1 bit unsigned-biased
+// keeps 2u - 1 and uses a scale of 0.5 and an offset of -0.5. Point sampled
+// integer results are rounded.
 //
-// TextureSign::kUnsignedBiased is deliberately NOT special-cased here. Upstream
-// 2ddc5ef73 gives biased components half scale with a -0.5 offset; that class
-// has zero measured engagement in the trace corpus and no available repro
-// title, so it is an excluded measured negative rather than unfinished work.
-// The 5-bit field reserves no room for it on purpose.
-// num_format is the fetch constant's 1-bit field: 0 = fractional, 1 = integer.
-uint32_t IntegerScaleBits(xenos::TextureFormat guest_format,
-                          uint32_t num_format, uint32_t host_swizzle,
+// Normalized num_format: unsigned-biased components carry w for the offset
+// binary decode. Unsigned components are rounded to 16 fractional bits, and
+// point sampled 4 to 7 bit unsigned components carry w to be reconstructed as
+// n * (2^w + 1) / 2^(2w), the conversion in 425307EC's page table shaders
+// (extrapolated upstream to 4 and 7 bits, not hardware-tested).
+//
+// Bit 26 also makes eligible 2D normalized point fetches sample texel centers
+// instead of adding kTextureCoordEpsilon.
+uint32_t IntegerScaleBits(const xenos::xe_gpu_texture_fetch_t& fetch,
                           uint8_t swizzled_signs);
 
 // Returns normalized clamp modes specified in the fetch constant based on the

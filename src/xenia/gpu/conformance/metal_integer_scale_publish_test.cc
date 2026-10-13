@@ -38,19 +38,27 @@ using metal::PublishIntegerScaleBits;
 using metal::ResetIntegerScaleBits;
 
 // A fetch constant shaped like the measured Just Cause 2 LUT binding:
-// k_8_8_8_8, integer num_format, swizzle 0x60A, unsigned signs.
+// k_8_8_8_8, integer num_format, swizzle 0x60A, unsigned signs, point sampled
+// (zero-initialized filters are point). point=false selects linear filters.
 xenos::xe_gpu_texture_fetch_t MakeFetch(xenos::TextureFormat format,
                                         uint32_t num_format,
-                                        uint32_t swizzle = 0x60A) {
+                                        uint32_t swizzle = 0x60A,
+                                        bool point = true) {
   xenos::xe_gpu_texture_fetch_t fetch = {};
   fetch.format = format;
   fetch.num_format = num_format;
   fetch.swizzle = swizzle;
+  if (!point) {
+    fetch.mag_filter = xenos::TextureFilter::kLinear;
+    fetch.min_filter = xenos::TextureFilter::kLinear;
+    fetch.mip_filter = xenos::TextureFilter::kLinear;
+  }
   return fetch;
 }
 
-// The value the backend was measured to publish for that binding.
-constexpr uint32_t kJC2ScaleBits = 0x00039CE7u;
+// The value the backend publishes for that binding since fetch ABI 8: four
+// unsigned 8-bit fields (7) in Canary's 6-bit layout plus the point bit 26.
+constexpr uint32_t kJC2ScaleBits = 0x041C71C7u;
 
 }  // namespace
 
@@ -107,27 +115,30 @@ TEST_CASE("Unaffected bindings publish zero into their own slots",
           "[integer_scale][transport]") {
   std::vector<uint32_t> slots(kMetalIntegerScaleSlotCount, 0);
 
-  SECTION("a stage whose bindings are all fractional contributes nothing") {
+  SECTION("filtered fractional bindings publish no integer scale") {
     // Mirrors the measured population: DXT, float and fractional-num_format
-    // bindings dominate and none of them may publish a scale.
+    // bindings dominate. Non-fixed formats publish nothing; fixed ones only
+    // request Q16 rounding of unsigned components (bit 24), with no widths.
     const struct {
       uint32_t slot;
       xenos::TextureFormat format;
-      uint32_t num_format;
+      uint32_t expected;
     } bindings[] = {
         {0, xenos::TextureFormat::k_DXT1, 0},
         {1, xenos::TextureFormat::k_DXT4_5, 0},
-        {2, xenos::TextureFormat::k_8_8_8_8, 0},
-        {11, xenos::TextureFormat::k_16, 0},
-        {12, xenos::TextureFormat::k_4_4_4_4, 0},
+        {2, xenos::TextureFormat::k_8_8_8_8,
+         texture_util::kIntegerScaleNormalizedBit},
+        {11, xenos::TextureFormat::k_16,
+         texture_util::kIntegerScaleNormalizedBit},
+        {12, xenos::TextureFormat::k_4_4_4_4,
+         texture_util::kIntegerScaleNormalizedBit},
     };
     for (const auto& b : bindings) {
       INFO("slot " << b.slot);
-      CHECK(PublishIntegerScaleBits(b.slot, MakeFetch(b.format, b.num_format),
-                                    0, slots.data(), slots.size()) == 0);
-    }
-    for (uint32_t v : slots) {
-      CHECK(v == 0);
+      CHECK(PublishIntegerScaleBits(b.slot,
+                                    MakeFetch(b.format, 0, 0x60A, false), 0,
+                                    slots.data(), slots.size()) == b.expected);
+      CHECK(slots[b.slot] == b.expected);
     }
   }
 
@@ -138,8 +149,8 @@ TEST_CASE("Unaffected bindings publish zero into their own slots",
           xenos::TextureFormat::k_16_16_16_16_FLOAT,
           xenos::TextureFormat::k_16_16_16_16_EXPAND}) {
       INFO("format " << uint32_t(format));
-      CHECK(PublishIntegerScaleBits(7, MakeFetch(format, 1), 0, slots.data(),
-                                    slots.size()) == 0);
+      CHECK(PublishIntegerScaleBits(7, MakeFetch(format, 1, 0x60A, false), 0,
+                                    slots.data(), slots.size()) == 0);
       CHECK(slots[7] == 0);
     }
   }
@@ -149,8 +160,9 @@ TEST_CASE("Unaffected bindings publish zero into their own slots",
     PublishIntegerScaleBits(6, MakeFetch(xenos::TextureFormat::k_8_8_8_8, 1), 0,
                             slots.data(), slots.size());
     REQUIRE(slots[6] == kJC2ScaleBits);
-    PublishIntegerScaleBits(6, MakeFetch(xenos::TextureFormat::k_DXT1, 0), 0,
-                            slots.data(), slots.size());
+    PublishIntegerScaleBits(
+        6, MakeFetch(xenos::TextureFormat::k_DXT1, 0, 0x60A, false), 0,
+        slots.data(), slots.size());
     CHECK(slots[6] == 0);
   }
 }

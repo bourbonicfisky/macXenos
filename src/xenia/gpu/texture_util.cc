@@ -617,49 +617,64 @@ uint8_t SwizzleSigns(const xenos::xe_gpu_texture_fetch_t& fetch) {
   return signs;
 }
 
-uint32_t IntegerScaleBits(xenos::TextureFormat guest_format,
-                          uint32_t num_format, uint32_t host_swizzle,
+uint32_t IntegerScaleBits(const xenos::xe_gpu_texture_fetch_t& fetch,
                           uint8_t swizzled_signs) {
-  // Fractional num_format is the normalized fetch - the host view already
-  // returns what the guest asked for.
-  if (!num_format) {
-    return 0;
-  }
-  const FormatInfo& format_info = *FormatInfo::Get(guest_format);
+  const FormatInfo& format_info = *FormatInfo::Get(fetch.format);
+  bool point_sampled = fetch.mag_filter == xenos::TextureFilter::kPoint &&
+                       fetch.min_filter == xenos::TextureFilter::kPoint &&
+                       (fetch.mip_filter == xenos::TextureFilter::kPoint ||
+                        fetch.mip_filter == xenos::TextureFilter::kBaseMap) &&
+                       fetch.aniso_filter == xenos::AnisoFilter::kDisabled;
+  uint32_t scale_bits = point_sampled ? kIntegerScalePointSampledBit : 0;
+
   if (!format_info.fixed) {
-    return 0;
+    return scale_bits;
   }
-  uint32_t scale_bits = 0;
+
+  if (!fetch.num_format) {
+    scale_bits |= kIntegerScaleNormalizedBit;
+  }
+
+  uint32_t last_stored_component = 0;
+  for (uint32_t i = 1; i < 4; ++i) {
+    if (format_info.component_bits[i]) {
+      last_stored_component = i;
+    }
+  }
+
   for (uint32_t i = 0; i < 4; ++i) {
-    // The scale is applied after swizzling, so walk each OUTPUT component back
-    // through the host swizzle to the SOURCE component whose width it carries.
-    // Getting this wrong is invisible on a format whose components are all the
-    // same width, which is why the conformance suite exercises an asymmetric
-    // one.
-    uint32_t source_component =
-        (host_swizzle >> (i * 3)) & 0b111;
+    uint32_t source_component = (fetch.swizzle >> (i * 3)) & 0b111;
     if (source_component >= xenos::XE_GPU_TEXTURE_SWIZZLE_0) {
-      // Constant 0/1 lane - no source data to rescale.
       continue;
     }
+    source_component = std::min(source_component, last_stored_component);
+
     xenos::TextureSign sign =
         xenos::TextureSign((swizzled_signs >> (i * 2)) & 0b11);
-    // Gamma components are linearized on sample; there is no integer range to
-    // restore. kUnsignedBiased is intentionally not special-cased - see the
-    // header.
-    if (sign == xenos::TextureSign::kGamma) {
-      continue;
-    }
+
     uint32_t width = format_info.component_bits[source_component];
     if (!width || width > 16) {
       continue;
     }
-    uint32_t component_scale = width - 1;
-    if (sign == xenos::TextureSign::kSigned) {
-      component_scale |= kIntegerScaleSignedBit;
+
+    bool carries_width = true;
+    if (sign == xenos::TextureSign::kGamma) {
+      if (fetch.num_format) {
+        continue;
+      }
+      carries_width = false;
+    } else if (!fetch.num_format && sign == xenos::TextureSign::kUnsigned) {
+      carries_width = point_sampled && width >= 4 && width <= 7;
     }
+
+    uint32_t component_scale = uint32_t(sign) << kIntegerScaleSignShift;
+    if (carries_width) {
+      component_scale |= width - 1;
+    }
+
     scale_bits |= component_scale << (i * kIntegerScaleBitsPerComponent);
   }
+
   return scale_bits;
 }
 

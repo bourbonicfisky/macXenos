@@ -27,9 +27,11 @@
 // point sampler, and it feeds the exact byte domain measured in the guest LUT
 // at 0x110C3000 (0-31 in trace 534307E7_6756, 0-64 in 534307E7_4218).
 //
-// The scale arithmetic below is the same sequence the DXBC fetch path emits:
-// unpack a 5-bit field, width = (field & 0xF) + 1, signed = field >> 4,
-// multiplier = (1 << (width - signed)) - 1, multiply, then the guest's trunc.
+// The scale arithmetic below is the same sequence the DXBC fetch path emits
+// for an integer num_format since fetch ABI 8 (Canary's layout): unpack a
+// 6-bit field, width = (field & 0xF) + 1, sign = (field >> 4) & 3, multiplier
+// = (1 << (width - (signed or biased))) - 1, multiply, round when the fetch
+// constant is point sampled (bit 26), then the guest's trunc.
 
 #import <Metal/Metal.h>
 
@@ -70,12 +72,19 @@ kernel void integer_fetch_index(
   float2 uv = (float2(c) + 0.5f) / float2(tex.get_width(), tex.get_height());
   float4 s = tex.sample(samp, uv);
 
-  if (scale_bits != 0u) {
-    uint4 fields = (uint4(scale_bits) >> uint4(0u, 5u, 10u, 15u)) & 0x1Fu;
+  // Bit 24 (normalized num_format) is clear for the integer class here.
+  if ((scale_bits & ((1u << 26) - 1u)) != 0u &&
+      (scale_bits & (1u << 24)) == 0u) {
+    uint4 fields = (uint4(scale_bits) >> uint4(0u, 6u, 12u, 18u)) & 0x3Fu;
     uint4 width = (fields & 0xFu) + 1u;
-    uint4 is_signed = fields >> 4u;
-    uint4 mul = (uint4(1u) << (width - is_signed)) - 1u;
-    s *= float4(mul);
+    uint4 sign = (fields >> 4u) & 3u;
+    uint4 halved = select(uint4(0u), uint4(1u), sign - 1u < 2u);
+    float4 mul = float4((uint4(1u) << (width - halved)) - 1u);
+    float4 offset = min(mul, 0.5f) - 0.5f;
+    s = s * max(mul, 0.5f) + offset;
+    if ((scale_bits & (1u << 26)) != 0u) {
+      s = rint(s);
+    }
   }
 
   // The guest's own decode: trunc, then use as an index.
@@ -192,10 +201,16 @@ struct DeviceFixture {
 // The packed scale the backend was measured to publish at all 13 sites:
 // k_8_8_8_8, integer num_format, all-unsigned -> multiplier 255 per component.
 uint32_t JC2ScaleBits() {
-  return texture_util::IntegerScaleBits(
-      xenos::TextureFormat::k_8_8_8_8, /*num_format=*/1,
-      /*host_swizzle=*/(0u << 0) | (1u << 3) | (2u << 6) | (3u << 9),
-      /*swizzled_signs=*/0);
+  // mag=point min=point mip=basemap aniso=0, as measured at the 13 sites.
+  xenos::xe_gpu_texture_fetch_t fetch = {};
+  fetch.format = xenos::TextureFormat::k_8_8_8_8;
+  fetch.num_format = 1;
+  fetch.swizzle = (0u << 0) | (1u << 3) | (2u << 6) | (3u << 9);
+  fetch.mag_filter = xenos::TextureFilter::kPoint;
+  fetch.min_filter = xenos::TextureFilter::kPoint;
+  fetch.mip_filter = xenos::TextureFilter::kBaseMap;
+  fetch.aniso_filter = xenos::AnisoFilter::kDisabled;
+  return texture_util::IntegerScaleBits(fetch, /*swizzled_signs=*/0);
 }
 
 }  // namespace
@@ -208,7 +223,7 @@ TEST_CASE("Point-sampled RGBA8Unorm x255 recovers the guest integer index",
     return;
   }
 
-  REQUIRE(JC2ScaleBits() == 0x00039CE7u);
+  REQUIRE(JC2ScaleBits() == 0x041C71C7u);
 
   // Every byte value the guest LUT can hold, so the result is not an argument
   // about the particular values measured in one frame.

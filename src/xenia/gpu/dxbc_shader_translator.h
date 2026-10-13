@@ -438,13 +438,14 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
 
-    // APPEND-ONLY. Integer num_format on fixed-point textures: each dword packs
-    // the per-output-component scale that turns a normalized host sample back
-    // into guest integer units, as produced by texture_util::IntegerScaleBits.
-    //   bits 0:3 = source component width - 1
-    //   bit 4    = signed
-    // Five bits per component, four components per fetch constant. Zero means
-    // "leave the sample alone" and is the shader's uniform early-out.
+    // APPEND-ONLY. Packed fixed texture conversion (see
+    // texture_util::IntegerScaleBits, Canary GetIntegerScaleBits).
+    // Every component occupies 6 bits in bits 0:23
+    //   bits 0:3 = component_bits - 1
+    //   bits 4:5 = xenos::TextureSign
+    // bit 24 = normalized num_format
+    // bit 26 = point sampled fetch constant
+    // Zero means no conversion and is the shader's uniform early-out.
     //
     // This field is appended at the end of the struct deliberately: the layout
     // is shared with the D3D12 backend, which is not built on macOS and so

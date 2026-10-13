@@ -12,8 +12,10 @@
 //
 // Two contracts are checked here, both pure and device-free:
 //   1. the format table's fixed-point classification and per-component widths;
-//   2. texture_util::IntegerScaleBits packing, including the ORDER in which
-//      output components map back to source component widths.
+//   2. texture_util::IntegerScaleBits packing (Canary's GetIntegerScaleBits
+//      layout since fetch ABI 8: 6-bit fields with width and TextureSign, bit 24
+//      normalized, bit 26 point sampled), including the ORDER in which output
+//      components map back to source component widths.
 //
 // The engaged title class (JC2's k_8_8_8_8) has four equal component widths, so
 // a swizzle/channel-order error in the derivation would be completely invisible
@@ -57,21 +59,46 @@ uint8_t UniformSigns(TextureSign sign) {
   return MakeSigns(sign, sign, sign, sign);
 }
 
-// The value the shader forms from one component's field: (1 << (width -
-// signed)) - 1, i.e. the multiplier that restores guest integer units.
-uint32_t FieldToMultiplier(uint32_t scale_bits, uint32_t component) {
-  uint32_t field =
-      (scale_bits >> (component * texture_util::kIntegerScaleBitsPerComponent)) &
-      ((1u << texture_util::kIntegerScaleBitsPerComponent) - 1);
-  uint32_t width = (field & texture_util::kIntegerScaleWidthMask) + 1;
-  uint32_t is_signed = (field & texture_util::kIntegerScaleSignedBit) ? 1 : 0;
-  return (1u << (width - is_signed)) - 1;
+// A fetch constant with the given format, num_format and swizzle. Filters are
+// linear unless point is requested, because zero-initialized filters are point
+// and would set bit 26 and the narrow point rule in every case.
+xenos::xe_gpu_texture_fetch_t MakeFetch(TextureFormat format,
+                                        uint32_t num_format, uint32_t swizzle,
+                                        bool point = false) {
+  xenos::xe_gpu_texture_fetch_t fetch = {};
+  fetch.format = format;
+  fetch.num_format = num_format;
+  fetch.swizzle = swizzle;
+  xenos::TextureFilter filter =
+      point ? xenos::TextureFilter::kPoint : xenos::TextureFilter::kLinear;
+  fetch.mag_filter = filter;
+  fetch.min_filter = filter;
+  fetch.mip_filter = filter;
+  fetch.aniso_filter = xenos::AnisoFilter::kDisabled;
+  return fetch;
 }
 
 uint32_t FieldOf(uint32_t scale_bits, uint32_t component) {
   return (scale_bits >>
           (component * texture_util::kIntegerScaleBitsPerComponent)) &
          ((1u << texture_util::kIntegerScaleBitsPerComponent) - 1);
+}
+
+TextureSign SignOf(uint32_t scale_bits, uint32_t component) {
+  return TextureSign((FieldOf(scale_bits, component) >>
+                      texture_util::kIntegerScaleSignShift) &
+                     0b11);
+}
+
+// The integer num_format multiplier the shader forms from one component's
+// field: 2^w - 1 for unsigned, 2^(w - 1) - 1 for signed and unsigned-biased.
+uint32_t FieldToMultiplier(uint32_t scale_bits, uint32_t component) {
+  uint32_t field = FieldOf(scale_bits, component);
+  uint32_t width = (field & texture_util::kIntegerScaleWidthMask) + 1;
+  TextureSign sign = SignOf(scale_bits, component);
+  bool halved =
+      sign == TextureSign::kSigned || sign == TextureSign::kUnsignedBiased;
+  return (1u << (width - (halved ? 1 : 0))) - 1;
 }
 
 }  // namespace
@@ -133,51 +160,97 @@ TEST_CASE("Format table classifies fixed-point formats",
   }
 }
 
-TEST_CASE("IntegerScaleBits returns zero when there is nothing to rescale",
+TEST_CASE("IntegerScaleBits returns zero when there is nothing to convert",
           "[integer_scale]") {
-  SECTION("fractional num_format") {
-    CHECK(texture_util::IntegerScaleBits(
-              TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity,
-              UniformSigns(TextureSign::kUnsigned)) == 0);
-  }
-
-  SECTION("integer num_format on a non-fixed format") {
+  SECTION("filtered fetch of a non-fixed format") {
     for (TextureFormat format :
          {TextureFormat::k_24_8_FLOAT, TextureFormat::k_32_FLOAT,
           TextureFormat::k_16_16_16_16_FLOAT,
           TextureFormat::k_16_16_16_16_EXPAND, TextureFormat::k_DXT1}) {
       INFO("format " << uint32_t(format));
       CHECK(texture_util::IntegerScaleBits(
-                format, kInteger, kSwizzleIdentity,
+                MakeFetch(format, kInteger, kSwizzleIdentity),
+                UniformSigns(TextureSign::kUnsigned)) == 0);
+      CHECK(texture_util::IntegerScaleBits(
+                MakeFetch(format, kFractional, kSwizzleIdentity),
                 UniformSigns(TextureSign::kUnsigned)) == 0);
     }
   }
 
-  SECTION("every output component is a constant 0/1 lane") {
+  SECTION("integer fetch whose lanes are all constant 0/1") {
     uint32_t all_constant =
         MakeSwizzle(xenos::XE_GPU_TEXTURE_SWIZZLE_0,
                     xenos::XE_GPU_TEXTURE_SWIZZLE_1,
                     xenos::XE_GPU_TEXTURE_SWIZZLE_0,
                     xenos::XE_GPU_TEXTURE_SWIZZLE_1);
     CHECK(texture_util::IntegerScaleBits(
-              TextureFormat::k_8_8_8_8, kInteger, all_constant,
+              MakeFetch(TextureFormat::k_8_8_8_8, kInteger, all_constant),
               UniformSigns(TextureSign::kUnsigned)) == 0);
   }
 
-  SECTION("every component is gamma") {
+  SECTION("integer fetch of all-gamma components") {
     CHECK(texture_util::IntegerScaleBits(
-              TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity,
+              MakeFetch(TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity),
               UniformSigns(TextureSign::kGamma)) == 0);
   }
 }
 
+TEST_CASE("IntegerScaleBits flags normalized and point-sampled fetches",
+          "[integer_scale]") {
+  SECTION("a filtered normalized unsigned fetch only requests Q16 rounding") {
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity),
+        UniformSigns(TextureSign::kUnsigned));
+    CHECK(bits == texture_util::kIntegerScaleNormalizedBit);
+  }
+
+  SECTION("point sampling sets bit 26 even for a non-fixed format") {
+    CHECK(texture_util::IntegerScaleBits(
+              MakeFetch(TextureFormat::k_32_FLOAT, kFractional,
+                        kSwizzleIdentity, true),
+              UniformSigns(TextureSign::kUnsigned)) ==
+          texture_util::kIntegerScalePointSampledBit);
+  }
+
+  SECTION("a linear mip filter is not point sampled") {
+    xenos::xe_gpu_texture_fetch_t fetch = MakeFetch(
+        TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity, true);
+    fetch.mip_filter = xenos::TextureFilter::kLinear;
+    CHECK_FALSE(texture_util::IntegerScaleBits(
+                    fetch, UniformSigns(TextureSign::kUnsigned)) &
+                texture_util::kIntegerScalePointSampledBit);
+  }
+
+  SECTION("point sampled 4 to 7 bit unsigned components carry their width") {
+    // k_4_4_4_4 is JC2's engaged point-snap class (format 15).
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_4_4_4_4, kFractional, kSwizzleIdentity,
+                  true),
+        UniformSigns(TextureSign::kUnsigned));
+    for (uint32_t i = 0; i < 4; ++i) {
+      INFO("component " << i);
+      CHECK(FieldOf(bits, i) == 3);
+    }
+  }
+
+  SECTION("point sampled 8 bit unsigned components carry no width") {
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity,
+                  true),
+        UniformSigns(TextureSign::kUnsigned));
+    CHECK(bits == (texture_util::kIntegerScaleNormalizedBit |
+                   texture_util::kIntegerScalePointSampledBit));
+  }
+}
+
 TEST_CASE("IntegerScaleBits packs the engaged JC2 class", "[integer_scale]") {
-  // k_8_8_8_8, integer num_format, all-unsigned signs: the one class the
-  // 49-trace census found engaged. Every component must restore x255.
+  // k_8_8_8_8, integer num_format, all-unsigned signs: the one integer class
+  // the 49-trace census found engaged. Every component must restore x255.
   uint32_t bits = texture_util::IntegerScaleBits(
-      TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity,
+      MakeFetch(TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity),
       UniformSigns(TextureSign::kUnsigned));
   REQUIRE(bits != 0);
+  CHECK_FALSE(bits & texture_util::kIntegerScaleNormalizedBit);
   for (uint32_t i = 0; i < 4; ++i) {
     INFO("component " << i);
     CHECK(FieldToMultiplier(bits, i) == 255);
@@ -194,7 +267,7 @@ TEST_CASE("IntegerScaleBits follows the guest-visible component order",
 
   SECTION("identity swizzle keeps source widths in place") {
     uint32_t bits = texture_util::IntegerScaleBits(
-        TextureFormat::k_2_10_10_10, kInteger, kSwizzleIdentity,
+        MakeFetch(TextureFormat::k_2_10_10_10, kInteger, kSwizzleIdentity),
         unsigned_signs);
     CHECK(FieldToMultiplier(bits, 0) == 1023);
     CHECK(FieldToMultiplier(bits, 1) == 1023);
@@ -205,7 +278,8 @@ TEST_CASE("IntegerScaleBits follows the guest-visible component order",
   SECTION("reversed swizzle moves the narrow component to output 0") {
     // Output 0 reads source 3 (2 bits), output 3 reads source 0 (10 bits).
     uint32_t bits = texture_util::IntegerScaleBits(
-        TextureFormat::k_2_10_10_10, kInteger, MakeSwizzle(3, 2, 1, 0),
+        MakeFetch(TextureFormat::k_2_10_10_10, kInteger,
+                  MakeSwizzle(3, 2, 1, 0)),
         unsigned_signs);
     CHECK(FieldToMultiplier(bits, 0) == 3);
     CHECK(FieldToMultiplier(bits, 1) == 1023);
@@ -216,7 +290,8 @@ TEST_CASE("IntegerScaleBits follows the guest-visible component order",
   SECTION("broadcasting one source component to every output") {
     // All four outputs read source 3, the 2-bit component.
     uint32_t bits = texture_util::IntegerScaleBits(
-        TextureFormat::k_2_10_10_10, kInteger, MakeSwizzle(3, 3, 3, 3),
+        MakeFetch(TextureFormat::k_2_10_10_10, kInteger,
+                  MakeSwizzle(3, 3, 3, 3)),
         unsigned_signs);
     for (uint32_t i = 0; i < 4; ++i) {
       INFO("component " << i);
@@ -229,13 +304,24 @@ TEST_CASE("IntegerScaleBits follows the guest-visible component order",
     // output 1 <- source 0 (5 bits), output 2 <- constant 1, output 3 <-
     // source 2 (5 bits). Every field is distinguishable.
     uint32_t swizzle = MakeSwizzle(1, 0, xenos::XE_GPU_TEXTURE_SWIZZLE_1, 2);
-    uint32_t bits = texture_util::IntegerScaleBits(TextureFormat::k_5_6_5,
-                                                   kInteger, swizzle,
-                                                   unsigned_signs);
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_5_6_5, kInteger, swizzle), unsigned_signs);
     CHECK(FieldToMultiplier(bits, 0) == 63);
     CHECK(FieldToMultiplier(bits, 1) == 31);
     CHECK(FieldOf(bits, 2) == 0);  // constant lane contributes nothing
     CHECK(FieldToMultiplier(bits, 3) == 31);
+  }
+
+  SECTION("a lane reading past the last stored component takes its width") {
+    // k_5_6_5 stores three components. Upstream 052cb95f2 clamps source 3 to
+    // the last stored one (blue, 5 bits), as the host swizzle does.
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_5_6_5, kInteger, MakeSwizzle(3, 3, 3, 3)),
+        unsigned_signs);
+    for (uint32_t i = 0; i < 4; ++i) {
+      INFO("component " << i);
+      CHECK(FieldToMultiplier(bits, i) == 31);
+    }
   }
 }
 
@@ -243,55 +329,65 @@ TEST_CASE("IntegerScaleBits handles per-component signs independently",
           "[integer_scale]") {
   SECTION("signed components use one bit less of range") {
     uint32_t bits = texture_util::IntegerScaleBits(
-        TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity,
+        MakeFetch(TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity),
         UniformSigns(TextureSign::kSigned));
     for (uint32_t i = 0; i < 4; ++i) {
       INFO("component " << i);
+      CHECK(SignOf(bits, i) == TextureSign::kSigned);
       CHECK(FieldToMultiplier(bits, i) == 127);
     }
   }
 
-  SECTION("a gamma component drops out while its neighbours do not") {
+  SECTION("an integer gamma component drops out while its neighbours do not") {
     uint8_t signs =
         MakeSigns(TextureSign::kUnsigned, TextureSign::kGamma,
                   TextureSign::kSigned, TextureSign::kUnsigned);
     uint32_t bits = texture_util::IntegerScaleBits(
-        TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity, signs);
+        MakeFetch(TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity), signs);
     CHECK(FieldToMultiplier(bits, 0) == 255);
     CHECK(FieldOf(bits, 1) == 0);
     CHECK(FieldToMultiplier(bits, 2) == 127);
     CHECK(FieldToMultiplier(bits, 3) == 255);
   }
-}
 
-TEST_CASE("Unsigned-biased components are excluded from this capability",
-          "[integer_scale][excluded]") {
-  // Upstream 2ddc5ef73 widens the field to 6 bits and gives biased components
-  // half scale with a -0.5 offset. That class has zero measured engagement
-  // (0/389 in the corpus) and no available repro title, so it is an excluded
-  // measured negative. These assertions exist to make an accidental import of
-  // that behavior fail loudly.
-
-  SECTION("the packed field stays 5 bits per component") {
-    CHECK(texture_util::kIntegerScaleBitsPerComponent == 5);
-    // 4 components x 5 bits must fit with no sixth bit reserved per component.
-    CHECK(texture_util::kIntegerScaleSignedBit == (1u << 4));
-    CHECK((texture_util::kIntegerScaleWidthMask |
-           texture_util::kIntegerScaleSignedBit) ==
-          ((1u << texture_util::kIntegerScaleBitsPerComponent) - 1));
-  }
-
-  SECTION("a biased component scales exactly like an unsigned one") {
-    uint32_t biased = texture_util::IntegerScaleBits(
-        TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity,
-        UniformSigns(TextureSign::kUnsignedBiased));
-    uint32_t plain = texture_util::IntegerScaleBits(
-        TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity,
-        UniformSigns(TextureSign::kUnsigned));
-    CHECK(biased == plain);
+  SECTION("a normalized gamma component keeps its sign but no width") {
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity),
+        UniformSigns(TextureSign::kGamma));
     for (uint32_t i = 0; i < 4; ++i) {
       INFO("component " << i);
-      CHECK(FieldToMultiplier(biased, i) == 255);
+      CHECK(SignOf(bits, i) == TextureSign::kGamma);
+      CHECK((FieldOf(bits, i) & texture_util::kIntegerScaleWidthMask) == 0);
+    }
+  }
+}
+
+TEST_CASE("Unsigned-biased components carry width for offset-binary decode",
+          "[integer_scale][biased]") {
+  // Upstream 2ddc5ef73 / c3cd8617b: biased components decode as
+  // (n - 2^(w - 1)) / (2^(w - 1) - 1), so an 8-bit 128 returns 0, and integer
+  // num_format scales them like signed. Engaged normalized in Halo 3 and
+  // Halo 4 normal maps (value-census-20261012).
+
+  SECTION("normalized biased components carry sign and width") {
+    uint32_t bits = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_8_8_8_8, kFractional, kSwizzleIdentity),
+        UniformSigns(TextureSign::kUnsignedBiased));
+    CHECK(bits & texture_util::kIntegerScaleNormalizedBit);
+    for (uint32_t i = 0; i < 4; ++i) {
+      INFO("component " << i);
+      CHECK(SignOf(bits, i) == TextureSign::kUnsignedBiased);
+      CHECK((FieldOf(bits, i) & texture_util::kIntegerScaleWidthMask) == 7);
+    }
+  }
+
+  SECTION("integer biased components scale like signed ones") {
+    uint32_t biased = texture_util::IntegerScaleBits(
+        MakeFetch(TextureFormat::k_8_8_8_8, kInteger, kSwizzleIdentity),
+        UniformSigns(TextureSign::kUnsignedBiased));
+    for (uint32_t i = 0; i < 4; ++i) {
+      INFO("component " << i);
+      CHECK(FieldToMultiplier(biased, i) == 127);
     }
   }
 }

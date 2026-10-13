@@ -161,8 +161,12 @@ DEFINE_bool(
     "it asked for unnormalized units. Enabled by default: Just Cause 2 fetches "
     "a per-texel light/material index table this way and truncates the result "
     "into the address register, so normalized delivery collapsed every index "
-    "to 0 and pinned the whole per-texel selection to one constant. Set false "
-    "to restore the previous behavior exactly.",
+    "to 0 and pinned the whole per-texel selection to one constant. Also "
+    "carries the rest of upstream's fixed texture conversion: unsigned-biased "
+    "components decode as offset binary (an 8-bit 128 returns 0), normalized "
+    "unsigned components round to 16 fractional bits, and point sampled "
+    "fetches snap to texel centers and reconstruct 4 to 7 bit components. Set "
+    "false to restore the behavior before any of these exactly.",
     "GPU");
 // Same hazard the presentation flip hit and measured: the config persists every
 // cvar, so a stored `false` -- written while false was the default -- beats a

@@ -170,8 +170,11 @@ TEST_CASE("The production fetch ABI revision is the current one",
   //     revision-5 cache would serve unmasked shaders.
   // 7 = stacked-texture fetches clamp the layer index for Inf/NaN coordinates
   //     (upstream Canary 04085efaa), again different DXBC for the same ucode.
+  // 8 = texture_integer_scale_bits takes Canary's packed fixed conversion
+  //     (d11950528..c3cd8617b): new fetch DXBC and a new meaning for the
+  //     same system-constant bytes.
   // Each boundary is pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 7);
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 8);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
