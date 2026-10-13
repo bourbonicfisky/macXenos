@@ -9,6 +9,7 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <set>
@@ -195,6 +196,12 @@ DEFINE_int32(screenshot_interval, 0,
              "unattended test runs (no screen-recording permission needed). "
              "0 = off.",
              "General");
+DEFINE_int32(screenshot_interval_ms, 0,
+             "Milliseconds between automatic screenshots, overriding "
+             "screenshot_interval when > 0 (burst capture for flicker hunts). "
+             "Burst filenames carry a sequence number and the guest swap "
+             "count. 0 = off.",
+             "General");
 DEFINE_int32(log_fps_interval, 0,
              "Seconds between GuestFps log lines (guest swaps per second, any "
              "GPU backend), for unattended test runs. 0 = off.",
@@ -340,7 +347,8 @@ void EmulatorWindow::OnEmulatorInitialized() {
     preferences_button_listener_->set_name("Preferences Button Listener");
   }
 #endif
-  if ((cvars::screenshot_interval > 0 || cvars::log_fps_interval > 0) &&
+  if ((cvars::screenshot_interval > 0 || cvars::screenshot_interval_ms > 0 ||
+       cvars::log_fps_interval > 0) &&
       !auto_screenshot_thread_) {
     auto_screenshot_thread_ =
         threading::Thread::Create({}, [this] { AutoScreenshotLoop(); });
@@ -1118,14 +1126,22 @@ void EmulatorWindow::TakeScreenshot() {
 // log_fps_interval: logs the guest swap rate every interval.
 void EmulatorWindow::AutoScreenshotLoop() {
   using clock = std::chrono::steady_clock;
-  const auto shot_interval = std::chrono::seconds(cvars::screenshot_interval);
+  const bool burst = cvars::screenshot_interval_ms > 0;
+  const auto shot_interval =
+      burst ? std::chrono::milliseconds(cvars::screenshot_interval_ms)
+            : std::chrono::milliseconds(
+                  std::max(cvars::screenshot_interval, 0) * 1000);
+  const auto poll_interval =
+      std::min(std::chrono::milliseconds(100),
+               burst ? shot_interval : std::chrono::milliseconds(100));
   const auto fps_interval = std::chrono::seconds(cvars::log_fps_interval);
   auto next_shot = clock::now() + shot_interval;
   auto fps_time = clock::now();
   uint64_t fps_count = 0;
   bool fps_started = false;
+  uint64_t burst_sequence = 0;
   while (!auto_screenshot_stop_.load()) {
-    xe::threading::Sleep(std::chrono::milliseconds(100));
+    xe::threading::Sleep(poll_interval);
     const auto now = clock::now();
     if (cvars::log_fps_interval > 0 && emulator_->title_id()) {
       gpu::GraphicsSystem* graphics = emulator_->graphics_system();
@@ -1146,25 +1162,39 @@ void EmulatorWindow::AutoScreenshotLoop() {
         }
       }
     }
-    if (cvars::screenshot_interval <= 0 || now < next_shot) {
+    if (shot_interval.count() <= 0 || now < next_shot) {
       continue;
     }
     next_shot += shot_interval;
+    if (next_shot < now) {
+      // A slow capture must not queue a backlog of shots.
+      next_shot = now + shot_interval;
+    }
     if (!emulator_->title_id()) {
       continue;
     }
-    app_context().CallInUIThread([this]() {
+    std::string suffix;
+    if (burst) {
+      gpu::GraphicsSystem* graphics = emulator_->graphics_system();
+      gpu::CommandProcessor* command_processor =
+          graphics ? graphics->command_processor() : nullptr;
+      suffix = fmt::format(
+          "{:06}-swap{}", burst_sequence++,
+          command_processor ? command_processor->guest_swap_count() : 0);
+    }
+    app_context().CallInUIThread([this, suffix]() {
       ui::Presenter* presenter = GetGraphicsSystemPresenter();
       xe::ui::RawImage image;
       if (presenter && presenter->CaptureGuestOutput(image)) {
-        ExportScreenshot(image, /*notify=*/false);
+        ExportScreenshot(image, /*notify=*/false, suffix);
       }
     });
   }
 }
 
 void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image,
-                                      bool notify) {
+                                      bool notify,
+                                      const std::string& suffix) {
   auto t = std::time(nullptr);
 
   // The format is: Year-Month-DayTHours-Minutes-Seconds based off ISO 8601
@@ -1193,7 +1223,10 @@ void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image,
     std::filesystem::create_directories(screenshot_path);
   }
 
-  std::string filename = fmt::format("{} - {}.png", title_id, datetime);
+  std::string filename =
+      suffix.empty()
+          ? fmt::format("{} - {}.png", title_id, datetime)
+          : fmt::format("{} - {} - {}.png", title_id, datetime, suffix);
   SaveImage(screenshot_path / filename, image);
   if (!notify) {
     XELOGI("Screenshot saved: {}",
