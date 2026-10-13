@@ -602,6 +602,14 @@ class CommandProcessor {
 
 #include "pm4_command_processor_declare.h"
 
+  // Guest physical address of a host pointer into the physical view (the ring
+  // and indirect buffers are TranslatePhysical views). Truncating the host
+  // pointer to 32 bits is only right when the physical view is 4 GiB-aligned,
+  // which the macOS mapping does not guarantee.
+  uint32_t HostToGuestPhysical(uintptr_t host_ptr) const {
+    return uint32_t(host_ptr - uintptr_t(memory_->physical_membase()));
+  }
+
   virtual Shader* LoadShader(xenos::ShaderType shader_type,
                              uint32_t guest_address,
                              const uint32_t* host_address,
