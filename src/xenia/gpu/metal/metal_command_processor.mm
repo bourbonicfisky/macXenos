@@ -6746,7 +6746,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }();
     metal::ConsumerRequest vertex_request =
         metal::ConsumerRequest::Uniform(vertex_dependency_ranges);
-    if (s_vertex_ordering) {
+    // The host tessellation route reads its index/factor stream from guest RAM
+    // on the CPU (TranslatePhysical at encode time), not from the shared
+    // buffer, so command order alone leaves a routed rasterizing producer's
+    // factors unpublished and the staleness backstop skips the draw. Viva
+    // Pinata's adaptive terrain dropped every frame this way with
+    // XE_METAL_MEMEXPORT_RASTER=1 (title-screen ground missing, 29 draws per
+    // frame). Such a request keeps the RAM-domain wait-and-publish.
+    if (s_vertex_ordering && !memexport_raster_consumer_range) {
       vertex_request.access = metal::ConsumerAccess::kSharedBuffer;
       vertex_request.order_memexport_producers = true;
     }
