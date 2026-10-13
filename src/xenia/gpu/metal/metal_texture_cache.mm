@@ -379,6 +379,13 @@ MetalTextureCache::~MetalTextureCache() {
     (void)released;
   }
   parked_.clear();
+  for (auto& sv : null_swizzle_views_) {
+    if (sv.second.view) {
+      id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)sv.second.view;
+      (void)released;
+    }
+  }
+  null_swizzle_views_.clear();
   // Per-swizzle exact-cover views are ours (retained +1); the resolved target
   // snapshots and tip textures are owned elsewhere and are not released here.
   for (auto& pair : resolved_targets_) {
@@ -1153,6 +1160,49 @@ void MetalTextureCache::PrepareSnapshotFit(
 }
 
 uint32_t MetalTextureCache::GetTextureSlot(
+    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
+  uint32_t slot = GetTextureSlotUnswizzledNull(fetch, is_signed);
+  if (slot || binding_allocation_failed_ || !null_texture_ ||
+      !IsTextureFetchConstantServable(
+          fetch.type, cvars::gpu_allow_invalid_fetch_constants)) {
+    return slot;
+  }
+  // The fetch swizzle's constant channels (4/6 = 0, 5/7 = 1) do not read
+  // memory, so they hold for a fetch nothing could be loaded for. Halo 4's
+  // Bink shader takes alpha from a base-0 1x1 fetch swizzled to 1111 and
+  // multiplies its output by it; the bare null texture (0, 0, 0, 0) made
+  // every video frame black. The null texture is zero in all channels, so
+  // only the constant-one channels need a view.
+  uint32_t one_mask = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint32_t comp = (fetch.swizzle >> (i * 3)) & 0b111;
+    if (comp == 5 || comp == 7) {
+      one_mask |= 1u << i;
+    }
+  }
+  if (!one_mask) {
+    return 0;
+  }
+  uint32_t null_swizzle = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    null_swizzle |= ((one_mask >> i) & 1 ? 5u : 4u) << (i * 3);
+  }
+  size_t null_views_before = null_swizzle_views_.size();
+  slot = GetSwizzledSnapshotSlot(null_texture_, null_swizzle,
+                                 null_swizzle_views_);
+  if (null_swizzle_views_.size() != null_views_before) {
+    XELOGI(
+        "MetalTex: constant-swizzle null view {:03X} for unservable fetch "
+        "base={:08X} fmt={} swz={:03X}",
+        null_swizzle, fetch.base_address << 12, uint32_t(fetch.format),
+        fetch.swizzle & 0xFFF);
+  }
+  // Out of slots or views: the plain null texture, as before.
+  binding_allocation_failed_ = false;
+  return slot;
+}
+
+uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   if (!trace_playback_) {
     DrainPendingInvalidations();

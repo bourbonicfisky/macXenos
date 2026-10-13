@@ -717,6 +717,16 @@ class MetalTextureCache {
   uint32_t GetSwizzledSnapshotSlot(
       void* source, uint32_t guest_swizzle,
       std::unordered_map<uint32_t, ResolvedTarget::SwizzleView>& views);
+
+  // The serve chain behind GetTextureSlot, which returns 0 for every fetch it
+  // cannot serve without applying the fetch constant's swizzle.
+  uint32_t GetTextureSlotUnswizzledNull(
+      const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed);
+  // Views of the null texture with the fetch swizzle's constant-one channels
+  // applied, keyed by the normalized swizzle (constant channels only). They
+  // hold no guest content, so they live as long as the cache.
+  std::unordered_map<uint32_t, ResolvedTarget::SwizzleView>
+      null_swizzle_views_;
 };
 
 }  // namespace metal
