@@ -470,11 +470,18 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
              dxbc::Src::LF(0.0f));
   }
 
-  // Zero the interpolators.
+  // Zero the interpolators (0.5 for a VS that writes none of them, when the
+  // backend asks - see Modification::vertex.fill_unwritten_interpolators).
   uint32_t interpolator_count =
       xe::bit_count(GetModificationInterpolatorMask());
+  float interpolator_fill =
+      (is_vertex_shader() &&
+       GetDxbcShaderModification().vertex.fill_unwritten_interpolators)
+          ? 0.5f
+          : 0.0f;
   for (uint32_t i = 0; i < interpolator_count; ++i) {
-    a_.OpMov(dxbc::Dest::O(out_reg_vs_interpolators_ + i), dxbc::Src::LF(0.0f));
+    a_.OpMov(dxbc::Dest::O(out_reg_vs_interpolators_ + i),
+             dxbc::Src::LF(interpolator_fill));
   }
 
   // Remember that x# are only accessible via mov load or store - use a

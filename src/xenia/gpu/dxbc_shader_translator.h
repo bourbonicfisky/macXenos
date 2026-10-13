@@ -193,7 +193,13 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // resources. Was zero padding, so every existing value keeps its
       // meaning (kVersion is deliberately not bumped).
       uint32_t domain_as_vertex : 1;
-      uint32_t : 1;
+      // Initialize the interpolators in interpolator_mask to 0.5 instead of
+      // zero. Set by the Metal backend only for a vertex shader that writes no
+      // interpolators while the pixel shader reads some (a position-only quad
+      // drawn with a leftover pixel shader); the guest value is undefined on
+      // hardware (metal_unwritten_interpolators). Was zero padding, so every
+      // existing value keeps its meaning.
+      uint32_t fill_unwritten_interpolators : 1;
       // uint32_t 1.
       // Pipeline stage and input configuration.
       Shader::HostVertexShaderType host_vertex_shader_type

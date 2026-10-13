@@ -173,11 +173,14 @@ endif()
 
 # Built-in per-title configs (docs/game_configs/<title id>.config.toml) are
 # read from game_configs/ beside the binary (config::LoadGameConfig); the
-# bundle packager copies the same folder into Contents/Resources.
-add_custom_command(TARGET xenia-app POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xenia-app>/game_configs"
+# bundle packager copies the same folder into Contents/Resources. A target of
+# its own that runs on every build, like the blades below: a new or edited
+# config alone does not relink the binary, so a POST_BUILD step skipped it.
+add_custom_target(xenia-app-game-configs ALL
+  COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:xenia-app>/game_configs"
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/docs/game_configs" "$<TARGET_FILE_DIR:xenia-app>/game_configs"
   COMMENT "Copying built-in per-title configs")
+add_dependencies(xenia-app xenia-app-game-configs)
 
 # The Preferences blades (blades_model.cc reads and writes JSON; the overlay
 # hosts the page in WebKit).

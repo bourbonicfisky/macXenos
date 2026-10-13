@@ -141,6 +141,12 @@ export const en = {
   "settings.resetDefaults": "Reset to defaults",
   "settings.defaults": "Defaults",
   "graphics.switches": "Renderer switches",
+  "graphics.unsetInputs.label": "Unset shader inputs",
+  "graphics.unsetInputs.body": "Some games draw with a shader that reads a value the game never set. The Xbox 360 left whatever was there, so no value is right for every game. Zero suits most of them; in Resident Evil 5 it makes tree shadows flicker.",
+  "graphics.unsetInputs.auto": "Auto",
+  "graphics.unsetInputs.on": "On",
+  "graphics.unsetInputs.off": "Off",
+  "graphics.unsetInputs.aside": "Auto fills in a neutral value only for games known to need it, today Resident Evil 5. On does it for every game, which changes Halo 3's lighting; Off never does.",
 
   // --- Controller > Button mapping -------------------------------------------------
   "controller.map.title": "Button mapping",

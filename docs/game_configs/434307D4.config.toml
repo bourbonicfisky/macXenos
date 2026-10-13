@@ -1,0 +1,12 @@
+# macXenos built-in per-title config: Resident Evil 5 (434307D4).
+# The game renders two shadow cascades into one EDRAM depth surface and
+# starts each with a position-only clear quad. The second clear is drawn with
+# the still-bound cloth caster pixel shader, which fetches its alpha mask at an
+# interpolator the vertex shader never writes and kills below 0.125 alpha. At
+# zero (the reference renderer's value) the fetch lands on a transparent
+# corner, the whole clear is killed and that cascade keeps the other's depth:
+# in the ~5% of frames where the game draws the near cascade second, tree
+# shadows flash for one frame. With 0.5 the clear survives.
+# (xenia-mac-evidence re5-shadow-flicker-20261013, interp-census-20261013)
+[GPU]
+metal_unwritten_interpolators_title = true

@@ -8,6 +8,15 @@
 "description": "Enable cache mount",
 "changed": false
 },
+"jit_precompile_functions": {
+"name": "jit_precompile_functions",
+"category": "CPU",
+"type": "string",
+"value": "",
+"defaultValue": "",
+"description": "Comma-separated guest function addresses (hex) to compile when the title loads, before its first thread runs. For titles whose non-thread-safe static initialization sets its guard before calling a constructor: the first call compiles the constructor, which widens a nanosecond race into milliseconds (Ultra Street Fighter IV's boot crash).",
+"changed": false
+},
 "time_scalar": {
 "name": "time_scalar",
 "category": "General",
@@ -854,6 +863,24 @@
 "description": "Capture a single-frame GPU trace (like the Trace Frame hotkey) when the swap counter reaches this value. 0 disables. For unattended captures where no UI hotkey is available.",
 "changed": false
 },
+"trace_gpu_frame_repeat_interval": {
+"name": "trace_gpu_frame_repeat_interval",
+"category": "GPU",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "With trace_gpu_frame_at_swap, capture another single-frame trace every this many swap-counter ticks after the first (0 = one capture only). For catching intermittent frames.",
+"changed": false
+},
+"trace_gpu_frame_repeat_count": {
+"name": "trace_gpu_frame_repeat_count",
+"category": "GPU",
+"type": "int",
+"value": 1,
+"defaultValue": 1,
+"description": "Total single-frame traces trace_gpu_frame_repeat_interval captures, the first included.",
+"changed": false
+},
 "dump_shaders": {
 "name": "dump_shaders",
 "category": "GPU",
@@ -1349,13 +1376,31 @@
 "description": "Draw the Xbox 360's 2x/4x MSAA fast clears straight into the matching 1x view of the same EDRAM instead of copying the whole surface out and back for each clear. Large speedup in titles that clear MSAA buffers often (Gears of War 3: 18 -> 30 fps on an M4); no visual change is intended - clears it cannot prove identical take the old path. Turn off only to troubleshoot a rendering problem. XE_METAL_MSAA_CLEAR_FOLD=0/1 overrides this setting.",
 "changed": false
 },
+"metal_unwritten_interpolators": {
+"name": "metal_unwritten_interpolators",
+"category": "GPU",
+"type": "string",
+"value": "auto",
+"defaultValue": "auto",
+"description": "What a pixel shader reads from an interpolator its vertex shader never wrote, for draws whose vertex shader writes none (a position-only quad drawn with a leftover pixel shader). The Xbox 360 leaves the value undefined. off: zero, as the reference renderer does. on: 0.5, which fixes Resident Evil 5's flickering shadows but changes Halo 3's lighting. auto: 0.5 only for titles whose built-in config sets metal_unwritten_interpolators_title.",
+"changed": false
+},
+"metal_unwritten_interpolators_title": {
+"name": "metal_unwritten_interpolators_title",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Per-title hint for metal_unwritten_interpolators = auto, set by the built-in config of titles that need the 0.5 fill (Resident Evil 5).",
+"changed": false
+},
 "metal_texture_integer_scale": {
 "name": "metal_texture_integer_scale",
 "category": "GPU",
 "type": "bool",
 "value": true,
 "defaultValue": true,
-"description": "Restore the guest's integer range for texture fetches whose fetch constant declares an integer num_format on a fixed-point format. The host view samples normalized, so without this the guest receives [0, 1] where it asked for unnormalized units. Enabled by default: Just Cause 2 fetches a per-texel light/material index table this way and truncates the result into the address register, so normalized delivery collapsed every index to 0 and pinned the whole per-texel selection to one constant. Set false to restore the previous behavior exactly.",
+"description": "Restore the guest's integer range for texture fetches whose fetch constant declares an integer num_format on a fixed-point format. The host view samples normalized, so without this the guest receives [0, 1] where it asked for unnormalized units. Enabled by default: Just Cause 2 fetches a per-texel light/material index table this way and truncates the result into the address register, so normalized delivery collapsed every index to 0 and pinned the whole per-texel selection to one constant. Also carries the rest of upstream's fixed texture conversion: unsigned-biased components decode as offset binary (an 8-bit 128 returns 0), normalized unsigned components round to 16 fractional bits, and point sampled fetches snap to texel centers and reconstruct 4 to 7 bit components. Set false to restore the behavior before any of these exactly.",
 "changed": false
 },
 "metal_guest_gamma_ramp": {
@@ -1365,6 +1410,15 @@
 "value": true,
 "defaultValue": true,
 "description": "Apply the guest's standard 256-entry gamma ramp to the presented guest output on Metal. Enabled by default: five calibrated titles program a complete non-identity ramp that is present at every swap, and ignoring it presented an untransformed image. Set false to restore the previous output exactly -- no ramp buffer is created, no upload occurs, and the swap source reaches the mailbox by the same blit as before.",
+"changed": false
+},
+"metal_pwl_gamma": {
+"name": "metal_pwl_gamma",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Apply the guest's piecewise-linear gamma ramp when DC_LUTA_CONTROL selects it (value 3, an 8-step increment over a 10-bit input; Halo 3). false presents those titles without a ramp, the pre-2026-10-10 behavior.",
 "changed": false
 },
 "metal_pipeline_metallib_cache": {
@@ -1653,6 +1707,42 @@
 "value": 10,
 "defaultValue": 10,
 "description": "How many recently played titles the File menu lists. Every title played is kept for the dashboard's All Games list; 0 keeps none.",
+"changed": false
+},
+"screenshot_path": {
+"name": "screenshot_path",
+"category": "General",
+"type": "path",
+"value": "",
+"defaultValue": "",
+"description": "Folder for screenshots (F12 and screenshot_interval). Empty: a screenshots folder beside the executable.",
+"changed": false
+},
+"screenshot_interval": {
+"name": "screenshot_interval",
+"category": "General",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "Seconds between automatic screenshots of the guest output, for unattended test runs (no screen-recording permission needed). 0 = off.",
+"changed": false
+},
+"screenshot_interval_ms": {
+"name": "screenshot_interval_ms",
+"category": "General",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "Milliseconds between automatic screenshots, overriding screenshot_interval when > 0 (burst capture for flicker hunts). Burst filenames carry a sequence number and the guest swap count. 0 = off.",
+"changed": false
+},
+"log_fps_interval": {
+"name": "log_fps_interval",
+"category": "General",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "Seconds between GuestFps log lines (guest swaps per second, any GPU backend), for unattended test runs. 0 = off.",
 "changed": false
 },
 "disable_doubleclick_fullscreen": {
@@ -2598,6 +2688,15 @@
 "value": 250,
 "defaultValue": 250,
 "description": "macOS-only: adaptive busy-poll backoff. The guest's lock-free pump loops spam Sleep(0); on POSIX that is sched_yield, which keeps the spinner runnable and on Apple Silicon's asymmetric scheduler starves the guest job dispatcher (the DOA5 load-stall freeze). After a short burst of cheap yields, a runaway Sleep(0) spinner instead sleeps this many microseconds so the dispatcher gets the core. 0 disables (pure sched_yield, pre-fix behavior). 250 is the validated value; tune via 100/250/500.",
+"changed": false
+},
+"macos_spin0_depress": {
+"name": "macos_spin0_depress",
+"category": "Kernel",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "macOS-only: the Sleep(0) backoff gives the core away with a priority-depressing thread_switch (any runnable thread runs first, and the spinner resumes at once when none is waiting) instead of sleeping macos_spin0_backoff_us. A fixed sleep wakes a guest frame limiter that polls the performance counter between Sleep(0)s up to one slice late, and limiters that restart from the late time (Ultra Street Fighter IV) drift below 60 fps. false restores the sleep.",
 "changed": false
 },
 "headless": {

@@ -153,6 +153,22 @@ DEFINE_bool(
     "overrides this setting.",
     "GPU");
 
+DEFINE_string(
+    metal_unwritten_interpolators, "auto",
+    "What a pixel shader reads from an interpolator its vertex shader never "
+    "wrote, for draws whose vertex shader writes none (a position-only quad "
+    "drawn with a leftover pixel shader). The Xbox 360 leaves the value "
+    "undefined. off: zero, as the reference renderer does. on: 0.5, which "
+    "fixes Resident Evil 5's flickering shadows but changes Halo 3's "
+    "lighting. auto: 0.5 only for titles whose built-in config sets "
+    "metal_unwritten_interpolators_title.",
+    "GPU");
+DEFINE_bool(
+    metal_unwritten_interpolators_title, false,
+    "Per-title hint for metal_unwritten_interpolators = auto, set by the "
+    "built-in config of titles that need the 0.5 fill (Resident Evil 5).",
+    "GPU");
+
 DEFINE_bool(
     metal_texture_integer_scale, true,
     "Restore the guest's integer range for texture fetches whose fetch "
@@ -212,6 +228,25 @@ uint64_t DeltaCensusKeyedCount(uint32_t tag, uint64_t key) {
   return ++counts[(uint64_t(tag) << 56) ^ key];
 }
 bool DeltaCensusLogCount(uint64_t count) { return (count & (count - 1)) == 0; }
+}  // namespace
+
+namespace {
+// metal_unwritten_interpolators: on / off, or auto = the title's hint.
+// Anything else reads as auto.
+bool UnwrittenInterpolatorFillEnabled() {
+  const std::string& mode = cvars::metal_unwritten_interpolators;
+  bool enabled = mode == "on" ? true
+                 : mode == "off"
+                     ? false
+                     : cvars::metal_unwritten_interpolators_title;
+  static int s_logged = -1;
+  if (s_logged != int(enabled)) {
+    s_logged = int(enabled);
+    XELOGI("Metal unwritten interpolators: mode={} title={} -> fill {}", mode,
+           cvars::metal_unwritten_interpolators_title, enabled ? "0.5" : "0");
+  }
+  return enabled;
+}
 }  // namespace
 
 namespace {
@@ -7183,6 +7218,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     interpolator_mask = pixel_shader->GetInterpolatorInputMask(
         sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
   }
+  // metal_unwritten_interpolators: a VS that writes no interpolators with a PS
+  // that reads some (RE5's second shadow-cascade clear runs the bound alpha
+  // kill PS, which at zero kills the whole clear) gets the PS's inputs wired
+  // and filled with 0.5 by the VS. Only position-only VSes: every real read
+  // in the 2026-10-13 census (interp-census-20261013) was one.
+  bool fill_unwritten_interpolators = false;
+  if (pixel_shader && !vertex_shader->writes_interpolators() &&
+      UnwrittenInterpolatorFillEnabled()) {
+    uint32_t ps_inputs = pixel_shader->GetInterpolatorInputMask(
+        sq_program_cntl, regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+    if (ps_inputs) {
+      interpolator_mask = ps_inputs;
+      fill_unwritten_interpolators = true;
+    }
+  }
 
   // Tessellated draws translate the guest VS as the DOMAIN shader the shared
   // processor chose (ProcessingResult::host_vertex_shader_type — task 4.1
@@ -7194,6 +7244,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           use_tessellation_emulation ? tess_pp.host_vertex_shader_type
                                      : Shader::HostVertexShaderType::kVertex));
   vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
+  vs_mod_decoded.vertex.fill_unwritten_interpolators =
+      fill_unwritten_interpolators ? 1 : 0;
   // Host tessellation route: the guest VS is translated as a VERTEX shader
   // that reads its domain registers from the host-generated record stream
   // (dxbc_shader_translator.h Modification::vertex.domain_as_vertex).

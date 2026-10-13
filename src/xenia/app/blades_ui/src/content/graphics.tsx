@@ -297,6 +297,32 @@ export function graphics(state: NativeState): BladeDef {
     });
   }
 
+  if (rendererShown(state, "metal")) {
+    const unsetInputs: Option[] = [
+      { value: "auto", label: t("graphics.unsetInputs.auto"), recommended: true },
+      { value: "on", label: t("graphics.unsetInputs.on") },
+      { value: "off", label: t("graphics.unsetInputs.off") }
+    ];
+    menu.push({
+      id: "unset-inputs",
+      label: t("graphics.unsetInputs.label"),
+      glyph: "layers",
+      value: <Value name="metal_unwritten_interpolators" options={unsetInputs} />,
+      heading: t("graphics.unsetInputs.label"),
+      detail: (
+        <>
+          <p>{t("graphics.unsetInputs.body")}</p>
+          <Options
+            name="metal_unwritten_interpolators"
+            title={t("graphics.unsetInputs.label")}
+            options={unsetInputs}
+          />
+          <Aside>{t("graphics.unsetInputs.aside")}</Aside>
+        </>
+      )
+    });
+  }
+
   menu.push({
     id: "troubleshooting",
     label: "Troubleshooting",
