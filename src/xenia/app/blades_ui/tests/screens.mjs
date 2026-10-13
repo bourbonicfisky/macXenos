@@ -28,6 +28,7 @@ const STATES = {
   "system-language": ["#system/language"],
   "system-about": ["#system/about"],
   "system-update": ["#system/software-update"],
+  "system-update-open": ["#system/software-update", "Enter", "ArrowDown", "Enter"],
   acknowledgements: ["#acknowledgements", "ArrowDown"],
   "acknowledgements-read": ["#acknowledgements", "Enter"],
   "system-animation": ["#system/motion"],

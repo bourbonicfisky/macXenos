@@ -249,6 +249,7 @@ export function dashboard(state: NativeState): BladeDef {
               name="check_for_updates"
               title={t("dashboard.update.when")}
               options={updateSchedule()}
+              dropdown
             />
           </>
         ) : (
