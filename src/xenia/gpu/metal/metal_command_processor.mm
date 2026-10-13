@@ -9475,6 +9475,41 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             }
           }
         }
+        {
+          // Upstream-delta census (2026-10-12): unsigned-biased components of
+          // fixed formats fetched with a normalized num_format. The translator
+          // decodes them as 2u - 1; Canary c3cd8617b decodes offset binary,
+          // (n - 2^(w-1)) / (2^(w-1) - 1), so an 8-bit 128 returns 0. bits is
+          // the widest biased component.
+          static const bool s_biased_census =
+              std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+          const FormatInfo* biased_format =
+              s_biased_census ? FormatInfo::Get(f.format) : nullptr;
+          if (biased_format && biased_format->fixed && !f.num_format) {
+            uint32_t biased_bits = 0;
+            for (uint32_t c = 0; c < 4; ++c) {
+              xenos::TextureSign sign =
+                  c == 0 ? f.sign_x : c == 1 ? f.sign_y
+                                    : c == 2 ? f.sign_z : f.sign_w;
+              if (sign == xenos::TextureSign::kUnsignedBiased) {
+                biased_bits = std::max(biased_bits,
+                                       uint32_t(biased_format->component_bits[c]));
+              }
+            }
+            if (biased_bits) {
+              uint64_t n = DeltaCensusKeyedCount(
+                  6, uint64_t(f.format) | (uint64_t(biased_bits) << 8));
+              if (DeltaCensusLogCount(n)) {
+                XELOGI(
+                    "DeltaCensus biased_norm draw={} fc={} fmt={} bits={} "
+                    "{}x{} count={}",
+                    trace_draw_index_, sb.fetch_constant, uint32_t(f.format),
+                    biased_bits, f.size_2d.width + 1, f.size_2d.height + 1,
+                    n);
+              }
+            }
+          }
+        }
         // Sampler parameters follow the shared D3D12/Vulkan contract
         // (D3D12TextureCache::GetSamplerParameters / WriteSampler):
         //  - clamp modes normalized per dimension (unused axes and every cube
