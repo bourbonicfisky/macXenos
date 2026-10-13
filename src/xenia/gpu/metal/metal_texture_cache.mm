@@ -1888,11 +1888,13 @@ uint32_t MetalTextureCache::GetTextureSlot(
       if (is_3d) {
         if (tiled) {
           src_off = uint32_t(texture_address::Tiled3D(
-              int32_t(bx), int32_t(by), int32_t(z), pitch_blocks_aligned,
-              z_slice_stride_block_rows, plan.block_log2));
+              int32_t(bx + base_xb), int32_t(by + base_yb), int32_t(z),
+              pitch_blocks_aligned, z_slice_stride_block_rows,
+              plan.block_log2));
         } else {
           src_off = z * z_slice_stride_bytes_linear +
-                    uint32_t(by * pitch_blocks + bx) * bpb;
+                    uint32_t((by + base_yb) * pitch_blocks + bx + base_xb) *
+                        bpb;
         }
       } else if (tiled) {
         src_off = z * array_slice_stride_bytes +

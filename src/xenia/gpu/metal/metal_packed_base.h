@@ -48,11 +48,13 @@ inline MetalPackedBaseOffset ComputeMetalPackedBaseOffset(
     bool packed_mips, xenos::DataDimension dimension, uint32_t width,
     uint32_t height, xenos::TextureFormat format) {
   MetalPackedBaseOffset result;
-  // 3D packing also spans Z (GetPackedMipOffset's z_blocks); the legacy cache
-  // uploads 3D textures slice-major without a Z tail model, so keep the 3D
-  // base at its historical (0, 0, 0) read until that path owns packed depth.
-  if (!packed_mips || dimension == xenos::DataDimension::k3D || !width ||
-      !height) {
+  // A 3D base level packs the same way in X and Y: GetPackedMipOffset only
+  // moves along Z for the 1x1 levels deep in the tail, never for level 0, so
+  // the base keeps z = 0 and every slice is read at the same (x, y) offset.
+  // Halo 4's 16x15x16 luminance LUT is read at x = 16; read at (0, 0, 0) it
+  // was mostly the smaller levels' empty space, every lookup returned zero
+  // and the game's exposure, and so its whole in-engine image, went black.
+  if (!packed_mips || !width || !height) {
     return result;
   }
   if (texture_util::GetPackedMipLevel(width, height) != 0) {

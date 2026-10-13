@@ -86,13 +86,33 @@ TEST_CASE("Metal packed base: 16x16 is the last packed size, 32x32 is not",
               .packed);
 }
 
-TEST_CASE("Metal packed base: no packed mips, 3D, or degenerate sizes read (0,0)",
+TEST_CASE("Metal packed base: a small 3D base packs in X/Y like 2D",
+          "[metal][texture][packed-base]") {
+  // Halo 4's 16x15x16 luminance LUT: the base sits 16 blocks along X in the
+  // tail (z stays 0 for level 0); read at (0, 0, 0) every lookup returned
+  // zero and the in-engine image went black.
+  MetalPackedBaseOffset lut = ComputeMetalPackedBaseOffset(
+      true, xenos::DataDimension::k3D, 16, 15,
+      xenos::TextureFormat::k_8_8_8_8);
+  REQUIRE(lut.packed);
+  REQUIRE(lut.x_blocks == 16);
+  REQUIRE(lut.y_blocks == 0);
+  // Same offset as the 2D base of the same width and height.
+  MetalPackedBaseOffset flat = ComputeMetalPackedBaseOffset(
+      true, k2D, 16, 15, xenos::TextureFormat::k_8_8_8_8);
+  REQUIRE(flat.x_blocks == lut.x_blocks);
+  REQUIRE(flat.y_blocks == lut.y_blocks);
+  // Too large to pack: unchanged.
+  REQUIRE_FALSE(ComputeMetalPackedBaseOffset(true, xenos::DataDimension::k3D,
+                                             64, 64,
+                                             xenos::TextureFormat::k_8_8_8_8)
+                    .packed);
+}
+
+TEST_CASE("Metal packed base: no packed mips or degenerate sizes read (0,0)",
           "[metal][texture][packed-base]") {
   REQUIRE_FALSE(ComputeMetalPackedBaseOffset(false, k2D, 8, 8,
                                              xenos::TextureFormat::k_DXT1)
-                    .packed);
-  REQUIRE_FALSE(ComputeMetalPackedBaseOffset(true, xenos::DataDimension::k3D,
-                                             8, 8, xenos::TextureFormat::k_DXT1)
                     .packed);
   REQUIRE_FALSE(ComputeMetalPackedBaseOffset(true, k2D, 0, 8,
                                              xenos::TextureFormat::k_DXT1)
