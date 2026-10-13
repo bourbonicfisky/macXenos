@@ -938,7 +938,11 @@ constexpr uint32_t kSystemViewEntryCount = 3;
 
 // Sized for bring-up; a real build would grow these on demand.
 constexpr uint32_t kViewBindlessHeapSlots = 4096;
-constexpr uint32_t kSamplerBindlessHeapSlots = 256;
+// Unique samplers (one slot each, never evicted; the space is bounded by the
+// sampler parameters). D3D12's heap holds 2000 and rolls over; 256 was hit in
+// long sessions, turning every later new sampler into a skipped draw. Clamped
+// to the device's argument-buffer sampler limit at heap creation.
+constexpr uint32_t kSamplerBindlessHeapSlots = 2048;
 constexpr uint32_t kUploadArenaSize = 32u * 1024 * 1024;
 // XE_METAL_ARENA_SIZE=<bytes>: ring-stress override — a small ring forces
 // constant wrapping/reclaim pressure in trace replay, turning any ring
@@ -1007,8 +1011,13 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
     *out_slot = it->second;
     return true;
   }
-  if (next_sampler_slot_ >= kSamplerBindlessHeapSlots ||
-      !sampler_bindless_heap_) {
+  if (next_sampler_slot_ >= sampler_heap_slots_ || !sampler_bindless_heap_) {
+    static bool s_full_logged = false;
+    if (!s_full_logged) {
+      s_full_logged = true;
+      XELOGE("MetalCommandProcessor: sampler heap full ({} unique samplers)",
+             sampler_heap_slots_);
+    }
     return false;
   }
   id<MTLDevice> device = (__bridge id<MTLDevice>)
@@ -2168,8 +2177,10 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       newBufferWithLength:kViewBindlessHeapSlots * sizeof(IRDescriptorTableEntry)
                   options:MTLResourceStorageModeShared |
                           MTLResourceCPUCacheModeWriteCombined];
+  sampler_heap_slots_ = uint32_t(std::min<NSUInteger>(
+      kSamplerBindlessHeapSlots, device.maxArgumentBufferSamplerCount));
   id<MTLBuffer> sampler_heap = [device
-      newBufferWithLength:kSamplerBindlessHeapSlots *
+      newBufferWithLength:sampler_heap_slots_ *
                           sizeof(IRDescriptorTableEntry)
                   options:MTLResourceStorageModeShared |
                           MTLResourceCPUCacheModeWriteCombined];
@@ -2183,7 +2194,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   }
   auto* sampler_entries =
       static_cast<IRDescriptorTableEntry*>([sampler_heap contents]);
-  for (uint32_t i = 0; i < kSamplerBindlessHeapSlots; ++i) {
+  for (uint32_t i = 0; i < sampler_heap_slots_; ++i) {
     IRDescriptorTableSetSampler(&sampler_entries[i], null_sampler, 0.0f);
   }
   view_bindless_heap_ = (__bridge_retained void*)view_heap;
@@ -5794,6 +5805,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pixel_shader->AnalyzeUcode(ucode_disasm);
     }
   }
+  // The D3D12/Vulkan raster gate: no rasterization in kNoOperation, with a
+  // multipass vertex shader export mode, a zero surface pitch or both faces
+  // culled. Such a draw has no effect unless its vertex shader exports to
+  // memory (those keep today's path, which routes the exports).
+  if (!draw_util::IsRasterizationPotentiallyDone(
+          regs, draw_util::IsPrimitivePolygonal(regs)) &&
+      !vertex_shader->memexport_eM_written()) {
+    RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "no-rasterization");
+    return true;
+  }
   // The D3D12/Vulkan rule: the pixel shader runs only in kColorDepth and when
   // it has an effect (colour written, kill, depth or memexport, or coverage
   // from alpha); depth-only passes (shadow maps, depth pre-passes, depth
@@ -7334,14 +7355,33 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
                    xenos::PrimitiveType::kPointList);
     }
-    // The RT0 MIN/MAX-blend premultiply factors default to kZero in a zeroed
-    // modification, which forces RT0 rgb/a to 0 (pure black) in the non-ROV
-    // output path. The neutral value is kOne (no premultiply); MIN/MAX blend
-    // handling comes with the blend state later.
+    // RT0 MIN/MAX blend with a source factor (as D3D12's pipeline cache): the
+    // Xbox 360 applies blend factors to MIN/MAX but Metal, like D3D12,
+    // ignores them, so with SrcAlpha / One the pixel shader premultiplies its
+    // RT0 output by source alpha. kOne (no premultiply) otherwise; a zeroed
+    // modification would mean kZero, forcing RT0 to black.
     ps_mod_decoded.pixel.rt0_blend_rgb_factor_for_premult =
         xenos::BlendFactor::kOne;
     ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
         xenos::BlendFactor::kOne;
+    if (pixel_shader->writes_color_target(0)) {
+      auto blend_control = regs.Get<reg::RB_BLENDCONTROL>(
+          reg::RB_BLENDCONTROL::rt_register_indices[0]);
+      if ((blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.color_destblend == xenos::BlendFactor::kOne) {
+        ps_mod_decoded.pixel.rt0_blend_rgb_factor_for_premult =
+            xenos::BlendFactor::kSrcAlpha;
+      }
+      if ((blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.alpha_destblend == xenos::BlendFactor::kOne) {
+        ps_mod_decoded.pixel.rt0_blend_a_factor_for_premult =
+            xenos::BlendFactor::kSrcAlpha;
+      }
+    }
     // Stage A (implement-metal-depth-semantics): float24 depth invariance.
     // Without XE_METAL_F24_PS, the shared depth_float24_convert_in_pixel_shader
     // cvar drives it directly (kCvarDriven honors depth_float24_round too).
@@ -8648,8 +8688,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (system_constant_guest_state.primitive_polygonal) {
       flags |= DxbcShaderTranslator::kSysFlag_PrimitivePolygonal;
     }
-    if (prim_type == xenos::PrimitiveType::kLineList ||
-        prim_type == xenos::PrimitiveType::kLineStrip) {
+    // Line lists and strips, and also line loops, 2D line strips and line
+    // patches (the shared rule D3D12 uses; it sets the PsParamGen line bit).
+    if (draw_util::IsPrimitiveLine(regs)) {
       flags |= DxbcShaderTranslator::kSysFlag_PrimitiveLine;
     }
     if (system_constant_guest_state.depth_float24) {
@@ -9019,6 +9060,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.znear = viewport_info.z_min;
       vp.zfar = viewport_info.z_max;
       [encoder setViewport:vp];
+    } else if (!memexport_draw && !vertex_shader->memexport_eM_written()) {
+      // A zero-extent viewport rasterizes nothing (D3D12 sets it as is).
+      // Metal can't take a zero-size viewport, and skipping setViewport
+      // would draw through the previous one, so the draw is a no-op, like
+      // both faces culled. A vertex shader that exports to memory still
+      // draws, so its exports run.
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "zero-viewport");
+      return true;
     }
     // Apply Xenos polygon culling and front-face winding per normal draw.
     // Metal encoder state persists across draws, so non-polygons explicitly
@@ -11098,16 +11147,16 @@ bool MetalCommandProcessor::IssueCopy() {
     return true;
   }
   // Copy command 2 (compare to k_DXT3A_AS_1_1_1_1) exists only as the shared
-  // resolve shader, and the Metal copy and clear routes below do not know it:
-  // they would copy the color as-is. Keep skipping the whole resolve, as before
-  // GetResolveInfo accepted the command.
+  // resolve shader, and the Metal copy routes below do not know it: they would
+  // copy the color as-is. Skip the copy but still perform the clears, as
+  // Canary does when it can't run that shader (resolution scaling).
   if (resolve_info.rb_copy_control.copy_command ==
       xenos::CopyCommand::kConvertTo1111) {
     static uint32_t s_convert_1111_logs = 0;
     if (s_convert_1111_logs++ < 4) {
-      XELOGW("Metal: resolve copy command 2 (DXT3A as 1_1_1_1) skipped");
+      XELOGW("Metal: resolve copy command 2 (DXT3A as 1_1_1_1) copy skipped");
     }
-    return true;
+    resolve_info.copy_dest_extent_length = 0;
   }
   {
     // Upstream-delta census (2026-10-09): depth resolved out of a
@@ -12610,6 +12659,16 @@ bool MetalCommandProcessor::IssueCopy() {
       }
     }
     if (resolve_info.IsClearingColor()) {
+      // The packed clear value's low and high dwords (Canary 16e1eb8e2): for
+      // 64bpp formats RB_COLOR_CLEAR_LO is the low dword (red | green << 16
+      // for 16_16_16_16, red for 32_32_FLOAT) and RB_COLOR_CLEAR the high;
+      // 32bpp clears take only RB_COLOR_CLEAR.
+      const bool color_64bpp =
+          resolve_info.color_edram_info.format_is_64bpp != 0;
+      const uint32_t color_clear_lo = color_64bpp
+                                          ? resolve_info.rb_color_clear_lo
+                                          : resolve_info.rb_color_clear;
+      const uint32_t color_clear_hi = resolve_info.rb_color_clear;
       uint32_t cbase, crowlen, crows;
       draw_util::GetResolveEdramTileSpan(resolve_info.color_edram_info,
                                          resolve_info.coordinate_info,
@@ -12625,8 +12684,7 @@ bool MetalCommandProcessor::IssueCopy() {
                              resolve_info.color_edram_info.msaa_samples),
                          resolve_info.color_edram_info.format_is_64bpp != 0,
                          clear_source_x, clear_source_y, clear_width,
-                         clear_height, resolve_info.rb_color_clear,
-                         resolve_info.rb_color_clear_lo);
+                         clear_height, color_clear_lo, color_clear_hi);
       cleared = cleared ||
                 (canonical_clear &&
                      render_target_cache_->PerformCanonicalResolveClear(
@@ -12639,8 +12697,7 @@ bool MetalCommandProcessor::IssueCopy() {
                          /*is_depth=*/false,
                          resolve_info.color_edram_info.format_is_64bpp != 0,
                          clear_source_x, clear_source_y, clear_width,
-                         clear_height, resolve_info.rb_color_clear,
-                         resolve_info.rb_color_clear_lo));
+                         clear_height, color_clear_lo, color_clear_hi));
       if (!cleared) {
         render_target_cache_->PerformResolveClear(
             frame_command_buffer_, cbase, crowlen, crows,

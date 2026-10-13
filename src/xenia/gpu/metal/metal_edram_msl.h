@@ -1179,6 +1179,17 @@ inline float4 xe_resolve_color_finish(float4 value,
     return value;
   }
   if (p.dest_red_only != 0u) {
+    // k_8 + swap is A8 (Canary 2b3f0cb45, from XGCopySurface: D3D maps A8 to
+    // k_8 with LOW_BLUE, so the swap selects the source alpha, not blue).
+    // Formats without alpha read 1.0 before exponent bias. k_8_A and k_8_B
+    // keep the red/blue exchange below.
+    if (p.dest_format == 2u) {
+      bool has_alpha = p.color_format == 0u || p.color_format == 2u ||
+                       p.color_format == 3u || p.color_format == 5u ||
+                       p.color_format == 7u;
+      value.r = has_alpha ? value.a : p.exp_bias_scale;
+      return value;
+    }
     // The resolve red-only packing path selects blue on swap only when the
     // source format actually stores a blue component. R/RG sources retain R.
     if (p.color_format == 0u || p.color_format == 2u ||

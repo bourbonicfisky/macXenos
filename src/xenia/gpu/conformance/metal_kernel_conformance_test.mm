@@ -3273,7 +3273,8 @@ TEST_CASE("Canonical packed color resolve matches guest formats and Endian128",
 
   // Red-only swap is specific to the 8bpp resolve shader. Wider conversion
   // paths swap the full float4 before packing, so R/RG -> R32 selects the
-  // absent blue lane (zero), while RG -> R8 selects the second stored dword.
+  // absent blue lane (zero). k_8 + swap is A8 (Canary 2b3f0cb45): it selects
+  // the source alpha, which a 32_32_FLOAT source lacks, so it reads 1.0.
   float quarter = 0.25f;
   float half = 0.5f;
   uint32_t quarter_bits, half_bits;
@@ -3288,7 +3289,17 @@ TEST_CASE("Canonical packed color resolve matches guest formats and Endian128",
   SurfaceParams rg_sp{0u, PitchFor(1u, 2u, 1u), 2u, 0u, 1u, word_count};
   auto converted_r8 = mc.ResolveColorPackedOne(
       rg_sp, 0u, true, 15u, 1.0f, 2u, 0u, 0u, false, r_words, &g_words);
-  CHECK(converted_r8[0] == 128u);
+  CHECK(converted_r8[0] == 255u);
+  // 8_8_8_8 -> k_8 + swap takes alpha (0x80), not blue (0x40); unswapped it
+  // takes red (0x10).
+  std::array<uint32_t, 4> rgba8_words;
+  rgba8_words.fill(0x80402010u);
+  auto a8 = mc.ResolveColorPackedOne(r32_sp, 0u, true, 0u, 1.0f, 2u, 0u, 0u,
+                                     false, rgba8_words);
+  CHECK(a8[0] == 0x80u);
+  auto l8 = mc.ResolveColorPackedOne(r32_sp, 0u, false, 0u, 1.0f, 2u, 0u, 0u,
+                                     false, rgba8_words);
+  CHECK(l8[0] == 0x10u);
 }
 
 TEST_CASE("Canonical resolve clear writes only the declared surface samples",
