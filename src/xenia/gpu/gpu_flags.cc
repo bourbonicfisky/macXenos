@@ -17,6 +17,15 @@ DEFINE_int32(trace_gpu_frame_at_swap, 0,
              "when the swap counter reaches this value. 0 disables. For "
              "unattended captures where no UI hotkey is available.",
              "GPU");
+DEFINE_int32(trace_gpu_frame_repeat_interval, 0,
+             "With trace_gpu_frame_at_swap, capture another single-frame trace "
+             "every this many swap-counter ticks after the first (0 = one "
+             "capture only). For catching intermittent frames.",
+             "GPU");
+DEFINE_int32(trace_gpu_frame_repeat_count, 1,
+             "Total single-frame traces trace_gpu_frame_repeat_interval "
+             "captures, the first included.",
+             "GPU");
 
 DEFINE_path(
     dump_shaders, "",

@@ -596,12 +596,24 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
       // multiple XE_SWAP-counted packets per presented frame (Sonic
       // Generations measured ~6x the present rate with visible skips), so an
       // exact match can never fire. The one-shot latch keeps this to a
-      // single capture.
-      static bool s_at_swap_fired = false;
-      if (cvars::trace_gpu_frame_at_swap > 0 && !s_at_swap_fired &&
-          counter_ >= uint32_t(cvars::trace_gpu_frame_at_swap) &&
+      // single capture, or to trace_gpu_frame_repeat_count captures spaced
+      // trace_gpu_frame_repeat_interval apart.
+      static int32_t s_at_swap_fired = 0;
+      static uint32_t s_at_swap_next = 0;
+      if (cvars::trace_gpu_frame_at_swap > 0 && s_at_swap_next == 0) {
+        s_at_swap_next = uint32_t(cvars::trace_gpu_frame_at_swap);
+      }
+      const int32_t at_swap_limit =
+          cvars::trace_gpu_frame_repeat_interval > 0
+              ? std::max(cvars::trace_gpu_frame_repeat_count, 1)
+              : 1;
+      if (cvars::trace_gpu_frame_at_swap > 0 &&
+          s_at_swap_fired < at_swap_limit && counter_ >= s_at_swap_next &&
           trace_state_ == TraceState::kDisabled && !trace_writer_.is_open()) {
-        s_at_swap_fired = true;
+        ++s_at_swap_fired;
+        s_at_swap_next =
+            counter_ + uint32_t(std::max(cvars::trace_gpu_frame_repeat_interval,
+                                         1));
         trace_state_ = TraceState::kSingleFrame;
         trace_frame_path_ = cvars::trace_gpu_prefix;
       }

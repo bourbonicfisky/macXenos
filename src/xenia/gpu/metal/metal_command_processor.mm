@@ -5619,6 +5619,69 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
            trace_draw_index_ - 1,
            vertex_shader ? vertex_shader->ucode_data_hash() : 0ull,
            pixel_shader ? pixel_shader->ucode_data_hash() : 0ull);
+    XELOGW("MetalDrawTrace   window_offset={:08X} window_scissor_tl={:08X} "
+           "br={:08X} screen_scissor_tl={:08X} br={:08X} surface_info={:08X} "
+           "depth_info={:08X} vte={:08X} su_sc_mode={:08X}",
+           (*register_file_)[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
+           (*register_file_)[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+           (*register_file_)[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+           (*register_file_)[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL],
+           (*register_file_)[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
+           (*register_file_)[XE_GPU_REG_RB_SURFACE_INFO],
+           (*register_file_)[XE_GPU_REG_RB_DEPTH_INFO],
+           (*register_file_)[XE_GPU_REG_PA_CL_VTE_CNTL],
+           (*register_file_)[XE_GPU_REG_PA_SU_SC_MODE_CNTL]);
+    XELOGW("MetalDrawTrace   depthcontrol={:08X} stencilrefmask={:08X} "
+           "colorcontrol={:08X} modecontrol={:08X} color_mask={:08X} "
+           "vport z scale={} offset={} clip_cntl={:08X}",
+           (*register_file_)[XE_GPU_REG_RB_DEPTHCONTROL],
+           (*register_file_)[XE_GPU_REG_RB_STENCILREFMASK],
+           (*register_file_)[XE_GPU_REG_RB_COLORCONTROL],
+           (*register_file_)[XE_GPU_REG_RB_MODECONTROL],
+           (*register_file_)[XE_GPU_REG_RB_COLOR_MASK],
+           register_file_->Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
+           register_file_->Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET),
+           (*register_file_)[XE_GPU_REG_PA_CL_CLIP_CNTL]);
+    XELOGW("MetalDrawTrace   sq_program_cntl={:08X} sq_context_misc={:08X} "
+           "vs_writes_interp={:X} ps_interp_mask={:X}",
+           (*register_file_)[XE_GPU_REG_SQ_PROGRAM_CNTL],
+           (*register_file_)[XE_GPU_REG_SQ_CONTEXT_MISC],
+           vertex_shader ? vertex_shader->writes_interpolators() : 0u,
+           pixel_shader ? [&] {
+             uint32_t pgp = UINT32_MAX;
+             return pixel_shader->GetInterpolatorInputMask(
+                 register_file_->Get<reg::SQ_PROGRAM_CNTL>(),
+                 register_file_->Get<reg::SQ_CONTEXT_MISC>(), pgp);
+           }() : 0u);
+    for (uint32_t c : {0u, 23u, 255u}) {
+      uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
+      XELOGW("MetalDrawTrace   ps c{} = ({}, {}, {}, {})", c,
+             register_file_->Get<float>(r), register_file_->Get<float>(r + 1),
+             register_file_->Get<float>(r + 2),
+             register_file_->Get<float>(r + 3));
+    }
+    if (pixel_shader) {
+      for (const auto& binding :
+           pixel_shader->GetTextureBindingsAfterTranslation()) {
+        auto f = register_file_->GetTextureFetch(binding.fetch_constant);
+        XELOGW("MetalDrawTrace   ps fetch fc={} base={:08X} fmt={} {}x{} "
+               "dim={} tiled={} endian={} swz={:03X} pitch={}",
+               binding.fetch_constant, f.base_address << 12,
+               uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
+               uint32_t(f.dimension), uint32_t(f.tiled),
+               uint32_t(f.endianness), f.swizzle & 0xFFF, f.pitch << 5);
+        XELOGW("MetalDrawTrace     sampler clamp=({},{},{}) mag={} min={} "
+               "mip={} aniso={} border={} mip_min={} mip_max={} lod_bias={} "
+               "num_format={} sign_x={} exp_adjust={}",
+               uint32_t(f.clamp_x), uint32_t(f.clamp_y), uint32_t(f.clamp_z),
+               uint32_t(f.mag_filter), uint32_t(f.min_filter),
+               uint32_t(f.mip_filter), uint32_t(f.aniso_filter),
+               uint32_t(f.border_color), uint32_t(f.mip_min_level),
+               uint32_t(f.mip_max_level), int32_t(f.lod_bias),
+               uint32_t(f.num_format), uint32_t(f.sign_x),
+               int32_t(f.exp_adjust));
+      }
+    }
   }
   bool use_geometry_emulation = !use_tessellation_emulation &&
                                 geometry_type != PipelineGeometryShader::kNone &&
@@ -6385,13 +6448,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     if (samples_snapshot) {
       static std::unordered_set<uint64_t> s_seen_consumer_ps;
+      // XE_METAL_RT_CONSUMER_ALL=1 logs every consuming draw, not only the
+      // first per (pixel shader, RT config), for per-draw bisection.
+      static const bool s_consumer_all =
+          std::getenv("XE_METAL_RT_CONSUMER_ALL") != nullptr;
       uint64_t seen_key = pixel_shader->ucode_data_hash() ^
                           (uint64_t(rt0_info.value) << 1);
-      if (s_seen_consumer_ps.insert(seen_key).second) {
+      if (s_seen_consumer_ps.insert(seen_key).second || s_consumer_all) {
         XELOGI(
-            "MetalRTConsumer: ps={:016X} -> color(base={} fmt={}) prim={} "
-            "depth={} zfunc={} samples:",
-            pixel_shader->ucode_data_hash(), uint32_t(rt0_info.color_base),
+            "MetalRTConsumer: draw={} ps={:016X} -> color(base={} fmt={}) "
+            "prim={} depth={} zfunc={} samples:",
+            int64_t(trace_draw_index_) - 1, pixel_shader->ucode_data_hash(),
+            uint32_t(rt0_info.color_base),
             uint32_t(rt0_info.color_format), uint32_t(prim_type), depth_bound,
             uint32_t(norm_depth.zfunc));
         for (const auto& binding :
@@ -12315,6 +12383,19 @@ bool MetalCommandProcessor::IssueCopy() {
   // Resolve CLEARS: guests set render-target base values this way (JC2's
   // quarter-res scene multiplies by DESTINATION — an unset base of 0 blackens
   // the chain; shadow cascades clear depth between renders).
+  {
+    static const bool s_clear_req_log =
+        std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
+    if (s_clear_req_log) {
+      XELOGW("MetalResolveClearReq @draw {}: copy_depth={} clear_color={} "
+             "clear_depth={} copy_control={:08X} cb={}",
+             trace_draw_index_, uint32_t(resolve_info.IsCopyingDepth()),
+             uint32_t(resolve_info.IsClearingColor()),
+             uint32_t(resolve_info.IsClearingDepth()),
+             resolve_info.rb_copy_control.value,
+             frame_command_buffer_ != nil);
+    }
+  }
   if ((resolve_info.IsClearingColor() || resolve_info.IsClearingDepth()) &&
       render_target_cache_ && frame_command_buffer_) {
     uint32_t span_base, span_row_length, span_rows, span_pitch;

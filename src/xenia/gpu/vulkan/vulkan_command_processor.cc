@@ -3275,6 +3275,19 @@ bool VulkanCommandProcessor::IssueCopy() {
           NotifyGuestRamWrite(written_address, written_length);
           memory::vastcpy(dest_ptr, static_cast<uint8_t*>(mapped_data),
                           written_length);
+          // XE_GPU_RESOLVE_WB_DUMP=1: write each read-back resolve's bytes to
+          // /tmp/xe_vkrd_<seq>_<address>.bin (cross-backend resolve diffs).
+          static const bool s_wb_dump =
+              std::getenv("XE_GPU_RESOLVE_WB_DUMP") != nullptr;
+          if (s_wb_dump) {
+            static uint32_t s_wb_dump_seq = 0;
+            std::string path = fmt::format("/tmp/xe_vkrd_{:04}_{:08X}.bin",
+                                           s_wb_dump_seq++, written_address);
+            if (FILE* f = std::fopen(path.c_str(), "wb")) {
+              std::fwrite(dest_ptr, 1, written_length, f);
+              std::fclose(f);
+            }
+          }
           // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1):
           // Vulkan's readback resolve also writes guest RAM during a frame
           // (age=1 in fast mode: the PREVIOUS buffered copy).
