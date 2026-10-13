@@ -1065,6 +1065,38 @@ TEST_CASE("Test Suspending Thread", "[thread]") {
   REQUIRE(result == threading::WaitResult::kSuccess);
 }
 
+TEST_CASE("Resume Right After Create Suspended", "[thread]") {
+  // How guest threads start: created suspended, resumed by the creator at
+  // once. A resume that landed while the new thread was still starting used
+  // to be lost, leaving the thread parked forever. Many creators at once
+  // (more threads than cores) so the new threads get preempted mid-start.
+  constexpr int kCreators = 32;
+  constexpr int kThreadsEach = 200;
+  std::atomic<int> lost{0};
+  std::vector<std::unique_ptr<Thread>> creators;
+  for (int c = 0; c < kCreators; ++c) {
+    creators.push_back(Thread::Create({}, [&lost] {
+      Thread::CreationParameters params = {};
+      params.create_suspended = true;
+      for (int i = 0; i < kThreadsEach; ++i) {
+        std::atomic<bool> ran{false};
+        auto thread = Thread::Create(params, [&ran] { ran = true; });
+        thread->Resume();
+        if (Wait(thread.get(), false, 2s) != WaitResult::kSuccess) {
+          ++lost;
+          // Release it so the test can finish.
+          thread->Resume();
+          Wait(thread.get(), false, 2s);
+        }
+      }
+    }));
+  }
+  for (auto& creator : creators) {
+    REQUIRE(Wait(creator.get(), false, 120s) == WaitResult::kSuccess);
+  }
+  REQUIRE(lost == 0);
+}
+
 TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
   std::unique_ptr<Thread> thread;
   WaitResult result;

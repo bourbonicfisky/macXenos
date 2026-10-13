@@ -1711,15 +1711,23 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   current_thread_ = thread;
   thread->handle_.tid_ = static_cast<pid_t>(syscall(SYS_gettid));
   {
+    // The suspend count must be published with the state: Resume() waits only
+    // for the state to leave kUninitialized, and a Resume() that ran between
+    // the two found a count of 0, did nothing, and the count set afterwards
+    // parked the thread forever. Every guest thread is created suspended and
+    // resumed by its creator, so this hit at random (Gears of War 3 stuck on
+    // "Loading profile": the loader thread never started).
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
+    if (create_suspended) {
+      thread->handle_.suspend_count_ = 1;
+    }
     thread->handle_.state_signal_.notify_all();
   }
 
   if (create_suspended) {
     std::unique_lock lock(thread->handle_.state_mutex_);
-    thread->handle_.suspend_count_ = 1;
     thread->handle_.state_signal_.wait(
         lock, [thread] { return thread->handle_.suspend_count_ == 0; });
   }
