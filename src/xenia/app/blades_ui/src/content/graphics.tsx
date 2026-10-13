@@ -343,6 +343,19 @@ export function graphics(state: NativeState): BladeDef {
             <Check name="metal_raster_sync_skip" label="Skip unchanged render-target syncs" />
             <Check name="metal_raster_mark_skip" label="Skip redundant tile marking" />
             <Check name="metal_fsr_half_precision" label="FSR in half precision" />
+            <p className="pref-group">{t("graphics.experimental.heading")}</p>
+            <p className="m-0">{t("graphics.experimental.rasterExportsBody")}</p>
+            <p className="pref-group">{t("graphics.experimental.rasterExports")}</p>
+            <Options
+              name="metal_memexport_raster_mode"
+              title={t("graphics.experimental.rasterExports")}
+              options={[
+                { value: "auto", label: t("graphics.experimental.auto"), recommended: true },
+                { value: "on", label: t("graphics.experimental.on") },
+                { value: "off", label: t("graphics.experimental.off") }
+              ]}
+            />
+            <Aside>{t("graphics.experimental.rasterExportsAside")}</Aside>
           </>
         ) : null}
         {rendererShown(state, "vulkan") ? (
@@ -359,6 +372,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_sync_skip",
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
+            "metal_memexport_raster_mode",
             "mvk_config_defaults"
           ]}
         />
@@ -371,6 +385,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_sync_skip",
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
+            "metal_memexport_raster_mode",
             "mvk_config_defaults"
           ]}
         />

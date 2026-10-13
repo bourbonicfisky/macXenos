@@ -133,14 +133,21 @@ DEFINE_bool(
     "policy.",
     "GPU");
 
+DEFINE_string(
+    metal_memexport_raster_mode, "auto",
+    "Experimental: route memory exports from vertex shaders that also "
+    "rasterize (the exports of a draw that has a render target bound). "
+    "Required by titles that copy data through such draws, for example Child "
+    "of Eden's video decoder; costs about 13% more GPU submissions per frame "
+    "on Viva Pinata. auto: only for titles that set metal_memexport_raster "
+    "(their built-in config). on: every title. off: none. "
+    "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+    "GPU");
 DEFINE_bool(
     metal_memexport_raster, false,
-    "Route memory exports from vertex shaders that also rasterize (the "
-    "exports of a draw that has a render target bound). Required by titles "
-    "that copy data through such draws, for example Child of Eden's video "
-    "decoder; costs about 11% on Viva Pinata, so it is off by default and "
-    "enabled per title through the title's config file. "
-    "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+    "Per-title hint for metal_memexport_raster_mode = auto, set by the "
+    "built-in config of titles that need rasterizing memory exports (Child "
+    "of Eden).",
     "GPU");
 DEFINE_bool(
     metal_msaa_clear_fold, true,
@@ -459,9 +466,16 @@ bool MetalMemexportRasterGateOn() {
   static const bool s_gate_on = [] {
     const char* value = std::getenv("XE_METAL_MEMEXPORT_RASTER");
     if (!value || !value[0]) {
-      // Unset: the config option (per-title files set it for the titles
-      // that need the route).
-      return cvars::metal_memexport_raster;
+      // Unset: the option. on / off, or auto = the title's hint (per-title
+      // files set it for the titles that need the route). Anything else
+      // reads as auto.
+      const std::string& mode = cvars::metal_memexport_raster_mode;
+      bool on = mode == "on"    ? true
+                : mode == "off" ? false
+                                : cvars::metal_memexport_raster;
+      XELOGI("Metal rasterizing memexport: mode={} title={} -> {}", mode,
+             cvars::metal_memexport_raster, on ? "on" : "off");
+      return on;
     }
     MetalMemexportRasterGate gate = ParseMetalMemexportRasterGate(value);
     if (gate == MetalMemexportRasterGate::kMalformed) {

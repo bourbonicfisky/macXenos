@@ -35,6 +35,7 @@ export const NEXT_LAUNCH = new Set([
   "anisotropic_override",
   "window_guest_resolution_mode",
   "metal_msaa_clear_fold",
+  "metal_memexport_raster_mode",
   "metal_stencil_export",
   "metal_resolve_span_coalesce",
   "metal_raster_sync_skip",

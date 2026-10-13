@@ -17,6 +17,9 @@ const STATES = {
   "graphics-resolution": ["#graphics/resolution"],
   "graphics-resolution-open": ["#graphics/resolution", "Enter", "Enter", "ArrowDown"],
   "graphics-unset-inputs": ["#graphics/unset-inputs"],
+  "graphics-troubleshooting": ["#graphics/troubleshooting"],
+  // Down through the switches to the experimental option.
+  "graphics-troubleshooting-experimental": ["#graphics/troubleshooting", "Enter", ...Array(6).fill("ArrowDown")],
   profiles: ["#profiles"],
   "profiles-unsigned": ["#profiles", "ArrowDown"],
   "picker": ["#profiles", "Enter", "Enter"],

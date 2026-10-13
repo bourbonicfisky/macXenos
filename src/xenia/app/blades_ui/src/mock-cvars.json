@@ -1376,13 +1376,22 @@
 "description": "Bind a Metal draw pass's colour, depth and stencil attachments only when a draw in the pass can read or write them, so the Apple GPU skips the tile load and store of untouched attachments (mostly the stencil plane of passes that never test stencil). The set is learned per pass so pass boundaries stay where they were; attachment contents are unchanged. Promoted 2026-10-03 (Just Cause 2 at 2x2 draw scale 10.5 -> 10.8 fps on an M4, corpus identical). XE_METAL_PASS_ATTACHMENTS=0/1 overrides this setting; XE_METAL_PASS_ATTACHMENTS_LEGACY=1 forces the bind-everything policy.",
 "changed": false
 },
+"metal_memexport_raster_mode": {
+"name": "metal_memexport_raster_mode",
+"category": "GPU",
+"type": "string",
+"value": "auto",
+"defaultValue": "auto",
+"description": "Experimental: route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 13% more GPU submissions per frame on Viva Pinata. auto: only for titles that set metal_memexport_raster (their built-in config). on: every title. off: none. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+"changed": false
+},
 "metal_memexport_raster": {
 "name": "metal_memexport_raster",
 "category": "GPU",
 "type": "bool",
 "value": false,
 "defaultValue": false,
-"description": "Route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 11% on Viva Pinata, so it is off by default and enabled per title through the title's config file. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+"description": "Per-title hint for metal_memexport_raster_mode = auto, set by the built-in config of titles that need rasterizing memory exports (Child of Eden).",
 "changed": false
 },
 "metal_msaa_clear_fold": {
