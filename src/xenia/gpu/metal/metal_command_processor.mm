@@ -20,6 +20,7 @@
 
 #include <mach/mach.h>
 #include <objc/message.h>
+#include <pthread.h>
 
 // Public ObjC ABI for manual autorelease-pool scopes that span calls (the
 // per-frame pool cycled at IssueSwap can't be an @autoreleasepool block).
@@ -3197,6 +3198,41 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
         return memory_->TranslatePhysical<uint8_t*>(address);
       });
   if (remaining) {
+    // XE_METAL_LAZY_STALE_LOG=1: name the reader and the owners of every
+    // stale page (first 200, then every 1024th).
+    static const bool s_stale_log =
+        std::getenv("XE_METAL_LAZY_STALE_LOG") != nullptr;
+    if (s_stale_log) {
+      static std::atomic<uint64_t> s_stale_events{0};
+      const uint64_t n = ++s_stale_events;
+      if (n <= 200 || (n & 1023) == 0) {
+        char thread_name[64] = {};
+        pthread_getname_np(pthread_self(), thread_name, sizeof(thread_name));
+        std::string owners_text;
+        const uint32_t first_page =
+            physical_address_start >> metal::MetalLazyPublication::kPageShift;
+        const uint32_t last_page =
+            (physical_address_start + length - 1) >>
+            metal::MetalLazyPublication::kPageShift;
+        for (uint32_t page = first_page; page <= last_page; ++page) {
+          for (const auto& o : lazy_publication_.PageOwners(page)) {
+            owners_text += fmt::format(
+                " [{}seq={} sub={} {:08X}+{:X} {}x{} bpp={} off=({},{})]",
+                o.linear ? "export " : "", o.authority_sequence, o.submission,
+                o.guest_addr, o.range_bytes, o.width, o.height, o.bpp,
+                o.dest_offset_x, o.dest_offset_y);
+          }
+        }
+        XELOGW(
+            "MetalLazyStale #{} swap#{}: thread '{}' {} {:08X}+{:X} "
+            "committed={} completed={} owners:{}",
+            n, swap_count_, thread_name,
+            access == Memory::PhysicalAccess::kRead ? "read" : "write",
+            physical_address_start, length, committed,
+            completed_submission_.load(std::memory_order_acquire),
+            owners_text.empty() ? std::string(" none") : owners_text);
+      }
+    }
     lazy_rearm_needed_.store(true, std::memory_order_release);
     stale_by_signal_[std::min<uint32_t>(
                          signal_since_commit_.load(std::memory_order_acquire),
@@ -5035,7 +5071,13 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   static const bool s_sync_wait =
       std::getenv("XE_METAL_SYNC_WAIT") != nullptr ||
       !AsyncSubmissionEnabled();
-  if (s_sync_wait) {
+  // Bisect lever: XE_METAL_SYNC_WAIT_REASONS=<hex mask of SeamBoundaryReason>
+  // waits for completion only after commits for those reasons.
+  static const uint32_t s_sync_wait_reasons = [] {
+    const char* v = std::getenv("XE_METAL_SYNC_WAIT_REASONS");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_sync_wait || (s_sync_wait_reasons >> uint32_t(reason)) & 1u) {
     // Counted on the branch that actually stalls, not from the mode flag: a
     // commit that returns and a commit that waits for the GPU are different
     // costs, and only the taken branch is evidence of which one happened.
@@ -9581,11 +9623,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           if (xe_lineage_base() &&
               (fetch.base_address << 12) == xe_lineage_base()) {
             XELOGW(
-                "MetalLineage BIND draw={} base={:08X} fc={} {}x{} routed={} "
-                "slot={} svc={}",
-                trace_draw_index_, fetch.base_address << 12,
+                "MetalLineage BIND swap#{} draw={} base={:08X} fc={} {}x{} "
+                "fmt={} signed={} routed={} slot={} svc={}",
+                swap_count_, trace_draw_index_, fetch.base_address << 12,
                 binding.fetch_constant, fetch.size_2d.width + 1,
-                fetch.size_2d.height + 1, routed_slot != 0, texture_slot,
+                fetch.size_2d.height + 1, uint32_t(fetch.format),
+                binding.is_signed, routed_slot != 0, texture_slot,
                 texture_cache_ ? uint32_t(texture_cache_->ClassifyFetchService(
                                      fetch, binding.is_signed))
                                : 99u);
@@ -15710,7 +15753,21 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   requested.Add(metal::GuestRange::FromBaseLength(
       0, static_cast<uint32_t>(SharedMemory::kBufferSize)));
   signal_since_commit_.store(5, std::memory_order_release);
-  CommitOpenFaultableWork();
+  // The guest treats a completion signal (INTERRUPT, EVENT_WRITE_SHD/EXT) as
+  // "the GPU has finished", so GPU-current work in the open buffer must finish
+  // before the signal is exposed, not only be committed. With a commit alone
+  // the command processor ran on and encoded more resolves to the same pages,
+  // and the guest's reads behind the signal faulted on records still in the
+  // new open buffer (stale reads, which see whatever RAM last held). Mass
+  // Effect's Earth shot then wrapped its colours for a frame: 10-14 frames
+  // per run -> 0 and stale reads 2.6k -> 0, still at 30 fps (2026-10-14).
+  // Waiting at MEM_WRITE / COND_WRITE fences or at swap did not help.
+  // XE_METAL_EXPOSURE_WAIT=0 restores the commit without the wait.
+  static const bool s_exposure_wait = [] {
+    const char* v = std::getenv("XE_METAL_EXPOSURE_WAIT");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  CommitOpenFaultableWork(s_exposure_wait);
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);
@@ -15722,7 +15779,7 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   return ok;
 }
 
-void MetalCommandProcessor::CommitOpenFaultableWork() {
+void MetalCommandProcessor::CommitOpenFaultableWork(bool wait) {
   if (!LazyPublishEnabled() || !lazy_read_callback_handle_ ||
       trace_writer_.is_open() || trace_playback_context() ||
       !frame_command_buffer_) {
@@ -15749,7 +15806,11 @@ void MetalCommandProcessor::CommitOpenFaultableWork() {
     }
   }
   if (open_record) {
-    EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+    if (wait) {
+      EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);
+    } else {
+      EndFrameEncoder(metal::SeamBoundaryReason::kConsumerDependency);
+    }
   }
 }
 
@@ -15765,7 +15826,7 @@ void MetalCommandProcessor::PrepareGuestMemoryForFenceWrite(
   // at scratch writebacks did not reduce Dead to Rights' stale reads.
   if (FenceCommitEnabled() && (kind == GuestSignalKind::kMemWrite ||
                                kind == GuestSignalKind::kCondWrite)) {
-    CommitOpenFaultableWork();
+    CommitOpenFaultableWork(false);
   }
 }
 

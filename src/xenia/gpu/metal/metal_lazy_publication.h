@@ -376,6 +376,13 @@ class MetalLazyPublication {
     return stats_;
   }
 
+  // The owners of `page` in arm order (diagnostics).
+  std::vector<Owner> PageOwners(uint32_t page) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::vector<Owner>* owners = FindPageOwners(page);
+    return owners ? *owners : std::vector<Owner>();
+  }
+
   size_t armed_page_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return (FlatPagesEnabled() ? flat_armed_pages_ : 0) + pages_.size();

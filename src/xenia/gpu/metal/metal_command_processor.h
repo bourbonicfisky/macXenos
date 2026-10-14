@@ -315,10 +315,11 @@ class MetalCommandProcessor : public CommandProcessor {
                                      uint32_t length) override;
   bool PrepareGuestMemoryForCompletionExposure() override;
   void PrepareGuestMemoryForFenceWrite(GuestSignalKind kind) override;
-  // Closes the open command buffer (no wait) when it holds a GPU-current
-  // resolve or memexport record armed for CPU faults, so a fault behind the
-  // fence the guest is about to see can wait for committed work.
-  void CommitOpenFaultableWork();
+  // Closes the open command buffer when it holds a GPU-current resolve or
+  // memexport record armed for CPU faults, so a fault behind the fence the
+  // guest is about to see can wait for committed work. `wait` also waits for
+  // the buffer to complete (completion signals).
+  void CommitOpenFaultableWork(bool wait);
   bool FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   bool ResolveRamConsumerDependencies(
