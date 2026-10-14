@@ -88,6 +88,9 @@ struct XAPC {
   static constexpr uint32_t kSize = 40;
   static constexpr uint32_t kDummyKernelRoutine = 0xF00DFF00;
   static constexpr uint32_t kDummyRundownRoutine = 0xF00DFF01;
+  // A kernel-allocated APC queued by a timer. Freed on delivery like the
+  // dummy kind; while one is queued the timer does not queue another.
+  static constexpr uint32_t kTimerKernelRoutine = 0xF00DFF02;
 
   // KAPC is 0x28(40) bytes? (what's passed to ExAllocatePoolWithTag)
   // This is 4b shorter than NT - looks like the reserved dword at +4 is gone.
@@ -446,8 +449,10 @@ class XThread : public XObject, public cpu::Thread {
   void EnterCriticalRegion();
   void LeaveCriticalRegion();
 
+  // from_timer: a timer's APC, not queued again while the previous one is
+  // still waiting (hardware timers own one APC).
   void EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
-                  uint32_t arg1, uint32_t arg2);
+                  uint32_t arg1, uint32_t arg2, bool from_timer = false);
 
   int32_t priority() const { return priority_; }
   int32_t QueryPriority();

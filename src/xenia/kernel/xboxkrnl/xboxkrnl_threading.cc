@@ -2134,9 +2134,41 @@ dword_result_t KfRaiseIrql_entry(dword_t new_irql, const ppc_context_t& ctx) {
 
 DECLARE_XBOXKRNL_EXPORT2(KfRaiseIrql, kThreading, kImplemented, kHighFrequency);
 
+// A host thread, such as an I/O worker or a timer callback, queues and removes
+// APCs with the target's context (see XThread::ApcQueueContext). It must leave
+// the target's IRQL alone, as the target may change it at the same time.
+static bool CallerIsHostThread() { return !cpu::ThreadState::Get(); }
+
+// Whether a timer APC for this routine and context is still queued on the
+// thread. A hardware timer owns one APC, and inserting it while it is queued
+// fails, so a periodic timer aimed at a thread that never waits alertably
+// keeps one APC pending. Allocating one per period instead grew the system
+// heap a page per fire (Mass Effect: two timers at 10 and 20 ms exhausted it
+// after ~7 minutes, then thread creation failed).
+static bool TimerApcQueued(X_KTHREAD* target_thread, uint32_t apc_routine,
+                           uint32_t apc_routine_context,
+                           cpu::ppc::PPCContext* context) {
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
+  bool queued = false;
+  for (auto&& apc : target_thread->apc_lists[1].IterateForward(context)) {
+    if (apc.kernel_routine == XAPC::kTimerKernelRoutine &&
+        apc.normal_routine == apc_routine &&
+        apc.normal_context == apc_routine_context) {
+      queued = true;
+      break;
+    }
+  }
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
+  return queued;
+}
+
 uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
                             uint32_t apc_routine_context, uint32_t arg1,
-                            uint32_t arg2, cpu::ppc::PPCContext* context) {
+                            uint32_t arg2, cpu::ppc::PPCContext* context,
+                            bool from_timer) {
   auto kernelstate = context->kernel_state;
   auto memory = kernelstate->memory();
   auto thread =
@@ -2147,13 +2179,22 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     return X_STATUS_INVALID_HANDLE;
   }
 
+  if (from_timer &&
+      TimerApcQueued(context->TranslateVirtual<X_KTHREAD*>(
+                         thread->guest_object()),
+                     apc_routine, apc_routine_context, context)) {
+    return X_STATUS_SUCCESS;
+  }
+
   uint32_t apc_ptr = memory->SystemHeapAlloc(XAPC::kSize);
   if (!apc_ptr) {
     return X_STATUS_NO_MEMORY;
   }
   XAPC* apc = context->TranslateVirtual<XAPC*>(apc_ptr);
-  xeKeInitializeApc(apc, thread->guest_object(), XAPC::kDummyKernelRoutine, 0,
-                    apc_routine, 1 /*user apc mode*/, apc_routine_context);
+  xeKeInitializeApc(apc, thread->guest_object(),
+                    from_timer ? XAPC::kTimerKernelRoutine
+                               : XAPC::kDummyKernelRoutine,
+                    0, apc_routine, 1 /*user apc mode*/, apc_routine_context);
 
   if (!xeKeInsertQueueApc(apc, arg1, arg2, 0, context)) {
     memory->SystemHeapFree(apc_ptr);
@@ -2209,7 +2250,8 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
 
     xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
     alert_status = X_STATUS_USER_APC;
-    if (apc->kernel_routine != XAPC::kDummyKernelRoutine) {
+    if (apc->kernel_routine != XAPC::kDummyKernelRoutine &&
+        apc->kernel_routine != XAPC::kTimerKernelRoutine) {
       uint64_t kernel_args[] = {
           apc_ptr,
           scratch_address + 0,
@@ -2342,11 +2384,6 @@ void KeInitializeApc_entry(pointer_t<XAPC> apc, lpvoid_t thread_ptr,
                     normal_routine, processor_mode, normal_context);
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeApc, kThreading, kImplemented);
-
-// A host thread, such as an I/O worker or a timer callback, queues and removes
-// APCs with the target's context (see XThread::ApcQueueContext). It must leave
-// the target's IRQL alone, as the target may change it at the same time.
-static bool CallerIsHostThread() { return !cpu::ThreadState::Get(); }
 
 uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
                             uint32_t priority_increment,

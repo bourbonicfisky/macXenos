@@ -160,6 +160,7 @@ namespace kernel {
 const uint32_t XAPC::kSize;
 const uint32_t XAPC::kDummyKernelRoutine;
 const uint32_t XAPC::kDummyRundownRoutine;
+const uint32_t XAPC::kTimerKernelRoutine;
 
 using namespace xe::literals;
 
@@ -867,12 +868,12 @@ void XThread::LeaveCriticalRegion() {
 }
 
 void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
-                         uint32_t arg1, uint32_t arg2) {
+                         uint32_t arg1, uint32_t arg2, bool from_timer) {
   // don't use thread_state_ -> context() ! we're not running on the thread
   // we're enqueuing to
   uint32_t success = xboxkrnl::xeNtQueueApcThread(
       this->handle(), normal_routine, normal_context, arg1, arg2,
-      cpu::ThreadState::Get()->context());
+      cpu::ThreadState::Get()->context(), from_timer);
 
   xenia_assert(success == X_STATUS_SUCCESS);
 }
