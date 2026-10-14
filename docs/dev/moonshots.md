@@ -230,3 +230,47 @@ vendored Metal Shader Converter 3.1.1):**
 tile-based GPUs pay for ordered device-memory writes in a way the FSI
 experiment already showed. The accuracy gain is in edge cases, so it
 has to be cheap enough to turn on for the titles that need it.
+
+## Dialogue enhance (centre-channel boost)
+
+Recorded 2026-10-14.
+
+**Goal:** an Audio setting that makes speech easier to hear over music and
+effects, as many TVs and soundbars offer. Most 5.1 game mixes put dialogue
+in the centre channel, so raising that channel's volume, with a simple
+presence EQ (a gentle boost around 1 to 4 kHz), lifts voices without
+touching the rest of the mix. Off by default, with a small strength choice
+(for example Low / Medium / High).
+
+**State (checked 2026-10-14: this tree 429f1c1c4):**
+- Games hand the audio system 5.1 frames: 6 channels in the order front
+  left, front right, centre, LFE, back left, back right, 256 samples per
+  channel at 48 kHz (`src/xenia/apu/audio_driver.h`, `conversion.h`).
+- On macOS the SDL driver converts each frame in its callback
+  (`src/xenia/apu/sdl/sdl_audio_driver.cc`). For a stereo device,
+  `sequential_6_BE_to_interleaved_2_LE` folds half the centre into left and
+  right and drops the LFE; for a 6-channel device the channels pass through.
+  The centre channel is still separate at that point, so this is where a
+  gain and EQ would go.
+- The `volume_` path in the same callback only runs when no conversion is
+  needed, so it doesn't apply to the usual 6-to-2 case either. Worth fixing
+  while there.
+- No Xenia fork has this.
+
+**Rough shape:**
+1. A centre gain (for example +3, +6, +9 dB) and a fixed presence biquad,
+   applied to the centre samples before the downmix or interleave. Clamp or
+   soft-limit the output, since boosting can clip.
+2. An Audio blade setting, global with a per-title override for games whose
+   mix needs more or less.
+3. Check which games really put speech in the centre: compare the channel
+   levels during a dialogue scene in a few routed titles (Mass Effect's
+   first conversation, the Red Dead opening cutscene).
+
+**Risk:** games that mix in stereo only, or put speech in the front pair.
+There the centre channel is empty and the setting does nothing. A
+mid-channel fallback (boost what is common to left and right) could cover
+them, but it also lifts centred music and effects. Also check what speaker
+setup the emulated console reports (`XAudioGetSpeakerConfig` reads the
+user audio flags from xconfig), because games choose stereo or 5.1 output
+from it.
