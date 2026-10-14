@@ -66,7 +66,10 @@ graphics settings and more.
 
 ## Game compatibility
 
-Many games run well, and some do not run at all yet. The community
+Many games run well, and some do not run at all yet. The
+[compatibility list](docs/compatibility.md) shows the games macXenos is
+tested with regularly, how far each test goes and the frame rate on an M4
+Mac mini. The community
 [compatibility list](https://xenia-manager.github.io/compatibility) tracks
 Xenia as a whole; results on the Mac can differ.
 

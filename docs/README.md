@@ -4,6 +4,8 @@
 
 - [User guide](user_guide.md): installing, adding games, the dashboard,
   controllers, graphics settings, and where your files are kept.
+- [Game compatibility](compatibility.md): the games tested regularly, how far
+  each test goes, and how fast they run.
 - [Troubleshooting](troubleshooting.md): games that won't start, graphics
   problems, slow games, and how to report a problem.
 - [Release notes](releases/): what changed in each build.
@@ -19,7 +21,7 @@
 
 | Path | What's there |
 | --- | --- |
-| `user_guide.md`, `troubleshooting.md` | Documentation for players |
+| `user_guide.md`, `compatibility.md`, `troubleshooting.md` | Documentation for players |
 | `building.md` | Building from source |
 | `releases/` | Release notes, one file per build |
 | `dev/` | Engineering records and inherited Xenia documentation |
