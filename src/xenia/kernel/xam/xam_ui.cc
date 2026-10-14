@@ -39,6 +39,11 @@ DEFINE_bool(storage_selection_dialog, false,
             "Show storage device selection dialog when the game requests it.",
             "UI");
 
+DEFINE_transient_string(headless_keyboard_text, "",
+              "With headless, the text the on-screen keyboard returns when the "
+              "game offers none (scripted test routes that must type a name). "
+              "Empty keeps the game's default text.",
+              "UI");
 DECLARE_int32(license_mask);
 
 constexpr std::chrono::milliseconds kUIDelayMillis(200);
@@ -517,8 +522,19 @@ dword_result_t XamShowKeyboardUI_entry(
   if (cvars::headless) {
     auto run = [default_text, buffer, buffer_length,
                 buffer_size]() -> X_RESULT {
-      // Redirect default_text back into the buffer.
-      if (!default_text) {
+      // Redirect default_text back into the buffer, or headless_keyboard_text
+      // when the game offers no text of its own.
+      bool no_default = !default_text || !default_text.value().size();
+      XELOGI("XamShowKeyboardUI (headless): default='{}' buffer_length={} -> {}",
+             default_text ? xe::to_utf8(default_text.value()) : "(null)",
+             uint32_t(buffer_length),
+             no_default ? cvars::headless_keyboard_text : "default");
+      if (no_default && !cvars::headless_keyboard_text.empty()) {
+        std::memset(buffer, 0, buffer_size);
+        string_util::copy_and_swap_truncating(
+            buffer, xe::to_utf16(cvars::headless_keyboard_text),
+            buffer_length);
+      } else if (!default_text) {
         std::memset(buffer, 0, buffer_size);
       } else {
         string_util::copy_and_swap_truncating(buffer, default_text.value(),
