@@ -33,6 +33,8 @@ class MacWindowedAppContext final : public WindowedAppContext {
   // -[NSApplication terminate:] (Cmd-Q, Dock Quit, Apple Event quit) into
   // QuitFromUIThread() so the app exits through its own quick_exit path.
   void* app_delegate_ = nullptr;
+  // dispatch_source_t for SIGTERM (retained).
+  void* sigterm_source_ = nullptr;
 };
 
 }  // namespace ui

@@ -12,6 +12,8 @@
 #import <AppKit/AppKit.h>
 #import <dispatch/dispatch.h>
 
+#include <csignal>
+
 // -[NSApplication terminate:] ends the process with exit(), which runs static
 // destructors (the global critical region's mutex among them) while guest and
 // host threads are still running; the next lock throws and the process aborts
@@ -46,11 +48,32 @@ MacWindowedAppContext::MacWindowedAppContext() {
   delegate.context = this;
   app_delegate_ = (void*)CFBridgingRetain(delegate);
   [NSApp setDelegate:delegate];
+
+  // SIGTERM quits the way Cmd-Q does, so scripted runs (the live-test
+  // harnesses) can end the emulator cleanly instead of with SIGKILL. Long A/B
+  // sessions that ended every run with SIGKILL saw swap grow ~0.3-0.5 GB per
+  // run until a reboot.
+  signal(SIGTERM, SIG_IGN);
+  dispatch_source_t sigterm_source = dispatch_source_create(
+      DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
+  dispatch_source_set_event_handler(sigterm_source, ^{
+    if (!HasQuitFromUIThread()) {
+      QuitFromUIThread();
+    }
+  });
+  dispatch_resume(sigterm_source);
+  sigterm_source_ = (__bridge_retained void*)sigterm_source;
 }
 
 MacWindowedAppContext::~MacWindowedAppContext() {
   // Execute anything still queued without invoking virtual methods.
   ExecutePendingFunctionsFromUIThread();
+  if (sigterm_source_) {
+    dispatch_source_t sigterm_source =
+        (__bridge_transfer dispatch_source_t)sigterm_source_;
+    dispatch_source_cancel(sigterm_source);
+    sigterm_source_ = nullptr;
+  }
   if (app_delegate_) {
     XeMacAppDelegate* delegate = (__bridge XeMacAppDelegate*)app_delegate_;
     delegate.context = nullptr;
