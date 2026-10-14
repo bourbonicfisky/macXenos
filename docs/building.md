@@ -143,5 +143,7 @@ Format changes with `clang-format` before committing.
 
 - [Developer documentation](dev/README.md): how the Metal renderer is put
   together and where the project's engineering records live.
+- [Live game tests](dev/live_game_tests.md): the scripted game routes and
+  the validation sweep that runs them.
 - [Dashboard (Blades) README](../src/xenia/app/blades_ui/README.md): building
   and testing the app's front end.
