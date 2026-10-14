@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <root>
 <ppc-isa name="6xx_pem">
-  <!-- These match docs/ppc/core_instructions.pdf -->
+  <!-- These match docs/dev/xenia/ppc/core_instructions.pdf -->
   <insn mnem="addx"         opcode="7c000214" form="XO"       group="i" desc="Add">
     <in field="RA" />
     <in field="RB" />
@@ -1446,7 +1446,7 @@
   </insn>
 </ppc-isa>
 <ppc-isa name="vmx">
-  <!-- These match docs/ppc/altivec_instructions.pdf -->
+  <!-- These match docs/dev/xenia/ppc/altivec_instructions.pdf -->
   <insn mnem="lvebx"        opcode="7c00000e" form="X"        group="m" desc="Load Vector Element Byte Indexed">
     <in field="RA0" />
     <in field="RB" />

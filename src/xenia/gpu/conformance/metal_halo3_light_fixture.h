@@ -15,7 +15,7 @@
 // trace with XE_CAPTURE_CONSTS (SHADER_CONSTANT_000..511 host-order dwords;
 // the pixel bank is registers 256..511, then 8 bool + 32 loop dwords).
 // Provenance: xenia-mac-evidence/halo3-operator-20260917/shaders-15990/ and
-// the consts991 capture recorded in docs/metal_live_compatibility_matrix.md.
+// the consts991 capture recorded in docs/dev/metal_live_compatibility_matrix.md.
 
 #ifndef XENIA_GPU_CONFORMANCE_METAL_HALO3_LIGHT_FIXTURE_H_
 #define XENIA_GPU_CONFORMANCE_METAL_HALO3_LIGHT_FIXTURE_H_

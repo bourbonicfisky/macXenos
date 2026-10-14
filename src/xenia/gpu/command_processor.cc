@@ -1259,7 +1259,7 @@ void CommandProcessor::LogRegisterSets(uint32_t base_register_index,
 namespace {
 // Gamma census (XE_GAMMA_CENSUS=1, default off): the guest's display-LUT
 // programming, so the Xenos PWL contract can be audited across titles
-// (docs/metal_pwl_gamma_audit.md section 7): every distinct value written to
+// (docs/dev/metal_pwl_gamma_audit.md section 7): every distinct value written to
 // DC_LUT_RW_MODE, DC_LUTA_CONTROL and the black/white offsets, and a summary of
 // each completed 256-entry or PWL table.
 bool GammaCensusEnabled() {

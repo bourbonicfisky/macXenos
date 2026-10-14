@@ -1,4 +1,5 @@
+blank_issues_enabled: true
 contact_links:
-  - name: Xenia Discord server
-    url: https://discord.gg/Q9mxZf9
-    about: Tech support for Xenia belongs here.
+  - name: macXenos website
+    url: https://macxenos.com
+    about: Downloads and news. Please don't report macXenos problems to the Xenia, Xenia Canary or Xenia Edge projects.

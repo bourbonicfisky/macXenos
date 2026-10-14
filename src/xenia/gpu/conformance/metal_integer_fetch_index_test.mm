@@ -270,7 +270,7 @@ TEST_CASE("The measured JC2 LUT byte domain reproduces as indices",
   }
 
   // The domains measured in the guest LUT at 0x110C3000
-  // (docs/archive/closed-investigations/metal_integer_fetch_consumer_investigation.md): trace 6756 tops out
+  // (docs/dev/archive/closed-investigations/metal_integer_fetch_consumer_investigation.md): trace 6756 tops out
   // at 31, trace 4218 at 64.
   struct Case {
     const char* trace;

@@ -16,7 +16,7 @@
 // buffer+blit shape, and are device-REQUIRED (fail, never skip). The G0c
 // sampling/mechanism cost measurement is NOT gated here as a flaky wall-clock
 // test — it is run and recorded in
-// docs/archive/evidence/metal_texture_cache_integration_adr.md
+// docs/dev/archive/evidence/metal_texture_cache_integration_adr.md
 // "C1T G0 outcome".
 
 #include <algorithm>

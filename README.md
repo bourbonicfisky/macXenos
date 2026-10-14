@@ -1,75 +1,107 @@
 <p align="center">
-    <a href="https://github.com/xenia-canary/xenia-canary/tree/canary_experimental/assets/icon">
-        <img height="256px" src="https://raw.githubusercontent.com/xenia-canary/xenia/master/assets/icon/256.png" />
-    </a>
+    <img height="256px" src="assets/mac-icon/macxenos_icon_1024.png" alt="macXenos icon" />
 </p>
 
-<h1 align="center">Xenia Canary - Xbox 360 Emulator</h1>
+<h1 align="center">macXenos</h1>
 
-Xenia Canary is an experimental fork of the Xenia emulator. For more information, see the
-[Xenia Canary wiki](https://github.com/xenia-canary/xenia-canary/wiki).
+<p align="center">An Xbox 360 emulator for the Mac.</p>
 
-Come chat with us about **emulator-related topics** on [Discord](https://discord.gg/Q9mxZf9).
-For developer chat join `#dev` but stay on topic. Lurking is not only fine, but encouraged!
-Please check the [FAQ](https://github.com/xenia-canary/xenia-canary/wiki/FAQ) page before asking questions.
-We've got jobs/lives/etc, so don't expect instant answers.
+macXenos is an unofficial macOS fork and port of
+[Xenia Canary](https://github.com/xenia-canary/xenia-canary), with a few
+tweaks from [Xenia Edge](https://github.com/has207/xenia-edge). Most of the
+emulator is Canary. The work here is about making it run well on a Mac.
 
-Discussing illegal activities will get you banned.
+The foundational research and discovery belong to the Xenia, Xenia Canary
+and Xenia Edge contributors. This project covers only the Mac-specific work.
 
-## Status
+Website and downloads: [macxenos.com](https://macxenos.com)
 
-Buildbot | Status | Releases
--------- | ------ | --------
-Canary (🪟, 🐧) | [![CI](https://github.com/xenia-canary/xenia-canary/actions/workflows/Orchestrator.yml/badge.svg?branch=canary_experimental)](https://github.com/xenia-canary/xenia-canary/actions/workflows/Orchestrator.yml/badge.svg?branch=canary_experimental) [![Codacy Badge](https://app.codacy.com/project/badge/Grade/cd506034fd8148309a45034925648499)](https://app.codacy.com/gh/xenia-canary/xenia-canary/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade) | [Latest](https://github.com/xenia-canary/xenia-canary/releases/latest) ◦ [All](https://github.com/xenia-canary/xenia-canary/releases) ◦ [Old](https://github.com/xenia-canary/xenia-canary-releases/releases)
+## About the name
 
-### Experimental Netplay
+Out of respect for the Xenia projects, the name is related to Xenia. Xenia
+is the Greek idea of hospitality to strangers, likely a play on *xenos*,
+which means "stranger" or "foreigner". Xenos is also the codename of the
+GPU inside the Xbox 360. This port is mostly about the graphics side, hence
+macXenos.
 
-Buildbot | Status | Releases
--------- | ------ | --------
-Windows | [![Codacy Badge](https://app.codacy.com/project/badge/Grade/d814c4b6aa444dcc9c1631e0224b2739)](https://app.codacy.com/gh/AdrianCassar/xenia-canary/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade) | [Latest](https://github.com/AdrianCassar/xenia-canary/releases/latest)
+## What's different on the Mac
 
-## Quickstart
+- **A native Metal renderer.** macXenos draws the game directly with Metal,
+  Apple's graphics API, ported from Xenia Canary and Edge with a focus on
+  stability, compatibility, performance and power use.
+- **Upscaling.** AMD FSR and MetalFX can upscale the picture to your window
+  or display.
+- **Internal resolution scaling.** Games can render at a higher resolution
+  than the Xbox 360 did.
+- **A Mac app.** A signed, universal app with a game library, settings,
+  player profiles and an in-game dashboard, plus automatic updates.
+- **Frame generation through Metal 4** is planned.
 
-See the [Quickstart](https://github.com/xenia-canary/xenia-canary/wiki/Quickstart) page.
+The Vulkan renderer (through MoltenVK) is still included as a fallback.
 
-## FAQ
+## Requirements
 
-See the [frequently asked questions](https://github.com/xenia-canary/xenia-canary/wiki/FAQ) page.
+- macOS 15 Sequoia or later
+- A Mac with Apple silicon (Intel Macs work on a best-effort basis)
+- About 2 to 3 GB of free memory while a game runs
+- A game controller
+- Xbox 360 games
 
-## Game Compatibility
+## Getting started
 
-See the [Game compatibility list](https://github.com/xenia-canary/game-compatibility/issues)
-for currently tracked games, and feel free to contribute your own updates,
-screenshots, and information there following the [existing conventions](https://github.com/xenia-canary/game-compatibility/blob/canary/README.md).
+1. Download the latest build from [macxenos.com](https://macxenos.com) and
+   drag macXenos to your Applications folder.
+2. Open it and point it at the folder that holds your games, or use
+   File > Open to start one directly.
+3. Plug in or pair a controller. Most controllers that macOS recognizes work
+   without setup.
 
-## Building
+The first time you play a game, it will stutter for a while as it builds its
+shaders. Later runs are smoother.
 
-See [building.md](docs/building.md) for setup and information about the
-`xb` script. When writing code, check the [style guide](docs/style_guide.md)
-and be sure to run clang-format!
+Settings, saves and the log are kept in `~/.local/share/Xenia`.
 
-## Contributors Wanted!
+The [user guide](docs/user_guide.md) covers the dashboard, controllers,
+graphics settings and more.
 
-Have some spare time, know advanced C++, and want to write an emulator?
-Contribute! There's a ton of work that needs to be done, a lot of which
-is wide open greenfield fun.
+## Game compatibility
 
-**For general rules and guidelines please see [CONTRIBUTING.md](.github/CONTRIBUTING.md).**
+Many games run well, and some do not run at all yet. The community
+[compatibility list](https://xenia-manager.github.io/compatibility) tracks
+Xenia as a whole; results on the Mac can differ.
 
-Fixes and optimizations are always welcome (please!), but in addition to
-that there are some major work areas still untouched:
+## Reporting problems
 
-* Help work through [missing functionality/bugs in games](https://github.com/xenia-canary/xenia-canary/labels/compat)
-* Reduce the size of Xenia's [huge log files](https://github.com/xenia-canary/xenia-canary/issues/1526)
-* Skilled with Linux? A strong contributor is needed to [help with porting](https://github.com/xenia-canary/xenia-canary/labels/platform-linux)
+See [Troubleshooting](docs/troubleshooting.md) for common problems and what
+to include in a report. Please report problems with macXenos to this project,
+not to the Xenia Canary or Xenia Edge projects.
 
-See more projects [good for contributors](https://github.com/xenia-canary/xenia-canary/labels/good%20first%20issue). It's a good idea to ask on Discord and check the issues page before beginning work on
-something.
+## Building from source
+
+See [Building macXenos](docs/building.md). macXenos builds on macOS only.
+Engineering notes for the Metal renderer are in the
+[developer documentation](docs/dev/README.md).
+
+## Credits
+
+- [Xenia](https://github.com/xenia-project/xenia) and
+  [Xenia Canary](https://github.com/xenia-canary/xenia-canary), which this
+  project is built on
+- [Xenia Edge](https://github.com/has207/xenia-edge), for several fixes
+  and ideas
+- Third-party libraries are listed in the app under System > About >
+  Acknowledgements
+
+## License
+
+macXenos is released under the same BSD license as Xenia. See
+[LICENSE](LICENSE).
 
 ## Disclaimer
 
-The goal of this project is to experiment, research, and educate on the topic
-of emulation of modern devices and operating systems. **It is not for enabling
-illegal activity**. All information is obtained via reverse engineering of
-legally purchased devices and games and information made public on the internet
-(you'd be surprised what's indexed on Google...).
+macXenos is not affiliated with the Xenia projects, Microsoft or Apple.
+
+This project is for research, experimentation and learning about emulation.
+**It is not for enabling illegal activity.** Use your own games. All
+information comes from reverse engineering legally purchased hardware and
+games, and from material that is publicly available.

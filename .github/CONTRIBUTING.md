@@ -1,3 +1,9 @@
+# Contributing to macXenos
+
+macXenos is a macOS port of Xenia Canary. Changes that aren't specific to the
+Mac usually belong upstream in [Xenia Canary](https://github.com/xenia-canary/xenia-canary)
+first; macXenos picks them up from there.
+
 # Content Guidelines
 
 The issue tracker is exclusively for filing and discussing bugs, feature
@@ -26,13 +32,11 @@ could result in the project being terminated, so just don't do it.
 
 ## Style Guide
 
-Please read over [style_guide.md](../docs/style_guide.md) before sending pull requests
-and ensure your code is clean as the buildbot (or I) will make you to fix it :)
-[style_guide.md](../docs/style_guide.md) has information about using `xb format` and
-various IDE auto formatting tools so that you can avoid having to clean things
-up later, so be sure to check it out.
+Please read over [style_guide.md](../docs/dev/xenia/style_guide.md) before
+sending pull requests. Format your changes with `clang-format` (the repository's
+`.clang-format` holds the settings) before you commit.
 
-Basically: run `xb format` before you add a commit and you won't have a problem.
+See [building.md](../docs/building.md) for how to build and run macXenos.
 
 ## Referencing Sources
 
@@ -64,7 +68,7 @@ traceable sources helps solve multiple issues:
   reasons (in case of the latter, it's recommended to provide both options,
   selectable with a configuration variable), or you just want more research to
   be done in the future, please leave a TODO comment in the format provided in
-  [style_guide.md](../docs/style_guide.md).
+  [style_guide.md](../docs/dev/xenia/style_guide.md).
 
 If you have verified your code by checking the correctness of the behavior of a
 game, **do not** refer to it by its title trademark. To avoid unnecessary

@@ -296,7 +296,7 @@ bool MetalRenderTargetCache::Initialize() {
   const bool canonical_full_sync_requested =
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_FULL_SYNC");
   // Stage B (implement-metal-depth-semantics): host-depth ownership.
-  // PROMOTED DEFAULT-ON 2026-08-01 (docs/metal_depth_semantics_probe.md:
+  // PROMOTED DEFAULT-ON 2026-08-01 (docs/dev/metal_depth_semantics_probe.md:
   // corpus + determinism + live gates green; matched-content perf gate shows
   // no regression with two valid samples per mode). Exact rollback:
   // XE_METAL_HOST_DEPTH=0. The predicate additionally fails closed while the

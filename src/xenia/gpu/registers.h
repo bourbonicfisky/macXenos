@@ -939,7 +939,7 @@ union alignas(uint32_t) DC_LUT_PWL_DATA {
     // index is the 7 bits of the front buffer value ABOVE the `increment` bits
     // and the multiplier is the lower `increment` bits of it.
     //
-    // AUDITED 2026-08-05 (docs/metal_pwl_gamma_audit.md). Provenance and limits,
+    // AUDITED 2026-08-05 (docs/dev/metal_pwl_gamma_audit.md). Provenance and limits,
     // because this comment previously stated more than the evidence supports:
     //
     // - The transfer function above is verified in the AMD M56 guide

@@ -8,7 +8,7 @@
  */
 
 // Minimal on-device discriminator for the geometry-emulation `materializeAll`
-// failures (docs/archive/evidence/metal_geometry_pipeline_materialize_failures.md).
+// failures (docs/dev/archive/evidence/metal_geometry_pipeline_materialize_failures.md).
 //
 // Live attribution narrowed the failure to a single field: every one of 43
 // successful geometry pipelines in a Red Dead run decoded to

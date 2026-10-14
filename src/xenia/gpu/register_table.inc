@@ -1088,7 +1088,7 @@ XE_GPU_REGISTER(0x1923, kDword, DC_LUT_SEQ_COLOR)
 // available corpus cannot settle the order either. Note the write-enable mask
 // (DC_LUT_WRITE_EN_MASK) runs blue, green, red while this assumed data order
 // runs red, green, blue; command_processor.cc implements both.
-// See docs/metal_pwl_gamma_audit.md.
+// See docs/dev/metal_pwl_gamma_audit.md.
 // Default: 0x00000000.
 XE_GPU_REGISTER(0x1924, kDword, DC_LUT_PWL_DATA)
 // Read / write, 0:9 - blue, 10:19 - green, 20:29 - red. The LUT index is
@@ -1110,7 +1110,7 @@ XE_GPU_REGISTER(0x1927, kDword, DC_LUT_WRITE_EN_MASK)
 // the 128-entry PWL gamma ramp for a 10bpc framebuffer). This is the only
 // Xenos-specific evidence to weigh against the verified M56 per-channel layout,
 // but "apparently" is deliberate: it suggests rather than proves a shared
-// control. Audited 2026-08-05, docs/metal_pwl_gamma_audit.md.
+// control. Audited 2026-08-05, docs/dev/metal_pwl_gamma_audit.md.
 // The BIT LAYOUT of this register is NOT established: only two values have ever
 // been observed anywhere (0x00000000 and 0x00000003), which is not enough to
 // locate the increment field, its width, or a distinct mode-select bit. A

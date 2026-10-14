@@ -188,7 +188,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // cross-backend resolve-copy compute shaders instead of the Metal-specific
   // pack kernel, resolving EDRAM straight into the shared-memory buffer at
   // guest tiled addresses exactly as D3D12 and Vulkan do
-  // (docs/archive/evidence/metal_shared_resolve_port_assessment.md).
+  // (docs/dev/archive/evidence/metal_shared_resolve_port_assessment.md).
   static bool SharedResolveShadersEnabled();
   static bool MsaaResolveOnStoreEnabled();
 
@@ -226,7 +226,7 @@ class MetalCommandProcessor : public CommandProcessor {
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
   // Guest gamma-state census (XE_GAMMA_CENSUS=1). Retained audit instrument —
-  // see docs/metal_pwl_gamma_audit.md.
+  // see docs/dev/metal_pwl_gamma_audit.md.
   void CensusGammaState();
 
   // Zero-copy lifecycle evidence, emitted from GPU-thread LIFECYCLE sites only

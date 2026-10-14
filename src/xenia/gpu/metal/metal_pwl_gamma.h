@@ -26,7 +26,7 @@
 // Channel order is the guest write order, R, G, B (gamma_ramp_pwl_rgb_[128][3]),
 // exactly the reference shader's `* 3 + 0/1/2`.
 //
-// SELECTION (docs/metal_pwl_gamma_audit.md, reopened 2026-10-10): the PWL
+// SELECTION (docs/dev/metal_pwl_gamma_audit.md, reopened 2026-10-10): the PWL
 // path is used only when DC_LUTA_CONTROL holds 3 (an increment of 2^3 = 8, so
 // a 10-bit input), the only PWL value any title has been observed to write.
 // Any other nonzero value is logged once and presented through the

@@ -2,7 +2,7 @@
 
 > **Legacy architecture background.** This page predates the native Metal
 > backend and is not a pixel-pipeline capability map. Start with
-> [Metal Current State](metal_current_state.md) for current Metal behavior and
+> [Metal Current State](../metal_current_state.md) for current Metal behavior and
 > gaps, then use this page only for general Xenos concepts.
 
 ## The Xenos Chip
@@ -16,7 +16,7 @@ The Xenos runs commands supplied to it directly by the DirectX bare-bones driver
 via a ringbuffer located in system memory.
 
 The bulk of the command processing code is located at
-[src/xenia/gpu/command_processor.cc](../src/xenia/gpu/command_processor.cc)
+[src/xenia/gpu/command_processor.cc](../../../src/xenia/gpu/command_processor.cc)
 
 ### EDRAM
 
@@ -29,7 +29,7 @@ TODO: More documentation
 
 ### General
 
-See the top of [src/xenia/gpu/gpu_flags.cc](../src/xenia/gpu/gpu_flags.cc).
+See the top of [src/xenia/gpu/gpu_flags.cc](../../../src/xenia/gpu/gpu_flags.cc).
 
 `--vsync=false` will attempt to render the game as fast as possible instead of
 waiting for a fixed 60hz timer.
@@ -61,7 +61,7 @@ Playground tool.
 
 #### Shader Playground
 
-Built separately (for now) under [tools/shader-playground/](../tools/shader-playground/)
+Built separately (for now) under [tools/shader-playground/](../../../tools/shader-playground/)
 is a GUI for interactive shader assembly, disassembly, validation, and
 translation.
 
@@ -78,7 +78,7 @@ disassembly is broken. Finally, the right most box will show the
 translated shader in the desired format.
 
 For more information and setup instructions see
-[tools/shader-playground/README.md](../tools/shader-playground/README.md).
+[tools/shader-playground/README.md](../../../tools/shader-playground/README.md).
 
 ### xe-gpu-trace-viewer
 
@@ -114,9 +114,9 @@ you to seek through them in the trace viewer. These files will get large.
 
 ### Command Buffer/Registers
 
-Registers documented at [src/xenia/gpu/register_table.inc](../src/xenia/gpu/register_table.inc).
+Registers documented at [src/xenia/gpu/register_table.inc](../../../src/xenia/gpu/register_table.inc).
 
-PM4 commands documented at [src/xenia/gpu/xenos.h](../src/xenia/gpu/xenos.h#L521).
+PM4 commands documented at [src/xenia/gpu/xenos.h](../../../src/xenia/gpu/xenos.h#L521).
 
 #### Performance Counters that may be read back by D3D
 

@@ -3068,7 +3068,7 @@ bool MetalCommandProcessor::AsyncSubmissionEnabled() {
   // PROMOTED 2026-08-09 (promote-metal-async-submission, GO at gate binary
   // feadfe8f…): unset = ON. The historical ~1/500-swap fault did not occur in
   // 48,640 engaged async swaps (95% UB 1/16,236 swaps — a BOUND, monitored,
-  // not "fixed"; see docs/archive/decisions/metal_async_submission_promotion_gate.md). Exact
+  // not "fixed"; see docs/dev/archive/decisions/metal_async_submission_promotion_gate.md). Exact
   // "0" restores full pre-promotion sync semantics bit-identically; malformed
   // warns once and fails closed to that same pre-promotion default — a
   // promotion never widens what counts as enabled beyond unset/exact-1.
@@ -12831,7 +12831,7 @@ bool MetalCommandProcessor::PwlGammaSelected() {
     return true;
   }
   if (control) {
-    // Never observed (docs/metal_pwl_gamma_audit.md): present through the
+    // Never observed (docs/dev/metal_pwl_gamma_audit.md): present through the
     // 256-entry table rather than guess the field layout.
     static bool s_logged = false;
     if (!s_logged) {
@@ -12912,7 +12912,7 @@ void* MetalCommandProcessor::PwlGammaPipeline(void* device_opaque,
 // RETAINED rather than removed with the rest of the audit scaffolding: the
 // audit stopped because DC_LUTA_CONTROL has only ever been observed holding two
 // values and no title with asymmetric PWL channels has been found
-// (docs/metal_pwl_gamma_audit.md §7). More census coverage over more titles is
+// (docs/dev/metal_pwl_gamma_audit.md §7). More census coverage over more titles is
 // precisely what would settle the bit layout, the valid increment domain, and
 // the RGB write order. Re-run it over any new corpus.
 //

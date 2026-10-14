@@ -8,7 +8,7 @@ their place, then lookup a kernel export and link it to each import. The JIT wil
 generate a sequence of instructions to call into Xenia's export if it encounters a syscall.
 
 Currently, there are two ways an export can be defined -
-[for example](../src/xenia/kernel/xboxkrnl/xboxkrnl_audio.cc):
+[for example](../../../src/xenia/kernel/xboxkrnl/xboxkrnl_audio.cc):
 * `SHIM_CALL XAudioGetSpeakerConfig_shim(PPCContext* ppc_context, KernelState* kernel_state)`
 * `dword_result_t XAudioGetSpeakerConfig(lpdword_t config_ptr)`
 

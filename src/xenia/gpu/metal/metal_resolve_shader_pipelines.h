@@ -26,7 +26,7 @@ namespace metal {
 // destination addresses.
 //
 // WHY THESE AND NOT A METAL-SPECIFIC KERNEL (task 4.1 assessment,
-// docs/archive/evidence/metal_shared_resolve_port_assessment.md): D3D12 and Vulkan already
+// docs/dev/archive/evidence/metal_shared_resolve_port_assessment.md): D3D12 and Vulkan already
 // resolve with these exact shaders, so their semantics -- destination
 // addressing, the sample-select matrix including averaging, the half-pixel
 // offset source clamp -- are validated cross-backend against the same guest

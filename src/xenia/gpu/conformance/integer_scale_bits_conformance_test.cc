@@ -131,7 +131,7 @@ TEST_CASE("Format table classifies fixed-point formats",
   }
 
   SECTION("the num_format=1 formats seen in the corpus that must NOT scale") {
-    // Measured in docs/metal_texture_integer_scale_pregate.md: these four all
+    // Measured in docs/dev/metal_texture_integer_scale_pregate.md: these four all
     // appear with an integer num_format, and all must classify as not fixed so
     // they derive a zero scale.
     CHECK_FALSE(FormatInfo::Get(TextureFormat::k_24_8_FLOAT)->fixed);

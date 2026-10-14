@@ -10,7 +10,7 @@
 // L1 on-device execution probe for the Halo 3 additive light-volume pixel
 // shader (FC3CCF4CD1C76640, trace t00015990 draw 991).
 //
-// Live observation (docs/metal_live_compatibility_matrix.md, Halo 3): on
+// Live observation (docs/dev/metal_live_compatibility_matrix.md, Halo 3): on
 // Metal the draw lights the character's face while Vulkan does not, and
 // forcing the shadow-test boolean b141 OFF renders the identical frame -- the
 // 16-tap point PCF block under `cexec b141` is inert. Every input the render

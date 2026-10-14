@@ -14,12 +14,12 @@ There are 3 phases to translation:
 
 PowerPC instructions are translated to Xenia's intermediate representation
 format in src/xenia/cpu/ppc/ppc_emit_*.cc (e.g. processor control is done in
-[ppc_emit_control.cc](../src/xenia/cpu/ppc/ppc_emit_control.cc)). HIR opcodes
+[ppc_emit_control.cc](../../../src/xenia/cpu/ppc/ppc_emit_control.cc)). HIR opcodes
 are relatively simple opcodes such that any host can define an implementation.
 
 After the HIR is generated, it is ran through a compiler to prep it for generation.
 The compiler is ran in a series of passes, the order of which is defined in
-[ppc_translator.cc](../src/xenia/cpu/ppc/ppc_translator.cc). Some passes are
+[ppc_translator.cc](../../../src/xenia/cpu/ppc/ppc_translator.cc). Some passes are
 essential to the successful generation, while others are merely for optimization
 purposes. Compiler passes are defined in src/xenia/cpu/compiler/passes with
 descriptive class names.
@@ -27,7 +27,7 @@ descriptive class names.
 Finally, the backend consumes the HIR and emits code that runs natively on the
 host. Currently, the only backend that exists is the x64 backend, with all the
 emission done in
-[x64_sequences.cc](../src/xenia/cpu/backend/x64/x64_sequences.cc).
+[x64_sequences.cc](../../../src/xenia/cpu/backend/x64/x64_sequences.cc).
 
 ## ABI
 
@@ -38,12 +38,12 @@ guest code.
 
 ### x64
 
-Transition thunks defined in [x64_backend.cc](../src/xenia/cpu/backend/x64/x64_backend.cc#L389).
-Registers are stored on the stack as defined by [StackLayout::Thunk](../src/xenia/cpu/backend/x64/x64_stack_layout.h#L96)
+Transition thunks defined in [x64_backend.cc](../../../src/xenia/cpu/backend/x64/x64_backend.cc#L389).
+Registers are stored on the stack as defined by [StackLayout::Thunk](../../../src/xenia/cpu/backend/x64/x64_stack_layout.h#L96)
 for later transitioning back to the host.
 
 Some registers are reserved for usage by the JIT to store temporary variables.
-See: [X64Emitter::gpr_reg_map_ and X64Emitter::xmm_reg_map_](../src/xenia/cpu/backend/x64/x64_emitter.cc#L57).
+See: [X64Emitter::gpr_reg_map_ and X64Emitter::xmm_reg_map_](../../../src/xenia/cpu/backend/x64/x64_emitter.cc#L57).
 
 #### Integer Registers
 
