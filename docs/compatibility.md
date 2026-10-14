@@ -6,9 +6,18 @@ measured for a minute. Results below are from the run on October 13, 2026,
 on a base M4 Mac mini at the original resolution (1x), using the Metal
 renderer.
 
-"Reaches" is how far the test goes, not how far the game works. The frame
-rate is what the game ran at; most Xbox 360 games run at 30 or 60 frames per
-second, so 30 or 60 means full speed.
+**"Reaches" is how far the test goes, not how far the game works.**
+
+The frame rate is what the game ran at during the test. Xbox 360 games were
+built to run at a fixed frame rate, almost always 30 or 60 frames per second,
+and the game itself holds to that limit. On the console a game set to 30 never
+goes above 30, however fast the hardware is, and macXenos runs each game at the
+rate it was designed for. So 30 or 60 in the table means the game is running at
+full speed, and a reading a frame or two either side of those numbers is the
+same thing. A faster Mac does not raise the limit; it only helps a game that
+falls below it. Many games also tie their timing to the frame rate, so running
+them faster than intended would speed up the game itself rather than make it
+smoother.
 
 | Game | Reaches | Frame rate | Notes |
 | --- | --- | ---: | --- |
