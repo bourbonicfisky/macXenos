@@ -575,6 +575,39 @@ dword_result_t XamUserAreUsersFriends_entry(
 }
 DECLARE_XAM_EXPORT1(XamUserAreUsersFriends, kUserProfiles, kSketchy);
 
+enum X_USER_AGE_GROUP : uint32_t { CHILD, TEEN, ADULT };
+
+// Every profile reports as an adult. Rise of the Tomb Raider (53510823) calls
+// this with an overlapped after Start and waits on it; unimplemented, the
+// overlapped never completed and the title sat on its autosave notice.
+// (Port of xenia-edge 0427283e0.)
+dword_result_t XamUserGetAgeGroup_entry(
+    dword_t user_index, lpdword_t age_ptr,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!age_ptr) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+
+  auto run = [age_ptr](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+    *age_ptr = X_USER_AGE_GROUP::ADULT;
+    extended_error = X_HRESULT_FROM_WIN32(X_ERROR_SUCCESS);
+    length = 0;
+    return X_ERROR_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    return run(extended_error, length);
+  }
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
+}
+DECLARE_XAM_EXPORT1(XamUserGetAgeGroup, kUserProfiles, kImplemented);
+
 dword_result_t XamUserCreateAchievementEnumerator_entry(
     dword_t title_id, dword_t user_index, qword_t xuid, dword_t flags,
     dword_t offset, dword_t count, lpdword_t buffer_size_ptr,
