@@ -75,8 +75,11 @@ void ContentPackage::LoadPackageLicenseMask(
 }
 
 ContentManager::ContentManager(KernelState* kernel_state,
-                               const std::filesystem::path& root_path)
-    : kernel_state_(kernel_state), root_path_(root_path) {}
+                               const std::filesystem::path& root_path,
+                               const std::filesystem::path& save_root_path)
+    : kernel_state_(kernel_state),
+      root_path_(root_path),
+      save_root_path_(save_root_path) {}
 
 ContentManager::~ContentManager() = default;
 
@@ -93,7 +96,8 @@ std::filesystem::path ContentManager::ResolvePackageRoot(
 
   // Package root path:
   // content_root/title_id/content_type/
-  return root_path_ / xuid_str / title_id_str / content_type_str;
+  return RootPathFor(content_type) / xuid_str / title_id_str /
+         content_type_str;
 }
 
 std::filesystem::path ContentManager::ResolvePackagePath(
@@ -159,8 +163,8 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(
 
   // Header root path:
   // content_root/xuid/title_id/Headers/content_type/
-  return root_path_ / xuid_str / title_id_str / kGameContentHeaderDirName /
-         content_type_str / final_name;
+  return RootPathFor(content_type) / xuid_str / title_id_str /
+         kGameContentHeaderDirName / content_type_str / final_name;
 }
 
 std::unordered_set<uint32_t> ContentManager::FindPublisherTitleIds(

@@ -66,6 +66,8 @@ export const NEXT_LAUNCH = new Set([
   "storage_root",
   "content_root",
   "cache_root",
+  "install_root",
+  "save_root",
   "keyboard_mode",
   "keyboard_user_index",
   "controller_hotkeys",

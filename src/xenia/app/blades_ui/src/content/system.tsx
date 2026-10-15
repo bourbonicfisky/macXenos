@@ -1,5 +1,5 @@
 import type { BladeDef } from "../ui/blade";
-import { send, type NativeState } from "../native";
+import { send, useNative, type NativeState } from "../native";
 import {
   ConsoleCheck,
   ConsoleLockNote,
@@ -20,6 +20,40 @@ const LOG_LEVELS: Option[] = [
   { value: 2, label: "Information", short: "Info" },
   { value: 3, label: "Everything", short: "Debug" }
 ];
+
+/** A folder setting: where it is now, the picker, and back to the default. */
+function FolderSetting({ name, title, fallback, pickerTitle }: {
+  name: "install_root" | "save_root";
+  title: string;
+  fallback: string;
+  pickerTitle: string;
+}) {
+  const cvar = useNative().cvars[name];
+  if (!cvar) return null;
+  const chosen = String(cvar.value);
+  return (
+    <>
+      <p className="pref-group">{t("folder.folder")}</p>
+      <p className="m-0 break-all">{chosen || fallback}</p>
+      <div className="flex flex-wrap gap-[0.5em]">
+        <PaneAction onSelect={() => send({ op: "pickFolder", name, title: pickerTitle })}>
+          {t("folder.choose")}
+        </PaneAction>
+        <PaneAction
+          disabled={!chosen}
+          onSelect={() => {
+            send({ op: "reset", name });
+            showToast(t("toast.preferenceSaved"), t("folder.toastDefault", { name: title }));
+          }}
+        >
+          {t("folder.useDefault")}
+        </PaneAction>
+      </div>
+    </>
+  );
+}
+
+const folderValue = (v: unknown) => (String(v) ? t("folder.custom") : t("folder.default"));
 
 export function system(state: NativeState): BladeDef {
   // The dashboard's own settings first, then the console's.
@@ -149,6 +183,44 @@ export function system(state: NativeState): BladeDef {
             <Check name="mount_scratch" label="Mount the scratch drive" />
             <Check name="mount_memory_unit" label="Mount a memory unit" />
             <NextLaunchNote names={["content_root", "cache_root", "storage_root", "mount_cache", "mount_scratch", "mount_memory_unit"]} />
+          </>
+        )
+      },
+      {
+        id: "saves",
+        label: t("saves.label"),
+        glyph: "people",
+        value: <Value name="save_root" format={folderValue} />,
+        heading: t("saves.label"),
+        detail: (
+          <>
+            <p>{t("saves.detail")}</p>
+            <FolderSetting
+              name="save_root"
+              title={t("saves.label")}
+              fallback={t("saves.default")}
+              pickerTitle={t("saves.pickerTitle")}
+            />
+            <Aside>{t("saves.note")}</Aside>
+          </>
+        )
+      },
+      {
+        id: "installs",
+        label: t("installs.label"),
+        glyph: "disc",
+        value: <Value name="install_root" format={folderValue} />,
+        heading: t("installs.label"),
+        detail: (
+          <>
+            <p>{t("installs.detail")}</p>
+            <FolderSetting
+              name="install_root"
+              title={t("installs.label")}
+              fallback={t("installs.default")}
+              pickerTitle={t("installs.pickerTitle")}
+            />
+            <Aside>{t("installs.note")}</Aside>
           </>
         )
       },

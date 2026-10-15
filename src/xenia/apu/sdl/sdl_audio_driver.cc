@@ -9,6 +9,7 @@
 
 #include "xenia/apu/sdl/sdl_audio_driver.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "xenia/apu/apu_flags.h"
@@ -192,6 +193,16 @@ void SDLAudioDriver::SDLCallback(void* userdata, Uint8* stream, int len) {
             static_cast<int>(driver->volume_ * SDL_MIX_MAXVOLUME));
       } else {
         std::memcpy(stream, buffer, len);
+      }
+    }
+    // The volume setting, on a squared curve so each step sounds about as
+    // big as the last (half the slider is a quarter of the amplitude).
+    const int volume = std::clamp(int(cvars::volume), 0, 100);
+    if (!cvars::mute && volume < 100) {
+      const float gain = float(volume * volume) / (100.0f * 100.0f);
+      float* samples = reinterpret_cast<float*>(stream);
+      for (size_t i = 0, n = size_t(len) / sizeof(float); i < n; ++i) {
+        samples[i] *= gain;
       }
     }
     driver->frames_unused_.push(buffer);

@@ -50,6 +50,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xconfig.h"
+#include "xenia/ui/file_picker.h"
 #include "xenia/ui/presenter.h"
 
 #include "version.h"
@@ -208,7 +209,15 @@ bool KeptByResetAll(const cvar::IConfigVar* var) {
   const std::string& name = var->name();
   return category == "Profiles" || category == "Config" ||
          name == "storage_root" || name == "content_root" ||
-         name == "cache_root";
+         name == "cache_root" || name == "install_root" ||
+         name == "save_root";
+}
+
+// Folder settings a pane may set through the system folder picker.
+bool IsFolderSetting(const std::string& name) {
+  return name == "install_root" || name == "save_root" ||
+         name == "content_root" ||
+         name == "cache_root" || name == "storage_root";
 }
 
 // Settings the presenter reads once and must be handed again after a change.
@@ -1515,6 +1524,42 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
     EmulatorWindow* window = &window_;
     window_.app_context().CallInUIThreadDeferred([window]() {
       window->AddGameFolders();
+#if XE_PLATFORM_MAC
+      if (window->blades_overlay_ && window->blades_model_) {
+        window->blades_overlay_->PushState(
+            window->blades_model_->BuildStateJson());
+      }
+#endif
+    });
+    return Result::kNone;
+  }
+  if (op == "pickFolder") {
+    // A folder setting chosen in the system picker, after this message
+    // returns (the picker runs its own loop). Cancel leaves it as it was.
+    const std::string name = string_member("name");
+    cvar::IConfigVar* var = IsFolderSetting(name) ? FindSetting(name) : nullptr;
+    if (!var) {
+      XELOGW("Blades: no folder setting named {}", name);
+      return Result::kNone;
+    }
+    const std::string title = string_member("title");
+    EmulatorWindow* window = &window_;
+    window_.app_context().CallInUIThreadDeferred([window, var, title]() {
+      auto file_picker = xe::ui::FilePicker::Create();
+      file_picker->set_mode(ui::FilePicker::Mode::kOpen);
+      file_picker->set_type(ui::FilePicker::Type::kDirectory);
+      file_picker->set_multi_selection(false);
+      file_picker->set_title(title.empty() ? std::string("Choose Folder")
+                                           : title);
+      if (file_picker->Show(window->window()) &&
+          !file_picker->selected_files().empty()) {
+        const std::string path =
+            xe::path_to_utf8(file_picker->selected_files().front());
+        if (SetSetting(var, rapidjson::Value(rapidjson::StringRef(
+                                path.c_str(), path.size())))) {
+          config::SaveConfig();
+        }
+      }
 #if XE_PLATFORM_MAC
       if (window->blades_overlay_ && window->blades_model_) {
         window->blades_overlay_->PushState(

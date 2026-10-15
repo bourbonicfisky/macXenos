@@ -208,6 +208,7 @@ export type NativeMessage =
   | { op: "gamerPicturesDelete" }
   | { op: "profilePicture"; xuid: string; picture: string }
   | { op: "gameFolderAdd" }
+  | { op: "pickFolder"; name: CvarName; title: string }
   | { op: "gameFolderRemove"; path: string }
   | { op: "gameFoldersRescan" }
   | { op: "launch"; path: string }

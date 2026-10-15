@@ -459,7 +459,10 @@ void EmulatorWindow::ContentInstallDialog::OnDraw(ImGuiIO& io) {
     ImGui::SameLine();
     if (ImGui::TextLink(
             xe::path_to_utf8(entry.data_installation_path_).c_str())) {
-      LaunchFileExplorer(emulator_window_.emulator_->content_root() /
+      LaunchFileExplorer(emulator_window_.emulator_->kernel_state()
+                             ->xam_state()
+                             ->content_manager()
+                             ->RootPathFor(entry.content_type_) /
                          entry.data_installation_path_);
     }
 

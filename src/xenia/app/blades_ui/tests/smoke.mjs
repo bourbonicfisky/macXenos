@@ -279,6 +279,45 @@ const tests = {
     expect((await page.eval(row)) === "More pictures", "library still installed after delete");
   },
 
+  async "Volume steps with left and right on the controller"(page, base) {
+    await page.open(base, "#audio/volume");
+    await page.key("Enter");
+    const slider = "document.activeElement?.getAttribute('aria-valuenow')";
+    expect((await page.eval(slider)) === "100", `volume starts at ${await page.eval(slider)}`);
+    await page.key("ArrowLeft");
+    await page.key("ArrowLeft");
+    expect((await page.eval(slider)) === "90", `two steps left reads ${await page.eval(slider)}`);
+    await page.key("ArrowRight");
+    expect((await page.eval(slider)) === "95", `a step right reads ${await page.eval(slider)}`);
+    const row = await page.eval("document.querySelector('.blade[data-state=open] .menu-row[data-focused=true]')?.textContent");
+    expect(row === "Volume95%", `row reads ${row}`);
+  },
+
+  async "Game installs chooses a folder and goes back to the default"(page, base) {
+    await page.open(base, "#system/installs");
+    const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
+    const button = (label) =>
+      `[...${pane}.querySelectorAll('button')].find((b) => b.textContent === '${label}')`;
+    expect((await page.eval(`${pane}.textContent`)).includes("Default (the storage folder)"), "no default shown");
+    await page.eval(`${button("Choose folder…")}.click()`);
+    await page.eval("new Promise((r) => setTimeout(r, 100))");
+    expect((await page.eval(`${pane}.textContent`)).includes("/Volumes/Games/Chosen"), "chosen folder not shown");
+    await page.eval(`${button("Use the default")}.click()`);
+    await page.eval("new Promise((r) => setTimeout(r, 100))");
+    expect((await page.eval(`${pane}.textContent`)).includes("Default (the storage folder)"), "default not restored");
+  },
+
+  async "Game saves chooses a folder"(page, base) {
+    await page.open(base, "#system/saves");
+    const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
+    expect((await page.eval(`${pane}.textContent`)).includes("Default (with the rest of your content)"), "no default shown");
+    await page.eval(`[...${pane}.querySelectorAll('button')].find((b) => b.textContent === 'Choose folder…').click()`);
+    await page.eval("new Promise((r) => setTimeout(r, 100))");
+    expect((await page.eval(`${pane}.textContent`)).includes("/Volumes/Games/Chosen"), "chosen folder not shown");
+    const row = await page.eval("document.querySelector('.blade[data-state=open] .menu-row[data-focused=true]')?.textContent");
+    expect(row === "Game savesCustom", `row reads ${row}`);
+  },
+
   async "Dashboard sounds puts the download first when missing"(page, base) {
     await page.open(base, "#system/sound");
     const order = await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) button')].map((b) => b.textContent)`);

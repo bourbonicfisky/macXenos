@@ -2,6 +2,7 @@ import type { BladeDef } from "../ui/blade";
 import { send, useNative, type NativeState } from "../native";
 import { NextLaunchNote, Options, Slider, Toggle, Value, type Option } from "../ui/settings-controls";
 import { Aside } from "./parts";
+import { t } from "../i18n";
 
 // "any" plays through SDL on a Mac, so it reads as the Mac's output.
 const OUTPUTS: Option[] = [
@@ -77,6 +78,26 @@ export function audio(state: NativeState): BladeDef {
     title: "Audio",
     tone: "blue",
     menu: [
+      {
+        id: "volume",
+        label: t("volume.label"),
+        glyph: "sound",
+        value: <Value name="volume" format={(v) => t("volume.value", { percent: Number(v) })} />,
+        heading: t("volume.label"),
+        detail: (
+          <>
+            <p>{t("volume.detail")}</p>
+            <Slider
+              name="volume"
+              title={t("volume.label")}
+              min={0}
+              max={100}
+              step={5}
+              format={(v) => t("volume.value", { percent: Math.round(v) })}
+            />
+          </>
+        )
+      },
       {
         id: "sound",
         label: "Game sound",

@@ -51,7 +51,9 @@ export function keptByResetAll(cvar: Cvar) {
     cvar.category === "Config" ||
     cvar.name === "storage_root" ||
     cvar.name === "content_root" ||
-    cvar.name === "cache_root"
+    cvar.name === "cache_root" ||
+    cvar.name === "install_root" ||
+    cvar.name === "save_root"
   );
 }
 

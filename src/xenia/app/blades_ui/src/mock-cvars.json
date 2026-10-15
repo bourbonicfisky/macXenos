@@ -1835,6 +1835,15 @@
 "description": "Root path for files used to speed up certain parts of the emulator or the game. These files may be persistent, but they can be deleted without major side effects such as progress loss. If empty, the cache folder under the storage root, or, if available, the cache directory preferred for the OS, will be used.",
 "changed": false
 },
+"install_root": {
+"name": "install_root",
+"category": "Storage",
+"type": "path",
+"value": "",
+"defaultValue": "",
+"description": "Root path for games' hard drive installs (the console's cache drives, cache0, cache1 and cache), or empty to use the storage root. Relative paths are under the storage root.",
+"changed": false
+},
 "mount_scratch": {
 "name": "mount_scratch",
 "category": "Storage",
@@ -2391,6 +2400,15 @@
 "value": false,
 "defaultValue": false,
 "description": "Mutes all audio output.",
+"changed": false
+},
+"volume": {
+"name": "volume",
+"category": "APU",
+"type": "int",
+"value": 100,
+"defaultValue": 100,
+"description": "Game sound volume, in percent (0 to 100). Applied on top of the game's own volume, without touching the host's.",
 "changed": false
 },
 "enable_xmp": {
@@ -2958,6 +2976,15 @@
 "value": false,
 "defaultValue": false,
 "description": "Enables usage of stereoscopic mode in titles.",
+"changed": false
+},
+"save_root": {
+"name": "save_root",
+"category": "Storage",
+"type": "path",
+"value": "",
+"defaultValue": "",
+"description": "Root path for saved games, or empty to keep them with the rest of the content (content_root). Relative paths are under the storage root.",
 "changed": false
 },
 "storage_selection_dialog": {

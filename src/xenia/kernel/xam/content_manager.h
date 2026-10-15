@@ -222,8 +222,12 @@ class ContentPackage {
 
 class ContentManager {
  public:
+  // Saved games (XContentType::kSavedGame) live under save_root_path; every
+  // other type under root_path. They are the same folder unless save_root
+  // is set.
   ContentManager(KernelState* kernel_state,
-                 const std::filesystem::path& root_path);
+                 const std::filesystem::path& root_path,
+                 const std::filesystem::path& save_root_path);
   ~ContentManager();
 
   std::vector<XCONTENT_AGGREGATE_DATA> ListContent(
@@ -264,6 +268,12 @@ class ContentManager {
   bool IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const;
   void CloseOpenedFilesFromContent(const ContentPackage& package);
 
+  // The folder a content type's packages and headers live under.
+  const std::filesystem::path& RootPathFor(XContentType content_type) const {
+    return content_type == XContentType::kSavedGame ? save_root_path_
+                                                     : root_path_;
+  }
+
   uint64_t GetContentTotalSpace() const;
   uint64_t GetContentFreeSpace() const;
 
@@ -286,6 +296,7 @@ class ContentManager {
 
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
+  std::filesystem::path save_root_path_;
 
   // TODO(benvanik): remove use of global lock, it's bad here!
   xe::global_critical_region global_critical_region_;

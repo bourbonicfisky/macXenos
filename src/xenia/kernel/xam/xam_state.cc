@@ -8,7 +8,15 @@
  */
 
 #include "xenia/kernel/xam/xam_state.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/emulator.h"
+
+DEFINE_path(save_root, "",
+            "Root path for saved games, or empty to keep them with the rest "
+            "of the content (content_root). Relative paths are under the "
+            "storage root.",
+            "Storage");
 
 namespace xe {
 namespace kernel {
@@ -22,8 +30,28 @@ XamState::XamState(Emulator* emulator, KernelState* kernel_state)
   if (!content_root.empty()) {
     content_root = std::filesystem::absolute(content_root);
   }
+  // Saved games: their own folder when save_root is set. One that can't be
+  // reached (a drive that isn't attached) falls back to the content root
+  // rather than leave games unable to save.
+  std::filesystem::path save_root = cvars::save_root;
+  if (save_root.empty()) {
+    save_root = content_root;
+  } else {
+    if (!save_root.is_absolute()) {
+      save_root = emulator->storage_root() / save_root;
+    }
+    save_root = std::filesystem::absolute(save_root);
+    std::error_code ec;
+    std::filesystem::create_directories(save_root, ec);
+    if (ec) {
+      XELOGW("Save root {} is unavailable ({}); saving to {}", save_root,
+             ec.message(), content_root);
+      save_root = content_root;
+    }
+  }
+  XELOGI("Save root: {}", save_root);
   content_manager_ =
-      std::make_unique<ContentManager>(kernel_state, content_root);
+      std::make_unique<ContentManager>(kernel_state, content_root, save_root);
 
   user_tracker_ = std::make_unique<UserTracker>();
   profile_manager_ =

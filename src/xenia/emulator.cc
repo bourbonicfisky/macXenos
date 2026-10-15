@@ -909,14 +909,19 @@ X_STATUS Emulator::InstallContentPackage(
     return X_STATUS_INVALID_PARAMETER;
   }
 
+  // Saved games go to the save root, which may be its own folder.
+  const std::filesystem::path& root =
+      kernel_state_->xam_state()->content_manager()->RootPathFor(
+          installation_info.content_type_);
+
   const std::filesystem::path installation_path =
-      content_root() / installation_info.data_installation_path_;
+      root / installation_info.data_installation_path_;
 
   const std::filesystem::path header_path =
-      content_root() / installation_info.header_installation_path_;
+      root / installation_info.header_installation_path_;
 
-  if (!std::filesystem::exists(content_root())) {
-    const std::error_code ec = xe::filesystem::CreateFolder(content_root());
+  if (!std::filesystem::exists(root)) {
+    const std::error_code ec = xe::filesystem::CreateFolder(root);
     if (ec) {
       installation_info.installation_state_ = InstallState::failed;
       installation_info.installation_error_message_ = ec.message();
@@ -925,7 +930,7 @@ X_STATUS Emulator::InstallContentPackage(
     }
   }
 
-  const auto disk_space = std::filesystem::space(content_root());
+  const auto disk_space = std::filesystem::space(root);
   if (disk_space.available < installation_info.content_size_ * 1.1f) {
     installation_info.installation_state_ = InstallState::failed;
     installation_info.installation_error_message_ = "Insufficient disk space!";

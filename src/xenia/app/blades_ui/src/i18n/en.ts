@@ -291,7 +291,30 @@ export const en = {
   "gameFolders.summary": "{games, plural, one {# game} other {# games}} in All Games from {folders, plural, one {# folder} other {# folders}}.",
   "gameFolders.noFolders": "No folders yet. Games you have played still appear in All Games.",
   "gameFolders.removed": "Game folder removed",
-  "gameFolders.removeLabel": "{folder}, remove"
+  "gameFolders.removeLabel": "{folder}, remove",
+
+  // --- Audio > Volume ------------------------------------------------------
+  "volume.label": "Volume",
+  "volume.detail": "How loud games play, without touching your Mac’s volume. Left and right on the controller move it a step.",
+  "volume.value": "{percent}%",
+
+  // --- System > Game saves and Game installs --------------------------------
+  "folder.folder": "Folder",
+  "folder.custom": "Custom",
+  "folder.default": "Default",
+  "folder.choose": "Choose folder…",
+  "folder.useDefault": "Use the default",
+  "folder.toastDefault": "{name}: Default (next launch)",
+  "saves.label": "Game saves",
+  "saves.detail": "Where game saves are kept. Choose a synced or backed-up folder to keep them safe; profiles, downloads and updates stay in the content folder.",
+  "saves.default": "Default (with the rest of your content)",
+  "saves.pickerTitle": "Choose Game Save Folder",
+  "saves.note": "Applies the next time macXenos starts. Saves already made stay where they are: move the folders named after each profile across yourself to keep playing them.",
+  "installs.label": "Game installs",
+  "installs.detail": "Where games keep what they install to the console’s hard drive. Choose a roomier drive if your Mac’s is short on space.",
+  "installs.default": "Default (the storage folder)",
+  "installs.pickerTitle": "Choose Game Install Folder",
+  "installs.note": "Applies the next time macXenos starts. Installs already made stay in the old folder: a game installs again, or you can move its cache0, cache1 and cache folders across yourself."
 } as const;
 
 export type MessageKey = keyof typeof en;

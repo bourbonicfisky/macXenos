@@ -122,6 +122,13 @@ DEFINE_path(
     "for the OS, will be used.",
     "Storage");
 
+DEFINE_path(
+    install_root, "",
+    "Root path for games' hard drive installs (the console's cache drives, "
+    "cache0, cache1 and cache), or empty to use the storage root. Relative "
+    "paths are under the storage root.",
+    "Storage");
+
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 
 // mount_cache is defined in emulator.cc so the launch path can honor a
@@ -718,8 +725,27 @@ void EmulatorApp::EmulatorThread() {
   }
 
   if (cvars::mount_cache) {
+    std::filesystem::path install_root = cvars::install_root;
+    if (install_root.empty()) {
+      install_root = emulator_->storage_root();
+    } else if (!install_root.is_absolute()) {
+      install_root = emulator_->storage_root() / install_root;
+    }
+    install_root = std::filesystem::absolute(install_root);
+    // A folder on a drive that isn't attached: install to the default rather
+    // than fail to mount the cache drives.
+    std::error_code install_root_error;
+    std::filesystem::create_directories(install_root, install_root_error);
+    if (install_root_error) {
+      XELOGW("Game install root {} is unavailable ({}); using {}",
+             install_root, install_root_error.message(),
+             emulator_->storage_root());
+      install_root = emulator_->storage_root();
+    }
+    XELOGI("Game install root: {}", install_root);
+
     auto cache0_device = std::make_unique<xe::vfs::HostPathDevice>(
-        "\\CACHE0", emulator_->storage_root() / "cache0", false);
+        "\\CACHE0", install_root / "cache0", false);
     if (!cache0_device->Initialize()) {
       XELOGE("Unable to scan cache0 path");
     } else {
@@ -731,7 +757,7 @@ void EmulatorApp::EmulatorThread() {
     }
 
     auto cache1_device = std::make_unique<xe::vfs::HostPathDevice>(
-        "\\CACHE1", emulator_->storage_root() / "cache1", false);
+        "\\CACHE1", install_root / "cache1", false);
     if (!cache1_device->Initialize()) {
       XELOGE("Unable to scan cache1 path");
     } else {
@@ -747,7 +773,7 @@ void EmulatorApp::EmulatorThread() {
     // substring/start_with logic inside VirtualFileSystem::ResolvePath, else
     // accesses to those devices will go here instead
     auto cache_device = std::make_unique<xe::vfs::HostPathDevice>(
-        "\\CACHE", emulator_->storage_root() / "cache", false);
+        "\\CACHE", install_root / "cache", false);
     if (!cache_device->Initialize()) {
       XELOGE("Unable to scan cache path");
     } else {

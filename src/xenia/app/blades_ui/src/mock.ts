@@ -168,6 +168,11 @@ export function mockApply(state: NativeState, message: NativeMessage): NativeSta
       return { ...state, gamerPictures: { ...state.gamerPictures, status: "downloading", received: 41_000_000 } };
     case "gameFolderAdd":
       return { ...state, gameFolders: { ...state.gameFolders, folders: [...state.gameFolders.folders, "/Volumes/Games"] } };
+    case "pickFolder": {
+      const cvar = state.cvars[message.name];
+      if (!cvar) return state;
+      return { ...state, cvars: { ...state.cvars, [message.name]: { ...cvar, value: "/Volumes/Games/Chosen", changed: true } } };
+    }
     case "gameFolderRemove":
       return {
         ...state,
