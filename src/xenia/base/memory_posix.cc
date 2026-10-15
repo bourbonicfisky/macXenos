@@ -142,29 +142,6 @@ struct MappedFileRange {
 std::vector<MappedFileRange> mapped_file_ranges;
 std::mutex g_mapped_file_ranges_mutex;
 
-// Track shm file names for cleanup on exit
-std::vector<std::string> g_shm_file_names;
-std::mutex g_shm_file_names_mutex;
-static bool g_cleanup_handlers_installed = false;
-
-#if !XE_PLATFORM_ANDROID
-static void CleanupAtExit() {
-  for (const auto& name : g_shm_file_names) {
-    shm_unlink(name.c_str());
-  }
-}
-
-static void InstallCleanupHandlers() {
-  if (g_cleanup_handlers_installed) {
-    return;
-  }
-  g_cleanup_handlers_installed = true;
-
-  std::atexit(CleanupAtExit);
-  std::at_quick_exit(CleanupAtExit);
-}
-#endif  // !XE_PLATFORM_ANDROID
-
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
   // mmap does not support reserve / commit, so ignore allocation_type.
@@ -418,37 +395,24 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   if (ret < 0) {
     return kFileMappingHandleInvalid;
   }
+  // Unlink the name at once: the descriptor and the views keep the object
+  // alive, and the kernel frees it when the last of them goes, however the
+  // process ends. A name left linked until exit outlived every SIGKILL and
+  // crash, holding the guest memory the run had touched (hundreds of MB to
+  // GB, compressed or swapped) until the next reboot.
+  shm_unlink(shm_name.c_str());
   if (ftruncate(ret, length) < 0) {
     close(ret);
-    shm_unlink(shm_name.c_str());
     return kFileMappingHandleInvalid;
   }
-  // Track for cleanup on abnormal exit and install cleanup handlers
-  {
-    std::lock_guard guard(g_shm_file_names_mutex);
-    g_shm_file_names.push_back(shm_name);
-  }
-  InstallCleanupHandlers();
   return ret;
 #endif
 }
 
 void CloseFileMappingHandle(FileMappingHandle handle,
                             const std::filesystem::path& path) {
+  // The name was unlinked when the mapping was created.
   close(handle);
-#if !XE_PLATFORM_ANDROID
-  std::string shm_name = ShmName(path);
-  shm_unlink(shm_name.c_str());
-  // Remove from tracking
-  {
-    std::lock_guard guard(g_shm_file_names_mutex);
-    auto it = std::find(g_shm_file_names.begin(), g_shm_file_names.end(),
-                        shm_name);
-    if (it != g_shm_file_names.end()) {
-      g_shm_file_names.erase(it);
-    }
-  }
-#endif
 }
 
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
