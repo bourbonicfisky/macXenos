@@ -98,6 +98,15 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   // code) fails with "label is too far"; emit it again with far branches.
   EmitFunctionInfo func_info = {};
   far_branches_ = false;
+  // Emit() turns each local into its stack offset with set_constant, which
+  // also retypes it to INT32; a retry must size the locals by their real
+  // types again, or 8- and 16-byte locals are packed 4 bytes apart (Fable II
+  // 82242ED0 then failed in store_local with "illegal register index").
+  std::vector<hir::TypeName> local_types;
+  local_types.reserve(builder->locals().size());
+  for (const hir::Value* slot : builder->locals()) {
+    local_types.push_back(slot->type);
+  }
   while (true) {
     stack_size_ = StackLayout::GUEST_STACK_SIZE;
     source_map_arena_.Reset();
@@ -110,6 +119,10 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
       break;
     } catch (const Xbyak_aarch64::Error& e) {
       if (far_branches_ || int(e) != Xbyak_aarch64::ERR_LABEL_IS_TOO_FAR) {
+        // The rethrow ends the process; say which function before it does.
+        XELOGE("A64: {} emitting function {:08X} (far branches {})", e.what(),
+               function->address(), far_branches_);
+        xe::FlushLog();
         throw;
       }
       XELOGI("A64: function {:08X} exceeds the conditional branch range ({} "
@@ -118,6 +131,9 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
       ResetCodegenState();
       far_branches_ = true;
       func_info = {};
+      for (size_t n = 0; n < local_types.size(); ++n) {
+        builder->locals()[n]->type = local_types[n];
+      }
     }
   }
 
