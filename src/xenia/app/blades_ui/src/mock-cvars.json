@@ -1385,15 +1385,6 @@
 "description": "Experimental: route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 13% more GPU submissions per frame on Viva Pinata. auto: only for titles that set metal_memexport_raster (their built-in config). on: every title. off: none. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
 "changed": false
 },
-"metal_memexport_raster": {
-"name": "metal_memexport_raster",
-"category": "GPU",
-"type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "Per-title hint for metal_memexport_raster_mode = auto, set by the built-in config of titles that need rasterizing memory exports (Child of Eden).",
-"changed": false
-},
 "metal_msaa_clear_fold": {
 "name": "metal_msaa_clear_fold",
 "category": "GPU",
@@ -1412,13 +1403,13 @@
 "description": "What a pixel shader reads from an interpolator its vertex shader never wrote, for draws whose vertex shader writes none (a position-only quad drawn with a leftover pixel shader). The Xbox 360 leaves the value undefined. off: zero, as the reference renderer does. on: 0.5, which fixes Resident Evil 5's flickering shadows but changes Halo 3's lighting. auto: 0.5 only for titles whose built-in config sets metal_unwritten_interpolators_title.",
 "changed": false
 },
-"metal_unwritten_interpolators_title": {
-"name": "metal_unwritten_interpolators_title",
+"metal_completion_wait": {
+"name": "metal_completion_wait",
 "category": "GPU",
-"type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "Per-title hint for metal_unwritten_interpolators = auto, set by the built-in config of titles that need the 0.5 fill (Resident Evil 5).",
+"type": "string",
+"value": "auto",
+"defaultValue": "auto",
+"description": "Wait for the GPU to finish pending resolves before the guest sees a completion signal (interrupt or end-of-pipe event), instead of only submitting them. Fixes Mass Effect's one-frame colour wrap on the Earth shot, but stops the CPU and GPU from overlapping, which cost most titles a third of their frame rate (Red Dead Redemption 27 -> 12 fps on an M1 Max). auto: only for titles whose built-in config sets metal_completion_wait_title. on: every title. off: none. XE_METAL_EXPOSURE_WAIT=0/1 overrides.",
 "changed": false
 },
 "metal_texture_integer_scale": {

@@ -13,3 +13,12 @@
 # oldcode-cfgstrict-m1)
 [GPU]
 occlusion_query = "strict"
+# The Earth shot also wrapped its colours into contour bands for single
+# frames: the guest reads resolve output as soon as the GPU signals
+# completion, and the command processor had only submitted that work, then
+# encoded more resolves to the same pages. Waiting for the GPU at each
+# completion signal stops it (10-14 frames per run -> 0, still 30 fps), but
+# the wait costs most other titles a third of their frame rate, so only Mass
+# Effect turns it on. (xenia-mac-evidence masseffect-visual-20261014;
+# perf-attrib-m1max-20261015)
+metal_completion_wait_title = true

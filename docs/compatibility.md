@@ -39,7 +39,7 @@ smoother.
 | Halo: Reach | Campaign, Winter Contingency | 29 | |
 | Just Cause 2 | Open world | 30 | |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 | |
-| Mass Effect | First conversation | 30 | Occasional one-frame colour glitches, and characters can vanish for a frame |
+| Mass Effect | First conversation | 30 | Its built-in settings fix the one-frame colour glitches and characters vanishing for a frame (October 14) |
 | Portal 2 | Relaxation Vault | 30 | |
 | Red Dead Redemption | Opening cutscene | 29 | Disc 1 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 14 | Playable, but well below full speed |

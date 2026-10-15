@@ -144,7 +144,7 @@ DEFINE_string(
     "(their built-in config). on: every title. off: none. "
     "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
     "GPU");
-DEFINE_bool(
+DEFINE_transient_bool(
     metal_memexport_raster, false,
     "Per-title hint for metal_memexport_raster_mode = auto, set by the "
     "built-in config of titles that need rasterizing memory exports (Child "
@@ -171,10 +171,27 @@ DEFINE_string(
     "lighting. auto: 0.5 only for titles whose built-in config sets "
     "metal_unwritten_interpolators_title.",
     "GPU");
-DEFINE_bool(
+DEFINE_transient_bool(
     metal_unwritten_interpolators_title, false,
     "Per-title hint for metal_unwritten_interpolators = auto, set by the "
     "built-in config of titles that need the 0.5 fill (Resident Evil 5).",
+    "GPU");
+
+DEFINE_string(
+    metal_completion_wait, "auto",
+    "Wait for the GPU to finish pending resolves before the guest sees a "
+    "completion signal (interrupt or end-of-pipe event), instead of only "
+    "submitting them. Fixes Mass Effect's one-frame colour wrap on the Earth "
+    "shot, but stops the CPU and GPU from overlapping, which cost most titles "
+    "a third of their frame rate (Red Dead Redemption 27 -> 12 fps on an M1 "
+    "Max). auto: only for titles whose built-in config sets "
+    "metal_completion_wait_title. on: every title. off: none. "
+    "XE_METAL_EXPOSURE_WAIT=0/1 overrides.",
+    "GPU");
+DEFINE_transient_bool(
+    metal_completion_wait_title, false,
+    "Per-title hint for metal_completion_wait = auto, set by the built-in "
+    "config of titles that need it (Mass Effect).",
     "GPU");
 
 DEFINE_bool(
@@ -252,6 +269,30 @@ bool UnwrittenInterpolatorFillEnabled() {
     s_logged = int(enabled);
     XELOGI("Metal unwritten interpolators: mode={} title={} -> fill {}", mode,
            cvars::metal_unwritten_interpolators_title, enabled ? "0.5" : "0");
+  }
+  return enabled;
+}
+}  // namespace
+
+namespace {
+// metal_completion_wait: on / off, or auto = the title's hint; the
+// XE_METAL_EXPOSURE_WAIT env (0/1) overrides. Anything else reads as auto.
+bool CompletionWaitEnabled() {
+  static const int s_env = [] {
+    const char* v = std::getenv("XE_METAL_EXPOSURE_WAIT");
+    return v && (v[0] == '0' || v[0] == '1') && !v[1] ? v[0] - '0' : -1;
+  }();
+  const std::string& mode = cvars::metal_completion_wait;
+  const bool enabled = s_env >= 0       ? s_env == 1
+                       : mode == "on"  ? true
+                       : mode == "off" ? false
+                                       : cvars::metal_completion_wait_title;
+  static int s_logged = -1;
+  if (s_logged != int(enabled)) {
+    s_logged = int(enabled);
+    XELOGI("Metal completion wait: mode={} title={} env={} -> {}", mode,
+           cvars::metal_completion_wait_title, s_env,
+           enabled ? "wait" : "commit only");
   }
   return enabled;
 }
@@ -15762,12 +15803,11 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   // Effect's Earth shot then wrapped its colours for a frame: 10-14 frames
   // per run -> 0 and stale reads 2.6k -> 0, still at 30 fps (2026-10-14).
   // Waiting at MEM_WRITE / COND_WRITE fences or at swap did not help.
-  // XE_METAL_EXPOSURE_WAIT=0 restores the commit without the wait.
-  static const bool s_exposure_wait = [] {
-    const char* v = std::getenv("XE_METAL_EXPOSURE_WAIT");
-    return !(v && v[0] == '0' && !v[1]);
-  }();
-  CommitOpenFaultableWork(s_exposure_wait);
+  // The wait is per title (metal_completion_wait): the CPU then idles while
+  // the GPU finishes, every frame, and the GPU idles while the CPU encodes.
+  // Library-wide it cut Red Dead Redemption 26.8 -> 11.8 fps, Skate 2 30 ->
+  // 18.3 and LEGO Star Wars II 60 -> 24.8 on the M1 Max (2026-10-15).
+  CommitOpenFaultableWork(CompletionWaitEnabled());
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);

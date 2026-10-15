@@ -112,6 +112,12 @@ void ReadConfig(const std::filesystem::path& file_path,
   defaults_date_cvar->SetConfigValue(0);
   for (auto& it : *cvar::ConfigVars) {
     auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+    // Transient values are never saved, so one in a config file is stale:
+    // per-title hints written there before game configs were loaded into
+    // their own layer (2026-10-15) would otherwise apply to every title.
+    if (config_var->is_transient()) {
+      continue;
+    }
     toml::path config_key =
         toml::path(config_var->category() + "." + config_var->name());
 
@@ -160,7 +166,12 @@ void ReadGameConfig(const std::filesystem::path& file_path) {
 
     const auto config_key_node = config.at_path(config_key);
     if (config_key_node) {
-      config_var->LoadConfigValue(config_key_node.node());
+      // The game layer, not the config value: SaveConfig writes config
+      // values, so a per-title setting loaded as one was saved into the
+      // user's config and applied to every title launched after it (Mass
+      // Effect's strict occlusion and completion wait, Resident Evil 5's
+      // interpolator fill).
+      config_var->LoadGameConfigValue(config_key_node.node());
     }
   }
   XELOGI("Loaded game config: {}", file_path);
