@@ -400,6 +400,21 @@ hdiutil create -volname "${APP_NAME}" -srcfolder "${STAGE}" \
   -ov -format UDZO "${DMG_PATH}" >/dev/null
 rm -rf "${STAGE}"
 
+# The DMG is what people download, so Gatekeeper checks it first: sign it, and
+# with --notarize submit and staple it too (the app inside is already stapled).
+if [[ "${ADHOC}" -eq 0 ]]; then
+  log "Signing DMG"
+  codesign --force --timestamp -s "${IDENTITY}" "${DMG_PATH}"
+fi
+if [[ "${DO_NOTARIZE}" -eq 1 ]]; then
+  log "Notarizing DMG"
+  xcrun notarytool submit "${DMG_PATH}" \
+    --apple-id "${APPLE_ID}" --password "${APPLE_PASSWORD}" \
+    --team-id "${APPLE_TEAM_ID}" --wait
+  xcrun stapler staple "${DMG_PATH}"
+  spctl -a -t open --context context:primary-signature -v "${DMG_PATH}"
+fi
+
 log "Done:"
 echo "  app: ${APP_DIR}"
 echo "  dmg: ${DMG_PATH}"
