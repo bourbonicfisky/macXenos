@@ -1,0 +1,15 @@
+# macXenos built-in per-title config: Mass Effect (4D5307E8).
+# Unreal Engine 3 culls an object for a frame when its occlusion query reads
+# zero samples. In fast mode the query result is a guess that is corrected
+# frames later, and with Metal's submission depth the guest has often read or
+# reissued the record by then, so a BEGIN/END pair can come from two different
+# guesses: Shepard, Joker and Earth vanish for single frames. Strict waits for
+# the real count and still holds the 30 fps cap. Opening Earth shot on the M1
+# Max (2026-10-14): fast dropped Earth for single frames twice, strict none,
+# both 29-30 fps. (Canary's running-counter ZPD rewrite, 3d233a5b2, is not a
+# substitute here yet: its fast mode flickers more on Metal and the port
+# stops Rage at the pod wake-up.)
+# (xenia-mac-evidence masseffect-visual-20261014: oldcode-fast-m1,
+# oldcode-cfgstrict-m1)
+[GPU]
+occlusion_query = "strict"
