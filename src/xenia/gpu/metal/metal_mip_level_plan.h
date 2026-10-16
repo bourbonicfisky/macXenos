@@ -116,6 +116,10 @@ struct MipLevelPlanInputs {
   uint32_t height = 0;
   uint32_t mip_max_level = 0;  // from the KEY
   uint32_t array_size = 1;     // stacked 2D: slices, each at the level's stride
+  // Guest block geometry for the envelope scan (see BuildMipLevelPlan): bytes
+  // per guest block and the block's edge in texels (4 for DXT/CTX1, else 1).
+  uint32_t bytes_per_block = 4;
+  uint32_t block_dim = 1;
   uint32_t guest_buffer_size = 0;
   bool load_base = false;
   bool load_mips = false;
@@ -147,6 +151,25 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
   }
   uint32_t packed = layout.packed_level;
 
+  // The envelope scan walks 4-byte groups of a 32bpp tiled layout. Other
+  // block sizes are expressed in that unit: a guest block of bytes_per_block
+  // bytes is bytes_per_block / 4 groups wide (or one group covers 4 /
+  // bytes_per_block texels), and block-compressed formats have block_dim x
+  // block_dim texels per block. Before 2026-10-16 the texel width and height
+  // were passed as groups, which put a 3968x4080 DXT5 level's envelope 64 MB
+  // past its base (past the end of guest memory: "plan-failed", Rage) and
+  // made every 8/16bpp consumed range 2-4x too wide.
+  const uint32_t bpb = std::max(in.bytes_per_block, 1u);
+  const uint32_t block_dim = std::max(in.block_dim, 1u);
+  auto to_scan_w = [&](uint32_t texels) -> uint32_t {
+    uint32_t blocks = (texels + block_dim - 1u) / block_dim;
+    return bpb >= 4u ? blocks * (bpb / 4u)
+                     : std::max((blocks * bpb + 3u) / 4u, 1u);
+  };
+  auto to_scan_h = [&](uint32_t texels) -> uint32_t {
+    return std::max((texels + block_dim - 1u) / block_dim, 1u);
+  };
+
   auto plan_one = [&](uint32_t level, uint32_t slice, uint64_t guest_offset,
                       uint32_t pitch_bytes, bool is_packed) -> bool {
     MipLevelPlan p;
@@ -172,10 +195,15 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
       return false;
     }
     p.guest_offset = uint32_t(guest_offset);
+    const uint32_t scan_px = to_scan_w(p.px);
+    const uint32_t scan_py = to_scan_h(p.py);
+    const uint32_t scan_w = to_scan_w(p.width);
+    const uint32_t scan_h = to_scan_h(p.height);
     TextureLoadSourceRange r =
-        memo ? memo->Get(p.px, p.py, p.width, p.height, p.pitch_blocks)
-             : ComputeStrictRgba8SourceRangeAtOrigin(0, p.px, p.py, p.width,
-                                                     p.height, p.pitch_blocks,
+        memo ? memo->Get(scan_px, scan_py, scan_w, scan_h, p.pitch_blocks)
+             : ComputeStrictRgba8SourceRangeAtOrigin(0, scan_px, scan_py,
+                                                     scan_w, scan_h,
+                                                     p.pitch_blocks,
                                                      UINT32_MAX);
     if (!r.valid) {
       return false;

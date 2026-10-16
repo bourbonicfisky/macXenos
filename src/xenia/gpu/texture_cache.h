@@ -623,8 +623,18 @@ class TextureCache {
   // implementation to update the internal dependencies of the binding.
   virtual void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) {}
 
+  // Destroys up to max_count least recently used textures whose last GPU use
+  // has completed, regardless of the host memory limits: for an
+  // implementation with a budget of its own (descriptor slots, for instance)
+  // that the memory limits know nothing about. Returns the number destroyed.
+  uint32_t DestroyLeastRecentlyUsedTextures(uint64_t completed_submission_index,
+                                            uint32_t max_count);
+
  private:
   void UpdateTexturesTotalHostMemoryUsage(uint64_t add, uint64_t subtract);
+  // Removes the texture from the map and destroys it; `texture` is invalid
+  // afterwards. The caller resets the bindings.
+  void DestroyTexture(Texture* texture);
 
   // Shared memory callback for texture data invalidation.
   static void WatchCallback(const global_unique_lock_type& global_lock,

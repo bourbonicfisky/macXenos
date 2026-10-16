@@ -249,17 +249,42 @@ void TextureCache::CompletedSubmissionUpdated(
       // any texture has been destroyed.
       ResetTextureBindings();
     }
-    // Remove the texture from the map and destroy it via its unique_ptr.
-    auto found_texture_it = textures_.find(texture->key());
-    assert_true(found_texture_it != textures_.end());
-    if (found_texture_it != textures_.end()) {
-      assert_true(found_texture_it->second.get() == texture);
-      textures_.erase(found_texture_it);
-      // `texture` is invalid now.
-    }
+    DestroyTexture(texture);
   }
   if (destroyed_any) {
     COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
+  }
+}
+
+uint32_t TextureCache::DestroyLeastRecentlyUsedTextures(
+    uint64_t completed_submission_index, uint32_t max_count) {
+  uint32_t destroyed = 0;
+  while (destroyed < max_count && texture_used_first_ != nullptr) {
+    Texture* texture = texture_used_first_;
+    if (texture->last_usage_submission_index() > completed_submission_index) {
+      break;
+    }
+    if (!destroyed) {
+      // See CompletedSubmissionUpdated.
+      ResetTextureBindings();
+    }
+    DestroyTexture(texture);
+    ++destroyed;
+  }
+  if (destroyed) {
+    COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
+  }
+  return destroyed;
+}
+
+void TextureCache::DestroyTexture(Texture* texture) {
+  // Remove the texture from the map and destroy it via its unique_ptr.
+  auto found_texture_it = textures_.find(texture->key());
+  assert_true(found_texture_it != textures_.end());
+  if (found_texture_it != textures_.end()) {
+    assert_true(found_texture_it->second.get() == texture);
+    textures_.erase(found_texture_it);
+    // `texture` is invalid now.
   }
 }
 

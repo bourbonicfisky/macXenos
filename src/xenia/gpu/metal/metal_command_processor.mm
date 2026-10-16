@@ -978,8 +978,13 @@ constexpr uint32_t kSystemViewNullUAV = 1;
 constexpr uint32_t kSystemViewSharedMemoryUAV = 2;
 constexpr uint32_t kSystemViewEntryCount = 3;
 
-// Sized for bring-up; a real build would grow these on demand.
-constexpr uint32_t kViewBindlessHeapSlots = 4096;
+// Texture view slots: one per live host texture view (legacy cache entries,
+// shared-cache swizzle/sign views, render-target and resolve views). 4096 was
+// exhausted by GTA IV's streamed set once the shared route kept its textures
+// alive (every legacy lookup then untiled with no slot to keep the result:
+// 42 ms/frame); both caches shed LRU entries as the headroom goes, so the
+// size bounds the resident working set, not correctness. 16 bytes a slot.
+constexpr uint32_t kViewBindlessHeapSlots = 16384;
 // Unique samplers (one slot each, never evicted; the space is bounded by the
 // sampler parameters). D3D12's heap holds 2000 and rolls over; 256 was hit in
 // long sessions, turning every later new sampler into a skipped draw. Clamped
@@ -2995,6 +3000,36 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       (__bridge id<MTLBuffer>)zpd_visibility_pool_.visibility_buffer();
   if (zpd_visibility_buffer) {
     pass.visibilityResultBuffer = zpd_visibility_buffer;
+  }
+  // Attribution probe: XE_METAL_PROBE_RT_BOUND_ROWS=N caps every draw pass's
+  // render area to N rows (and the attachments' width). Host render targets
+  // are allocated at EDRAM-capacity height (a 1280-wide 32bpp target is 2048
+  // rows), so a 720-row game loads and stores 1328 untouched rows per pass
+  // unless the pass is bounded. Draws past row N are clipped, so the frame is
+  // only right when the title never renders below N; the GPU busy delta is
+  // what the probe measures (RE5 2026-10-16).
+  static const uint32_t s_probe_bound_rows = [] {
+    const char* v = std::getenv("XE_METAL_PROBE_RT_BOUND_ROWS");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_probe_bound_rows) {
+    NSUInteger min_w = 0, min_h = 0;
+    auto note_attachment = [&](id<MTLTexture> t) {
+      if (!t) {
+        return;
+      }
+      min_w = min_w ? std::min<NSUInteger>(min_w, t.width) : t.width;
+      min_h = min_h ? std::min<NSUInteger>(min_h, t.height) : t.height;
+    };
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      note_attachment(pass.colorAttachments[i].texture);
+    }
+    note_attachment(pass.depthAttachment.texture);
+    if (min_w && min_h) {
+      pass.renderTargetWidth = min_w;
+      pass.renderTargetHeight =
+          std::min<NSUInteger>(min_h, NSUInteger(s_probe_bound_rows));
+    }
   }
 
   id<MTLRenderCommandEncoder> encoder =
@@ -13351,7 +13386,15 @@ bool MetalCommandProcessor::SharedRouteEligible(
   }
   // Stacked RGBA8 is outside the strict class (single-slice direct loads)
   // and takes the generic family route like every other stacked format.
-  if (rgba8_class && !(fetch.stacked && metal::SharedRouteStackedEnabled())) {
+  // The strict RGBA8 class is the tiled 2D promotion; a linear or cube RGBA8
+  // fetch takes the general predicates (family loaders) like any other
+  // format, else it stayed on the legacy cache (RE5's cube map 2026-10-16).
+  const bool rgba8_general =
+      (!fetch.tiled && metal::SharedRouteLinearEnabled()) ||
+      (fetch.dimension == xenos::DataDimension::kCube &&
+       metal::SharedRouteCubeEnabled());
+  if (rgba8_class && !rgba8_general &&
+      !(fetch.stacked && metal::SharedRouteStackedEnabled())) {
     if (is_signed) {
       if (metal::IsStrictRgba8SignedRouteEligible(fetch, width, height,
                                                   pitch_texels)) {

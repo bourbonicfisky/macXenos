@@ -221,10 +221,39 @@ inline bool SharedRouteStackedEnabled() {
   return s_enabled;
 }
 
+// Linear (untiled) 2D textures load through the family loaders with the
+// upstream shaders' linear addressing (is_tiled bit clear). Rage streams its
+// 16 MB DXT5 megatexture page cache and its 5:6:5 mip chains linear, and the
+// legacy CPU untile of them was 11 ms/frame after the signed-twin fix.
+// XE_METAL_TEX_ROUTE_LINEAR=0 keeps linear textures on the legacy cache.
+inline bool SharedRouteLinearEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_LINEAR");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+// Cube maps load as six array slices of the upstream guest layout into a
+// cube-array host texture (the translator samples cubes as texturecube_array).
+// RE5 renders a 128x128 RGBA8 cube map with mips every frame; unrouted, the
+// draw sampling it was a RAM-publication consumer (53 publications, 17 ms of
+// CP per frame). XE_METAL_TEX_ROUTE_CUBE=0 keeps cubes on the legacy cache.
+inline bool SharedRouteCubeEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_CUBE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool IsSharedRouteShapeEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
-  if (!fetch.tiled || fetch.dimension != xenos::DataDimension::k2DOrStacked ||
+  const bool cube = fetch.dimension == xenos::DataDimension::kCube &&
+                    SharedRouteCubeEnabled() && width == height;
+  if ((!fetch.tiled && !SharedRouteLinearEnabled()) ||
+      (fetch.dimension != xenos::DataDimension::k2DOrStacked && !cube) ||
       (fetch.stacked && !SharedRouteStackedEnabled())) {
     return false;
   }

@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 #define XENIA_GPU_METAL_METAL_SHARED_MEMORY_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <unordered_map>
@@ -196,6 +197,26 @@ class MetalSharedMemory : public SharedMemory {
   // down resolved-target bridges each frame (probe #4's 10.9x slot churn).
   void ReassertGpuWritten(uint32_t start, uint32_t length) {
     MakeRangeValid(start, length, /*written_by_gpu=*/true);
+  }
+
+  // True when any system page of [start, start + length) holds GPU-written
+  // content the buffer has that RAM does not (valid + gpu_written). A CPU
+  // read of RAM over such a range is stale by definition; the shared texture
+  // cache's hash revalidation must reload instead of comparing. CP thread
+  // only, like every other validity user.
+  bool AnyPageGpuWritten(uint32_t start, uint32_t length) const {
+    if (!length || start >= kBufferSize) {
+      return false;
+    }
+    const uint32_t shift = page_size_log2();
+    const uint32_t last = std::min<uint32_t>(uint64_t(start) + length - 1,
+                                             kBufferSize - 1);
+    for (uint32_t page = start >> shift; page <= (last >> shift); ++page) {
+      if (IsPageGpuWritten(page)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Validity page size for the straddler re-assert's fragment math (the base

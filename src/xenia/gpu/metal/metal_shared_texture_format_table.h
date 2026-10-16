@@ -51,6 +51,17 @@ enum class SharedLoadFamily : uint32_t {
   // texels (texture_load_dxt3a), as the legacy CPU decode does at the base
   // level only.
   kDxt3aToR8,
+  // 16-byte 4x4 block copy (texture_load_128bpb) for DXT3 / DXT5 / DXN kept
+  // compressed on the host (BC2 / BC3 / BC5); DXT1 / DXT5A take k64bpb
+  // (BC1 / BC4). 2026-10-16: Rage's 16 MB linear DXT5 megatexture page cache
+  // was a CPU untile every frame.
+  k128bpb,
+  // 32-bit depth texels (k_24_8 unorm24 / k_24_8_FLOAT 20e4) converted to
+  // R32Float on the GPU (texture_load_depth_unorm / _float, the same rule the
+  // legacy CPU decode implements). 2026-10-16: Rage's 768x768 24_8_FLOAT
+  // shadow maps were 5 ms/frame of CPU decode.
+  kDepthUnormToR32,
+  kDepthFloatToR32,
 };
 
 struct SharedTextureFormatEntry {
@@ -71,6 +82,7 @@ struct SharedTextureFormatEntry {
 enum : uint32_t {
   kMtlPixelFormatInvalid = 0,
   kMtlPixelFormatR8Unorm = 10,
+  kMtlPixelFormatB5G6R5Unorm = 40,
   kMtlPixelFormatABGR4Unorm = 42,
   kMtlPixelFormatR8Snorm = 12,
   kMtlPixelFormatR16Unorm = 20,
@@ -88,6 +100,13 @@ enum : uint32_t {
   kMtlPixelFormatRGBA16Unorm = 110,
   kMtlPixelFormatRGBA16Snorm = 112,
   kMtlPixelFormatRGBA16Float = 115,
+  kMtlPixelFormatBC1_RGBA = 130,
+  kMtlPixelFormatBC2_RGBA = 132,
+  kMtlPixelFormatBC3_RGBA = 134,
+  kMtlPixelFormatBC4_RUnorm = 140,
+  kMtlPixelFormatBC4_RSnorm = 141,
+  kMtlPixelFormatBC5_RGUnorm = 142,
+  kMtlPixelFormatBC5_RGSnorm = 143,
 };
 
 inline const SharedTextureFormatEntry* SharedTextureFormatTable(
@@ -178,6 +197,16 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_5_6_5, SharedLoadFamily::k16bpbR5G6B5ToRgba8,
        kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
        XE_GPU_MAKE_TEXTURE_SWIZZLE(R, G, B, B), 2, false},
+      // 5:6:5 native (Apple, packed16), 2026-10-16: the raw 16-bit copy into
+      // B5G6R5Unorm with the legacy plan's host swizzle (guest R sits in the
+      // low bits, Metal's B field; alpha from the high field, as the legacy
+      // CPU path reads it), so routed and legacy serve the same bits. Until
+      // now Apple GPUs kept 5:6:5 on the CPU (Rage: two linear mip chains,
+      // 6.7 ms/frame). Selected only with packed16; XE_METAL_TEX_ROUTE_565=0
+      // drops it.
+      {xenos::TextureFormat::k_5_6_5, SharedLoadFamily::k16bpb,
+       kMtlPixelFormatB5G6R5Unorm, kMtlPixelFormatB5G6R5Unorm,
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R), 2, false},
       // CTX1 decoded to RG8 on the GPU, mips included (Halo 3 materials: 134
       // mipped uploads in a 40 s sweep served base-only by the legacy CPU
       // decode, on every GPU). RGGG like the legacy plan; no snorm sibling,
@@ -191,6 +220,44 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_DXT3A, SharedLoadFamily::kDxt3aToR8,
        kMtlPixelFormatR8Unorm, kMtlPixelFormatR8Unorm,
        xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 8, false},
+      // Block-compressed formats kept compressed on the host (BC1-BC5, native
+      // on Apple GPUs; the legacy plan uploads the same blocks after a CPU
+      // untile). 8- or 16-byte block copies with the 64bpb / 128bpb loaders;
+      // host swizzles as the legacy plan (DXT5A RRRR, DXN RGGG with a snorm
+      // sibling). Selected only where the device reports BC support;
+      // XE_METAL_TEX_ROUTE_BC=0 drops them. 2026-10-16, Rage.
+      {xenos::TextureFormat::k_DXT1, SharedLoadFamily::k64bpb,
+       kMtlPixelFormatBC1_RGBA, kMtlPixelFormatBC1_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 8, false},
+      {xenos::TextureFormat::k_DXT1_AS_16_16_16_16, SharedLoadFamily::k64bpb,
+       kMtlPixelFormatBC1_RGBA, kMtlPixelFormatBC1_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 8, false},
+      {xenos::TextureFormat::k_DXT2_3, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatBC2_RGBA, kMtlPixelFormatBC2_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 16, false},
+      {xenos::TextureFormat::k_DXT2_3_AS_16_16_16_16, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatBC2_RGBA, kMtlPixelFormatBC2_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 16, false},
+      {xenos::TextureFormat::k_DXT4_5, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatBC3_RGBA, kMtlPixelFormatBC3_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 16, false},
+      {xenos::TextureFormat::k_DXT4_5_AS_16_16_16_16, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatBC3_RGBA, kMtlPixelFormatBC3_RGBA,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 16, false},
+      {xenos::TextureFormat::k_DXT5A, SharedLoadFamily::k64bpb,
+       kMtlPixelFormatBC4_RUnorm, kMtlPixelFormatBC4_RUnorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 8, false},
+      {xenos::TextureFormat::k_DXN, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatBC5_RGUnorm, kMtlPixelFormatBC5_RGSnorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG, 16, false},
+      // Depth texels to R32Float on the GPU (RRRR like the legacy plan).
+      // XE_METAL_TEX_ROUTE_DEPTH=0 drops both.
+      {xenos::TextureFormat::k_24_8, SharedLoadFamily::kDepthUnormToR32,
+       kMtlPixelFormatR32Float, kMtlPixelFormatR32Float,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 4, false},
+      {xenos::TextureFormat::k_24_8_FLOAT, SharedLoadFamily::kDepthFloatToR32,
+       kMtlPixelFormatR32Float, kMtlPixelFormatR32Float,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 4, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -221,13 +288,55 @@ inline uint32_t SharedTextureHostBytesPerBlock(
   }
 }
 
-// Guest block edge in texels: 4 for the 4x4 block-compressed families, 1 for
+// The 4x4 block-compressed guest formats (decoded or kept compressed).
+inline bool IsSharedTextureBlockCompressedFormat(xenos::TextureFormat format) {
+  switch (format) {
+    case xenos::TextureFormat::k_DXT1:
+    case xenos::TextureFormat::k_DXT1_AS_16_16_16_16:
+    case xenos::TextureFormat::k_DXT2_3:
+    case xenos::TextureFormat::k_DXT2_3_AS_16_16_16_16:
+    case xenos::TextureFormat::k_DXT4_5:
+    case xenos::TextureFormat::k_DXT4_5_AS_16_16_16_16:
+    case xenos::TextureFormat::k_DXT5A:
+    case xenos::TextureFormat::k_DXN:
+    case xenos::TextureFormat::k_CTX1:
+    case xenos::TextureFormat::k_DXT3A:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Guest block edge in texels: 4 for the 4x4 block-compressed formats, 1 for
 // everything else.
 inline uint32_t SharedTextureBlockDim(const SharedTextureFormatEntry& entry) {
+  return IsSharedTextureBlockCompressedFormat(entry.format) ? 4u : 1u;
+}
+
+// Host texels per guest block edge: the decoding families (CTX1, DXT3A)
+// write 4x4 host texels per guest block; the BC-preserving families and
+// every uncompressed format write one host block/texel per guest block.
+inline uint32_t SharedTextureHostExpand(const SharedTextureFormatEntry& entry) {
   return entry.load_shader == SharedLoadFamily::kCtx1ToRg8 ||
                  entry.load_shader == SharedLoadFamily::kDxt3aToR8
              ? 4u
              : 1u;
+}
+
+// Whether the entry's host texture is a BC (compressed) pixel format: no
+// shader-write usage, blits address block rows.
+inline bool SharedTextureHostIsBc(const SharedTextureFormatEntry& entry) {
+  return entry.host_format >= kMtlPixelFormatBC1_RGBA &&
+         entry.host_format <= kMtlPixelFormatBC5_RGSnorm;
+}
+
+// BC texture compression support, recorded by the shared cache at
+// initialization (MTLDevice supportsBCTextureCompression: every Apple
+// Silicon Mac; not every Intel/AMD part). Entries with BC host formats are
+// dropped without it.
+inline std::atomic<bool>& SharedTextureBcSupported() {
+  static std::atomic<bool> supported{false};
+  return supported;
 }
 
 // Mipped 4:4:4:4 keys take the RGBA4 -> RGBA8 expansion (non-Apple GPUs):
@@ -309,8 +418,35 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
         const char* v = std::getenv("XE_METAL_TEX_ROUTE_565");
         return !(v && v[0] == '0' && !v[1]);
       }();
-      if (!s_565 ||
-          SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+      if (!s_565) {
+        return nullptr;
+      }
+      // Two 5:6:5 entries: the native B5G6R5 one with packed16, the RGBA8
+      // expansion without.
+      const bool packed16 =
+          SharedTexturePacked16Supported().load(std::memory_order_relaxed);
+      const bool native = table[i].load_shader == SharedLoadFamily::k16bpb;
+      if (packed16 != native) {
+        continue;
+      }
+    }
+    if (table[i].load_shader == SharedLoadFamily::kDepthUnormToR32 ||
+        table[i].load_shader == SharedLoadFamily::kDepthFloatToR32) {
+      static const bool s_depth = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_DEPTH");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_depth) {
+        return nullptr;
+      }
+    }
+    if (SharedTextureHostIsBc(table[i])) {
+      static const bool s_bc = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_BC");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_bc ||
+          !SharedTextureBcSupported().load(std::memory_order_relaxed)) {
         return nullptr;
       }
     }

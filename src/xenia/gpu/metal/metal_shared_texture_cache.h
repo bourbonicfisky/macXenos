@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "xenia/gpu/register_file.h"
@@ -155,6 +156,20 @@ class MetalSharedTextureCache : public TextureCache {
   // drains those pools. Reversing the two would strand the retirements in a
   // pool that was already emptied.
   void ClearCache() override;
+  // Per-swap: the base binding reset, plus the load census report
+  // (MetalSharedTexCensus, every 128 frames): loads, reloads, bytes and hash
+  // revalidations per frame, by format. Evidence for the pass-split cost of
+  // mid-frame loads (every load ends the open render pass).
+  void BeginFrame() override;
+  // The base memory-limit LRU, then the descriptor-slot budget: the host
+  // textures of this cache hold view slots in the legacy cache's bindless
+  // heap (one per swizzle/sign view) that the memory limits know nothing
+  // about. A streaming title (GTA IV) fills the heap with live, small, never
+  // destroyed textures; the legacy path then has no slot for anything and
+  // untiles every binding every draw (42 ms/frame). When the heap's headroom
+  // is gone and this cache holds more than half of it, the least recently
+  // used textures are destroyed down to 3/8 of the heap.
+  void CompletedSubmissionUpdated(uint64_t completed_submission_index) override;
 
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override {
@@ -172,8 +187,12 @@ class MetalSharedTextureCache : public TextureCache {
   }
   uint32_t GetMaxHostTextureDepthOrArraySize(
       xenos::DataDimension dimension) const override {
-    // Plain and stacked 2D (Metal's 2D array limit); everything else, and
-    // stacked textures under XE_METAL_TEX_ROUTE_STACKED=0, single-slice.
+    // Plain and stacked 2D (Metal's 2D array limit); cube maps six faces
+    // (XE_METAL_TEX_ROUTE_CUBE); everything else, and stacked textures under
+    // XE_METAL_TEX_ROUTE_STACKED=0, single-slice.
+    if (dimension == xenos::DataDimension::kCube) {
+      return SharedRouteCubeEnabled() ? 6u : 1u;
+    }
     return dimension == xenos::DataDimension::k2DOrStacked &&
                    SharedRouteStackedEnabled()
                ? 2048u
@@ -241,6 +260,48 @@ class MetalSharedTextureCache : public TextureCache {
   static constexpr size_t kScratchBufferMax = 8;
   std::vector<ScratchBuffer> scratch_;
   uint64_t family_load_count_ = 0;
+
+  // Hash revalidation of a base-region reload (XE_METAL_SHARED_REVALIDATE=0
+  // disables): a CPU write watch fires on every write into a texture's
+  // pages, including rewrites of identical bytes (streamed atlases, UI,
+  // double-buffered uploads), and every reload here ends the open render
+  // pass. When the previous load's XXH3 of the guest base bytes still
+  // matches, the texture is marked up to date without a load. Never applied
+  // over GPU-written pages (RAM is stale there by definition) nor to mip
+  // reloads, and it stops hashing a texture whose content keeps changing.
+  static constexpr uint32_t kRevalidateMaxBytes = 8u * 1024u * 1024u;
+  uint64_t HashGuestBase(uint32_t base, uint32_t bytes) const;
+  // Returns true when the reload can be skipped (content unchanged).
+  bool RevalidateBase(MetalTexture& texture, uint32_t base, uint32_t bytes);
+  // Hash RevalidateBase computed for the load now in progress; adopted by
+  // the texture only once that load succeeds. 0 = none.
+  uint64_t pending_base_hash_ = 0;
+
+  // Load census, per swap (see BeginFrame).
+  uint32_t census_frames_ = 0;
+  uint64_t census_loads_base_ = 0;
+  uint64_t census_loads_mips_ = 0;
+  uint64_t census_reloads_ = 0;
+  uint64_t census_load_bytes_ = 0;
+  uint64_t census_revalidated_ = 0;
+  uint64_t census_revalidate_changed_ = 0;
+  uint64_t census_revalidate_gpu_skipped_ = 0;
+  uint64_t census_revalidate_ns_ = 0;
+  uint64_t census_destroyed_ = 0;     // textures destroyed in the window
+  uint64_t census_served_stale_ = 0;  // served outdated, loaded this submission
+  // Whether every outdated region of `texture` was loaded by `submission`
+  // (so the binding holds this submission's prep-time content; see
+  // GetServedSlot).
+  static bool ServedByCurrentSubmission(const MetalTexture& texture,
+                                        uint64_t submission);
+  int64_t census_host_bytes_ = 0;     // live host bytes booked by this cache
+  uint32_t live_textures_ = 0;        // MetalTexture objects alive
+  // Bindless view-heap slots this cache holds (texture view caches and
+  // binding slots), for the slot budget in CompletedSubmissionUpdated.
+  uint32_t external_slots_held_ = 0;
+  uint64_t census_slot_destroyed_ = 0;  // destroyed by the slot budget
+  // (format | linear << 8) -> loads in the window.
+  std::unordered_map<uint32_t, uint32_t> census_loads_by_format_;
   bool AllocateScratch(uint32_t size, uint32_t alignment, uint64_t submission,
                        void** buffer_out, uint32_t* offset_out);
   bool LoadLevelsDirect(Texture& texture, const std::vector<MipLevelPlan>& plan,
