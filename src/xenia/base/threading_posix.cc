@@ -66,6 +66,16 @@ DEFINE_bool(
     "Set-then-Reset transient is no longer lost (the DOA5 worker-pool deadlock). "
     "WaitAll still uses the poll. Regression-check broadly before shipping.",
     "Threading");
+DEFINE_bool(
+    threading_blocking_waitall, false,
+    "Candidate fix (default off = current 1ms poll): make WaitMultiple(WaitAll) "
+    "event-driven. The waiter registers a notify-only wait-block with every "
+    "member; any member's Signal wakes it to re-run the all-signaled check "
+    "under the member locks (nothing is consumed by the wake itself), with a "
+    "1 ms backstop re-check for members whose Signal is not hooked (mutant, "
+    "timer, thread). RE5 2026-10-16: the main guest thread spent 70% of its "
+    "time in the poll's sleep. Regression-check broadly before shipping.",
+    "Threading");
 
 #if XE_PLATFORM_MAC
 DEFINE_string(
@@ -89,6 +99,11 @@ struct WaitBlock {
   std::condition_variable cv;
   int fired_index = -1;
   bool satisfied = false;
+  // WaitAll: a Signal only pokes the waiter (sets `pending`, notifies `cv`),
+  // consumes nothing and leaves the block registered; the waiter re-runs the
+  // all-signaled check itself and unregisters when done.
+  bool notify_only = false;
+  bool pending = false;
 };
 
 #if XE_PLATFORM_ANDROID
@@ -408,6 +423,9 @@ class PosixConditionBase {
     if (!wait_all && cvars::threading_blocking_waitany) {
       return WaitAnyBlocking(handles, timeout);
     }
+    if (wait_all && cvars::threading_blocking_waitall) {
+      return WaitAllBlocking(handles, timeout);
+    }
 
     // For multiple handles, we need to poll since we can't wait on multiple
     // condition variables simultaneously. This is a limitation of the POSIX
@@ -610,6 +628,86 @@ class PosixConditionBase {
     return std::make_pair(WaitResult::kTimeout, size_t(0));
   }
 
+  // Event-driven WaitAll: one notify-only WaitBlock registered with every
+  // member. The all-signaled check (and the consumption of every member on
+  // success) runs under ALL member locks, taken in address order, exactly as
+  // the poll did with try-locks; between checks the waiter sleeps on the
+  // block's cv until a member's Signal pokes it, or 1 ms passes (the poll's
+  // interval, for members whose Signal is not hooked).
+  static std::pair<WaitResult, size_t> WaitAllBlocking(
+      std::vector<PosixConditionBase*>& handles,
+      std::chrono::milliseconds timeout) {
+    const size_t n = handles.size();
+    WaitBlock block;
+    block.notify_only = true;
+    std::vector<PosixConditionBase*> sorted(handles);
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    // Register with every member (under its lock) before the first check so
+    // no Signal between the check and the sleep is missed.
+    for (auto* h : sorted) {
+      std::lock_guard<std::mutex> hl(h->mutex_);
+      h->wait_blocks_.push_back({&block, 0});
+    }
+
+    const auto end = (timeout == std::chrono::milliseconds::max())
+                         ? std::chrono::steady_clock::time_point::max()
+                         : std::chrono::steady_clock::now() + timeout;
+    WaitResult result = WaitResult::kTimeout;
+    while (true) {
+      {
+        std::vector<std::unique_lock<std::mutex>> locks;
+        locks.reserve(sorted.size());
+        for (auto* h : sorted) {
+          locks.emplace_back(h->mutex_);
+        }
+        bool all_signaled = true;
+        for (size_t i = 0; i < n; ++i) {
+          if (!handles[i]->signaled()) {
+            all_signaled = false;
+            break;
+          }
+        }
+        if (all_signaled) {
+          for (size_t i = 0; i < n; ++i) {
+            handles[i]->post_execution();
+          }
+          result = WaitResult::kSuccess;
+          break;
+        }
+      }
+      const auto now = std::chrono::steady_clock::now();
+      auto backstop = std::chrono::milliseconds(1);
+      if (end != std::chrono::steady_clock::time_point::max()) {
+        if (now >= end) {
+          break;
+        }
+        backstop = std::min(
+            backstop,
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - now));
+      }
+      std::unique_lock<std::mutex> bl(block.m);
+      if (!block.pending) {
+        block.cv.wait_for(bl, backstop, [&] { return block.pending; });
+      }
+      block.pending = false;
+    }
+
+    for (auto* h : sorted) {
+      std::lock_guard<std::mutex> hl(h->mutex_);
+      auto& v = h->wait_blocks_;
+      for (auto it = v.begin(); it != v.end();) {
+        if (it->first == &block) {
+          it = v.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    return std::make_pair(result, size_t(0));
+  }
+
   [[nodiscard]] virtual void* native_handle() const {
     return const_cast<std::condition_variable&>(cond_).native_handle();
   }
@@ -631,6 +729,15 @@ class PosixConditionBase {
       }
       WaitBlock* b = it->first;
       const size_t idx = it->second;
+      if (b->notify_only) {
+        // WaitAll waiter: poke it and leave the signal and the registration
+        // alone (it consumes every member itself once all are signaled).
+        std::lock_guard<std::mutex> bl(b->m);
+        b->pending = true;
+        b->cv.notify_all();
+        ++it;
+        continue;
+      }
       bool consumed = false;
       {
         std::lock_guard<std::mutex> bl(b->m);
@@ -677,7 +784,9 @@ class PosixCondition<Event> : public PosixConditionBase {
   bool Signal() override {
     auto lock = std::unique_lock(mutex_);
     signal_ = true;
-    if (cvars::threading_blocking_waitany && DeliverToWaitBlocksLocked()) {
+    if ((cvars::threading_blocking_waitany ||
+         cvars::threading_blocking_waitall) &&
+        DeliverToWaitBlocksLocked()) {
       // Consumed by a WaitAny waiter (auto-reset) — do not also wake a single
       // Wait() waiter, or the one signal would satisfy two.
       return true;
@@ -720,8 +829,9 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
       *out_previous_count = count_;
     }
     count_ += release_count;
-    if (cvars::threading_blocking_waitany) {
-      DeliverToWaitBlocksLocked();  // hand counts to WaitAny waiters
+    if (cvars::threading_blocking_waitany ||
+        cvars::threading_blocking_waitall) {
+      DeliverToWaitBlocksLocked();  // hand counts to WaitAny/WaitAll waiters
     }
     cond_.notify_all();
     return true;
