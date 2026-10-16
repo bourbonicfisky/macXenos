@@ -158,9 +158,10 @@ class MetalSharedTextureCache::MetalTexture final
   uint64_t last_load_submission = 0;      // base region
   uint64_t last_mip_load_submission = 0;  // mip chain
 
-  // Hash revalidation state (see MetalSharedTextureCache::RevalidateBase).
+  // Hash revalidation state (see MetalSharedTextureCache::RevalidateRegions).
   uint32_t loads = 0;            // successful loads of any region
   uint64_t base_hash = 0;        // XXH3 of the guest base bytes at last load
+  uint64_t mips_hash = 0;        // XXH3 of the guest mip bytes at last load
   uint32_t hash_changed_streak = 0;  // consecutive reloads whose hash moved
 
   // Views of this texture in bindless slots, one per (host swizzle,
@@ -455,14 +456,18 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
 
-  // ---- Reload of an already-loaded base region: when the guest bytes still
-  // hash to what the last load read, there is nothing to load (and no render
-  // pass to end). Mip reloads and first loads go straight to the load.
+  // ---- Reload of an already-loaded texture: when the guest bytes of every
+  // region to load still hash to what the last load read, there is nothing
+  // to load (and no render pass to end). First loads go straight to the load.
   pending_base_hash_ = 0;
-  if (load_base && !load_mips && metal_texture.loads) {
+  pending_mips_hash_ = 0;
+  if (metal_texture.loads) {
     ++census_reloads_;
-    if (RevalidateBase(metal_texture, uint32_t(key.base_page) << 12,
-                       texture.GetGuestBaseSize())) {
+    if (RevalidateRegions(metal_texture, load_base,
+                          uint32_t(key.base_page) << 12,
+                          texture.GetGuestBaseSize(), load_mips,
+                          uint32_t(key.mip_page) << 12,
+                          texture.GetGuestMipsSize())) {
       return true;
     }
   }
@@ -544,16 +549,18 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   if (load_base) {
     metal_texture.last_load_submission = submission;
     // The hash of what this load read, for the next reload's revalidation:
-    // RevalidateBase computed it from the same bytes just before the load and
-    // parked it here; it is adopted only now that the load succeeded, so a
-    // declined load can never leave a hash claiming content the texture does
-    // not hold. A first load (or a load with mips) is never hashed.
+    // RevalidateRegions computed it from the same bytes just before the load
+    // and parked it here; it is adopted only now that the load succeeded, so
+    // a declined load can never leave a hash claiming content the texture
+    // does not hold. A first load is never hashed.
     metal_texture.base_hash = pending_base_hash_;
   }
-  pending_base_hash_ = 0;
   if (load_mips) {
     metal_texture.last_mip_load_submission = submission;
+    metal_texture.mips_hash = pending_mips_hash_;
   }
+  pending_base_hash_ = 0;
+  pending_mips_hash_ = 0;
   ++metal_texture.loads;
   // Load census (reported per swap by BeginFrame).
   if (load_base) {
@@ -768,9 +775,21 @@ uint64_t MetalSharedTextureCache::HashGuestBase(uint32_t base,
   return hash ? hash : 1;
 }
 
-bool MetalSharedTextureCache::RevalidateBase(MetalTexture& texture,
-                                             uint32_t base, uint32_t bytes) {
-  if (!SharedRevalidateEnabled() || !bytes || bytes > kRevalidateMaxBytes) {
+bool MetalSharedTextureCache::RevalidateRegions(
+    MetalTexture& texture, bool load_base, uint32_t base, uint32_t base_bytes,
+    bool load_mips, uint32_t mips, uint32_t mips_bytes) {
+  if (!SharedRevalidateEnabled()) {
+    return false;
+  }
+  const uint64_t total = (load_base ? uint64_t(base_bytes) : 0) +
+                         (load_mips ? uint64_t(mips_bytes) : 0);
+  if (!total || total > kRevalidateMaxBytes) {
+    return false;
+  }
+  if (load_base && !base_bytes) {
+    return false;
+  }
+  if (load_mips && !mips_bytes) {
     return false;
   }
   // A texture whose content really changes on every reload (a per-frame
@@ -784,31 +803,39 @@ bool MetalSharedTextureCache::RevalidateBase(MetalTexture& texture,
   // memexport landed there and was not published), so a RAM hash says
   // nothing about what the load would read. Reload.
   auto& metal_shared_memory = static_cast<MetalSharedMemory&>(shared_memory());
-  if (metal_shared_memory.AnyPageGpuWritten(base, bytes)) {
+  if ((load_base && metal_shared_memory.AnyPageGpuWritten(base, base_bytes)) ||
+      (load_mips && metal_shared_memory.AnyPageGpuWritten(mips, mips_bytes))) {
     ++census_revalidate_gpu_skipped_;
     return false;
   }
   const auto t0 = std::chrono::steady_clock::now();
-  const uint64_t now_hash = HashGuestBase(base, bytes);
+  const uint64_t base_now = load_base ? HashGuestBase(base, base_bytes) : 0;
+  const uint64_t mips_now = load_mips ? HashGuestBase(mips, mips_bytes) : 0;
   census_revalidate_ns_ += uint64_t(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - t0)
           .count());
-  if (!now_hash) {
+  if ((load_base && !base_now) || (load_mips && !mips_now)) {
     return false;
   }
-  if (texture.base_hash && now_hash == texture.base_hash) {
+  const bool base_known = !load_base || texture.base_hash != 0;
+  const bool mips_known = !load_mips || texture.mips_hash != 0;
+  const bool base_same = !load_base || base_now == texture.base_hash;
+  const bool mips_same = !load_mips || mips_now == texture.mips_hash;
+  if (base_known && mips_known && base_same && mips_same) {
     texture.hash_changed_streak = 0;
     ++census_revalidated_;
     return true;
   }
-  if (texture.base_hash) {
+  if ((load_base && texture.base_hash && !base_same) ||
+      (load_mips && texture.mips_hash && !mips_same)) {
     ++census_revalidate_changed_;
     ++texture.hash_changed_streak;
   }
-  // The load that follows reads exactly these bytes; adopt the hash on its
+  // The load that follows reads exactly these bytes; adopt the hashes on its
   // success (see LoadTextureDataFromResidentMemoryImpl).
-  pending_base_hash_ = now_hash;
+  pending_base_hash_ = base_now;
+  pending_mips_hash_ = mips_now;
   return false;
 }
 

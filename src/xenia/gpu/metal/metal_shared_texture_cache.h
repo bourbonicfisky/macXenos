@@ -266,16 +266,22 @@ class MetalSharedTextureCache : public TextureCache {
   // pages, including rewrites of identical bytes (streamed atlases, UI,
   // double-buffered uploads), and every reload here ends the open render
   // pass. When the previous load's XXH3 of the guest base bytes still
-  // matches, the texture is marked up to date without a load. Never applied
-  // over GPU-written pages (RAM is stale there by definition) nor to mip
-  // reloads, and it stops hashing a texture whose content keeps changing.
+  // matches for every region the reload would read (base and/or mips, hashed
+  // separately), the texture is marked up to date without a load. Never
+  // applied over GPU-written pages (RAM is stale there by definition), and it
+  // stops hashing a texture whose content keeps changing. RDR 2026-10-16:
+  // base-only coverage left 47 mip-chain reloads a frame (streamed DXT whose
+  // watch ranges fire on neighbouring writes), each ending the render pass.
   static constexpr uint32_t kRevalidateMaxBytes = 8u * 1024u * 1024u;
   uint64_t HashGuestBase(uint32_t base, uint32_t bytes) const;
   // Returns true when the reload can be skipped (content unchanged).
-  bool RevalidateBase(MetalTexture& texture, uint32_t base, uint32_t bytes);
-  // Hash RevalidateBase computed for the load now in progress; adopted by
-  // the texture only once that load succeeds. 0 = none.
+  bool RevalidateRegions(MetalTexture& texture, bool load_base, uint32_t base,
+                         uint32_t base_bytes, bool load_mips, uint32_t mips,
+                         uint32_t mips_bytes);
+  // Hashes RevalidateRegions computed for the load now in progress; adopted
+  // by the texture only once that load succeeds. 0 = none.
   uint64_t pending_base_hash_ = 0;
+  uint64_t pending_mips_hash_ = 0;
 
   // Load census, per swap (see BeginFrame).
   uint32_t census_frames_ = 0;
