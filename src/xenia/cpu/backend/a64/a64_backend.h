@@ -90,6 +90,11 @@ struct A64BackendContext {
 constexpr unsigned int DEFAULT_FPU_FPCR = 0;
 // Default FPCR for VMX mode (flush to zero, preserve NaN payloads).
 constexpr unsigned int DEFAULT_VMX_FPCR = (1 << 24);  // FZ
+// XE_A64_FPCR_UNIFIED=1 (probe): run scalar FPU code under the VMX FPCR
+// (flush-to-zero) too, so the JIT never switches FPCR between scalar and
+// vector sequences. msr FPCR serializes on Apple cores; RE5's hot thread
+// spent ~45% of its JIT samples on the switch (re5-perf-20261015).
+bool A64FpcrUnified();
 
 class A64Backend : public Backend {
  public:

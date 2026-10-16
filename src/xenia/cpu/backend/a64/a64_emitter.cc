@@ -567,6 +567,10 @@ void A64Emitter::ReloadMembase() {
 }
 
 bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
+  if (A64FpcrUnified()) {
+    // One FPCR for both modes: nothing to switch (see A64FpcrUnified).
+    return false;
+  }
   if (fpcr_mode_ == new_mode) {
     return false;
   }

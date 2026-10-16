@@ -758,12 +758,21 @@ void A64Backend::UninstallBreakpoint(Breakpoint* breakpoint) {
   breakpoint->backend_data().clear();
 }
 
+bool A64FpcrUnified() {
+  static const bool s_unified = [] {
+    const char* v = std::getenv("XE_A64_FPCR_UNIFIED");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return s_unified;
+}
+
 void A64Backend::InitializeBackendContext(void* ctx) {
   auto* a64_ctx = BackendContextForGuestContext(ctx);
   std::memset(a64_ctx, 0, sizeof(A64BackendContext));
   a64_ctx->reserve_helper_ = &reserve_helper_;
   a64_ctx->Ox1000 = 0x1000;
-  a64_ctx->fpcr_fpu = DEFAULT_FPU_FPCR;
+  a64_ctx->fpcr_fpu =
+      DEFAULT_FPU_FPCR | (A64FpcrUnified() ? DEFAULT_VMX_FPCR : 0u);
   a64_ctx->fpcr_vmx = DEFAULT_VMX_FPCR;
   a64_ctx->flags = (1U << kA64BackendNJMOn);  // NJM on by default
   a64_ctx->guest_tick_count = Clock::GetGuestTickCountPointer();
@@ -866,6 +875,9 @@ void A64Backend::SetGuestRoundingMode(void* ctx, unsigned int mode) {
   A64BackendContext* bctx = BackendContextForGuestContext(ctx);
   uint32_t control = mode & 7;
   uint32_t fpcr_val = fpcr_table[control];
+  if (A64FpcrUnified()) {
+    fpcr_val |= DEFAULT_VMX_FPCR;
+  }
 #if XE_COMPILER_MSVC
   // MSVC ARM64 intrinsic: ARM64_FPCR = register ID 0x5A20.
   _WriteStatusReg(0x5A20, static_cast<uint64_t>(fpcr_val));

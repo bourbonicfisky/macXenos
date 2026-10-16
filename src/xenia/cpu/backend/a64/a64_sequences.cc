@@ -4468,6 +4468,9 @@ struct SET_ROUNDING_MODE
 
     if (i.src1.is_constant) {
       uint32_t fpcr_val = fpcr_table[i.src1.constant() & 7];
+      if (A64FpcrUnified()) {
+        fpcr_val |= DEFAULT_VMX_FPCR;
+      }
       e.mov(e.x0, static_cast<uint64_t>(fpcr_val));
       e.msr(3, 3, 4, 4, 0, e.x0);  // msr FPCR, x0
       // Cache in backend context.
@@ -4492,6 +4495,9 @@ struct SET_ROUNDING_MODE
       e.mov(e.x0, reinterpret_cast<uint64_t>(fpcr_table));
       e.and_(e.w1, i.src1, 7);
       e.ldr(e.w0, Xbyak_aarch64::ptr(e.x0, e.x1, Xbyak_aarch64::LSL, 2));
+      if (A64FpcrUnified()) {
+        e.orr(e.w0, e.w0, DEFAULT_VMX_FPCR);
+      }
       // Write FPCR.
       e.msr(3, 3, 4, 4, 0, e.x0);
       // Cache in backend context.

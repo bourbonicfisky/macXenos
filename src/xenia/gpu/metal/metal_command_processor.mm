@@ -5579,6 +5579,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    !vertex_shader ? "no-vertex-shader" : "draw-objects-missing");
     return true;
   }
+  // CEILING PROBE (re5-perf-20261015): XE_METAL_PROBE_SKIP_SMALL_RT=<pitch>
+  // skips every draw whose RB_SURFACE_INFO pitch is <= that many pixels. RE5
+  // renders a 128x128 cube map (6 faces + ~42 per-mip quad passes) every
+  // frame; the ~48 tiny passes cost ~10 ms of GPU fixed overhead. The probe
+  // measures what removing that overhead would buy; the cube content is wrong
+  // while it is on. Never on by default.
+  static const uint32_t s_probe_skip_small_rt = [] {
+    const char* v = std::getenv("XE_METAL_PROBE_SKIP_SMALL_RT");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_probe_skip_small_rt) {
+    const uint32_t surface_pitch =
+        (*register_file_)[XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFFu;
+    if (surface_pitch && surface_pitch <= s_probe_skip_small_rt) {
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "probe-small-rt");
+      return true;
+    }
+  }
 
   // --- Gated tessellation route (port-xenios-tessellation task 4.1, design
   // D5b): selected BEFORE the geometry-emulation classification and
@@ -7868,6 +7886,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           // Snapshot serving cannot observe buffer-resident memexport bytes.
           memexport_order_safe = false;
         }
+        // CEILING PROBE (re5-perf-20261015): XE_METAL_PROBE_SKIP_CUBE_DEPS=1
+        // drops cube fetches from the dependency request. Cube maps cannot
+        // take the shared route, so a per-frame rendered cube (RE5's 128x128
+        // environment probe, mips 0-7) makes its draw a RAM consumer that
+        // drains ~55 GPU-resident resolves every frame. The probe serves
+        // stale RAM (wrong reflections) and only measures what GPU-side cube
+        // serving would be worth. Never on by default.
+        static const bool s_probe_skip_cube_deps = [] {
+          const char* v = std::getenv("XE_METAL_PROBE_SKIP_CUBE_DEPS");
+          return v && v[0] == '1' && !v[1];
+        }();
+        if (s_probe_skip_cube_deps &&
+            f.dimension == xenos::DataDimension::kCube) {
+          continue;
+        }
         if (!bridge_served) {
           request.resolve_ranges.Add(base_range);
           if (rng.mip_end > rng.mip_begin) {
@@ -7939,7 +7972,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             texture_resolve_consumers_buffer_read = false;
             // Name the precise failing condition, bounded (reopen census).
             static uint32_t s_blocker_detail_logs = 0;
-            if (s_gpu_ordering && s_blocker_detail_logs < 24) {
+            // XE_METAL_ORDERING_DETAIL_LOGS=N raises the bound (RE5 census:
+            // the default 24 were spent in the menus).
+            static const uint32_t s_blocker_detail_cap = [] {
+              const char* v = std::getenv("XE_METAL_ORDERING_DETAIL_LOGS");
+              return v ? uint32_t(strtoul(v, nullptr, 10)) : 24u;
+            }();
+            if (s_gpu_ordering && s_blocker_detail_logs < s_blocker_detail_cap) {
               ++s_blocker_detail_logs;
               XELOGI(
                   "MetalGpuOrderingBlockDetail draw={} base={:08X} fmt={} "
@@ -11241,6 +11280,18 @@ bool MetalCommandProcessor::IssueCopy() {
       XELOGW("Metal: resolve copy command 2 (DXT3A as 1_1_1_1) copy skipped");
     }
     resolve_info.copy_dest_extent_length = 0;
+  }
+  // CEILING PROBE (re5-perf-20261015): XE_METAL_PROBE_SKIP_SMALL_RESOLVE=<bytes>
+  // skips (copy AND clear) every resolve whose destination extent is at most
+  // that many bytes -- RE5's ~77 cube-face/mip resolves per frame (4-64 KB
+  // each) cost ~4 ms of per-op GPU overhead. Measurement only; never default.
+  static const uint32_t s_probe_skip_small_resolve = [] {
+    const char* v = std::getenv("XE_METAL_PROBE_SKIP_SMALL_RESOLVE");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_probe_skip_small_resolve && resolve_info.copy_dest_extent_length &&
+      resolve_info.copy_dest_extent_length <= s_probe_skip_small_resolve) {
+    return true;
   }
   {
     // Upstream-delta census (2026-10-09): depth resolved out of a
