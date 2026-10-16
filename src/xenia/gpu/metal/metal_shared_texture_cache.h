@@ -103,7 +103,9 @@ class MetalSharedTextureCache : public TextureCache {
   // prevents redundant loads) and runs the base RequestTextures flow, whose
   // LoadTextureDataFromResidentMemoryImpl encodes the direct dispatch on the
   // frame command buffer.
-  void PrepareEligible(uint32_t eligible_mask);
+  // dirty_mask: the fetch constants written since the last prep (bit per
+  // index); only those are re-parsed, the rest keep their bindings.
+  void PrepareEligible(uint32_t eligible_mask, uint32_t dirty_mask);
 
   // Loads served through the buffer-writing families since creation
   // (engagement evidence for the stage-1 widening).

@@ -1564,7 +1564,8 @@ void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
   binding_slot = BindingSlot{};
 }
 
-void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask) {
+void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
+                                              uint32_t dirty_mask) {
   if (!eligible_mask) {
     return;
   }
@@ -1573,10 +1574,10 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask) {
     last_begun_submission_ = submission;
     BeginSubmission(submission);
   }
-  // Per-draw re-parse of exactly the masked constants (no register-write
-  // notification exists in this backend; the base key comparison keeps
-  // unchanged bindings load-free).
-  uint32_t bits = eligible_mask;
+  // Re-parse only the eligible constants written since the last prep (the
+  // command processor's WriteRegister keeps the dirty mask); an unchanged
+  // binding keeps its texture, as in the D3D12 cache.
+  uint32_t bits = eligible_mask & dirty_mask;
   uint32_t index;
   while (xe::bit_scan_forward(bits, &index)) {
     bits = xe::clear_lowest_bit(bits);

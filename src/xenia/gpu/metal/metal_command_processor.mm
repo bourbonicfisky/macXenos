@@ -1716,6 +1716,20 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer(uint32_t site) {
   return frame_command_buffer_;
 }
 
+void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  // Texture fetch constants: 32 of 6 dwords from 0x4800
+  // (XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0). Mark the slot for the draw prep.
+  constexpr uint32_t kFetchBase = 0x4800u;
+  constexpr uint32_t kFetchEnd = kFetchBase + 32u * 6u;
+  if (index >= kFetchBase && index < kFetchEnd &&
+      register_file_->values[index] != value) {
+    // Titles re-upload the whole fetch block before most draws; only a
+    // changed dword makes the binding worth re-parsing.
+    fetch_constant_dirty_mask_ |= 1u << ((index - kFetchBase) / 6u);
+  }
+  CommandProcessor::WriteRegister(index, value);
+}
+
 void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
   // No pass boundary: the side buffer is committed ahead of the frame one
   // (CommitSideCommandBuffer), so a load encoded here executes before every
@@ -6050,6 +6064,63 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
     pixel_shader = nullptr;
   }
+  // Attribution bound (XE_METAL_DIAG_PS_NULL=1, never for play): drop EVERY
+  // pixel shader without side effects (no kill, depth output or memexport),
+  // so the draw rasterizes depth only. GPU busy with it on is the ceiling the
+  // translated pixel shaders' ALU, texture and colour-write work could buy.
+  // Classes (the value): 1 = every such shader; 2 = only shaders with dynamic
+  // register addressing; 3 = only shaders with >= 6 texture bindings; 4 =
+  // only shaders of >= 512 ucode dwords; 5 = only shaders whose static
+  // register bound is >= 32. The complement of a class's gain is what the
+  // rest costs.
+  static const uint32_t s_diag_ps_null = [] {
+    const char* v = std::getenv("XE_METAL_DIAG_PS_NULL");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_diag_ps_null && pixel_shader && !use_geometry_emulation &&
+      !pixel_shader->kills_pixels() && !pixel_shader->writes_depth() &&
+      !pixel_shader->memexport_eM_written()) {
+    bool in_class = true;
+    switch (s_diag_ps_null) {
+      case 2:
+        in_class = pixel_shader->uses_register_dynamic_addressing();
+        break;
+      case 3:
+        in_class = pixel_shader->texture_bindings().size() >= 6;
+        break;
+      case 4:
+        in_class = pixel_shader->ucode_dword_count() >= 512;
+        break;
+      case 5:
+        in_class = pixel_shader->register_static_address_bound() >= 32;
+        break;
+      default:
+        break;
+    }
+    if (in_class) {
+      pixel_shader = nullptr;
+    }
+  }
+  // XE_METAL_PS_CLASS_CENSUS=1: one line per distinct pixel shader (bounded)
+  // with the class fields above, to size the classes.
+  static const bool s_ps_class_census =
+      std::getenv("XE_METAL_PS_CLASS_CENSUS") != nullptr;
+  if (s_ps_class_census && pixel_shader) {
+    static std::unordered_set<uint64_t> s_seen;
+    if (s_seen.size() < 2048 &&
+        s_seen.insert(pixel_shader->ucode_data_hash()).second) {
+      XELOGI("MetalPsClass ps={:016X} dyn={} fetches={} dwords={} regs={} "
+             "kill={} depth={} memexport={}",
+             pixel_shader->ucode_data_hash(),
+             pixel_shader->uses_register_dynamic_addressing() ? 1 : 0,
+             pixel_shader->texture_bindings().size(),
+             pixel_shader->ucode_dword_count(),
+             pixel_shader->register_static_address_bound(),
+             pixel_shader->kills_pixels() ? 1 : 0,
+             pixel_shader->writes_depth() ? 1 : 0,
+             pixel_shader->memexport_eM_written() ? 1 : 0);
+    }
+  }
   // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
   // ucode disassembly to /tmp/xe_ps_<hash>.txt once, for single-shader
   // forensics (what inputs drive the color output).
@@ -8556,7 +8627,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     accumulate_eligible(pixel_shader);
     if (draw_shared_route_mask_) {
   draw_trace_milestone("after-eligible");
-      shared_texture_cache_->PrepareEligible(draw_shared_route_mask_);
+      static const bool s_fetch_dirty = [] {
+        const char* v = std::getenv("XE_METAL_FETCH_DIRTY");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      shared_texture_cache_->PrepareEligible(
+          draw_shared_route_mask_,
+          s_fetch_dirty ? fetch_constant_dirty_mask_ : ~0u);
+      {
+        // Census: how many eligible bindings were actually rewritten since
+        // the previous draw (the ceiling of what the dirty mask can skip).
+        static uint64_t s_draws = 0, s_eligible_bits = 0, s_dirty_bits = 0;
+        s_eligible_bits += xe::bit_count(draw_shared_route_mask_);
+        s_dirty_bits += xe::bit_count(draw_shared_route_mask_ &
+                                      fetch_constant_dirty_mask_);
+        if ((++s_draws & 65535) == 0) {
+          XELOGI("MetalFetchDirty draws={} eligible/draw={:.2f} dirty/draw={:.2f}",
+                 s_draws, double(s_eligible_bits) / s_draws,
+                 double(s_dirty_bits) / s_draws);
+        }
+      }
+      fetch_constant_dirty_mask_ &= ~draw_shared_route_mask_;
       // Verify every routed fetch is actually servable now (its load may
       // have been refused: unmappable range, view or slot failure). A fetch
       // that cannot be served GPU-side leaves the mask, and if this draw

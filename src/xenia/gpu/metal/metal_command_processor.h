@@ -506,6 +506,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // same submission id.
   void* side_command_buffer_ = nullptr;
   void* PrepareSideTransferCommandBuffer();
+  // Fetch constants written since the shared texture cache last parsed
+  // them (bit = fetch constant index). Set by WriteRegister, consumed by the
+  // draw prep: a draw whose fetch constants did not change since the previous
+  // draw re-parses none of them (the D3D12 cache's register-write rule; before
+  // this every draw re-parsed every binding, ~5 ms a frame of RDR's 3789
+  // draws). XE_METAL_FETCH_DIRTY=0 restores the per-draw re-parse.
+  uint32_t fetch_constant_dirty_mask_ = ~0u;
+  void WriteRegister(uint32_t index, uint32_t value) override;
   void CommitSideCommandBuffer(uint64_t submission, uint64_t submit_epoch);
 
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)
