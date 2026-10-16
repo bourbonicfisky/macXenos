@@ -53,10 +53,16 @@ DEFINE_string(
     "guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved "
     "but not yet implemented.",
     "CPU");
-DEFINE_string(guest_thread_qos_class, "user_initiated",
+// The class default is the one every A/B measured (2026-10-15: Mafia II 25 ->
+// 56 fps on the M1 Max, 34 -> 57 on the M4 with priority/all); it has no
+// effect while the policy is off, which stays the default: on 4-P-core Macs
+// every policy costs Just Cause 2 and Resident Evil 5 1-2 fps, so the user
+// picks per title (Graphics and CPU preferences).
+DEFINE_string(guest_thread_qos_class, "user_interactive",
               "macOS only: QoS class applied when guest_thread_qos selects a "
-              "thread: 'user_initiated' (default) | 'user_interactive'.",
+              "thread: 'user_initiated' | 'user_interactive' (default).",
               "CPU");
+UPDATE_from_string(guest_thread_qos_class, 2026, 10, 16, 0, "user_initiated");
 DEFINE_int32(guest_thread_qos_priority_threshold, 1,
              "macOS only: with guest_thread_qos=priority, tag guest threads "
              "whose guest priority is >= this value.",

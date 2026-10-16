@@ -154,6 +154,14 @@ export const en = {
   "graphics.unsetInputs.on": "On",
   "graphics.unsetInputs.off": "Off",
   "graphics.unsetInputs.aside": "Auto fills in a neutral value only for games known to need it, today Resident Evil 5. On does it for every game, which changes Halo 3's lighting; Off never does.",
+  "graphics.qos.label": "Performance cores",
+  "graphics.qos.body": "Asks macOS to keep the game's threads on the Mac's performance cores. Left alone, macOS parks most of them on efficiency cores, which starves some games: with high-priority threads Mafia II goes from 34 to 57 fps and Grand Theft Auto IV from 32 to 38 on an M4.",
+  "graphics.qos.off": "Off",
+  "graphics.qos.priority": "High-priority threads",
+  "graphics.qos.priorityShort": "Priority",
+  "graphics.qos.all": "Every thread",
+  "graphics.qos.allShort": "All",
+  "graphics.qos.aside": "On Macs with four performance cores it can also cost a little: Just Cause 2 and Resident Evil 5 lose 1 to 2 fps. Try High-priority threads first; Off is safe everywhere. Takes effect when the game next starts.",
 
   // --- Controller > Button mapping -------------------------------------------------
   "controller.map.title": "Button mapping",

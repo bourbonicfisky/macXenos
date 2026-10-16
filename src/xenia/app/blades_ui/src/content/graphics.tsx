@@ -323,6 +323,32 @@ export function graphics(state: NativeState): BladeDef {
     });
   }
 
+  // Guest-thread QoS (also under CPU). A Graphics row because it is the
+  // single biggest frame-rate switch on Apple Silicon and has no safe default:
+  // 2026-10-15 A/Bs, M4 mini: priority + user_interactive Mafia II 34 -> 57,
+  // GTA IV 32 -> 38, Banjo/Judgment 0, JC2 29.8 -> 27.5, RE5 13.7 -> 12.3;
+  // M1 Max (8 P-cores): no loser.
+  const qosPolicies: Option[] = [
+    { value: "off", label: t("graphics.qos.off"), short: t("graphics.qos.off"), recommended: true },
+    { value: "priority", label: t("graphics.qos.priority"), short: t("graphics.qos.priorityShort") },
+    { value: "all", label: t("graphics.qos.all"), short: t("graphics.qos.allShort") }
+  ];
+  menu.push({
+    id: "performance-cores",
+    label: t("graphics.qos.label"),
+    glyph: "chip",
+    value: <Value name="guest_thread_qos" options={qosPolicies} />,
+    heading: t("graphics.qos.label"),
+    detail: (
+      <>
+        <p>{t("graphics.qos.body")}</p>
+        <Options name="guest_thread_qos" title={t("graphics.qos.label")} options={qosPolicies} />
+        <Aside>{t("graphics.qos.aside")}</Aside>
+        <NextLaunchNote names={["guest_thread_qos"]} />
+      </>
+    )
+  });
+
   menu.push({
     id: "troubleshooting",
     label: "Troubleshooting",

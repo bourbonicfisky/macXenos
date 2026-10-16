@@ -2667,9 +2667,9 @@
 "name": "guest_thread_qos_class",
 "category": "CPU",
 "type": "string",
-"value": "user_initiated",
-"defaultValue": "user_initiated",
-"description": "macOS only: QoS class applied when guest_thread_qos selects a thread: 'user_initiated' (default) | 'user_interactive'.",
+"value": "user_interactive",
+"defaultValue": "user_interactive",
+"description": "macOS only: QoS class applied when guest_thread_qos selects a thread: 'user_initiated' | 'user_interactive' (default).",
 "changed": false
 },
 "guest_thread_qos_priority_threshold": {
