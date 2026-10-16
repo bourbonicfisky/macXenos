@@ -2879,6 +2879,26 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // USF4 fights 45.4 -> 49.4 fps (reduce-edram-pass-traffic).
   const bool ms_resolve_store =
       raster_sample_count > 1u && MsaaResolveOnStoreEnabled();
+  // Attribution probes (frame output is wrong with either): measure what the
+  // per-pass attachment load / store traffic costs on the GPU by dropping it.
+  // XE_METAL_PROBE_LOAD_DONTCARE=1 loads nothing, XE_METAL_PROBE_STORE_DONTCARE=1
+  // stores nothing (MSAA resolve-on-store keeps its resolve). Compare GPU busy
+  // against the baseline run; the difference is the traffic share.
+  static const bool s_probe_load_dontcare = [] {
+    const char* v = std::getenv("XE_METAL_PROBE_LOAD_DONTCARE");
+    return v && v[0] == '1' && !v[1];
+  }();
+  static const bool s_probe_store_dontcare = [] {
+    const char* v = std::getenv("XE_METAL_PROBE_STORE_DONTCARE");
+    return v && v[0] == '1' && !v[1];
+  }();
+  const MTLLoadAction probe_load =
+      s_probe_load_dontcare ? MTLLoadActionDontCare : MTLLoadActionLoad;
+  const MTLStoreAction probe_store =
+      s_probe_store_dontcare ? MTLStoreActionDontCare : MTLStoreActionStore;
+  const MTLStoreAction probe_store_resolve =
+      s_probe_store_dontcare ? MTLStoreActionMultisampleResolve
+                             : MTLStoreActionStoreAndMultisampleResolve;
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     if (!color_targets[i]) {
       continue;
@@ -2887,14 +2907,13 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     // ownership transfers / persistence, clears from guest resolve clears.
     pass.colorAttachments[i].texture =
         (__bridge id<MTLTexture>)color_targets[i];
-    pass.colorAttachments[i].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[i].loadAction = probe_load;
     if (ms_resolve_store) {
       pass.colorAttachments[i].resolveTexture =
           (__bridge id<MTLTexture>)color_resolves[i];
-      pass.colorAttachments[i].storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
+      pass.colorAttachments[i].storeAction = probe_store_resolve;
     } else {
-      pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+      pass.colorAttachments[i].storeAction = probe_store;
     }
   }
   // Depth attachment: cleared to the GUEST's depth-clear value (RB_DEPTH_CLEAR,
@@ -2903,30 +2922,28 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // fail z>=1.0 -> black. Reading the guest value serves both directions.
   if (depth && bind_depth_plane) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
-    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.loadAction = probe_load;
     if (ms_resolve_store) {
       pass.depthAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;
       pass.depthAttachment.depthResolveFilter =
           MTLMultisampleDepthResolveFilterSample0;
-      pass.depthAttachment.storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
+      pass.depthAttachment.storeAction = probe_store_resolve;
     } else {
-      pass.depthAttachment.storeAction = MTLStoreActionStore;
+      pass.depthAttachment.storeAction = probe_store;
     }
   }
   if (depth && bind_stencil_plane) {
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
-    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+    pass.stencilAttachment.loadAction = probe_load;
     if (ms_resolve_store) {
       pass.stencilAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;
       pass.stencilAttachment.stencilResolveFilter =
           MTLMultisampleStencilResolveFilterSample0;
-      pass.stencilAttachment.storeAction =
-          MTLStoreActionStoreAndMultisampleResolve;
+      pass.stencilAttachment.storeAction = probe_store_resolve;
     } else {
-      pass.stencilAttachment.storeAction = MTLStoreActionStore;
+      pass.stencilAttachment.storeAction = probe_store;
     }
   }
   if (!depth && primary_color_target && dummy_depth_pass_) {
