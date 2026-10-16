@@ -1734,6 +1734,46 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
       retired_textures_.emplace_back(RetireSubmission(), parked.texture);
     }
   }
+  // Signed twin. A shader's signed and unsigned bindings of one texture key
+  // apart, and the legacy path untiled the same guest bytes once per key
+  // (Rage 2026-10-15: every streamed texture twice, 19 of 39 ms/frame). Serve
+  // the second binding from the first's host texture: the same pixel format
+  // shares it, a unorm/snorm pair takes a format view (the shared route already
+  // serves signed bindings as views). The entry carries the twin's guest range
+  // and hash, so a guest write evicts both. XE_METAL_TEX_SIGNED_TWIN=0 disables.
+  static const bool s_signed_twin = [] {
+    const char* v = std::getenv("XE_METAL_TEX_SIGNED_TWIN");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (s_signed_twin) {
+    uint32_t twin_mip_min = 0, twin_mip_max = 0;
+    const uint64_t twin_key =
+        MakeTextureKey(fetch, !is_signed, base, width, height, depth,
+                       pitch_texels, &twin_mip_min, &twin_mip_max);
+    auto twin_it = cache_.find(twin_key);
+    if (twin_it != cache_.end() && twin_it->second.texture) {
+      // Copy: AllocateSlot may evict entries and invalidate the iterator.
+      const Entry twin = twin_it->second;
+      id<MTLTexture> twin_tex = (__bridge id<MTLTexture>)twin.texture;
+      id<MTLTexture> alias = twin_tex.pixelFormat == plan.host_format
+                                 ? twin_tex
+                                 : [twin_tex newTextureViewWithPixelFormat:
+                                                 plan.host_format];
+      if (alias) {
+        uint32_t slot = AllocateSlot();
+        if (slot) {
+          void* alias_ptr = (__bridge_retained void*)alias;
+          WriteSlotDescriptor(slot, alias_ptr);
+          EmplaceEntry(key, Entry{alias_ptr, slot, twin.guest_base,
+                                  twin.guest_bytes, twin.mip_base,
+                                  twin.mip_bytes, twin.guest_hash});
+          active_textures_.push_back(alias_ptr);
+          ++census_signed_twin_;
+          return slot;
+        }
+      }
+    }
+  }
   const uint8_t* guest =
       static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
   if (!guest) {
@@ -2620,11 +2660,14 @@ std::string MetalTextureCache::ConsumeUntileTimingReport(uint32_t frames) {
   std::string report = fmt::format(
       "untile {:.2f} ms/frame over {:.1f} misses/frame; top:{}; inval/frame:{}; "
       "revalidated {:.1f}/frame in {:.2f} ms (changed {:.1f}, parked {}); "
+      "signed-twin {:.1f}/frame; "
       "evicting ranges (calls/evicted per frame):{}",
       double(untile_total_ns_) / 1e6 / f, float(untile_total_count_) / f,
       top, inval, float(census_revalidated_) / f,
       double(census_revalidate_ns_) / 1e6 / f,
-      float(census_revalidate_changed_) / f, parked_.size(), top_ranges);
+      float(census_revalidate_changed_) / f, parked_.size(),
+      float(census_signed_twin_) / f, top_ranges);
+  census_signed_twin_ = 0;
   census_revalidated_ = 0;
   census_revalidate_changed_ = 0;
   census_revalidate_ns_ = 0;

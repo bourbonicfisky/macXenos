@@ -558,6 +558,9 @@ class MetalTextureCache {
   uint32_t census_revalidated_ = 0;
   uint32_t census_revalidate_changed_ = 0;
   uint64_t census_revalidate_ns_ = 0;
+  // Signed-twin aliases served instead of a second untile (see
+  // GetTextureSlotUnswizzledNull).
+  uint32_t census_signed_twin_ = 0;
   std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> inval_ranges_;
   std::vector<void*> active_textures_;
 
