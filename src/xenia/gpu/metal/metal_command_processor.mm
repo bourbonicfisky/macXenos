@@ -15647,6 +15647,15 @@ void MetalCommandProcessor::NoteGpuBusyInterval(double start, double end) {
   if (!(end > start) || start <= 0.0) {
     return;
   }
+  // A command buffer that never ran on the GPU (faulted, or dropped by the
+  // driver) can report a garbage end stamp; one such interval would push
+  // last_end years ahead and clamp every later interval to zero for the rest
+  // of the run (Banjo/Judgment attribution 2026-10-15 read 0.00 ms after one
+  // 48037563206 ms interval). Reject anything over 5 s or in the future.
+  const double now = [NSProcessInfo processInfo].systemUptime;
+  if (end - start > 5.0 || end > now + 1.0) {
+    return;
+  }
   GpuBusyAccumulator& accumulator = GpuBusy();
   std::lock_guard<std::mutex> lock(accumulator.mutex);
   double begin = std::max(start, accumulator.last_end);
