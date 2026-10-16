@@ -113,6 +113,15 @@ class Emulator {
   // Folder files safe to remove without significant side effects are stored in.
   const std::filesystem::path& cache_root() const { return cache_root_; }
 
+  // Folder saved games go to when the save_root cvar is empty; empty keeps
+  // them with the rest of the content. Set before Setup.
+  const std::filesystem::path& default_save_root() const {
+    return default_save_root_;
+  }
+  void set_default_save_root(const std::filesystem::path& path) {
+    default_save_root_ = path;
+  }
+
   // Name of the title in the default language.
   const std::string& title_name() const { return title_name_; }
 
@@ -343,6 +352,7 @@ class Emulator {
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
+  std::filesystem::path default_save_root_;
 
   std::string title_name_;
   std::string title_version_;

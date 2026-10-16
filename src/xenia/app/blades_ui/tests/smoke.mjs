@@ -310,7 +310,7 @@ const tests = {
   async "Game saves chooses a folder"(page, base) {
     await page.open(base, "#system/saves");
     const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
-    expect((await page.eval(`${pane}.textContent`)).includes("Default (with the rest of your content)"), "no default shown");
+    expect((await page.eval(`${pane}.textContent`)).includes("Default (Documents › macXenos › Saves)"), "no default shown");
     await page.eval(`[...${pane}.querySelectorAll('button')].find((b) => b.textContent === 'Choose folder…').click()`);
     await page.eval("new Promise((r) => setTimeout(r, 100))");
     expect((await page.eval(`${pane}.textContent`)).includes("/Volumes/Games/Chosen"), "chosen folder not shown");

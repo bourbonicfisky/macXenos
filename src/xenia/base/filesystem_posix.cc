@@ -74,17 +74,9 @@ std::filesystem::path GetExecutableFolder() {
   return GetExecutablePath().parent_path();
 }
 
-std::filesystem::path GetUserFolder() {
-  // get preferred data home
-  char* home = std::getenv("XDG_DATA_HOME");
-  if (home) {
-    return std::string(home);
-  }
-
-  // if XDG_DATA_HOME not set, fallback to HOME directory
-  home = std::getenv("HOME");
-
-  // if HOME not set, fall back to this
+// The user's home folder: HOME, or the password database without it.
+static std::filesystem::path GetHomeFolder() {
+  const char* home = std::getenv("HOME");
   if (home == NULL) {
     struct passwd pw1;
     struct passwd* pw;
@@ -93,9 +85,29 @@ std::filesystem::path GetUserFolder() {
     assert(&pw1 == pw);  // sanity check
     home = pw->pw_dir;
   }
-
-  return std::filesystem::path(home) / ".local" / "share";
+  return std::filesystem::path(home);
 }
+
+std::filesystem::path GetUserFolder() {
+  // get preferred data home
+  char* home = std::getenv("XDG_DATA_HOME");
+  if (home) {
+    return std::string(home);
+  }
+
+  // if XDG_DATA_HOME not set, fallback to HOME directory
+  return GetHomeFolder() / ".local" / "share";
+}
+
+#if XE_PLATFORM_MAC
+std::filesystem::path GetMacStorageFolder() {
+  return GetHomeFolder() / "Library" / "Application Support" / "macXenos";
+}
+
+std::filesystem::path GetMacSavesFolder() {
+  return GetHomeFolder() / "Documents" / "macXenos" / "Saves";
+}
+#endif  // XE_PLATFORM_MAC
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
   return fopen(path.c_str(), std::string(mode).c_str());

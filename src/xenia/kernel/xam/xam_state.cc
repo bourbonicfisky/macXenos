@@ -13,9 +13,10 @@
 #include "xenia/emulator.h"
 
 DEFINE_path(save_root, "",
-            "Root path for saved games, or empty to keep them with the rest "
-            "of the content (content_root). Relative paths are under the "
-            "storage root.",
+            "Root path for saved games, or empty for the default: "
+            "~/Documents/macXenos/Saves on macOS, otherwise with the rest of "
+            "the content (content_root). Relative paths are under the storage "
+            "root.",
             "Storage");
 
 namespace xe {
@@ -30,10 +31,14 @@ XamState::XamState(Emulator* emulator, KernelState* kernel_state)
   if (!content_root.empty()) {
     content_root = std::filesystem::absolute(content_root);
   }
-  // Saved games: their own folder when save_root is set. One that can't be
-  // reached (a drive that isn't attached) falls back to the content root
-  // rather than leave games unable to save.
+  // Saved games: their own folder when save_root is set, else the
+  // emulator's default (macOS: ~/Documents/macXenos/Saves), else with the
+  // content. One that can't be reached (a drive that isn't attached) falls
+  // back to the content root rather than leave games unable to save.
   std::filesystem::path save_root = cvars::save_root;
+  if (save_root.empty()) {
+    save_root = emulator->default_save_root();
+  }
   if (save_root.empty()) {
     save_root = content_root;
   } else {

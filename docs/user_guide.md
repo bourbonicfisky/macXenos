@@ -129,14 +129,28 @@ belong to the profile that is signed in.
 
 ## Where macXenos keeps your files
 
-Settings, saves, the shader cache and the log are kept in:
+Game saves are kept in your Documents folder:
 
 ```
-~/.local/share/Xenia
+~/Documents/macXenos/Saves
 ```
 
-This folder is hidden by default. In Finder, choose **Go > Go to Folder…**
-and paste the path above.
+Everything else (settings, profiles, downloads and title updates, game
+installs, the shader cache and the log) is kept in:
+
+```
+~/Library/Application Support/macXenos
+```
+
+The Library folder is hidden by default. In Finder, choose **Go > Go to
+Folder…** and paste the path above. Both folders can be changed on the
+**System** blade (**Game saves** and **Game installs**).
+
+Versions before 1.0 kept everything in `~/.local/share/Xenia`. The first
+time a newer version starts, it copies that folder to Application Support
+and moves the saves in the copy to Documents. The old folder is left as it
+was, as a backup; once you're happy everything came across, you can delete
+it.
 
 Inside it:
 

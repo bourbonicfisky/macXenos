@@ -11,6 +11,7 @@
 #define XENIA_CONFIG_H_
 
 #include <filesystem>
+#include <string>
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wabsolute-value"
@@ -23,6 +24,9 @@
 toml::parse_result ParseFile(const std::filesystem::path& filename);
 
 namespace config {
+// The config file's name in the storage root.
+extern std::string config_name;
+
 void SetupConfig(const std::filesystem::path& config_folder);
 void LoadGameConfig(const std::string_view title_id);
 void SaveConfig();

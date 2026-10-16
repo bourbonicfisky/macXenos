@@ -307,7 +307,7 @@ export const en = {
   "folder.toastDefault": "{name}: Default (next launch)",
   "saves.label": "Game saves",
   "saves.detail": "Where game saves are kept. Choose a synced or backed-up folder to keep them safe; profiles, downloads and updates stay in the content folder.",
-  "saves.default": "Default (with the rest of your content)",
+  "saves.default": "Default (Documents › macXenos › Saves)",
   "saves.pickerTitle": "Choose Game Save Folder",
   "saves.note": "Applies the next time macXenos starts. Saves already made stay where they are: move the folders named after each profile across yourself to keep playing them.",
   "installs.label": "Game installs",

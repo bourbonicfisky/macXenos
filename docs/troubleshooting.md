@@ -59,9 +59,10 @@ to **Controller > Dashboard shortcut** and choose **Back + Start**.
 ## Starting over with default settings
 
 Quit macXenos and delete (or rename) `xenia-canary.config.toml` in
-`~/.local/share/Xenia`. macXenos writes a fresh one with the default
-settings the next time it starts. Your saves and profiles are kept elsewhere
-in the same folder and are not touched.
+`~/Library/Application Support/macXenos`. macXenos writes a fresh one with
+the default settings the next time it starts. Your profiles are kept
+elsewhere in the same folder and your saves in `~/Documents/macXenos/Saves`;
+neither is touched.
 
 ## Reporting a problem
 
@@ -70,8 +71,8 @@ Please include:
 - the game's name and, if you know it, its title ID,
 - your Mac model and macOS version,
 - which renderer you were using (it's shown in the window's title bar),
-- the log file, `~/.local/share/Xenia/xenia.log`, from the run that went
-  wrong,
+- the log file, `~/Library/Application Support/macXenos/xenia.log`, from
+  the run that went wrong,
 - a screenshot, if it's a graphics problem.
 
 For graphics problems, a GPU trace is the most useful thing you can send.

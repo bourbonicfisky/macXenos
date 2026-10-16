@@ -56,7 +56,7 @@ body:
     type: textarea
     attributes:
       label: Log file
-      description: Attach `~/.local/share/Xenia/xenia.log` from the run that went wrong.
+      description: Attach `~/Library/Application Support/macXenos/xenia.log` from the run that went wrong.
   - id: extra
     type: textarea
     attributes:

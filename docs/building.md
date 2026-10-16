@@ -91,7 +91,7 @@ build/bin/macOS/Release/xenia_canary "/path/to/game.iso"
 ```
 
 A bare binary writes its log next to itself. The packaged app writes it to
-`~/.local/share/Xenia/xenia.log`.
+`~/Library/Application Support/macXenos/xenia.log`.
 
 ## Packaging the app
 

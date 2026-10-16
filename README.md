@@ -59,7 +59,9 @@ The Vulkan renderer (through MoltenVK) is still included as a fallback.
 The first time you play a game, it will stutter for a while as it builds its
 shaders. Later runs are smoother.
 
-Settings, saves and the log are kept in `~/.local/share/Xenia`.
+Saves are kept in `~/Documents/macXenos/Saves`. Settings, profiles,
+downloads, game installs and the log are kept in
+`~/Library/Application Support/macXenos`.
 
 The [user guide](docs/user_guide.md) covers the dashboard, controllers,
 graphics settings and more.

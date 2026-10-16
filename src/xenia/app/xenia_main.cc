@@ -8,7 +8,10 @@
  */
 
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -34,6 +37,10 @@
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
+
+#if XE_PLATFORM_MAC
+#include <copyfile.h>
+#endif
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
@@ -168,6 +175,7 @@ DEFINE_transient_bool(portable, true,
 #endif
 
 DECLARE_bool(debug);
+DECLARE_path(save_root);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
 
@@ -180,6 +188,112 @@ namespace app {
 
 namespace {
 std::shared_ptr<const hid::scripted::InputScript> prepared_input_script;
+
+#if XE_PLATFORM_MAC
+// Copies (APFS clones, so no extra space until something changes) a file or
+// folder to `to`, through a temporary name so an interrupted copy never
+// leaves a half-copied entry behind.
+bool CloneEntry(const std::filesystem::path& from,
+                const std::filesystem::path& to) {
+  std::filesystem::path partial = to;
+  partial += ".copying";
+  std::error_code ec;
+  std::filesystem::remove_all(partial, ec);
+  if (copyfile(from.c_str(), partial.c_str(), nullptr,
+               COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_CLONE) != 0) {
+    XELOGE("Could not copy {} to {}: {}", from, partial, strerror(errno));
+    std::filesystem::remove_all(partial, ec);
+    return false;
+  }
+  std::filesystem::rename(partial, to, ec);
+  if (ec) {
+    XELOGE("Could not rename {} to {}: {}", partial, to, ec.message());
+    std::filesystem::remove_all(partial, ec);
+    return false;
+  }
+  return true;
+}
+
+// The storage root used to be ~/.local/share/Xenia, which Finder hides. On
+// the first launch with the new default the old folder is duplicated into it
+// (entry by entry, skipping what is already there, such as the log opened
+// before this runs) and left untouched as a backup.
+void CopyLegacyStorage(const std::filesystem::path& legacy,
+                       const std::filesystem::path& storage_root) {
+  const std::filesystem::path marker = storage_root / ".copied-from-legacy";
+  std::error_code ec;
+  if (!std::filesystem::is_directory(legacy, ec) ||
+      std::filesystem::exists(storage_root / config::config_name, ec) ||
+      std::filesystem::exists(marker, ec)) {
+    return;
+  }
+  XELOGI("Copying the old storage folder {} to {}", legacy, storage_root);
+  std::filesystem::create_directories(storage_root, ec);
+  bool ok = !ec;
+  for (const auto& entry : std::filesystem::directory_iterator(legacy, ec)) {
+    const std::filesystem::path to = storage_root / entry.path().filename();
+    if (std::filesystem::exists(to)) {
+      continue;
+    }
+    ok &= CloneEntry(entry.path(), to);
+  }
+  if (ok && !ec) {
+    std::ofstream(marker) << legacy.string() << "\n";
+    XELOGI("Old storage folder copied; {} is left as it was", legacy);
+  } else {
+    XELOGW("Old storage folder only partly copied; retrying next launch");
+  }
+}
+
+// Saved games now default to their own folder. When it doesn't exist yet,
+// the saves already under the content root (<xuid>/<title>/00000001 and
+// their headers) move into it, keeping the same layout.
+void MoveSavesToDefaultFolder(const std::filesystem::path& content_root,
+                              const std::filesystem::path& save_root) {
+  std::error_code ec;
+  if (std::filesystem::exists(save_root, ec)) {
+    return;
+  }
+  std::filesystem::create_directories(save_root, ec);
+  if (ec) {
+    return;
+  }
+  const std::filesystem::path save_type = "00000001";
+  size_t moved = 0;
+  for (const auto& xuid : std::filesystem::directory_iterator(content_root, ec)) {
+    if (!xuid.is_directory()) {
+      continue;
+    }
+    std::error_code title_ec;
+    for (const auto& title :
+         std::filesystem::directory_iterator(xuid.path(), title_ec)) {
+      const std::filesystem::path relative =
+          std::filesystem::path(xuid.path().filename()) / title.path().filename();
+      for (const std::filesystem::path& part :
+           {save_type, std::filesystem::path("Headers") / save_type}) {
+        const std::filesystem::path from = title.path() / part;
+        if (!std::filesystem::is_directory(from)) {
+          continue;
+        }
+        const std::filesystem::path to = save_root / relative / part;
+        std::error_code move_ec;
+        std::filesystem::create_directories(to.parent_path(), move_ec);
+        std::filesystem::rename(from, to, move_ec);
+        if (move_ec) {
+          // Another volume: copy, and remove the original only once copied.
+          if (!CloneEntry(from, to)) {
+            continue;
+          }
+          std::filesystem::remove_all(from, move_ec);
+        }
+        ++moved;
+      }
+    }
+  }
+  XELOGI("Moved {} save folders from {} to {}", moved, content_root,
+         save_root);
+}
+#endif  // XE_PLATFORM_MAC
 }  // namespace
 
 class EmulatorApp final : public xe::ui::WindowedApp {
@@ -541,6 +655,9 @@ bool EmulatorApp::OnInitialize() {
 
   // Figure out where internal files and content should go.
   std::filesystem::path storage_root = cvars::storage_root;
+  // macOS defaults: storage in Application Support, saves in Documents. Only
+  // when neither the storage folder nor portable mode was chosen.
+  [[maybe_unused]] bool mac_default_folders = false;
   if (storage_root.empty()) {
     storage_root = xe::filesystem::GetExecutableFolder();
     if (!cvars::portable &&
@@ -548,6 +665,11 @@ bool EmulatorApp::OnInitialize() {
       storage_root = xe::filesystem::GetUserFolder();
 #if XE_PLATFORM_ANDROID
       // TODO(Triang3l): Point to the app's external storage "files" directory.
+#elif XE_PLATFORM_MAC
+      const std::filesystem::path legacy = storage_root / "Xenia";
+      storage_root = xe::filesystem::GetMacStorageFolder();
+      CopyLegacyStorage(legacy, storage_root);
+      mac_default_folders = true;
 #else
       storage_root = storage_root / "Xenia";
 #endif
@@ -624,6 +746,17 @@ bool EmulatorApp::OnInitialize() {
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ =
       std::make_unique<Emulator>("", storage_root, content_root, cache_root);
+#if XE_PLATFORM_MAC
+  // Saves default to ~/Documents/macXenos/Saves, unless the content folder
+  // was chosen too (then they stay with it, as before).
+  if (mac_default_folders && cvars::content_root.empty()) {
+    const std::filesystem::path save_root = xe::filesystem::GetMacSavesFolder();
+    if (cvars::save_root.empty()) {
+      MoveSavesToDefaultFolder(content_root, save_root);
+    }
+    emulator_->set_default_save_root(save_root);
+  }
+#endif  // XE_PLATFORM_MAC
 
   // Main emulator display window.
   emulator_window_ =

@@ -2975,7 +2975,7 @@
 "type": "path",
 "value": "",
 "defaultValue": "",
-"description": "Root path for saved games, or empty to keep them with the rest of the content (content_root). Relative paths are under the storage root.",
+"description": "Root path for saved games, or empty for the default: ~/Documents/macXenos/Saves on macOS, otherwise with the rest of the content (content_root). Relative paths are under the storage root.",
 "changed": false
 },
 "storage_selection_dialog": {

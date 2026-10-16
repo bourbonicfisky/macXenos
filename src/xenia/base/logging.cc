@@ -456,12 +456,12 @@ void InitializeLogging(const std::string_view app_name) {
 #if XE_PLATFORM_MAC
     // Inside a signed .app bundle the executable folder is sealed (writing
     // there breaks the signature and /Applications is often read-only), so
-    // log beside the user's storage root instead. Bare dev binaries keep
+    // log in the default storage root instead. Bare dev binaries keep
     // logging next to the executable.
     if (log_folder.filename() == "MacOS" &&
         log_folder.parent_path().filename() == "Contents" &&
         log_folder.parent_path().parent_path().extension() == ".app") {
-      log_folder = xe::filesystem::GetUserFolder() / "Xenia";
+      log_folder = xe::filesystem::GetMacStorageFolder();
       std::filesystem::create_directories(log_folder);
     }
 #endif  // XE_PLATFORM_MAC

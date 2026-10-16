@@ -40,6 +40,15 @@ std::filesystem::path GetExecutableFolder();
 // Get user folder.
 std::filesystem::path GetUserFolder();
 
+#if XE_PLATFORM_MAC
+// ~/Library/Application Support/macXenos: the default storage root (config,
+// profiles, downloads and updates, game installs, caches and logs).
+std::filesystem::path GetMacStorageFolder();
+
+// ~/Documents/macXenos/Saves: the default folder for saved games.
+std::filesystem::path GetMacSavesFolder();
+#endif  // XE_PLATFORM_MAC
+
 // Creates the parent folder of the specified path if needed.
 // This can be used to ensure the destination path for a new file exists before
 // attempting to create it.
