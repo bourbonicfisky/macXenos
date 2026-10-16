@@ -504,11 +504,23 @@ TextureCache::Texture::Texture(TextureCache& texture_cache,
 }
 
 TextureCache::Texture::~Texture() {
-  if (mips_watch_handle_) {
-    texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
-  }
-  if (base_watch_handle_) {
-    texture_cache().shared_memory().UnwatchMemoryRange(base_watch_handle_);
+  {
+    // The handles must be read under the global lock: FireWatches runs on the
+    // guest thread that wrote the memory, releases the range and nulls the
+    // handle through WatchCallback, so a handle read before the lock could be
+    // a range already released (then released again here: the free list
+    // self-loops and WatchMemoryRange later writes into __TEXT). Rage's
+    // CPU-streamed megatexture on the GPU route hit it within minutes
+    // (2026-10-16). UnwatchMemoryRange re-acquires the recursive lock.
+    auto global_lock = texture_cache_.global_critical_region_.Acquire();
+    if (mips_watch_handle_) {
+      texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
+      mips_watch_handle_ = nullptr;
+    }
+    if (base_watch_handle_) {
+      texture_cache().shared_memory().UnwatchMemoryRange(base_watch_handle_);
+      base_watch_handle_ = nullptr;
+    }
   }
 
   // Only remove from usage list if we were added to it (track_usage=true).

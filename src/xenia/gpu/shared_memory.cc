@@ -366,6 +366,26 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
 }
 
 void SharedMemory::UnlinkWatchRange(WatchRange* range) {
+  // A range released twice puts itself on the free list as a self-loop; the
+  // next two allocations then hand out the live range and read its callback
+  // pointer as the free-list head (SIGBUS in WatchMemoryRange writing into
+  // __TEXT, Rage / Banjo 2026-10-16). page_first is outside the next_free
+  // union member, so a poison there survives on the free list and names the
+  // second release here instead of the later allocation.
+  constexpr uint32_t kReleasedPoison = 0xFFFFFFFFu;
+  if (range->page_first == kReleasedPoison &&
+      range->page_last == kReleasedPoison) {
+    // Already on the free list: a second release would self-loop it. The
+    // known cause (Texture::~Texture reading its handle before the global
+    // lock) is fixed; keep the guard so any other path logs instead of
+    // corrupting the pool.
+    static uint32_t s_logged = 0;
+    if (s_logged++ < 8) {
+      XELOGE("SharedMemory: watch range {} released twice; ignoring",
+             static_cast<const void*>(range));
+    }
+    return;
+  }
   uint32_t bucket =
       range->page_first << page_size_log2_ >> kWatchBucketSizeLog2;
   WatchNode* node = range->node_first;
@@ -384,6 +404,8 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
     node = node_next;
     ++bucket;
   }
+  range->page_first = kReleasedPoison;
+  range->page_last = kReleasedPoison;
   range->next_free = watch_range_first_free_;
   watch_range_first_free_ = range;
 }
