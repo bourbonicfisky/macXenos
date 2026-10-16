@@ -219,6 +219,19 @@ class MetalSharedMemory : public SharedMemory {
     return false;
   }
 
+  // True when a pending GPU producer (an unpublished resolve writeback or a
+  // memexport, GPU-current in the buffer) overlaps [start, start + length):
+  // its bytes land when its command buffer runs, so a load committed ahead
+  // of the frame buffer must not read there. CP thread only.
+  bool AnyPendingGpuProducerSpan(uint32_t start, uint32_t length) {
+    if (!length || !gpu_current_span_provider_) {
+      return false;
+    }
+    producer_span_scratch_.clear();
+    gpu_current_span_provider_(start, length, &producer_span_scratch_);
+    return !producer_span_scratch_.empty();
+  }
+
   // True when a staged hazard upload (a blit encoded into the open frame
   // command buffer, see UploadRanges) still owes bytes to any part of
   // [start, start + length) for `open_submission`: the buffer holds the OLD
@@ -375,6 +388,7 @@ class MetalSharedMemory : public SharedMemory {
     uint64_t submission;
   };
   std::vector<StagedRange> staged_open_;
+  std::vector<std::pair<uint32_t, uint32_t>> producer_span_scratch_;
   // Exact-key lookup (start << 32 | end -> index) for the common case of a
   // range consumed again by a later draw (the same vertex buffer): the
   // containment scan over ~1,000 live ranges per vertex fetch was 5% of

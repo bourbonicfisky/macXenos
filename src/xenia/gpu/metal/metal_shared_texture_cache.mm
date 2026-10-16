@@ -551,6 +551,9 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     auto clean = [&](uint32_t begin, uint32_t len) {
       return len != 0 &&
              !metal_shared_memory.AnyPageGpuWritten(begin, len) &&
+             // A memexport is not marked GPU-written at encode (only at its
+             // drain), so ask the pending-producer index as well.
+             !metal_shared_memory.AnyPendingGpuProducerSpan(begin, len) &&
              !metal_shared_memory.AnyStagedUploadPending(begin, len,
                                                          open_submission);
     };
@@ -1142,6 +1145,14 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
       case SharedLoadFamily::kDxt3aToR8:
         wanted = "texture_load_dxt3a_cs";
         load_shader_index = kLoadShaderIndexDXT3A;
+        break;
+      case SharedLoadFamily::kR11G11B10ToRgba16:
+        wanted = "texture_load_r11g11b10_rgba16_cs";
+        load_shader_index = kLoadShaderIndexR11G11B10ToRGBA16;
+        break;
+      case SharedLoadFamily::kR10G11B11ToRgba16:
+        wanted = "texture_load_r10g11b11_rgba16_cs";
+        load_shader_index = kLoadShaderIndexR10G11B11ToRGBA16;
         break;
       case SharedLoadFamily::k128bpb:
         wanted = "texture_load_128bpb_cs";

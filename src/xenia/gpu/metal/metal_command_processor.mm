@@ -8280,10 +8280,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
       if ((++s_break_total & 4095) == 1) {
+        // Name the breaking producers (first 8 of them): a record that is
+        // neither GPU-current nor a memexport is the one the consumer waits on.
+        std::string breakers;
+        uint32_t named = 0;
+        for (const auto& p : authority_decision.selected) {
+          if (p.state != metal::TransitState::kPendingResolve || named >= 8) {
+            continue;
+          }
+          ++named;
+          breakers += fmt::format(" [{:08X}+{:X} sub={} seq={}]",
+                                  p.range.start(), p.range.length(),
+                                  p.submission, p.sequence);
+        }
         XELOGI(
             "MetalGpuOrderingMixedBreak decisions={} plain_resolve={} "
-            "memexport={}",
-            s_break_total, s_break_resolve, s_break_memexport);
+            "memexport={} open_sub={} completed={}:{}",
+            s_break_total, s_break_resolve, s_break_memexport,
+            CurrentEncodingSubmission(),
+            completed_submission_.load(std::memory_order_acquire), breakers);
       }
     }
     if (ServingCensusEnabled()) {
@@ -12084,6 +12099,16 @@ bool MetalCommandProcessor::IssueCopy() {
           // uncommitted destination, pipelines unavailable) the existing paths
           // below run unchanged.
           bool shared_resolve_dispatched = false;
+          if (!canonical_packed && std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+            // The legacy-blit writeback: never GPU-current, so every draw
+            // sampling its range commits and waits (Tomb Raider: 32 a frame).
+            XELOGW(
+                "MetalLegacyWriteback draw={} base={:08X} {}x{} bpp={} fmt={} "
+                "canonical_resolve={} canonical_prepared={} legacy_blit={}",
+                trace_draw_index_, resolve_info.copy_dest_base, rw, rh, wb_bpp,
+                dest_format, canonical_resolve ? 1 : 0,
+                canonical_prepared ? 1 : 0, legacy_blit_format ? 1 : 0);
+          }
           if (SharedResolveShadersEnabled()) {
             if (canonical_prepared) {
               shared_resolve_dispatched =
@@ -12329,6 +12354,21 @@ bool MetalCommandProcessor::IssueCopy() {
                 dest_pixel_format == MetalRenderTargetCache::kColorFormat &&
                 !canonical_resolve &&
                 resolve_info.copy_dest_info.copy_dest_swap;
+            if (writeback_encoded && !gpu_resident_resolve &&
+                std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              // A CPU-staged color writeback (never GPU-current): the draws
+              // that sample its range commit and wait on it.
+              XELOGW(
+                  "MetalCpuWriteback draw={} base={:08X} {}x{} bpp={} fmt={} "
+                  "slice={} array={} canonical_packed={} shared_dispatched={} "
+                  "scatter_eligible={}",
+                  trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                  wb_bpp, dest_format,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_slice),
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_array),
+                  canonical_packed ? 1 : 0, shared_resolve_dispatched ? 1 : 0,
+                  scatter_eligible ? 1 : 0);
+            }
             if (writeback_encoded) {
               pending_writebacks_.push_back(PendingWriteback{
                   (__bridge_retained void*)staging,
@@ -12718,6 +12758,23 @@ bool MetalCommandProcessor::IssueCopy() {
                 depth_scatter = false;
               }
             }
+            if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              // Same census as MetalGpuScatter for the depth path: which depth
+              // resolves stay on the CPU writeback (their consumers then
+              // commit and wait on the record instead of ordering after it).
+              XELOGW(
+                  "MetalDepthScatter draw={} base={:08X} {}x{} fmt={} msaa={} "
+                  "pitch_aligned={} off=({},{}) extent={} canonical={} "
+                  "encoded={} scatter={}",
+                  trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                  uint32_t(resolve_info.depth_edram_info.format),
+                  uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                  uint32_t(dc_d.pitch_aligned_div_32) << 5,
+                  uint32_t(dc_d.offset_x_div_8) << 3,
+                  uint32_t(dc_d.offset_y_div_8) << 3, depth_extent_bytes,
+                  canonical_depth_writeback ? 1 : 0, writeback_encoded ? 1 : 0,
+                  depth_scatter ? 1 : 0);
+            }
           }
           if (!depth_scatter && !staging) {
             staging = [wb_device newBufferWithLength:size_t(rw) * rh * 4u
@@ -12765,6 +12822,18 @@ bool MetalCommandProcessor::IssueCopy() {
           uint32_t extent_bytes = resolve_info.copy_dest_extent_start -
                                   resolve_info.copy_dest_base +
                                   resolve_info.copy_dest_extent_length;
+          if (writeback_encoded && !depth_scatter &&
+              std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+            // CPU-staged depth writeback (never GPU-current).
+            XELOGW(
+                "MetalCpuWriteback draw={} base={:08X} {}x{} depth fmt={} "
+                "slice={} array={} canonical={}",
+                trace_draw_index_, resolve_info.copy_dest_base, rw, rh,
+                uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_slice),
+                uint32_t(resolve_info.copy_dest_info.copy_dest_array),
+                canonical_depth_writeback ? 1 : 0);
+          }
           if (writeback_encoded) {
             void* staging_retained = nullptr;
             if (!depth_scatter) {

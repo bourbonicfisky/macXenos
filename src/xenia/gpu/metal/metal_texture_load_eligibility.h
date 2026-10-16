@@ -62,9 +62,12 @@ inline bool IsStrictRgba8Eligible(const xenos::xe_gpu_texture_fetch_t& fetch,
   if (is_signed) {
     return false;
   }
+  // kUnsignedBiased too: the same unorm bytes, biased by the translated
+  // shader from the fetch constant's sign bits (see the signed predicate).
   auto sign_ok = [](xenos::TextureSign s) {
     return s == xenos::TextureSign::kUnsigned ||
-           s == xenos::TextureSign::kGamma;
+           s == xenos::TextureSign::kGamma ||
+           s == xenos::TextureSign::kUnsignedBiased;
   };
   if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
       !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
@@ -117,9 +120,13 @@ inline bool IsStrictRgba8SignedRouteEligible(
       fetch.format != xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16) {
     return false;
   }
-  auto sign_ok = [](xenos::TextureSign s) {
-    return s != xenos::TextureSign::kUnsignedBiased;
-  };
+  // kUnsignedBiased samples the same unorm bytes: the translator decodes the
+  // bias in the shader from the fetch constant's sign bits (signs_temp in
+  // dxbc_shader_translator_fetch.cc), on every path, so for the cache it is
+  // kUnsigned. Excluding it sent Tomb Raider's 1280x720 / 640x360 RGBA8
+  // post-process buffers to the CPU path, whose RAM reads forced 58
+  // memexport drains and 25 ms of GPU waits a frame (2026-10-16).
+  auto sign_ok = [](xenos::TextureSign) { return true; };
   if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
       !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
     return false;
@@ -282,9 +289,9 @@ inline bool IsSharedRouteEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
   // plan does, so their component signs do not gate routing.
   const bool sign_selects_view = entry->host_format_signed != entry->host_format;
   if (sign_selects_view) {
-    auto sign_ok = [](xenos::TextureSign s) {
-      return s != xenos::TextureSign::kUnsignedBiased;
-    };
+    // kUnsignedBiased: see the strict signed predicate -- the bias is a
+    // shader-side decode of the same bytes, not a texture class.
+    auto sign_ok = [](xenos::TextureSign) { return true; };
     if (!sign_ok(fetch.sign_x) || !sign_ok(fetch.sign_y) ||
         !sign_ok(fetch.sign_z) || !sign_ok(fetch.sign_w)) {
       return false;
@@ -292,7 +299,8 @@ inline bool IsSharedRouteEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
     if (!is_signed) {
       auto unsigned_ok = [](xenos::TextureSign s) {
         return s == xenos::TextureSign::kUnsigned ||
-               s == xenos::TextureSign::kGamma;
+               s == xenos::TextureSign::kGamma ||
+               s == xenos::TextureSign::kUnsignedBiased;
       };
       if (!unsigned_ok(fetch.sign_x) || !unsigned_ok(fetch.sign_y) ||
           !unsigned_ok(fetch.sign_z) || !unsigned_ok(fetch.sign_w)) {

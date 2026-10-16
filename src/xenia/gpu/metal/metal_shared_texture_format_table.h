@@ -47,6 +47,13 @@ enum class SharedLoadFamily : uint32_t {
   // decoded to RG8 texels (texture_load_ctx1). The legacy cache decodes it on
   // the CPU at the base level only.
   kCtx1ToRg8,
+  // 32bpp packed 11:11:10 / 10:11:11 unorm expanded to RGBA16 (the upstream
+  // texture_load_r11g11b10_rgba16 / r10g11b11 shaders): the host block is 8
+  // bytes, twice the guest's. Signed bindings take an RGBA16Snorm view of
+  // the same bytes (the exact snorm decode is a separate shader the view
+  // cannot express; the HDR chains that use these formats fetch unsigned).
+  kR11G11B10ToRgba16,
+  kR10G11B11ToRgba16,
   // DXT3A (the DXT3 alpha block alone, 8-byte 4x4 blocks) expanded to R8
   // texels (texture_load_dxt3a), as the legacy CPU decode does at the base
   // level only.
@@ -91,6 +98,7 @@ enum : uint32_t {
   kMtlPixelFormatRG8Unorm = 30,
   kMtlPixelFormatRG8Snorm = 32,
   kMtlPixelFormatR32Float = 55,
+  kMtlPixelFormatRG32Float = 105,
   kMtlPixelFormatRG16Unorm = 60,
   kMtlPixelFormatRG16Snorm = 62,
   kMtlPixelFormatRG16Float = 65,
@@ -159,6 +167,11 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_32_FLOAT, SharedLoadFamily::k32bpb,
        kMtlPixelFormatR32Float, kMtlPixelFormatR32Float,
        xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 4, false},
+      // Two-channel 32-bit float (Tomb Raider's 1x1 luminance readback; off
+      // the route its draw was a RAM consumer of the resolve: commit + wait).
+      {xenos::TextureFormat::k_32_32_FLOAT, SharedLoadFamily::k64bpb,
+       kMtlPixelFormatRG32Float, kMtlPixelFormatRG32Float,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG, 8, false},
       // Same bit layout as RGB10A2; no snorm sibling in Metal, a signed fetch
       // keeps the unorm view (legacy plan does the same).
       {xenos::TextureFormat::k_2_10_10_10, SharedLoadFamily::k32bpb,
@@ -214,6 +227,19 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_CTX1, SharedLoadFamily::kCtx1ToRg8,
        kMtlPixelFormatRG8Unorm, kMtlPixelFormatRG8Unorm,
        xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG, 8, false},
+      // Packed 11:11:10 / 10:11:11 (resolve-backed HDR chains: Tomb Raider's
+      // 320x180 / 80x48 / 20x12 downsamples) expanded to RGBA16 on the GPU.
+      // Off the route these are RAM consumers of the resolve, and every draw
+      // sampling one paid a commit + GPU wait (58 drains, 25 ms a frame).
+      // XE_METAL_TEX_ROUTE_1110=0 drops these entries.
+      {xenos::TextureFormat::k_11_11_10_AS_16_16_16_16,
+       SharedLoadFamily::kR11G11B10ToRgba16, kMtlPixelFormatRGBA16Unorm,
+       kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
+       false},
+      {xenos::TextureFormat::k_10_11_11_AS_16_16_16_16,
+       SharedLoadFamily::kR10G11B11ToRgba16, kMtlPixelFormatRGBA16Unorm,
+       kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
+       false},
       // DXT3A expanded to R8 on the GPU, mips included (Halo 3, Viva Pinata).
       // RRRR like the legacy plan; no snorm sibling.
       // XE_METAL_TEX_ROUTE_DXT3A=0 drops this entry.
@@ -279,6 +305,9 @@ inline uint32_t SharedTextureHostBytesPerBlock(
     case SharedLoadFamily::k16bpbRgba4ToRgba8:
     case SharedLoadFamily::k16bpbR5G6B5ToRgba8:
       return 4u;
+    case SharedLoadFamily::kR11G11B10ToRgba16:
+    case SharedLoadFamily::kR10G11B11ToRgba16:
+      return 8u;
     case SharedLoadFamily::kCtx1ToRg8:
       return 2u;
     case SharedLoadFamily::kDxt3aToR8:
@@ -377,6 +406,16 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
     }
     if (!table[i].direct && !SharedTextureRouteFormatsWidened()) {
       return nullptr;
+    }
+    if (table[i].format == xenos::TextureFormat::k_11_11_10_AS_16_16_16_16 ||
+        table[i].format == xenos::TextureFormat::k_10_11_11_AS_16_16_16_16) {
+      static const bool s_1110 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_ROUTE_1110");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_1110) {
+        return nullptr;
+      }
     }
     if (table[i].format == xenos::TextureFormat::k_4_4_4_4) {
       static const bool s_4444 = [] {
