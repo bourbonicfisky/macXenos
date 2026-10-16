@@ -8572,7 +8572,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
         }
         static uint32_t s_unserved_logs = 0;
-        if (s_unserved_logs++ < 64) {
+        // XE_METAL_UNSERVED_LOG=N raises the bound (per-title attribution:
+        // the first 64 of a streaming title are all one reason).
+        static const uint32_t s_unserved_log_limit = [] {
+          const char* v = std::getenv("XE_METAL_UNSERVED_LOG");
+          return v ? uint32_t(strtoul(v, nullptr, 10)) : 64u;
+        }();
+        if (s_unserved_logs++ < s_unserved_log_limit) {
           XELOGW(
               "MetalSharedTex UNSERVED fc={} fmt={} base={:08X} {}x{} "
               "mips={}..{} mip_addr={:08X} signed={} draw={} ordering={} "

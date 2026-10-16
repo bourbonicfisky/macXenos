@@ -227,6 +227,11 @@ class MetalSharedTextureCache : public TextureCache {
     // XE_METAL_ROUTE_VIEW_CACHE=0); otherwise they belong to the texture's
     // view cache and the binding only refers to them.
     bool owns_views = false;
+    // The texture was up to date when this draw's prep (PrepareEligible ->
+    // RequestTextures) finished: a watch firing between prep and serve marks
+    // it for the NEXT request, and the content loaded at prep is what the
+    // D3D12 cache binds too. Set per prep, read by GetServedSlot.
+    bool prep_current = false;
   };
   void ReleaseBindingSlot(BindingSlot& binding_slot);
   // A 2DArray view (full mip range, host swizzle) of `texture` in a bindless

@@ -1572,6 +1572,18 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask) {
     TextureFetchConstantWritten(index);
   }
   RequestTextures(eligible_mask);
+  // Record which bindings are current as of this prep (see
+  // BindingSlot::prep_current): the serve check reads it when a watch fires
+  // in the window between here and the draw's issue.
+  bits = eligible_mask;
+  while (xe::bit_scan_forward(bits, &index)) {
+    bits = xe::clear_lowest_bit(bits);
+    const TextureBinding* binding = GetValidTextureBinding(index);
+    const Texture* texture = binding ? binding->texture : nullptr;
+    binding_slots_[index].prep_current =
+        texture && !texture->base_outdated_lockless() &&
+        !texture->mips_outdated_lockless();
+  }
 }
 
 uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
@@ -1598,8 +1610,14 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
     // DXT5 page cache) hit that window on most frames: a 2.4 ms CPU untile of
     // the whole page cache per hit. XE_METAL_SHARED_SERVE_STALE=0 restores the
     // strict rule.
-    if (!ServeStaleEnabled() || !submission_provider_ ||
-        !ServedByCurrentSubmission(*metal_texture, submission_provider_())) {
+    // Two ways to know the prep-time content is this draw's: the binding was
+    // current when this draw's prep finished (prep_current, the D3D12 rule),
+    // or the outdated region was loaded by this submission.
+    if (!ServeStaleEnabled() ||
+        !(binding_slot.prep_current ||
+          (submission_provider_ &&
+           ServedByCurrentSubmission(*metal_texture,
+                                     submission_provider_())))) {
       return 0;
     }
     ++census_served_stale_;
@@ -1678,10 +1696,12 @@ const char* MetalSharedTextureCache::UnservedReason(
     return "slot-texture-mismatch";
   }
   const bool stale_ok =
-      ServeStaleEnabled() && submission_provider_ &&
-      ServedByCurrentSubmission(
-          *static_cast<const MetalTexture*>(binding->texture),
-          submission_provider_());
+      ServeStaleEnabled() &&
+      (binding_slot.prep_current ||
+       (submission_provider_ &&
+        ServedByCurrentSubmission(
+            *static_cast<const MetalTexture*>(binding->texture),
+            submission_provider_())));
   if (binding->texture->base_outdated_lockless() && !stale_ok) {
     return "base-outdated";
   }
