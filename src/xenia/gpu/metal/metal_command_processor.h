@@ -499,6 +499,14 @@ class MetalCommandProcessor : public CommandProcessor {
   void* frame_command_buffer_ = nullptr;
   void* frame_render_encoder_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
+  // Side command buffer of the open submission: first loads of CPU-sourced
+  // textures by the shared texture cache, encoded without ending the render
+  // pass and committed just ahead of the frame command buffer (resources are
+  // hazard-tracked, so the draws order after the loads). Faults land on the
+  // same submission id.
+  void* side_command_buffer_ = nullptr;
+  void* PrepareSideTransferCommandBuffer();
+  void CommitSideCommandBuffer(uint64_t submission, uint64_t submit_epoch);
 
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)
   // the open encoder was created with; a draw whose accumulated render targets

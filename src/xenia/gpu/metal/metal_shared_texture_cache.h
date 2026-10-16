@@ -64,9 +64,16 @@ class MetalSharedTextureCache : public TextureCache {
 
   // Command-processor wiring (all GPU-thread).
   // Returns the frame id<MTLCommandBuffer> at a pass boundary (the existing
-  // PrepareTransferCommandBuffer), or nullptr.
-  void SetPrepareTransferCallback(std::function<void*()> callback) {
+  // PrepareTransferCommandBuffer), or, with `side`, the submission's side
+  // command buffer (committed ahead of the frame one, no pass boundary), or
+  // nullptr.
+  void SetPrepareTransferCallback(std::function<void*(bool side)> callback) {
     prepare_transfer_ = std::move(callback);
+  }
+  // Whether a render encoder is open right now (a frame-buffer load would end
+  // it); side loads are only worth their command buffer when it is.
+  void SetRenderPassOpenQuery(std::function<bool()> query) {
+    render_pass_open_ = std::move(query);
   }
   // The submission id the currently-open frame command buffer will get.
   void SetSubmissionProvider(std::function<uint64_t()> provider) {
@@ -238,7 +245,12 @@ class MetalSharedTextureCache : public TextureCache {
   // non-direct table format; empty when the widening is rolled back or the
   // pipelines failed to build (those formats then stay legacy).
   MetalLoadShaderPipelines family_pipelines_;
-  std::function<void*()> prepare_transfer_;
+  std::function<void*(bool side)> prepare_transfer_;
+  std::function<bool()> render_pass_open_;
+  // Set per load (see LoadTextureDataFromResidentMemoryImpl): the load's
+  // encoders go to the side command buffer instead of ending the render pass.
+  bool side_load_ = false;
+  uint64_t census_side_loads_ = 0;  // loads that took the side command buffer
   std::function<uint64_t()> submission_provider_;
   bool trace_playback_ = false;
   std::function<bool(uint64_t)> submission_fault_query_;

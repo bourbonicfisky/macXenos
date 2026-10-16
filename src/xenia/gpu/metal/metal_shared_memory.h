@@ -219,6 +219,25 @@ class MetalSharedMemory : public SharedMemory {
     return false;
   }
 
+  // True when a staged hazard upload (a blit encoded into the open frame
+  // command buffer, see UploadRanges) still owes bytes to any part of
+  // [start, start + length) for `open_submission`: the buffer holds the OLD
+  // bytes until that command buffer runs, so a load committed ahead of it (a
+  // side command buffer) would read them. CP thread only.
+  bool AnyStagedUploadPending(uint32_t start, uint32_t length,
+                              uint64_t open_submission) const {
+    if (!length || staged_open_.empty()) {
+      return false;
+    }
+    const uint64_t end = uint64_t(start) + length;
+    for (const StagedRange& s : staged_open_) {
+      if (s.submission == open_submission && start < s.end && end > s.start) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Validity page size for the straddler re-assert's fragment math (the base
   // accessor is protected).
   uint32_t validity_page_size_log2() const { return page_size_log2(); }
@@ -348,6 +367,14 @@ class MetalSharedMemory : public SharedMemory {
     uint64_t submission;
   };
   std::vector<ConsumedRange> consumed_ranges_;
+  // Staged hazard uploads not yet executed (see AnyStagedUploadPending);
+  // entries of an older submission are dropped as new ones are appended.
+  struct StagedRange {
+    uint32_t start;
+    uint32_t end;
+    uint64_t submission;
+  };
+  std::vector<StagedRange> staged_open_;
   // Exact-key lookup (start << 32 | end -> index) for the common case of a
   // range consumed again by a later draw (the same vertex buffer): the
   // containment scan over ~1,000 live ranges per vertex fetch was 5% of

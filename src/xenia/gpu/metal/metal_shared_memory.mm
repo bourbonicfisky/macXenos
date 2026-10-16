@@ -867,6 +867,17 @@ bool MetalSharedMemory::UploadRanges(
             // direct memcpy over it before the blit executes would be undone
             // by the blit, so it must stage too (the overlap test sees it).
             AppendConsumedRange(piece_start, piece_start + piece_length, blit_submission);
+            // Side-command-buffer texture loads must not read these pages
+            // before the blit runs (AnyStagedUploadPending). Entries of
+            // earlier, committed submissions are dropped as we go.
+            staged_open_.erase(
+                std::remove_if(staged_open_.begin(), staged_open_.end(),
+                               [&](const StagedRange& s) {
+                                 return s.submission < blit_submission;
+                               }),
+                staged_open_.end());
+            staged_open_.push_back(StagedRange{
+                piece_start, piece_start + piece_length, blit_submission});
             ++staged_uploads_;
             staged_upload_bytes_ =
                 SaturatingAdd(staged_upload_bytes_, piece_length);

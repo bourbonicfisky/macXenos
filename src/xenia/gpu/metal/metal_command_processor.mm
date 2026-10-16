@@ -1716,6 +1716,55 @@ void* MetalCommandProcessor::PrepareTransferCommandBuffer(uint32_t site) {
   return frame_command_buffer_;
 }
 
+void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
+  // No pass boundary: the side buffer is committed ahead of the frame one
+  // (CommitSideCommandBuffer), so a load encoded here executes before every
+  // draw of this submission. Only valid while a frame command buffer exists,
+  // or the ordering claim has nothing to be ahead of.
+  if (!frame_command_buffer_) {
+    return nullptr;
+  }
+  if (!side_command_buffer_) {
+    auto* provider =
+        static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+    if (!provider || !provider->command_queue()) {
+      return nullptr;
+    }
+    id<MTLCommandQueue> queue =
+        (__bridge id<MTLCommandQueue>)provider->command_queue();
+    id<MTLCommandBuffer> command_buffer = MakeAttributedCommandBuffer(queue);
+    if (!command_buffer) {
+      return nullptr;
+    }
+    command_buffer.label = @"side loads";
+    side_command_buffer_ = (__bridge_retained void*)command_buffer;
+  }
+  return side_command_buffer_;
+}
+
+void MetalCommandProcessor::CommitSideCommandBuffer(uint64_t submission,
+                                                    uint64_t submit_epoch) {
+  if (!side_command_buffer_) {
+    return;
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (__bridge_transfer id<MTLCommandBuffer>)side_command_buffer_;
+  side_command_buffer_ = nullptr;
+  // A fault here is a fault of the submission whose textures it loaded: the
+  // same record the frame buffer's handler writes (minus the epoch
+  // reservation, which the frame buffer owns), so DrainFaultedCommandBuffers
+  // invalidates the routed textures of this submission as usual.
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    if (cb.status == MTLCommandBufferStatusError && submission) {
+      std::lock_guard<std::mutex> lock(fault_mutex_);
+      faulted_completions_.push_back(
+          FaultedCompletion{(__bridge_retained void*)cb, submission,
+                            submit_epoch});
+    }
+  }];
+  [command_buffer commit];
+}
+
 // ---------------------------------------------------------------------------
 // DEBUG TOGGLES (environment variables) — the Metal backend is under active
 // bring-up; these enable fast in-agent/on-device bisection without rebuilds.
@@ -2335,10 +2384,20 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       *register_file_, *shared_memory_, device_ptr, texture_cache_.get(),
       draw_resolution_scale_x_, draw_resolution_scale_y_);
   shared_texture_cache_->SetPrepareTransferCallback(
-      [this]() {
+      [this](bool side) {
+        if (side) {
+          // No frame command buffer yet (or none could be made): the frame
+          // path has no pass to end then, so it is the right fallback.
+          void* cb = PrepareSideTransferCommandBuffer();
+          if (cb) {
+            return cb;
+          }
+        }
         return PrepareTransferCommandBuffer(
             uint32_t(metal::MetalTransferSite::kTextureUpload));
       });
+  shared_texture_cache_->SetRenderPassOpenQuery(
+      [this]() { return frame_open_ && frame_render_encoder_ != nullptr; });
   // NOT gated on S7TagsOff: these ids drive the subclass's BeginSubmission
   // advance, LRU gating, and M4 faulted-submission matching — equality
   // bookkeeping that needs real monotonic ids in both sync and async
@@ -5146,6 +5205,9 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   if (upload_arena_) {
     upload_arena_->MarkSubmission(submission);
   }
+  // Side loads first: the queue runs command buffers in commit order, and
+  // the frame's draws read what they loaded.
+  CommitSideCommandBuffer(submission, submit_epoch);
   [command_buffer commit];
   if (lazy_rearm_needed_.exchange(false, std::memory_order_acq_rel)) {
     RearmLazyPublications();

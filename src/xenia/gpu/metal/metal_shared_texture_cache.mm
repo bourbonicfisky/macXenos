@@ -379,6 +379,7 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
 }
 
 namespace {
+bool SideLoadEnabled();  // defined below (XE_METAL_TEX_SIDE_LOAD)
 // Bounded per-reason log of shared-route load declines (the prepass then
 // reports the fetch as UNSERVED and drains it for the legacy path).
 template <typename Key>  // TextureCache::TextureKey (protected; deduced)
@@ -524,6 +525,65 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
 
+  // ---- Side command buffer: a FIRST load of a texture whose source pages
+  // are CPU-written (not GPU-written, no staged hazard blit pending) has no
+  // ordering need against the open frame command buffer -- nothing in it
+  // reads this texture yet, and the bytes are already in the shared buffer
+  // -- so it is encoded into the submission's side command buffer, committed
+  // just ahead of the frame one (tracked resources order the draws after it)
+  // instead of ending the render pass (~40 MB of EDRAM-height attachment
+  // traffic per resume; GTA IV paid 31 such ends a frame). Reloads stay in
+  // the frame buffer: earlier draws of this submission sample the old content.
+  // XE_METAL_TEX_SIDE_LOAD=0 disables.
+  side_load_ = false;
+  if (SideLoadEnabled() && render_pass_open_ && render_pass_open_()) {
+    const uint64_t open_submission =
+        submission_provider_ ? submission_provider_() : 0;
+    // A reload qualifies too when no draw of the open submission has sampled
+    // the texture yet (its last use is an earlier, already-committed
+    // submission that the side buffer orders after): the common streaming
+    // case, a texture invalidated by the guest's writes and reloaded before
+    // its first draw of the frame.
+    bool eligible =
+        open_submission != 0 &&
+        (metal_texture.loads == 0 ||
+         metal_texture.last_usage_submission_index() < open_submission);
+    auto clean = [&](uint32_t begin, uint32_t len) {
+      return len != 0 &&
+             !metal_shared_memory.AnyPageGpuWritten(begin, len) &&
+             !metal_shared_memory.AnyStagedUploadPending(begin, len,
+                                                         open_submission);
+    };
+    const uint32_t block_dim = SharedTextureBlockDim(*entry);
+    for (const MipLevelPlan& p : plan) {
+      if (!eligible) {
+        break;
+      }
+      if (!clean(p.consumed_begin, p.consumed_end - p.consumed_begin)) {
+        eligible = false;
+        break;
+      }
+      if (!entry->direct) {
+        // The family loaders read the whole tiled extent (see the consumed
+        // registration above); check the same superset.
+        uint32_t pitch_blocks = (p.pitch_blocks * 4u) / entry->bytes_per_block;
+        uint32_t block_rows = (p.py + p.height + block_dim - 1u) / block_dim;
+        uint64_t rows = uint64_t((block_rows + 31u) & ~31u);
+        uint64_t bytes = rows * pitch_blocks * entry->bytes_per_block;
+        uint64_t end = std::min<uint64_t>(uint64_t(p.guest_offset) + bytes,
+                                          SharedMemory::kBufferSize);
+        if (end <= p.guest_offset ||
+            !clean(p.guest_offset, uint32_t(end - p.guest_offset))) {
+          eligible = false;
+        }
+      }
+    }
+    if (eligible) {
+      side_load_ = true;
+      ++census_side_loads_;
+    }
+  }
+
   // XE_METAL_RGBA4_EXPAND_MIPS=0: the RGBA4 -> RGBA8 expansion serves level 0
   // only and the legacy decode takes mipped keys, atomically (nothing is
   // encoded yet).
@@ -642,7 +702,7 @@ bool MetalSharedTextureCache::LoadLevelsDirect(
 
   // ---- ONE PrepareTransferCommandBuffer per texture load; ALL levels batched
   // as dispatches on that existing frame command buffer. ----
-  void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_() : nullptr;
+  void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_(side_load_) : nullptr;
   if (!command_buffer_ptr || !direct_pipeline_) {
     return false;
   }
@@ -741,6 +801,13 @@ bool ServeStaleEnabled() {
   }();
   return s_enabled;
 }
+bool SideLoadEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_SIDE_LOAD");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
 }  // namespace
 
 bool MetalSharedTextureCache::ServedByCurrentSubmission(
@@ -806,6 +873,26 @@ bool MetalSharedTextureCache::RevalidateRegions(
   if ((load_base && metal_shared_memory.AnyPageGpuWritten(base, base_bytes)) ||
       (load_mips && metal_shared_memory.AnyPageGpuWritten(mips, mips_bytes))) {
     ++census_revalidate_gpu_skipped_;
+    // XE_METAL_REVAL_LOG=1: which textures reload over GPU-written pages
+    // (bounded). A block-compressed texture here means the flag is wider
+    // than the resolve that set it, or the title really resolves there.
+    static const bool s_log = std::getenv("XE_METAL_REVAL_LOG") != nullptr;
+    static uint32_t s_logs = 0;
+    // The first 32, then one in 64 (gameplay coverage past the menus).
+    if (s_log && (s_logs++ < 32 || (s_logs & 63u) == 0)) {
+      const TextureKey key = texture.key();
+      XELOGI(
+          "MetalSharedTex GPU-WRITTEN-RELOAD fmt={} base={:08X}+{:X} "
+          "mips={:08X}+{:X} {}x{} loads={} base_gpu={} mips_gpu={}",
+          uint32_t(key.format), base, base_bytes, mips, mips_bytes,
+          key.GetWidth(), key.GetHeight(), texture.loads,
+          load_base && metal_shared_memory.AnyPageGpuWritten(base, base_bytes)
+              ? 1
+              : 0,
+          load_mips && metal_shared_memory.AnyPageGpuWritten(mips, mips_bytes)
+              ? 1
+              : 0);
+    }
     return false;
   }
   const auto t0 = std::chrono::steady_clock::now();
@@ -906,13 +993,13 @@ void MetalSharedTextureCache::BeginFrame() {
     }
     XELOGI(
         "MetalSharedTexCensus: loads {:.1f}/frame (base {:.1f}, mips {:.1f}, "
-        "reloads {:.1f}, {:.2f} MB); destroyed {:.1f}/frame (slot budget "
-        "{:.1f}), live {} MB in {} textures, slots {} of {} (free {}), "
-        "served-stale {:.1f}/frame; revalidated {:.1f}/frame (changed {:.1f}, "
-        "gpu-written {:.1f}) in {:.2f} ms; top:{}",
+        "reloads {:.1f}, side {:.1f}, {:.2f} MB); destroyed {:.1f}/frame "
+        "(slot budget {:.1f}), live {} MB in {} textures, slots {} of {} "
+        "(free {}), served-stale {:.1f}/frame; revalidated {:.1f}/frame "
+        "(changed {:.1f}, gpu-written {:.1f}) in {:.2f} ms; top:{}",
         double(census_loads_base_ + census_loads_mips_) / f,
         double(census_loads_base_) / f, double(census_loads_mips_) / f,
-        double(census_reloads_) / f,
+        double(census_reloads_) / f, double(census_side_loads_) / f,
         double(census_load_bytes_) / f / (1024.0 * 1024.0),
         double(census_destroyed_) / f, double(census_slot_destroyed_) / f,
         census_host_bytes_ >> 20, live_textures_, external_slots_held_,
@@ -928,6 +1015,7 @@ void MetalSharedTextureCache::BeginFrame() {
   }
   census_destroyed_ = 0;
   census_slot_destroyed_ = 0;
+  census_side_loads_ = 0;
   census_served_stale_ = 0;
   census_frames_ = 0;
   census_loads_base_ = 0;
@@ -1174,7 +1262,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     dispatches.push_back(d);
   }
 
-  void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_() : nullptr;
+  void* command_buffer_ptr = prepare_transfer_ ? prepare_transfer_(side_load_) : nullptr;
   if (!command_buffer_ptr) {
     return false;
   }
