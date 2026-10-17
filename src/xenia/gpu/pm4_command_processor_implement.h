@@ -1702,6 +1702,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
                    4, 8, cf);
             fwrite(&register_file_->values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00], 4,
                    32, cf);
+            // The 32 fetch constants (6 dwords each) follow, so a texture's
+            // signs / exp_adjust / num_format can be read with the draw.
+            fwrite(&register_file_->values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0],
+                   4, 32 * 6, cf);
+            // Then the resolve registers as they stand at the draw
+            // (RB_COPY_CONTROL, RB_COPY_DEST_BASE, RB_COPY_DEST_PITCH,
+            // RB_COPY_DEST_INFO): the copy that preceded the draw left them.
+            const uint32_t copy_regs[4] = {
+                register_file_->values[XE_GPU_REG_RB_COPY_CONTROL],
+                register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE],
+                register_file_->values[XE_GPU_REG_RB_COPY_DEST_PITCH],
+                register_file_->values[XE_GPU_REG_RB_COPY_DEST_INFO]};
+            fwrite(copy_regs, 4, 4, cf);
             fclose(cf);
           }
         }

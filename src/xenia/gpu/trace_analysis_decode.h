@@ -32,6 +32,9 @@ struct DecodedImage {
   uint32_t width = 0;
   uint32_t height = 0;
   std::vector<uint8_t> rgba;  // width*height*4, row-major.
+  // The raw 32-bit EDRAM word of every pixel (row-major), for offline decodes
+  // of formats the RGBA8 view only approximates (float 7e3, 16-bit floats).
+  std::vector<uint32_t> words;
 };
 
 // Decodes a 32bpp color render target from an EDRAM snapshot into RGBA8 for one

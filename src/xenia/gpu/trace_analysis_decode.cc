@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/trace_analysis_decode.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -43,6 +44,15 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
   out->width = width;
   out->height = height;
   out->rgba.assign(size_t(width) * height * 4, 0);
+  out->words.assign(size_t(width) * height, 0);
+  // Float 7e3 view: Reinhard x/(1+x) then gamma 2.2, so the [0, 32) HDR range
+  // reads as a picture instead of wrapping bytes.
+  auto hdr_to_8 = [](float v) {
+    v = v < 0.0f ? 0.0f : v;
+    float t = v / (1.0f + v);
+    float g = std::pow(t, 1.0f / 2.2f);
+    return uint8_t(g * 255.0f + 0.5f);
+  };
   for (uint32_t y = 0; y < height; ++y) {
     for (uint32_t x = 0; x < width; ++x) {
       uint32_t off = XeEdramSnapshotOffsetBytes(
@@ -56,7 +66,17 @@ bool DecodeEdramColor32bpp(const uint8_t* edram, size_t edram_size,
       }
       uint32_t v;
       std::memcpy(&v, edram + off, sizeof(v));
+      out->words[px] = v;
       switch (format) {
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+        case xenos::ColorRenderTargetFormat::
+            k_2_10_10_10_FLOAT_AS_16_16_16_16: {
+          WriteRgba(out->rgba, px,
+                    hdr_to_8(xenos::Float7e3To32((v >> 0) & 0x3FF)),
+                    hdr_to_8(xenos::Float7e3To32((v >> 10) & 0x3FF)),
+                    hdr_to_8(xenos::Float7e3To32((v >> 20) & 0x3FF)),
+                    uint8_t(((v >> 30) & 0x3) * 85));
+        } break;
         case xenos::ColorRenderTargetFormat::k_8_8_8_8:
         case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
           // 32bpp RGBA8 as stored; low byte = R.
@@ -442,6 +462,13 @@ int DecodeCaptureDirectory(const std::filesystem::path& capture_dir,
     if (FILE* bf = xe::filesystem::OpenFile(bin_path, "wb")) {
       fwrite(img.rgba.data(), 1, img.rgba.size(), bf);
       fclose(bf);
+    }
+    // Raw EDRAM words, row-major, for format-exact offline reads.
+    std::filesystem::path words_path =
+        capture_dir / fmt::format("color_draw{:06d}.words.bin", draw_index);
+    if (FILE* wf = xe::filesystem::OpenFile(words_path, "wb")) {
+      fwrite(img.words.data(), sizeof(uint32_t), img.words.size(), wf);
+      fclose(wf);
     }
     std::filesystem::path png_path =
         capture_dir /

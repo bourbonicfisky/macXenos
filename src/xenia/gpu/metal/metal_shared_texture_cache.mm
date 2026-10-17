@@ -1371,13 +1371,19 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
     for (const MipLevelPlan& p0 : plan) {
       NSUInteger row = NSUInteger(p0.width) * bpb;
-      id<MTLBuffer> rb = [device newBufferWithLength:row * p0.height
-                                             options:MTLResourceStorageModeShared];
+      // Volumes: every depth slice of the level, image after image.
+      const NSUInteger depth =
+          base_texture.textureType == MTLTextureType3D
+              ? std::max<NSUInteger>(p0.depth, 1)
+              : 1;
+      id<MTLBuffer> rb =
+          [device newBufferWithLength:row * p0.height * depth
+                              options:MTLResourceStorageModeShared];
       [blit copyFromTexture:base_texture
                   sourceSlice:0
                   sourceLevel:p0.host_level
                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(p0.width, p0.height, 1)
+                   sourceSize:MTLSizeMake(p0.width, p0.height, depth)
                      toBuffer:rb
             destinationOffset:0
        destinationBytesPerRow:row
@@ -1389,7 +1395,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
                pb = p0.pitch_blocks;
       [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
         if (FILE* f = fopen(path.c_str(), "wb")) {
-          fwrite([rb contents], 1, row * h, f);
+          fwrite([rb contents], 1, row * h * depth, f);
           fclose(f);
         }
         XELOGW("MetalRouteDump {} L{} {}x{} bpb={} guest_offset={:08X} px={} py={} pitch_blocks32={}",
