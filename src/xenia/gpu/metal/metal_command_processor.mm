@@ -15706,31 +15706,69 @@ MetalCommandProcessor::ResolvePendingProducerDependencies(
     eager.reserve(decision.selected.size());
     const uint64_t completed_now =
         completed_submission_.load(std::memory_order_acquire);
+    // Both queues are in authority-sequence (registration) order and the
+    // selection is sorted by sequence, so one merge walk finds each record.
+    // The former scan per producer was quadratic: Gears of War Judgment's
+    // EVENT_WRITE_SHD full-domain publications against ~200 pending records
+    // put 16% of the command-processor thread in this loop (2026-10-17). A
+    // selection out of order restarts the walk; a record not at the walk
+    // position (queue out of order) falls back to the scan.
+    size_t wb_walk = 0, me_walk = 0;
+    uint64_t last_sequence = 0;
+    auto find_writeback = [&](uint64_t sequence) -> PendingWriteback* {
+      while (wb_walk < pending_writebacks_.size() &&
+             pending_writebacks_[wb_walk].authority_sequence < sequence) {
+        ++wb_walk;
+      }
+      if (wb_walk < pending_writebacks_.size() &&
+          pending_writebacks_[wb_walk].authority_sequence == sequence) {
+        return &pending_writebacks_[wb_walk];
+      }
+      for (PendingWriteback& wb : pending_writebacks_) {
+        if (wb.authority_sequence == sequence) {
+          return &wb;
+        }
+      }
+      return nullptr;
+    };
+    auto find_memexport = [&](uint64_t sequence) -> PendingMemexport* {
+      while (me_walk < pending_memexports_.size() &&
+             pending_memexports_[me_walk].authority_sequence < sequence) {
+        ++me_walk;
+      }
+      if (me_walk < pending_memexports_.size() &&
+          pending_memexports_[me_walk].authority_sequence == sequence) {
+        return &pending_memexports_[me_walk];
+      }
+      for (PendingMemexport& me : pending_memexports_) {
+        if (me.authority_sequence == sequence) {
+          return &me;
+        }
+      }
+      return nullptr;
+    };
     for (const metal::PendingProducer& p : decision.selected) {
+      if (p.sequence < last_sequence) {
+        wb_walk = 0;
+        me_walk = 0;
+      }
+      last_sequence = p.sequence;
       bool armed = false;
       if (p.state == metal::TransitState::kGpuCurrentShared && p.submission) {
-        for (PendingWriteback& wb : pending_writebacks_) {
-          if (wb.authority_sequence != p.sequence) {
-            continue;
+        if (PendingWriteback* wb = find_writeback(p.sequence)) {
+          if (!wb->lazy_armed) {
+            ArmLazyPublication(*wb);
           }
-          if (!wb.lazy_armed) {
-            ArmLazyPublication(wb);
-          }
-          armed = wb.lazy_armed != 0;
-          break;
+          armed = wb->lazy_armed != 0;
         }
       }
       if (!armed && p.state == metal::TransitState::kPendingMemexport &&
           p.submission) {
-        for (PendingMemexport& me : pending_memexports_) {
-          if (me.authority_sequence != p.sequence) {
-            continue;
+        if (PendingMemexport* me = find_memexport(p.sequence)) {
+          if (!me->lazy_armed) {
+            ArmLazyMemexport(*me);
           }
-          if (!me.lazy_armed) {
-            ArmLazyMemexport(me);
-          }
-          armed = me.lazy_armed != 0;
-          break;
+          armed = me->lazy_armed != 0;
         }
       }
       if (armed) {

@@ -772,6 +772,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     uint64_t materialize_tiles_from_clear = 0;
     // Resolve clears drawn into the attachment instead (Lever 2).
     uint64_t attachment_clears = 0;
+    // MarkCurrentRasterTargetsWritten: calls (one per draw), slots whose
+    // memo matched, and tiles re-marked in the authority tracker (always
+    // counted; the function was 3-10% of the command-processor thread in
+    // the 2026-10-16 samples of every title).
+    uint64_t mark_calls = 0, mark_memo_hits = 0, mark_slots = 0,
+             mark_tiles = 0;
     uint64_t frames = 0;
   } pack_census_;
   // Per EDRAM tile: the latest canonical producer is a resolve clear that no

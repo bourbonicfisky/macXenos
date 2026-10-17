@@ -401,7 +401,7 @@ inline bool SharedTextureRouteFormatsWidened() {
   return s_widened;
 }
 
-inline const SharedTextureFormatEntry* FindSharedTextureFormat(
+inline const SharedTextureFormatEntry* FindSharedTextureFormatUncached(
     xenos::TextureFormat format) {
   // The texture KEY carries the base format (TextureCache::GetBaseFormat:
   // k_11_11_10_AS_16_16_16_16 -> k_11_11_10) while the fetch constant carries
@@ -507,6 +507,37 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
     return &table[i];
   }
   return nullptr;
+}
+
+// Memoized per format and per pair of runtime support flags (packed 16-bit
+// and BC host formats, the only inputs that can change after start; the
+// XE_METAL_TEX_ROUTE_* switches are fixed per process). The uncached scan
+// walks the whole table with its switch checks on every call, and the
+// eligibility predicates call it several times per fetch of every draw:
+// 1.5-3.4% of the command-processor thread across eight titles (2026-10-17
+// samples). 0 = not yet looked up, 1 = no entry, otherwise the entry.
+inline const SharedTextureFormatEntry* FindSharedTextureFormat(
+    xenos::TextureFormat format) {
+  const uint32_t index = uint32_t(format);
+  if (index >= 64u) {
+    return FindSharedTextureFormatUncached(format);
+  }
+  const uint32_t flags =
+      (SharedTexturePacked16Supported().load(std::memory_order_relaxed) ? 1u
+                                                                        : 0u) |
+      (SharedTextureBcSupported().load(std::memory_order_relaxed) ? 2u : 0u);
+  static std::atomic<uintptr_t> s_memo[4][64] = {};
+  std::atomic<uintptr_t>& slot = s_memo[flags][index];
+  const uintptr_t memo = slot.load(std::memory_order_relaxed);
+  if (memo) {
+    return memo == 1u ? nullptr
+                      : reinterpret_cast<const SharedTextureFormatEntry*>(memo);
+  }
+  const SharedTextureFormatEntry* entry =
+      FindSharedTextureFormatUncached(format);
+  slot.store(entry ? reinterpret_cast<uintptr_t>(entry) : uintptr_t(1),
+             std::memory_order_relaxed);
+  return entry;
 }
 
 }  // namespace metal

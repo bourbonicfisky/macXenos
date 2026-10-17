@@ -1159,6 +1159,7 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
   const bool census = MetalCommandProcessor::PassCensusEnabled();
+  ++pack_census_.mark_calls;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     bool written = slot == 0 ? depth_or_stencil_written
                              : (color_write_mask &
@@ -1189,16 +1190,6 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
                                        rows_per_tile) * pitch;
     d0 = std::max(d0, start_tiles);
     d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
-    if (census) {
-      // Census: a lower bound on pack redundancy.
-      std::vector<uint8_t>& dirty = pack_dirty_tiles_[attachment];
-      if (dirty.size() != xenos::kEdramTileCount) {
-        dirty.assign(xenos::kEdramTileCount, 1);
-      }
-      for (uint32_t t = d0; t < d1; ++t) {
-        dirty[t] = 1;
-      }
-    }
     // XE_METAL_MARK_DRAW_ROWS=1 (2026-10-04, USF4: 69% of GPU time in the
     // canonical pack/resolve/materialize machinery): only the draw-covered
     // tile rows become host-authoritative, so a later pack to canonical
@@ -1220,14 +1211,31 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
         MetalSwitchEnabled(cvars::metal_raster_mark_skip,
                            std::getenv("XE_METAL_RASTER_MARK_SKIP"));
     RasterSyncMemo& memo = raster_mark_memo_[slot];
+    ++pack_census_.mark_slots;
     if (s_mark_skip && memo.valid && memo.attachment == attachment &&
         memo.start_tiles == mark_start && memo.end_tiles == mark_end &&
         memo.version == canonical_authority_.version()) {
+      ++pack_census_.mark_memo_hits;
       continue;
     }
+    pack_census_.mark_tiles += mark_end - mark_start;
     canonical_authority_.MarkAttachment(attachment, mark_start, mark_end,
                                         ++canonical_authority_order_);
     if (census) {
+      // Census: a lower bound on pack redundancy. Behind the memo: a draw
+      // whose slot memo matched re-dirtied the same tiles, and the walk
+      // itself (every tile of every bound target, every draw) was ~10% of
+      // the command-processor thread in the attribution runs of GTA IV and
+      // Burnout, inflating the very cost they measure (2026-10-17 samples).
+      // The pack clears a tile's dirty bit through SynchronizeCanonical,
+      // which bumps the authority version and so misses the memo.
+      std::vector<uint8_t>& dirty = pack_dirty_tiles_[attachment];
+      if (dirty.size() != xenos::kEdramTileCount) {
+        dirty.assign(xenos::kEdramTileCount, 1);
+      }
+      for (uint32_t t = d0; t < d1; ++t) {
+        dirty[t] = 1;
+      }
       for (uint32_t t = mark_start; t < mark_end && t < xenos::kEdramTileCount;
            ++t) {
         census_clear_tiles_[t] = 0;
@@ -1290,6 +1298,13 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
       "materialize_tiles_from_clear={} attachment_clears={}",
       c.clears, c.clear_tiles, c.clears_whole_tiles,
       c.materialize_tiles_from_clear, c.attachment_clears);
+  out += fmt::format(
+      " | mark: calls/frame {:.0f} slots/frame {:.0f} memo-hit {:.1f}% "
+      "tiles/frame {:.0f}",
+      double(c.mark_calls) / frames, double(c.mark_slots) / frames,
+      c.mark_slots ? 100.0 * double(c.mark_memo_hits) / double(c.mark_slots)
+                   : 0.0,
+      double(c.mark_tiles) / frames);
   if (reset) {
     c = PackCensus{};
   }
