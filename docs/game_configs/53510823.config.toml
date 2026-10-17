@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Rise of the Tomb Raider (53510823).
+# The title builds its 32x32x32 colour-grading LUT one slice per draw with a
+# full-viewport quad whose vertex shader leaves clip-space Z at -9 W (the
+# matrix in c40-c43 is the gameplay projection, the quad's Z is 0.5). The
+# console rasterizes it; a host that clips against the near plane drops all
+# 32 slices and the frame is graded through whatever the LUT memory held
+# (green / magenta casts, 2026-10-17). Depth clamping keeps the quad and
+# changes nothing else that was measured in this title.
+[GPU]
+force_depth_clamp = true

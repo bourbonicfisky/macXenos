@@ -33,6 +33,15 @@ DEFINE_path(
     "GPU");
 
 DEFINE_bool(vsync, true, "Enable VSYNC.", "GPU");
+DEFINE_bool(
+    force_depth_clamp, false,
+    "Use host depth clamping instead of near and far plane clipping when "
+    "guest clipping is enabled. X/Y/W clipping is unaffected. Some titles draw "
+    "screen-space passes whose Z lands outside 0..W and still expect them "
+    "rasterized (Rise of the Tomb Raider builds its colour-grading LUT this "
+    "way; Canary names 494707EE and 41560881). Set per title in its game "
+    "config; on Vulkan this requires depthClamp support.",
+    "GPU");
 
 DEFINE_uint64(framerate_limit, 0,
               "Maximum frames per second. 0 = Unlimited frames.\n"

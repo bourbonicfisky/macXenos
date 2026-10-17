@@ -1459,6 +1459,33 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // chrispy: rearrange check order, place set after checks
 
   if (XE_LIKELY(index < RegisterFile::kRegisterCount)) {
+    // XE_GPU_WATCH_REG=<first>[-<last>] (hex register indices): log every
+    // write in the range with the draw counter, to see when (and whether) a
+    // guest sets a constant a draw depends on. Backend-agnostic, replay-safe.
+    struct WatchReg {
+      uint32_t first = 0;
+      uint32_t last = 0;
+    };
+    static const WatchReg s_watch_reg = [] {
+      WatchReg w;
+      if (const char* v = std::getenv("XE_GPU_WATCH_REG")) {
+        char* end = nullptr;
+        w.first = uint32_t(strtoul(v, &end, 16));
+        w.last = (end && *end == '-') ? uint32_t(strtoul(end + 1, nullptr, 16))
+                                      : w.first;
+      }
+      return w;
+    }();
+    if (s_watch_reg.last && index >= s_watch_reg.first &&
+        index <= s_watch_reg.last) {
+      static uint32_t s_watch_logs = 0;
+      if (s_watch_logs++ < 4096) {
+        float as_float;
+        std::memcpy(&as_float, &value, sizeof(as_float));
+        XELOGI("GpuWatchReg draw={} reg={:04X} value={:08X} ({})",
+               trace_draw_index_, index, value, as_float);
+      }
+    }
     register_file_->values[index] = value;
     // Backend-agnostic diagnostic (XE_GPU_FORCE_BOOL=<index>:<0|1>): pin one
     // guest bool constant at register-write time so a shader block gated by

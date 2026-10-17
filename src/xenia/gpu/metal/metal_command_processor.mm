@@ -3671,9 +3671,15 @@ bool MetalCommandProcessor::MsaaResolveOnStoreEnabled() {
 }
 
 bool MetalCommandProcessor::SharedResolveArraysEnabled() {
+  // Default OFF (XE_METAL_SHARED_RESOLVE_ARRAYS=1 opts in). The GPU route for
+  // array / slice destinations wrote Rise of the Tomb Raider's 32x32x32
+  // colour-grading LUT, but the volume consumer then sampled stale guest RAM
+  // (frame graded green); the CPU writeback renders it right. The 3D
+  // destination's GPU-current publication and validity need the slice
+  // extents before this can be the default again.
   static const bool s_enabled = [] {
     const char* v = std::getenv("XE_METAL_SHARED_RESOLVE_ARRAYS");
-    return !(v && v[0] == '0' && !v[1]);
+    return v && v[0] == '1' && !v[1];
   }();
   return s_enabled;
 }
@@ -9592,7 +9598,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (!memexport_draw) {
       MetalDepthClipMode depth_clip_mode = GetMetalDepthClipMode(
           regs.Get<reg::PA_CL_CLIP_CNTL>());
-      [encoder setDepthClipMode:depth_clip_mode == MetalDepthClipMode::kClamp
+      // force_depth_clamp (per-title config): host depth clamping in place of
+      // near/far clipping while the guest keeps X/Y/W clipping, as the Vulkan
+      // backend does. Rise of the Tomb Raider's colour-grading LUT slices are
+      // drawn at Z/W = -9 and every backend that clips Z drops them.
+      [encoder setDepthClipMode:(depth_clip_mode == MetalDepthClipMode::kClamp ||
+                                 cvars::force_depth_clamp)
                                     ? MTLDepthClipModeClamp
                                     : MTLDepthClipModeClip];
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(

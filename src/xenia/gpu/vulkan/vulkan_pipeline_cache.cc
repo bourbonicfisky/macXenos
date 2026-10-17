@@ -1301,7 +1301,8 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
 
   description_out.depth_clamp_enable =
       device_properties.depthClamp &&
-      regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+      (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable ||
+       cvars::force_depth_clamp);
 
   // TODO(Triang3l): Tessellation.
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);

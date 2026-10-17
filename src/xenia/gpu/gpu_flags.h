@@ -20,6 +20,7 @@ DECLARE_int32(trace_gpu_frame_repeat_count);
 DECLARE_path(dump_shaders);
 
 DECLARE_bool(vsync);
+DECLARE_bool(force_depth_clamp);
 
 DECLARE_uint64(framerate_limit);
 
