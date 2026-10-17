@@ -38,6 +38,7 @@
 // remaining ExactCoverInputs guards are covered separately and exhaustively by
 // metal_exact_cover_predicate_test.cc; this suite does not duplicate them.
 
+#include <cstdio>
 #include <string>
 
 #include "xenia/gpu/metal/metal_resolved_fetch_service.h"
@@ -105,137 +106,142 @@ ResolvedFetchServiceInputs Row(int row) {
 }
 
 // COMMITTED GOLDEN TABLE. Captured once from the production classifier at base
-// 2e1dee1c0 (production source tree 797c00ffbad4937fba0e05e1bf9e846d51d1847a).
-// This is recorded output, NOT a formula that re-derives the classifier.
+// 2e1dee1c0 (production source tree 797c00ffbad4937fba0e05e1bf9e846d51d1847a);
+// re-recorded 2026-10-17 after the depth rule changed: a depth snapshot now
+// serves only fetches that read the range AS depth (k_24_8 / k_24_8_FLOAT);
+// the row baseline fetches k_8_8_8_8, so every registered depth row that is
+// not exact-cover moved from the bridge to RAM content (GTA IV depth/stencil
+// restore). This is recorded output, NOT a formula that re-derives the
+// classifier.
 constexpr ResolvedFetchService kGolden[kRowCount] = {
     /*   0 */ ResolvedFetchService::kNotResolveBacked,
     /*   1 */ ResolvedFetchService::kBridgeSnapshot,
     /*   2 */ ResolvedFetchService::kNotResolveBacked,
-    /*   3 */ ResolvedFetchService::kBridgeSnapshot,
+    /*   3 */ ResolvedFetchService::kRamContent,
     /*   4 */ ResolvedFetchService::kNotResolveBacked,
     /*   5 */ ResolvedFetchService::kRamContent,
     /*   6 */ ResolvedFetchService::kNotResolveBacked,
-    /*   7 */ ResolvedFetchService::kBridgeSnapshot,
+    /*   7 */ ResolvedFetchService::kRamContent,
     /*   8 */ ResolvedFetchService::kNotResolveBacked,
     /*   9 */ ResolvedFetchService::kBridgeSnapshot,
     /*  10 */ ResolvedFetchService::kNotResolveBacked,
-    /*  11 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  11 */ ResolvedFetchService::kRamContent,
     /*  12 */ ResolvedFetchService::kNotResolveBacked,
     /*  13 */ ResolvedFetchService::kExactCoverSnapshot,
     /*  14 */ ResolvedFetchService::kNotResolveBacked,
-    /*  15 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  15 */ ResolvedFetchService::kRamContent,
     /*  16 */ ResolvedFetchService::kNotResolveBacked,
     /*  17 */ ResolvedFetchService::kBridgeSnapshot,
     /*  18 */ ResolvedFetchService::kNotResolveBacked,
-    /*  19 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  19 */ ResolvedFetchService::kRamContent,
     /*  20 */ ResolvedFetchService::kNotResolveBacked,
     /*  21 */ ResolvedFetchService::kBridgeSnapshot,
     /*  22 */ ResolvedFetchService::kNotResolveBacked,
-    /*  23 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  23 */ ResolvedFetchService::kRamContent,
     /*  24 */ ResolvedFetchService::kNotResolveBacked,
     /*  25 */ ResolvedFetchService::kBridgeSnapshot,
     /*  26 */ ResolvedFetchService::kNotResolveBacked,
-    /*  27 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  27 */ ResolvedFetchService::kRamContent,
     /*  28 */ ResolvedFetchService::kNotResolveBacked,
     /*  29 */ ResolvedFetchService::kBridgeSnapshot,
     /*  30 */ ResolvedFetchService::kNotResolveBacked,
-    /*  31 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  31 */ ResolvedFetchService::kRamContent,
     /*  32 */ ResolvedFetchService::kNotResolveBacked,
     /*  33 */ ResolvedFetchService::kBridgeSnapshot,
     /*  34 */ ResolvedFetchService::kNotResolveBacked,
-    /*  35 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  35 */ ResolvedFetchService::kRamContent,
     /*  36 */ ResolvedFetchService::kNotResolveBacked,
     /*  37 */ ResolvedFetchService::kBridgeSnapshot,
     /*  38 */ ResolvedFetchService::kNotResolveBacked,
-    /*  39 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  39 */ ResolvedFetchService::kRamContent,
     /*  40 */ ResolvedFetchService::kNotResolveBacked,
     /*  41 */ ResolvedFetchService::kBridgeSnapshot,
     /*  42 */ ResolvedFetchService::kNotResolveBacked,
-    /*  43 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  43 */ ResolvedFetchService::kRamContent,
     /*  44 */ ResolvedFetchService::kNotResolveBacked,
     /*  45 */ ResolvedFetchService::kExactCoverSnapshot,
     /*  46 */ ResolvedFetchService::kNotResolveBacked,
-    /*  47 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  47 */ ResolvedFetchService::kRamContent,
     /*  48 */ ResolvedFetchService::kNotResolveBacked,
     /*  49 */ ResolvedFetchService::kBridgeSnapshot,
     /*  50 */ ResolvedFetchService::kNotResolveBacked,
-    /*  51 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  51 */ ResolvedFetchService::kRamContent,
     /*  52 */ ResolvedFetchService::kNotResolveBacked,
     /*  53 */ ResolvedFetchService::kBridgeSnapshot,
     /*  54 */ ResolvedFetchService::kNotResolveBacked,
-    /*  55 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  55 */ ResolvedFetchService::kRamContent,
     /*  56 */ ResolvedFetchService::kNotResolveBacked,
     /*  57 */ ResolvedFetchService::kBridgeSnapshot,
     /*  58 */ ResolvedFetchService::kNotResolveBacked,
-    /*  59 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  59 */ ResolvedFetchService::kRamContent,
     /*  60 */ ResolvedFetchService::kNotResolveBacked,
     /*  61 */ ResolvedFetchService::kBridgeSnapshot,
     /*  62 */ ResolvedFetchService::kNotResolveBacked,
-    /*  63 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  63 */ ResolvedFetchService::kRamContent,
     /*  64 */ ResolvedFetchService::kNotResolveBacked,
     /*  65 */ ResolvedFetchService::kBridgeSnapshot,
     /*  66 */ ResolvedFetchService::kNotResolveBacked,
-    /*  67 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  67 */ ResolvedFetchService::kRamContent,
     /*  68 */ ResolvedFetchService::kNotResolveBacked,
     /*  69 */ ResolvedFetchService::kRamContent,
     /*  70 */ ResolvedFetchService::kNotResolveBacked,
-    /*  71 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  71 */ ResolvedFetchService::kRamContent,
     /*  72 */ ResolvedFetchService::kNotResolveBacked,
     /*  73 */ ResolvedFetchService::kBridgeSnapshot,
     /*  74 */ ResolvedFetchService::kNotResolveBacked,
-    /*  75 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  75 */ ResolvedFetchService::kRamContent,
     /*  76 */ ResolvedFetchService::kNotResolveBacked,
     /*  77 */ ResolvedFetchService::kRamContent,
     /*  78 */ ResolvedFetchService::kNotResolveBacked,
-    /*  79 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  79 */ ResolvedFetchService::kRamContent,
     /*  80 */ ResolvedFetchService::kNotResolveBacked,
     /*  81 */ ResolvedFetchService::kBridgeSnapshot,
     /*  82 */ ResolvedFetchService::kNotResolveBacked,
-    /*  83 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  83 */ ResolvedFetchService::kRamContent,
     /*  84 */ ResolvedFetchService::kNotResolveBacked,
     /*  85 */ ResolvedFetchService::kBridgeSnapshot,
     /*  86 */ ResolvedFetchService::kNotResolveBacked,
-    /*  87 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  87 */ ResolvedFetchService::kRamContent,
     /*  88 */ ResolvedFetchService::kNotResolveBacked,
     /*  89 */ ResolvedFetchService::kBridgeSnapshot,
     /*  90 */ ResolvedFetchService::kNotResolveBacked,
-    /*  91 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  91 */ ResolvedFetchService::kRamContent,
     /*  92 */ ResolvedFetchService::kNotResolveBacked,
     /*  93 */ ResolvedFetchService::kBridgeSnapshot,
     /*  94 */ ResolvedFetchService::kNotResolveBacked,
-    /*  95 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  95 */ ResolvedFetchService::kRamContent,
     /*  96 */ ResolvedFetchService::kNotResolveBacked,
     /*  97 */ ResolvedFetchService::kBridgeSnapshot,
     /*  98 */ ResolvedFetchService::kNotResolveBacked,
-    /*  99 */ ResolvedFetchService::kBridgeSnapshot,
+    /*  99 */ ResolvedFetchService::kRamContent,
     /* 100 */ ResolvedFetchService::kNotResolveBacked,
     /* 101 */ ResolvedFetchService::kBridgeSnapshot,
     /* 102 */ ResolvedFetchService::kNotResolveBacked,
-    /* 103 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 103 */ ResolvedFetchService::kRamContent,
     /* 104 */ ResolvedFetchService::kNotResolveBacked,
     /* 105 */ ResolvedFetchService::kBridgeSnapshot,
     /* 106 */ ResolvedFetchService::kNotResolveBacked,
-    /* 107 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 107 */ ResolvedFetchService::kRamContent,
     /* 108 */ ResolvedFetchService::kNotResolveBacked,
     /* 109 */ ResolvedFetchService::kBridgeSnapshot,
     /* 110 */ ResolvedFetchService::kNotResolveBacked,
-    /* 111 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 111 */ ResolvedFetchService::kRamContent,
     /* 112 */ ResolvedFetchService::kNotResolveBacked,
     /* 113 */ ResolvedFetchService::kBridgeSnapshot,
     /* 114 */ ResolvedFetchService::kNotResolveBacked,
-    /* 115 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 115 */ ResolvedFetchService::kRamContent,
     /* 116 */ ResolvedFetchService::kNotResolveBacked,
     /* 117 */ ResolvedFetchService::kBridgeSnapshot,
     /* 118 */ ResolvedFetchService::kNotResolveBacked,
-    /* 119 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 119 */ ResolvedFetchService::kRamContent,
     /* 120 */ ResolvedFetchService::kNotResolveBacked,
     /* 121 */ ResolvedFetchService::kBridgeSnapshot,
     /* 122 */ ResolvedFetchService::kNotResolveBacked,
-    /* 123 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 123 */ ResolvedFetchService::kRamContent,
     /* 124 */ ResolvedFetchService::kNotResolveBacked,
     /* 125 */ ResolvedFetchService::kBridgeSnapshot,
     /* 126 */ ResolvedFetchService::kNotResolveBacked,
-    /* 127 */ ResolvedFetchService::kBridgeSnapshot,
+    /* 127 */ ResolvedFetchService::kRamContent,
 };
 
 static_assert(sizeof(kGolden) / sizeof(kGolden[0]) == kRowCount,
@@ -297,10 +303,10 @@ TEST_CASE(
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kNotResolveBacked)] ==
           64);
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kBridgeSnapshot)] ==
-          59);
+          27);
   REQUIRE(counts[static_cast<int>(ResolvedFetchService::kExactCoverSnapshot)] ==
           2);
-  REQUIRE(counts[static_cast<int>(ResolvedFetchService::kRamContent)] == 3);
+  REQUIRE(counts[static_cast<int>(ResolvedFetchService::kRamContent)] == 35);
   REQUIRE(counts[0] + counts[1] + counts[2] + counts[3] == 128);
 }
 
@@ -314,7 +320,7 @@ TEST_CASE("Resolved-fetch service: every enumerated factor is load-bearing",
   // a semantic drift that keeps a factor merely "non-zero" still fails.
   const int kExpectedDifferingPairs[kFactorCount] = {
       /* registration   */ 64,
-      /* depth          */ 5,
+      /* depth          */ 29,
       /* ram_backed     */ 5,
       /* full_rect      */ 2,
       /* color_bridge   */ 5,
@@ -366,6 +372,60 @@ TEST_CASE("Resolved-fetch service: every enumerated factor is load-bearing",
 }
 
 }  // namespace
+}  // namespace metal
+}  // namespace gpu
+}  // namespace xe
+
+namespace xe {
+namespace gpu {
+namespace metal {
+
+TEST_CASE("Resolved-fetch service: a depth snapshot serves only depth-format fetches",
+          "[l0][metal][reader][service]") {
+  // GTA IV resolves its depth/stencil buffer to a k_24_8_FLOAT texture, reads
+  // it back as depth for SSAO and fog, and later redraws it over EDRAM as
+  // k_8_8_8_8 colour to restore the depth buffer. The R32F snapshot can stand
+  // in for the former, never for the latter: that fetch wants the raw words.
+  ResolvedFetchServiceInputs in = Row((1 << kFactorRegistration) |
+                                      (1 << kFactorDepth) |
+                                      (1 << kFactorRamBacked));
+  in.exact.fetch_format = xenos::TextureFormat::k_24_8_FLOAT;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kBridgeSnapshot);
+  in.exact.fetch_format = xenos::TextureFormat::k_24_8;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kBridgeSnapshot);
+  in.exact.fetch_format = xenos::TextureFormat::k_8_8_8_8;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kRamContent);
+  in.exact.fetch_format = xenos::TextureFormat::k_32_FLOAT;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kRamContent);
+}
+
+// Hidden helper: prints the classifier's table in the golden-table layout, so
+// a deliberate semantic change can re-record it from production code.
+TEST_CASE("Resolved-fetch service: dump the current table",
+          "[.golden-dump][metal][reader][service]") {
+  int counts[4] = {0, 0, 0, 0};
+  for (int row = 0; row < kRowCount; ++row) {
+    const ResolvedFetchService actual = ClassifyResolvedFetch(Row(row));
+    counts[static_cast<int>(actual)]++;
+    std::printf("    /* %3d */ ResolvedFetchService::%s,\n", row,
+                ServiceName(actual));
+  }
+  std::printf("GOLDEN-COUNTS nrb=%d bridge=%d exact=%d ram=%d\n", counts[0],
+              counts[1], counts[2], counts[3]);
+  for (int factor = 0; factor < kFactorCount; ++factor) {
+    const int bit = 1 << factor;
+    int differing = 0;
+    for (int row = 0; row < kRowCount; ++row) {
+      if (row & bit) continue;
+      if (ClassifyResolvedFetch(Row(row)) !=
+          ClassifyResolvedFetch(Row(row | bit))) {
+        ++differing;
+      }
+    }
+    std::printf("GOLDEN-FACTOR %s %d\n", kFactorNames[factor], differing);
+  }
+}
+
 }  // namespace metal
 }  // namespace gpu
 }  // namespace xe

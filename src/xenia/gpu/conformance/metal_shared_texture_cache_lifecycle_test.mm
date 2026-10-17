@@ -261,7 +261,7 @@ struct Fixture {
     cache = std::make_unique<MetalSharedTextureCache>(
         regs, *env.shared_memory, (__bridge void*)env.device, legacy.get(),
         /*draw_resolution_scale_x=*/1, /*draw_resolution_scale_y=*/1);
-    cache->SetPrepareTransferCallback([this]() -> void* {
+    cache->SetPrepareTransferCallback([this](bool) -> void* {
       ++prepare_transfer_calls;
       if (fail_prepare_transfer) {
         return nullptr;
@@ -300,7 +300,9 @@ struct Fixture {
   }
 
   // One "draw": the pre-encoder prepass over the eligible mask.
-  void Prepare(uint32_t index) { cache->PrepareEligible(1u << index); }
+  void Prepare(uint32_t index) {
+    cache->PrepareEligible(1u << index, /*dirty_mask=*/1u << index);
+  }
 
   // Close the frame: commit, wait, then run the completion actions the command
   // processor runs (LRU advance, slot reclaim, consumed-range release).

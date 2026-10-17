@@ -68,6 +68,19 @@ inline ResolvedFetchService ClassifyResolvedFetch(
   if (ExactCoverSnapshotEligible(in.exact)) {
     return ResolvedFetchService::kExactCoverSnapshot;
   }
+  // A depth snapshot holds the depth as a float view; it can only stand in for
+  // a fetch that reads the destination AS depth (k_24_8 / k_24_8_FLOAT). A
+  // fetch of the same range through any other format wants the raw D24S8
+  // words (GTA IV restores its depth/stencil buffer by drawing the saved
+  // k_24_8_FLOAT resolve back over EDRAM as k_8_8_8_8 colour; the float view
+  // gave (1,0,0,1) per texel, the depth buffer became all-ones and every
+  // deferred light failed its depth test). The depth writeback keeps the raw
+  // words in RAM, so RAM serves those fetches.
+  if (in.exact.rt_is_depth &&
+      in.exact.fetch_format != xenos::TextureFormat::k_24_8 &&
+      in.exact.fetch_format != xenos::TextureFormat::k_24_8_FLOAT) {
+    return ResolvedFetchService::kRamContent;
+  }
   if (in.exact.rt_is_depth || in.exact.color_bridge || !in.exact.ram_backed ||
       in.covered_r32f) {
     return ResolvedFetchService::kBridgeSnapshot;
