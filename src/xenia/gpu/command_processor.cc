@@ -1553,9 +1553,44 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     return;
   }
 }
+namespace {
+// Shader constant ranges whose register writes have no side effects in
+// WriteRegister (no special register, no texture fetch slot the backends
+// watch): ALU float constants, bool constants and loop constants. A bulk
+// write that stays inside one of them can store straight into the register
+// file instead of taking the virtual per-register path with its checks:
+// SET_CONSTANT / LOAD_ALU_CONSTANT write ~100-200 dwords before most draws
+// and WriteRegister was 2-5% of the command-processor thread across eight
+// titles (2026-10-17 samples). XE_GPU_WATCH_REG / XE_GPU_FORCE_BOOL keep the
+// per-register path, since they act inside it.
+bool PlainConstantRange(uint32_t base, uint32_t num_registers) {
+  static const bool s_diagnostics_armed =
+      std::getenv("XE_GPU_WATCH_REG") != nullptr ||
+      std::getenv("XE_GPU_FORCE_BOOL") != nullptr;
+  if (s_diagnostics_armed || !num_registers) {
+    return false;
+  }
+  const uint32_t end = base + num_registers;
+  if (end < base) {
+    return false;
+  }
+  return (base >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+          end <= XE_GPU_REG_SHADER_CONSTANT_511_W + 1u) ||
+         (base >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+          end <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1u);
+}
+}  // namespace
+
 void CommandProcessor::WriteRegistersFromMem(uint32_t start_index,
                                              uint32_t* base,
                                              uint32_t num_registers) {
+  if (PlainConstantRange(start_index, num_registers)) {
+    uint32_t* values = &register_file_->values[start_index];
+    for (uint32_t i = 0; i < num_registers; ++i) {
+      values[i] = xe::load_and_swap<uint32_t>(base + i);
+    }
+    return;
+  }
   for (uint32_t i = 0; i < num_registers; ++i) {
     uint32_t data = xe::load_and_swap<uint32_t>(base + i);
     this->WriteRegister(start_index + i, data);
@@ -1565,6 +1600,13 @@ void CommandProcessor::WriteRegistersFromMem(uint32_t start_index,
 void CommandProcessor::WriteRegisterRangeFromRing(xe::RingBuffer* ring,
                                                   uint32_t base,
                                                   uint32_t num_registers) {
+  if (PlainConstantRange(base, num_registers)) {
+    uint32_t* values = &register_file_->values[base];
+    for (uint32_t i = 0; i < num_registers; ++i) {
+      values[i] = ring->ReadAndSwap<uint32_t>();
+    }
+    return;
+  }
   for (uint32_t i = 0; i < num_registers; ++i) {
     uint32_t data = ring->ReadAndSwap<uint32_t>();
     WriteRegister(base + i, data);
