@@ -478,9 +478,16 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
   if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size,
                         adjusted_alignment, allocation_type, protect, top_down,
                         &base_address)) {
-    // Failed - assume no memory available.
-    XELOGW("MmAllocatePhysicalMemoryEx: Allocation failed: {:08X} Size: {:08X}",
-           base_address, adjusted_size);
+    // Failed - assume no memory available. Name the request: the window the
+    // title asked for decides whether this is exhaustion or a range the heap
+    // cannot satisfy (Rise of the Tomb Raider fails 55 of these at boot).
+    XELOGW(
+        "MmAllocatePhysicalMemoryEx: Allocation failed: {:08X} Size: {:08X} "
+        "(flags={:08X} protect={:08X} range={:08X}-{:08X} alignment={:08X} "
+        "page_size={:X} heap={:08X}+{:X} window={:08X}-{:08X})",
+        base_address, adjusted_size, flags, protect_bits, min_addr_range,
+        max_addr_range, alignment, page_size, heap_base, heap_size,
+        heap_min_addr, heap_max_addr);
     return 0;
   }
   XELOGD("MmAllocatePhysicalMemoryEx = {:08X} Size: {:08X}", base_address,

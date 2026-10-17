@@ -1561,8 +1561,22 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
       ++census_1d_empty_;
     }
   }
+  // 1D: the translator binds every 1D fetch as a 2D texture (DXBC
+  // FindOrAddTextureBinding) and the guest layout is one linear row, so a
+  // 1D texture is served as a width x 1 linear 2D upload. Until 2026-10-17
+  // this cache skipped 1D and served the null slot: Rise of the Tomb Raider's
+  // tonemap multiplies the scene by a 256x1 k_8 curve, so the whole world
+  // composited to black while the HUD (no curve) stayed intact.
+  // XE_METAL_TEX_1D=0 restores the null serve.
+  static const bool s_tex_1d = [] {
+    const char* v = std::getenv("XE_METAL_TEX_1D");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  const bool is_1d = fetch.dimension == xenos::DataDimension::k1D &&
+                     s_tex_1d && !fetch.tiled &&
+                     fetch.size_1d.width < xenos::kTexture2DCubeMaxWidthHeight;
   if (fetch.dimension != xenos::DataDimension::k2DOrStacked && !is_3d &&
-      !is_cube) {
+      !is_cube && !is_1d) {
     log_null("dim");
     return 0;
   }
@@ -1594,8 +1608,12 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     return 0;
   }
 
-  uint32_t width = (is_3d ? fetch.size_3d.width : fetch.size_2d.width) + 1;
-  uint32_t height = (is_3d ? fetch.size_3d.height : fetch.size_2d.height) + 1;
+  uint32_t width = (is_3d   ? fetch.size_3d.width
+                    : is_1d ? fetch.size_1d.width
+                            : fetch.size_2d.width) +
+                   1;
+  uint32_t height =
+      is_1d ? 1u : (is_3d ? fetch.size_3d.height : fetch.size_2d.height) + 1;
   uint32_t base = fetch.base_address << 12;
   uint32_t pitch_texels = fetch.pitch << 5;  // guest pitch is texels/32.
   if (!base || !width || !height || width > 8192 || height > 8192 ||
