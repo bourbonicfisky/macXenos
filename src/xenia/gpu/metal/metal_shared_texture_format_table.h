@@ -232,11 +232,11 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       // Off the route these are RAM consumers of the resolve, and every draw
       // sampling one paid a commit + GPU wait (58 drains, 25 ms a frame).
       // XE_METAL_TEX_ROUTE_1110=0 drops these entries.
-      {xenos::TextureFormat::k_11_11_10_AS_16_16_16_16,
+      {xenos::TextureFormat::k_11_11_10,
        SharedLoadFamily::kR11G11B10ToRgba16, kMtlPixelFormatRGBA16Unorm,
        kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
        false},
-      {xenos::TextureFormat::k_10_11_11_AS_16_16_16_16,
+      {xenos::TextureFormat::k_10_11_11,
        SharedLoadFamily::kR10G11B11ToRgba16, kMtlPixelFormatRGBA16Unorm,
        kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
        false},
@@ -398,6 +398,16 @@ inline bool SharedTextureRouteFormatsWidened() {
 
 inline const SharedTextureFormatEntry* FindSharedTextureFormat(
     xenos::TextureFormat format) {
+  // The texture KEY carries the base format (TextureCache::GetBaseFormat:
+  // k_11_11_10_AS_16_16_16_16 -> k_11_11_10) while the fetch constant carries
+  // the AS variant; both must resolve to the same entry, or the fetch is
+  // route-eligible but the key never gets a texture (Tomb Raider's HDR
+  // pyramid: UNSERVED why=no-texture, 10 RAM drains a frame).
+  if (format == xenos::TextureFormat::k_11_11_10_AS_16_16_16_16) {
+    format = xenos::TextureFormat::k_11_11_10;
+  } else if (format == xenos::TextureFormat::k_10_11_11_AS_16_16_16_16) {
+    format = xenos::TextureFormat::k_10_11_11;
+  }
   size_t count = 0;
   const SharedTextureFormatEntry* table = SharedTextureFormatTable(&count);
   for (size_t i = 0; i < count; ++i) {
@@ -407,8 +417,8 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormat(
     if (!table[i].direct && !SharedTextureRouteFormatsWidened()) {
       return nullptr;
     }
-    if (table[i].format == xenos::TextureFormat::k_11_11_10_AS_16_16_16_16 ||
-        table[i].format == xenos::TextureFormat::k_10_11_11_AS_16_16_16_16) {
+    if (table[i].format == xenos::TextureFormat::k_11_11_10 ||
+        table[i].format == xenos::TextureFormat::k_10_11_11) {
       static const bool s_1110 = [] {
         const char* v = std::getenv("XE_METAL_TEX_ROUTE_1110");
         return !(v && v[0] == '0' && !v[1]);

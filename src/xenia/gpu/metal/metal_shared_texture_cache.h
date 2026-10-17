@@ -202,6 +202,9 @@ class MetalSharedTextureCache : public TextureCache {
     if (dimension == xenos::DataDimension::kCube) {
       return SharedRouteCubeEnabled() ? 6u : 1u;
     }
+    if (dimension == xenos::DataDimension::k3D) {
+      return SharedRouteVolumeEnabled() ? 2048u : 1u;
+    }
     return dimension == xenos::DataDimension::k2DOrStacked &&
                    SharedRouteStackedEnabled()
                ? 2048u

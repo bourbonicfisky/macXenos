@@ -254,13 +254,27 @@ inline bool SharedRouteCubeEnabled() {
   return s_enabled;
 }
 
+// Volume textures on the GPU load route (the load shaders' 3D path; Tomb
+// Raider's per-frame 32^3 colour LUT). XE_METAL_TEX_ROUTE_3D=0 keeps them on
+// the legacy cache.
+inline bool SharedRouteVolumeEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_3D");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool IsSharedRouteShapeEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
   const bool cube = fetch.dimension == xenos::DataDimension::kCube &&
                     SharedRouteCubeEnabled() && width == height;
+  const bool volume = fetch.dimension == xenos::DataDimension::k3D &&
+                      SharedRouteVolumeEnabled() && fetch.tiled;
   if ((!fetch.tiled && !SharedRouteLinearEnabled()) ||
-      (fetch.dimension != xenos::DataDimension::k2DOrStacked && !cube) ||
+      (fetch.dimension != xenos::DataDimension::k2DOrStacked && !cube &&
+       !volume) ||
       (fetch.stacked && !SharedRouteStackedEnabled())) {
     return false;
   }

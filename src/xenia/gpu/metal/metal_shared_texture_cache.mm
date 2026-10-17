@@ -250,6 +250,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
   in.height = key.GetHeight();
   in.mip_max_level = key.mip_max_level;
   in.array_size = key.depth_or_array_size_minus_1 + 1;
+  in.is_3d = key.dimension == xenos::DataDimension::k3D;
   in.guest_buffer_size = SharedMemory::kBufferSize;
   in.load_base = load_base;
   in.load_mips = load_mips;
@@ -264,7 +265,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
   if (!BuildMipLevelPlan(in, texture.guest_layout(), out, &range_memo_)) {
     return false;
   }
-  if (!key.tiled) {
+  if (!key.tiled && key.dimension != xenos::DataDimension::k3D) {
     // Linear layout: the planner's envelope is the tiled walk's; a linear
     // level reads exactly block rows x pitch from its offset (the packed
     // origin's rows included). Same conservative role: a surplus only adds a
@@ -299,7 +300,14 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
                     SharedRouteCubeEnabled() &&
                     key.GetWidth() == key.GetHeight() &&
                     key.depth_or_array_size_minus_1 == 5;
-  if ((key.dimension != xenos::DataDimension::k2DOrStacked && !cube) ||
+  // Volume textures (XE_METAL_TEX_ROUTE_3D): a 3D host texture loaded by the
+  // load shaders' 3D path (Tomb Raider's per-frame 32x32x32 colour LUT, whose
+  // draw was a RAM consumer of its 32 slice resolves: a GPU wait a frame).
+  const bool volume = key.dimension == xenos::DataDimension::k3D &&
+                      SharedRouteVolumeEnabled() && key.tiled &&
+                      key.depth_or_array_size_minus_1 + 1 <= 2048;
+  if ((key.dimension != xenos::DataDimension::k2DOrStacked && !cube &&
+       !volume) ||
       (!key.tiled && !SharedRouteLinearEnabled()) ||
       key.signed_separate || key.scaled_resolve || key.pitch == 0 ||
       (key.depth_or_array_size_minus_1 != 0 && !SharedRouteStackedEnabled())) {
@@ -342,6 +350,9 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
     // per slice, exactly as for stacked textures).
     desc.textureType = MTLTextureTypeCubeArray;
     desc.arrayLength = 1;
+  } else if (volume) {
+    desc.textureType = MTLTextureType3D;
+    desc.depth = array_size;
   } else if (array_size > 1) {
     desc.textureType = MTLTextureType2DArray;
     desc.arrayLength = array_size;
@@ -509,6 +520,9 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     // (32-row aligned) as consumed. A superset can only add a hazard flush.
     const uint32_t block_dim = SharedTextureBlockDim(*entry);
     for (const MipLevelPlan& p : plan) {
+      if (p.depth > 1) {
+        continue;  // 3D: the plan's range is already the whole level
+      }
       uint32_t pitch_blocks = (p.pitch_blocks * 4u) / entry->bytes_per_block;
       uint32_t block_rows =
           (p.py + p.height + block_dim - 1u) / block_dim;
@@ -1210,6 +1224,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     uint32_t threads_x = 0;
     uint32_t src_x = 0;     // level origin in the scratch region, texels
     uint32_t src_y = 0;
+    uint32_t depth = 1;     // 3D: slices in this level's scratch
   };
   std::vector<LevelDispatch> dispatches;
   dispatches.reserve(plan.size());
@@ -1232,8 +1247,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         ((d.region_w + blocks_per_thread - 1u) / blocks_per_thread) *
         blocks_per_thread * host_expand * bpb;
     d.host_pitch = (written_row + 255u) & ~255u;
+    d.depth = std::max(p.depth, 1u);
     uint64_t dest_bytes =
-        uint64_t(d.host_pitch) * d.region_h * host_expand + 256u;
+        uint64_t(d.host_pitch) * d.region_h * host_expand * d.depth + 256u;
     static uint32_t s_scratch_logs = 0;
     if (dest_bytes > kScratchBufferSize) {
       if (s_scratch_logs++ < 16) {
@@ -1260,12 +1276,14 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     d.constants = {};
     // Bit 0 = tiled; the upstream shaders address linear levels by pitch.
     d.constants.is_tiled_3d_endian_scale =
-        (key.tiled ? 1u : 0u) | (uint32_t(key.endianness) << 2);
+        (key.tiled ? 1u : 0u) | (d.depth > 1 ? 2u : 0u) |
+        (uint32_t(key.endianness) << 2);
     d.constants.guest_offset = p.guest_offset;
     d.constants.guest_pitch_aligned = pitch_blocks;
+    d.constants.guest_z_stride_block_rows_aligned = p.z_stride_block_rows;
     d.constants.size_blocks[0] = d.region_w;
     d.constants.size_blocks[1] = d.region_h;
-    d.constants.size_blocks[2] = 1;
+    d.constants.size_blocks[2] = d.depth;
     d.constants.host_offset = 0;
     d.constants.host_pitch = d.host_pitch;
     d.constants.height_texels = d.region_h * host_expand;
@@ -1309,7 +1327,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
                                           group.width,
                                       (d.region_h + group.height - 1) /
                                           group.height,
-                                      1)
+                                      d.depth)
             threadsPerThreadgroup:group];
   }
   [encoder endEncoding];
@@ -1332,7 +1350,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
                sourceOffset:source_offset
           sourceBytesPerRow:d.host_pitch
         sourceBytesPerImage:NSUInteger(d.host_pitch) * d.region_h * host_expand
-                 sourceSize:MTLSizeMake(p.width, p.height, 1)
+                 sourceSize:MTLSizeMake(p.width, p.height, d.depth)
                   toTexture:base_texture
            destinationSlice:p.slice
            destinationLevel:p.host_level
@@ -1469,13 +1487,18 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
   // FULL mip range: a mipped texture served through a single-level view
   // samples only mip 0, which would silently break guest LOD selection.
   const bool cube_base = base_texture.textureType == MTLTextureTypeCubeArray;
+  const bool volume_base = base_texture.textureType == MTLTextureType3D;
   id<MTLTexture> view = [base_texture
       newTextureViewWithPixelFormat:view_format
-                        textureType:cube_base ? MTLTextureTypeCubeArray
-                                              : MTLTextureType2DArray
+                        textureType:cube_base     ? MTLTextureTypeCubeArray
+                                    : volume_base ? MTLTextureType3D
+                                                  : MTLTextureType2DArray
                              levels:NSMakeRange(0, base_texture.mipmapLevelCount)
-                            slices:NSMakeRange(0, base_texture.arrayLength *
-                                                      (cube_base ? 6 : 1))
+                            slices:NSMakeRange(
+                                       0, volume_base
+                                              ? 1
+                                              : base_texture.arrayLength *
+                                                    (cube_base ? 6 : 1))
                            swizzle:channels];
   if (!view) {
     return false;

@@ -450,13 +450,15 @@ inline bool RouteServiceOk(ResolvedFetchService service,
           !(declaration_site && RouteAllDrainsBase(fetch_base)));
 }
 inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.size_2d.width + 1;
+  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.width + 1
+                                                  : f.size_2d.width + 1;
 }
 inline uint32_t fetch_height_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.size_2d.height + 1;
+  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.height + 1
+                                                  : f.size_2d.height + 1;
 }
 inline uint32_t fetch_pitch_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  uint32_t w = f.size_2d.width + 1;
+  uint32_t w = fetch_width_serve(f);
   return f.pitch ? (uint32_t(f.pitch) << 5) : ((w + 31u) & ~31u);
 }
 }  // namespace
@@ -2390,7 +2392,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // the route is enabled: it is default OFF, and 9 pipeline creations are not
   // free at startup. A failure here is logged and non-fatal -- the dispatcher
   // checks `initialized()` and the existing resolve path continues.
-  if (SharedResolveShadersEnabled() &&
+  if ((SharedResolveShadersEnabled() || SharedResolveArraysEnabled()) &&
       !resolve_shader_pipelines_.Initialize(device_ptr)) {
     XELOGE(
         "MetalCommandProcessor: shared resolve-copy pipelines failed to "
@@ -3666,6 +3668,14 @@ bool MetalCommandProcessor::MsaaResolveOnStoreEnabled() {
     return false;
   }();
   return enabled;
+}
+
+bool MetalCommandProcessor::SharedResolveArraysEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SHARED_RESOLVE_ARRAYS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
 }
 
 bool MetalCommandProcessor::SharedResolveShadersEnabled() {
@@ -8135,6 +8145,32 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         auto f = regs.GetTextureFetch(binding.fetch_constant);
         uint32_t fbase = f.base_address << 12;
         if (!fbase) continue;
+        // DEAD SIGN BINDING: the translator declares an unsigned and a signed
+        // binding per fetch and samples each component through the one its
+        // sign selects, so a binding whose signedness no component uses is
+        // never sampled (the serve path never loads it either). It must not
+        // veto GPU ordering: Tomb Raider's 640x360 k_16_16_16_16 velocity
+        // buffer (signs=1111) made its draw a RAM consumer through the
+        // unsigned binding alone, 11 commits + ~11 ms GPU wait a frame.
+        // XE_METAL_DEAD_SIGN_BINDINGS=0 restores the veto.
+        static const bool s_skip_dead_sign_bindings = [] {
+          const char* v = std::getenv("XE_METAL_DEAD_SIGN_BINDINGS");
+          return !(v && v[0] == '0' && !v[1]);
+        }();
+        if (s_skip_dead_sign_bindings) {
+          auto is_signed_sign = [](xenos::TextureSign s) {
+            return s == xenos::TextureSign::kSigned;
+          };
+          uint32_t signed_components =
+              uint32_t(is_signed_sign(f.sign_x)) +
+              uint32_t(is_signed_sign(f.sign_y)) +
+              uint32_t(is_signed_sign(f.sign_z)) +
+              uint32_t(is_signed_sign(f.sign_w));
+          if (binding.is_signed ? signed_components == 0
+                                : signed_components == 4) {
+            continue;
+          }
+        }
 
         metal::FetchGuestRanges rng = ComputeFetchGuestRanges(f);
         auto base_range =
@@ -8236,10 +8272,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           ResolvedFetchService fetch_service =
               ResolvedFetchService::kRamContent;
           if (fetch_buffer_read) {
-            uint32_t fw = f.size_2d.width + 1;
-            uint32_t fh = f.size_2d.height + 1;
-            uint32_t fp =
-                f.pitch ? (uint32_t(f.pitch) << 5) : ((fw + 31u) & ~31u);
+            uint32_t fw = fetch_width_serve(f);
+            uint32_t fh = fetch_height_serve(f);
+            uint32_t fp = fetch_pitch_serve(f);
             strict_eligible =
                 SharedRouteEligible(f, binding.is_signed, fw, fh, fp, nullptr);
             fetch_service =
@@ -12319,7 +12354,16 @@ bool MetalCommandProcessor::IssueCopy() {
                 dest_format, canonical_resolve ? 1 : 0,
                 canonical_prepared ? 1 : 0, legacy_blit_format ? 1 : 0);
           }
-          if (SharedResolveShadersEnabled()) {
+          // Array / slice destinations (a 3D LUT built one slice at a time)
+          // cannot take the canonical scatter; the shared resolve shaders
+          // address 3D destinations natively, so they take those even with
+          // the general switch off (XE_METAL_SHARED_RESOLVE_ARRAYS=0 drops
+          // them back to the CPU writeback).
+          const bool array_dest =
+              resolve_info.copy_dest_info.copy_dest_array ||
+              resolve_info.copy_dest_info.copy_dest_slice;
+          if (SharedResolveShadersEnabled() ||
+              (array_dest && SharedResolveArraysEnabled())) {
             if (canonical_prepared) {
               shared_resolve_dispatched =
                   DispatchSharedResolveCopy(resolve_info);
@@ -13739,7 +13783,9 @@ bool MetalCommandProcessor::SharedRouteEligible(
   const bool rgba8_general =
       (!fetch.tiled && metal::SharedRouteLinearEnabled()) ||
       (fetch.dimension == xenos::DataDimension::kCube &&
-       metal::SharedRouteCubeEnabled());
+       metal::SharedRouteCubeEnabled()) ||
+      (fetch.dimension == xenos::DataDimension::k3D &&
+       metal::SharedRouteVolumeEnabled());
   if (rgba8_class && !rgba8_general &&
       !(fetch.stacked && metal::SharedRouteStackedEnabled())) {
     if (is_signed) {

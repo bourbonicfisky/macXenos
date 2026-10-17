@@ -37,6 +37,8 @@ namespace metal {
 struct MipLevelPlan {
   uint32_t host_level = 0;
   uint32_t slice = 0;           // array slice (stacked textures), else 0
+  uint32_t depth = 1;           // 3D textures: the level's depth
+  uint32_t z_stride_block_rows = 0;  // 3D: guest z slice stride (block rows)
   uint32_t guest_offset = 0;    // absolute guest byte address of the level
   uint32_t pitch_blocks = 0;    // row pitch in blocks (== texels at 32bpp)
   uint32_t width = 0;           // level texels
@@ -116,6 +118,10 @@ struct MipLevelPlanInputs {
   uint32_t height = 0;
   uint32_t mip_max_level = 0;  // from the KEY
   uint32_t array_size = 1;     // stacked 2D: slices, each at the level's stride
+  // 3D (volume) texture: array_size is the base depth; one plan entry per
+  // level covering the whole volume (the load shader's 3D path), consumed
+  // range = the level's whole guest extent.
+  bool is_3d = false;
   // Guest block geometry for the envelope scan (see BuildMipLevelPlan): bytes
   // per guest block and the block's edge in texels (4 for DXT/CTX1, else 1).
   uint32_t bytes_per_block = 4;
@@ -219,6 +225,53 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
     return true;
   };
 
+  if (in.is_3d) {
+    // Volume levels: whole-level entries, no per-slice scan.
+    auto plan_3d = [&](uint32_t level, uint64_t guest_offset,
+                       const texture_util::TextureGuestLayout::Level& lv) {
+      MipLevelPlan p;
+      p.host_level = level;
+      p.slice = 0;
+      p.pitch_blocks = lv.row_pitch_bytes / 4u;
+      p.width = std::max(in.width >> level, 1u);
+      p.height = std::max(in.height >> level, 1u);
+      p.depth = std::max(in.array_size >> level, 1u);
+      p.z_stride_block_rows = lv.z_slice_stride_block_rows;
+      if (!p.pitch_blocks || !p.width || !p.height ||
+          guest_offset >= in.guest_buffer_size) {
+        return false;
+      }
+      uint64_t end = guest_offset + uint64_t(lv.level_data_extent_bytes);
+      if (end > uint64_t(in.guest_buffer_size) || end <= guest_offset) {
+        return false;
+      }
+      p.guest_offset = uint32_t(guest_offset);
+      p.consumed_begin = p.guest_offset;
+      p.consumed_end = uint32_t(end);
+      out->push_back(p);
+      return true;
+    };
+    if (in.load_base) {
+      if (!in.base_address || !plan_3d(0, in.base_address, layout.base)) {
+        return false;
+      }
+    }
+    if (in.load_mips) {
+      if (!in.mip_max_level || !in.mip_address || packed != UINT32_MAX) {
+        return false;  // packed 3D mip tails stay on the legacy cache
+      }
+      for (uint32_t level = 1; level <= in.mip_max_level; ++level) {
+        if (level >= xe::countof(layout.mips) ||
+            !plan_3d(level,
+                     uint64_t(in.mip_address) +
+                         uint64_t(layout.mip_offsets_bytes[level]),
+                     layout.mips[level])) {
+          return false;
+        }
+      }
+    }
+    return !out->empty();
+  }
   if (in.load_base) {
     if (!in.base_address) {
       return false;
