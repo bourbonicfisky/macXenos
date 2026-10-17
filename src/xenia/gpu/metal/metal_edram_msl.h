@@ -1136,6 +1136,9 @@ struct CanonicalResolveParams {
   uint dest_offset_x;
   uint dest_offset_y;
   uint dest_extent_bytes;
+  // RB_COPY_DEST_INFO copy_dest_number: how fixed-point destination formats
+  // are packed (see xe_resolve_pack_fixed).
+  uint dest_number;
 };
 // The draw resolution scale (host pixels per guest pixel) implied by the tile
 // geometry, and the host pixel a resolve reads for a guest pixel: the
@@ -1269,18 +1272,46 @@ inline uint xe_resolve_pack_101111(float3 v) {
   uint3 n = uint3(saturate(v) * float3(1023.0, 2047.0, 2047.0) + 0.5);
   return n.r | (n.g << 10u) | (n.b << 21u);
 }
-inline uint xe_resolve_pack_16(float v) {
-  return uint(saturate(v) * 65535.0 + 0.5);
+// Fixed-point pack by the destination number format (RB_COPY_DEST_INFO
+// copy_dest_number): 0 unsigned fraction, 1 signed fraction, 2 unsigned
+// integer, 3 signed integer; anything else packs as an unsigned fraction.
+// A title that resolves a -32..32 fixed render target with exp_bias -5 into a
+// signed 16-bit texture needs the signed pack: the unsigned one zeroes every
+// negative value (Rise of the Tomb Raider's particle buffer, encoded as
+// 2*(c-16), came back as a +16 wash over the whole frame).
+inline uint xe_resolve_pack_fixed(float v, uint bits, uint num_format) {
+  uint unsigned_max = (1u << bits) - 1u;
+  uint packed;
+  if (num_format == 1u) {
+    float positive_max = float((1u << (bits - 1u)) - 1u);
+    packed = uint(int(clamp(v, -1.0, 1.0) * positive_max +
+                      (v >= 0.0 ? 0.5 : -0.5)));
+  } else if (num_format == 2u) {
+    packed = uint(clamp(v, 0.0, float(unsigned_max)) + 0.5);
+  } else if (num_format == 3u) {
+    float signed_min = -float(1u << (bits - 1u));
+    float signed_max = float((1u << (bits - 1u)) - 1u);
+    packed = uint(int(clamp(v, signed_min, signed_max) +
+                      (v >= 0.0 ? 0.5 : -0.5)));
+  } else {
+    packed = uint(saturate(v) * float(unsigned_max) + 0.5);
+  }
+  return packed & unsigned_max;
 }
-inline uint xe_resolve_pack_16_16(float2 v) {
-  uint2 n = uint2(saturate(v) * 65535.0 + 0.5);
-  return n.x | (n.y << 16u);
+inline uint xe_resolve_pack_16(float v, uint num_format) {
+  return xe_resolve_pack_fixed(v, 16u, num_format);
 }
-inline uint2 xe_resolve_pack_16_16_16_16(float4 v) {
-  uint4 n = uint4(saturate(v) * 65535.0 + 0.5);
-  return uint2(n.x | (n.y << 16u), n.z | (n.w << 16u));
+inline uint xe_resolve_pack_16_16(float2 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.x, 16u, num_format) |
+         (xe_resolve_pack_fixed(v.y, 16u, num_format) << 16u);
 }
-inline ushort xe_resolve_pack_16bpp(float4 v, uint format) {
+inline uint2 xe_resolve_pack_16_16_16_16(float4 v, uint num_format) {
+  return uint2(xe_resolve_pack_fixed(v.x, 16u, num_format) |
+                   (xe_resolve_pack_fixed(v.y, 16u, num_format) << 16u),
+               xe_resolve_pack_fixed(v.z, 16u, num_format) |
+                   (xe_resolve_pack_fixed(v.w, 16u, num_format) << 16u));
+}
+inline ushort xe_resolve_pack_16bpp(float4 v, uint format, uint num_format) {
   switch (format) {
     case 3u: return ushort(xe_resolve_pack_5551(v));
     case 4u: return ushort(xe_resolve_pack_565(v.rgb));
@@ -1290,11 +1321,11 @@ inline ushort xe_resolve_pack_16bpp(float4 v, uint format) {
       return ushort(n.x | (n.y << 8u));
     }
     case 15u: return ushort(xe_resolve_pack_4444(v));
-    case 24u: return ushort(xe_resolve_pack_16(v.r));
+    case 24u: return ushort(xe_resolve_pack_16(v.r, num_format));
     default: return as_type<ushort>(half(v.r));
   }
 }
-inline uint xe_resolve_pack_32bpp(float4 v, uint format) {
+inline uint xe_resolve_pack_32bpp(float4 v, uint format, uint num_format) {
   switch (format) {
     case 6u:
     case 14u:
@@ -1309,15 +1340,15 @@ inline uint xe_resolve_pack_32bpp(float4 v, uint format) {
     case 17u:
     case 56u: return xe_resolve_pack_101111(v.rgb);
     case 13u:
-    case 25u: return xe_resolve_pack_16_16(v.rg);
+    case 25u: return xe_resolve_pack_16_16(v.rg, num_format);
     case 31u: return as_type<uint>(half2(v.rg));
     default: return as_type<uint>(v.r);
   }
 }
-inline uint2 xe_resolve_pack_64bpp(float4 v, uint format) {
+inline uint2 xe_resolve_pack_64bpp(float4 v, uint format, uint num_format) {
   switch (format) {
     case 21u:
-    case 26u: return xe_resolve_pack_16_16_16_16(v);
+    case 26u: return xe_resolve_pack_16_16_16_16(v, num_format);
     case 32u: return as_type<uint2>(half4(v));
     default: return as_type<uint2>(v.rg);
   }
@@ -1428,20 +1459,23 @@ inline void xe_resolve_store_value(device uchar* destination,
       destination[byte_offset] = uchar(saturate(value.r) * 255.0 + 0.5);
       break;
     case 1u: {
-      ushort packed = xe_resolve_pack_16bpp(value, p.dest_format);
+      ushort packed =
+          xe_resolve_pack_16bpp(value, p.dest_format, p.dest_number);
       if (p.dest_endian == 1u) packed = ushort((packed << 8u) | (packed >> 8u));
       *reinterpret_cast<device ushort*>(destination + byte_offset) = packed;
       break;
     }
     case 2u:
       *reinterpret_cast<device uint*>(destination + byte_offset) =
-          xe_resolve_endian32(xe_resolve_pack_32bpp(value, p.dest_format),
-                              p.dest_endian);
+          xe_resolve_endian32(
+              xe_resolve_pack_32bpp(value, p.dest_format, p.dest_number),
+              p.dest_endian);
       break;
     case 3u:
       *reinterpret_cast<device uint2*>(destination + byte_offset) =
-          xe_resolve_endian64(xe_resolve_pack_64bpp(value, p.dest_format),
-                              p.dest_endian);
+          xe_resolve_endian64(
+              xe_resolve_pack_64bpp(value, p.dest_format, p.dest_number),
+              p.dest_endian);
       break;
     default:
       *reinterpret_cast<device uint4*>(destination + byte_offset) =

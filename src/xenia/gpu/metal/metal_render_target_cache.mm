@@ -4536,11 +4536,11 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
       }
     }
     if (cs_slot) {
-      // The MSL parameter block is the full 26-word CanonicalResolveParams;
+      // The MSL parameter block is the full 27-word CanonicalResolveParams;
       // the snapshot path uses its first 20 words.
       struct {
         ResolveParams params;
-        uint32_t scatter_unused[6];
+        uint32_t scatter_unused[7];
       } padded{params, {}};
       const uint32_t origin[2] = {dest_x_offset * sx, dest_y_offset * sy};
       const bool direct = !is_depth && direct_color_source_;
@@ -4651,6 +4651,7 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     uint32_t scatter_enable;
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
   } params{surface,
            source_x,
            source_y,
@@ -4671,8 +4672,9 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
            scatter ? scatter->dest_pitch_aligned : 0u,
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
-           scatter ? scatter->dest_extent_bytes : 0u};
-  static_assert(sizeof(ResolveParams) == 26u * sizeof(uint32_t));
+           scatter ? scatter->dest_extent_bytes : 0u,
+           0u};
+  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -4703,7 +4705,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     bool dest_swap, float exp_bias_scale, uint32_t dest_format,
     uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
     void* destination_buffer, uint32_t width, uint32_t height,
-    const CanonicalScatterDest* scatter) {
+    const CanonicalScatterDest* scatter, uint32_t dest_number) {
   xenos::ColorRenderTargetFormat storage_format =
       xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
   if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
@@ -4752,6 +4754,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     uint32_t scatter_enable;
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
   } params{surface,
            source_x,
            source_y,
@@ -4772,8 +4775,9 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
            scatter ? scatter->dest_pitch_aligned : 0u,
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
-           scatter ? scatter->dest_extent_bytes : 0u};
-  static_assert(sizeof(ResolveParams) == 26u * sizeof(uint32_t));
+           scatter ? scatter->dest_extent_bytes : 0u,
+           dest_number};
+  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   const bool direct = direct_color_source_ != nullptr;

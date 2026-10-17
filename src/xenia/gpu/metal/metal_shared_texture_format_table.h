@@ -232,12 +232,17 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       // Off the route these are RAM consumers of the resolve, and every draw
       // sampling one paid a commit + GPU wait (58 drains, 25 ms a frame).
       // XE_METAL_TEX_ROUTE_1110=0 drops these entries.
+      // The Xenos names count fields from the most significant bit, the load
+      // shaders from the least: k_11_11_10 keeps red in the LOW 10 bits, so
+      // it is the r10g11b11 loader (and the resolve packs it as 10:11:11),
+      // exactly as the D3D12 and Vulkan tables pair them. The reverse pairing
+      // decoded Rise of the Tomb Raider's bloom chain into contour noise.
       {xenos::TextureFormat::k_11_11_10,
-       SharedLoadFamily::kR11G11B10ToRgba16, kMtlPixelFormatRGBA16Unorm,
+       SharedLoadFamily::kR10G11B11ToRgba16, kMtlPixelFormatRGBA16Unorm,
        kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
        false},
       {xenos::TextureFormat::k_10_11_11,
-       SharedLoadFamily::kR10G11B11ToRgba16, kMtlPixelFormatRGBA16Unorm,
+       SharedLoadFamily::kR11G11B10ToRgba16, kMtlPixelFormatRGBA16Unorm,
        kMtlPixelFormatRGBA16Snorm, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 4,
        false},
       // DXT3A expanded to R8 on the GPU, mips included (Halo 3, Viva Pinata).

@@ -252,7 +252,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       bool dest_swap, float exp_bias_scale, uint32_t dest_format,
       uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
       void* destination_buffer, uint32_t width, uint32_t height,
-      const CanonicalScatterDest* scatter = nullptr);
+      const CanonicalScatterDest* scatter = nullptr,
+      // RB_COPY_DEST_INFO copy_dest_number: fixed-point destinations pack
+      // as unsigned/signed fraction or integer accordingly.
+      uint32_t dest_number = 0);
   bool PerformCanonicalResolveClear(
       const void* command_buffer, uint32_t span_base,
       uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,

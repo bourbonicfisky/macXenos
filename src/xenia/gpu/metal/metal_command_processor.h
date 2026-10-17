@@ -194,6 +194,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // (XE_METAL_SHARED_RESOLVE_ARRAYS, default on).
   static bool SharedResolveArraysEnabled();
   static bool MsaaResolveOnStoreEnabled();
+  // Fixed-point resolve destinations packed by copy_dest_number
+  // (XE_METAL_RESOLVE_NUMBER_FORMAT, default on).
+  static bool ResolveNumberFormatEnabled();
 
  private:
   // Shared cross-backend resolve-copy dispatch (task 4.2). Returns false when

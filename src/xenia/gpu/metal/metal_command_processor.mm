@@ -3678,6 +3678,19 @@ bool MetalCommandProcessor::SharedResolveArraysEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::ResolveNumberFormatEnabled() {
+  // Fixed-point resolve destinations pack by RB_COPY_DEST_INFO's number
+  // format (signed fraction / integer) instead of always as an unsigned
+  // fraction. Rise of the Tomb Raider resolves its -32..32 particle target
+  // with exp_bias -5 into a signed 16_16_16_16 texture; the unsigned pack
+  // zeroed every negative value and the composite washed the frame.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_METAL_RESOLVE_NUMBER_FORMAT");
+    return !(value && value[0] == '0' && !value[1]);
+  }();
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::SharedResolveShadersEnabled() {
   static const bool s_enabled = [] {
     const char* value = std::getenv("XE_METAL_SHARED_RESOLVE");
@@ -12580,7 +12593,13 @@ bool MetalCommandProcessor::IssueCopy() {
                       scatter_eligible ? (__bridge void*)shared_scatter_buffer
                                        : (__bridge void*)staging,
                       rw, rh,
-                      scatter_eligible ? &scatter_dest : nullptr);
+                      scatter_eligible ? &scatter_dest : nullptr,
+                      // XE_METAL_RESOLVE_NUMBER_FORMAT=0: pack every fixed
+                      // destination as an unsigned fraction (the old way).
+                      ResolveNumberFormatEnabled()
+                          ? uint32_t(
+                                resolve_info.copy_dest_info.copy_dest_number)
+                          : 0u);
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -13304,7 +13323,7 @@ bool MetalCommandProcessor::IssueCopy() {
         "extent=[{:08X}+{}] depth={} fmt={} w_div8={} h_div8={} "
         "src(base_tiles={} pitch_tiles={} msaa={} fmt={}) "
         "edram_off=({},{}) dest_pitch={} dest_swap={} sample_select={} "
-        "dest_endian={} dest_coord=({},{})",
+        "dest_endian={} dest_number={} dest_exp_bias={} dest_coord=({},{})",
         trace_draw_index_, resolve_info.copy_dest_base,
         resolve_info.copy_dest_extent_start,
         resolve_info.copy_dest_extent_length, resolve_info.IsCopyingDepth(),
@@ -13325,6 +13344,8 @@ bool MetalCommandProcessor::IssueCopy() {
         uint32_t(resolve_info.copy_dest_info.copy_dest_swap),
         uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select),
         uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+        uint32_t(resolve_info.copy_dest_info.copy_dest_number),
+        int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
         resolve_info.copy_dest_coordinate_info.offset_x_div_8 << 3,
         resolve_info.copy_dest_coordinate_info.offset_y_div_8 << 3);
   }
