@@ -799,6 +799,10 @@ class DxbcShaderTranslator : public ShaderTranslator {
                               dxbc::Src::kXXXX);
   }
 
+  // Fetch constant `tfetch_index` is statically unsigned with no result
+  // transform under this translation (pipeline variant pattern, or the
+  // dxbc_diag_minimal_fetch attribution switch).
+  bool FetchIsStaticUnsigned(uint32_t tfetch_index) const;
   Modification GetDxbcShaderModification() const {
     return Modification(current_translation().modification());
   }

@@ -519,6 +519,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // The pixel-shader variant certification reads these in O(bindings) bit
   // tests instead of decoding every bound fetch constant per draw.
   uint32_t fetch_plain_mask_ = 0;
+  Shader::FetchStaticInfo fetch_static_info_[32] = {};
   uint32_t fetch_plain_known_mask_ = 0;
   // Per pixel shader (ucode hash): the fetch constants its bindings sample.
   std::unordered_map<uint64_t, uint32_t> pixel_shader_fetch_masks_;

@@ -7656,43 +7656,73 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       while (xe::bit_scan_forward(unknown, &slot)) {
         unknown = xe::clear_lowest_bit(unknown);
         const auto f = regs.GetTextureFetch(slot);
-        // "Plain" for the decode switch: no component biased or gamma. A
-        // signed component takes the snorm view and never enters the
-        // switch, so signed normal maps do not disqualify a shader.
-        auto plain_sign = [](xenos::TextureSign sign) {
-          return sign != xenos::TextureSign::kUnsignedBiased &&
-                 sign != xenos::TextureSign::kGamma;
-        };
-        const bool plain = plain_sign(f.sign_x) && plain_sign(f.sign_y) &&
-                           plain_sign(f.sign_z) && plain_sign(f.sign_w);
+        // What the shader would read for this constant: the swizzled sign
+        // byte, the integer scale bits under those signs, the exponent bias.
+        Shader::FetchStaticInfo& info = fetch_static_info_[slot];
+        info.swizzled_signs = texture_util::SwizzleSigns(f);
+        info.integer_scale_bits =
+            texture_util::IntegerScaleBits(f, info.swizzled_signs);
+        info.exp_adjust = int8_t(f.exp_adjust);
+        bool plain = true;
+        for (uint32_t c = 0; c < 4; ++c) {
+          const uint32_t sign = (info.swizzled_signs >> (c * 2)) & 3;
+          if (sign == uint32_t(xenos::TextureSign::kUnsignedBiased) ||
+              sign == uint32_t(xenos::TextureSign::kGamma)) {
+            plain = false;
+          }
+        }
         fetch_plain_mask_ = plain ? (fetch_plain_mask_ | (1u << slot))
                                   : (fetch_plain_mask_ & ~(1u << slot));
         fetch_plain_known_mask_ |= 1u << slot;
       }
       const uint32_t plain_mask = fetch_mask & fetch_plain_mask_;
-      const uint32_t pattern =
-          plain_mask ? static_cast<MetalShader*>(pixel_shader)
-                           ->FindOrAddFetchPlainPattern(plain_mask)
-                     : 0u;
+      uint32_t pattern = 0;
+      if (fetch_mask) {
+        MetalShader::FetchPattern fp = {};
+        fp.fetch_mask = fetch_mask;
+        uint32_t bits = fetch_mask;
+        while (xe::bit_scan_forward(bits, &slot)) {
+          bits = xe::clear_lowest_bit(bits);
+          fp.info[slot] = fetch_static_info_[slot];
+        }
+        pattern = static_cast<MetalShader*>(pixel_shader)->FindOrAddFetchPattern(fp);
+      }
+      uint32_t static_mask = 0;
+      {
+        uint32_t bits = fetch_mask;
+        while (xe::bit_scan_forward(bits, &slot)) {
+          bits = xe::clear_lowest_bit(bits);
+          const Shader::FetchStaticInfo& info = fetch_static_info_[slot];
+          if (info.swizzled_signs == 0 && info.exp_adjust == 0 &&
+              (info.integer_scale_bits & ((1u << 26) - 1)) == 0) {
+            static_mask |= 1u << slot;
+          }
+        }
+      }
       ps_mod_decoded.pixel.fetch_plain_pattern = pattern;
       static uint64_t s_ps_draws = 0, s_pattern_draws = 0, s_fetch_bits = 0,
-                      s_plain_bits = 0, s_table_full = 0;
+                      s_plain_bits = 0, s_static_bits = 0, s_table_full = 0;
       ++s_ps_draws;
       s_fetch_bits += xe::bit_count(fetch_mask);
       if (pattern) {
         ++s_pattern_draws;
         s_plain_bits += xe::bit_count(plain_mask);
-      } else if (plain_mask) {
+        s_static_bits += xe::bit_count(static_mask);
+      } else if (fetch_mask) {
         ++s_table_full;
       }
       if ((s_ps_draws & 65535) == 0) {
         XELOGI(
             "MetalFetchSpecialize ps draws={} with-pattern={} ({:.1f}%) "
-            "plain fetches {}/{} ({:.1f}%) table-full={}",
+            "plain fetches {}/{} ({:.1f}%) static-unsigned {} ({:.1f}%) "
+            "table-full={}",
             s_ps_draws, s_pattern_draws,
             100.0 * double(s_pattern_draws) / double(s_ps_draws),
             s_plain_bits, s_fetch_bits,
             s_fetch_bits ? 100.0 * double(s_plain_bits) / double(s_fetch_bits)
+                         : 0.0,
+            s_static_bits,
+            s_fetch_bits ? 100.0 * double(s_static_bits) / double(s_fetch_bits)
                          : 0.0,
             s_table_full);
       }

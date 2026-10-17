@@ -21,6 +21,7 @@
 
 DECLARE_bool(dxbc_assume_unsigned_fetches);
 DECLARE_uint32(dxbc_diag_max_fetches);
+DECLARE_bool(dxbc_diag_minimal_fetch);
 
 namespace xe {
 namespace gpu {
@@ -646,6 +647,23 @@ uint32_t DxbcShaderTranslator::FindOrAddSamplerBinding(
   return uint32_t(sampler_bindings_.size() - 1);
 }
 
+bool DxbcShaderTranslator::FetchIsStaticUnsigned(uint32_t tfetch_index) const {
+  if (cvars::dxbc_diag_minimal_fetch) {
+    return true;
+  }
+  if (!is_pixel_shader() || tfetch_index >= 32) {
+    return false;
+  }
+  Shader::FetchStaticInfo info = {};
+  if (!current_shader().GetFetchStaticInfo(
+          GetDxbcShaderModification().pixel.fetch_plain_pattern, tfetch_index,
+          &info)) {
+    return false;
+  }
+  return info.swizzled_signs == 0 && info.exp_adjust == 0 &&
+         (info.integer_scale_bits & ((1u << 26) - 1)) == 0;
+}
+
 void DxbcShaderTranslator::ProcessTextureFetchInstruction(
     const ParsedTextureFetchInstruction& instr) {
   if (emit_source_map_) {
@@ -772,6 +790,16 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   }
 
   uint32_t tfetch_index = instr.operands[1].storage_index;
+  // Static fetch record from the pipeline variant (Metal): the sign byte,
+  // the integer scale bits and the exponent bias become literals, and the
+  // compiler folds the SRV selection, the decode switch and the tails.
+  Shader::FetchStaticInfo static_info = {};
+  const bool fetch_static =
+      !cvars::dxbc_diag_minimal_fetch && is_pixel_shader() &&
+      tfetch_index < 32 &&
+      current_shader().GetFetchStaticInfo(
+          GetDxbcShaderModification().pixel.fetch_plain_pattern, tfetch_index,
+          &static_info);
 
   // Whether to use gradients (implicit or explicit) for LOD calculation.
   bool use_computed_lod =
@@ -1080,11 +1108,14 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   } else {
     // - Component signedness, for selecting the SRV, and if data is needed.
 
-    dxbc::Src signs_uint_src(
-        GetSystemConstantSrc(offsetof(SystemConstants, texture_swizzled_signs) +
-                                 sizeof(uint32_t) * (tfetch_index >> 2),
-                             dxbc::Src::kXXXX));
     uint32_t signs_shift = (tfetch_index & 3) * 8;
+    dxbc::Src signs_uint_src(
+        fetch_static
+            ? dxbc::Src::LU(uint32_t(static_info.swizzled_signs) << signs_shift)
+            : GetSystemConstantSrc(
+                  offsetof(SystemConstants, texture_swizzled_signs) +
+                      sizeof(uint32_t) * (tfetch_index >> 2),
+                  dxbc::Src::kXXXX));
     uint32_t signs_temp = UINT32_MAX;
     if (instr.opcode == FetchOpcode::kTextureFetch) {
       signs_temp = PushSystemTemp();
@@ -1481,12 +1512,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
       // at least one non-signed component, will be using the unsigned one.
       uint32_t is_unsigned_temp = PushSystemTemp();
       MarkSystemConstantUsed(SystemConstants::Index::kTextureSwizzledSigns);
-      a_.OpUBFE(dxbc::Dest::R(is_unsigned_temp, 0b0001), dxbc::Src::LU(8),
-                dxbc::Src::LU(signs_shift), signs_uint_src);
-      a_.OpINE(
-          dxbc::Dest::R(is_unsigned_temp, 0b0001),
-          dxbc::Src::R(is_unsigned_temp, dxbc::Src::kXXXX),
-          dxbc::Src::LU(uint32_t(xenos::TextureSign::kSigned) * 0b01010101));
+      const bool static_unsigned_fetch = FetchIsStaticUnsigned(tfetch_index);
+      if (static_unsigned_fetch) {
+        // Statically unsigned: the SRV index folds to a constant.
+        a_.OpMov(dxbc::Dest::R(is_unsigned_temp, 0b0001), dxbc::Src::LU(1));
+      } else {
+        a_.OpUBFE(dxbc::Dest::R(is_unsigned_temp, 0b0001), dxbc::Src::LU(8),
+                  dxbc::Src::LU(signs_shift), signs_uint_src);
+        a_.OpINE(
+            dxbc::Dest::R(is_unsigned_temp, 0b0001),
+            dxbc::Src::R(is_unsigned_temp, dxbc::Src::kXXXX),
+            dxbc::Src::LU(uint32_t(xenos::TextureSign::kSigned) * 0b01010101));
+      }
       if (bindless_resources_used_) {
         // Bindless path - select the SRV index between unsigned and signed to
         // query.
@@ -1848,9 +1885,14 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
 
       // Extract whether each component is signed.
       uint32_t is_signed_temp = PushSystemTemp();
-      a_.OpIEq(dxbc::Dest::R(is_signed_temp, used_result_nonzero_components),
-               dxbc::Src::R(signs_temp),
-               dxbc::Src::LU(uint32_t(xenos::TextureSign::kSigned)));
+      if (FetchIsStaticUnsigned(tfetch_index)) {
+        a_.OpMov(dxbc::Dest::R(is_signed_temp, used_result_nonzero_components),
+                 dxbc::Src::LU(0));
+      } else {
+        a_.OpIEq(dxbc::Dest::R(is_signed_temp, used_result_nonzero_components),
+                 dxbc::Src::R(signs_temp),
+                 dxbc::Src::LU(uint32_t(xenos::TextureSign::kSigned)));
+      }
 
       // Calculate the lerp factor between stacked texture layers if needed (or
       // 0 if point-sampled), and check which signedness SRVs need to be
@@ -2251,15 +2293,19 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
     // sampler filtering).
     if (instr.opcode == FetchOpcode::kTextureFetch) {
       assert_true(signs_temp != UINT32_MAX);
-      dxbc::Src integer_scale_bits_packed = LoadSystemConstant(
-          SystemConstants::Index::kTextureIntegerScaleBits,
-          offsetof(SystemConstants, texture_integer_scale_bits) +
-              sizeof(uint32_t) * tfetch_index,
-          dxbc::Src::kXXXX);
+      dxbc::Src integer_scale_bits_packed =
+          fetch_static
+              ? dxbc::Src::LU(static_info.integer_scale_bits)
+              : LoadSystemConstant(
+                    SystemConstants::Index::kTextureIntegerScaleBits,
+                    offsetof(SystemConstants, texture_integer_scale_bits) +
+                        sizeof(uint32_t) * tfetch_index,
+                    dxbc::Src::kXXXX);
       // The decode switch is omitted when the pipeline variant certifies every
       // sampled fetch constant as plain unsigned (Modification::pixel.
       // fetches_plain_unsigned), or for the attribution switch.
-      bool skip_decode = cvars::dxbc_assume_unsigned_fetches;
+      bool skip_decode = cvars::dxbc_assume_unsigned_fetches ||
+                         FetchIsStaticUnsigned(tfetch_index);
       if (!skip_decode && is_pixel_shader()) {
         const uint32_t pattern =
             GetDxbcShaderModification().pixel.fetch_plain_pattern;
@@ -2325,6 +2371,7 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         a_.OpEndSwitch();
       }
       // Apply num_format after signs/gamma.
+      if (!FetchIsStaticUnsigned(tfetch_index)) {
       uint32_t integer_scale_temp = PushSystemTemp();
       dxbc::Dest integer_scale_dest(
           dxbc::Dest::R(integer_scale_temp, used_result_nonzero_components));
@@ -2443,6 +2490,7 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
       a_.OpEndIf();
       a_.OpEndIf();
       PopSystemTemp();
+      }
     }
     if (signs_temp != UINT32_MAX) {
       PopSystemTemp();
@@ -2453,12 +2501,16 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
     PopSystemTemp();
   }
 
-  if (instr.opcode == FetchOpcode::kTextureFetch) {
+  if (instr.opcode == FetchOpcode::kTextureFetch &&
+      !FetchIsStaticUnsigned(tfetch_index)) {
     // Apply the result exponent bias.
     uint32_t exp_adjust_temp = PushSystemTemp();
     a_.OpIBFE(dxbc::Dest::R(exp_adjust_temp, 0b0001), dxbc::Src::LU(6),
               dxbc::Src::LU(13),
-              RequestTextureFetchConstantWord(tfetch_index, 3));
+              fetch_static
+                  ? dxbc::Src::LU((uint32_t(static_info.exp_adjust) & 63u)
+                                  << 13)
+                  : RequestTextureFetchConstantWord(tfetch_index, 3));
     a_.OpIMAd(dxbc::Dest::R(exp_adjust_temp, 0b0001),
               dxbc::Src::R(exp_adjust_temp, dxbc::Src::kXXXX),
               dxbc::Src::LI(int32_t(1) << 23), dxbc::Src::LF(1.0f));

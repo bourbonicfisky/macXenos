@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "xenia/gpu/dxbc_shader.h"
@@ -64,29 +65,75 @@ class MetalShader : public DxbcShader {
   // Fetch-plain patterns (see Shader::GetFetchPlainPattern). Returns the
   // 1-based index of `mask`, adding it while the table has room (15), else
   // 0 (full decode). Patterns are stable per material, so a shader sees few.
-  uint32_t FindOrAddFetchPlainPattern(uint32_t mask) {
-    for (size_t i = 0; i < fetch_plain_patterns_.size(); ++i) {
-      if (fetch_plain_patterns_[i] == mask) {
+  // Fetch-plain patterns (see Shader::GetFetchStaticInfo): per pattern, the
+  // static record of every fetch constant the shader samples (others zero).
+  struct FetchPattern {
+    uint32_t fetch_mask;
+    FetchStaticInfo info[32];
+    bool operator==(const FetchPattern& other) const {
+      return fetch_mask == other.fetch_mask &&
+             std::memcmp(info, other.info, sizeof(info)) == 0;
+    }
+  };
+  // Returns the 1-based index of `pattern`, adding it while the table has
+  // room (15), else 0 (fully dynamic translation). Patterns are stable per
+  // material, so a shader sees few.
+  uint32_t FindOrAddFetchPattern(const FetchPattern& pattern) {
+    for (size_t i = 0; i < fetch_patterns_.size(); ++i) {
+      if (fetch_patterns_[i] == pattern) {
         return uint32_t(i + 1);
       }
     }
-    if (fetch_plain_patterns_.size() >= 15) {
+    if (fetch_patterns_.size() >= 15) {
       return 0;
     }
-    fetch_plain_patterns_.push_back(mask);
-    return uint32_t(fetch_plain_patterns_.size());
+    fetch_patterns_.push_back(pattern);
+    return uint32_t(fetch_patterns_.size());
   }
   uint32_t GetFetchPlainPattern(uint32_t pattern_index) const override {
-    return pattern_index && pattern_index <= fetch_plain_patterns_.size()
-               ? fetch_plain_patterns_[pattern_index - 1]
-               : 0u;
+    if (!pattern_index || pattern_index > fetch_patterns_.size()) {
+      return 0;
+    }
+    const FetchPattern& p = fetch_patterns_[pattern_index - 1];
+    uint32_t plain = 0;
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (!(p.fetch_mask & (1u << i))) {
+        continue;
+      }
+      const uint8_t signs = p.info[i].swizzled_signs;
+      bool ok = true;
+      for (uint32_t c = 0; c < 4; ++c) {
+        const uint32_t sign = (signs >> (c * 2)) & 3;
+        if (sign == uint32_t(xenos::TextureSign::kUnsignedBiased) ||
+            sign == uint32_t(xenos::TextureSign::kGamma)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        plain |= 1u << i;
+      }
+    }
+    return plain;
+  }
+  bool GetFetchStaticInfo(uint32_t pattern_index, uint32_t tfetch_index,
+                          FetchStaticInfo* out) const override {
+    if (!pattern_index || pattern_index > fetch_patterns_.size() ||
+        tfetch_index >= 32) {
+      return false;
+    }
+    const FetchPattern& p = fetch_patterns_[pattern_index - 1];
+    if (!(p.fetch_mask & (1u << tfetch_index))) {
+      return false;
+    }
+    *out = p.info[tfetch_index];
+    return true;
   }
 
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
 
  private:
-  std::vector<uint32_t> fetch_plain_patterns_;
+  std::vector<FetchPattern> fetch_patterns_;
 };
 
 }  // namespace metal

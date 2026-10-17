@@ -34,6 +34,12 @@ DEFINE_uint32(dxbc_diag_max_fetches, 0,
               "ceiling for what repeated taps (manual PCF kernels) cost. 0 = "
               "unlimited.",
               "GPU");
+DEFINE_bool(dxbc_diag_minimal_fetch, false,
+            "Attribution only (never for play): translate every texture fetch "
+            "as plain unsigned with no signed SRV selection, no biased / gamma "
+            "decode, no num_format integer scale and no exponent bias. The "
+            "ceiling of per-fetch-constant specialization.",
+            "GPU");
 DEFINE_bool(dxbc_switch, true,
             "Use switch rather than if for flow control. Turning this off or "
             "on may improve stability, though this heavily depends on the "

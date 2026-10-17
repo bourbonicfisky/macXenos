@@ -986,6 +986,20 @@ class Shader {
   virtual uint32_t GetFetchPlainPattern(uint32_t pattern_index) const {
     return 0;
   }
+  // Same table: the fetch constant's sign byte (texture_util::SwizzleSigns),
+  // integer scale bits (texture_util::IntegerScaleBits) and exponent bias as
+  // the pipeline variant certified them from the registers, so the
+  // translator emits them as literals and the compiler folds every sign
+  // branch, decode switch and result transform. False = dynamic.
+  struct FetchStaticInfo {
+    uint8_t swizzled_signs;
+    int8_t exp_adjust;
+    uint32_t integer_scale_bits;
+  };
+  virtual bool GetFetchStaticInfo(uint32_t pattern_index, uint32_t tfetch_index,
+                                  FetchStaticInfo* out) const {
+    return false;
+  }
 
   // True if the shader has any texture-related instructions (any fetch
   // instructions other than vertex fetch) writing any non-constant components.
