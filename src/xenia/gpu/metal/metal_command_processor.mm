@@ -3110,11 +3110,23 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   // Fault attribution: names this encoder in per-encoder execution status.
-  encoder.label = [NSString
-      stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
-                       (unsigned long long)want_key,
-                       memexport_pass_ ? 1u
-                                       : render_target_cache_->current_msaa_samples()];
+  // Formatting an NSString per pass was ~2% of RDR's command-processor
+  // thread (CFString formatting, ~100 passes a frame); the label is only
+  // read by fault reports and the xctrace breakdown, so it is built when
+  // XE_METAL_ENCODER_LABELS=1 (attrib.sh sets it) or a GPU capture is on.
+  static const bool s_encoder_labels = [] {
+    const char* v = std::getenv("XE_METAL_ENCODER_LABELS");
+    return (v && v[0] == '1' && !v[1]) ||
+           std::getenv("MTL_CAPTURE_ENABLED") != nullptr;
+  }();
+  if (s_encoder_labels) {
+    encoder.label = [NSString
+        stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
+                         (unsigned long long)want_key,
+                         memexport_pass_
+                             ? 1u
+                             : render_target_cache_->current_msaa_samples()];
+  }
   // The label's rt= value is a one-way rolling hash of the accumulated
   // attachment set (current_attachment_key), so a recurring hash in fault
   // reports cannot be read back into a concrete render target. Log the
