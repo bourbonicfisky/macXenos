@@ -67,15 +67,19 @@ DEFINE_bool(
     "WaitAll still uses the poll. Regression-check broadly before shipping.",
     "Threading");
 DEFINE_bool(
-    threading_blocking_waitall, false,
-    "Candidate fix (default off = current 1ms poll): make WaitMultiple(WaitAll) "
-    "event-driven. The waiter registers a notify-only wait-block with every "
-    "member; any member's Signal wakes it to re-run the all-signaled check "
-    "under the member locks (nothing is consumed by the wake itself), with a "
-    "1 ms backstop re-check for members whose Signal is not hooked (mutant, "
-    "timer, thread). RE5 2026-10-16: the main guest thread spent 70% of its "
-    "time in the poll's sleep. Regression-check broadly before shipping.",
+    threading_blocking_waitall, true,
+    "Event-driven WaitMultiple(WaitAll) (default on). The waiter registers a "
+    "notify-only wait-block with every member; any member's Signal wakes it to "
+    "re-run the all-signaled check under the member locks (nothing is consumed "
+    "by the wake itself), with a 1 ms backstop re-check for members whose "
+    "Signal is not hooked (mutant, timer, thread). Off = the previous 1 ms "
+    "poll, which cost titles that join worker jobs every frame up to a "
+    "millisecond per join (Resident Evil 5 ran at 12 fps instead of 30). "
+    "Advanced: turn off only to bisect a threading regression.",
     "Threading");
+// 2026-10-17: default off -> on after the regression check (21 titles over
+// two machines, no loser; RE5 12.4 -> 29.1 fps, GTA IV +3.5).
+UPDATE_from_bool(threading_blocking_waitall, 2026, 10, 17, 0, false);
 
 #if XE_PLATFORM_MAC
 DEFINE_string(
