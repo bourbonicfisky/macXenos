@@ -513,6 +513,15 @@ class MetalCommandProcessor : public CommandProcessor {
   // this every draw re-parsed every binding, ~5 ms a frame of RDR's 3789
   // draws). XE_METAL_FETCH_DIRTY=0 restores the per-draw re-parse.
   uint32_t fetch_constant_dirty_mask_ = ~0u;
+  // Per fetch constant: whether its four component signs are all kUnsigned
+  // (fetch_plain_mask_), and whether that answer is current
+  // (fetch_plain_known_mask_, cleared by WriteRegister on a changed dword).
+  // The pixel-shader variant certification reads these in O(bindings) bit
+  // tests instead of decoding every bound fetch constant per draw.
+  uint32_t fetch_plain_mask_ = 0;
+  uint32_t fetch_plain_known_mask_ = 0;
+  // Per pixel shader (ucode hash): the fetch constants its bindings sample.
+  std::unordered_map<uint64_t, uint32_t> pixel_shader_fetch_masks_;
   void WriteRegister(uint32_t index, uint32_t value) override;
   void CommitSideCommandBuffer(uint64_t submission, uint64_t submit_epoch);
 

@@ -60,8 +60,33 @@ class MetalShader : public DxbcShader {
               const uint32_t* ucode_dwords, size_t ucode_dword_count,
               std::endian ucode_source_endian = std::endian::big);
 
+ public:
+  // Fetch-plain patterns (see Shader::GetFetchPlainPattern). Returns the
+  // 1-based index of `mask`, adding it while the table has room (15), else
+  // 0 (full decode). Patterns are stable per material, so a shader sees few.
+  uint32_t FindOrAddFetchPlainPattern(uint32_t mask) {
+    for (size_t i = 0; i < fetch_plain_patterns_.size(); ++i) {
+      if (fetch_plain_patterns_[i] == mask) {
+        return uint32_t(i + 1);
+      }
+    }
+    if (fetch_plain_patterns_.size() >= 15) {
+      return 0;
+    }
+    fetch_plain_patterns_.push_back(mask);
+    return uint32_t(fetch_plain_patterns_.size());
+  }
+  uint32_t GetFetchPlainPattern(uint32_t pattern_index) const override {
+    return pattern_index && pattern_index <= fetch_plain_patterns_.size()
+               ? fetch_plain_patterns_[pattern_index - 1]
+               : 0u;
+  }
+
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
+
+ private:
+  std::vector<uint32_t> fetch_plain_patterns_;
 };
 
 }  // namespace metal

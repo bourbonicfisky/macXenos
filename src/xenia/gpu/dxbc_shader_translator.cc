@@ -21,6 +21,19 @@
 #include "xenia/ui/graphics_provider.h"
 
 // The test case for AMD is 4D5307E6 (checked in 2018).
+DEFINE_bool(dxbc_assume_unsigned_fetches, false,
+            "Attribution only (never for play): translate texture fetches as "
+            "if every component were plain unsigned -- no biased / gamma "
+            "decode switch per component. Measures what the per-fetch decode "
+            "epilogue costs in the converted shaders (Far Cry 3 2026-10-16: 66 "
+            "fetches a pixel at ~10% occupancy on Apple GPUs).",
+            "GPU");
+DEFINE_uint32(dxbc_diag_max_fetches, 0,
+              "Attribution only (never for play): translate at most this many "
+              "texture fetch instructions per shader; the rest return 0.5. A "
+              "ceiling for what repeated taps (manual PCF kernels) cost. 0 = "
+              "unlimited.",
+              "GPU");
 DEFINE_bool(dxbc_switch, true,
             "Use switch rather than if for flow control. Turning this off or "
             "on may improve stability, though this heavily depends on the "
@@ -126,6 +139,7 @@ uint64_t DxbcShaderTranslator::GetDefaultPixelShaderModification(
 
 void DxbcShaderTranslator::Reset() {
   ShaderTranslator::Reset();
+  diag_fetch_count_ = 0;
 
   shader_code_.clear();
 

@@ -228,6 +228,17 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // Only RT0 is supported for now.
       xenos::BlendFactor rt0_blend_rgb_factor_for_premult : 5;
       xenos::BlendFactor rt0_blend_a_factor_for_premult : 5;
+      // No fetch constant the shader samples has a biased or gamma component
+      // sign (signed is fine: it takes the snorm view and never enters the
+      // decode), as read from the registers at pipeline lookup: the
+      // per-component biased/gamma decode switch after each texture fetch is
+      // omitted. Far Cry 3 (2026-10-16, Apple
+      // GPUs): that switch, emitted 66 times in the material shader, was a
+      // third of the fragment time (Metal backend only sets it).
+      // Index (1..15) of a per-shader pattern (Shader::GetFetchPlainPattern:
+      // bit per fetch constant) naming the fetch constants that take no
+      // biased/gamma decode switch after sampling; 0 = full decode for all.
+      uint32_t fetch_plain_pattern : 4;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)
@@ -1303,6 +1314,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Vector ALU or fetch result / scratch (since Xenos write masks can contain
   // swizzles).
   uint32_t system_temp_result_;
+  // Texture fetch instructions translated so far (dxbc_diag_max_fetches).
+  uint32_t diag_fetch_count_ = 0;
   // Temporary register ID for previous scalar result, program counter,
   // predicate and absolute address register.
   uint32_t system_temp_ps_pc_p0_a0_;

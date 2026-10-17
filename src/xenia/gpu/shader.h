@@ -980,6 +980,12 @@ class Shader {
 
   // True if the current shader has any `kill` instructions.
   bool kills_pixels() const { return kills_pixels_; }
+  // Backend-provided per-shader table for the pixel-shader modification's
+  // fetch_plain_pattern: the fetch constants (bit per index) whose sampled
+  // components are neither biased nor gamma under that pattern. 0 = none.
+  virtual uint32_t GetFetchPlainPattern(uint32_t pattern_index) const {
+    return 0;
+  }
 
   // True if the shader has any texture-related instructions (any fetch
   // instructions other than vertex fetch) writing any non-constant components.

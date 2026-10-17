@@ -37,6 +37,22 @@ bool MetalShader::MetalTranslation::CreateMetalFunction(
   }
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;
 
+  // XE_METAL_DUMP_METALLIB_DIR=<dir>: every converted shader as
+  // <dir>/<vs|ps>_<ucode hash>_<modification>.metallib, for offline AIR
+  // inspection (xcrun metal-objdump) of what the translator + converter emit.
+  static const char* const s_dump_dir = std::getenv("XE_METAL_DUMP_METALLIB_DIR");
+  if (s_dump_dir && s_dump_dir[0]) {
+    const bool is_ps = shader().type() == xenos::ShaderType::kPixel;
+    std::string path =
+        fmt::format("{}/{}_{:016X}_{:X}.metallib", s_dump_dir,
+                    is_ps ? "ps" : "vs", shader().ucode_data_hash(),
+                    modification());
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+      fwrite(metallib.data(), 1, metallib.size(), f);
+      fclose(f);
+    }
+  }
+
   // Wrap the metallib bytes without copying; dispatch_data_create keeps them
   // alive until the library is built.
   dispatch_data_t data = dispatch_data_create(

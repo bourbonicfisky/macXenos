@@ -1725,7 +1725,9 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
       register_file_->values[index] != value) {
     // Titles re-upload the whole fetch block before most draws; only a
     // changed dword makes the binding worth re-parsing.
-    fetch_constant_dirty_mask_ |= 1u << ((index - kFetchBase) / 6u);
+    const uint32_t slot = (index - kFetchBase) / 6u;
+    fetch_constant_dirty_mask_ |= 1u << slot;
+    fetch_plain_known_mask_ &= ~(1u << slot);
   }
   CommandProcessor::WriteRegister(index, value);
 }
@@ -7620,6 +7622,81 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             pixel_shader->GetDynamicAddressableRegisterCount(
                 sq_program_cntl.ps_num_reg)));
     ps_mod_decoded.pixel.interpolator_mask = interpolator_mask;
+    // Plain-unsigned fetch variant: certify, from the bound fetch constants,
+    // that no sampled component is signed, biased or gamma, so the translator
+    // omits the per-component decode switch after every fetch (a third of
+    // Far Cry 3's fragment time). XE_METAL_FETCH_SPECIALIZE=0 keeps one
+    // variant with the full decode.
+    static const bool s_fetch_specialize = [] {
+      const char* v = std::getenv("XE_METAL_FETCH_SPECIALIZE");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    if (s_fetch_specialize) {
+      // The shader's sampled fetch constants, as a bit mask (cached per
+      // shader); then the plain bits, refreshed only for constants written
+      // since the last look.
+      uint32_t fetch_mask;
+      {
+        auto it = pixel_shader_fetch_masks_.find(pixel_shader->ucode_data_hash());
+        if (it == pixel_shader_fetch_masks_.end()) {
+          fetch_mask = 0;
+          for (const auto& binding : pixel_shader->texture_bindings()) {
+            if (binding.fetch_constant < 32) {
+              fetch_mask |= 1u << binding.fetch_constant;
+            }
+          }
+          pixel_shader_fetch_masks_.emplace(pixel_shader->ucode_data_hash(),
+                                            fetch_mask);
+        } else {
+          fetch_mask = it->second;
+        }
+      }
+      uint32_t unknown = fetch_mask & ~fetch_plain_known_mask_;
+      uint32_t slot;
+      while (xe::bit_scan_forward(unknown, &slot)) {
+        unknown = xe::clear_lowest_bit(unknown);
+        const auto f = regs.GetTextureFetch(slot);
+        // "Plain" for the decode switch: no component biased or gamma. A
+        // signed component takes the snorm view and never enters the
+        // switch, so signed normal maps do not disqualify a shader.
+        auto plain_sign = [](xenos::TextureSign sign) {
+          return sign != xenos::TextureSign::kUnsignedBiased &&
+                 sign != xenos::TextureSign::kGamma;
+        };
+        const bool plain = plain_sign(f.sign_x) && plain_sign(f.sign_y) &&
+                           plain_sign(f.sign_z) && plain_sign(f.sign_w);
+        fetch_plain_mask_ = plain ? (fetch_plain_mask_ | (1u << slot))
+                                  : (fetch_plain_mask_ & ~(1u << slot));
+        fetch_plain_known_mask_ |= 1u << slot;
+      }
+      const uint32_t plain_mask = fetch_mask & fetch_plain_mask_;
+      const uint32_t pattern =
+          plain_mask ? static_cast<MetalShader*>(pixel_shader)
+                           ->FindOrAddFetchPlainPattern(plain_mask)
+                     : 0u;
+      ps_mod_decoded.pixel.fetch_plain_pattern = pattern;
+      static uint64_t s_ps_draws = 0, s_pattern_draws = 0, s_fetch_bits = 0,
+                      s_plain_bits = 0, s_table_full = 0;
+      ++s_ps_draws;
+      s_fetch_bits += xe::bit_count(fetch_mask);
+      if (pattern) {
+        ++s_pattern_draws;
+        s_plain_bits += xe::bit_count(plain_mask);
+      } else if (plain_mask) {
+        ++s_table_full;
+      }
+      if ((s_ps_draws & 65535) == 0) {
+        XELOGI(
+            "MetalFetchSpecialize ps draws={} with-pattern={} ({:.1f}%) "
+            "plain fetches {}/{} ({:.1f}%) table-full={}",
+            s_ps_draws, s_pattern_draws,
+            100.0 * double(s_pattern_draws) / double(s_ps_draws),
+            s_plain_bits, s_fetch_bits,
+            s_fetch_bits ? 100.0 * double(s_plain_bits) / double(s_fetch_bits)
+                         : 0.0,
+            s_table_full);
+      }
+    }
     // A/B: XE_METAL_NO_CENTROID=1 forces center sampling. Gameplay surfaces are
     // 4x MSAA (menus 1x), and at 4x the PS modification requests CENTROID
     // interpolation on some inputs — if MSC mis-links centroid-decorated PS
@@ -16232,6 +16309,53 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // XE_METAL_GPUTRACE=<path.gputrace> [XE_METAL_GPUTRACE_FRAME=N, default
+  // 600]: a programmatic Xcode GPU capture of one frame at swap N, written
+  // for the Xcode GPU debugger / shader profiler (the only reader of
+  // per-pipeline registers and occupancy). Needs MTL_CAPTURE_ENABLED=1 in
+  // the environment before the device is created.
+  {
+    static const char* const s_trace_path = std::getenv("XE_METAL_GPUTRACE");
+    static const uint32_t s_trace_frame = [] {
+      const char* v = std::getenv("XE_METAL_GPUTRACE_FRAME");
+      return v ? uint32_t(strtoul(v, nullptr, 10)) : 600u;
+    }();
+    static uint32_t s_trace_swaps = 0;
+    static bool s_trace_active = false;
+    if (s_trace_path && s_trace_path[0]) {
+      ++s_trace_swaps;
+      MTLCaptureManager* manager = [MTLCaptureManager sharedCaptureManager];
+      if (s_trace_active) {
+        [manager stopCapture];
+        s_trace_active = false;
+        XELOGI("MetalCommandProcessor: GPU trace written to {}", s_trace_path);
+      } else if (s_trace_swaps == s_trace_frame) {
+        auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+            graphics_system_->provider());
+        if (![manager supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+          XELOGW(
+              "MetalCommandProcessor: GPU trace documents unsupported "
+              "(MTL_CAPTURE_ENABLED=1 not set before launch?)");
+        } else if (provider && provider->command_queue()) {
+          MTLCaptureDescriptor* desc = [[MTLCaptureDescriptor alloc] init];
+          desc.captureObject =
+              (__bridge id<MTLCommandQueue>)provider->command_queue();
+          desc.destination = MTLCaptureDestinationGPUTraceDocument;
+          desc.outputURL = [NSURL
+              fileURLWithPath:[NSString stringWithUTF8String:s_trace_path]];
+          NSError* error = nil;
+          if ([manager startCaptureWithDescriptor:desc error:&error]) {
+            s_trace_active = true;
+            XELOGI("MetalCommandProcessor: GPU trace capture started at swap {}",
+                   s_trace_swaps);
+          } else {
+            XELOGW("MetalCommandProcessor: GPU trace capture failed: {}",
+                   error ? [[error localizedDescription] UTF8String] : "?");
+          }
+        }
+      }
+    }
+  }
   last_frontbuffer_base_ = frontbuffer_ptr;
   last_frontbuffer_bytes_ =
       ((frontbuffer_width ? frontbuffer_width : 1280) + 31u & ~31u) *

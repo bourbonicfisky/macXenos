@@ -19,6 +19,9 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 
+DECLARE_bool(dxbc_assume_unsigned_fetches);
+DECLARE_uint32(dxbc_diag_max_fetches);
+
 namespace xe {
 namespace gpu {
 using namespace ucode;
@@ -708,6 +711,13 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   if (!used_result_nonzero_components) {
     // Nothing to fetch, only constant 0/1 writes.
     StoreResult(instr.result, dxbc::Src::LF(0.0f));
+    return;
+  }
+  if (instr.opcode == FetchOpcode::kTextureFetch &&
+      cvars::dxbc_diag_max_fetches &&
+      ++diag_fetch_count_ > cvars::dxbc_diag_max_fetches) {
+    // Attribution ceiling: taps past the cap are not sampled.
+    StoreResult(instr.result, dxbc::Src::LF(0.5f));
     return;
   }
 
@@ -2246,7 +2256,19 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           offsetof(SystemConstants, texture_integer_scale_bits) +
               sizeof(uint32_t) * tfetch_index,
           dxbc::Src::kXXXX);
-      for (uint32_t i = 0; i < 4; ++i) {
+      // The decode switch is omitted when the pipeline variant certifies every
+      // sampled fetch constant as plain unsigned (Modification::pixel.
+      // fetches_plain_unsigned), or for the attribution switch.
+      bool skip_decode = cvars::dxbc_assume_unsigned_fetches;
+      if (!skip_decode && is_pixel_shader()) {
+        const uint32_t pattern =
+            GetDxbcShaderModification().pixel.fetch_plain_pattern;
+        if (pattern && tfetch_index < 32) {
+          skip_decode = (current_shader().GetFetchPlainPattern(pattern) &
+                         (1u << tfetch_index)) != 0;
+        }
+      }
+      for (uint32_t i = 0; i < (skip_decode ? 0u : 4u); ++i) {
         if (!(used_result_nonzero_components & (1 << i))) {
           continue;
         }
