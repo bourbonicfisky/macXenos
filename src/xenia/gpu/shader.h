@@ -995,6 +995,12 @@ class Shader {
     uint8_t swizzled_signs;
     int8_t exp_adjust;
     uint32_t integer_scale_bits;
+    // NOT folded: the fetch constant's dwords 2..5 (size, format / exp /
+    // swizzle, filters, mips). Folding them (2026-10-16) took Far Cry 3's
+    // fragment time 14.1 -> 11.7 ms but filled the 15-entry pattern table on
+    // Judgment for 57-60% of its draws (sizes, then the filter / mip words
+    // vary per texture) and compiled 2100-2900 pipelines a session. Signs,
+    // scale bits and exponent bias are what a material keeps constant.
   };
   virtual bool GetFetchStaticInfo(uint32_t pattern_index, uint32_t tfetch_index,
                                   FetchStaticInfo* out) const {
