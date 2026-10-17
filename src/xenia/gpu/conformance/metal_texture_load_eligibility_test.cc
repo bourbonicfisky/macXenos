@@ -66,6 +66,12 @@ TEST_CASE("StrictRgba8Eligibility: baseline and gamma signs pass",
   fetch.sign_z = xenos::TextureSign::kGamma;
   fetch.sign_w = xenos::TextureSign::kGamma;
   REQUIRE(Eligible(fetch));
+  // Unsigned-biased components sample the same unorm bytes too: the
+  // translator decodes the bias in the shader from the fetch constant's sign
+  // bits (098b82d60; excluding it sent Tomb Raider's RGBA8 post-process
+  // buffers to the CPU path).
+  fetch.sign_w = xenos::TextureSign::kUnsignedBiased;
+  REQUIRE(Eligible(fetch));
 }
 
 TEST_CASE("StrictRgba8Eligibility: every guard falls one perturbation",
@@ -82,11 +88,6 @@ TEST_CASE("StrictRgba8Eligibility: every guard falls one perturbation",
   SECTION("signed component sign excluded") {
     auto fetch = EligibleFetch();
     fetch.sign_y = xenos::TextureSign::kSigned;
-    REQUIRE(!Eligible(fetch));
-  }
-  SECTION("unsigned-biased component sign excluded") {
-    auto fetch = EligibleFetch();
-    fetch.sign_w = xenos::TextureSign::kUnsignedBiased;
     REQUIRE(!Eligible(fetch));
   }
   SECTION("linear (untiled) excluded") {

@@ -3671,15 +3671,18 @@ bool MetalCommandProcessor::MsaaResolveOnStoreEnabled() {
 }
 
 bool MetalCommandProcessor::SharedResolveArraysEnabled() {
-  // Default OFF (XE_METAL_SHARED_RESOLVE_ARRAYS=1 opts in). The GPU route for
-  // array / slice destinations wrote Rise of the Tomb Raider's 32x32x32
-  // colour-grading LUT, but the volume consumer then sampled stale guest RAM
-  // (frame graded green); the CPU writeback renders it right. The 3D
-  // destination's GPU-current publication and validity need the slice
-  // extents before this can be the default again.
+  // Default ON (XE_METAL_SHARED_RESOLVE_ARRAYS=0 rolls back to the CPU slice
+  // writeback). Array / slice destinations take the shared resolve shaders:
+  // Rise of the Tomb Raider builds a 32x32x32 colour-grading LUT from 32
+  // slice resolves a frame, and the CPU writeback cost ~8 ms of GPU wait and
+  // 35 texture drains a swap. The route first shipped opt-in because the
+  // volume consumer sampled stale bytes: the direct colour path skipped the
+  // canonical EDRAM pack the shared shader reads, and RAM publication walked
+  // the slice with the 2D addresser. Both fixed (replay oracle: frame 24610,
+  // LUT texture and RAM byte-identical to the CPU path).
   static const bool s_enabled = [] {
     const char* v = std::getenv("XE_METAL_SHARED_RESOLVE_ARRAYS");
-    return v && v[0] == '1' && !v[1];
+    return !(v && v[0] == '0' && !v[1]);
   }();
   return s_enabled;
 }
@@ -12076,15 +12079,27 @@ bool MetalCommandProcessor::IssueCopy() {
         const bool canonical_raw_copy = resolve_info.IsColorRawCopySafe();
         bool resolved = false;
         bool canonical_prepared = false;
+        // Array / slice destinations (a 3D LUT built one slice at a time)
+        // take the shared resolve shaders (3D destination addressing is
+        // native there) even with the general switch off.
+        const bool array_dest =
+            resolve_info.copy_dest_info.copy_dest_array ||
+            resolve_info.copy_dest_info.copy_dest_slice;
+        const bool shared_resolve_route =
+            SharedResolveShadersEnabled() ||
+            (array_dest && SharedResolveArraysEnabled());
         if (canonical_resolve) {
           // Direct colour resolve: read the open colour attachment instead of
           // packing it into canonical EDRAM first (scope closed at the end of
           // this colour branch). The shared resolve route reads canonical, so
-          // it keeps the pack.
+          // it keeps the pack -- for the array route too: with only the
+          // array switch on, the direct path skipped the pack and the shared
+          // shader resolved whatever canonical EDRAM last held (Rise of the
+          // Tomb Raider's colour LUT: every slice the stale magenta tile).
           // Resolves without a snapshot (Lever 3) take it too: the guest
           // write-back reads the attachment the same way.
           const bool direct_color =
-              !SharedResolveShadersEnabled() &&
+              !shared_resolve_route &&
               render_target_cache_->BeginDirectColorResolve(
                   resolve_info.color_edram_info.base_tiles,
                   resolve_info.color_edram_info.pitch_tiles,
@@ -12378,16 +12393,11 @@ bool MetalCommandProcessor::IssueCopy() {
                 dest_format, canonical_resolve ? 1 : 0,
                 canonical_prepared ? 1 : 0, legacy_blit_format ? 1 : 0);
           }
-          // Array / slice destinations (a 3D LUT built one slice at a time)
-          // cannot take the canonical scatter; the shared resolve shaders
-          // address 3D destinations natively, so they take those even with
-          // the general switch off (XE_METAL_SHARED_RESOLVE_ARRAYS=0 drops
-          // them back to the CPU writeback).
-          const bool array_dest =
-              resolve_info.copy_dest_info.copy_dest_array ||
-              resolve_info.copy_dest_info.copy_dest_slice;
-          if (SharedResolveShadersEnabled() ||
-              (array_dest && SharedResolveArraysEnabled())) {
+          // Array / slice destinations cannot take the canonical scatter;
+          // they take the shared resolve shaders even with the general
+          // switch off (XE_METAL_SHARED_RESOLVE_ARRAYS=0 drops them back to
+          // the CPU writeback). Decided above, before the canonical pack.
+          if (shared_resolve_route) {
             if (canonical_prepared) {
               shared_resolve_dispatched =
                   DispatchSharedResolveCopy(resolve_info);
@@ -14959,6 +14969,15 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         // bit 3 set unpublished (metal_tiled_publish_run.h). Runs are aligned
         // on the TILED x (destination offset included).
         const uint32_t run_texels = metal::TiledPublishRunTexels(wb.bpp);
+        // Array / slice destinations were written with the 3D tiled
+        // addresser (the shared resolve shader's XeResolveDestPixelAddress),
+        // so publication walks the same 3D addresses of the record's slice;
+        // the 2D walk copied slice 0's region for every slice and left the
+        // rest of the LUT's RAM untouched. The x run rule is the same: the
+        // low address bits are the x bits in both layouts.
+        const uint32_t height_aligned =
+            wb.dest_height_aligned ? wb.dest_height_aligned
+                                   : ((wb.height + 31u) & ~31u);
         // An armed record may already have published some pages on first
         // touch, and the host may have discarded others; RAM there can hold
         // newer CPU data (Halo 4's prologue Bink buffer, read from disc into
@@ -14990,10 +15009,17 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             uint32_t tiled_x = wb.dest_offset_x + x;
             uint32_t run = std::min(
                 run_texels - (tiled_x & (run_texels - 1)), wb.width - x);
-            uint32_t off = uint32_t(texture_address::Tiled2D(
-                int32_t(wb.dest_offset_x + x),
-                int32_t(wb.dest_offset_y + uint32_t(y)), pitch_aligned,
-                int32_t(block_log2)));
+            uint32_t off =
+                wb.dest_is_3d
+                    ? uint32_t(texture_address::Tiled3D(
+                          int32_t(wb.dest_offset_x + x),
+                          int32_t(wb.dest_offset_y + uint32_t(y)),
+                          int32_t(wb.dest_slice), pitch_aligned,
+                          height_aligned, int32_t(block_log2)))
+                    : uint32_t(texture_address::Tiled2D(
+                          int32_t(wb.dest_offset_x + x),
+                          int32_t(wb.dest_offset_y + uint32_t(y)),
+                          pitch_aligned, int32_t(block_log2)));
             uint32_t run_bytes = run * wb.bpp;
             if (wb.dest_extent_bytes &&
                 off + run_bytes > wb.dest_extent_bytes) {

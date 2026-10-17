@@ -109,11 +109,21 @@ TEST_CASE("Scaled cover: classified only where RAM would otherwise serve",
   ResolvedFetchServiceInputs one_x = RamContentBase();
   CHECK(ClassifyResolvedFetch(one_x) == ResolvedFetchService::kRamContent);
 
-  // The bridge keeps precedence (a depth snapshot, for example).
+  // The bridge keeps precedence (a depth snapshot fetched as depth).
   ResolvedFetchServiceInputs depth = RamContentBase();
   depth.exact.rt_is_depth = true;
+  depth.exact.fetch_format = xenos::TextureFormat::k_24_8;
   depth.scaled = EligibleScaledCover();
   CHECK(ClassifyResolvedFetch(depth) == ResolvedFetchService::kBridgeSnapshot);
+
+  // A depth-backed range fetched through a colour format wants the raw
+  // D24S8 words (GTA IV restores depth/stencil by drawing the saved resolve
+  // back as k_8_8_8_8), which only RAM holds: never the float snapshot, and
+  // not the scaled cover either.
+  ResolvedFetchServiceInputs depth_words = RamContentBase();
+  depth_words.exact.rt_is_depth = true;
+  depth_words.scaled = EligibleScaledCover();
+  CHECK(ClassifyResolvedFetch(depth_words) == ResolvedFetchService::kRamContent);
 
   // No registration: the ordinary guest-memory path, whatever the inputs.
   ResolvedFetchServiceInputs none;
