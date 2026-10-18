@@ -1239,12 +1239,28 @@ class MetalCommandProcessor : public CommandProcessor {
     std::vector<std::pair<uint32_t, uint32_t>> seed_spans;
     uint64_t rebuilds = 0, queries = 0, fast_empty = 0, indexed_decisions = 0,
              verify_mismatches = 0;
+    // The last indexed decision and its inputs (XE_METAL_DECISION_MEMO): a
+    // draw run re-asks the same request against an unchanged index snapshot.
+    struct DecisionMemo {
+      bool valid = false;
+      uint64_t rebuilds = 0;
+      uint64_t completed = 0;
+      metal::ConsumerKind consumer = metal::ConsumerKind::kTexture;
+      metal::ConsumerAccess access = metal::ConsumerAccess::kGuestRam;
+      bool order_memexport_producers = false;
+      std::vector<metal::GuestRange> resolve_ranges, memexport_ranges;
+      metal::ConsumerDecision decision;
+    } memo;
+    uint64_t memo_hits = 0;
   };
   mutable ProducerIndex producer_index_;
   const std::vector<metal::PendingProducer>& IndexedPendingProducers(
       bool* any_page_hit, const metal::ConsumerRequest& request) const;
   // DecideConsumer over the page index: identical result, O(candidates).
   static bool LeanDecisionEnabled();
+  metal::ConsumerDecision DecideConsumerIndexedImpl(
+      metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
+      uint64_t completed_submission) const;
   metal::ConsumerDecision DecideConsumerIndexed(
       metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
       uint64_t completed_submission) const;

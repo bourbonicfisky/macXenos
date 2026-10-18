@@ -14494,10 +14494,11 @@ MetalCommandProcessor::IndexedPendingProducers(
     ++index.fast_empty;
   }
   if (SeamTimingEnabled() && (index.queries & 65535) == 0) {
-    XELOGI("MetalProducerIndex: queries={} fast-empty={} indexed={} rebuilds={} "
-           "pending={} verify-mismatches={}",
+    XELOGI("MetalProducerIndex: queries={} fast-empty={} indexed={} "
+           "memo-hits={} rebuilds={} pending={} verify-mismatches={}",
            index.queries, index.fast_empty, index.indexed_decisions,
-           index.rebuilds, index.producers.size(), index.verify_mismatches);
+           index.memo_hits, index.rebuilds, index.producers.size(),
+           index.verify_mismatches);
   }
   *any_page_hit = hit;
   return index.producers;
@@ -14536,7 +14537,63 @@ bool MetalCommandProcessor::LeanDecisionEnabled() {
   return s_enabled;
 }
 
+// One-entry memo over the indexed decision. Its inputs are the request, the
+// index snapshot (rebuilt whenever a producer registers or retires or the
+// memory authority sequence moves; `rebuilds` counts the snapshots) and the
+// completed submission, so an equal key returns the identical decision.
+// Burnout: ~7,700 draws a frame, consecutive draws asking about the same
+// texture ranges, the per-page producer walk ~4.5% of the command-processor
+// thread (2026-10-18 line profile). XE_METAL_DECISION_MEMO=0 disables.
 metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
+    metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
+    uint64_t completed_submission) const {
+  static const bool s_memo = [] {
+    const char* v = std::getenv("XE_METAL_DECISION_MEMO");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_memo) {
+    return DecideConsumerIndexedImpl(consumer, request, completed_submission);
+  }
+  ProducerIndex& index = producer_index_;
+  ProducerIndex::DecisionMemo& memo = index.memo;
+  auto same_ranges = [](const std::vector<metal::GuestRange>& cached,
+                        const metal::GuestRangeSet& set) {
+    const std::vector<metal::GuestRange>& ranges = set.ranges();
+    if (cached.size() != ranges.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < ranges.size(); ++i) {
+      if (cached[i].start() != ranges[i].start() ||
+          cached[i].end() != ranges[i].end()) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (memo.valid && memo.rebuilds == index.rebuilds &&
+      memo.completed == completed_submission && memo.consumer == consumer &&
+      memo.access == request.access &&
+      memo.order_memexport_producers == request.order_memexport_producers &&
+      same_ranges(memo.resolve_ranges, request.resolve_ranges) &&
+      same_ranges(memo.memexport_ranges, request.memexport_ranges)) {
+    ++index.memo_hits;
+    return memo.decision;
+  }
+  metal::ConsumerDecision decision =
+      DecideConsumerIndexedImpl(consumer, request, completed_submission);
+  memo.valid = true;
+  memo.rebuilds = index.rebuilds;
+  memo.completed = completed_submission;
+  memo.consumer = consumer;
+  memo.access = request.access;
+  memo.order_memexport_producers = request.order_memexport_producers;
+  memo.resolve_ranges = request.resolve_ranges.ranges();
+  memo.memexport_ranges = request.memexport_ranges.ranges();
+  memo.decision = decision;
+  return decision;
+}
+
+metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
     metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
     uint64_t completed_submission) const {
   ProducerIndex& index = producer_index_;
