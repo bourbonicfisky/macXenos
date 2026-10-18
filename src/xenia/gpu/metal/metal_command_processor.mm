@@ -2913,6 +2913,23 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // drawn over the composited front buffer after its resolve) keeps working,
   // while distinct targets no longer bleed into each other through a shared
   // texture (each has its own now).
+  if (!memexport_pass_) {
+    // A deferred clear load whose attachment this pass does not bind must
+    // materialize after all (compute, ahead of the render pass).
+    uint32_t bound_color_mask = 0;
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (color_targets[i]) {
+        bound_color_mask |= 1u << i;
+      }
+    }
+    const bool depth_both_planes =
+        depth != nullptr && bind_depth_plane && bind_stencil_plane;
+    if (!render_target_cache_->FlushPendingClearLoads(
+            (__bridge const void*)command_buffer, bound_color_mask,
+            depth_both_planes)) {
+      return nullptr;
+    }
+  }
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   if (memexport_pass_) {
@@ -2990,6 +3007,14 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     pass.colorAttachments[i].texture =
         (__bridge id<MTLTexture>)color_targets[i];
     pass.colorAttachments[i].loadAction = probe_load;
+    double clear_color[4];
+    if (render_target_cache_->TakePendingClearLoad(i, clear_color)) {
+      // Untouched whole-tile resolve clear in canonical EDRAM: open on the
+      // value the materialize would have written instead of copying it.
+      pass.colorAttachments[i].loadAction = MTLLoadActionClear;
+      pass.colorAttachments[i].clearColor = MTLClearColorMake(
+          clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+    }
     if (ms_resolve_store) {
       pass.colorAttachments[i].resolveTexture =
           (__bridge id<MTLTexture>)color_resolves[i];
@@ -3002,9 +3027,19 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // 24-bit depth in the high bits), not a fixed 1.0. Reverse-z titles (JC2
   // menus) clear to 0 and test "greater"; a hardcoded 1.0 made every fragment
   // fail z>=1.0 -> black. Reading the guest value serves both directions.
+  double depth_clear_value = 0.0;
+  uint32_t stencil_clear_value = 0;
+  const bool depth_clear_load =
+      depth && bind_depth_plane && bind_stencil_plane &&
+      render_target_cache_->TakePendingDepthClearLoad(&depth_clear_value,
+                                                      &stencil_clear_value);
   if (depth && bind_depth_plane) {
     pass.depthAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.depthAttachment.loadAction = probe_load;
+    if (depth_clear_load) {
+      pass.depthAttachment.loadAction = MTLLoadActionClear;
+      pass.depthAttachment.clearDepth = depth_clear_value;
+    }
     if (ms_resolve_store) {
       pass.depthAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;
@@ -3018,6 +3053,10 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   if (depth && bind_stencil_plane) {
     pass.stencilAttachment.texture = (__bridge id<MTLTexture>)depth;
     pass.stencilAttachment.loadAction = probe_load;
+    if (depth_clear_load) {
+      pass.stencilAttachment.loadAction = MTLLoadActionClear;
+      pass.stencilAttachment.clearStencil = stencil_clear_value;
+    }
     if (ms_resolve_store) {
       pass.stencilAttachment.resolveTexture =
           (__bridge id<MTLTexture>)depth_resolve;

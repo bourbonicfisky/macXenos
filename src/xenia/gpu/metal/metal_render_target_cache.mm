@@ -933,6 +933,10 @@ bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
       operation.kind ==
       MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical;
   const RenderTargetKey& key = render_target->key();
+  if (!materialize) {
+    // A pack rewrites canonical: no longer an untouched clear.
+    SetTileClear(operation.start_tiles, operation.end_tiles, false, 0, 0);
+  }
   if (MetalCommandProcessor::PassCensusEnabled()) {
     const uint32_t r = uint32_t(sync_requester_);
     const uint32_t tiles = operation.end_tiles - operation.start_tiles;
@@ -1022,9 +1026,150 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         memo.version == canonical_authority_.version()) {
       continue;
     }
+    // A deferral left by a pass that never opened: materialize it now, the
+    // tracker already counts the attachment as clean.
+    if (pending_clear_load_[slot].valid) {
+      if (!command_buffer) {
+        command_buffer = (__bridge id<MTLCommandBuffer>)
+            command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
+      }
+      if (!FlushPendingClearLoad(slot, (__bridge const void*)command_buffer)) {
+        return false;
+      }
+    }
     auto operations = canonical_authority_.SynchronizeAttachment(
         attachment, start_tiles, end_tiles, ++canonical_authority_order_);
     sync_requester_ = CanonicalSyncRequester::kRasterViews;
+    // Clear load action: when every tile of this colour attachment is about
+    // to be materialized from canonical and canonical holds one untouched
+    // whole-tile clear value there, defer the materializes and let the pass
+    // open with a clear of that value (TakePendingClearLoad). Packs for other
+    // attachments in the list still encode first, and they reset the tile
+    // state they rewrite, so the check below sees their effect.
+    size_t materialize_first = operations.size();
+    for (size_t i = 0; i < operations.size(); ++i) {
+      if (operations[i].kind ==
+          MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical) {
+        materialize_first = std::min(materialize_first, i);
+      }
+    }
+    bool defer_clear = false;
+    uint32_t defer_lo = 0, defer_hi = 0;
+    // XE_METAL_CLEAR_LOAD_LOG=1: why a materialize did not become a clear.
+    static const bool s_clear_load_log =
+        std::getenv("XE_METAL_CLEAR_LOAD_LOG") != nullptr;
+    auto clear_load_decline = [&](const char* why, uint32_t a, uint32_t b) {
+      static uint32_t s_logs = 0;
+      if (s_clear_load_log && s_logs++ < 64) {
+        XELOGW(
+            "MetalClearLoad decline slot={} fmt={} depth={} tiles=[{},{}) "
+            "ops={} first_mat={} why={} ({}, {})",
+            slot, uint32_t(render_target->key().resource_format),
+            render_target->key().is_depth ? 1 : 0, start_tiles, end_tiles,
+            operations.size(), materialize_first, why, a, b);
+      }
+    };
+    const bool clear_load_format =
+        render_target->key().is_depth
+            ? slot == 0
+            : (slot != 0 &&
+               (render_target->key().GetColorFormat() ==
+                    xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
+                render_target->key().GetColorFormat() ==
+                    xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
+    if (ClearLoadEnabled() && materialize_first < operations.size() &&
+        !clear_load_format) {
+      clear_load_decline("format", 0, 0);
+    }
+    PendingClearLoad defer_value;
+    if (ClearLoadEnabled() && clear_load_format &&
+        materialize_first < operations.size() && end_tiles > start_tiles &&
+        end_tiles <= xenos::kEdramTileCount) {
+      // Encode the packs (they precede the materializes), then judge.
+      for (size_t i = 0; i < materialize_first; ++i) {
+        if (!command_buffer) {
+          command_buffer = (__bridge id<MTLCommandBuffer>)
+              command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
+        }
+        if (!command_buffer ||
+            !EncodeCanonicalAuthorityOperation((__bridge const void*)command_buffer,
+                                               operations[i])) {
+          canonical_authority_.ResetUnknown();
+          ResetTileClears();
+          return false;
+        }
+      }
+      // Coverage: the materializes must tile [start, end) exactly, in order.
+      uint32_t cursor = start_tiles;
+      bool covered = true;
+      for (size_t i = materialize_first; i < operations.size() && covered; ++i) {
+        const auto& op = operations[i];
+        if (op.kind != MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical ||
+            op.attachment != attachment || op.start_tiles != cursor ||
+            op.end_tiles <= op.start_tiles) {
+          covered = false;
+          break;
+        }
+        cursor = op.end_tiles;
+      }
+      covered = covered && cursor == end_tiles;
+      if (!covered) {
+        clear_load_decline("coverage", cursor,
+                           uint32_t(operations.size() - materialize_first));
+      }
+      if (covered) {
+        const TileClear& first = tile_clear_[start_tiles];
+        bool uniform = first.uniform != 0;
+        uint32_t first_bad = start_tiles;
+        for (uint32_t t = start_tiles + 1; t < end_tiles && uniform; ++t) {
+          const TileClear& tc = tile_clear_[t];
+          uniform = tc.uniform && tc.lo == first.lo && tc.hi == first.hi;
+          if (!uniform) {
+            first_bad = t;
+          }
+        }
+        if (uniform) {
+          if (ComputeClearLoadValue(render_target->key(), first.lo, first.hi,
+                                    &defer_value)) {
+            defer_clear = true;
+            defer_lo = first.lo;
+            defer_hi = first.hi;
+          } else {
+            clear_load_decline("value", first.lo, first.hi);
+          }
+        } else {
+          clear_load_decline("uniform", first_bad, first.uniform);
+        }
+      }
+      if (!defer_clear) {
+        // Fall through to the ordinary encode of the materializes.
+        operations.erase(operations.begin(),
+                         operations.begin() + ptrdiff_t(materialize_first));
+      }
+    }
+    if (defer_clear) {
+      PendingClearLoad& pending = pending_clear_load_[slot];
+      pending.valid = true;
+      pending.attachment = attachment;
+      for (uint32_t c = 0; c < 4; ++c) {
+        pending.color[c] = defer_value.color[c];
+      }
+      pending.depth = defer_value.depth;
+      pending.stencil = defer_value.stencil;
+      (void)defer_lo;
+      (void)defer_hi;
+      pending.operations.assign(operations.begin() + ptrdiff_t(materialize_first),
+                                operations.end());
+      // The clear needs a NEW pass: close the open render encoder exactly as
+      // a materialize transfer would have.
+      if (!command_buffer) {
+        command_buffer = (__bridge id<MTLCommandBuffer>)
+            command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
+      }
+      memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
+              true};
+      continue;
+    }
     for (const auto& operation : operations) {
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
@@ -1041,6 +1186,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         // The scheduler has already advanced optimistically. Forget all
         // authority rather than claiming a conversion that wasn't encoded.
         canonical_authority_.ResetUnknown();
+    ResetTileClears();
         return false;
       }
     }
@@ -1064,6 +1210,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
       command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kCanonicalReadback));
   if (!command_buffer) {
     canonical_authority_.ResetUnknown();
+    ResetTileClears();
     return false;
   }
   for (const auto& operation : operations) {
@@ -1074,6 +1221,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
           "attachment {:016X}, tiles [{},{})",
           operation.attachment, operation.start_tiles, operation.end_tiles);
       canonical_authority_.ResetUnknown();
+    ResetTileClears();
       return false;
     }
   }
@@ -1105,6 +1253,7 @@ bool MetalRenderTargetCache::PrepareCanonicalEdramForResolve(
             operation.attachment, operation.start_tiles,
             operation.end_tiles);
         canonical_authority_.ResetUnknown();
+    ResetTileClears();
         return false;
       }
     }
@@ -1305,6 +1454,10 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
       c.mark_slots ? 100.0 * double(c.mark_memo_hits) / double(c.mark_slots)
                    : 0.0,
       double(c.mark_tiles) / frames);
+  out += fmt::format(" | clear-load: {:.2f}/frame ({:.0f} tiles/frame) flushed {:.2f}/frame",
+                     double(c.clear_loads) / frames,
+                     double(c.clear_load_tiles) / frames,
+                     double(c.clear_load_flushes) / frames);
   if (reset) {
     c = PackCensus{};
   }
@@ -4913,6 +5066,44 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
       }
     }
   }
+  {
+    // Whole-tile clears leave every covered tile uniformly (clear_lo,
+    // clear_hi) in canonical; a partial clear leaves mixed content.
+    const uint32_t tile_h = msaa_samples ? 8u : 16u;
+    const uint32_t tile_w = msaa_samples >= 2 ? 40u : 80u;
+    // Whole tile rows from x = 0 reaching into the last tile column of the
+    // span: the surface's own pixels are then uniform. A surface narrower
+    // than its pitch (FEAR: 768 px over 10 tiles = 800) leaves the pitch
+    // padding of the last column untouched by the clear; those bytes belong
+    // to no pixel of this surface and are published neither by its resolves
+    // nor read by its draws, so a clear load that also clears them is still
+    // the surface the guest sees. A clear that starts past x = 0, skips tile
+    // columns or covers partial rows leaves mixed content.
+    const bool whole_tiles =
+        source_x == 0 && !(source_y % tile_h) && !(height % tile_h) &&
+        width + tile_w > row_length_used * tile_w;
+    static const bool s_clear_log = std::getenv("XE_METAL_CLEAR_LOAD_LOG") != nullptr;
+    static uint32_t s_clear_logs = 0;
+    if (s_clear_log && s_clear_logs++ < 64) {
+      XELOGW("MetalClearLoad clear span_base={} rows={} len={} pitch={} depth={} "
+             "msaa={} rect=({},{} {}x{}) whole={} value={:08X}:{:08X}",
+             span_base, rows, row_length_used, span_pitch, is_depth ? 1 : 0,
+             msaa_samples, source_x, source_y, width, height, whole_tiles ? 1 : 0,
+             clear_lo, clear_hi);
+    }
+    for (uint32_t row = 0; row < rows; ++row) {
+      uint32_t start =
+          (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
+      uint32_t first_length =
+          std::min(row_length_used, xenos::kEdramTileCount - start);
+      SetTileClear(start, start + first_length, whole_tiles, clear_lo,
+                   clear_hi);
+      if (first_length < row_length_used) {
+        SetTileClear(0u, row_length_used - first_length, whole_tiles,
+                     clear_lo, clear_hi);
+      }
+    }
+  }
   for (uint32_t row = 0; row < rows; ++row) {
     uint32_t start =
         (span_base + row * span_pitch) & (xenos::kEdramTileCount - 1u);
@@ -4926,6 +5117,217 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
     }
   }
   return true;
+}
+
+void MetalRenderTargetCache::SetTileClear(uint32_t start_tiles,
+                                          uint32_t end_tiles, bool uniform,
+                                          uint32_t lo, uint32_t hi) {
+  end_tiles = std::min(end_tiles, uint32_t(xenos::kEdramTileCount));
+  for (uint32_t t = start_tiles; t < end_tiles; ++t) {
+    tile_clear_[t] = TileClear{lo, hi, uint8_t(uniform ? 1u : 0u)};
+  }
+}
+
+bool MetalRenderTargetCache::ClearLoadEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CLEAR_LOAD");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+namespace {
+// Mirrors xe_gamma_byte_to_linear (metal_edram_msl.h) in float, evaluated
+// with the division and with a reciprocal multiply; a byte whose 16-bit
+// unorm quantization differs between the two is not reproducible.
+bool GammaByteTo16(uint32_t byte, uint32_t* out) {
+  const float b = float(byte);
+  float num, den;
+  if (b < 64.0f) {
+    num = b + 0.5f;
+    den = 1023.0f;
+  } else if (b < 96.0f) {
+    num = b - 31.5f;
+    den = 511.5f;
+  } else if (b < 192.0f) {
+    num = b - 63.5f;
+    den = 255.75f;
+  } else {
+    num = b - 127.5f;
+    den = 127.875f;
+  }
+  const float v1 = num / den;
+  const float v2 = num * (1.0f / den);
+  auto quantize = [](float v) {
+    v = std::min(std::max(v, 0.0f), 1.0f);
+    return uint32_t(std::lrint(double(v) * 65535.0));
+  };
+  const uint32_t q1 = quantize(v1), q2 = quantize(v2);
+  if (q1 != q2) {
+    return false;
+  }
+  // Also guard a half-way case where the GPU's own rounding could tip.
+  const double exact = double(v1) * 65535.0;
+  if (std::fabs(exact - std::floor(exact) - 0.5) < 1e-3) {
+    return false;
+  }
+  *out = q1;
+  return true;
+}
+// Mirrors xe_f20e4_to_f32.
+float F20E4ToF32(uint32_t f24) {
+  f24 &= 0xFFFFFFu;
+  if (f24 == 0u) {
+    return 0.0f;
+  }
+  uint32_t mantissa = f24 & 0xFFFFFu;
+  uint32_t exponent = f24 >> 20;
+  if (exponent == 0u) {
+    uint32_t lz = uint32_t(__builtin_clz(mantissa)) - 11u;
+    exponent = 1u - lz;
+    mantissa = (mantissa << lz) & 0xFFFFFu;
+  }
+  const uint32_t bits = ((exponent + 112u) << 23) | (mantissa << 3);
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+}  // namespace
+
+bool MetalRenderTargetCache::ComputeClearLoadValue(const RenderTargetKey& key,
+                                                   uint32_t lo, uint32_t hi,
+                                                   PendingClearLoad* out) {
+  if (key.is_depth) {
+    const uint32_t d24 = lo >> 8;
+    float depth;
+    if (key.GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8) {
+      depth = F20E4ToF32(d24) * 0.5f;
+    } else {
+      // xe_unorm24_to_f32: a power-of-two scale, exact on both sides.
+      depth = float(d24 + (d24 >> 23)) * (1.0f / 16777216.0f);
+    }
+    out->depth = double(depth);
+    out->stencil = lo & 0xFFu;
+    return true;
+  }
+  switch (key.GetColorFormat()) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8: {
+      // xe_unpack_8888 into RGBA8Unorm: byte / 255, exact.
+      for (uint32_t c = 0; c < 4; ++c) {
+        out->color[c] = double((lo >> (8u * c)) & 0xFFu) / 255.0;
+      }
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
+      // xe_unpack_color32_working_gamma into RGBA16Unorm.
+      for (uint32_t c = 0; c < 3; ++c) {
+        uint32_t q;
+        if (!GammaByteTo16((lo >> (8u * c)) & 0xFFu, &q)) {
+          return false;
+        }
+        out->color[c] = double(q) / 65535.0;
+      }
+      out->color[3] = double(lo >> 24) / 255.0;
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+bool MetalRenderTargetCache::HasPendingClearLoad(uint32_t color_index) const {
+  return color_index < xenos::kMaxColorRenderTargets &&
+         pending_clear_load_[color_index + 1u].valid;
+}
+
+bool MetalRenderTargetCache::TakePendingClearLoad(uint32_t color_index,
+                                                  double clear_color[4]) {
+  if (color_index >= xenos::kMaxColorRenderTargets) {
+    return false;
+  }
+  PendingClearLoad& pending = pending_clear_load_[color_index + 1u];
+  if (!pending.valid) {
+    return false;
+  }
+  RenderTarget* const* used = last_update_used_render_targets();
+  if (GetCanonicalAttachmentId(used[color_index + 1u]) != pending.attachment) {
+    // Not the attachment the deferral was made for: never clear it.
+    return false;
+  }
+  for (uint32_t c = 0; c < 4; ++c) {
+    clear_color[c] = pending.color[c];
+  }
+  for (const auto& operation : pending.operations) {
+    pack_census_.clear_load_tiles += operation.end_tiles - operation.start_tiles;
+  }
+  ++pack_census_.clear_loads;
+  pending.valid = false;
+  pending.operations.clear();
+  return true;
+}
+
+bool MetalRenderTargetCache::TakePendingDepthClearLoad(double* clear_depth,
+                                                       uint32_t* clear_stencil) {
+  PendingClearLoad& pending = pending_clear_load_[0];
+  if (!pending.valid) {
+    return false;
+  }
+  RenderTarget* const* used = last_update_used_render_targets();
+  if (GetCanonicalAttachmentId(used[0]) != pending.attachment) {
+    return false;
+  }
+  *clear_depth = pending.depth;
+  *clear_stencil = pending.stencil;
+  for (const auto& operation : pending.operations) {
+    pack_census_.clear_load_tiles += operation.end_tiles - operation.start_tiles;
+  }
+  ++pack_census_.clear_loads;
+  pending.valid = false;
+  pending.operations.clear();
+  return true;
+}
+
+bool MetalRenderTargetCache::FlushPendingClearLoad(uint32_t slot,
+                                                   const void* command_buffer) {
+  PendingClearLoad& pending = pending_clear_load_[slot];
+  if (!pending.valid) {
+    return true;
+  }
+  pending.valid = false;
+  ++pack_census_.clear_load_flushes;
+  bool ok = command_buffer != nullptr;
+  for (const auto& operation : pending.operations) {
+    if (!ok || !EncodeCanonicalAuthorityOperation(command_buffer, operation)) {
+      ok = false;
+      break;
+    }
+  }
+  pending.operations.clear();
+  if (!ok) {
+    XELOGE(
+        "MetalRenderTargetCache: deferred materialize for attachment {:016X} "
+        "could not be encoded; forgetting authority",
+        pending.attachment);
+    canonical_authority_.ResetUnknown();
+    ResetTileClears();
+    ResetTileClears();
+  }
+  return ok;
+}
+
+bool MetalRenderTargetCache::FlushPendingClearLoads(const void* command_buffer,
+                                                    uint32_t bound_color_mask,
+                                                    bool depth_bound) {
+  bool ok = true;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (pending_clear_load_[i + 1u].valid && !(bound_color_mask & (1u << i))) {
+      ok = FlushPendingClearLoad(i + 1u, command_buffer) && ok;
+    }
+  }
+  if (pending_clear_load_[0].valid && !depth_bound) {
+    ok = FlushPendingClearLoad(0, command_buffer) && ok;
+  }
+  return ok;
 }
 
 bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
@@ -5086,6 +5488,7 @@ void MetalRenderTargetCache::PerformResolveClear(
   // a stale clean-attachment claim survive a fallback attempt.
   if (sample_edram_raster_enabled_) {
     canonical_authority_.ResetUnknown();
+    ResetTileClears();
   }
   resolve_dump_rectangles_.clear();
   GetResolveCopyRectanglesToDump(span_base, row_length_used, rows, span_pitch,
@@ -6431,6 +6834,7 @@ bool MetalRenderTargetCache::RestoreCanonicalEdram(const void* snapshot) {
   canonical_authority_.MarkCanonical(0, xenos::kEdramTileCount,
                                      ++canonical_authority_order_);
   census_clear_tiles_.fill(0);
+  ResetTileClears();
   return true;
 }
 

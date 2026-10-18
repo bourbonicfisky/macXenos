@@ -104,6 +104,29 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // canonical per-sample EDRAM before the render pass opens. Returns false if
   // a required scheduled conversion couldn't be encoded.
   bool PrepareCurrentRasterViews();
+  // Clear load action (XE_METAL_CLEAR_LOAD, default on; =0 rolls back): a
+  // colour attachment whose whole tile range would be materialized from a
+  // canonical EDRAM region that still holds an untouched, whole-tile resolve
+  // clear opens its next render pass with MTLLoadActionClear of that value
+  // instead of a materialize copy (JC2 / GTA IV / Banjo / Burnout: 1,440
+  // tiles a frame, FEAR 1,800; the EDRAM machinery is 40-50% of GPU time).
+  // PrepareCurrentRasterViews defers the materialize operations and ends the
+  // open pass; the command processor takes the clear when it binds the
+  // attachment in the new pass, or flushes the deferred operations when it
+  // does not bind it.
+  static bool ClearLoadEnabled();
+  bool HasPendingClearLoad(uint32_t color_index) const;
+  // The clear colour (RGBA, host attachment units) for colour attachment
+  // `color_index`, or false when no clear load is pending for it.
+  bool TakePendingClearLoad(uint32_t color_index, double clear_color[4]);
+  // The depth / stencil clear for the depth attachment (both planes must be
+  // bound by the pass), or false when none is pending.
+  bool TakePendingDepthClearLoad(double* clear_depth, uint32_t* clear_stencil);
+  // Encodes the deferred materializes of every pending slot the pass does not
+  // bind: colour slot i unless bit i of `bound_color_mask`, depth unless
+  // `depth_bound` (both planes).
+  bool FlushPendingClearLoads(const void* command_buffer,
+                              uint32_t bound_color_mask, bool depth_bound);
   // Pass census: does any tile of the resolve span [edram_base, rows x
   // row_length_used at pitch_tiles) belong to a render target in the
   // accumulated (currently bound) attachment set? Ownership-truth query, no
@@ -778,11 +801,43 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // the 2026-10-16 samples of every title).
     uint64_t mark_calls = 0, mark_memo_hits = 0, mark_slots = 0,
              mark_tiles = 0;
+    // Clear load actions taken / materialize tiles they replaced / deferred
+    // loads flushed back to a materialize (unbound attachment).
+    uint64_t clear_loads = 0, clear_load_tiles = 0, clear_load_flushes = 0;
     uint64_t frames = 0;
   } pack_census_;
   // Per EDRAM tile: the latest canonical producer is a resolve clear that no
   // draw has written since (census only).
   std::array<uint8_t, xenos::kEdramTileCount> census_clear_tiles_ = {};
+  // Per EDRAM tile: canonical holds an untouched whole-tile resolve clear of
+  // (lo, hi) (production state behind the clear load action).
+  struct TileClear {
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    uint8_t uniform = 0;
+  };
+  std::array<TileClear, xenos::kEdramTileCount> tile_clear_{};
+  void SetTileClear(uint32_t start_tiles, uint32_t end_tiles, bool uniform,
+                    uint32_t lo, uint32_t hi);
+  void ResetTileClears() { tile_clear_.fill(TileClear{}); }
+  struct PendingClearLoad {
+    bool valid = false;
+    uint64_t attachment = 0;
+    double color[4] = {0, 0, 0, 0};
+    double depth = 0;
+    uint32_t stencil = 0;
+    std::vector<MetalEdramAuthorityTracker::SyncOperation> operations;
+  };
+  // The host clear value the materialize of (lo, hi) would produce for this
+  // target, or false when the format is not handled or the value is not
+  // reproducible bit-exactly by a clear (the decode's result must agree
+  // under both the exact and the reciprocal-multiply evaluation the GPU may
+  // use).
+  static bool ComputeClearLoadValue(const RenderTargetKey& key, uint32_t lo,
+                                    uint32_t hi, PendingClearLoad* out);
+  std::array<PendingClearLoad, xenos::kMaxColorRenderTargets + 1>
+      pending_clear_load_{};
+  bool FlushPendingClearLoad(uint32_t slot, const void* command_buffer);
   void NotePackCensusFrame() { ++pack_census_.frames; }
  public:
   void NotePackCensusSwap() { ++pack_census_.frames; }
