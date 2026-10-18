@@ -10811,12 +10811,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (encoder_dedupe) {
       const uint32_t bits = uint32_t(usage) | (uint32_t(stages) << 8);
       void* raw = (__bridge void*)resource;
-      auto [it, inserted] = encoder_declared_resources_.try_emplace(raw, bits);
-      if (!inserted) {
-        if ((it->second & bits) == bits) {
+      if (uint32_t* declared = encoder_declared_resources_.Find(raw)) {
+        if ((*declared & bits) == bits) {
           return;
         }
-        it->second |= bits;
+        *declared |= bits;
       }
     }
     [encoder useResource:resource usage:usage stages:stages];
@@ -14207,7 +14206,7 @@ bool MetalCommandProcessor::EncoderDedupeEnabled() {
 }
 
 void MetalCommandProcessor::ResetEncoderDedupe() {
-  encoder_declared_resources_.clear();
+  encoder_declared_resources_.Clear();
   for (auto& stage : encoder_buffer_binds_) {
     for (EncoderBufferBind& bind : stage) {
       bind = EncoderBufferBind{};

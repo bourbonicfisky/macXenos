@@ -569,7 +569,54 @@ class MetalCommandProcessor : public CommandProcessor {
   // every draw re-declared ~15 resources and re-bound both heaps on two
   // stages (Red Dead gameplay: ~7,000 draws in ~170 passes per frame).
   // resource -> usage bits | stage bits << 8 already declared on the encoder.
-  std::unordered_map<void*, uint32_t> encoder_declared_resources_;
+  // Open-addressing table cleared per encoder by generation: no node
+  // allocation, no rehash (std::unordered_map::try_emplace per resource per
+  // draw was ~3% of GTA IV's command-processor thread, 2026-10-17 line
+  // profile). When it fills past three quarters the caller declares without
+  // deduplication for the rest of the encoder.
+  struct DeclaredResourceTable {
+    struct Slot {
+      void* key = nullptr;
+      uint32_t bits = 0;
+      uint32_t generation = 0;
+    };
+    static constexpr size_t kSlots = 4096;  // power of two
+    std::vector<Slot> slots = std::vector<Slot>(kSlots);
+    uint32_t generation = 1;
+    size_t count = 0;
+    void Clear() {
+      count = 0;
+      if (++generation == 0) {
+        for (Slot& slot : slots) {
+          slot.generation = 0;
+        }
+        generation = 1;
+      }
+    }
+    // The slot's bits for `key` (0 for a key first seen on this encoder), or
+    // nullptr when the table is too full to track it.
+    uint32_t* Find(void* key) {
+      if (count * 4 >= kSlots * 3) {
+        return nullptr;
+      }
+      size_t i = (uintptr_t(key) >> 4) & (kSlots - 1);
+      for (;;) {
+        Slot& slot = slots[i];
+        if (slot.generation != generation) {
+          slot.key = key;
+          slot.bits = 0;
+          slot.generation = generation;
+          ++count;
+          return &slot.bits;
+        }
+        if (slot.key == key) {
+          return &slot.bits;
+        }
+        i = (i + 1) & (kSlots - 1);
+      }
+    }
+  };
+  DeclaredResourceTable encoder_declared_resources_;
   struct EncoderBufferBind {
     void* buffer = nullptr;
     uint64_t offset = 0;
