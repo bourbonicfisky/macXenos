@@ -52,6 +52,14 @@ DEFINE_bool(
     "overrides this setting.",
     "GPU");
 DEFINE_bool(
+    metal_mark_draw_rows, true,
+    "Mark only the EDRAM tile rows a draw's scissor covers as written by the "
+    "render target, so a resolve copies those rows back instead of the whole "
+    "target. Performance only (F.E.A.R. 52 fewer resolve copies a frame); "
+    "turn off only to troubleshoot a rendering problem. "
+    "XE_METAL_MARK_DRAW_ROWS=0/1 overrides this setting.",
+    "GPU");
+DEFINE_bool(
     metal_resolve_span_coalesce, true,
     "Synchronize a full-width resolve's EDRAM rows as one span instead of row "
     "by row. Performance only (Just Cause 2 +25% on an M4 once the other "
@@ -1339,18 +1347,17 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
                                        rows_per_tile) * pitch;
     d0 = std::max(d0, start_tiles);
     d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
-    // XE_METAL_MARK_DRAW_ROWS=1 (2026-10-04, USF4: 69% of GPU time in the
-    // canonical pack/resolve/materialize machinery): only the draw-covered
-    // tile rows become host-authoritative, so a later pack to canonical
-    // (before a resolve, or when another attachment takes a tile) moves the
-    // rows a draw could have written instead of the whole bound target. Tiles
-    // outside the draw's rows keep their previous state: canonical and clean
-    // for this attachment (materialized at bind) or already host-authoritative
-    // from an earlier draw. Default off until gated.
-    static const bool s_mark_draw_rows = [] {
-      const char* v = std::getenv("XE_METAL_MARK_DRAW_ROWS");
-      return v && v[0] == '1' && !v[1];
-    }();
+    // Draw-row marking (2026-10-04 introduced for USF4, DEFAULT ON
+    // 2026-10-18; metal_mark_draw_rows, XE_METAL_MARK_DRAW_ROWS=0/1): only the
+    // draw-covered tile rows become host-authoritative, so a later pack to
+    // canonical (before a resolve, or when another attachment takes a tile)
+    // moves the rows a draw could have written instead of the whole bound
+    // target. Tiles outside the draw's rows keep their previous state:
+    // canonical and clean for this attachment (materialized at bind) or
+    // already host-authoritative from an earlier draw. F.E.A.R.: resolve packs
+    // 272 -> 220 a frame, the census's redundant pack tiles 15% -> 0.
+    static const bool s_mark_draw_rows = MetalSwitchEnabled(
+        cvars::metal_mark_draw_rows, std::getenv("XE_METAL_MARK_DRAW_ROWS"));
     const uint32_t mark_start = s_mark_draw_rows ? d0 : start_tiles;
     const uint32_t mark_end = s_mark_draw_rows ? d1 : end_tiles;
     if (mark_end <= mark_start) {
