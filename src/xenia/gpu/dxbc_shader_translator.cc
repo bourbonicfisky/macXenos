@@ -163,6 +163,7 @@ void DxbcShaderTranslator::Reset() {
   out_reg_vs_position_ = UINT32_MAX;
   out_reg_vs_clip_cull_distances_ = UINT32_MAX;
   out_reg_vs_point_size_ = UINT32_MAX;
+  out_reg_vs_point_coordinates_ = UINT32_MAX;
   in_reg_ps_interpolators_ = UINT32_MAX;
   in_reg_ps_point_coordinates_ = UINT32_MAX;
   in_reg_ps_position_ = UINT32_MAX;
@@ -413,18 +414,25 @@ void DxbcShaderTranslator::StartVertexShader_LoadVertexIndex() {
 
   dxbc::Dest index_dest(dxbc::Dest::R(reg, 0b0001));
   dxbc::Src index_src(dxbc::Src::R(reg, dxbc::Src::kXXXX));
-
+  // The host vertex index: SV_VertexID, or, for a point list drawn as
+  // two-triangle strips (4 host vertices per guest point, the low 2 bits
+  // being the corner), the guest point index SV_VertexID >> 2. Held in Y,
+  // which the endian swap below reuses only after the index is consumed.
+  dxbc::Src host_index_src(
+      dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX));
+  if (IsDxbcPointStripVertexShader()) {
+    a_.OpUShR(dxbc::Dest::R(reg, 0b0010), host_index_src, dxbc::Src::LU(2));
+    host_index_src = dxbc::Src::R(reg, dxbc::Src::kYYYY);
+  }
   // Check if the closing vertex of a non-indexed line loop is being processed.
   a_.OpINE(
-      index_dest, dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+      index_dest, host_index_src,
       LoadSystemConstant(SystemConstants::Index::kLineLoopClosingIndex,
                          offsetof(SystemConstants, line_loop_closing_index),
                          dxbc::Src::kXXXX));
   // Zero the index if processing the closing vertex of a line loop, or do
   // nothing (replace 0 with 0) if not needed.
-  a_.OpAnd(index_dest,
-           dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
-           index_src);
+  a_.OpAnd(index_dest, host_index_src, index_src);
 
   {
     // Swap the vertex index's endianness.
@@ -567,6 +575,7 @@ void DxbcShaderTranslator::StartVertexOrDomainShader() {
 
   switch (host_vertex_shader_type) {
     case Shader::HostVertexShaderType::kVertex:
+    case Shader::HostVertexShaderType::kPointListAsTriangleStrip:
       StartVertexShader_LoadVertexIndex();
       break;
 
@@ -974,6 +983,12 @@ void DxbcShaderTranslator::StartTranslation() {
       out_reg_vs_point_size_ = out_reg_index;
       ++out_reg_index;
     }
+    // Point sprite coordinates (vertex-shader point expansion).
+    if (shader_modification.vertex.output_point_coordinates &&
+        IsDxbcPointStripVertexShader()) {
+      out_reg_vs_point_coordinates_ = out_reg_index;
+      ++out_reg_index;
+    }
   } else if (is_pixel_shader()) {
     uint32_t in_reg_index = 0;
     // Interpolators.
@@ -1053,6 +1068,23 @@ void DxbcShaderTranslator::StartTranslation() {
         dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0001),
         dxbc::Src::LU(1), dxbc::Src::LU(kSysFlag_SharedMemoryIsUAV_Shift),
         LoadFlagsSystemConstant());
+    if (IsDxbcPointStripVertexShader()) {
+      // The guest program runs once per host corner of the expanded point;
+      // export only from the first corner so each guest vertex exports once.
+      uint32_t memexport_corner_temp = PushSystemTemp();
+      a_.OpAnd(dxbc::Dest::R(memexport_corner_temp, 0b0001),
+               dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+               dxbc::Src::LU(3));
+      a_.OpIEq(dxbc::Dest::R(memexport_corner_temp, 0b0001),
+               dxbc::Src::R(memexport_corner_temp, dxbc::Src::kXXXX),
+               dxbc::Src::LU(0));
+      a_.OpAnd(
+          dxbc::Dest::R(system_temp_memexport_enabled_and_eM_written_, 0b0001),
+          dxbc::Src::R(system_temp_memexport_enabled_and_eM_written_,
+                       dxbc::Src::kXXXX),
+          dxbc::Src::R(memexport_corner_temp, dxbc::Src::kXXXX));
+      PopSystemTemp();
+    }
     system_temp_memexport_address_ = PushSystemTemp(0b1111);
     uint8_t memexport_eM_remaining = memexport_eM_written;
     uint32_t memexport_eM_index;
@@ -1169,6 +1201,77 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
                               offsetof(SystemConstants, ndc_offset), 0b100100),
            dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW),
            dxbc::Src::R(system_temp_position_));
+  if (IsDxbcPointStripVertexShader()) {
+    // Point sprite expansion in the vertex shader (the geometry shader's
+    // kPointList expansion, dxbc_geometry_shader.cc, applied to this host
+    // corner): the low 2 bits of SV_VertexID select the corner in the
+    // top-left, top-right, bottom-left, bottom-right order, with left-to-right,
+    // top-to-bottom sprite coordinates. Bottom is -Y in Direct3D NDC.
+    uint32_t point_temp = PushSystemTemp();
+    // XY = the diameter: the vertex shader's value when it wrote a
+    // non-negative one (initialized to -1), else the constant diameter.
+    dxbc::Src point_constant_diameter_src(LoadSystemConstant(
+        SystemConstants::Index::kPointConstantDiameter,
+        offsetof(SystemConstants, point_constant_diameter), 0b0100));
+    if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b001) {
+      a_.OpGE(dxbc::Dest::R(point_temp, 0b0100),
+              dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                           dxbc::Src::kXXXX),
+              dxbc::Src::LF(0.0f));
+      a_.OpMovC(dxbc::Dest::R(point_temp, 0b0011),
+                dxbc::Src::R(point_temp, dxbc::Src::kZZZZ),
+                dxbc::Src::R(system_temp_point_size_edge_flag_kill_vertex_,
+                             dxbc::Src::kXXXX),
+                point_constant_diameter_src);
+    } else {
+      a_.OpMov(dxbc::Dest::R(point_temp, 0b0011),
+               point_constant_diameter_src);
+    }
+    // A zero-size point renders nothing (4D5307F1's zero-size snowflakes, and
+    // point lists used as memexport "compute"): kill the primitive through a
+    // NaN W, which leaves the memory export of this invocation intact.
+    a_.OpLT(dxbc::Dest::R(point_temp, 0b1100), dxbc::Src::LF(0.0f),
+            dxbc::Src::R(point_temp, 0b0100 | (1 << 6)));
+    a_.OpAnd(dxbc::Dest::R(point_temp, 0b0100),
+             dxbc::Src::R(point_temp, dxbc::Src::kZZZZ),
+             dxbc::Src::R(point_temp, dxbc::Src::kWWWW));
+    a_.OpMovC(dxbc::Dest::R(system_temp_position_, 0b1000),
+              dxbc::Src::R(point_temp, dxbc::Src::kZZZZ),
+              dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW),
+              dxbc::Src::LF(std::nanf("")));
+    // XY = the radius in clip space: guest screen diameter -> NDC radius,
+    // times W.
+    a_.OpMul(dxbc::Dest::R(point_temp, 0b0011), dxbc::Src::R(point_temp),
+             LoadSystemConstant(
+                 SystemConstants::Index::kPointScreenDiameterToNDCRadius,
+                 offsetof(SystemConstants, point_screen_diameter_to_ndc_radius),
+                 0b0100));
+    a_.OpMul(dxbc::Dest::R(point_temp, 0b0011), dxbc::Src::R(point_temp),
+             dxbc::Src::R(system_temp_position_, dxbc::Src::kWWWW));
+    // Z = corner bit 0 (right), W = corner bit 1 (bottom).
+    a_.OpAnd(dxbc::Dest::R(point_temp, 0b1100),
+             dxbc::Src::V1D(kInRegisterVSVertexIndex, dxbc::Src::kXXXX),
+             dxbc::Src::LU(0, 0, 1, 2));
+    // X = +radius for the right corners, -radius for the left ones; Y =
+    // -radius for the bottom corners, +radius for the top ones.
+    a_.OpMovC(dxbc::Dest::R(point_temp, 0b0001),
+              dxbc::Src::R(point_temp, dxbc::Src::kZZZZ),
+              dxbc::Src::R(point_temp, dxbc::Src::kXXXX),
+              -dxbc::Src::R(point_temp, dxbc::Src::kXXXX));
+    a_.OpMovC(dxbc::Dest::R(point_temp, 0b0010),
+              dxbc::Src::R(point_temp, dxbc::Src::kWWWW),
+              -dxbc::Src::R(point_temp, dxbc::Src::kYYYY),
+              dxbc::Src::R(point_temp, dxbc::Src::kYYYY));
+    a_.OpAdd(dxbc::Dest::R(system_temp_position_, 0b0011),
+             dxbc::Src::R(system_temp_position_), dxbc::Src::R(point_temp));
+    if (out_reg_vs_point_coordinates_ != UINT32_MAX) {
+      a_.OpMovC(dxbc::Dest::O(out_reg_vs_point_coordinates_, 0b0011),
+                dxbc::Src::R(point_temp, 0b1110),
+                dxbc::Src::LF(1.0f), dxbc::Src::LF(0.0f));
+    }
+    // Release point_temp.
+    PopSystemTemp();
+  }
 
   // Kill the primitive if needed - check if the shader wants to kill (bits
   // 0:30 of the vertex kill register are not zero - using `and`, not abs or
@@ -2920,7 +3023,9 @@ void DxbcShaderTranslator::WriteInputSignature() {
       vertex_id.component_type = dxbc::SignatureRegisterComponentType::kUInt32;
       vertex_id.register_index = kInRegisterVSVertexIndex;
       vertex_id.mask = 0b0001;
-      vertex_id.always_reads_mask = (register_count() >= 1) ? 0b0001 : 0b0000;
+      vertex_id.always_reads_mask =
+          (register_count() >= 1 || IsDxbcPointStripVertexShader()) ? 0b0001
+                                                                     : 0b0000;
     }
 
     // Semantic names.
@@ -3340,6 +3445,23 @@ void DxbcShaderTranslator::WriteOutputSignature() {
         point_size.never_writes_mask = 0b1110;
       }
     }
+    // Point sprite coordinates (XESPRITETEXCOORD) of the vertex-shader point
+    // expansion, read by the pixel shader's point PsParamGen.
+    size_t point_coordinates_position = shader_object_.size();
+    if (out_reg_vs_point_coordinates_ != UINT32_MAX) {
+      shader_object_.resize(shader_object_.size() + kParameterDwords);
+      ++parameter_count;
+      {
+        auto& point_coordinates =
+            *reinterpret_cast<dxbc::SignatureParameter*>(
+                shader_object_.data() + point_coordinates_position);
+        point_coordinates.component_type =
+            dxbc::SignatureRegisterComponentType::kFloat32;
+        point_coordinates.register_index = out_reg_vs_point_coordinates_;
+        point_coordinates.mask = 0b0011;
+        point_coordinates.never_writes_mask = 0b1100;
+      }
+    }
 
     // Semantic names.
     uint32_t semantic_offset =
@@ -3391,6 +3513,16 @@ void DxbcShaderTranslator::WriteOutputSignature() {
         point_size.semantic_name_ptr = semantic_offset;
       }
       semantic_offset += dxbc::AppendAlignedString(shader_object_, "XEPSIZE");
+    }
+    if (out_reg_vs_point_coordinates_ != UINT32_MAX) {
+      {
+        auto& point_coordinates =
+            *reinterpret_cast<dxbc::SignatureParameter*>(
+                shader_object_.data() + point_coordinates_position);
+        point_coordinates.semantic_name_ptr = semantic_offset;
+      }
+      semantic_offset +=
+          dxbc::AppendAlignedString(shader_object_, "XESPRITETEXCOORD");
     }
   } else if (is_pixel_shader()) {
     if (!edram_rov_used_) {
@@ -3734,8 +3866,10 @@ void DxbcShaderTranslator::WriteShaderCode() {
             control_point_count, kInRegisterDSControlPointIndex, 0b0001));
       }
     } else {
-      if (register_count()) {
-        // Unswapped vertex index input (only X component).
+      if (register_count() || IsDxbcPointStripVertexShader()) {
+        // Unswapped vertex index input (only X component). The point
+        // expansion reads the corner from it in the epilogue even when the
+        // guest program has no registers.
         ao_.OpDclInputSGV(dxbc::Dest::V1D(kInRegisterVSVertexIndex, 0b0001),
                           dxbc::Name::kVertexID);
       }
@@ -3783,6 +3917,10 @@ void DxbcShaderTranslator::WriteShaderCode() {
     // Point size output.
     if (out_reg_vs_point_size_ != UINT32_MAX) {
       ao_.OpDclOutput(dxbc::Dest::O(out_reg_vs_point_size_, 0b0001));
+    }
+    // Point sprite coordinates output.
+    if (out_reg_vs_point_coordinates_ != UINT32_MAX) {
+      ao_.OpDclOutput(dxbc::Dest::O(out_reg_vs_point_coordinates_, 0b0011));
     }
   } else if (is_pixel_shader()) {
     bool is_writing_float24_depth = DSV_IsWritingFloat24Depth();

@@ -151,6 +151,25 @@ DEFINE_transient_bool(
     "of Eden).",
     "GPU");
 DEFINE_bool(
+    metal_quad_lists_as_triangles, true,
+    "Draw quad lists as triangle lists (two triangles per quad) instead of "
+    "through the Metal "
+    "object+mesh geometry pipelines. On the M1 Max with macOS 27 the mesh "
+    "quad pipelines made the GPU abort Red Dead Redemption's command buffers "
+    "(\"Insufficient Memory\") about a thousand times a session. Turn off "
+    "only to troubleshoot a rendering problem. XE_METAL_QUAD_CONVERT=0/1 "
+    "overrides this setting.",
+    "GPU");
+DEFINE_bool(
+    metal_point_sprite_vs_expansion, true,
+    "Draw point sprites by expanding each point into two triangles in the "
+    "vertex shader instead of through the Metal object+mesh geometry "
+    "pipelines. On the M1 Max with macOS 27 the mesh pipelines made the GPU "
+    "abort command buffers (\"Insufficient Memory\") and cost Banjo-Kazooie "
+    "a third of its frame rate. Turn off only to troubleshoot a rendering "
+    "problem. XE_METAL_POINT_VS=0/1 overrides this setting.",
+    "GPU");
+DEFINE_bool(
     metal_msaa_clear_fold, true,
     "Draw the Xbox 360's 2x/4x MSAA fast clears straight into the matching "
     "1x view of the same EDRAM instead of copying the whole surface out and "
@@ -1595,6 +1614,80 @@ static bool ResidentSweepEnabled(id<MTLDevice> device) {
   return s_enabled;
 }
 
+// Geometry emulation (rectangle / point / quad lists) runs as object+mesh
+// threadgroups through the shader-converter runtime: one guest draw is one
+// mesh grid. XE_METAL_GEO_CHUNK=N splits a draw into dispatches of at most N
+// object threadgroups each (0 = one dispatch per draw, the runtime's own
+// behaviour). Returns the vertex/index count per dispatch, clamped to the
+// draw. The per-object-threadgroup vertex stride mirrors the runtime's
+// IRRuntimeCalculateDrawInfoForGSEmulation (16 KB payload less 32 bytes of
+// metadata, 256 object threads, 1024 mesh threadgroups per object
+// threadgroup), so a chunk boundary never splits a primitive.
+static uint32_t GeometryEmulationChunkVertices(IRRuntimePrimitiveType primitive,
+                                               uint32_t vertex_size,
+                                               uint32_t max_input_primitives,
+                                               uint32_t draw_vertices) {
+  static const uint32_t s_chunk_threadgroups = [] {
+    const char* v = std::getenv("XE_METAL_GEO_CHUNK");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (!s_chunk_threadgroups || !vertex_size || !max_input_primitives ||
+      !draw_vertices) {
+    return draw_vertices;
+  }
+  const uint32_t per_primitive =
+      primitive == IRRuntimePrimitiveTypePoint         ? 1u
+      : primitive == IRRuntimePrimitiveTypeLineWithAdj ? 4u
+                                                       : 3u;
+  const uint32_t payload_vertices =
+      (((16384u - 32u) / vertex_size) / per_primitive) * per_primitive;
+  uint32_t primitives = std::min(payload_vertices / per_primitive,
+                                 1024u * max_input_primitives);
+  primitives = std::min(primitives, 256u / per_primitive);
+  const uint32_t stride = std::max(primitives, 1u) * per_primitive;
+  const uint64_t chunk = uint64_t(stride) * s_chunk_threadgroups;
+  return uint32_t(std::min<uint64_t>(chunk, draw_vertices));
+}
+
+// Point sprites: expand in the vertex shader (the guest point drawn as a
+// two-triangle strip of 4 host vertices, Shader::HostVertexShaderType::
+// kPointListAsTriangleStrip) instead of the shader-converter object+mesh
+// geometry emulation. On the M1 Max under macOS 27.0.1 the mesh point
+// pipelines made the GPU abort the scene pass' command buffer with
+// "Insufficient Memory" (kIOGPUCommandBufferCallbackErrorOutOfMemory) 50-110
+// times per Banjo-Kazooie session (2026-10-18; RDR, Judgment and Tomb Raider
+// too), and the whole mesh route held Banjo at 20 fps where the plain path
+// runs its declared 30. metal_point_sprite_vs_expansion / XE_METAL_POINT_VS=0
+// restore the mesh path.
+static bool PointSpriteVsExpansionEnabled() {
+  static const bool s_enabled = [] {
+    if (const char* v = std::getenv("XE_METAL_POINT_VS")) {
+      return v[0] == '1';
+    }
+    return cvars::metal_point_sprite_vs_expansion;
+  }();
+  return s_enabled;
+}
+
+// XE_METAL_GEO_LOG=1: the first 200 geometry-emulation draws of 2,048 or more
+// vertices, with the dispatch chunk in effect (mesh-grid size attribution).
+static void NoteGeometryEmulationDraw(uint32_t geometry_type,
+                                      uint32_t draw_vertices, uint32_t chunk) {
+  static const bool s_log = [] {
+    const char* v = std::getenv("XE_METAL_GEO_LOG");
+    return v && v[0] == '1' && !v[1];
+  }();
+  if (!s_log || draw_vertices < 2048) {
+    return;
+  }
+  static uint32_t s_logged = 0;
+  if (s_logged++ < 200) {
+    XELOGI("MetalGeoDraw type={} vertices={} chunk={} dispatches={}",
+           geometry_type, draw_vertices, chunk,
+           (draw_vertices + chunk - 1) / std::max(chunk, 1u));
+  }
+}
+
 // Logs the per-encoder execution status carried by a faulted command buffer
 // (requires MakeAttributedCommandBuffer): which encoders faulted vs completed.
 //
@@ -1630,25 +1723,67 @@ static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
          err ? long(err.code) : -1L);
   NSArray<id<MTLCommandBufferEncoderInfo>>* infos =
       err.userInfo[MTLCommandBufferEncoderInfoErrorKey];
-  for (id<MTLCommandBufferEncoderInfo> info in infos) {
-    const char* state = "unknown";
-    switch (info.errorState) {
-      case MTLCommandEncoderErrorStateCompleted: state = "completed"; break;
-      case MTLCommandEncoderErrorStateAffected: state = "AFFECTED"; break;
-      case MTLCommandEncoderErrorStateUnknown: state = "unknown"; break;
-      case MTLCommandEncoderErrorStatePending: state = "pending"; break;
-      case MTLCommandEncoderErrorStateFaulted: state = "FAULTED"; break;
+  // The command buffer's label and the device-wide GPU allocation at the time
+  // of the fault: an "Insufficient Memory" completion is a per-submission
+  // allocation failure, and both the submission's size (encoder count) and the
+  // process's GPU-resident volume are needed to tell a volume problem from a
+  // transient one.
+  XELOGE("  command buffer '{}': {} encoders, device allocated {} MB, "
+         "kernel {:.3f}-{:.3f} s, GPU {:.3f}-{:.3f} s",
+         command_buffer.label ? command_buffer.label.UTF8String
+                              : "(unlabeled)",
+         infos ? uint32_t(infos.count) : 0u,
+         command_buffer.device
+             ? uint64_t(command_buffer.device.currentAllocatedSize) >> 20
+             : 0ull,
+         command_buffer.kernelStartTime, command_buffer.kernelEndTime,
+         command_buffer.GPUStartTime, command_buffer.GPUEndTime);
+  // Every key the driver attached, in case it carries more than the encoder
+  // status (e.g. a resource or address for a memory fault).
+  for (NSString* key in err.userInfo) {
+    if ([key isEqualToString:MTLCommandBufferEncoderInfoErrorKey]) {
+      continue;
     }
+    NSString* value = [err.userInfo[key] description];
+    XELOGE("  userInfo[{}] = {}", key.UTF8String,
+           value ? value.UTF8String : "(nil)");
+  }
+  auto state_name = [](id<MTLCommandBufferEncoderInfo> info) {
+    switch (info.errorState) {
+      case MTLCommandEncoderErrorStateCompleted: return "completed";
+      case MTLCommandEncoderErrorStateAffected: return "AFFECTED";
+      case MTLCommandEncoderErrorStateUnknown: return "unknown";
+      case MTLCommandEncoderErrorStatePending: return "pending";
+      case MTLCommandEncoderErrorStateFaulted: return "FAULTED";
+    }
+    return "unknown";
+  };
+  uint32_t index = 0;
+  for (id<MTLCommandBufferEncoderInfo> info in infos) {
     // Only the interesting ones — a frame can have hundreds of completed
-    // encoders.
+    // encoders. Each is logged with its position and the labels of the two
+    // encoders before and after it, so an unlabeled faulted encoder can be
+    // placed inside the submission.
     if (info.errorState != MTLCommandEncoderErrorStateCompleted) {
       // Carry the serial on every encoder line too, so encoder attributions
       // can be grouped by the submission they belong to without re-parsing
       // the surrounding header.
-      XELOGE("  encoder '{}': {} (episode={} submission={})",
-             info.label ? info.label.UTF8String : "(unlabeled)", state,
-             episode, submission);
+      XELOGE("  encoder '{}' [#{}/{}]: {} (episode={} submission={})",
+             info.label ? info.label.UTF8String : "(unlabeled)", index,
+             uint32_t(infos.count), state_name(info), episode, submission);
+      const uint32_t lo = index >= 2 ? index - 2 : 0;
+      const uint32_t hi = std::min<uint32_t>(uint32_t(infos.count), index + 3);
+      for (uint32_t i = lo; i < hi; ++i) {
+        if (i == index) {
+          continue;
+        }
+        id<MTLCommandBufferEncoderInfo> near = infos[i];
+        XELOGE("    neighbour #{} '{}': {}", i,
+               near.label ? near.label.UTF8String : "(unlabeled)",
+               state_name(near));
+      }
     }
+    ++index;
   }
 }
 
@@ -2190,11 +2325,16 @@ bool MetalCommandProcessor::SetupContext() {
   // A failure leaves primitive_processor_ null and every draw falls back to the
   // inline path (behavior-preserving), including auto fans.
   {
+    // Quad lists as triangle lists everywhere (2026-10-18): on the M1 Max
+    // under macOS 27.0.1 the shader-converter object+mesh quad pipelines made
+    // the GPU abort Red Dead Redemption's scene pass ~1,000 times a session
+    // ("Insufficient Memory"). The conversion is the one other GPUs always
+    // used ((0,1,2),(0,2,3) per quad, the shared table's order); reordering
+    // it to the mesh path's 0,1,3,2 strip broke Viva Pinata's water, while
+    // this order renders it and the mesh path drew it as green spikes.
     const char* v = std::getenv("XE_METAL_QUAD_CONVERT");
-    convert_auto_quads_ =
-        v ? (v[0] == '1')
-          : ![(__bridge id<MTLDevice>)device supportsFamily:MTLGPUFamilyApple7];
-    XELOGI("MetalCommandProcessor: auto-indexed quad lists via {}",
+    convert_auto_quads_ = v ? (v[0] == '1') : cvars::metal_quad_lists_as_triangles;
+    XELOGI("MetalCommandProcessor: quad lists via {}",
            convert_auto_quads_ ? "triangle-list conversion"
                                : "geometry emulation");
   }
@@ -4209,11 +4349,27 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
     // reconstructing it from revoke lines afterwards.
     const uint64_t episode =
         NoteFaultEpisodeMember(faulted_submission, completion.submit_epoch);
-    static uint32_t s_cb_errors = 0;
-    ++s_cb_errors;
+    const uint32_t s_cb_errors = ++cb_error_count_;
     if (s_cb_errors <= 32 || (s_cb_errors & 255) == 0) {
       LogCommandBufferFault(command_buffer, "frame commit", swap_count_,
                             faulted_submission, episode);
+      XELOGE("  state: residency members={} in-flight={} (latest submission "
+             "{}, completed {}), texture slots {}/{}, footprint {:.0f} MB",
+             residency_members_.size(),
+             submission_counter_ -
+                 completed_submission_.load(std::memory_order_acquire),
+             submission_counter_,
+             completed_submission_.load(std::memory_order_acquire),
+             texture_cache_ ? texture_cache_->slots_used() : 0,
+             texture_cache_ ? texture_cache_->slots_capacity() : 0,
+             ProcessFootprintMiB());
+      XELOGE("  committed by {}; recent loads: {}",
+             submission_counter_ - faulted_submission < 64
+                 ? metal::SeamBoundaryReasonName(metal::SeamBoundaryReason(
+                       submission_reason_ring_[faulted_submission % 64]))
+                 : "(unknown)",
+             shared_texture_cache_ ? shared_texture_cache_->DescribeRecentLoads()
+                                   : std::string("(no shared cache)"));
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
@@ -5250,6 +5406,7 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   // the GPU thread from PumpCompletedActions — a fault otherwise fails the
   // command buffer SILENTLY and reads on-screen as a freeze).
   uint64_t submission = ++submission_counter_;
+  submission_reason_ring_[submission % 64] = uint8_t(reason);
   signal_since_commit_.store(0, std::memory_order_release);
   // Epoch AT SUBMISSION: a late callback must still join its original episode.
   //
@@ -5971,9 +6128,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool dma_line_loop_route =
       index_buffer_info && index_buffer_info->guest_base &&
       IsDmaLineLoopRoutable(*register_file_, prim_type);
+  // Point sprites expanded in the vertex shader (two-triangle strips, 4 host
+  // vertices per point) instead of the object+mesh geometry emulation.
+  const bool point_strip_route =
+      prim_type == xenos::PrimitiveType::kPointList &&
+      PointSpriteVsExpansionEnabled();
   if (prim_type == xenos::PrimitiveType::kRectangleList) {
     geometry_type = PipelineGeometryShader::kRectangleList;
-  } else if (prim_type == xenos::PrimitiveType::kPointList) {
+  } else if (prim_type == xenos::PrimitiveType::kPointList &&
+             !point_strip_route) {
     geometry_type = PipelineGeometryShader::kPointList;
   } else if (prim_type == xenos::PrimitiveType::kQuadList &&
              !auto_quad_route && !dma_quad_route) {
@@ -6057,9 +6220,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
-  bool use_geometry_emulation = !use_tessellation_emulation &&
-                                geometry_type != PipelineGeometryShader::kNone &&
-                                mesh_shader_supported_ && pixel_shader != nullptr;
+  // XE_METAL_DISABLE_GEO_TYPES=<mask> (diagnostic): bit 1 point lists, bit 2
+  // rectangle lists, bit 3 quad lists take the non-mesh fallback instead of
+  // the object+mesh geometry emulation (bisecting the 2026-10-18 M1 Max
+  // command-buffer faults by primitive type).
+  static const uint32_t s_disable_geometry_types = [] {
+    const char* v = std::getenv("XE_METAL_DISABLE_GEO_TYPES");
+    return v ? uint32_t(strtoul(v, nullptr, 0)) : 0u;
+  }();
+  bool use_geometry_emulation =
+      !use_tessellation_emulation &&
+      geometry_type != PipelineGeometryShader::kNone &&
+      mesh_shader_supported_ && pixel_shader != nullptr &&
+      !(s_disable_geometry_types & (1u << uint32_t(geometry_type)));
 
   RegisterFile& regs = *register_file_;
   // PP3-auto line loops are intentionally absent from the guest primitive
@@ -7655,7 +7828,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           vertex_shader->GetDynamicAddressableRegisterCount(
               sq_program_cntl.vs_num_reg),
           use_tessellation_emulation ? tess_pp.host_vertex_shader_type
-                                     : Shader::HostVertexShaderType::kVertex));
+          : point_strip_route
+              ? Shader::HostVertexShaderType::kPointListAsTriangleStrip
+              : Shader::HostVertexShaderType::kVertex));
   vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
   vs_mod_decoded.vertex.fill_unwritten_interpolators =
       fill_unwritten_interpolators ? 1 : 0;
@@ -7692,10 +7867,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     vs_mod_decoded.vertex.vertex_kill_and = uint32_t(
         (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b100) &&
         !pa_cl_clip_cntl.vtx_kill_or);
+    // XEPSIZE feeds the geometry-emulation mesh stage only; the vertex-shader
+    // point expansion consumes the size inside the vertex shader and writes
+    // the sprite coordinates the pixel shader's point PsParamGen reads.
     vs_mod_decoded.vertex.output_point_size = uint32_t(
         (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b001) &&
+        !point_strip_route &&
         regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
             xenos::PrimitiveType::kPointList);
+    vs_mod_decoded.vertex.output_point_coordinates = uint32_t(
+        point_strip_route && ps_param_gen_pos < xenos::kMaxInterpolators);
   }
   uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
@@ -8964,7 +9145,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   bool auto_fan_route = IsAutoFanRoutable(regs, prim_type);
   PrimitiveProcessor::ProcessingResult pp_result{};
   draw_trace_milestone("before-primitive-processor");
-  if (primitive_processor_ && !use_geometry_emulation &&
+  if (primitive_processor_ && !use_geometry_emulation && !point_strip_route &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
        auto_quad_route || auto_line_loop_route || fixed_reset_strip_route) &&
       IsPp1DrawViewConsistent(
@@ -11030,15 +11211,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // The runtime reads the index buffer by gpuAddress; our data lives at the
       // arena byte offset, expressed here as an element start index.
       uint32_t start_index = uint32_t(index_alloc.offset / index_size);
-      IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
-          encoder, geometry_primitive, index_type, index_buffer,
-          geometry_config, /*instanceCount=*/1, index_count, start_index,
-          /*baseVertex=*/0, /*baseInstance=*/0);
+      const uint32_t chunk = GeometryEmulationChunkVertices(
+          geometry_primitive, gs_vertex_size, gs_max_input_primitives,
+          index_count);
+      NoteGeometryEmulationDraw(uint32_t(geometry_type), index_count, chunk);
+      for (uint32_t first = 0; first < index_count; first += chunk) {
+        const uint32_t count = std::min(chunk, index_count - first);
+        IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
+            encoder, geometry_primitive, index_type, index_buffer,
+            geometry_config, /*instanceCount=*/1, count, start_index + first,
+            /*baseVertex=*/0, /*baseInstance=*/0);
+      }
     } else {
-      IRRuntimeDrawPrimitivesGeometryEmulation(
-          encoder, geometry_primitive, geometry_config,
-          /*instanceCount=*/1, index_count, /*baseVertex=*/0,
-          /*baseInstance=*/0);
+      const uint32_t chunk = GeometryEmulationChunkVertices(
+          geometry_primitive, gs_vertex_size, gs_max_input_primitives,
+          index_count);
+      NoteGeometryEmulationDraw(uint32_t(geometry_type), index_count, chunk);
+      for (uint32_t first = 0; first < index_count; first += chunk) {
+        const uint32_t count = std::min(chunk, index_count - first);
+        IRRuntimeDrawPrimitivesGeometryEmulation(
+            encoder, geometry_primitive, geometry_config,
+            /*instanceCount=*/1, count, /*baseVertex=*/first,
+            /*baseInstance=*/0);
+      }
     }
     mark_raster_targets_written();
     // Task 2.3: the geometry-emulated rasterizing producer publishes on the
@@ -11218,7 +11413,51 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     uint32_t host_index_count = index_count;
     MetalUploadAllocation index_alloc{};
-    if (dma_quad_route) {
+    if (point_strip_route) {
+      // Point list -> two-triangle strips: every guest index g becomes the
+      // 32-bit host indices 4g+0..4g+3 and a strip restart (the vertex shader
+      // recovers g = SV_VertexID >> 2 and the corner from the low 2 bits).
+      // Guest indices are swapped in cached stack chunks; the arena is
+      // write-combined and never read back.
+      if (!index_count) {
+        RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                       "point-degenerate");
+        return true;
+      }
+      host_index_count = index_count * 5;
+      if (!upload_arena_->Allocate(host_index_count * 4, 16, &index_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "point-index-alloc");
+        return true;
+      }
+      auto expand = [&](auto* src) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(src)>>;
+        constexpr uint32_t kChunkPoints = 256;
+        T chunk[kChunkPoints];
+        uint32_t* dst = static_cast<uint32_t*>(index_alloc.cpu_ptr);
+        for (uint32_t p0 = 0; p0 < index_count; p0 += kChunkPoints) {
+          const uint32_t n = std::min(kChunkPoints, index_count - p0);
+          SwapIndicesInto(chunk, src + p0, n, index_buffer_info->format,
+                          index_buffer_info->endianness);
+          for (uint32_t p = 0; p < n; ++p) {
+            const uint32_t base = uint32_t(chunk[p]) * 4u;
+            uint32_t* o = dst + size_t(p0 + p) * 5;
+            o[0] = base;
+            o[1] = base + 1;
+            o[2] = base + 2;
+            o[3] = base + 3;
+            o[4] = UINT32_MAX;
+          }
+        }
+      };
+      if (index_size == 4) {
+        expand(static_cast<const uint32_t*>(guest_indices));
+      } else {
+        expand(static_cast<const uint16_t*>(guest_indices));
+      }
+      index_size = 4;
+      mtl_prim = MTLPrimitiveTypeTriangleStrip;
+    } else if (dma_quad_route) {
       // Quad list -> triangle list: (0,1,2),(0,2,3) per quad. The arena is
       // write-combined, so never read it back: swap guest indices in cached
       // stack chunks and only write the expanded triangles to the arena.
@@ -11301,6 +11540,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                               : MTLIndexTypeUInt16;
     IRRuntimeDrawIndexedPrimitives(encoder, mtl_prim, host_index_count,
                                    index_type, index_buffer, index_alloc.offset,
+                                   /*instanceCount=*/1, /*baseVertex=*/0,
+                                   /*baseInstance=*/0);
+  } else if (point_strip_route) {
+    // Auto-indexed point list -> two-triangle strips: host indices
+    // 4p+0..4p+3 and a strip restart per guest point p (see the DMA branch).
+    if (!index_count) {
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                     "point-degenerate");
+      return true;
+    }
+    const uint32_t host_index_count = index_count * 5;
+    MetalUploadAllocation index_alloc{};
+    if (!upload_arena_->Allocate(host_index_count * 4, 16, &index_alloc)) {
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "point-index-alloc");
+      return true;
+    }
+    uint32_t* dst = static_cast<uint32_t*>(index_alloc.cpu_ptr);
+    for (uint32_t p = 0; p < index_count; ++p) {
+      uint32_t* o = dst + size_t(p) * 5;
+      o[0] = p * 4u;
+      o[1] = p * 4u + 1;
+      o[2] = p * 4u + 2;
+      o[3] = p * 4u + 3;
+      o[4] = UINT32_MAX;
+    }
+    __unsafe_unretained id<MTLBuffer> index_buffer =
+        (__bridge id<MTLBuffer>)index_alloc.buffer;
+    [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangleStrip,
+                                   host_index_count, MTLIndexTypeUInt32,
+                                   index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
   } else {
@@ -17005,10 +17276,22 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       // Memory-leak telemetry: physical footprint every stats tick — a
       // steadily climbing number is a leak long before the system pauses.
       double footprint_mb = ProcessFootprintMiB();
+      // The device's GPU-resident allocation alongside the process footprint:
+      // the two diverge when driver-side allocations (not in phys_footprint)
+      // grow, which is what an "Insufficient Memory" command-buffer completion
+      // is about.
+      uint64_t gpu_alloc_mb = 0;
+      if (auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())) {
+        if (id<MTLDevice> device =
+                (__bridge id<MTLDevice>)provider->device()) {
+          gpu_alloc_mb = uint64_t(device.currentAllocatedSize) >> 20;
+        }
+      }
       XELOGI(
           "MetalFrameStats swap#{}: {:.1f} fps, {:.2f} commits/frame, "
           "{:.0f} draws/frame, {:.0f} MB footprint, {:.1f} tex-uploads/frame, "
-          "slots {}/{} (free {}, stale {})",
+          "slots {}/{} (free {}, stale {}), gpu-alloc {} MB, faults {}",
           count, 128.0f / std::max(secs, 0.001f),
           float(frame_commit_count_ - s_last_commits) / 128.0f,
           float(draw_count_ - s_last_draws) / 128.0f, footprint_mb,
@@ -17017,7 +17300,8 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_used() : 0,
           texture_cache_ ? texture_cache_->slots_capacity() : 0,
           texture_cache_ ? texture_cache_->slots_free() : 0,
-          texture_cache_ ? texture_cache_->slots_stale() : 0);
+          texture_cache_ ? texture_cache_->slots_stale() : 0, gpu_alloc_mb,
+          cb_error_count_);
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
         XELOGI("MetalGpuBusy swap#{}: {:.2f} ms/frame busy, {:.1f}% of wall",

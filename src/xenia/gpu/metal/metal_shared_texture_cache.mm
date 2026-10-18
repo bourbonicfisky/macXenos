@@ -189,6 +189,20 @@ MetalSharedTextureCache::MetalSharedTextureCache(
       device_(device),
       legacy_(legacy_adapter) {}
 
+std::string MetalSharedTextureCache::DescribeRecentLoads() const {
+  std::string out;
+  const uint32_t count = std::min<uint32_t>(recent_load_next_, 8u);
+  for (uint32_t i = 0; i < count; ++i) {
+    const RecentLoad& load =
+        recent_loads_[(recent_load_next_ - count + i) % 8];
+    out += fmt::format("{}{}{} {:08X} {}x{} L{} s{}", i ? ", " : "",
+                       load.direct ? "direct" : "family",
+                       load.side ? "/side" : "", load.base_page << 12,
+                       load.width, load.height, load.levels, load.submission);
+  }
+  return out.empty() ? std::string("(none)") : out;
+}
+
 MetalSharedTextureCache::~MetalSharedTextureCache() {
   for (BindingSlot& binding_slot : binding_slots_) {
     ReleaseBindingSlot(binding_slot);
@@ -595,7 +609,14 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
         }
       }
     }
-    if (eligible) {
+    // XE_METAL_TEX_SIDE_LOAD=2 (diagnostic only; reloads of a texture an
+    // earlier draw of this submission sampled then race it): every load takes
+    // the side buffer, so no load ends a render pass.
+    static const bool s_force_side = [] {
+      const char* v = std::getenv("XE_METAL_TEX_SIDE_LOAD");
+      return v && v[0] == '2' && !v[1];
+    }();
+    if (eligible || s_force_side) {
       side_load_ = true;
       ++census_side_loads_;
     }
@@ -731,6 +752,10 @@ bool MetalSharedTextureCache::LoadLevelsDirect(
   }
   encoder.label = mipped ? @"shared-texcache direct load (mip chain)"
                          : @"shared-texcache direct load";
+  NoteRecentLoad(RecentLoad{uint32_t(key.base_page), key.GetWidth(),
+                            key.GetHeight(), uint32_t(plan.size()),
+                            submission_provider_ ? submission_provider_() : 0,
+                            side_load_, true});
   // XE_METAL_ROUTE_LOAD_LOG=1: every direct load in encode order (bounded),
   // to interleave with the scatter / draw logs when bisecting staleness.
   static const bool s_load_log = std::getenv("XE_METAL_ROUTE_LOAD_LOG") != nullptr;
@@ -1307,6 +1332,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     return false;
   }
   encoder.label = @"shared-texcache family load";
+  NoteRecentLoad(RecentLoad{uint32_t(key.base_page), key.GetWidth(),
+                            key.GetHeight(), uint32_t(dispatches.size()),
+                            submission_provider_ ? submission_provider_() : 0,
+                            side_load_, false});
   [encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)
                                        pipeline_ptr];
   [encoder setBuffer:(__bridge id<MTLBuffer>)metal_shared_memory.GetBuffer()

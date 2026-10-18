@@ -51,6 +51,21 @@ class MetalTextureCache;
 // prep-time and serve-time can never disagree.
 class MetalSharedTextureCache : public TextureCache {
  public:
+  // Fault attribution: the last eight loads encoded (base page, extent,
+  // levels, side/frame buffer, submission), newest last.
+  struct RecentLoad {
+    uint32_t base_page = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t levels = 0;
+    uint64_t submission = 0;
+    bool side = false;
+    bool direct = false;
+  };
+  void NoteRecentLoad(const RecentLoad& load) {
+    recent_loads_[recent_load_next_++ % 8] = load;
+  }
+  std::string DescribeRecentLoads() const;
   MetalSharedTextureCache(const RegisterFile& register_file,
                           MetalSharedMemory& shared_memory, void* device,
                           MetalTextureCache* legacy_adapter,
@@ -261,6 +276,8 @@ class MetalSharedTextureCache : public TextureCache {
   // encoders go to the side command buffer instead of ending the render pass.
   bool side_load_ = false;
   uint64_t census_side_loads_ = 0;  // loads that took the side command buffer
+  RecentLoad recent_loads_[8] = {};
+  uint32_t recent_load_next_ = 0;
   std::function<uint64_t()> submission_provider_;
   bool trace_playback_ = false;
   std::function<bool(uint64_t)> submission_fault_query_;

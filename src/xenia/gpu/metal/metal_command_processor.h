@@ -1042,6 +1042,12 @@ class MetalCommandProcessor : public CommandProcessor {
   // Geometry-emulation (rect-list) diagnostics: draws dispatched via the mesh
   // path, and times the geometry pipeline failed to build (fell through to skip).
   uint32_t geo_draw_count_ = 0;
+  // Command buffers that completed with an error this session (every one,
+  // not only the logged ones; reported on the MetalFrameStats line).
+  uint32_t cb_error_count_ = 0;
+  // Seam boundary reason of the last 64 submissions, by submission serial
+  // (fault attribution: why the faulted command buffer was committed).
+  uint8_t submission_reason_ring_[64] = {};
   // Draws by guest primitive type and the path that issued them (census):
   // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,
   // 4 geometry emulation, 5 tessellation, 6 unmappable (skipped).

@@ -204,6 +204,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // Pipeline stage and input configuration.
       Shader::HostVertexShaderType host_vertex_shader_type
           : Shader::kHostVertexShaderTypeBitCount;
+      // With host_vertex_shader_type kPointListAsTriangleStrip (point sprites
+      // expanded in the vertex shader on hosts without geometry shaders -
+      // the Metal backend): also write the XESPRITETEXCOORD output the pixel
+      // shader's point PsParamGen reads. Was zero padding, so every existing
+      // value keeps its meaning.
+      uint32_t output_point_coordinates : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -821,6 +827,15 @@ class DxbcShaderTranslator : public ShaderTranslator {
            Shader::IsHostVertexShaderTypeDomain(
                modification.vertex.host_vertex_shader_type);
   }
+  // Point list drawn as two-triangle strips with the point sprite expanded
+  // in the vertex shader (4 host vertices per guest point; SV_VertexID >> 2
+  // is the guest point, the low 2 bits the corner). Hosts without geometry
+  // shaders (the Metal backend).
+  bool IsDxbcPointStripVertexShader() const {
+    return is_vertex_shader() &&
+           GetDxbcShaderModification().vertex.host_vertex_shader_type ==
+               Shader::HostVertexShaderType::kPointListAsTriangleStrip;
+  }
   bool IsDxbcVertexShader() const {
     return is_vertex_shader() &&
            (!Shader::IsHostVertexShaderTypeDomain(
@@ -1230,6 +1245,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // user_clip_plane_cull, then one SV_CullDistance if vertex_kill_and is used.
   uint32_t out_reg_vs_clip_cull_distances_;
   uint32_t out_reg_vs_point_size_;
+  // XESPRITETEXCOORD written by the point-list-as-triangle-strip vertex
+  // shader (Modification::vertex.output_point_coordinates).
+  uint32_t out_reg_vs_point_coordinates_;
   uint32_t in_reg_ps_interpolators_;
   uint32_t in_reg_ps_point_coordinates_;
   uint32_t in_reg_ps_position_;
