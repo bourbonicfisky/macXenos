@@ -54,12 +54,49 @@ char* xe_strdup(const char* source) {
 #endif  // XE_PLATFORM_WIN32
 }
 
+// Guest strings are not trusted text: a title can hand a kernel export a
+// buffer with an unpaired surrogate (Mass Effect's character-name keyboard
+// on the M4, 2026-10-18), and the checked utfcpp conversion throws
+// utf8::invalid_utf16, which nothing above catches (the exception terminated
+// the process from the export trampoline's parameter logging). Convert
+// leniently instead: invalid units become U+FFFD, exactly as a lossy decoder
+// would, so logging and lookups degrade instead of aborting.
 std::string to_utf8(const std::u16string_view source) {
-  return utfcpp::utf16to8(source);
+  try {
+    return utfcpp::utf16to8(source);
+  } catch (const utfcpp::exception&) {
+  }
+  std::string result;
+  result.reserve(source.size());
+  for (size_t i = 0; i < source.size(); ++i) {
+    uint32_t code_point = source[i];
+    if (code_point >= 0xD800u && code_point <= 0xDBFFu) {
+      if (i + 1 < source.size() && source[i + 1] >= 0xDC00u &&
+          source[i + 1] <= 0xDFFFu) {
+        code_point = 0x10000u + ((code_point - 0xD800u) << 10) +
+                     (source[i + 1] - 0xDC00u);
+        ++i;
+      } else {
+        code_point = 0xFFFDu;
+      }
+    } else if (code_point >= 0xDC00u && code_point <= 0xDFFFu) {
+      code_point = 0xFFFDu;
+    }
+    utfcpp::unchecked::append(code_point, std::back_inserter(result));
+  }
+  return result;
 }
 
 std::u16string to_utf16(const std::string_view source) {
-  return utfcpp::utf8to16(source);
+  try {
+    return utfcpp::utf8to16(source);
+  } catch (const utfcpp::exception&) {
+  }
+  // Same leniency for malformed UTF-8 (a guest path or a config value).
+  std::string repaired;
+  utfcpp::replace_invalid(source.begin(), source.end(),
+                        std::back_inserter(repaired), 0xFFFDu);
+  return utfcpp::utf8to16(repaired);
 }
 
 std::string utf8_to_win1252(const std::string_view source) {

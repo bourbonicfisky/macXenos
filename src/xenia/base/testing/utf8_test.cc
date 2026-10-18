@@ -639,4 +639,23 @@ TEST_CASE("UTF-8 Canonicalize Path", "[utf8]") {
 
 // TODO(gibbed): canonicalize_guest_path
 
+TEST_CASE("Lenient guest string conversion", "[utf8]") {
+  // A guest buffer with an unpaired surrogate must not throw (Mass Effect's
+  // keyboard title aborted the process through the export parameter log).
+  const char16_t unpaired[] = {u'a', 0xD800, u'b', 0};
+  std::string lenient;
+  REQUIRE_NOTHROW(lenient = xe::to_utf8(std::u16string_view(unpaired, 3)));
+  REQUIRE(lenient == std::string("a\xEF\xBF\xBD" "b"));
+  const char16_t lone_low[] = {0xDC00, u'z', 0};
+  REQUIRE_NOTHROW(lenient = xe::to_utf8(std::u16string_view(lone_low, 2)));
+  REQUIRE(lenient == std::string("\xEF\xBF\xBD" "z"));
+  // Valid pairs still convert exactly.
+  const char16_t pair[] = {0xD83D, 0xDE00, 0};
+  REQUIRE(xe::to_utf8(std::u16string_view(pair, 2)) == std::string("\xF0\x9F\x98\x80"));
+  // Malformed UTF-8 the other way.
+  std::u16string wide;
+  REQUIRE_NOTHROW(wide = xe::to_utf16(std::string_view("a\xFFz", 3)));
+  REQUIRE(wide == std::u16string(u"a\uFFFDz"));
+}
+
 }  // namespace xe::base::test
