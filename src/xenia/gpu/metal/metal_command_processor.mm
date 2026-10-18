@@ -7218,8 +7218,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const char* v = std::getenv("XE_METAL_VERTEX_ORDERING");
       return !(g && g[0] == '0' && !g[1]) && !(v && v[0] == '0' && !v[1]);
     }();
-    metal::ConsumerRequest vertex_request =
-        metal::ConsumerRequest::Uniform(vertex_dependency_ranges);
+    // Persistent scratch: the request's two range vectors keep their
+    // capacity across draws instead of being allocated and freed per draw
+    // (operator new / free were 3-4% of the command-processor thread in GTA
+    // IV and Burnout, 2026-10-17 samples).
+    metal::ConsumerRequest& vertex_request = vertex_request_scratch_;
+    vertex_request.resolve_ranges = vertex_dependency_ranges;
+    vertex_request.memexport_ranges = vertex_dependency_ranges;
+    vertex_request.access = metal::ConsumerAccess::kGuestRam;
+    vertex_request.order_memexport_producers = false;
     // The host tessellation route reads its index/factor stream from guest RAM
     // on the CPU (TranslatePhysical at encode time), not from the shared
     // buffer, so command order alone leaves a routed rasterizing producer's
@@ -8396,7 +8403,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       }
     };
-    metal::ConsumerRequest texture_request;
+    // Persistent scratch (see vertex_request_scratch_).
+    metal::ConsumerRequest& texture_request = texture_request_scratch_;
+    texture_request.resolve_ranges.Clear();
+    texture_request.memexport_ranges.Clear();
+    texture_request.access = metal::ConsumerAccess::kGuestRam;
+    texture_request.order_memexport_producers = false;
     collect_texture_ranges(pixel_shader, texture_request);
     collect_texture_ranges(vertex_shader, texture_request);
     // Stage B endgame (reopen 4.1, XE_METAL_GPU_ORDERING=1, default OFF):
@@ -8833,7 +8845,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // the draw being skipped.
       uint32_t bits = draw_shared_route_mask_;
       uint32_t index;
-      metal::GuestRangeSet unserved_ranges;
+      metal::GuestRangeSet& unserved_ranges = unserved_ranges_scratch_;
+      unserved_ranges.Clear();
       while (xe::bit_scan_forward(bits, &index)) {
         bits = xe::clear_lowest_bit(bits);
         const bool is_signed = (route_signed_mask >> index) & 1u;

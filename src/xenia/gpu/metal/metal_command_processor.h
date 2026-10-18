@@ -1091,6 +1091,11 @@ class MetalCommandProcessor : public CommandProcessor {
     }
   };
   std::vector<PendingWriteback> pending_writebacks_;
+  // Per-draw consumer requests, kept across draws so their range vectors
+  // keep their capacity (IssueDraw).
+  metal::ConsumerRequest vertex_request_scratch_;
+  metal::ConsumerRequest texture_request_scratch_;
+  metal::GuestRangeSet unserved_ranges_scratch_;
 
   // Memexport draws executed this frame whose exports are not yet coherent in
   // guest RAM. The shared-memory buffer is MTLStorageModeShared, so the drain

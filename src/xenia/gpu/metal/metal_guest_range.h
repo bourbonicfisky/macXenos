@@ -215,24 +215,23 @@ class GuestRangeSet {
                 }
                 return a.end() < b.end();
               });
-    std::vector<GuestRange> merged;
-    merged.reserve(ranges_.size());
+    // Merge in place: the write index never passes the read index, and no
+    // vector is allocated per call (Normalize runs per draw).
+    size_t out = 0;
     uint32_t cur_begin = ranges_.front().start();
     uint32_t cur_end = ranges_.front().end();
     for (size_t i = 1; i < ranges_.size(); ++i) {
       const GuestRange& r = ranges_[i];
-      // Merge when overlapping OR touching (r.start() <= cur_end). A strict gap
-      // (r.start() > cur_end) starts a new range.
       if (r.start() <= cur_end) {
         cur_end = std::max(cur_end, r.end());
       } else {
-        merged.push_back(*GuestRange::FromBounds(cur_begin, cur_end));
+        ranges_[out++] = *GuestRange::FromBounds(cur_begin, cur_end);
         cur_begin = r.start();
         cur_end = r.end();
       }
     }
-    merged.push_back(*GuestRange::FromBounds(cur_begin, cur_end));
-    ranges_.swap(merged);
+    ranges_[out++] = *GuestRange::FromBounds(cur_begin, cur_end);
+    ranges_.erase(ranges_.begin() + ptrdiff_t(out), ranges_.end());
   }
 
   // True if any stored range shares a byte with the query. Adjacency is not
