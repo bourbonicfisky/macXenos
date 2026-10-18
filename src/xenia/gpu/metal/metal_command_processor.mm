@@ -8436,7 +8436,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         ++s_ord_blocked;
       }
       const uint32_t total = s_ord_eligible + s_ord_blocked;
-      if ((total & 2047) == 1) {
+      if ((total & 0xFFFFu) == 1) {
         XELOGI("MetalGpuOrdering: buffer-read declared={} blocked={}",
                s_ord_eligible, s_ord_blocked);
       }
@@ -11282,7 +11282,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   frame_has_render_ = true;
   ++draw_count_;
   ++draws_since_commit_;
-  if (draw_count_ == 1 || (draw_count_ % 2000) == 0) {
+  // Every 65,536 draws: at 5,000-7,500 draws per frame the former 2,000
+  // cadence was 2-4 lines per frame (GTA IV: 37k lines in a 7-minute run,
+  // one of several per-frame info lines whose formatting was ~2% of the
+  // command-processor thread in the 2026-10-17 line profile).
+  if (draw_count_ == 1 || (draw_count_ & 0xFFFFu) == 0) {
     XELOGI("MetalCommandProcessor: encoded draw #{} (prim {}, {} indices, {})",
            draw_count_, uint32_t(prim_type), index_count,
            index_buffer_info ? "indexed" : "auto");
@@ -17408,9 +17412,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         (has_layout ? (uint64_t(layout_it->second.swap_rb) << 4) |
                           (uint64_t(layout_it->second.endian) << 1) | 1u
                     : 0u);
-    static uint64_t s_last_swap_fetch_key = ~0ull;
-    if (key != s_last_swap_fetch_key) {
-      s_last_swap_fetch_key = key;
+    // Titles alternate front buffers, so "changed since last swap" logged
+    // every swap (GTA IV: 23k lines in 7 minutes); remember the last few keys.
+    static uint64_t s_swap_fetch_keys[8] = {~0ull, ~0ull, ~0ull, ~0ull,
+                                           ~0ull, ~0ull, ~0ull, ~0ull};
+    static uint32_t s_swap_fetch_next = 0;
+    bool swap_fetch_seen = false;
+    for (uint64_t seen : s_swap_fetch_keys) {
+      if (seen == key) {
+        swap_fetch_seen = true;
+        break;
+      }
+    }
+    if (!swap_fetch_seen) {
+      s_swap_fetch_keys[s_swap_fetch_next++ & 7u] = key;
       XELOGI(
           "MetalSwapFetch: fb {:08X} {}x{} fetch0 base={:08X} fmt={} endian={} "
           "swizzle={:03X} size={}x{} | resolve layout {} swap_rb={} endian={}",
