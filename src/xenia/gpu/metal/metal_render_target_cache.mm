@@ -2125,7 +2125,12 @@ bool MetalRenderTargetCache::EncodeLaneRefresh(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height,
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      key.base_tiles, key.GetPitchTiles(), uint32_t(key.msaa_samples),
+      record.start_tiles, work_height, texture.height,
+      draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
                                        ms ? texture.sampleCount : 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
@@ -2261,7 +2266,10 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
                              constant RangeParams& rp [[buffer(2)]],
                              constant HostLaneParams& hl [[buffer(3)]],
                              device float* lane [[buffer(4)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+                             constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
   if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
@@ -2296,7 +2304,10 @@ kernel void lane_store_range(depth2d<float, access::read> tex [[texture(0)]],
                              device float* lane [[buffer(0)]],
                              constant SurfaceParams& sp [[buffer(1)]],
                              constant RangeParams& rp [[buffer(2)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+                             constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (sp.is_depth != 2u) return;
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
@@ -2758,7 +2769,12 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -6649,7 +6665,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -6717,7 +6738,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -6868,8 +6894,13 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:
-               MTLSizeMake(texture.width, work_height, texture.sampleCount)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
+                                       texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -7098,6 +7129,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
+    const uint32_t row_start = 0;
+    [enc setBytes:&row_start length:sizeof(row_start) atIndex:7];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
@@ -7111,6 +7144,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
+    const uint32_t row_start = 0;
+    [enc setBytes:&row_start length:sizeof(row_start) atIndex:7];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
