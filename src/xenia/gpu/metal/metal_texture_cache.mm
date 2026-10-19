@@ -197,6 +197,28 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
       return ReplicateNarrowHostChannels(
           {true, false, 2, 1, 1, MTLPixelFormatB5G6R5Unorm, false, false},
           XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R));
+    case xenos::TextureFormat::k_1_5_5_5: {
+      // 16bpp packed RGBA 5:5:5:1. After the fetch-endian swap the guest word
+      // is R5 (bits 0-4) G5 (5-9) B5 (10-14) A1 (15) (the D3D12 and Vulkan
+      // load shaders swap red and blue into B5G5R5A1). Metal's BGR5A1Unorm
+      // reads B from bits 0-4, G 5-9, R 10-14, A 15 (device probe,
+      // 2026-10-19), so the texels copy raw and the host swizzle swaps red
+      // and blue back, as for 5:6:5. Until now this format had no plan and
+      // every fetch was served null: Fable II's 256x256 mipped 1:5:5:5
+      // textures, whose draws also waited on the GPU for them (2026-10-19).
+      // BGR5A1Unorm exists only on Apple GPU families; elsewhere the format
+      // stays unserved (XE_METAL_TEX_1555=0 restores that on Apple too).
+      static const bool s_1555 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_1555");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!packed16_supported || !s_1555) {
+        return {false, false, 0, 0, 0, MTLPixelFormatInvalid};
+      }
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatBGR5A1Unorm, false, false},
+          XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A));
+    }
     case xenos::TextureFormat::k_16:
       // 16bpp single channel at FULL precision. (Was decode_r16 high-byte
       // RGBA8 expansion — 8-bit quantization banded JC2's 1024x3072 k_16
