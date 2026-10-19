@@ -22,9 +22,9 @@ smoother.
 | Game | Reaches | M4 mini | M1 Max | Notes |
 | --- | --- | ---: | ---: | --- |
 | Assassin's Creed II | Story mode opening | 30 | 30 |  |
-| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 20 | Logged GPU memory errors on the M1 Max during the test. Below full speed on the M1 Max |
+| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 20 | Below full speed on the M1 Max |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
-| Burnout Paradise | Driving in Paradise City | 43 | 30 | Its target is 60; below full speed on both |
+| Burnout Paradise | Driving in Paradise City | 47 | 30 | Its target is 60; below full speed on both |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
@@ -34,40 +34,38 @@ smoother.
 | Devil May Cry 4 | Prologue | 30 | 30 |  |
 | Dishonored | New game opening | 30 | 30 |  |
 | F.E.A.R. | Instant Action, Distribution | 30 | 29 |  |
-| Fable II | Childhood, Bowerstone at night | 30 | 20 | Below full speed on the M1 Max |
-| Far Cry 3 | Opening (the cage) | 29 | 26 |  |
+| Fable II | Childhood, Bowerstone at night | 30 | 21 | Below full speed on the M1 Max |
+| Far Cry 3 | Opening (the cage) | 29 | 27 | Below full speed on the M1 Max |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
-| Gears of War: Judgment | Survival, Estate | 30 | 30 | Logged GPU memory errors on the M1 Max during the test |
-| Grand Theft Auto IV | Opening drive | 47 | 50 | The game does not cap its own frame rate |
+| Gears of War: Judgment | Survival, Estate | 30 | 30 |  |
+| Grand Theft Auto IV | Opening drive | 47 | 49 | The game does not cap its own frame rate |
 | Halo 3 | Campaign, Arrival | 30 | 30 |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | Only the main menu is tested |
 | Halo: Reach | Campaign, Winter Contingency | 30 | 30 |  |
 | Just Cause 2 | Open world | 27 | 30 |  |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 | 60 |  |
-| Mafia II | Story opening | 82 | 82 | The game does not cap its own frame rate |
+| Mafia II | Story opening | 82 | 83 | The game does not cap its own frame rate |
 | Mass Effect | First conversation | 30 | 30 | Its built-in settings fix the one-frame colour glitches and characters vanishing for a frame (October 14) |
 | Mirror's Edge | Story, first chapter | 30 | 30 |  |
 | Portal 2 | Relaxation Vault | 30 | 30 |  |
-| Prince of Persia: The Forgotten Sands | Opening | 30 | 0 | On the M1 Max the test stalled at the loading screen (a known intermittent hang); the game itself loaded fine on the M4 |
+| Prince of Persia: The Forgotten Sands | Opening | 30 | 30 | Sometimes stalls at the loading screen (a known intermittent hang); both test runs loaded |
 | Rage | Campaign opening | 60 | 60 |  |
 | Rayman Legends | Teensies in Trouble | 60 | 60 |  |
-| Red Dead Redemption | Opening cutscene | 30 | 29 | Disc 1 of the Game of the Year Edition. Logged GPU memory errors on the M1 Max during the test |
+| Red Dead Redemption | Opening cutscene | 30 | 30 | Disc 1 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 29 | 30 |  |
-| Rise of the Tomb Raider | Ascension, the mountain | 30 | 29 | Logged GPU memory errors on the M1 Max during the test |
+| Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
 | Ultra Street Fighter IV | Arcade fight | 60 | 60 |  |
 | Viva Piñata | Garden | 30 | 30 |  |
 
-One run of Mass Effect on the M4 mini stopped with a text-conversion error that
-has since been fixed; it ran at full speed in its reruns. On the M4 mini none
-of the games hit a GPU error; on the M1 Max four of them logged GPU memory errors while still
-running, which is being investigated. The M1 Max was driven over Screen
-Sharing during its run, which costs some GPU time, so its numbers are a
-little pessimistic for games that lean on the GPU.
+None of the games hit a GPU error on either Mac in these runs. A Screen
+Sharing connection was open to the M1 Max during its run, which can cost some
+GPU time, so its numbers may be a little pessimistic for games that lean on
+the GPU.
 
 ## Other games
 
