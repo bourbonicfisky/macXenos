@@ -163,6 +163,31 @@ NSUInteger GetCanonicalRangeTextureHeight(
   }
   return height;
 }
+// The first texture row a range operation can touch: every row above it lies
+// in a tile row strictly above the one holding start_tiles, so the range
+// shaders' in-range test rejects all of it. Range passes start their scissor
+// here and range kernels their dispatch (XE_METAL_RANGE_ROW_START=0 restores
+// row 0). FEAR: about 20 depth MSAA packs and 20 materializes a frame, each
+// covering every row above its range (2026-10-18).
+NSUInteger GetCanonicalRangeTextureRowStart(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
+    uint32_t start_tiles, NSUInteger work_height, NSUInteger texture_height,
+    uint32_t scale_y) {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_RANGE_ROW_START");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled) {
+    return 0;
+  }
+  uint32_t x_shift, y_shift;
+  GetMsaaShifts(msaa_samples, x_shift, y_shift);
+  (void)x_shift;
+  uint32_t row_start = ComputeCanonicalRangeTextureRowStart(
+      base_tiles, pitch_tiles, y_shift, start_tiles, uint32_t(texture_height),
+      scale_y);
+  return std::min<NSUInteger>(row_start, work_height);
+}
 // Compile options defining the scaled EDRAM tile geometry for the canonical
 // EDRAM MSL (kEdramMsl's XE_EDRAM_TILE_WIDTH/HEIGHT_SAMPLES). At 1x they equal
 // the source's own defaults, so the generated code is unchanged.
@@ -968,6 +993,17 @@ bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
       }
       ++pack_census_.pack_ops[r];
       pack_census_.pack_tiles[r] += tiles;
+      // Raster-pair census: packs from resolves / readbacks also decide who
+      // last wrote canonical (raster-view packs are noted at sync time).
+      if (sync_requester_ != CanonicalSyncRequester::kRasterViews) {
+        if (census_last_packer_.size() != xenos::kEdramTileCount) {
+          census_last_packer_.assign(xenos::kEdramTileCount, 0);
+        }
+        for (uint32_t t = operation.start_tiles;
+             t < operation.end_tiles && t < xenos::kEdramTileCount; ++t) {
+          census_last_packer_[t] = operation.attachment;
+        }
+      }
       pack_census_.pack_tiles_redundant[r] += redundant;
       if (redundant == tiles) {
         ++pack_census_.pack_ops_all_redundant[r];
@@ -1048,6 +1084,9 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     auto operations = canonical_authority_.SynchronizeAttachment(
         attachment, start_tiles, end_tiles, ++canonical_authority_order_);
     sync_requester_ = CanonicalSyncRequester::kRasterViews;
+    if (MetalCommandProcessor::PassCensusEnabled() && !operations.empty()) {
+      NoteRasterPairs(attachment, operations);
+    }
     // Clear load action: when every tile of this colour attachment is about
     // to be materialized from canonical and canonical holds one untouched
     // whole-tile clear value there, defer the materializes and let the pass
@@ -1422,6 +1461,72 @@ uint32_t MetalRenderTargetCache::current_msaa_samples() const {
     }
   }
   return samples;
+}
+
+void MetalRenderTargetCache::NoteRasterPairs(
+    uint64_t dest,
+    const std::vector<MetalEdramAuthorityTracker::SyncOperation>& operations) {
+  if (census_last_packer_.size() != xenos::kEdramTileCount) {
+    census_last_packer_.assign(xenos::kEdramTileCount, 0);
+  }
+  for (const auto& op : operations) {
+    const uint32_t start = std::min(op.start_tiles, xenos::kEdramTileCount);
+    const uint32_t end = std::min(op.end_tiles, xenos::kEdramTileCount);
+    if (end <= start) {
+      continue;
+    }
+    if (op.kind ==
+        MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical) {
+      // Split the materialize by the attachment that last packed each run.
+      uint32_t t = start;
+      while (t < end) {
+        const uint64_t source = census_last_packer_[t];
+        uint32_t run_end = t + 1;
+        while (run_end < end && census_last_packer_[run_end] == source) {
+          ++run_end;
+        }
+        RasterPairCount& c = raster_pair_census_[{dest, source, true}];
+        ++c.ops;
+        c.tiles += run_end - t;
+        t = run_end;
+      }
+    } else {
+      RasterPairCount& c = raster_pair_census_[{dest, op.attachment, false}];
+      ++c.ops;
+      c.tiles += end - start;
+      for (uint32_t t = start; t < end; ++t) {
+        census_last_packer_[t] = op.attachment;
+      }
+    }
+  }
+}
+
+std::string MetalRenderTargetCache::FormatRasterPairCensus(bool reset) {
+  const double frames = double(std::max<uint64_t>(pack_census_.frames, 1));
+  std::vector<std::pair<RasterPairKey, RasterPairCount>> rows(
+      raster_pair_census_.begin(), raster_pair_census_.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.tiles > b.second.tiles;
+  });
+  auto describe = [this](uint64_t attachment) -> std::string {
+    if (!attachment) {
+      return "canonical";
+    }
+    const RenderTarget* rt = FindCanonicalAttachment(attachment);
+    return rt ? rt->key().GetDebugName() : fmt::format("gone:{:X}", attachment);
+  };
+  std::string out = fmt::format("MetalRasterPairCensus frames={}", pack_census_.frames);
+  for (size_t i = 0; i < rows.size() && i < 12; ++i) {
+    const auto& [key, count] = rows[i];
+    out += fmt::format(" | {} {} <- {}: {:.1f} ops {:.0f} tiles/frame",
+                       key.materialize ? "mat" : "pack", describe(key.dest),
+                       describe(key.source), double(count.ops) / frames,
+                       double(count.tiles) / frames);
+  }
+  if (reset) {
+    raster_pair_census_.clear();
+  }
+  return out;
 }
 
 std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
@@ -2526,7 +2631,12 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
     [encoder endEncoding];
     return false;
   }
-  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
+  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y());
+  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
+                                         work_height - row_start}];
   const bool stencil_export =
       CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
@@ -2738,7 +2848,12 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
     [encoder endEncoding];
     return false;
   }
-  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
+  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y());
+  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
+                                         work_height - row_start}];
 
   // With stencil export the first pass writes every depth sample and its
   // complete stencil byte. Otherwise it replaces stencil with zero and eight
@@ -2864,8 +2979,17 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:
-               MTLSizeMake(texture.width, work_height, texture.sampleCount)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  if (row_start >= work_height) {
+    [encoder endEncoding];
+    return true;
+  }
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:5];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
+                                       texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -6662,7 +6786,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
     [encoder endEncoding];
     return false;
   }
-  [encoder setScissorRect:MTLScissorRect{0, 0, texture.width, work_height}];
+  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y());
+  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
+                                         work_height - row_start}];
   [encoder setRenderPipelineState:pipeline];
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];

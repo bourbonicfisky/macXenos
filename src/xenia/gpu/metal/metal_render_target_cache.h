@@ -841,6 +841,35 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void NotePackCensusFrame() { ++pack_census_.frames; }
  public:
   void NotePackCensusSwap() { ++pack_census_.frames; }
+  // Raster-view traffic by render-target pair (pass census only): packs of
+  // another attachment's tiles forced by binding `dest`, and materializes
+  // into `dest` keyed by the attachment that last packed those tiles
+  // (0 = canonical written by a resolve, a clear or unknown).
+  struct RasterPairKey {
+    uint64_t dest = 0;
+    uint64_t source = 0;
+    bool materialize = false;
+    bool operator==(const RasterPairKey& o) const {
+      return dest == o.dest && source == o.source &&
+             materialize == o.materialize;
+    }
+  };
+  struct RasterPairKeyHash {
+    size_t operator()(const RasterPairKey& k) const {
+      return size_t(k.dest * 1000003u ^ k.source * 31u ^ uint64_t(k.materialize));
+    }
+  };
+  struct RasterPairCount {
+    uint64_t ops = 0, tiles = 0;
+  };
+  std::unordered_map<RasterPairKey, RasterPairCount, RasterPairKeyHash>
+      raster_pair_census_;
+  // Per EDRAM tile: the attachment whose pack last wrote canonical there.
+  std::vector<uint64_t> census_last_packer_;
+  void NoteRasterPairs(
+      uint64_t dest,
+      const std::vector<MetalEdramAuthorityTracker::SyncOperation>& operations);
+  std::string FormatRasterPairCensus(bool reset);
  private:
 
   // --- Canonical DEPTH authority (Option 1: durable per-sample EDRAM as the

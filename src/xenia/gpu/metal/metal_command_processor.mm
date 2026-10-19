@@ -17390,6 +17390,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       if (PassCensusEnabled()) {
         XELOGI("{}", pass_census_.Format("periodic", /*window=*/true));
         if (render_target_cache_) {
+          XELOGI("{}", render_target_cache_->FormatRasterPairCensus(/*reset=*/true));
           XELOGI("{}", render_target_cache_->FormatPackCensus(/*reset=*/true));
         }
       }

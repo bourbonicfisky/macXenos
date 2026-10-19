@@ -1067,7 +1067,10 @@ kernel void pack_depth_ms_range(
     constant AuthorityRangeParams& range [[buffer(2)]],
     constant HostLaneParams& hl [[buffer(3)]],
     device float* lane [[buffer(4)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(5)]],
+    uint3 tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(tid.x, tid.y + row_start, tid.z);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples() ||
