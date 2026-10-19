@@ -2,7 +2,7 @@
 
 These are the games macXenos is tested with regularly. Each one is started
 automatically, played to the point shown with a scripted controller, and
-measured for a minute. Results below are from the runs on October 18, 2026,
+measured for a minute. Results below are from the runs on October 19, 2026,
 on a base M4 Mac mini and on an M1 Max MacBook Pro, at the original
 resolution (1x), using the Metal renderer.
 
@@ -24,23 +24,23 @@ smoother.
 | Assassin's Creed II | Story mode opening | 30 | 30 |  |
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 20 | Below full speed on the M1 Max |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
-| Burnout Paradise | Driving in Paradise City | 47 | 30 | Its target is 60; below full speed on both |
+| Burnout Paradise | Driving in Paradise City | 48 | 30 | Its target is 60; below full speed on both |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |
-| Dead to Rights: Retribution | Prologue | 30 | 29 |  |
+| Dead to Rights: Retribution | Prologue | 30 | 28 | Below full speed on the M1 Max |
 | Devil May Cry 4 | Prologue | 30 | 30 |  |
 | Dishonored | New game opening | 30 | 30 |  |
-| F.E.A.R. | Instant Action, Distribution | 30 | 29 |  |
-| Fable II | Childhood, Bowerstone at night | 30 | 21 | Below full speed on the M1 Max |
-| Far Cry 3 | Opening (the cage) | 29 | 27 | Below full speed on the M1 Max |
+| F.E.A.R. | Instant Action, Distribution | 30 | 30 |  |
+| Fable II | Childhood, Bowerstone at night | 30 | 30 |  |
+| Far Cry 3 | Opening (the cage) | 29 | 28 | Below full speed on the M1 Max |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
 | Gears of War: Judgment | Survival, Estate | 30 | 30 |  |
-| Grand Theft Auto IV | Opening drive | 47 | 49 | The game does not cap its own frame rate |
+| Grand Theft Auto IV | Opening drive | 49 | 50 | The game does not cap its own frame rate |
 | Halo 3 | Campaign, Arrival | 30 | 30 |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | Only the main menu is tested |
@@ -59,13 +59,10 @@ smoother.
 | Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
-| Ultra Street Fighter IV | Arcade fight | 60 | 60 |  |
+| Ultra Street Fighter IV | Arcade fight | 60 | 59 |  |
 | Viva Piñata | Garden | 30 | 30 |  |
 
-None of the games hit a GPU error on either Mac in these runs. A Screen
-Sharing connection was open to the M1 Max during its run, which can cost some
-GPU time, so its numbers may be a little pessimistic for games that lean on
-the GPU.
+None of the games hit a GPU error on either Mac in these runs.
 
 ## Other games
 
