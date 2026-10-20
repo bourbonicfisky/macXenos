@@ -22,9 +22,9 @@ smoother.
 | Game | Reaches | M4 mini | M1 Max | Notes |
 | --- | --- | ---: | ---: | --- |
 | Assassin's Creed II | Story mode opening | 30 | 30 |  |
-| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 20 | Below full speed on the M1 Max |
+| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 |  |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
-| Burnout Paradise | Driving in Paradise City | 48 | 30 | Its target is 60; below full speed on both |
+| Burnout Paradise | Driving in Paradise City | 50 | 30 | Its target is 60; below full speed on both |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
@@ -40,7 +40,7 @@ smoother.
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
 | Gears of War: Judgment | Survival, Estate | 30 | 30 |  |
-| Grand Theft Auto IV | Opening drive | 49 | 50 | The game does not cap its own frame rate |
+| Grand Theft Auto IV | Opening drive | 47 | 50 | The game does not cap its own frame rate |
 | Halo 3 | Campaign, Arrival | 30 | 30 |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | Only the main menu is tested |
