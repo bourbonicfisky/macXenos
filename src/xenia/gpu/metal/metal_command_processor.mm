@@ -1266,7 +1266,7 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
       !memory_ || !length) {
     return;
   }
-  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
   const uint8_t* contents =
       buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
   if (!contents) {
@@ -1832,6 +1832,125 @@ uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
   return CurrentEncodingSubmission();
 }
 
+void MetalCommandProcessor::EndDiscreteUploadBlit() {
+  if (!discrete_upload_blit_) {
+    return;
+  }
+  id<MTLBlitCommandEncoder> blit =
+      (__bridge_transfer id<MTLBlitCommandEncoder>)discrete_upload_blit_;
+  discrete_upload_blit_ = nullptr;
+  [blit endEncoding];
+}
+
+// Blit copies on macOS need 4-byte aligned offsets and sizes. Uploads are
+// page pieces and vfetch renames are 4-byte multiples; a stray unaligned
+// edge widens to the enclosing words (the CPU mirror holds the same bytes
+// the GPU copy should, outside GPU-produced spans).
+static inline void AlignBlitRange(uint32_t& offset, uint32_t& length,
+                                  uint64_t limit) {
+  uint64_t start = offset & ~uint64_t(3);
+  uint64_t end = (uint64_t(offset) + length + 3) & ~uint64_t(3);
+  end = std::min(end, limit);
+  offset = uint32_t(start);
+  length = uint32_t(end - start);
+}
+
+void MetalCommandProcessor::EncodeDiscreteMirrorUpload(uint32_t offset,
+                                                       uint32_t length) {
+  id<MTLBuffer> cpu = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
+  id<MTLBuffer> gpu = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  if (!cpu || !gpu || cpu == gpu) {
+    return;
+  }
+  AlignBlitRange(offset, length, gpu.length);
+  if (!length) {
+    return;
+  }
+  if (!frame_command_buffer_ &&
+      !PrepareTransferCommandBuffer(
+          uint32_t(metal::MetalTransferSite::kHazardUpload))) {
+    XELOGE("MetalSharedMemory: no command buffer for a VRAM upload");
+    return;
+  }
+  if (!discrete_upload_blit_) {
+    id<MTLCommandBuffer> side =
+        (__bridge id<MTLCommandBuffer>)EnsureSideCommandBuffer();
+    if (!side) {
+      XELOGE("MetalSharedMemory: no side command buffer for a VRAM upload");
+      return;
+    }
+    id<MTLBlitCommandEncoder> blit = [side blitCommandEncoder];
+    if (!blit) {
+      return;
+    }
+    blit.label = @"shared memory upload";
+    discrete_upload_blit_ = (__bridge_retained void*)blit;
+  }
+  id<MTLBlitCommandEncoder> blit =
+      (__bridge id<MTLBlitCommandEncoder>)discrete_upload_blit_;
+  [blit copyFromBuffer:cpu
+          sourceOffset:offset
+              toBuffer:gpu
+     destinationOffset:offset
+                  size:length];
+  ++discrete_upload_blits_;
+  discrete_upload_bytes_ += length;
+}
+
+void MetalCommandProcessor::EncodeDiscreteMirrorReadback(void* command_buffer,
+                                                         uint64_t submission) {
+  if (discrete_produced_ranges_.empty()) {
+    return;
+  }
+  id<MTLBuffer> cpu = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
+  id<MTLBuffer> gpu = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  if (!cpu || !gpu || cpu == gpu) {
+    discrete_produced_ranges_.clear();
+    return;
+  }
+  // Merge overlapping and touching ranges (resolves to one target repeat).
+  auto& ranges = discrete_produced_ranges_;
+  std::sort(ranges.begin(), ranges.end());
+  std::vector<std::pair<uint32_t, uint32_t>> merged;
+  merged.reserve(ranges.size());
+  for (const auto& r : ranges) {
+    uint64_t start = r.first, end = uint64_t(r.first) + r.second;
+    if (!merged.empty() &&
+        start <= uint64_t(merged.back().first) + merged.back().second) {
+      uint64_t back_end = uint64_t(merged.back().first) + merged.back().second;
+      merged.back().second = uint32_t(std::max(back_end, end) - merged.back().first);
+    } else {
+      merged.emplace_back(uint32_t(start), uint32_t(end - start));
+    }
+  }
+  ranges.clear();
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+  if (!blit) {
+    return;
+  }
+  blit.label = @"shared memory readback";
+  for (auto r : merged) {
+    uint32_t offset = r.first, length = r.second;
+    AlignBlitRange(offset, length, gpu.length);
+    if (!length) {
+      continue;
+    }
+    [blit copyFromBuffer:gpu
+            sourceOffset:offset
+                toBuffer:cpu
+       destinationOffset:offset
+                    size:length];
+    // An upload over these bytes while the readback is in flight must not
+    // memcpy into the CPU mirror the blit is about to overwrite: as a
+    // consumed range of this submission it takes the staged-blit path.
+    shared_memory_->NoteGpuWriteInFlight(offset, length, submission);
+    ++discrete_readback_blits_;
+    discrete_readback_bytes_ += length;
+  }
+  [blit endEncoding];
+}
+
 void* MetalCommandProcessor::PrepareTransferCommandBuffer(uint32_t site) {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.
@@ -1870,6 +1989,14 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 }
 
 void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
+  // The caller encodes its own pass on the side buffer: an open discrete
+  // mirror upload blit must end first (encode order is execution order, so
+  // the load still sees the bytes uploaded before it).
+  EndDiscreteUploadBlit();
+  return EnsureSideCommandBuffer();
+}
+
+void* MetalCommandProcessor::EnsureSideCommandBuffer() {
   // No pass boundary: the side buffer is committed ahead of the frame one
   // (CommitSideCommandBuffer), so a load encoded here executes before every
   // draw of this submission. Only valid while a frame command buffer exists,
@@ -1897,6 +2024,7 @@ void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
 
 void MetalCommandProcessor::CommitSideCommandBuffer(uint64_t submission,
                                                     uint64_t submit_epoch) {
+  EndDiscreteUploadBlit();
   if (!side_command_buffer_) {
     return;
   }
@@ -2187,6 +2315,9 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
   }
+  // Not validated under frame-trace capture/playback (they restore and
+  // record the CPU mirror directly); a live-play setting.
+  discrete_mirror_ = shared_memory_->is_discrete_mirror();
   // Intra-frame rewrite hazard: commit + wait the open frame so already-
   // encoded draws consume the pre-rewrite bytes (also resets the consumed-
   // range set). Runs from inside RequestConsumedRange, which is only called
@@ -2205,6 +2336,10 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetStagedUploadCallback(
       [this](uint32_t offset, uint32_t length) {
         return StageHazardUpload(offset, length);
+      });
+  shared_memory_->SetCpuWriteCallback(
+      [this](uint32_t offset, uint32_t length) {
+        EncodeDiscreteMirrorUpload(offset, length);
       });
   shared_memory_->SetCompletedSubmissionProvider([this]() {
     return completed_submission_.load(std::memory_order_acquire);
@@ -2288,7 +2423,7 @@ bool MetalCommandProcessor::SetupContext() {
             std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
         if (s_skip_census && !out->empty() && lazy_read_callback_handle_) {
           id<MTLBuffer> buffer =
-              (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+              (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
           const uint8_t* contents =
               buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
           static uint64_t s_unowned_spans = 0, s_realized = 0;
@@ -3543,7 +3678,7 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   if (!shared_memory_ || !memory_) {
     return;
   }
-  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
   const uint8_t* contents =
       buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
   if (!contents) {
@@ -3673,6 +3808,7 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
     playback_gpu_written_.emplace_back(base, extent_bytes);
   }
   pending_writebacks_.back().gpu_current = 1u;
+  NoteDiscreteProducedRange(base, extent_bytes);
   // Mark the destination GPU-written so the shared-memory
   // validity model does not upload guest RAM over the freshly
   // scattered bytes. LEAN marking (validity bits only), NOT the
@@ -5467,6 +5603,9 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   if (upload_arena_) {
     upload_arena_->MarkSubmission(submission);
   }
+  // Discrete mirror: GPU-produced ranges back to the CPU mirror, last in
+  // this submission (every producer encoder has ended).
+  EncodeDiscreteMirrorReadback((__bridge void*)command_buffer, submission);
   // Side loads first: the queue runs command buffers in commit order, and
   // the frame's draws read what they loaded.
   CommitSideCommandBuffer(submission, submit_epoch);
@@ -7154,7 +7293,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             memory_->TranslatePhysical<const uint32_t*>(fetch_base);
         const uint32_t* buf = nullptr;
         if (shared_memory_) {
-          __unsafe_unretained id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          __unsafe_unretained id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
           if (b && b.storageMode != MTLStorageModePrivate && b.contents) {
             buf = reinterpret_cast<const uint32_t*>(
                 static_cast<const uint8_t*>(b.contents) + fetch_base);
@@ -11093,6 +11232,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               pending_memexports_.push_back(PendingMemexport{
                   owned.range.start(), owned.range.length(), owned.submission,
                   ++memory_authority_sequence_});
+              NoteDiscreteProducedRange(owned.range.start(),
+                                        owned.range.length());
               if (trace_playback_context()) {
                 playback_gpu_written_.emplace_back(owned.range.start(),
                                                    owned.range.length());
@@ -13726,7 +13867,7 @@ bool MetalCommandProcessor::IssueCopy() {
       // The shared buffer, not guest RAM: GPU-resident publication leaves
       // resolved bytes only in the buffer.
       id<MTLBuffer> shared_buffer =
-          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       fwrite(static_cast<const uint8_t*>([shared_buffer contents]) +
                  resolve_info.copy_dest_extent_start,
              1, resolve_info.copy_dest_extent_length, f);
@@ -14975,7 +15116,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     bool retire_exact_export = false;
     id<MTLBuffer> me_shared_buffer = shared_memory_
                                          ? (__bridge id<MTLBuffer>)
-                                               shared_memory_->GetBuffer()
+                                               shared_memory_->GetCpuBuffer()
                                          : nil;
     const uint8_t* me_contents =
         static_cast<const uint8_t*>(me_shared_buffer.contents);
@@ -15292,7 +15433,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // wrote. Copying exactly the written offsets is the only publication
       // that is correct without first uploading the destination from RAM.
       id<MTLBuffer> shared_buffer =
-          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer()
                          : nil;
       const uint8_t* shared_contents =
           static_cast<const uint8_t*>(shared_buffer.contents);
@@ -15969,7 +16110,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     uint8_t* reassert_buffer_contents = nullptr;
     if (!shared_memory_->is_zero_copy()) {
       id<MTLBuffer> reassert_buffer =
-          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       reassert_buffer_contents = static_cast<uint8_t*>(reassert_buffer.contents);
     }
     const uint32_t page_size = 1u << shared_memory_->validity_page_size_log2();
@@ -16009,6 +16150,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             memory_->TranslatePhysical<const uint8_t*>(g0);
         if (ram) {
           std::memcpy(reassert_buffer_contents + g0, ram, g1 - g0);
+          shared_memory_->NoteCpuWrite(g0, g1 - g0);
         }
       };
       for (const auto& span : owned) {
@@ -16956,7 +17098,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       const char* comma = strchr(s_bufdump.c_str(), ',');
       uint32_t len = comma ? uint32_t(strtoul(comma + 1, nullptr, 16)) : 0x1000;
       EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
-      id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       const uint8_t* bc = b ? static_cast<const uint8_t*>(b.contents) : nullptr;
       const uint8_t* rc = memory_->TranslatePhysical<const uint8_t*>(base);
       if (bc && rc) {
@@ -17365,6 +17507,17 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0, gpu_alloc_mb,
           cb_error_count_);
+      if (discrete_mirror_) {
+        XELOGI(
+            "MetalDiscreteMirror swap#{}: uploads {:.1f}/frame {:.1f} KB/frame, "
+            "readbacks {:.1f}/frame {:.1f} KB/frame",
+            count, double(discrete_upload_blits_) / 128.0,
+            double(discrete_upload_bytes_) / 128.0 / 1024.0,
+            double(discrete_readback_blits_) / 128.0,
+            double(discrete_readback_bytes_) / 128.0 / 1024.0);
+        discrete_upload_blits_ = discrete_upload_bytes_ = 0;
+        discrete_readback_blits_ = discrete_readback_bytes_ = 0;
+      }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
         XELOGI("MetalGpuBusy swap#{}: {:.2f} ms/frame busy, {:.1f}% of wall",

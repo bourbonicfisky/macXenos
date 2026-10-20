@@ -400,6 +400,20 @@ class MetalCommandProcessor : public CommandProcessor {
   // copies guest RAM [offset, offset+length) into a staging buffer and
   // encodes a blit into the shared buffer on the open frame command buffer.
   uint64_t StageHazardUpload(uint32_t offset, uint32_t length);
+  // Discrete shared-memory mirror (MetalSharedMemory::is_discrete_mirror):
+  // copies a CPU-mirror range into the VRAM copy with a blit on the side
+  // command buffer, which runs ahead of the open submission's draws.
+  void EncodeDiscreteMirrorUpload(uint32_t offset, uint32_t length);
+  void EndDiscreteUploadBlit();
+  // At commit: blits this submission's GPU-produced ranges (writebacks,
+  // memexports) from the VRAM copy back into the CPU mirror, so publication
+  // and lazy reads after the submission completes see them.
+  void EncodeDiscreteMirrorReadback(void* command_buffer, uint64_t submission);
+  void NoteDiscreteProducedRange(uint32_t start, uint32_t length) {
+    if (discrete_mirror_ && length) {
+      discrete_produced_ranges_.emplace_back(start, length);
+    }
+  }
 
   // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
   // texture (as depth2d) and writes its value into the R32Float snapshot
@@ -512,6 +526,12 @@ class MetalCommandProcessor : public CommandProcessor {
   // same submission id.
   void* side_command_buffer_ = nullptr;
   void* PrepareSideTransferCommandBuffer();
+  void* EnsureSideCommandBuffer();
+  bool discrete_mirror_ = false;
+  void* discrete_upload_blit_ = nullptr;  // id<MTLBlitCommandEncoder>, retained
+  std::vector<std::pair<uint32_t, uint32_t>> discrete_produced_ranges_;
+  uint64_t discrete_upload_blits_ = 0, discrete_upload_bytes_ = 0;
+  uint64_t discrete_readback_blits_ = 0, discrete_readback_bytes_ = 0;
   // Fetch constants written since the shared texture cache last parsed
   // them (bit = fetch constant index). Set by WriteRegister, consumed by the
   // draw prep: a draw whose fetch constants did not change since the previous

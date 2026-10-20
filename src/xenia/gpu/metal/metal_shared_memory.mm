@@ -25,6 +25,13 @@
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
 DECLARE_bool(protect_on_release);
+DEFINE_bool(
+    metal_discrete_vram_mirror, true,
+    "On Macs with a discrete GPU (AMD), keep the GPU's copy of guest memory "
+    "in video memory instead of reading it from system memory across PCIe. "
+    "Has no effect on Apple Silicon. XE_METAL_DISCRETE_MIRROR=0/1 overrides "
+    "this setting.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -174,14 +181,32 @@ bool MetalSharedMemory::Initialize() {
     // is fine because nothing reads it from the CPU.
     const uint32_t mirror_length =
         kBufferSize + (VfetchRenameEnabled() ? kRenameArenaBytes : 0u);
+    // Discrete mirror: the CPU mirror is read back on the CPU (publication),
+    // so it keeps the default cached mode; the GPU copy lives in VRAM.
+    const bool discrete =
+        DiscreteMirrorEnabled() && ![device hasUnifiedMemory];
     buffer = [device newBufferWithLength:mirror_length
-                                 options:MTLResourceStorageModeShared |
-                                         MTLResourceCPUCacheModeWriteCombined];
+                                 options:discrete
+                                             ? MTLResourceStorageModeShared
+                                             : (MTLResourceStorageModeShared |
+                                                MTLResourceCPUCacheModeWriteCombined)];
     gpu_visible_length_ = mirror_length;
     if (!buffer) {
       XELOGE("MetalSharedMemory: failed to allocate {} MiB shared buffer",
              kBufferSize / (1024 * 1024));
       return false;
+    }
+    if (discrete) {
+      id<MTLBuffer> gpu = [device newBufferWithLength:mirror_length
+                                              options:MTLResourceStorageModePrivate];
+      if (gpu) {
+        gpu.label = @"shared memory (VRAM)";
+        gpu_buffer_ = (__bridge_retained void*)gpu;
+        XELOGI("MetalSharedMemory: discrete mirror, {} MiB in VRAM",
+               mirror_length / (1024 * 1024));
+      } else {
+        XELOGW("MetalSharedMemory: no VRAM copy; GPU reads system RAM");
+      }
     }
   }
   buffer_ = (__bridge_retained void*)buffer;
@@ -235,6 +260,11 @@ void MetalSharedMemory::Shutdown() {
   consumed_ranges_.clear();
   consumed_index_.clear();
   ClearConsumedPages();
+  if (gpu_buffer_) {
+    id<MTLBuffer> released_gpu = (__bridge_transfer id<MTLBuffer>)gpu_buffer_;
+    (void)released_gpu;
+    gpu_buffer_ = nullptr;
+  }
   if (buffer_) {
     id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)buffer_;
     (void)released;
@@ -343,6 +373,21 @@ void MetalSharedMemory::AppendConsumedRange(uint32_t start, uint32_t end, uint64
   IndexConsumedRange(index);
 }
 
+void MetalSharedMemory::NoteGpuWriteInFlight(uint32_t start, uint32_t length,
+                                             uint64_t submission) {
+  if (!length || !submission) {
+    return;
+  }
+  const uint32_t end = start + length;
+  auto it = consumed_index_.find((uint64_t(start) << 32) | end);
+  if (it != consumed_index_.end()) {
+    ConsumedRange& range = consumed_ranges_[it->second];
+    range.submission = std::max(range.submission, submission);
+    return;
+  }
+  AppendConsumedRange(start, end, submission);
+}
+
 void MetalSharedMemory::RebuildConsumedIndex() {
   consumed_index_.clear();
   consumed_index_.reserve(consumed_ranges_.size() * 2);
@@ -392,6 +437,16 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
   }
   AppendConsumedRange(start, end, submission);
   return result;
+}
+
+bool MetalSharedMemory::DiscreteMirrorEnabled() {
+  static const bool s_enabled = [] {
+    if (const char* v = std::getenv("XE_METAL_DISCRETE_MIRROR")) {
+      return v[0] == '1';
+    }
+    return cvars::metal_discrete_vram_mirror;
+  }();
+  return s_enabled;
 }
 
 bool MetalSharedMemory::VfetchRenameEnabled() {
@@ -713,6 +768,7 @@ bool MetalSharedMemory::UploadRanges(
           AllocateRename(rename_request_length_, &arena_offset)) {
         std::memcpy(buffer_contents_ + kBufferSize + arena_offset, source,
                     rename_request_length_);
+        NoteCpuWrite(kBufferSize + arena_offset, rename_request_length_);
         rename_result_ = {rename_request_start_, rename_request_length_,
                           kBufferSize + arena_offset};
         rename_happened_ = true;
@@ -892,6 +948,7 @@ bool MetalSharedMemory::UploadRanges(
         if (copied_direct) {
           std::memcpy(buffer_contents_ + piece_start,
                       memory().TranslatePhysical(piece_start), piece_length);
+          NoteCpuWrite(piece_start, piece_length);
         }
       }
       // Counted AT the copy, so the number is what moved, not what the mode

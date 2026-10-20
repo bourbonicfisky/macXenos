@@ -82,8 +82,36 @@ class MetalSharedMemory : public SharedMemory {
   // GPU-written ranges straight from guest RAM (CPU-authoritative here).
   void WriteTraceInitialState(TraceWriter& trace_writer);
 
-  // id<MTLBuffer> (shared storage), not owned by the caller.
-  void* GetBuffer() const { return buffer_; }
+  // id<MTLBuffer> the GPU binds, not owned by the caller: the shared-storage
+  // mirror, or the Private (VRAM) copy under the discrete mirror below.
+  void* GetBuffer() const { return gpu_buffer_ ? gpu_buffer_ : buffer_; }
+  // id<MTLBuffer> whose contents the CPU reads and writes (the shared-storage
+  // mirror). The same buffer as GetBuffer() unless the discrete mirror is on.
+  void* GetCpuBuffer() const { return buffer_; }
+
+  // Discrete-GPU mirror (metal_discrete_vram_mirror, devices without
+  // unified memory): the GPU binds a Private copy in VRAM instead of reading
+  // the shared-storage mirror in system RAM across PCIe (Mac Pro RX 6900 XT
+  // 2026-10-19: RDR 22.6 -> 28, Gears 3 23.3 -> 30, USF4 45 -> 51). Default
+  // on; Apple GPUs never take it. Every CPU write into the CPU
+  // mirror goes through NoteCpuWrite, whose callback encodes the CPU->VRAM
+  // blit ahead of the consumers; the command processor blits GPU-produced
+  // ranges back into the CPU mirror at commit and marks them consumed by
+  // their submission (NoteGpuWriteInFlight), so an upload over them while the
+  // readback is in flight takes the staged-blit hazard path.
+  static bool DiscreteMirrorEnabled();
+  bool is_discrete_mirror() const { return gpu_buffer_ != nullptr; }
+  void SetCpuWriteCallback(
+      std::function<void(uint32_t offset, uint32_t length)> callback) {
+    cpu_write_callback_ = std::move(callback);
+  }
+  void NoteCpuWrite(uint32_t offset, uint32_t length) {
+    if (gpu_buffer_ && length && cpu_write_callback_) {
+      cpu_write_callback_(offset, length);
+    }
+  }
+  void NoteGpuWriteInFlight(uint32_t start, uint32_t length,
+                            uint64_t submission);
 
   // Whether the installed buffer aliases guest RAM rather than mirroring it.
   // Decided once in Initialize and never transitioned afterwards: consumers
@@ -367,6 +395,8 @@ class MetalSharedMemory : public SharedMemory {
   TraceWriter* trace_writer_ = nullptr;
   void* device_;                        // id<MTLDevice>, not owned.
   void* buffer_ = nullptr;              // id<MTLBuffer>, retained.
+  void* gpu_buffer_ = nullptr;  // id<MTLBuffer> Private, retained (discrete).
+  std::function<void(uint32_t, uint32_t)> cpu_write_callback_;
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
   bool is_zero_copy_ = false;
   ZeroCopyObservation zero_copy_observation_;
