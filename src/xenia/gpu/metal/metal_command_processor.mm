@@ -5857,6 +5857,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.
   {
@@ -10033,7 +10034,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.height = viewport_info.xy_extent[1];
       vp.znear = viewport_info.z_min;
       vp.zfar = viewport_info.z_max;
-      [encoder setViewport:vp];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const double vp_values[6] = {vp.originX, vp.originY, vp.width,
+                                   vp.height,  vp.znear,   vp.zfar};
+      if (!state_dedupe || !fs.viewport_valid ||
+          std::memcmp(fs.viewport, vp_values, sizeof(vp_values))) {
+        [encoder setViewport:vp];
+        std::memcpy(fs.viewport, vp_values, sizeof(vp_values));
+        fs.viewport_valid = true;
+      }
     } else if (!memexport_draw && !vertex_shader->memexport_eM_written()) {
       // A zero-extent viewport rasterizes nothing (D3D12 sets it as is).
       // Metal can't take a zero-size viewport, and skipping setViewport
@@ -10055,10 +10064,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // near/far clipping while the guest keeps X/Y/W clipping, as the Vulkan
       // backend does. Rise of the Tomb Raider's colour-grading LUT slices are
       // drawn at Z/W = -9 and every backend that clips Z drops them.
-      [encoder setDepthClipMode:(depth_clip_mode == MetalDepthClipMode::kClamp ||
-                                 cvars::force_depth_clamp)
-                                    ? MTLDepthClipModeClamp
-                                    : MTLDepthClipModeClip];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const MTLDepthClipMode metal_clip =
+          (depth_clip_mode == MetalDepthClipMode::kClamp ||
+           cvars::force_depth_clamp)
+              ? MTLDepthClipModeClamp
+              : MTLDepthClipModeClip;
+      if (!state_dedupe || fs.depth_clip != int32_t(metal_clip)) {
+        [encoder setDepthClipMode:metal_clip];
+        fs.depth_clip = int32_t(metal_clip);
+      }
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
           regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal);
       if (face_state.culls_all()) {
@@ -10077,11 +10092,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (s_no_cull) {
         cull_mode = MTLCullModeNone;
       }
-      [encoder setCullMode:cull_mode];
-      [encoder
-          setFrontFacingWinding:face_state.front_face_clockwise
-                                    ? MTLWindingClockwise
-                                    : MTLWindingCounterClockwise];
+      if (!state_dedupe || fs.cull != int32_t(cull_mode)) {
+        [encoder setCullMode:cull_mode];
+        fs.cull = int32_t(cull_mode);
+      }
+      const MTLWinding winding = face_state.front_face_clockwise
+                                     ? MTLWindingClockwise
+                                     : MTLWindingCounterClockwise;
+      if (!state_dedupe || fs.winding != int32_t(winding)) {
+        [encoder setFrontFacingWinding:winding];
+        fs.winding = int32_t(winding);
+      }
 
       // Apply a complete fill/depth-bias value every draw so state cannot leak
       // across guest transitions or newly opened render encoders. The slope
@@ -10095,14 +10116,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset_scale,
           polygon_offset,
           std::max(draw_resolution_scale_x_, draw_resolution_scale_y_));
-      [encoder
-          setTriangleFillMode:fill_bias.triangle_fill_mode ==
-                                      MetalTriangleFillMode::kLines
-                                  ? MTLTriangleFillModeLines
-                                  : MTLTriangleFillModeFill];
-      [encoder setDepthBias:fill_bias.depth_bias_constant
-                 slopeScale:fill_bias.depth_bias_slope
-                      clamp:0.0f];
+      const MTLTriangleFillMode fill_mode =
+          fill_bias.triangle_fill_mode == MetalTriangleFillMode::kLines
+              ? MTLTriangleFillModeLines
+              : MTLTriangleFillModeFill;
+      if (!state_dedupe || fs.fill != int32_t(fill_mode)) {
+        [encoder setTriangleFillMode:fill_mode];
+        fs.fill = int32_t(fill_mode);
+      }
+      const float depth_bias[2] = {fill_bias.depth_bias_constant,
+                                   fill_bias.depth_bias_slope};
+      if (!state_dedupe || !fs.depth_bias_valid ||
+          std::memcmp(fs.depth_bias, depth_bias, sizeof(depth_bias))) {
+        [encoder setDepthBias:fill_bias.depth_bias_constant
+                   slopeScale:fill_bias.depth_bias_slope
+                        clamp:0.0f];
+        std::memcpy(fs.depth_bias, depth_bias, sizeof(depth_bias));
+        fs.depth_bias_valid = true;
+      }
     }
     // Stage 17: apply the guest scissor on every normal raster draw. Shared
     // draw_util owns Xenos window/screen/offset/pitch semantics; the Metal-only
@@ -10154,7 +10185,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       MTLScissorRect scissor_rect{metal_scissor.x, metal_scissor.y,
                                   metal_scissor.width, metal_scissor.height};
-      [encoder setScissorRect:scissor_rect];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const uint64_t scissor_values[4] = {
+          uint64_t(scissor_rect.x), uint64_t(scissor_rect.y),
+          uint64_t(scissor_rect.width), uint64_t(scissor_rect.height)};
+      if (!state_dedupe || !fs.scissor_valid ||
+          std::memcmp(fs.scissor, scissor_values, sizeof(scissor_values))) {
+        [encoder setScissorRect:scissor_rect];
+        std::memcpy(fs.scissor, scissor_values, sizeof(scissor_values));
+        fs.scissor_valid = true;
+      }
       draw_host_y0 = uint32_t(metal_scissor.y);
       draw_host_y1 = uint32_t(metal_scissor.y + metal_scissor.height);
     }
@@ -11074,7 +11114,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   std::memcpy(ab_alloc.cpu_ptr, argument_buffer.data(), sizeof(argument_buffer));
 
   // --- Bind. ---
-  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  if (!state_dedupe || encoder_fixed_state_.pipeline != pipeline) {
+    [encoder
+        setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+    encoder_fixed_state_.pipeline = pipeline;
+  }
 
   // Apply complete blend/stencil dynamic values on every normal draw. Metal
   // encoder state persists across draws, while a new encoder begins with its
@@ -11094,10 +11138,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       draw_util::IsPrimitivePolygonal(regs), stencil_ref_mask,
       stencil_ref_mask_back);
   if (!memexport_draw) {
-    [encoder setBlendColorRed:blend_stencil.blend_color_red
-                        green:blend_stencil.blend_color_green
-                         blue:blend_stencil.blend_color_blue
-                        alpha:blend_stencil.blend_color_alpha];
+    EncoderFixedState& fs = encoder_fixed_state_;
+    const float blend_color[4] = {
+        blend_stencil.blend_color_red, blend_stencil.blend_color_green,
+        blend_stencil.blend_color_blue, blend_stencil.blend_color_alpha};
+    if (!state_dedupe || !fs.blend_color_valid ||
+        std::memcmp(fs.blend_color, blend_color, sizeof(blend_color))) {
+      [encoder setBlendColorRed:blend_stencil.blend_color_red
+                          green:blend_stencil.blend_color_green
+                           blue:blend_stencil.blend_color_blue
+                          alpha:blend_stencil.blend_color_alpha];
+      std::memcpy(fs.blend_color, blend_color, sizeof(blend_color));
+      fs.blend_color_valid = true;
+    }
   }
   if (kDepthEnabled && depth_bound &&
       (encoder_bound_attachments_ & metal::kMetalPassAttachmentDepthStencil)) {
@@ -14758,7 +14811,16 @@ bool MetalCommandProcessor::EncoderDedupeEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::StateDedupeEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_STATE_DEDUPE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 void MetalCommandProcessor::ResetEncoderDedupe() {
+  encoder_fixed_state_ = EncoderFixedState{};
   encoder_declared_resources_.Clear();
   for (auto& stage : encoder_buffer_binds_) {
     for (EncoderBufferBind& bind : stage) {

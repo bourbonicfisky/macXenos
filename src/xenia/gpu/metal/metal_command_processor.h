@@ -623,6 +623,23 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   // [stage kind: vertex, fragment, object, mesh][bind point slot 0..2].
   EncoderBufferBind encoder_buffer_binds_[4][3];
+  // Fixed-function state IssueDraw last set on the open encoder
+  // (XE_METAL_STATE_DEDUPE=0 disables). Nothing else sets these on the draw
+  // encoder, and a new encoder resets them with the rest. Burnout set all of
+  // it on each of ~7,600 draws a frame: ~5% of the command-processor thread
+  // on the M1 Max, mostly repeats of the previous draw.
+  struct EncoderFixedState {
+    void* pipeline = nullptr;
+    bool viewport_valid = false, scissor_valid = false;
+    bool depth_bias_valid = false, blend_color_valid = false;
+    int32_t depth_clip = -1, cull = -1, winding = -1, fill = -1;
+    double viewport[6] = {};
+    uint64_t scissor[4] = {};
+    float depth_bias[2] = {};
+    float blend_color[4] = {};
+  };
+  EncoderFixedState encoder_fixed_state_;
+  static bool StateDedupeEnabled();
   static bool EncoderDedupeEnabled();
   static bool HostReadFastEnabled();
   void ResetEncoderDedupe();
