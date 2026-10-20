@@ -1218,6 +1218,13 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
       continue;
     }
     for (const auto& operation : operations) {
+      if (MetalCommandProcessor::PassCensusEnabled() &&
+          operation.kind == MetalEdramAuthorityTracker::SyncKind::
+                                kMaterializeFromCanonical &&
+          operation.attachment == attachment) {
+        NoteMaterializeFate(slot, attachment, operation.start_tiles,
+                            operation.end_tiles);
+      }
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
             command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
@@ -1529,6 +1536,100 @@ std::string MetalRenderTargetCache::FormatRasterPairCensus(bool reset) {
   return out;
 }
 
+void MetalRenderTargetCache::NoteMaterializeFate(uint32_t slot,
+                                                 uint64_t attachment,
+                                                 uint32_t start_tiles,
+                                                 uint32_t end_tiles) {
+  MaterializeFate& fate = materialize_fate_[slot];
+  if (fate.pending.size() != xenos::kEdramTileCount) {
+    fate.pending.assign(xenos::kEdramTileCount, 0);
+  }
+  if (fate.attachment != attachment) {
+    pack_census_.fate_untouched += fate.pending_count;
+    std::fill(fate.pending.begin(), fate.pending.end(), uint8_t(0));
+    fate.pending_count = 0;
+    fate.attachment = attachment;
+  }
+  end_tiles = std::min(end_tiles, uint32_t(xenos::kEdramTileCount));
+  for (uint32_t t = start_tiles; t < end_tiles; ++t) {
+    if (!fate.pending[t]) {
+      fate.pending[t] = 1;
+      ++fate.pending_count;
+    } else {
+      // Materialized again before any draw touched it.
+      ++pack_census_.fate_untouched;
+    }
+    ++pack_census_.fate_tiles;
+  }
+}
+
+void MetalRenderTargetCache::NoteMaterializeFirstUse(
+    uint32_t color_write_mask, uint32_t color_read_mask, bool depth_written,
+    bool depth_read, bool full_width, bool rect, uint32_t host_y0,
+    uint32_t host_y1) {
+  RenderTarget* const* used = last_update_used_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    MaterializeFate& fate = materialize_fate_[slot];
+    RenderTarget* render_target = used[slot];
+    if (!fate.pending_count || !render_target || !lengths[slot] ||
+        GetCanonicalAttachmentId(render_target) != fate.attachment) {
+      continue;
+    }
+    const uint32_t nibble =
+        slot ? (color_write_mask >> ((slot - 1u) * 4u)) & 0xFu : 0u;
+    const bool reads =
+        slot ? ((color_read_mask >> (slot - 1u)) & 1u) != 0 : depth_read;
+    const bool writes = slot ? nibble != 0 : depth_written;
+    if (!reads && !writes) {
+      continue;
+    }
+    const bool overwrites =
+        !reads && full_width && (slot == 0 || nibble == 0xFu);
+    // The tile rows the draw's scissor covers, as in
+    // MarkCurrentRasterTargetsWritten.
+    const uint32_t start_tiles = render_target->key().base_tiles;
+    const uint32_t end_tiles = start_tiles + lengths[slot];
+    const uint32_t pitch = render_target->key().GetPitchTiles();
+    const uint32_t rows_per_tile =
+        (xenos::kEdramTileHeightSamples >>
+         uint32_t(render_target->key().msaa_samples >=
+                  xenos::MsaaSamples::k2X)) *
+        draw_resolution_scale_y();
+    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d1 = host_y1 == UINT32_MAX
+                      ? end_tiles
+                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
+                                       rows_per_tile) * pitch;
+    // A partly covered first or last tile row counts as read.
+    const uint32_t partial_first =
+        host_y0 % rows_per_tile ? start_tiles + (host_y0 / rows_per_tile) * pitch
+                                : UINT32_MAX;
+    const uint32_t partial_last =
+        host_y1 != UINT32_MAX && host_y1 % rows_per_tile
+            ? start_tiles + (host_y1 / rows_per_tile) * pitch
+            : UINT32_MAX;
+    d0 = std::max(d0, start_tiles);
+    d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
+    for (uint32_t t = d0; t < d1; ++t) {
+      if (!fate.pending[t]) {
+        continue;
+      }
+      fate.pending[t] = 0;
+      --fate.pending_count;
+      const uint32_t row = t - (t - start_tiles) % pitch;
+      if (overwrites && row != partial_first && row != partial_last) {
+        ++pack_census_.fate_overwritten;
+        if (rect) {
+          ++pack_census_.fate_overwritten_rect;
+        }
+      } else {
+        ++pack_census_.fate_read;
+      }
+    }
+  }
+}
+
 std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
   static const char* kNames[] = {"rasterviews", "readback", "resolve", "other"};
   PackCensus& c = pack_census_;
@@ -1570,6 +1671,16 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
                      double(c.clear_loads) / frames,
                      double(c.clear_load_tiles) / frames,
                      double(c.clear_load_flushes) / frames);
+  if (c.fate_tiles) {
+    out += fmt::format(
+        " | materialize fate: tiles/frame {:.0f} read {:.1f}% overwritten "
+        "{:.1f}% (rect {:.1f}%) untouched {:.1f}%",
+        double(c.fate_tiles) / frames,
+        100.0 * double(c.fate_read) / double(c.fate_tiles),
+        100.0 * double(c.fate_overwritten) / double(c.fate_tiles),
+        100.0 * double(c.fate_overwritten_rect) / double(c.fate_tiles),
+        100.0 * double(c.fate_untouched) / double(c.fate_tiles));
+  }
   if (reset) {
     c = PackCensus{};
   }

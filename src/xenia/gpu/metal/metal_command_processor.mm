@@ -9533,6 +9533,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Host scissor rows of this draw (pack census dirty rows); whole range
   // until the scissor is applied below.
   uint32_t draw_host_y0 = 0, draw_host_y1 = UINT32_MAX;
+  bool draw_full_width = true;  // the scissor spans the render width
   // Attribution aid: XE_METAL_PASS_SPLIT_EVERY=<n> ends the open pass every n
   // draws (legacy binding), to measure what a pass boundary alone does to
   // attachment contents on this GPU.
@@ -10197,6 +10198,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       draw_host_y0 = uint32_t(metal_scissor.y);
       draw_host_y1 = uint32_t(metal_scissor.y + metal_scissor.height);
+      draw_full_width = metal_scissor.x == 0 &&
+                        uint32_t(metal_scissor.width) >= render_width;
     }
   draw_trace_milestone("before-rt-probe");
     // Diagnostic (XE_METAL_RT_PROBE=<draw>): the attachments this draw is
@@ -11324,6 +11327,43 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   draw_trace_milestone("after-use-resources");
   auto mark_raster_targets_written = [&] {
+    if (PassCensusEnabled()) {
+      // Materialize-fate census: can this draw observe each target's old
+      // content? Pixel kill and alpha test leave pixels unwritten, so they
+      // count as reads of every target.
+      const bool kills =
+          (pixel_shader && pixel_shader->kills_pixels()) ||
+          regs.Get<reg::RB_COLORCONTROL>().alpha_test_enable;
+      uint32_t color_read_mask = 0;
+      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+        if (!((normalized_color_mask >> (i * 4)) & 0xFu)) {
+          continue;
+        }
+        auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+            reg::RB_BLENDCONTROL::rt_register_indices[i]);
+        const bool replace =
+            blend.color_srcblend == xenos::BlendFactor::kOne &&
+            blend.color_destblend == xenos::BlendFactor::kZero &&
+            blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+            blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+            blend.alpha_destblend == xenos::BlendFactor::kZero &&
+            blend.alpha_comb_fcn == xenos::BlendOp::kAdd;
+        if (kills || !replace) {
+          color_read_mask |= 1u << i;
+        }
+      }
+      const bool depth_read =
+          kills || norm_depth.stencil_enable ||
+          (norm_depth.z_enable &&
+           norm_depth.zfunc != xenos::CompareFunction::kAlways);
+      render_target_cache_->NoteMaterializeFirstUse(
+          normalized_color_mask, color_read_mask,
+          norm_depth.z_write_enable || norm_depth.stencil_enable, depth_read,
+          draw_full_width,
+          prim_type == xenos::PrimitiveType::kRectangleList ||
+              index_count <= 6,
+          draw_host_y0, draw_host_y1);
+    }
     render_target_cache_->MarkCurrentRasterTargetsWritten(
         normalized_color_mask,
         norm_depth.z_write_enable || norm_depth.stencil_enable, draw_host_y0,

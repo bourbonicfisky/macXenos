@@ -157,6 +157,14 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        bool depth_or_stencil_written,
                                        uint32_t host_y0 = 0,
                                        uint32_t host_y1 = UINT32_MAX);
+  // Pack census: classifies the materialized tiles this draw touches first
+  // (see PackCensus::fate_*). `color_read_mask` has a bit per color slot
+  // (1 << rt) whose old content the draw can observe; `full_width` is false
+  // when the scissor misses part of a row.
+  void NoteMaterializeFirstUse(uint32_t color_write_mask,
+                               uint32_t color_read_mask, bool depth_written,
+                               bool depth_read, bool full_width, bool rect,
+                               uint32_t host_y0, uint32_t host_y1);
   // The largest guest MSAA sample count (1, 2 or 4) among the accumulated
   // attachments; 1 when none.
   uint32_t current_msaa_samples() const;
@@ -804,8 +812,26 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // Clear load actions taken / materialize tiles they replaced / deferred
     // loads flushed back to a materialize (unbound attachment).
     uint64_t clear_loads = 0, clear_load_tiles = 0, clear_load_flushes = 0;
+    // Materialize fate: raster-view tiles materialized from canonical, by
+    // what the first draw touching them did. read = it could see the old
+    // content (depth/stencil test, blending, partial write mask, pixel
+    // kill/alpha test, partial width); overwritten = it replaced it whole;
+    // untouched = the slot moved on before any draw touched them.
+    // overwritten_rect: by a rectangle-list or <= 6-vertex draw, which
+    // likely covers its scissor; the rest is an upper bound (geometry may
+    // not cover the scissor rows).
+    uint64_t fate_tiles = 0, fate_read = 0, fate_overwritten = 0,
+             fate_overwritten_rect = 0, fate_untouched = 0;
     uint64_t frames = 0;
   } pack_census_;
+  struct MaterializeFate {
+    uint64_t attachment = 0;
+    std::vector<uint8_t> pending;  // per EDRAM tile
+    uint32_t pending_count = 0;
+  };
+  MaterializeFate materialize_fate_[1 + xenos::kMaxColorRenderTargets];
+  void NoteMaterializeFate(uint32_t slot, uint64_t attachment,
+                           uint32_t start_tiles, uint32_t end_tiles);
   // Per EDRAM tile: the latest canonical producer is a resolve clear that no
   // draw has written since (census only).
   std::array<uint8_t, xenos::kEdramTileCount> census_clear_tiles_ = {};
