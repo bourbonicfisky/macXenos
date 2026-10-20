@@ -646,6 +646,17 @@ class MetalCommandProcessor : public CommandProcessor {
     float blend_color[4] = {};
   };
   EncoderFixedState encoder_fixed_state_;
+  // Last descriptor index plan per shader stage (vertex, pixel): a pure
+  // function of the shader's binding lists, asked on every draw.
+  struct DescriptorPlanMemo {
+    const void* shader = nullptr;
+    const void* textures = nullptr;
+    const void* samplers = nullptr;
+    size_t texture_count = 0, sampler_count = 0;
+    uint32_t plan_count = 1;
+    bool plan_valid = true;
+  };
+  DescriptorPlanMemo descriptor_plan_memo_[2];
   static bool StateDedupeEnabled();
   static bool EncoderDedupeEnabled();
   static bool HostReadFastEnabled();

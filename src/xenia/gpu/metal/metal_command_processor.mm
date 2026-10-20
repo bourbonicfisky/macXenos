@@ -10512,8 +10512,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // texture/sampler slot, which is always valid.
     MetalDescriptorIndexPlan plan;
     if (shader) {
-      plan = GetMetalDescriptorIndexPlan(shader->GetTextureBindingsAfterTranslation(),
-                                         shader->GetSamplerBindingsAfterTranslation());
+      const auto& texture_bindings = shader->GetTextureBindingsAfterTranslation();
+      const auto& sampler_bindings = shader->GetSamplerBindingsAfterTranslation();
+      DescriptorPlanMemo& plan_memo =
+          descriptor_plan_memo_[shader->type() == xenos::ShaderType::kPixel];
+      static const bool s_plan_memo = [] {
+        const char* v = std::getenv("XE_METAL_DESCRIPTOR_PLAN_MEMO");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (s_plan_memo && plan_memo.shader == shader &&
+          plan_memo.textures == texture_bindings.data() &&
+          plan_memo.texture_count == texture_bindings.size() &&
+          plan_memo.samplers == sampler_bindings.data() &&
+          plan_memo.sampler_count == sampler_bindings.size()) {
+        plan.count = plan_memo.plan_count;
+        plan.valid = plan_memo.plan_valid;
+      } else {
+        plan = GetMetalDescriptorIndexPlan(texture_bindings, sampler_bindings);
+        plan_memo.shader = shader;
+        plan_memo.textures = texture_bindings.data();
+        plan_memo.texture_count = texture_bindings.size();
+        plan_memo.samplers = sampler_bindings.data();
+        plan_memo.sampler_count = sampler_bindings.size();
+        plan_memo.plan_count = plan.count;
+        plan_memo.plan_valid = plan.valid;
+      }
       if (!plan.valid) {
         XELOGW("MetalCommandProcessor: skipping draw with invalid {} descriptor "
                "index layout",

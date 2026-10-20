@@ -1601,9 +1601,36 @@ void CommandProcessor::WriteRegisterRangeFromRing(xe::RingBuffer* ring,
                                                   uint32_t base,
                                                   uint32_t num_registers) {
   if (PlainConstantRange(base, num_registers)) {
+    // Copy each contiguous run up to the ring end in one byte-swapping pass:
+    // the per-dword ReadAndSwap loop (wrap test and read offset store per
+    // dword) did not vectorize, and Burnout writes ~1M constant dwords a
+    // frame (3% of the command-processor thread, 2026-10-20).
+    // XE_GPU_RING_BULK_SWAP=0 restores the per-dword loop.
+    static const bool s_bulk_swap = [] {
+      const char* v = std::getenv("XE_GPU_RING_BULK_SWAP");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
     uint32_t* values = &register_file_->values[base];
-    for (uint32_t i = 0; i < num_registers; ++i) {
-      values[i] = ring->ReadAndSwap<uint32_t>();
+    if (!s_bulk_swap) {
+      for (uint32_t i = 0; i < num_registers; ++i) {
+        values[i] = ring->ReadAndSwap<uint32_t>();
+      }
+      return;
+    }
+    uint32_t remaining = num_registers;
+    while (remaining) {
+      const size_t offset = ring->read_offset();
+      const uint32_t run = uint32_t(
+          std::min<size_t>(remaining, (ring->capacity() - offset) >> 2));
+      if (XE_UNLIKELY(!run)) {
+        *values++ = ring->ReadAndSwap<uint32_t>();
+        --remaining;
+        continue;
+      }
+      xe::copy_and_swap_32_unaligned(values, ring->buffer() + offset, run);
+      ring->set_read_offset(offset + size_t(run) * 4);
+      values += run;
+      remaining -= run;
     }
     return;
   }
