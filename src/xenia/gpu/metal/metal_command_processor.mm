@@ -11326,6 +11326,77 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   draw_trace_milestone("after-use-resources");
+  // Draw parameters (XE_METAL_DRAW_PARAMS): the IRRuntime draw helpers upload
+  // the draw arguments and the index-type word with setVertexBytes on every
+  // draw. The translated vertex shaders fetch vertices themselves (no
+  // stage-in) and every draw here passes instance count 1, base vertex 0 and
+  // base instance 0, so only those fields can matter; mode 1 (default) binds
+  // canonical arguments and re-binds only when the pair changes on the open
+  // encoder. Burnout: ~6,000 draws in the main pass, whose vertex phase is
+  // front-end bound (vertex occupancy ~4%). 0 = the IRRuntime helpers;
+  // 2 = probe: the per-draw-only fields hold junk (must render identically).
+  static const uint32_t s_draw_params_mode = [] {
+    const char* v = std::getenv("XE_METAL_DRAW_PARAMS");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 1u;
+  }();
+  auto bind_draw_params = [&](bool indexed, uint16_t ir_index_type) {
+    const int32_t key = indexed ? int32_t(ir_index_type) : -2;
+    if (encoder_fixed_state_.draw_params == key) {
+      return;
+    }
+    IRRuntimeDrawParams dp = {};
+    const uint32_t junk = s_draw_params_mode == 2 ? 0x00012345u : 0u;
+    if (indexed) {
+      dp.drawIndexed.indexCountPerInstance = junk;
+      dp.drawIndexed.instanceCount = 1;
+      dp.drawIndexed.startIndexLocation = junk;
+    } else {
+      dp.draw.vertexCountPerInstance = junk;
+      dp.draw.instanceCount = 1;
+    }
+    [encoder setVertexBytes:&dp
+                     length:sizeof(dp)
+                    atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+    const uint16_t uniform = indexed ? ir_index_type : kIRNonIndexedDraw;
+    [encoder setVertexBytes:&uniform
+                     length:sizeof(uniform)
+                    atIndex:kIRArgumentBufferUniformsBindPoint];
+    encoder_fixed_state_.draw_params = key;
+  };
+  auto ir_draw_indexed = [&](MTLPrimitiveType prim, uint64_t index_count_host,
+                             MTLIndexType index_type,
+                             __unsafe_unretained id<MTLBuffer> index_buffer,
+                             uint64_t index_offset, uint64_t instance_count,
+                             int64_t base_vertex, uint64_t base_instance) {
+    if (!s_draw_params_mode) {
+      IRRuntimeDrawIndexedPrimitives(encoder, prim, index_count_host,
+                                     index_type, index_buffer, index_offset,
+                                     instance_count, base_vertex,
+                                     base_instance);
+      return;
+    }
+    // IRMetalIndexToIRIndex (implementation-only in the runtime header).
+    bind_draw_params(true, uint16_t(uint16_t(index_type) + 1u));
+    [encoder drawIndexedPrimitives:prim
+                        indexCount:index_count_host
+                         indexType:index_type
+                       indexBuffer:index_buffer
+                 indexBufferOffset:index_offset
+                     instanceCount:instance_count
+                        baseVertex:base_vertex
+                      baseInstance:base_instance];
+  };
+  auto ir_draw = [&](MTLPrimitiveType prim, uint64_t vertex_start,
+                     uint64_t vertex_count) {
+    if (!s_draw_params_mode) {
+      IRRuntimeDrawPrimitives(encoder, prim, vertex_start, vertex_count);
+      return;
+    }
+    bind_draw_params(false, 0);
+    [encoder drawPrimitives:prim
+                vertexStart:vertex_start
+                vertexCount:vertex_count];
+  };
   auto mark_raster_targets_written = [&] {
     if (PassCensusEnabled()) {
       // Materialize-fate census: can this draw observe each target's old
@@ -11456,8 +11527,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:tess_table_buffer
                    usage:MTLResourceUsageRead
                   stages:stages];
-    IRRuntimeDrawIndexedPrimitives(
-        encoder, MTLPrimitiveTypeTriangle, tess_host_index_count,
+    ir_draw_indexed( MTLPrimitiveTypeTriangle, tess_host_index_count,
         MTLIndexTypeUInt32, tess_indices_buffer, tess_host_indices_alloc.offset,
         /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
     mark_raster_targets_written();
@@ -11612,7 +11682,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     __unsafe_unretained id<MTLBuffer> fan_ib = (__bridge id<MTLBuffer>)fan_alloc.buffer;
     [encoder useResource:fan_ib usage:MTLResourceUsageRead stages:stages];
-    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangle,
+    ir_draw_indexed( MTLPrimitiveTypeTriangle,
                                    host_index_count, MTLIndexTypeUInt32, fan_ib,
                                    fan_alloc.offset, /*instanceCount=*/1,
                                    /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11657,14 +11727,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
       MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-      IRRuntimeDrawIndexedPrimitives(encoder, pp_prim, host_count, index_type, index_buffer,
+      ir_draw_indexed( pp_prim, host_count, index_type, index_buffer,
                                      index_alloc.offset,
                                      /*instanceCount=*/1, /*baseVertex=*/0,
                                      /*baseInstance=*/0);
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
       // PP1 auto pass-through or PP3-auto line loop: no host index byte stream.
-      IRRuntimeDrawPrimitives(encoder, pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
+      ir_draw( pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto) {
       // PP2-auto triangle fan: the shared built-in 16-bit fan table expands the
@@ -11695,7 +11765,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-      IRRuntimeDrawIndexedPrimitives(encoder, pp_prim, host_count,
+      ir_draw_indexed( pp_prim, host_count,
                                      MTLIndexTypeUInt16, index_buffer,
                                      index_alloc.offset, /*instanceCount=*/1,
                                      /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11849,7 +11919,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
     MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32
                                               : MTLIndexTypeUInt16;
-    IRRuntimeDrawIndexedPrimitives(encoder, mtl_prim, host_index_count,
+    ir_draw_indexed( mtl_prim, host_index_count,
                                    index_type, index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
@@ -11880,13 +11950,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     __unsafe_unretained id<MTLBuffer> index_buffer =
         (__bridge id<MTLBuffer>)index_alloc.buffer;
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangleStrip,
+    ir_draw_indexed( MTLPrimitiveTypeTriangleStrip,
                                    host_index_count, MTLIndexTypeUInt32,
                                    index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
   } else {
-    IRRuntimeDrawPrimitives(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
+    ir_draw( mtl_prim, /*vertexStart=*/uint64_t(0),
                             uint64_t(index_count));
   }
 
