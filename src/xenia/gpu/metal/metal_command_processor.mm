@@ -1110,6 +1110,37 @@ inline void DrawNoRetain(__unsafe_unretained id<MTLRenderCommandEncoder> enc,
          baseInstance:0];
 }
 
+// XE_METAL_HEAP_MISS_LOG=1: names each distinct texture that the
+// heap path still declares per draw (diagnostic only).
+void LogHeapMissTexture(void* tex) {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_HEAP_MISS_LOG");
+    return v && v[0] == '1';
+  }();
+  if (!enabled) {
+    return;
+  }
+  static std::unordered_set<void*> seen;
+  if (seen.size() >= 256 || !seen.insert(tex).second) {
+    return;
+  }
+  __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
+  __unsafe_unretained id<MTLTexture> root = t;
+  uint32_t depth = 0;
+  while (root.parentTexture && depth < 4) {
+    root = root.parentTexture;
+    ++depth;
+  }
+  XELOGI(
+      "MetalHeapMiss: {} '{}' root '{}' depth {} {}x{}x{} fmt {} type {} "
+      "storage {} usage {:X} samples {} buffer {}",
+      fmt::ptr(tex), t.label ? [t.label UTF8String] : "",
+      root.label ? [root.label UTF8String] : "", depth, uint32_t(root.width),
+      uint32_t(root.height), uint32_t(root.arrayLength), uint32_t(root.pixelFormat),
+      uint32_t(root.textureType), uint32_t(root.storageMode), uint32_t(root.usage),
+      uint32_t(root.sampleCount), root.buffer ? 1 : 0);
+}
+
 // SwapIndicesInto (guest index byte-swap into the host arena) and IsPp1Routable
 // (the routing predicate) are the shared production contracts, defined once in
 // metal_primitive_processor.h so the device-free conformance test exercises the
@@ -2738,6 +2769,66 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
         [blit endEncoding];
         return true;
       });
+  // Heap-allocated fitted snapshot views (discrete GPUs) start zeroed: blit
+  // row strips from one 4 MiB GPU-zeroed buffer, ordered before the fit blit.
+  // Depth/stencil formats take the CPU-zeroed Shared fallback.
+  texture_cache_->SetSnapshotZeroer(
+      [this](void* texture, uint32_t width, uint32_t height) {
+        id<MTLTexture> dst = (__bridge id<MTLTexture>)texture;
+        if (!dst || !width || !height) {
+          return false;
+        }
+        switch (dst.pixelFormat) {
+          case MTLPixelFormatDepth16Unorm:
+          case MTLPixelFormatDepth32Float:
+          case MTLPixelFormatDepth32Float_Stencil8:
+          case MTLPixelFormatStencil8:
+            return false;
+          default:
+            break;
+        }
+        constexpr NSUInteger kZeroBytes = NSUInteger(4) << 20;
+        const NSUInteger row_bytes =
+            NSUInteger(width) * AttachmentBytesPerPixel(dst.pixelFormat);
+        if (row_bytes > kZeroBytes) {
+          return false;
+        }
+        id<MTLCommandBuffer> cb =
+            (__bridge id<MTLCommandBuffer>)PrepareTransferCommandBuffer(
+                uint32_t(metal::MetalTransferSite::kSnapshotFit));
+        if (!cb) {
+          return false;
+        }
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        blit.label = @"texcache:snapshot-zero";
+        if (!snapshot_zero_buffer_) {
+          id<MTLBuffer> zero =
+              [dst.device newBufferWithLength:kZeroBytes
+                                      options:MTLResourceStorageModePrivate];
+          if (!zero) {
+            [blit endEncoding];
+            return false;
+          }
+          [blit fillBuffer:zero range:NSMakeRange(0, kZeroBytes) value:0];
+          snapshot_zero_buffer_ = (__bridge_retained void*)zero;
+        }
+        id<MTLBuffer> zero = (__bridge id<MTLBuffer>)snapshot_zero_buffer_;
+        const uint32_t strip = uint32_t(kZeroBytes / row_bytes);
+        for (uint32_t y = 0; y < height; y += strip) {
+          const uint32_t rows = std::min(strip, height - y);
+          [blit copyFromBuffer:zero
+                     sourceOffset:0
+                sourceBytesPerRow:row_bytes
+              sourceBytesPerImage:row_bytes * rows
+                       sourceSize:MTLSizeMake(width, rows, 1)
+                        toTexture:dst
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, y, 0)];
+        }
+        [blit endEncoding];
+        return true;
+      });
   texture_cache_->SetSubmissionProvider([this]() {
     return S7TagsOff() ? 0 : CurrentEncodingSubmission();
   });
@@ -2824,6 +2915,7 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   release(null_buffer_);
   release(null_texture_);
   release(null_sampler_);
+  release(snapshot_zero_buffer_);
   for (auto& pair : depth_stencil_states_) {
     release(pair.second);
   }
@@ -8449,9 +8541,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       pending_pass_signature_ = signature;
       if (!s_hysteresis_only) {
-        uint32_t& learned = pass_learned_use_[signature];
-        learned |= used;
-        used = learned & pass_present;
+        uint32_t* learned = pass_learned_use_.Find(signature);
+        if (learned) {
+          *learned |= used;
+          used = *learned & pass_present;
+        } else {
+          pass_learned_use_.Insert(signature, used, false);
+        }
       }
       // A draw that touches nothing present keeps the legacy set (a pass needs
       // an attachment; the census counts how often this happens).
@@ -11384,6 +11480,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               break;
             }
             t = t.parentTexture;
+          }
+          if (!*declared) {
+            LogHeapMissTexture(tex);
           }
         }
         if (*declared & kHeapBackedBit) {

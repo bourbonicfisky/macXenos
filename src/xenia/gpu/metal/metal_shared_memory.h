@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_flat_index_map.h"
 #include "xenia/gpu/metal/metal_zero_copy_contract.h"
 #include "xenia/gpu/metal/metal_zero_copy_overlap.h"
 #include "xenia/gpu/shared_memory.h"
@@ -374,7 +375,7 @@ class MetalSharedMemory : public SharedMemory {
   // been committed and waited on).
   void ResetFrameRanges() {  // sync-mode/shutdown
     consumed_ranges_.clear();
-    consumed_index_.clear();
+    consumed_index_.Clear();
     ClearConsumedPages();
   }
   // Post-clear evidence: submission-tagged hazard records still held. At a
@@ -480,7 +481,7 @@ class MetalSharedMemory : public SharedMemory {
   // containment scan over ~1,000 live ranges per vertex fetch was 5% of
   // Red Dead's command-processor thread (2026-10-05). Rebuilt whenever the
   // vector is compacted.
-  std::unordered_map<uint64_t, uint32_t> consumed_index_;
+  MetalFlatIndexMap consumed_index_;
   // 64 KiB page -> indices (ascending) of the consumed ranges covering it
   // (XE_METAL_CONSUMED_PAGE_INDEX=0 restores the scans). A range containing
   // [start, end) covers start's page, and a range overlapping an upload

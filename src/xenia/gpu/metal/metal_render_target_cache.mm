@@ -19,6 +19,7 @@
 #include <cstring>
 #include <memory>
 #include <set>
+#include <span>
 #include <vector>
 
 #include "xenia/base/logging.h"
@@ -734,7 +735,10 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     return true;
   }
 
-  std::vector<MetalRenderTarget*> targets;
+  // At most one target per slot (colour + depth); a fixed array keeps this
+  // per-draw check off the heap.
+  MetalRenderTarget* target_storage[xenos::kMaxColorRenderTargets + 1];
+  uint32_t target_count = 0;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     auto* target = static_cast<MetalRenderTarget*>(accumulated[slot]);
     if (!target) {
@@ -747,8 +751,10 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       return false;
     }
     current_height = std::max(current_height, target->msaa_texture_height());
-    targets.push_back(target);
+    target_storage[target_count++] = target;
   }
+  const std::span<MetalRenderTarget* const> targets(target_storage,
+                                                    target_count);
   uint32_t allocation_height = ComputeMsaaCompanionAllocationHeight(
       current_height, requested_height, full_height, tile_row_height);
   bool allocation_needed = false;

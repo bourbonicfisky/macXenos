@@ -25,6 +25,7 @@
 #include "xenia/gpu/shader_interpreter.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/host_tessellator.h"
+#include "xenia/gpu/metal/metal_flat_index_map.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_pass_census.h"
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
@@ -522,6 +523,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // frame into passes.
   void* frame_command_buffer_ = nullptr;
   void* frame_render_encoder_ = nullptr;
+  // 4 MiB GPU-zeroed buffer for heap fitted-snapshot views (retained).
+  void* snapshot_zero_buffer_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
   // Side command buffer of the open submission: first loads of CPU-sourced
   // textures by the shared texture cache, encoded without ending the render
@@ -581,7 +584,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // a pass boundary between blended draws moves colour LSBs) while planes the
   // key never touches stay unbound. Bounded by the number of attachment
   // configurations a title uses.
-  std::unordered_map<uint64_t, uint32_t> pass_learned_use_;
+  MetalFlatIndexMap pass_learned_use_;
   // The learned-set signature of the open pass and of the pass the next draw
   // opens: the attachment key mixed with the pass's first draw's shader pair,
   // so passes of one key that differ in content (a stencil-masked UI pass and

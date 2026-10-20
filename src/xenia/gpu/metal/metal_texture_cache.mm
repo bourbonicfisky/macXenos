@@ -1166,11 +1166,26 @@ bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
     desc.arrayLength = 1;
     desc.mipmapLevelCount = 1;
     desc.usage = MTLTextureUsageShaderRead;
-    // Shared so the texels the snapshot does not cover can be zeroed once at
-    // creation from the CPU (deterministic stand-in for guest RAM the game
-    // does not sample); the GPU blit below writes the covered rect.
-    desc.storageMode = MTLStorageModeShared;
-    id<MTLTexture> tex = [src.device newTextureWithDescriptor:desc];
+    // The texels the snapshot does not cover are zeroed once at creation
+    // (deterministic stand-in for guest RAM the game does not sample); the
+    // GPU blit below writes the covered rect. Discrete GPUs (texture heaps):
+    // a Private heap texture zeroed by a GPU blit -- the Shared texture's
+    // CPU zero fill was 2.5% of Red Dead's command-processor thread on the
+    // Mac Pro, and its texels lived in system memory. Otherwise Shared,
+    // zeroed from the CPU.
+    id<MTLTexture> tex = nil;
+    if (heaps_enabled_ && snapshot_zero_) {
+      desc.storageMode = MTLStorageModePrivate;
+      tex = (__bridge_transfer id<MTLTexture>)NewHeapTexture((__bridge void*)desc);
+      if (tex && !snapshot_zero_((__bridge void*)tex, fetch_w * sx, fetch_h * sy)) {
+        tex = nil;
+      }
+    }
+    const bool cpu_zero = !tex;
+    if (cpu_zero) {
+      desc.storageMode = MTLStorageModeShared;
+      tex = [src.device newTextureWithDescriptor:desc];
+    }
     if (!tex) {
       free_slots_.push_back(slot);
       if (carried.texture) {
@@ -1178,16 +1193,18 @@ bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
       }
       return false;
     }
-    // 16 bytes/texel covers every snapshot pixel format; replaceRegion reads
-    // width*bpp bytes from each 16*width-byte row.
-    const size_t row_bytes = size_t(fetch_w) * sx * 16;
-    std::vector<uint8_t> zeros(row_bytes * size_t(fetch_h) * sy, 0);
-    [tex replaceRegion:MTLRegionMake2D(0, 0, fetch_w * sx, fetch_h * sy)
-           mipmapLevel:0
-                 slice:0
-             withBytes:zeros.data()
-           bytesPerRow:row_bytes
-         bytesPerImage:0];
+    if (cpu_zero) {
+      // 16 bytes/texel covers every snapshot pixel format; replaceRegion reads
+      // width*bpp bytes from each 16*width-byte row.
+      const size_t row_bytes = size_t(fetch_w) * sx * 16;
+      std::vector<uint8_t> zeros(row_bytes * size_t(fetch_h) * sy, 0);
+      [tex replaceRegion:MTLRegionMake2D(0, 0, fetch_w * sx, fetch_h * sy)
+             mipmapLevel:0
+                   slice:0
+               withBytes:zeros.data()
+             bytesPerRow:row_bytes
+           bytesPerImage:0];
+    }
     WriteSlotDescriptor(slot, (__bridge void*)tex);
     fv.texture = (__bridge_retained void*)tex;
     fv.slot = slot;

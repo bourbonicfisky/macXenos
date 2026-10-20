@@ -264,7 +264,7 @@ void MetalSharedMemory::Shutdown() {
   // destroyed (MetalCommandProcessor::ShutdownContext does).
   zero_copy_overlap_.Shutdown();
   consumed_ranges_.clear();
-  consumed_index_.clear();
+  consumed_index_.Clear();
   ClearConsumedPages();
   if (fetch_queue_) {
     id<MTLCommandQueue> released_queue =
@@ -385,7 +385,7 @@ void MetalSharedMemory::ClearConsumedPages() {
 
 void MetalSharedMemory::AppendConsumedRange(uint32_t start, uint32_t end, uint64_t submission) {
   const uint32_t index = uint32_t(consumed_ranges_.size());
-  consumed_index_[(uint64_t(start) << 32) | end] = index;
+  consumed_index_.Insert((uint64_t(start) << 32) | end, index, true);
   consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   IndexConsumedRange(index);
 }
@@ -396,9 +396,9 @@ void MetalSharedMemory::NoteGpuWriteInFlight(uint32_t start, uint32_t length,
     return;
   }
   const uint32_t end = start + length;
-  auto it = consumed_index_.find((uint64_t(start) << 32) | end);
-  if (it != consumed_index_.end()) {
-    ConsumedRange& range = consumed_ranges_[it->second];
+  if (const uint32_t* it =
+          consumed_index_.Find((uint64_t(start) << 32) | end)) {
+    ConsumedRange& range = consumed_ranges_[*it];
     range.submission = std::max(range.submission, submission);
     return;
   }
@@ -668,12 +668,12 @@ MetalSharedMemory::VramFetchStats MetalSharedMemory::ConsumeVramFetchStats() {
 }
 
 void MetalSharedMemory::RebuildConsumedIndex() {
-  consumed_index_.clear();
-  consumed_index_.reserve(consumed_ranges_.size() * 2);
+  consumed_index_.Clear();
+  consumed_index_.Reserve(consumed_ranges_.size());
   ClearConsumedPages();
   for (uint32_t i = 0; i < consumed_ranges_.size(); ++i) {
     const ConsumedRange& r = consumed_ranges_[i];
-    consumed_index_.emplace((uint64_t(r.first) << 32) | r.second, i);
+    consumed_index_.Insert((uint64_t(r.first) << 32) | r.second, i, false);
     IndexConsumedRange(i);
   }
 }
@@ -683,9 +683,10 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
   uint32_t end = start + length;
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
   {
-    auto hit = consumed_index_.find((uint64_t(start) << 32) | end);
-    if (hit != consumed_index_.end() && hit->second < consumed_ranges_.size()) {
-      ConsumedRange& range = consumed_ranges_[hit->second];
+    const uint32_t* hit =
+        consumed_index_.Find((uint64_t(start) << 32) | end);
+    if (hit && *hit < consumed_ranges_.size()) {
+      ConsumedRange& range = consumed_ranges_[*hit];
       if (range.first == start && range.second == end) {
         range.submission = std::max(range.submission, submission);
         return result;

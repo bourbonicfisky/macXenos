@@ -139,6 +139,13 @@ class MetalTextureCache {
           blitter) {
     snapshot_fit_blit_ = std::move(blitter);
   }
+  // Zeroes a whole Private texture on the GPU (ordered before the fit blit
+  // that follows it); used for heap-allocated fitted views.
+  void SetSnapshotZeroer(
+      std::function<bool(void* texture, uint32_t width, uint32_t height)>
+          zeroer) {
+    snapshot_zero_ = std::move(zeroer);
+  }
   void PrepareSnapshotFit(const xenos::xe_gpu_texture_fetch_t& fetch,
                           bool is_signed);
 
@@ -722,6 +729,7 @@ class MetalTextureCache {
                                bool identity);
   void RetireFittedView(ResolvedTarget::FittedView& fitted);
   std::function<bool(void*, void*, uint32_t, uint32_t)> snapshot_fit_blit_;
+  std::function<bool(void*, uint32_t, uint32_t)> snapshot_zero_;
   // Draw resolution scaling: column assemblies (see RegisterScaledAssembly),
   // keyed by the destination's x = 0 base. The texture is owned by the
   // render-target cache; the slot and swizzle views are ours.
