@@ -9491,6 +9491,65 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
+  // Discrete GPUs: a routed guest-DMA index buffer is bound straight from the
+  // VRAM mirror and the vertex shader swaps it (vertex_index_endian), instead
+  // of the CPU byte-swapping every index into the system-memory upload arena
+  // the GPU then reads across PCIe. The range is requested like a vertex
+  // fetch (consumed-range hazard tracking, rename on a rewrite hazard), so
+  // the bound bytes are the ones the CPU path would have swapped. Only the
+  // endian shapes SwapIndicesInto treats identically to the shader are taken;
+  // 4-byte alignment is Metal's index-buffer offset rule.
+  // XE_METAL_GPU_INDEX_SWAP=0 restores the CPU swap.
+  bool direct_index = false;
+  xenos::Endian direct_index_endian = xenos::Endian::kNone;
+  uint32_t direct_index_offset = 0;
+  static const bool s_gpu_index_swap = [] {
+    const char* v = std::getenv("XE_METAL_GPU_INDEX_SWAP");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (s_gpu_index_swap && discrete_mirror_ && pp_routed &&
+      !use_tessellation_emulation && !trace_writer_.is_open() &&
+      pp_result.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+      pp_result.host_draw_vertex_count &&
+      !(pp_result.guest_index_base & 3)) {
+    const bool i32 = pp_result.host_index_format == xenos::IndexFormat::kInt32;
+    const xenos::Endian e = pp_result.host_shader_index_endian;
+    bool endian_ok;
+    xenos::Endian shader_endian;
+    if (i32) {
+      endian_ok = e == xenos::Endian::kNone || e == xenos::Endian::k8in32;
+      shader_endian = e;
+    } else {
+      endian_ok = e == xenos::Endian::kNone || e == xenos::Endian::k8in16 ||
+                  e == xenos::Endian::k8in32;
+      shader_endian =
+          e == xenos::Endian::kNone ? xenos::Endian::kNone
+                                    : xenos::Endian::k8in16;
+    }
+    const uint32_t bytes = pp_result.host_draw_vertex_count * (i32 ? 4u : 2u);
+    if (endian_ok) {
+      MetalSharedMemory::VfetchRename rename;
+      bool ok;
+      if (MetalSharedMemory::VfetchRenameEnabled()) {
+        ok = shared_memory_->RequestVertexFetchRange(pp_result.guest_index_base,
+                                                     bytes, &rename);
+      } else {
+        ok = shared_memory_->RequestConsumedRange(pp_result.guest_index_base,
+                                                  bytes);
+      }
+      if (ok) {
+        direct_index = true;
+        direct_index_endian = shader_endian;
+        direct_index_offset =
+            rename.length ? rename.buffer_offset +
+                                (pp_result.guest_index_base - rename.guest_start)
+                          : pp_result.guest_index_base;
+        ++direct_index_draws_;
+      }
+    }
+  }
+
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
   pending_pass_bound_ = pass_bound;
@@ -9853,7 +9912,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // prebuilt tess VS's in-shader XeEndianSwap32 sees kNone and is the
     // identity. Publishing the guest endian here while binding a pre-swapped
     // stream would double-swap every adaptive factor silently.
-    system_constants.vertex_index_endian = xenos::Endian::kNone;
+    //
+    // The exception is a direct-bound draw (discrete GPUs, above): its raw
+    // guest indices are bound unswapped, so the shader swaps them.
+    system_constants.vertex_index_endian =
+        direct_index ? direct_index_endian : xenos::Endian::kNone;
     system_constants.vertex_index_offset =
         system_constant_guest_state.vertex_index_offset;
     system_constants.vertex_index_min =
@@ -11510,7 +11573,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     MTLPrimitiveType pp_prim = MTLPrimitiveTypeTriangle;
     MapPrimitiveType(pp_result.host_primitive_type, &pp_prim);
     uint32_t host_count = pp_result.host_draw_vertex_count;
-    if (pp_result.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+    if (direct_index) {
+      __unsafe_unretained id<MTLBuffer> index_buffer =
+          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      IRRuntimeDrawIndexedPrimitives(
+          encoder, pp_prim, host_count,
+          pp_result.host_index_format == xenos::IndexFormat::kInt32
+              ? MTLIndexTypeUInt32
+              : MTLIndexTypeUInt16,
+          index_buffer, direct_index_offset,
+          /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
+    } else if (pp_result.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
       uint32_t index_size = pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
       uint32_t total = host_count * index_size;
       const void* guest_indices = memory_->TranslatePhysical(pp_result.guest_index_base);
@@ -17570,6 +17643,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                  fs.hot);
           discrete_deferred_ranges_ = 0;
         }
+        XELOGI("MetalDiscreteIndex swap#{}: gpu-swapped {:.1f}/frame",
+               count, double(direct_index_draws_) / 128.0);
+        direct_index_draws_ = 0;
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
