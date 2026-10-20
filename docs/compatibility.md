@@ -30,7 +30,7 @@ smoother.
 | Dark Souls | Undead Asylum | 30 | 30 |  |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |
-| Dead to Rights: Retribution | Prologue | 30 | 28 | Below full speed on the M1 Max |
+| Dead to Rights: Retribution | Prologue | 30 | 28 | 28-30 across repeated runs on the M1 Max |
 | Devil May Cry 4 | Prologue | 30 | 30 |  |
 | Dishonored | New game opening | 30 | 30 |  |
 | F.E.A.R. | Instant Action, Distribution | 30 | 30 |  |
@@ -59,7 +59,7 @@ smoother.
 | Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
-| Ultra Street Fighter IV | Arcade fight | 60 | 59 |  |
+| Ultra Street Fighter IV | Arcade fight | 60 | 60 |  |
 | Viva Piñata | Garden | 30 | 30 |  |
 
 None of the games hit a GPU error on either Mac in these runs.
