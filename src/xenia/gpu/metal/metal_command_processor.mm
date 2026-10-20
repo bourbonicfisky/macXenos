@@ -6147,6 +6147,59 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // path). With the gate off use_tessellation_emulation is always false and
   // this is exactly the pre-existing expression.
   draw_trace_milestone("after-shaders");
+  // XE_METAL_REPEAT_DRAW_CENSUS=1 (diagnostic): how many draws repeat the
+  // previous draw's texture inputs -- the same shader pair, and no fetch
+  // constant either shader binds rewritten since -- and how many of those
+  // also have no pending GPU producer (resolve writeback or memexport) that
+  // could change what a texture serves. Those draws are the ceiling of a
+  // per-draw texture-binding reuse (Burnout: ~7,700 draws a frame, ~20% of
+  // the command-processor thread in per-draw texture work, 2026-10-19).
+  {
+    static const bool s_repeat_census =
+        std::getenv("XE_METAL_REPEAT_DRAW_CENSUS") != nullptr;
+    if (s_repeat_census) {
+      static const void* s_prev_vs = nullptr;
+      static const void* s_prev_ps = nullptr;
+      static uint64_t s_draws = 0, s_same_shaders = 0, s_repeat = 0,
+                      s_repeat_quiet = 0, s_textured = 0;
+      uint32_t bound_mask = 0;
+      for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+        if (!shader) {
+          continue;
+        }
+        for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+          if (binding.fetch_constant < 32) {
+            bound_mask |= 1u << binding.fetch_constant;
+          }
+        }
+      }
+      ++s_draws;
+      if (bound_mask) {
+        ++s_textured;
+      }
+      if (vertex_shader == s_prev_vs && pixel_shader == s_prev_ps) {
+        ++s_same_shaders;
+        if (bound_mask && !(fetch_constant_dirty_mask_ & bound_mask)) {
+          ++s_repeat;
+          if (pending_writebacks_.empty() && pending_memexports_.empty()) {
+            ++s_repeat_quiet;
+          }
+        }
+      }
+      s_prev_vs = vertex_shader;
+      s_prev_ps = pixel_shader;
+      if ((s_draws & 65535) == 0) {
+        XELOGI(
+            "MetalRepeatDrawCensus draws={} textured={:.1f}% same-shaders="
+            "{:.1f}% textured-repeat={:.1f}% repeat-without-pending="
+            "{:.1f}%",
+            s_draws, 100.0 * double(s_textured) / double(s_draws),
+            100.0 * double(s_same_shaders) / double(s_draws),
+            100.0 * double(s_repeat) / double(s_draws),
+            100.0 * double(s_repeat_quiet) / double(s_draws));
+      }
+    }
+  }
   static const char* const s_draw_trace_env =
       std::getenv("XE_METAL_DRAW_TRACE");
   if (s_draw_trace_env &&
@@ -9290,6 +9343,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  draw_trace_milestone("after-primitive-processor");
+
   // Auto line loops have no valid inline Metal fallback: the guest topology is
   // intentionally unmapped. If view consistency, Process, or the exact shape
   // guard rejected the route, preserve the prior behavior and skip.
@@ -9345,6 +9400,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     prepare_fits(pixel_shader);
     prepare_fits(vertex_shader);
   }
+  draw_trace_milestone("after-snapshot-fit");
   __unsafe_unretained id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
@@ -9352,6 +9408,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    "encoder-unavailable");
     return true;
   }
+  draw_trace_milestone("after-encoder");
   if (PassCensusEnabled() && !memexport_draw) {
     pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
         norm_depth, normalized_color_mask, blend_controls,
@@ -11052,6 +11109,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead);
   }
 
+  draw_trace_milestone("after-use-resources");
   auto mark_raster_targets_written = [&] {
     render_target_cache_->MarkCurrentRasterTargetsWritten(
         normalized_color_mask,
@@ -14126,9 +14184,29 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
 // predicates (and the signed corridor, applied by the callers); every other
 // table format routes both signs on the shared shape rules.
 bool MetalCommandProcessor::SharedRouteEligible(
-    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+    const xenos::xe_gpu_texture_fetch_t& fetch_in, bool is_signed,
     uint32_t width, uint32_t height, uint32_t pitch_texels,
     bool* corridor_required_out) {
+  // A raw minimum level above the maximum (Banjo's 512x512 k_8 fetches: min 1,
+  // max 0) is one level by GetSubresourcesFromFetchConstant: the base when the
+  // fetch has no mip page, else mip `min` alone. The cache key and the sampler
+  // already take those levels; the predicates below read the raw fields and
+  // refused both shapes, leaving each such draw on the CPU-wait path (M1 Max:
+  // 11k blocked fetches, Banjo 20 fps; routed, 0 and 30 fps).
+  // XE_METAL_TEX_ROUTE_INVERTED_MIPS=0 restores the refusal.
+  static const bool s_inverted_mips = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_INVERTED_MIPS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  xenos::xe_gpu_texture_fetch_t fetch = fetch_in;
+  if (s_inverted_mips && fetch.mip_min_level > fetch.mip_max_level) {
+    uint32_t min_level = 0, max_level = 0;
+    texture_util::GetSubresourcesFromFetchConstant(
+        fetch_in, nullptr, nullptr, nullptr, nullptr, nullptr, &min_level,
+        &max_level);
+    fetch.mip_min_level = min_level;
+    fetch.mip_max_level = max_level;
+  }
   const bool rgba8_class =
       fetch.format == xenos::TextureFormat::k_8_8_8_8 ||
       fetch.format == xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
