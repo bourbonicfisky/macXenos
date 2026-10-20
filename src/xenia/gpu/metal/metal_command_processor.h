@@ -1148,6 +1148,26 @@ class MetalCommandProcessor : public CommandProcessor {
   // keep their capacity (IssueDraw).
   metal::ConsumerRequest vertex_request_scratch_;
   metal::ConsumerRequest texture_request_scratch_;
+  // Texture-dependency memo (XE_METAL_TEX_DEP_MEMO): draws whose shader pair
+  // and bound fetch words were already found to have NO dependency on any
+  // pending producer, while the producer set, the completed submission, the
+  // resolved-target registry and trace capture are all unchanged. Any change
+  // to that state clears it. Burnout: ~90% of texture consultations are
+  // empty and 88% of bindings repeat.
+  struct TexDependencyMemo {
+    uint64_t sequence = ~uint64_t(0);
+    uint64_t completed = ~uint64_t(0);
+    uint64_t registry_epoch = ~uint64_t(0);
+    size_t writebacks = ~size_t(0);
+    size_t memexports = ~size_t(0);
+    bool trace_open = false;
+    // hash -> exact key (shader pointers, bound mask, bound fetch words).
+    std::unordered_map<uint64_t, std::vector<uint32_t>> entries;
+    std::vector<uint32_t> key_scratch;
+    uint64_t hits = 0, misses = 0, inserts = 0, clears = 0;
+    uint64_t verify_checked = 0, verify_mismatches = 0;
+  };
+  TexDependencyMemo tex_dependency_memo_;
   metal::GuestRangeSet unserved_ranges_scratch_;
 
   // Memexport draws executed this frame whose exports are not yet coherent in

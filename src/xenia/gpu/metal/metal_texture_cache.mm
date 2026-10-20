@@ -453,6 +453,7 @@ MetalTextureCache::~MetalTextureCache() {
 
 void MetalTextureCache::ReleaseDerivedResolveBridges(
     std::vector<std::pair<uint32_t, void*>>* released_out) {
+  ++registry_epoch_;
   for (auto it = resolved_targets_.begin(); it != resolved_targets_.end();) {
     const ResolvedTarget& target = it->second;
     // See the header for the classification. Only a RAM-backed color bridge is
@@ -489,6 +490,7 @@ void MetalTextureCache::ReleaseDerivedResolveBridges(
 }
 
 void MetalTextureCache::RetireAllResolvedTargets() {
+  ++registry_epoch_;
   // See the header. Atomic with the snapshot owners' release at the
   // replay-reset seam: a serving entry must never outlive its texture, and a
   // texture must not survive with no register describing it.
@@ -2814,6 +2816,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
                                                bool requires_fetch_swizzle,
                                                uint32_t guest_extent_start,
                                                uint32_t guest_extent_length) {
+  ++registry_epoch_;
   if (!texture) {
     return;
   }
@@ -2941,6 +2944,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
 }
 
 void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
+  ++registry_epoch_;
   if (!texture) {
     return;
   }
@@ -2992,6 +2996,7 @@ void MetalTextureCache::ExtendResolvedTargetCoverage(void* texture,
                                                      uint32_t extent_start,
                                                      uint32_t extent_length,
                                                      uint32_t wb_endian) {
+  ++registry_epoch_;
   if (!IsDrawResolutionScaled() || !texture) {
     return;
   }
@@ -3027,6 +3032,7 @@ void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
                                                     uint32_t wb_height,
                                                     bool full_rect_geometry,
                                                     uint32_t wb_endian) {
+  ++registry_epoch_;
   auto it = resolved_targets_.find(base);
   if (it == resolved_targets_.end()) {
     return;
@@ -3208,6 +3214,7 @@ void MetalTextureCache::RegisterScaledAssembly(
     uint32_t base0, void* texture, uint32_t width, uint32_t height, uint32_t x,
     uint32_t w, uint32_t extent_start, uint32_t extent_length,
     uint32_t wb_endian) {
+  ++registry_epoch_;
   if (!IsDrawResolutionScaled() || !texture) {
     return;
   }
@@ -3380,6 +3387,7 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
       if ((guest_extent && invalidation->Overlaps(*guest_extent)) ||
           (scaled_extent && invalidation->Overlaps(*scaled_extent))) {
         RetireResolvedTarget(it->second);
+        ++registry_epoch_;
         it = resolved_targets_.erase(it);
         ++evicted;
       } else {

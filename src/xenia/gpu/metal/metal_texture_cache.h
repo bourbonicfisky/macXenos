@@ -153,6 +153,10 @@ class MetalTextureCache {
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }
+  // Bumped by every change to the resolved-target registry (registration,
+  // tip views, coverage, RAM-backed marking, retirement, invalidation). The
+  // per-draw texture-dependency memo keys on it.
+  uint64_t registry_epoch() const { return registry_epoch_; }
   void ResetActive() {
     active_textures_.clear();
     binding_allocation_failed_ = false;
@@ -683,6 +687,7 @@ class MetalTextureCache {
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+  uint64_t registry_epoch_ = 0;
   static void CacheSnapshotProperties(ResolvedTarget& rt);
   void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
                           uint32_t* height_out) const;

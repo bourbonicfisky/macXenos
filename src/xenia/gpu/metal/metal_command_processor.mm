@@ -6198,6 +6198,58 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             100.0 * double(s_repeat) / double(s_draws),
             100.0 * double(s_repeat_quiet) / double(s_draws));
       }
+      // v2: per binding, are the slot's six fetch words unchanged since the
+      // slot was last bound, and is the producer state (authority sequence,
+      // pending writeback/memexport counts) unchanged since then? That pair
+      // is the ceiling of a per-slot memo of the texture phase.
+      {
+        struct SlotSeen {
+          uint32_t words[6];
+          uint64_t sequence;
+          size_t writebacks, memexports;
+          bool valid;
+        };
+        static SlotSeen s_seen[32] = {};
+        static uint64_t s_bindings = 0, s_same_words = 0, s_same_all = 0,
+                        s_draws_tex = 0, s_draws_all = 0;
+        bool draw_all = bound_mask != 0;
+        for (uint32_t slot = 0; slot < 32; ++slot) {
+          if (!(bound_mask & (1u << slot))) {
+            continue;
+          }
+          const uint32_t* w =
+              &register_file_->values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
+                                      slot * 6];
+          SlotSeen& seen = s_seen[slot];
+          ++s_bindings;
+          const bool same_words =
+              seen.valid && std::memcmp(seen.words, w, sizeof(seen.words)) == 0;
+          const bool same_state =
+              seen.valid && seen.sequence == memory_authority_sequence_ &&
+              seen.writebacks == pending_writebacks_.size() &&
+              seen.memexports == pending_memexports_.size();
+          s_same_words += same_words;
+          s_same_all += same_words && same_state;
+          draw_all = draw_all && same_words && same_state;
+          std::memcpy(seen.words, w, sizeof(seen.words));
+          seen.sequence = memory_authority_sequence_;
+          seen.writebacks = pending_writebacks_.size();
+          seen.memexports = pending_memexports_.size();
+          seen.valid = true;
+        }
+        s_draws_tex += bound_mask != 0;
+        s_draws_all += draw_all;
+        if ((s_draws & 65535) == 0 && s_bindings) {
+          XELOGI(
+              "MetalSlotReuseCensus bindings={} same-words={:.1f}% "
+              "same-words+producers={:.1f}% | textured draws all-reusable="
+              "{:.1f}%",
+              s_bindings, 100.0 * double(s_same_words) / double(s_bindings),
+              100.0 * double(s_same_all) / double(s_bindings),
+              s_draws_tex ? 100.0 * double(s_draws_all) / double(s_draws_tex)
+                          : 0.0);
+        }
+      }
     }
   }
   static const char* const s_draw_trace_env =
@@ -8361,7 +8413,96 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
   draw_gpu_ordering_active_ = false;
-  if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
+  // XE_METAL_TEX_DEP_MEMO: 1 on (default), 0 off, 2 verify (run the full
+  // block anyway and count memo hits whose real decision was not empty; 0 of
+  // ~80M across Burnout, JC2, RDR, Sonic, Gears 3, VP, Judgment, FEAR and
+  // GTA IV). See TexDependencyMemo in the header.
+  static const uint32_t s_tex_dep_memo = [] {
+    const char* v = std::getenv("XE_METAL_TEX_DEP_MEMO");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 1u;
+  }();
+  bool tex_dep_memo_hit = false;
+  uint64_t tex_dep_memo_hash = 0;
+  if (s_tex_dep_memo &&
+      (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
+    TexDependencyMemo& memo = tex_dependency_memo_;
+    // Completion is not part of the key unless XE_METAL_TEX_DEP_MEMO_COMPLETED
+    // is set: an empty decision means no overlap with any pending record, and
+    // retiring a record changes the pending counts, which are.
+    static const bool s_key_completed =
+        std::getenv("XE_METAL_TEX_DEP_MEMO_COMPLETED") != nullptr;
+    const uint64_t completed =
+        s_key_completed ? completed_submission_.load(std::memory_order_acquire)
+                        : 0;
+    const uint64_t epoch = texture_cache_ ? texture_cache_->registry_epoch() : 0;
+    const bool trace_open = trace_writer_.is_open();
+    if (memo.sequence != memory_authority_sequence_ ||
+        memo.completed != completed || memo.registry_epoch != epoch ||
+        memo.writebacks != pending_writebacks_.size() ||
+        memo.memexports != pending_memexports_.size() ||
+        memo.trace_open != trace_open) {
+      if (!memo.entries.empty()) {
+        memo.entries.clear();
+        ++memo.clears;
+      }
+      memo.sequence = memory_authority_sequence_;
+      memo.completed = completed;
+      memo.registry_epoch = epoch;
+      memo.writebacks = pending_writebacks_.size();
+      memo.memexports = pending_memexports_.size();
+      memo.trace_open = trace_open;
+    }
+    std::vector<uint32_t>& key = memo.key_scratch;
+    key.clear();
+    const uint64_t vs_bits = uint64_t(uintptr_t(vertex_shader));
+    const uint64_t ps_bits = uint64_t(uintptr_t(pixel_shader));
+    key.push_back(uint32_t(vs_bits));
+    key.push_back(uint32_t(vs_bits >> 32));
+    key.push_back(uint32_t(ps_bits));
+    key.push_back(uint32_t(ps_bits >> 32));
+    uint32_t bound_mask = 0;
+    for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+      if (!shader) {
+        continue;
+      }
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        if (binding.fetch_constant < 32) {
+          bound_mask |= 1u << binding.fetch_constant;
+        }
+      }
+    }
+    key.push_back(bound_mask);
+    for (uint32_t m = bound_mask; m;) {
+      const uint32_t slot = uint32_t(__builtin_ctz(m));
+      m &= m - 1;
+      const uint32_t* w = &register_file_->values
+          [XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
+      key.insert(key.end(), w, w + 6);
+    }
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (uint32_t v : key) {
+      hash = (hash ^ v) * 0x100000001b3ull;
+    }
+    tex_dep_memo_hash = hash;
+    auto it = memo.entries.find(hash);
+    tex_dep_memo_hit = it != memo.entries.end() && it->second == key;
+    if (tex_dep_memo_hit) {
+      ++memo.hits;
+    } else {
+      ++memo.misses;
+    }
+    if (((memo.hits + memo.misses) & 0xFFFFF) == 0) {
+      XELOGI(
+          "MetalTexDepMemo hits={} misses={} ({:.1f}% hit) inserts={} "
+          "clears={} verify checked={} mismatches={}",
+          memo.hits, memo.misses,
+          100.0 * double(memo.hits) / double(memo.hits + memo.misses),
+          memo.inserts, memo.clears, memo.verify_checked,
+          memo.verify_mismatches);
+    }
+  }
+  if ((!pending_writebacks_.empty() || !pending_memexports_.empty()) &&
+      !(tex_dep_memo_hit && s_tex_dep_memo == 1)) {
     // CENSUS ONLY: the same request with GPU-served fetches omitting their
     // resolve range, so the decision the repair WOULD take can be compared
     // against the one taken. Never passed to the production path.
@@ -8928,6 +9069,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                      "texture-dependency-drain");
       return true;
+    }
+    if (s_tex_dep_memo) {
+      TexDependencyMemo& memo = tex_dependency_memo_;
+      const bool no_dependency =
+          authority_decision.selected.empty() &&
+          authority_decision.action == metal::AuthorityAction::kNoDependency;
+      if (tex_dep_memo_hit) {
+        // Verify mode only (mode 1 skipped this block on a hit).
+        ++memo.verify_checked;
+        if (!no_dependency && ++memo.verify_mismatches <= 32) {
+          XELOGE(
+              "MetalTexDepMemo VERIFY MISMATCH draw={} action={} selected={}",
+              trace_draw_index_, uint32_t(authority_decision.action),
+              authority_decision.selected.size());
+        }
+      } else if (no_dependency) {
+        memo.entries[tex_dep_memo_hash] = memo.key_scratch;
+        ++memo.inserts;
+      }
     }
   }
 
