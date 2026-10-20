@@ -1042,6 +1042,16 @@ void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
 bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
                                              uint32_t fetch_w,
                                              uint32_t fetch_h) {
+  ResolvedTarget::FittedView& current = rt.fitted;
+  // Steady state (every draw sampling a fitted view): the view already holds
+  // this snapshot generation at these dims. A view is only ever blitted from
+  // a source of its own pixel format (a mismatch retires it first), so the
+  // format check below cannot fail here; skip its Objective-C reads.
+  if (current.texture && current.width == fetch_w &&
+      current.height == fetch_h && current.source == rt.texture &&
+      current.source_generation == rt.generation) {
+    return true;
+  }
   id<MTLTexture> src = (__bridge id<MTLTexture>)rt.texture;
   ResolvedTarget::FittedView& fv = rt.fitted;
   // A previous view at other dims carries its content (the union of the
