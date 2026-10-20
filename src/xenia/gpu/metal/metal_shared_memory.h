@@ -403,6 +403,8 @@ class MetalSharedMemory : public SharedMemory {
   static constexpr uint32_t kConsumedPageShift = 16;
   std::vector<std::vector<uint32_t>> consumed_pages_;
   std::vector<uint32_t> consumed_pages_touched_;
+  // ReleaseConsumedRanges scratch: old index -> compacted index.
+  std::vector<uint32_t> consumed_remap_;
   std::vector<uint32_t> upload_candidates_;  // scratch for UploadRanges
   static bool ConsumedPageIndexEnabled();
   void IndexConsumedRange(uint32_t index);
