@@ -629,6 +629,13 @@ class MetalTextureCache {
     // column writes) clear this and keep the exact-address RAM path.
     bool full_rect = false;
     uint32_t wb_endian = 0;
+    // Immutable properties of `texture` (an MTLTexture never changes size or
+    // format), cached wherever `texture` is assigned: the per-binding serve
+    // classification read them through Objective-C on every draw (Burnout:
+    // ~15k bindings a frame).
+    uint32_t texture_width = 0;
+    uint32_t texture_height = 0;
+    uint32_t texture_pixel_format = 0;  // MTLPixelFormat
     // Draw resolution scaling only (scaled-cover serving): guest rows from the
     // top of the snapshot written by resolves (the base resolve and joined
     // strips) since the texture was created, and the union of their guest
@@ -676,6 +683,7 @@ class MetalTextureCache {
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+  static void CacheSnapshotProperties(ResolvedTarget& rt);
   void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
                           uint32_t* height_out) const;
   bool SnapshotFitApplies(const ResolvedTarget& rt, uint32_t fetch_w,

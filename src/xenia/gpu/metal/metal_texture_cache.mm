@@ -796,22 +796,20 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   bool covered_r32f =
       !rt.is_depth && !rt.ram_backed && rt.width >= fetch_w &&
       rt.height >= fetch_h &&
-      ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
-          MTLPixelFormatR32Float;
+      rt.texture_pixel_format == MTLPixelFormatR32Float;
   // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
   // fetches (the exposure tips) down the RAM path.
   if (s_tip_ram_fetch && covered_r32f && fetch_w == 1 && fetch_h == 1 &&
       !rt.is_depth && !s_color_bridge && rt.ram_backed) {
     covered_r32f = false;
   }
-  id<MTLTexture> exact_snap = (__bridge id<MTLTexture>)rt.texture;
   out->exact = ExactCoverInputs{
       rt.is_depth,
       s_color_bridge,
       rt.ram_backed,
       rt.full_rect,
       is_signed,
-      exact_snap.pixelFormat == MTLPixelFormatRGBA8Unorm,
+      rt.texture_pixel_format == MTLPixelFormatRGBA8Unorm,
       fetch.format,
       bool(fetch.tiled),
       fetch.dimension,
@@ -833,7 +831,7 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   if (IsDrawResolutionScaled() && s_scaled_cover_enabled) {
     // Snapshot formats whose texels are exactly what the RAM upload of the
     // fetch format decodes to.
-    MTLPixelFormat snapshot_format = exact_snap.pixelFormat;
+    MTLPixelFormat snapshot_format = MTLPixelFormat(rt.texture_pixel_format);
     bool format_matches =
         (snapshot_format == MTLPixelFormatRGBA8Unorm &&
          fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
@@ -856,9 +854,9 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
     scaled.fetch_height = fetch_h;
     scaled.fetch_pitch_texels = uint32_t(fetch.pitch) << 5;
     scaled.snapshot_width =
-        uint32_t(exact_snap.width) / draw_resolution_scale_x_;
+        rt.texture_width / draw_resolution_scale_x_;
     scaled.snapshot_height =
-        uint32_t(exact_snap.height) / draw_resolution_scale_y_;
+        rt.texture_height / draw_resolution_scale_y_;
     scaled.rows_written = rt.scaled_rows_written;
     scaled.fetch_endianness = uint32_t(fetch.endianness);
     scaled.wb_endian = rt.wb_endian;
@@ -988,12 +986,18 @@ bool SnapshotFitEnabled() {
 // joined into a full-size parent texture while the registration tracks the
 // last strip, and a fetch of the parent's size needs no fit (fitting it to
 // one strip blanked the lower half of the scene depth: corpus A/B 2026-10-03).
+void MetalTextureCache::CacheSnapshotProperties(ResolvedTarget& rt) {
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)rt.texture;
+  rt.texture_width = tex ? uint32_t(tex.width) : 0;
+  rt.texture_height = tex ? uint32_t(tex.height) : 0;
+  rt.texture_pixel_format = tex ? uint32_t(tex.pixelFormat) : 0;
+}
+
 void MetalTextureCache::SnapshotObjectDims(const ResolvedTarget& rt,
                                            uint32_t* width_out,
                                            uint32_t* height_out) const {
-  id<MTLTexture> tex = (__bridge id<MTLTexture>)rt.texture;
-  *width_out = uint32_t(tex.width) / std::max(1u, draw_resolution_scale_x_);
-  *height_out = uint32_t(tex.height) / std::max(1u, draw_resolution_scale_y_);
+  *width_out = rt.texture_width / std::max(1u, draw_resolution_scale_x_);
+  *height_out = rt.texture_height / std::max(1u, draw_resolution_scale_y_);
 }
 
 bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
@@ -2844,6 +2848,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       }
       WriteSlotDescriptor(new_slot, texture);
       it->second.texture = texture;
+      CacheSnapshotProperties(it->second);
       it->second.slot = new_slot;
     }
 
@@ -2914,6 +2919,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       guest_extent ? guest_extent->length() : 0,
       is_depth,
       requires_fetch_swizzle};
+  CacheSnapshotProperties(resolved_targets_[base]);
   if (IsDrawResolutionScaled()) {
     ResolvedTarget& registered = resolved_targets_[base];
     registered.scaled_rows_written = height;
