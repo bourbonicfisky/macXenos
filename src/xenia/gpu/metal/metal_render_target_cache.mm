@@ -620,6 +620,7 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
 
 RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
+  ++render_target_epoch_;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLPixelFormat pixel_format =
       key.is_depth ? (MTLPixelFormat)kDepthFormat
@@ -696,6 +697,23 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   RenderTarget* const* used = last_update_used_render_targets();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  static const bool s_memo_enabled =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_MSAA_COMPANION_MEMO", true);
+  constexpr size_t kSlots = xenos::kMaxColorRenderTargets + 1;
+  MsaaCompanionMemo& memo = msaa_companion_memo_;
+  if (s_memo_enabled && memo.valid && memo.epoch == render_target_epoch_ &&
+      !std::memcmp(memo.used, used, sizeof(memo.used)) &&
+      !std::memcmp(memo.accumulated, accumulated, sizeof(memo.accumulated)) &&
+      !std::memcmp(memo.lengths, lengths, sizeof(memo.lengths))) {
+    return true;
+  }
+  auto remember_satisfied = [&]() {
+    memo.valid = true;
+    memo.epoch = render_target_epoch_;
+    std::memcpy(memo.used, used, kSlots * sizeof(RenderTarget*));
+    std::memcpy(memo.accumulated, accumulated, kSlots * sizeof(RenderTarget*));
+    std::memcpy(memo.lengths, lengths, kSlots * sizeof(uint32_t));
+  };
   uint32_t requested_height = 0;
   uint32_t current_height = 0;
   uint32_t full_height = 0;
@@ -732,6 +750,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
             draw_resolution_scale_y()));
   }
   if (!sample_count || !requested_height || !full_height) {
+    remember_satisfied();
     return true;
   }
 
@@ -766,6 +785,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     }
   }
   if (!allocation_needed) {
+    remember_satisfied();
     return true;
   }
 
@@ -1224,6 +1244,13 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
       continue;
     }
     for (const auto& operation : operations) {
+      if (MetalCommandProcessor::PassCensusEnabled() &&
+          operation.kind == MetalEdramAuthorityTracker::SyncKind::
+                                kMaterializeFromCanonical &&
+          operation.attachment == attachment) {
+        NoteMaterializeFate(slot, attachment, operation.start_tiles,
+                            operation.end_tiles);
+      }
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
             command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
@@ -1535,6 +1562,100 @@ std::string MetalRenderTargetCache::FormatRasterPairCensus(bool reset) {
   return out;
 }
 
+void MetalRenderTargetCache::NoteMaterializeFate(uint32_t slot,
+                                                 uint64_t attachment,
+                                                 uint32_t start_tiles,
+                                                 uint32_t end_tiles) {
+  MaterializeFate& fate = materialize_fate_[slot];
+  if (fate.pending.size() != xenos::kEdramTileCount) {
+    fate.pending.assign(xenos::kEdramTileCount, 0);
+  }
+  if (fate.attachment != attachment) {
+    pack_census_.fate_untouched += fate.pending_count;
+    std::fill(fate.pending.begin(), fate.pending.end(), uint8_t(0));
+    fate.pending_count = 0;
+    fate.attachment = attachment;
+  }
+  end_tiles = std::min(end_tiles, uint32_t(xenos::kEdramTileCount));
+  for (uint32_t t = start_tiles; t < end_tiles; ++t) {
+    if (!fate.pending[t]) {
+      fate.pending[t] = 1;
+      ++fate.pending_count;
+    } else {
+      // Materialized again before any draw touched it.
+      ++pack_census_.fate_untouched;
+    }
+    ++pack_census_.fate_tiles;
+  }
+}
+
+void MetalRenderTargetCache::NoteMaterializeFirstUse(
+    uint32_t color_write_mask, uint32_t color_read_mask, bool depth_written,
+    bool depth_read, bool full_width, bool rect, uint32_t host_y0,
+    uint32_t host_y1) {
+  RenderTarget* const* used = last_update_used_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    MaterializeFate& fate = materialize_fate_[slot];
+    RenderTarget* render_target = used[slot];
+    if (!fate.pending_count || !render_target || !lengths[slot] ||
+        GetCanonicalAttachmentId(render_target) != fate.attachment) {
+      continue;
+    }
+    const uint32_t nibble =
+        slot ? (color_write_mask >> ((slot - 1u) * 4u)) & 0xFu : 0u;
+    const bool reads =
+        slot ? ((color_read_mask >> (slot - 1u)) & 1u) != 0 : depth_read;
+    const bool writes = slot ? nibble != 0 : depth_written;
+    if (!reads && !writes) {
+      continue;
+    }
+    const bool overwrites =
+        !reads && full_width && (slot == 0 || nibble == 0xFu);
+    // The tile rows the draw's scissor covers, as in
+    // MarkCurrentRasterTargetsWritten.
+    const uint32_t start_tiles = render_target->key().base_tiles;
+    const uint32_t end_tiles = start_tiles + lengths[slot];
+    const uint32_t pitch = render_target->key().GetPitchTiles();
+    const uint32_t rows_per_tile =
+        (xenos::kEdramTileHeightSamples >>
+         uint32_t(render_target->key().msaa_samples >=
+                  xenos::MsaaSamples::k2X)) *
+        draw_resolution_scale_y();
+    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d1 = host_y1 == UINT32_MAX
+                      ? end_tiles
+                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
+                                       rows_per_tile) * pitch;
+    // A partly covered first or last tile row counts as read.
+    const uint32_t partial_first =
+        host_y0 % rows_per_tile ? start_tiles + (host_y0 / rows_per_tile) * pitch
+                                : UINT32_MAX;
+    const uint32_t partial_last =
+        host_y1 != UINT32_MAX && host_y1 % rows_per_tile
+            ? start_tiles + (host_y1 / rows_per_tile) * pitch
+            : UINT32_MAX;
+    d0 = std::max(d0, start_tiles);
+    d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
+    for (uint32_t t = d0; t < d1; ++t) {
+      if (!fate.pending[t]) {
+        continue;
+      }
+      fate.pending[t] = 0;
+      --fate.pending_count;
+      const uint32_t row = t - (t - start_tiles) % pitch;
+      if (overwrites && row != partial_first && row != partial_last) {
+        ++pack_census_.fate_overwritten;
+        if (rect) {
+          ++pack_census_.fate_overwritten_rect;
+        }
+      } else {
+        ++pack_census_.fate_read;
+      }
+    }
+  }
+}
+
 std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
   static const char* kNames[] = {"rasterviews", "readback", "resolve", "other"};
   PackCensus& c = pack_census_;
@@ -1576,6 +1697,16 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
                      double(c.clear_loads) / frames,
                      double(c.clear_load_tiles) / frames,
                      double(c.clear_load_flushes) / frames);
+  if (c.fate_tiles) {
+    out += fmt::format(
+        " | materialize fate: tiles/frame {:.0f} read {:.1f}% overwritten "
+        "{:.1f}% (rect {:.1f}%) untouched {:.1f}%",
+        double(c.fate_tiles) / frames,
+        100.0 * double(c.fate_read) / double(c.fate_tiles),
+        100.0 * double(c.fate_overwritten) / double(c.fate_tiles),
+        100.0 * double(c.fate_overwritten_rect) / double(c.fate_tiles),
+        100.0 * double(c.fate_untouched) / double(c.fate_tiles));
+  }
   if (reset) {
     c = PackCensus{};
   }
@@ -2131,7 +2262,12 @@ bool MetalRenderTargetCache::EncodeLaneRefresh(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height,
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      key.base_tiles, key.GetPitchTiles(), uint32_t(key.msaa_samples),
+      record.start_tiles, work_height, texture.height,
+      draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
                                        ms ? texture.sampleCount : 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
@@ -2267,7 +2403,10 @@ kernel void pack_depth_range(depth2d<float, access::read> tex [[texture(0)]],
                              constant RangeParams& rp [[buffer(2)]],
                              constant HostLaneParams& hl [[buffer(3)]],
                              device float* lane [[buffer(4)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+                             constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
   if (tile < rp.start_tiles || tile >= rp.end_tiles) return;
@@ -2302,7 +2441,10 @@ kernel void lane_store_range(depth2d<float, access::read> tex [[texture(0)]],
                              device float* lane [[buffer(0)]],
                              constant SurfaceParams& sp [[buffer(1)]],
                              constant RangeParams& rp [[buffer(2)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+                             constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (sp.is_depth != 2u) return;
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height()) return;
   uint tile = xe_edram_tile_of(gid.x, gid.y, sp.base, sp.pitch, sp.msaa, 0u);
@@ -2764,7 +2906,12 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -6685,7 +6832,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -6753,7 +6905,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height, 1)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
   [encoder endEncoding];
   return true;
@@ -6904,8 +7061,13 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
     [encoder endEncoding];
     return false;
   }
-  [encoder dispatchThreads:
-               MTLSizeMake(texture.width, work_height, texture.sampleCount)
+  const uint32_t row_start = uint32_t(GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y()));
+  [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
+  [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
+                                       texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;
@@ -7134,6 +7296,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
+    const uint32_t row_start = 0;
+    [enc setBytes:&row_start length:sizeof(row_start) atIndex:7];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];
@@ -7147,6 +7311,8 @@ void MetalRenderTargetCache::RunCanonicalRestoreSelfCheck(
     [enc setBuffer:sp_buf offset:0 atIndex:1];
     [enc setBytes:&color_format length:sizeof(color_format) atIndex:2];
     [enc setBytes:&full_range length:sizeof(full_range) atIndex:3];
+    const uint32_t row_start = 0;
+    [enc setBytes:&row_start length:sizeof(row_start) atIndex:7];
     [enc dispatchThreads:MTLSizeMake(width, height, 1)
         threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
     [enc endEncoding];

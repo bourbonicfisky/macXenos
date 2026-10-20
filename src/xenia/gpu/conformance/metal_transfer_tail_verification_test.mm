@@ -189,6 +189,9 @@ fragment half4 fill_fs(VOut in [[stage_in]], uint sid [[sample_id]]) {
   [compute setBytes:&sp length:sizeof(sp) atIndex:1];
   [compute setBytes:&format length:sizeof(format) atIndex:2];
   [compute setBytes:&range length:sizeof(range) atIndex:3];
+  // Range kernels take their first texture row at buffer(7).
+  static const uint32_t kXeRowStartZero = 0;
+  [compute setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
   [compute dispatchThreads:MTLSizeMake(80, 16, 2)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [compute endEncoding];

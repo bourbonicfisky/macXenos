@@ -197,6 +197,28 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
       return ReplicateNarrowHostChannels(
           {true, false, 2, 1, 1, MTLPixelFormatB5G6R5Unorm, false, false},
           XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R));
+    case xenos::TextureFormat::k_1_5_5_5: {
+      // 16bpp packed RGBA 5:5:5:1. After the fetch-endian swap the guest word
+      // is R5 (bits 0-4) G5 (5-9) B5 (10-14) A1 (15) (the D3D12 and Vulkan
+      // load shaders swap red and blue into B5G5R5A1). Metal's BGR5A1Unorm
+      // reads B from bits 0-4, G 5-9, R 10-14, A 15 (device probe,
+      // 2026-10-19), so the texels copy raw and the host swizzle swaps red
+      // and blue back, as for 5:6:5. Until now this format had no plan and
+      // every fetch was served null: Fable II's 256x256 mipped 1:5:5:5
+      // textures, whose draws also waited on the GPU for them (2026-10-19).
+      // BGR5A1Unorm exists only on Apple GPU families; elsewhere the format
+      // stays unserved (XE_METAL_TEX_1555=0 restores that on Apple too).
+      static const bool s_1555 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_1555");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!packed16_supported || !s_1555) {
+        return {false, false, 0, 0, 0, MTLPixelFormatInvalid};
+      }
+      return ReplicateNarrowHostChannels(
+          {true, false, 2, 1, 1, MTLPixelFormatBGR5A1Unorm, false, false},
+          XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A));
+    }
     case xenos::TextureFormat::k_16:
       // 16bpp single channel at FULL precision. (Was decode_r16 high-byte
       // RGBA8 expansion — 8-bit quantization banded JC2's 1024x3072 k_16
@@ -521,6 +543,7 @@ MetalTextureCache::~MetalTextureCache() {
 
 void MetalTextureCache::ReleaseDerivedResolveBridges(
     std::vector<std::pair<uint32_t, void*>>* released_out) {
+  ++registry_epoch_;
   for (auto it = resolved_targets_.begin(); it != resolved_targets_.end();) {
     const ResolvedTarget& target = it->second;
     // See the header for the classification. Only a RAM-backed color bridge is
@@ -557,6 +580,7 @@ void MetalTextureCache::ReleaseDerivedResolveBridges(
 }
 
 void MetalTextureCache::RetireAllResolvedTargets() {
+  ++registry_epoch_;
   // See the header. Atomic with the snapshot owners' release at the
   // replay-reset seam: a serving entry must never outlive its texture, and a
   // texture must not survive with no register describing it.
@@ -890,22 +914,20 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   bool covered_r32f =
       !rt.is_depth && !rt.ram_backed && rt.width >= fetch_w &&
       rt.height >= fetch_h &&
-      ((__bridge id<MTLTexture>)rt.texture).pixelFormat ==
-          MTLPixelFormatR32Float;
+      rt.texture_pixel_format == MTLPixelFormatR32Float;
   // DIAGNOSTIC (stabilize 6.6): XE_METAL_TIP_RAM_FETCH=1 forces 1x1 R32F
   // fetches (the exposure tips) down the RAM path.
   if (s_tip_ram_fetch && covered_r32f && fetch_w == 1 && fetch_h == 1 &&
       !rt.is_depth && !s_color_bridge && rt.ram_backed) {
     covered_r32f = false;
   }
-  id<MTLTexture> exact_snap = (__bridge id<MTLTexture>)rt.texture;
   out->exact = ExactCoverInputs{
       rt.is_depth,
       s_color_bridge,
       rt.ram_backed,
       rt.full_rect,
       is_signed,
-      exact_snap.pixelFormat == MTLPixelFormatRGBA8Unorm,
+      rt.texture_pixel_format == MTLPixelFormatRGBA8Unorm,
       fetch.format,
       bool(fetch.tiled),
       fetch.dimension,
@@ -927,7 +949,7 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
   if (IsDrawResolutionScaled() && s_scaled_cover_enabled) {
     // Snapshot formats whose texels are exactly what the RAM upload of the
     // fetch format decodes to.
-    MTLPixelFormat snapshot_format = exact_snap.pixelFormat;
+    MTLPixelFormat snapshot_format = MTLPixelFormat(rt.texture_pixel_format);
     bool format_matches =
         (snapshot_format == MTLPixelFormatRGBA8Unorm &&
          fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
@@ -950,9 +972,9 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
     scaled.fetch_height = fetch_h;
     scaled.fetch_pitch_texels = uint32_t(fetch.pitch) << 5;
     scaled.snapshot_width =
-        uint32_t(exact_snap.width) / draw_resolution_scale_x_;
+        rt.texture_width / draw_resolution_scale_x_;
     scaled.snapshot_height =
-        uint32_t(exact_snap.height) / draw_resolution_scale_y_;
+        rt.texture_height / draw_resolution_scale_y_;
     scaled.rows_written = rt.scaled_rows_written;
     scaled.fetch_endianness = uint32_t(fetch.endianness);
     scaled.wb_endian = rt.wb_endian;
@@ -1082,12 +1104,18 @@ bool SnapshotFitEnabled() {
 // joined into a full-size parent texture while the registration tracks the
 // last strip, and a fetch of the parent's size needs no fit (fitting it to
 // one strip blanked the lower half of the scene depth: corpus A/B 2026-10-03).
+void MetalTextureCache::CacheSnapshotProperties(ResolvedTarget& rt) {
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)rt.texture;
+  rt.texture_width = tex ? uint32_t(tex.width) : 0;
+  rt.texture_height = tex ? uint32_t(tex.height) : 0;
+  rt.texture_pixel_format = tex ? uint32_t(tex.pixelFormat) : 0;
+}
+
 void MetalTextureCache::SnapshotObjectDims(const ResolvedTarget& rt,
                                            uint32_t* width_out,
                                            uint32_t* height_out) const {
-  id<MTLTexture> tex = (__bridge id<MTLTexture>)rt.texture;
-  *width_out = uint32_t(tex.width) / std::max(1u, draw_resolution_scale_x_);
-  *height_out = uint32_t(tex.height) / std::max(1u, draw_resolution_scale_y_);
+  *width_out = rt.texture_width / std::max(1u, draw_resolution_scale_x_);
+  *height_out = rt.texture_height / std::max(1u, draw_resolution_scale_y_);
 }
 
 bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
@@ -1132,6 +1160,16 @@ void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
 bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
                                              uint32_t fetch_w,
                                              uint32_t fetch_h) {
+  ResolvedTarget::FittedView& current = rt.fitted;
+  // Steady state (every draw sampling a fitted view): the view already holds
+  // this snapshot generation at these dims. A view is only ever blitted from
+  // a source of its own pixel format (a mismatch retires it first), so the
+  // format check below cannot fail here; skip its Objective-C reads.
+  if (current.texture && current.width == fetch_w &&
+      current.height == fetch_h && current.source == rt.texture &&
+      current.source_generation == rt.generation) {
+    return true;
+  }
   id<MTLTexture> src = (__bridge id<MTLTexture>)rt.texture;
   ResolvedTarget::FittedView& fv = rt.fitted;
   // A previous view at other dims carries its content (the union of the
@@ -2911,6 +2949,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
                                                bool requires_fetch_swizzle,
                                                uint32_t guest_extent_start,
                                                uint32_t guest_extent_length) {
+  ++registry_epoch_;
   if (!texture) {
     return;
   }
@@ -2955,6 +2994,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       }
       WriteSlotDescriptor(new_slot, texture);
       it->second.texture = texture;
+      CacheSnapshotProperties(it->second);
       it->second.slot = new_slot;
     }
 
@@ -3025,6 +3065,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       guest_extent ? guest_extent->length() : 0,
       is_depth,
       requires_fetch_swizzle};
+  CacheSnapshotProperties(resolved_targets_[base]);
   if (IsDrawResolutionScaled()) {
     ResolvedTarget& registered = resolved_targets_[base];
     registered.scaled_rows_written = height;
@@ -3036,6 +3077,7 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
 }
 
 void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
+  ++registry_epoch_;
   if (!texture) {
     return;
   }
@@ -3087,6 +3129,7 @@ void MetalTextureCache::ExtendResolvedTargetCoverage(void* texture,
                                                      uint32_t extent_start,
                                                      uint32_t extent_length,
                                                      uint32_t wb_endian) {
+  ++registry_epoch_;
   if (!IsDrawResolutionScaled() || !texture) {
     return;
   }
@@ -3122,6 +3165,7 @@ void MetalTextureCache::MarkResolvedTargetRamBacked(uint32_t base,
                                                     uint32_t wb_height,
                                                     bool full_rect_geometry,
                                                     uint32_t wb_endian) {
+  ++registry_epoch_;
   auto it = resolved_targets_.find(base);
   if (it == resolved_targets_.end()) {
     return;
@@ -3303,6 +3347,7 @@ void MetalTextureCache::RegisterScaledAssembly(
     uint32_t base0, void* texture, uint32_t width, uint32_t height, uint32_t x,
     uint32_t w, uint32_t extent_start, uint32_t extent_length,
     uint32_t wb_endian) {
+  ++registry_epoch_;
   if (!IsDrawResolutionScaled() || !texture) {
     return;
   }
@@ -3475,6 +3520,7 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
       if ((guest_extent && invalidation->Overlaps(*guest_extent)) ||
           (scaled_extent && invalidation->Overlaps(*scaled_extent))) {
         RetireResolvedTarget(it->second);
+        ++registry_epoch_;
         it = resolved_targets_.erase(it);
         ++evicted;
       } else {

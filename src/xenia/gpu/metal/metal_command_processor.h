@@ -564,6 +564,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // Per pixel shader (ucode hash): the fetch constants its bindings sample.
   std::unordered_map<uint64_t, uint32_t> pixel_shader_fetch_masks_;
   void WriteRegister(uint32_t index, uint32_t value) override;
+  void OnRegistersRestoredRaw(uint32_t first_register,
+                              uint32_t register_count) override;
   void CommitSideCommandBuffer(uint64_t submission, uint64_t submit_epoch);
 
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)
@@ -657,6 +659,41 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   // [stage kind: vertex, fragment, object, mesh][bind point slot 0..2].
   EncoderBufferBind encoder_buffer_binds_[4][3];
+  // Fixed-function state IssueDraw last set on the open encoder
+  // (XE_METAL_STATE_DEDUPE=0 disables). Nothing else sets these on the draw
+  // encoder, and a new encoder resets them with the rest. Burnout set all of
+  // it on each of ~7,600 draws a frame: ~5% of the command-processor thread
+  // on the M1 Max, mostly repeats of the previous draw.
+  struct EncoderFixedState {
+    void* pipeline = nullptr;
+    bool viewport_valid = false, scissor_valid = false;
+    bool depth_bias_valid = false, blend_color_valid = false;
+    int32_t depth_clip = -1, cull = -1, winding = -1, fill = -1;
+    // IssueDraw's IR draw-parameter binding (XE_METAL_DRAW_PARAMS).
+    int32_t draw_params = -1;
+    // Scissor clamp extent of the bound attachments (the encoder retains
+    // them, so the pointers cannot be recycled while it is open).
+    bool extent_valid = false;
+    void* extent_key[5] = {};
+    uint32_t extent_width = 0, extent_height = 0;
+    double viewport[6] = {};
+    uint64_t scissor[4] = {};
+    float depth_bias[2] = {};
+    float blend_color[4] = {};
+  };
+  EncoderFixedState encoder_fixed_state_;
+  // Last descriptor index plan per shader stage (vertex, pixel): a pure
+  // function of the shader's binding lists, asked on every draw.
+  struct DescriptorPlanMemo {
+    const void* shader = nullptr;
+    const void* textures = nullptr;
+    const void* samplers = nullptr;
+    size_t texture_count = 0, sampler_count = 0;
+    uint32_t plan_count = 1;
+    bool plan_valid = true;
+  };
+  DescriptorPlanMemo descriptor_plan_memo_[2];
+  static bool StateDedupeEnabled();
   static bool EncoderDedupeEnabled();
   static bool HostReadFastEnabled();
   void ResetEncoderDedupe();
@@ -1182,6 +1219,26 @@ class MetalCommandProcessor : public CommandProcessor {
   // keep their capacity (IssueDraw).
   metal::ConsumerRequest vertex_request_scratch_;
   metal::ConsumerRequest texture_request_scratch_;
+  // Texture-dependency memo (XE_METAL_TEX_DEP_MEMO): draws whose shader pair
+  // and bound fetch words were already found to have NO dependency on any
+  // pending producer, while the producer set, the completed submission, the
+  // resolved-target registry and trace capture are all unchanged. Any change
+  // to that state clears it. Burnout: ~90% of texture consultations are
+  // empty and 88% of bindings repeat.
+  struct TexDependencyMemo {
+    uint64_t sequence = ~uint64_t(0);
+    uint64_t completed = ~uint64_t(0);
+    uint64_t registry_epoch = ~uint64_t(0);
+    size_t writebacks = ~size_t(0);
+    size_t memexports = ~size_t(0);
+    bool trace_open = false;
+    // hash -> exact key (shader pointers, bound mask, bound fetch words).
+    std::unordered_map<uint64_t, std::vector<uint32_t>> entries;
+    std::vector<uint32_t> key_scratch;
+    uint64_t hits = 0, misses = 0, inserts = 0, clears = 0;
+    uint64_t verify_checked = 0, verify_mismatches = 0;
+  };
+  TexDependencyMemo tex_dependency_memo_;
   metal::GuestRangeSet unserved_ranges_scratch_;
 
   // Memexport draws executed this frame whose exports are not yet coherent in

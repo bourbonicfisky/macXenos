@@ -91,6 +91,7 @@ enum : uint32_t {
   kMtlPixelFormatR8Unorm = 10,
   kMtlPixelFormatB5G6R5Unorm = 40,
   kMtlPixelFormatABGR4Unorm = 42,
+  kMtlPixelFormatBGR5A1Unorm = 43,
   kMtlPixelFormatR8Snorm = 12,
   kMtlPixelFormatR16Unorm = 20,
   kMtlPixelFormatR16Snorm = 22,
@@ -220,6 +221,15 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_5_6_5, SharedLoadFamily::k16bpb,
        kMtlPixelFormatB5G6R5Unorm, kMtlPixelFormatB5G6R5Unorm,
        XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, R), 2, false},
+      // 1:5:5:5 native (Apple, packed16), 2026-10-19: the raw 16-bit copy into
+      // BGR5A1Unorm with the legacy plan's host swizzle (guest R in the low
+      // bits, Metal's B field; device probe), so routed and legacy serve the
+      // same bits. Fable II's 256x256 mipped 1:5:5:5 textures were neither
+      // served nor routable: their draws waited on the GPU 21 times a frame.
+      // Selected only with packed16; XE_METAL_TEX_1555=0 drops it.
+      {xenos::TextureFormat::k_1_5_5_5, SharedLoadFamily::k16bpb,
+       kMtlPixelFormatBGR5A1Unorm, kMtlPixelFormatBGR5A1Unorm,
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A), 2, false},
       // CTX1 decoded to RG8 on the GPU, mips included (Halo 3 materials: 134
       // mipped uploads in a 40 s sweep served base-only by the legacy CPU
       // decode, on every GPU). RGGG like the legacy plan; no snorm sibling,
@@ -447,6 +457,16 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormatUncached(
           table[i].load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8;
       if (packed16 == expands) {
         continue;
+      }
+    }
+    if (table[i].format == xenos::TextureFormat::k_1_5_5_5) {
+      static const bool s_1555 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_1555");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_1555 ||
+          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+        return nullptr;
       }
     }
     if (table[i].format == xenos::TextureFormat::k_CTX1) {

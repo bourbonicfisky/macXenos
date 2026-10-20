@@ -408,7 +408,10 @@ kernel void materialize_color_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -424,7 +427,10 @@ kernel void pack_color_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint off = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -440,7 +446,10 @@ kernel void materialize_color64_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -456,7 +465,10 @@ kernel void pack_color64_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -473,7 +485,10 @@ kernel void materialize_color_raw_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -487,7 +502,10 @@ kernel void pack_color_raw_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -502,7 +520,10 @@ kernel void materialize_color64_raw_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -518,7 +539,10 @@ kernel void pack_color64_raw_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint2 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint2 gid = uint2(xe_tid.x, xe_tid.y + row_start);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       !xe_authority_in_range(gid.x, gid.y, sp, 0u, range)) return;
   uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
@@ -655,7 +679,10 @@ kernel void pack_color_ms_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint3 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(xe_tid.x, xe_tid.y + row_start, xe_tid.z);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples() ||
@@ -693,7 +720,10 @@ kernel void pack_color64_ms_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint3 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(xe_tid.x, xe_tid.y + row_start, xe_tid.z);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples() ||
@@ -730,7 +760,10 @@ kernel void pack_color_raw_ms_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint3 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(xe_tid.x, xe_tid.y + row_start, xe_tid.z);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples() ||
@@ -767,7 +800,10 @@ kernel void pack_color64_raw_ms_range(
     constant SurfaceParams& sp [[buffer(1)]],
     constant uint& format [[buffer(2)]],
     constant AuthorityRangeParams& range [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint3 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(xe_tid.x, xe_tid.y + row_start, xe_tid.z);
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||
       gid.z >= tex.get_num_samples() ||
@@ -1096,7 +1132,10 @@ kernel void lane_store_ms_range(
     device float* lane [[buffer(0)]],
     constant SurfaceParams& sp [[buffer(1)]],
     constant AuthorityRangeParams& range [[buffer(2)]],
-    uint3 gid [[thread_position_in_grid]]) {
+    constant uint& row_start [[buffer(7)]],
+    uint3 xe_tid [[thread_position_in_grid]]) {
+  // The dispatch starts at the range's first texture row (row_start).
+  uint3 gid = uint3(xe_tid.x, xe_tid.y + row_start, xe_tid.z);
   if (sp.is_depth != 2u) return;
   uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
   if (gid.x >= tex.get_width() || gid.y >= tex.get_height() ||

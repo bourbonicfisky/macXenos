@@ -160,6 +160,10 @@ class MetalTextureCache {
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
   const std::vector<void*>& active_textures() const { return active_textures_; }
+  // Bumped by every change to the resolved-target registry (registration,
+  // tip views, coverage, RAM-backed marking, retirement, invalidation). The
+  // per-draw texture-dependency memo keys on it.
+  uint64_t registry_epoch() const { return registry_epoch_; }
   void ResetActive() {
     active_textures_.clear();
     binding_allocation_failed_ = false;
@@ -671,6 +675,13 @@ class MetalTextureCache {
     // column writes) clear this and keep the exact-address RAM path.
     bool full_rect = false;
     uint32_t wb_endian = 0;
+    // Immutable properties of `texture` (an MTLTexture never changes size or
+    // format), cached wherever `texture` is assigned: the per-binding serve
+    // classification read them through Objective-C on every draw (Burnout:
+    // ~15k bindings a frame).
+    uint32_t texture_width = 0;
+    uint32_t texture_height = 0;
+    uint32_t texture_pixel_format = 0;  // MTLPixelFormat
     // Draw resolution scaling only (scaled-cover serving): guest rows from the
     // top of the snapshot written by resolves (the base resolve and joined
     // strips) since the texture was created, and the union of their guest
@@ -718,6 +729,8 @@ class MetalTextureCache {
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
+  uint64_t registry_epoch_ = 0;
+  static void CacheSnapshotProperties(ResolvedTarget& rt);
   void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
                           uint32_t* height_out) const;
   bool SnapshotFitApplies(const ResolvedTarget& rt, uint32_t fetch_w,

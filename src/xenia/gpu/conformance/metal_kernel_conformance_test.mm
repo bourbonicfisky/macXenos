@@ -1163,6 +1163,9 @@ struct MetalCompute {
         [encoder setComputePipelineState:pipeline];
         NSUInteger tw = pipeline.threadExecutionWidth;
         NSUInteger th = pipeline.maxTotalThreadsPerThreadgroup / tw;
+        // Range kernels take their first texture row at buffer(7).
+        static const uint32_t kXeRowStartZero = 0;
+        [encoder setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
         [encoder dispatchThreads:MTLSizeMake(w, h, 1u)
             threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
       };
@@ -1259,6 +1262,9 @@ struct MetalCompute {
         [encoder setBuffer:range_buf offset:0 atIndex:3];
         NSUInteger tw = pack.threadExecutionWidth;
         NSUInteger th = pack.maxTotalThreadsPerThreadgroup / tw;
+        // Range kernels take their first texture row at buffer(7).
+        static const uint32_t kXeRowStartZero = 0;
+        [encoder setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
         [encoder dispatchThreads:MTLSizeMake(w, h, num_samples)
             threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
         [encoder endEncoding];
@@ -2121,6 +2127,9 @@ TEST_CASE("lane refresh installs the SELECTED source's provenance",
   [compute setBuffer:lane offset:0 atIndex:0];
   [compute setBytes:&sp length:sizeof(sp) atIndex:1];
   [compute setBytes:&range length:sizeof(range) atIndex:2];
+  // Range kernels take their first texture row at buffer(7).
+  static const uint32_t kXeRowStartZero = 0;
+  [compute setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
   [compute dispatchThreads:MTLSizeMake(80, 16, 2)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [compute endEncoding];

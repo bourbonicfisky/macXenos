@@ -801,15 +801,77 @@ bool MetalSharedMemory::AllocateRename(uint32_t length,
 }
 
 void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
-  const size_t before = consumed_ranges_.size();
-  consumed_ranges_.erase(
-      std::remove_if(consumed_ranges_.begin(), consumed_ranges_.end(),
-                     [&](const ConsumedRange& range) {
-                       return range.submission <= completed_submission;
-                     }),
-      consumed_ranges_.end());
-  if (consumed_ranges_.size() != before) {
+  const uint32_t count = uint32_t(consumed_ranges_.size());
+  uint32_t first_removed = 0;
+  while (first_removed < count &&
+         consumed_ranges_[first_removed].submission > completed_submission) {
+    ++first_removed;
+  }
+  if (first_removed == count) {
+    return;
+  }
+  // Compact in place and remap both indices: survivors keep their order, so
+  // every page list stays ascending. Until 2026-10-19 any release rebuilt
+  // both from scratch, freeing and reallocating every hash node, once per
+  // completed submission (Burnout: ~11 a frame, 1.5% of the CP thread). The
+  // hash is only a shortcut (a miss falls back to the page scan), so a
+  // duplicate key losing its entry costs a scan, never a wrong answer.
+  // XE_METAL_CONSUMED_REBUILD=1 restores the rebuild.
+  static const bool s_rebuild = [] {
+    const char* v = std::getenv("XE_METAL_CONSUMED_REBUILD");
+    return v && v[0] == '1' && !v[1];
+  }();
+  if (s_rebuild) {
+    consumed_ranges_.erase(
+        std::remove_if(consumed_ranges_.begin(), consumed_ranges_.end(),
+                       [&](const ConsumedRange& range) {
+                         return range.submission <= completed_submission;
+                       }),
+        consumed_ranges_.end());
     RebuildConsumedIndex();
+    return;
+  }
+  constexpr uint32_t kRemoved = UINT32_MAX;
+  consumed_remap_.resize(count);
+  for (uint32_t i = 0; i < first_removed; ++i) {
+    consumed_remap_[i] = i;
+  }
+  uint32_t kept = first_removed;
+  for (uint32_t i = first_removed; i < count; ++i) {
+    const ConsumedRange range = consumed_ranges_[i];
+    if (range.submission <= completed_submission) {
+      consumed_remap_[i] = kRemoved;
+      continue;
+    }
+    consumed_ranges_[kept] = range;
+    consumed_remap_[i] = kept++;
+  }
+  consumed_ranges_.resize(kept);
+  // The flat map has no erase; refilling it keeps its storage (no allocation)
+  // and, like AppendConsumedRange, lets the newest range own a duplicate key.
+  consumed_index_.Clear();
+  for (uint32_t i = 0; i < kept; ++i) {
+    const ConsumedRange& range = consumed_ranges_[i];
+    consumed_index_.Insert((uint64_t(range.first) << 32) | range.second, i,
+                           true);
+  }
+  if (ConsumedPageIndexEnabled()) {
+    size_t pages_kept = 0;
+    for (uint32_t page : consumed_pages_touched_) {
+      std::vector<uint32_t>& list = consumed_pages_[page];
+      size_t out = 0;
+      for (uint32_t index : list) {
+        const uint32_t mapped = consumed_remap_[index];
+        if (mapped != kRemoved) {
+          list[out++] = mapped;
+        }
+      }
+      list.resize(out);
+      if (out) {
+        consumed_pages_touched_[pages_kept++] = page;
+      }
+    }
+    consumed_pages_touched_.resize(pages_kept);
   }
 }
 

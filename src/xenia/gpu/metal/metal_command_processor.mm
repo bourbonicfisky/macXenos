@@ -1060,56 +1060,6 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   }
 }
 
-// The shader-converter runtime's draw helpers, inlined without ARC traffic:
-// its out-of-line versions (ir_runtime_impl.mm, ARC) retained and released
-// the encoder and index buffer on every draw -- 2-4% of the command-processor
-// thread on the Mac Pro. Same Metal calls, same draw-parameter bytes.
-inline void DrawIndexedNoRetain(
-    __unsafe_unretained id<MTLRenderCommandEncoder> enc,
-    MTLPrimitiveType primitive_type, uint64_t index_count,
-    MTLIndexType index_type, __unsafe_unretained id<MTLBuffer> index_buffer,
-    uint64_t index_buffer_offset, uint64_t instance_count, int64_t base_vertex,
-    uint64_t base_instance) {
-  IRRuntimeDrawIndexedArgument da = (IRRuntimeDrawIndexedArgument){
-      .indexCountPerInstance = (uint32_t)index_count,
-      .instanceCount = (uint32_t)instance_count,
-      .startIndexLocation = (uint32_t)index_buffer_offset,
-      .baseVertexLocation = (int32_t)base_vertex,
-      .startInstanceLocation = (uint32_t)base_instance};
-  IRRuntimeDrawParams dp = {.drawIndexed = da};
-  const uint16_t ir_index_type = uint16_t(index_type + 1);
-  [enc setVertexBytes:&dp
-               length:sizeof(IRRuntimeDrawParams)
-              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
-  [enc setVertexBytes:&ir_index_type
-               length:sizeof(uint16_t)
-              atIndex:kIRArgumentBufferUniformsBindPoint];
-  [enc drawIndexedPrimitives:primitive_type
-                  indexCount:index_count
-                   indexType:index_type
-                 indexBuffer:index_buffer
-           indexBufferOffset:index_buffer_offset
-               instanceCount:instance_count
-                  baseVertex:base_vertex
-                baseInstance:base_instance];
-}
-
-inline void DrawNoRetain(__unsafe_unretained id<MTLRenderCommandEncoder> enc,
-                         MTLPrimitiveType primitive_type, uint64_t vertex_start,
-                         uint64_t vertex_count) {
-  IRRuntimeDrawArgument da = {(uint32_t)vertex_count, 1u,
-                              (uint32_t)vertex_start, 0u};
-  IRRuntimeDrawParams dp = {.draw = da};
-  [enc setVertexBytes:&dp
-               length:sizeof(IRRuntimeDrawParams)
-              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
-  [enc drawPrimitives:primitive_type
-          vertexStart:vertex_start
-          vertexCount:vertex_count
-        instanceCount:1
-         baseInstance:0];
-}
-
 // XE_METAL_HEAP_MISS_LOG=1: names each distinct texture that the
 // heap path still declares per draw (diagnostic only).
 void LogHeapMissTexture(void* tex) {
@@ -2085,6 +2035,24 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     fetch_plain_known_mask_ &= ~(1u << slot);
   }
   CommandProcessor::WriteRegister(index, value);
+}
+
+void MetalCommandProcessor::OnRegistersRestoredRaw(uint32_t first_register,
+                                                   uint32_t register_count) {
+  // Trace playback restores register snapshots without WriteRegister: every
+  // fetch constant in the range is dirty and its cached sign/plain state stale.
+  constexpr uint32_t kFetchBase = 0x4800u;
+  constexpr uint32_t kFetchEnd = kFetchBase + 32u * 6u;
+  const uint32_t first = std::max(first_register, kFetchBase);
+  const uint32_t end = std::min(first_register + register_count, kFetchEnd);
+  if (first >= end) {
+    return;
+  }
+  for (uint32_t slot = (first - kFetchBase) / 6u;
+       slot <= (end - 1u - kFetchBase) / 6u; ++slot) {
+    fetch_constant_dirty_mask_ |= 1u << slot;
+    fetch_plain_known_mask_ &= ~(1u << slot);
+  }
 }
 
 void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
@@ -6185,6 +6153,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.
   {
@@ -6475,6 +6444,111 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // path). With the gate off use_tessellation_emulation is always false and
   // this is exactly the pre-existing expression.
   draw_trace_milestone("after-shaders");
+  // XE_METAL_REPEAT_DRAW_CENSUS=1 (diagnostic): how many draws repeat the
+  // previous draw's texture inputs -- the same shader pair, and no fetch
+  // constant either shader binds rewritten since -- and how many of those
+  // also have no pending GPU producer (resolve writeback or memexport) that
+  // could change what a texture serves. Those draws are the ceiling of a
+  // per-draw texture-binding reuse (Burnout: ~7,700 draws a frame, ~20% of
+  // the command-processor thread in per-draw texture work, 2026-10-19).
+  {
+    static const bool s_repeat_census =
+        std::getenv("XE_METAL_REPEAT_DRAW_CENSUS") != nullptr;
+    if (s_repeat_census) {
+      static const void* s_prev_vs = nullptr;
+      static const void* s_prev_ps = nullptr;
+      static uint64_t s_draws = 0, s_same_shaders = 0, s_repeat = 0,
+                      s_repeat_quiet = 0, s_textured = 0;
+      uint32_t bound_mask = 0;
+      for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+        if (!shader) {
+          continue;
+        }
+        for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+          if (binding.fetch_constant < 32) {
+            bound_mask |= 1u << binding.fetch_constant;
+          }
+        }
+      }
+      ++s_draws;
+      if (bound_mask) {
+        ++s_textured;
+      }
+      if (vertex_shader == s_prev_vs && pixel_shader == s_prev_ps) {
+        ++s_same_shaders;
+        if (bound_mask && !(fetch_constant_dirty_mask_ & bound_mask)) {
+          ++s_repeat;
+          if (pending_writebacks_.empty() && pending_memexports_.empty()) {
+            ++s_repeat_quiet;
+          }
+        }
+      }
+      s_prev_vs = vertex_shader;
+      s_prev_ps = pixel_shader;
+      if ((s_draws & 65535) == 0) {
+        XELOGI(
+            "MetalRepeatDrawCensus draws={} textured={:.1f}% same-shaders="
+            "{:.1f}% textured-repeat={:.1f}% repeat-without-pending="
+            "{:.1f}%",
+            s_draws, 100.0 * double(s_textured) / double(s_draws),
+            100.0 * double(s_same_shaders) / double(s_draws),
+            100.0 * double(s_repeat) / double(s_draws),
+            100.0 * double(s_repeat_quiet) / double(s_draws));
+      }
+      // v2: per binding, are the slot's six fetch words unchanged since the
+      // slot was last bound, and is the producer state (authority sequence,
+      // pending writeback/memexport counts) unchanged since then? That pair
+      // is the ceiling of a per-slot memo of the texture phase.
+      {
+        struct SlotSeen {
+          uint32_t words[6];
+          uint64_t sequence;
+          size_t writebacks, memexports;
+          bool valid;
+        };
+        static SlotSeen s_seen[32] = {};
+        static uint64_t s_bindings = 0, s_same_words = 0, s_same_all = 0,
+                        s_draws_tex = 0, s_draws_all = 0;
+        bool draw_all = bound_mask != 0;
+        for (uint32_t slot = 0; slot < 32; ++slot) {
+          if (!(bound_mask & (1u << slot))) {
+            continue;
+          }
+          const uint32_t* w =
+              &register_file_->values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
+                                      slot * 6];
+          SlotSeen& seen = s_seen[slot];
+          ++s_bindings;
+          const bool same_words =
+              seen.valid && std::memcmp(seen.words, w, sizeof(seen.words)) == 0;
+          const bool same_state =
+              seen.valid && seen.sequence == memory_authority_sequence_ &&
+              seen.writebacks == pending_writebacks_.size() &&
+              seen.memexports == pending_memexports_.size();
+          s_same_words += same_words;
+          s_same_all += same_words && same_state;
+          draw_all = draw_all && same_words && same_state;
+          std::memcpy(seen.words, w, sizeof(seen.words));
+          seen.sequence = memory_authority_sequence_;
+          seen.writebacks = pending_writebacks_.size();
+          seen.memexports = pending_memexports_.size();
+          seen.valid = true;
+        }
+        s_draws_tex += bound_mask != 0;
+        s_draws_all += draw_all;
+        if ((s_draws & 65535) == 0 && s_bindings) {
+          XELOGI(
+              "MetalSlotReuseCensus bindings={} same-words={:.1f}% "
+              "same-words+producers={:.1f}% | textured draws all-reusable="
+              "{:.1f}%",
+              s_bindings, 100.0 * double(s_same_words) / double(s_bindings),
+              100.0 * double(s_same_all) / double(s_bindings),
+              s_draws_tex ? 100.0 * double(s_draws_all) / double(s_draws_tex)
+                          : 0.0);
+        }
+      }
+    }
+  }
   static const char* const s_draw_trace_env =
       std::getenv("XE_METAL_DRAW_TRACE");
   if (s_draw_trace_env &&
@@ -6928,7 +7002,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         (color_bound ? regs[reg::RB_COLOR_INFO::rt_register_indices[0]] : 0) ^
         (depth_bound ? (uint64_t(rb_depth_info.value) | (1ull << 32)) : 0);
     static std::unordered_set<uint64_t> s_seen_rt_configs;
-    if (s_seen_rt_configs.insert(cfg_key).second) {
+    // Consecutive draws nearly always repeat the configuration: test the
+    // previous key before the set insert.
+    static uint64_t s_last_rt_config = ~uint64_t(0);
+    if (cfg_key != s_last_rt_config &&
+        (s_last_rt_config = cfg_key, s_seen_rt_configs.insert(cfg_key).second)) {
       XELOGI(
           "MetalRTConfig: color={} (base={} fmt={} mask={:X} expbias={}) "
           "depth={} (base={} fmt={}) ncm={:04X}",
@@ -7345,9 +7423,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       logc(255);
     }
   }
+  // DIAGNOSTICS (JC2 lighting investigation, closed): the producer and
+  // consumer logs below did hash-set and resolve-snapshot lookups on every
+  // draw to log once per shader (about 1% of the Burnout command-processor
+  // thread, 2026-10-20). XE_METAL_RT_CONSUMER_LOG=1 (or
+  // XE_METAL_RT_CONSUMER_ALL) arms them.
+  static const bool s_rt_consumer_log =
+      std::getenv("XE_METAL_RT_CONSUMER_LOG") != nullptr ||
+      std::getenv("XE_METAL_RT_CONSUMER_ALL") != nullptr;
   // DIAGNOSTIC: the quarter-res lighting producer — log draws into small-pitch
   // color RTs (the inferred-lighting buffer) with everything they sample.
-  if (color_bound && pixel_shader &&
+  if (s_rt_consumer_log && color_bound && pixel_shader &&
       regs.Get<reg::RB_SURFACE_INFO>().surface_pitch <= 400) {
     static std::unordered_set<uint64_t> s_seen_light_producer;
     if (s_seen_light_producer.insert(pixel_shader->ucode_data_hash()).second &&
@@ -7378,7 +7464,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // every draw whose PS samples a RESOLVED SNAPSHOT (the RT-consuming passes —
   // deferred lighting, composite, post) with what it samples and where it
   // writes, so the black lighting can be traced through the pass graph.
-  if (color_bound && pixel_shader && render_target_cache_) {
+  if (s_rt_consumer_log && color_bound && pixel_shader &&
+      render_target_cache_) {
     bool samples_snapshot = false;
     for (const auto& binding :
          pixel_shader->GetTextureBindingsAfterTranslation()) {
@@ -8640,7 +8727,96 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
   draw_gpu_ordering_active_ = false;
-  if (!pending_writebacks_.empty() || !pending_memexports_.empty()) {
+  // XE_METAL_TEX_DEP_MEMO: 1 on (default), 0 off, 2 verify (run the full
+  // block anyway and count memo hits whose real decision was not empty; 0 of
+  // ~80M across Burnout, JC2, RDR, Sonic, Gears 3, VP, Judgment, FEAR and
+  // GTA IV). See TexDependencyMemo in the header.
+  static const uint32_t s_tex_dep_memo = [] {
+    const char* v = std::getenv("XE_METAL_TEX_DEP_MEMO");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 1u;
+  }();
+  bool tex_dep_memo_hit = false;
+  uint64_t tex_dep_memo_hash = 0;
+  if (s_tex_dep_memo &&
+      (!pending_writebacks_.empty() || !pending_memexports_.empty())) {
+    TexDependencyMemo& memo = tex_dependency_memo_;
+    // Completion is not part of the key unless XE_METAL_TEX_DEP_MEMO_COMPLETED
+    // is set: an empty decision means no overlap with any pending record, and
+    // retiring a record changes the pending counts, which are.
+    static const bool s_key_completed =
+        std::getenv("XE_METAL_TEX_DEP_MEMO_COMPLETED") != nullptr;
+    const uint64_t completed =
+        s_key_completed ? completed_submission_.load(std::memory_order_acquire)
+                        : 0;
+    const uint64_t epoch = texture_cache_ ? texture_cache_->registry_epoch() : 0;
+    const bool trace_open = trace_writer_.is_open();
+    if (memo.sequence != memory_authority_sequence_ ||
+        memo.completed != completed || memo.registry_epoch != epoch ||
+        memo.writebacks != pending_writebacks_.size() ||
+        memo.memexports != pending_memexports_.size() ||
+        memo.trace_open != trace_open) {
+      if (!memo.entries.empty()) {
+        memo.entries.clear();
+        ++memo.clears;
+      }
+      memo.sequence = memory_authority_sequence_;
+      memo.completed = completed;
+      memo.registry_epoch = epoch;
+      memo.writebacks = pending_writebacks_.size();
+      memo.memexports = pending_memexports_.size();
+      memo.trace_open = trace_open;
+    }
+    std::vector<uint32_t>& key = memo.key_scratch;
+    key.clear();
+    const uint64_t vs_bits = uint64_t(uintptr_t(vertex_shader));
+    const uint64_t ps_bits = uint64_t(uintptr_t(pixel_shader));
+    key.push_back(uint32_t(vs_bits));
+    key.push_back(uint32_t(vs_bits >> 32));
+    key.push_back(uint32_t(ps_bits));
+    key.push_back(uint32_t(ps_bits >> 32));
+    uint32_t bound_mask = 0;
+    for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+      if (!shader) {
+        continue;
+      }
+      for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
+        if (binding.fetch_constant < 32) {
+          bound_mask |= 1u << binding.fetch_constant;
+        }
+      }
+    }
+    key.push_back(bound_mask);
+    for (uint32_t m = bound_mask; m;) {
+      const uint32_t slot = uint32_t(__builtin_ctz(m));
+      m &= m - 1;
+      const uint32_t* w = &register_file_->values
+          [XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6];
+      key.insert(key.end(), w, w + 6);
+    }
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (uint32_t v : key) {
+      hash = (hash ^ v) * 0x100000001b3ull;
+    }
+    tex_dep_memo_hash = hash;
+    auto it = memo.entries.find(hash);
+    tex_dep_memo_hit = it != memo.entries.end() && it->second == key;
+    if (tex_dep_memo_hit) {
+      ++memo.hits;
+    } else {
+      ++memo.misses;
+    }
+    if (((memo.hits + memo.misses) & 0xFFFFF) == 0) {
+      XELOGI(
+          "MetalTexDepMemo hits={} misses={} ({:.1f}% hit) inserts={} "
+          "clears={} verify checked={} mismatches={}",
+          memo.hits, memo.misses,
+          100.0 * double(memo.hits) / double(memo.hits + memo.misses),
+          memo.inserts, memo.clears, memo.verify_checked,
+          memo.verify_mismatches);
+    }
+  }
+  if ((!pending_writebacks_.empty() || !pending_memexports_.empty()) &&
+      !(tex_dep_memo_hit && s_tex_dep_memo == 1)) {
     // CENSUS ONLY: the same request with GPU-served fetches omitting their
     // resolve range, so the decision the repair WOULD take can be compared
     // against the one taken. Never passed to the production path.
@@ -9208,6 +9384,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      "texture-dependency-drain");
       return true;
     }
+    if (s_tex_dep_memo) {
+      TexDependencyMemo& memo = tex_dependency_memo_;
+      const bool no_dependency =
+          authority_decision.selected.empty() &&
+          authority_decision.action == metal::AuthorityAction::kNoDependency;
+      if (tex_dep_memo_hit) {
+        // Verify mode only (mode 1 skipped this block on a hit).
+        ++memo.verify_checked;
+        if (!no_dependency && ++memo.verify_mismatches <= 32) {
+          XELOGE(
+              "MetalTexDepMemo VERIFY MISMATCH draw={} action={} selected={}",
+              trace_draw_index_, uint32_t(authority_decision.action),
+              authority_decision.selected.size());
+        }
+      } else if (no_dependency) {
+        memo.entries[tex_dep_memo_hash] = memo.key_scratch;
+        ++memo.inserts;
+      }
+    }
   }
 
   // C1T-R prepass: prepare eligible strict-RGBA8 kRamContent
@@ -9622,6 +9817,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  draw_trace_milestone("after-primitive-processor");
+
   // Auto line loops have no valid inline Metal fallback: the guest topology is
   // intentionally unmapped. If view consistency, Process, or the exact shape
   // guard rejected the route, preserve the prior behavior and skip.
@@ -9708,6 +9905,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Host scissor rows of this draw (pack census dirty rows); whole range
   // until the scissor is applied below.
   uint32_t draw_host_y0 = 0, draw_host_y1 = UINT32_MAX;
+  bool draw_full_width = true;  // the scissor spans the render width
   // Attribution aid: XE_METAL_PASS_SPLIT_EVERY=<n> ends the open pass every n
   // draws (legacy binding), to measure what a pass boundary alone does to
   // attachment contents on this GPU.
@@ -9736,6 +9934,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     prepare_fits(pixel_shader);
     prepare_fits(vertex_shader);
   }
+  draw_trace_milestone("after-snapshot-fit");
   __unsafe_unretained id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
@@ -9743,6 +9942,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    "encoder-unavailable");
     return true;
   }
+  draw_trace_milestone("after-encoder");
   if (PassCensusEnabled() && !memexport_draw) {
     pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
         norm_depth, normalized_color_mask, blend_controls,
@@ -9941,7 +10141,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         uint32_t fc = binding.fetch_constant;
         auto fetch = regs.GetTextureFetch(fc);
-        uint32_t signs = texture_util::SwizzleSigns(fetch);
+        // fetch_static_info_ holds the signs and scale bits of every constant
+        // whose known bit survives (cleared by WriteRegister on a changed
+        // dword); recomputing them per binding per draw was ~1.5% of the
+        // Burnout command-processor thread. XE_METAL_FETCH_SIGNS_MEMO=0
+        // recomputes.
+        static const bool s_signs_memo = [] {
+          const char* v = std::getenv("XE_METAL_FETCH_SIGNS_MEMO");
+          return !(v && v[0] == '0' && !v[1]);
+        }();
+        const bool signs_known =
+            s_signs_memo && fc < 32 && (fetch_plain_known_mask_ & (1u << fc));
+        uint32_t signs = signs_known ? fetch_static_info_[fc].swizzled_signs
+                                     : texture_util::SwizzleSigns(fetch);
         system_constants.texture_swizzled_signs[fc >> 2] |=
             signs << ((fc & 3) * 8);
         // Integer num_format on a fixed-point format needs the guest's
@@ -9963,9 +10175,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // component as that lane's sign. They are consumed together, in the
         // same shader, one immediately after the other.
         if (integer_texture_scaling_enabled) {
-          PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
-                                  system_constants.texture_integer_scale_bits,
-                                  kMetalIntegerScaleSlotCount);
+          if (signs_known) {
+            if (fc < kMetalIntegerScaleSlotCount) {
+              system_constants.texture_integer_scale_bits[fc] =
+                  fetch_static_info_[fc].integer_scale_bits;
+            }
+          } else {
+            PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
+                                    system_constants.texture_integer_scale_bits,
+                                    kMetalIntegerScaleSlotCount);
+          }
         }
         // Draw resolution scaling: a fetch served from a resolve snapshot reads
         // the scaled snapshot, so the shader applies the scaled texel-offset
@@ -10211,7 +10430,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       vp.height = viewport_info.xy_extent[1];
       vp.znear = viewport_info.z_min;
       vp.zfar = viewport_info.z_max;
-      [encoder setViewport:vp];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const double vp_values[6] = {vp.originX, vp.originY, vp.width,
+                                   vp.height,  vp.znear,   vp.zfar};
+      if (!state_dedupe || !fs.viewport_valid ||
+          std::memcmp(fs.viewport, vp_values, sizeof(vp_values))) {
+        [encoder setViewport:vp];
+        std::memcpy(fs.viewport, vp_values, sizeof(vp_values));
+        fs.viewport_valid = true;
+      }
     } else if (!memexport_draw && !vertex_shader->memexport_eM_written()) {
       // A zero-extent viewport rasterizes nothing (D3D12 sets it as is).
       // Metal can't take a zero-size viewport, and skipping setViewport
@@ -10233,10 +10460,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // near/far clipping while the guest keeps X/Y/W clipping, as the Vulkan
       // backend does. Rise of the Tomb Raider's colour-grading LUT slices are
       // drawn at Z/W = -9 and every backend that clips Z drops them.
-      [encoder setDepthClipMode:(depth_clip_mode == MetalDepthClipMode::kClamp ||
-                                 cvars::force_depth_clamp)
-                                    ? MTLDepthClipModeClamp
-                                    : MTLDepthClipModeClip];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const MTLDepthClipMode metal_clip =
+          (depth_clip_mode == MetalDepthClipMode::kClamp ||
+           cvars::force_depth_clamp)
+              ? MTLDepthClipModeClamp
+              : MTLDepthClipModeClip;
+      if (!state_dedupe || fs.depth_clip != int32_t(metal_clip)) {
+        [encoder setDepthClipMode:metal_clip];
+        fs.depth_clip = int32_t(metal_clip);
+      }
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
           regs.Get<reg::PA_SU_SC_MODE_CNTL>(), primitive_polygonal);
       if (face_state.culls_all()) {
@@ -10255,11 +10488,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (s_no_cull) {
         cull_mode = MTLCullModeNone;
       }
-      [encoder setCullMode:cull_mode];
-      [encoder
-          setFrontFacingWinding:face_state.front_face_clockwise
-                                    ? MTLWindingClockwise
-                                    : MTLWindingCounterClockwise];
+      if (!state_dedupe || fs.cull != int32_t(cull_mode)) {
+        [encoder setCullMode:cull_mode];
+        fs.cull = int32_t(cull_mode);
+      }
+      const MTLWinding winding = face_state.front_face_clockwise
+                                     ? MTLWindingClockwise
+                                     : MTLWindingCounterClockwise;
+      if (!state_dedupe || fs.winding != int32_t(winding)) {
+        [encoder setFrontFacingWinding:winding];
+        fs.winding = int32_t(winding);
+      }
 
       // Apply a complete fill/depth-bias value every draw so state cannot leak
       // across guest transitions or newly opened render encoders. The slope
@@ -10273,14 +10512,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset_scale,
           polygon_offset,
           std::max(draw_resolution_scale_x_, draw_resolution_scale_y_));
-      [encoder
-          setTriangleFillMode:fill_bias.triangle_fill_mode ==
-                                      MetalTriangleFillMode::kLines
-                                  ? MTLTriangleFillModeLines
-                                  : MTLTriangleFillModeFill];
-      [encoder setDepthBias:fill_bias.depth_bias_constant
-                 slopeScale:fill_bias.depth_bias_slope
-                      clamp:0.0f];
+      const MTLTriangleFillMode fill_mode =
+          fill_bias.triangle_fill_mode == MetalTriangleFillMode::kLines
+              ? MTLTriangleFillModeLines
+              : MTLTriangleFillModeFill;
+      if (!state_dedupe || fs.fill != int32_t(fill_mode)) {
+        [encoder setTriangleFillMode:fill_mode];
+        fs.fill = int32_t(fill_mode);
+      }
+      const float depth_bias[2] = {fill_bias.depth_bias_constant,
+                                   fill_bias.depth_bias_slope};
+      if (!state_dedupe || !fs.depth_bias_valid ||
+          std::memcmp(fs.depth_bias, depth_bias, sizeof(depth_bias))) {
+        [encoder setDepthBias:fill_bias.depth_bias_constant
+                   slopeScale:fill_bias.depth_bias_slope
+                        clamp:0.0f];
+        std::memcpy(fs.depth_bias, depth_bias, sizeof(depth_bias));
+        fs.depth_bias_valid = true;
+      }
     }
     // Stage 17: apply the guest scissor on every normal raster draw. Shared
     // draw_util owns Xenos window/screen/offset/pitch semantics; the Metal-only
@@ -10292,23 +10541,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       uint32_t render_width = UINT32_MAX;
       uint32_t render_height = UINT32_MAX;
       bool have_render_extent = false;
-      auto intersect_render_extent = [&](void* texture_ptr) {
-        if (!texture_ptr) {
-          return;
-        }
-        __unsafe_unretained id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;
-        render_width = std::min(render_width, uint32_t(texture.width));
-        render_height = std::min(render_height, uint32_t(texture.height));
-        have_render_extent = true;
-      };
+      void* extent_key[5] = {};
       if (have_color) {
         for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-          intersect_render_extent(
-              render_target_cache_->current_color_texture(i, nullptr));
+          extent_key[i] = render_target_cache_->current_color_texture(i, nullptr);
         }
       }
       if (depth_bound) {
-        intersect_render_extent(render_target_cache_->current_depth_texture());
+        extent_key[4] = render_target_cache_->current_depth_texture();
+      }
+      EncoderFixedState& efs = encoder_fixed_state_;
+      if (state_dedupe && efs.extent_valid &&
+          !std::memcmp(efs.extent_key, extent_key, sizeof(extent_key))) {
+        render_width = efs.extent_width;
+        render_height = efs.extent_height;
+        have_render_extent = true;
+      } else {
+        for (void* texture_ptr : extent_key) {
+          if (!texture_ptr) {
+            continue;
+          }
+          __unsafe_unretained id<MTLTexture> texture =
+              (__bridge id<MTLTexture>)texture_ptr;
+          render_width = std::min(render_width, uint32_t(texture.width));
+          render_height = std::min(render_height, uint32_t(texture.height));
+          have_render_extent = true;
+        }
+        if (have_render_extent) {
+          std::memcpy(efs.extent_key, extent_key, sizeof(extent_key));
+          efs.extent_width = render_width;
+          efs.extent_height = render_height;
+          efs.extent_valid = true;
+        }
       }
       if (!have_render_extent) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
@@ -10332,9 +10596,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       MTLScissorRect scissor_rect{metal_scissor.x, metal_scissor.y,
                                   metal_scissor.width, metal_scissor.height};
-      [encoder setScissorRect:scissor_rect];
+      EncoderFixedState& fs = encoder_fixed_state_;
+      const uint64_t scissor_values[4] = {
+          uint64_t(scissor_rect.x), uint64_t(scissor_rect.y),
+          uint64_t(scissor_rect.width), uint64_t(scissor_rect.height)};
+      if (!state_dedupe || !fs.scissor_valid ||
+          std::memcmp(fs.scissor, scissor_values, sizeof(scissor_values))) {
+        [encoder setScissorRect:scissor_rect];
+        std::memcpy(fs.scissor, scissor_values, sizeof(scissor_values));
+        fs.scissor_valid = true;
+      }
       draw_host_y0 = uint32_t(metal_scissor.y);
       draw_host_y1 = uint32_t(metal_scissor.y + metal_scissor.height);
+      draw_full_width = metal_scissor.x == 0 &&
+                        uint32_t(metal_scissor.width) >= render_width;
     }
   draw_trace_milestone("before-rt-probe");
     // Diagnostic (XE_METAL_RT_PROBE=<draw>): the attachments this draw is
@@ -10374,7 +10649,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                       (uint64_t(viewport_info.z_max * 1000) << 10) ^
                       (render_target_cache_->current_attachment_key() << 20);
       static std::unordered_set<uint64_t> s_seen_zcfg;
-      if (s_seen_zcfg.insert(zcfg).second && s_seen_zcfg.size() <= 24) {
+      static uint64_t s_last_zcfg = ~uint64_t(0);
+      if (zcfg != s_last_zcfg &&
+          (s_last_zcfg = zcfg, s_seen_zcfg.insert(zcfg).second) &&
+          s_seen_zcfg.size() <= 24) {
         XELOGI(
             "MetalZCfg: z=({},{}) zfunc={} zwrite={} ext=({},{}) color={} "
             "clear={:08X}",
@@ -10632,8 +10910,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // texture/sampler slot, which is always valid.
     MetalDescriptorIndexPlan plan;
     if (shader) {
-      plan = GetMetalDescriptorIndexPlan(shader->GetTextureBindingsAfterTranslation(),
-                                         shader->GetSamplerBindingsAfterTranslation());
+      const auto& texture_bindings = shader->GetTextureBindingsAfterTranslation();
+      const auto& sampler_bindings = shader->GetSamplerBindingsAfterTranslation();
+      DescriptorPlanMemo& plan_memo =
+          descriptor_plan_memo_[shader->type() == xenos::ShaderType::kPixel];
+      static const bool s_plan_memo = [] {
+        const char* v = std::getenv("XE_METAL_DESCRIPTOR_PLAN_MEMO");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (s_plan_memo && plan_memo.shader == shader &&
+          plan_memo.textures == texture_bindings.data() &&
+          plan_memo.texture_count == texture_bindings.size() &&
+          plan_memo.samplers == sampler_bindings.data() &&
+          plan_memo.sampler_count == sampler_bindings.size()) {
+        plan.count = plan_memo.plan_count;
+        plan.valid = plan_memo.plan_valid;
+      } else {
+        plan = GetMetalDescriptorIndexPlan(texture_bindings, sampler_bindings);
+        plan_memo.shader = shader;
+        plan_memo.textures = texture_bindings.data();
+        plan_memo.texture_count = texture_bindings.size();
+        plan_memo.samplers = sampler_bindings.data();
+        plan_memo.sampler_count = sampler_bindings.size();
+        plan_memo.plan_count = plan.count;
+        plan_memo.plan_valid = plan.valid;
+      }
       if (!plan.valid) {
         XELOGW("MetalCommandProcessor: skipping draw with invalid {} descriptor "
                "index layout",
@@ -11252,7 +11553,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   std::memcpy(ab_alloc.cpu_ptr, argument_buffer.data(), sizeof(argument_buffer));
 
   // --- Bind. ---
-  [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+  if (!state_dedupe || encoder_fixed_state_.pipeline != pipeline) {
+    [encoder
+        setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+    encoder_fixed_state_.pipeline = pipeline;
+  }
 
   // Apply complete blend/stencil dynamic values on every normal draw. Metal
   // encoder state persists across draws, while a new encoder begins with its
@@ -11272,10 +11577,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       draw_util::IsPrimitivePolygonal(regs), stencil_ref_mask,
       stencil_ref_mask_back);
   if (!memexport_draw) {
-    [encoder setBlendColorRed:blend_stencil.blend_color_red
-                        green:blend_stencil.blend_color_green
-                         blue:blend_stencil.blend_color_blue
-                        alpha:blend_stencil.blend_color_alpha];
+    EncoderFixedState& fs = encoder_fixed_state_;
+    const float blend_color[4] = {
+        blend_stencil.blend_color_red, blend_stencil.blend_color_green,
+        blend_stencil.blend_color_blue, blend_stencil.blend_color_alpha};
+    if (!state_dedupe || !fs.blend_color_valid ||
+        std::memcmp(fs.blend_color, blend_color, sizeof(blend_color))) {
+      [encoder setBlendColorRed:blend_stencil.blend_color_red
+                          green:blend_stencil.blend_color_green
+                           blue:blend_stencil.blend_color_blue
+                          alpha:blend_stencil.blend_color_alpha];
+      std::memcpy(fs.blend_color, blend_color, sizeof(blend_color));
+      fs.blend_color_valid = true;
+    }
   }
   if (kDepthEnabled && depth_bound &&
       (encoder_bound_attachments_ & metal::kMetalPassAttachmentDepthStencil)) {
@@ -11495,7 +11809,116 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead);
   }
 
+  draw_trace_milestone("after-use-resources");
+  // Draw parameters (XE_METAL_DRAW_PARAMS): the IRRuntime draw helpers upload
+  // the draw arguments and the index-type word with setVertexBytes on every
+  // draw. The translated vertex shaders fetch vertices themselves (no
+  // stage-in) and every draw here passes instance count 1, base vertex 0 and
+  // base instance 0, so only those fields can matter; mode 1 (default) binds
+  // canonical arguments and re-binds only when the pair changes on the open
+  // encoder. Burnout: ~6,000 draws in the main pass, whose vertex phase is
+  // front-end bound (vertex occupancy ~4%). 0 = the IRRuntime helpers;
+  // 2 = probe: the per-draw-only fields hold junk (must render identically).
+  static const uint32_t s_draw_params_mode = [] {
+    const char* v = std::getenv("XE_METAL_DRAW_PARAMS");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 1u;
+  }();
+  auto bind_draw_params = [&](bool indexed, uint16_t ir_index_type) {
+    const int32_t key = indexed ? int32_t(ir_index_type) : -2;
+    if (encoder_fixed_state_.draw_params == key) {
+      return;
+    }
+    IRRuntimeDrawParams dp = {};
+    const uint32_t junk = s_draw_params_mode == 2 ? 0x00012345u : 0u;
+    if (indexed) {
+      dp.drawIndexed.indexCountPerInstance = junk;
+      dp.drawIndexed.instanceCount = 1;
+      dp.drawIndexed.startIndexLocation = junk;
+    } else {
+      dp.draw.vertexCountPerInstance = junk;
+      dp.draw.instanceCount = 1;
+    }
+    [encoder setVertexBytes:&dp
+                     length:sizeof(dp)
+                    atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+    const uint16_t uniform = indexed ? ir_index_type : kIRNonIndexedDraw;
+    [encoder setVertexBytes:&uniform
+                     length:sizeof(uniform)
+                    atIndex:kIRArgumentBufferUniformsBindPoint];
+    encoder_fixed_state_.draw_params = key;
+  };
+  auto ir_draw_indexed = [&](MTLPrimitiveType prim, uint64_t index_count_host,
+                             MTLIndexType index_type,
+                             __unsafe_unretained id<MTLBuffer> index_buffer,
+                             uint64_t index_offset, uint64_t instance_count,
+                             int64_t base_vertex, uint64_t base_instance) {
+    if (!s_draw_params_mode) {
+      IRRuntimeDrawIndexedPrimitives(encoder, prim, index_count_host,
+                                     index_type, index_buffer, index_offset,
+                                     instance_count, base_vertex,
+                                     base_instance);
+      return;
+    }
+    // IRMetalIndexToIRIndex (implementation-only in the runtime header).
+    bind_draw_params(true, uint16_t(uint16_t(index_type) + 1u));
+    [encoder drawIndexedPrimitives:prim
+                        indexCount:index_count_host
+                         indexType:index_type
+                       indexBuffer:index_buffer
+                 indexBufferOffset:index_offset
+                     instanceCount:instance_count
+                        baseVertex:base_vertex
+                      baseInstance:base_instance];
+  };
+  auto ir_draw = [&](MTLPrimitiveType prim, uint64_t vertex_start,
+                     uint64_t vertex_count) {
+    if (!s_draw_params_mode) {
+      IRRuntimeDrawPrimitives(encoder, prim, vertex_start, vertex_count);
+      return;
+    }
+    bind_draw_params(false, 0);
+    [encoder drawPrimitives:prim
+                vertexStart:vertex_start
+                vertexCount:vertex_count];
+  };
   auto mark_raster_targets_written = [&] {
+    if (PassCensusEnabled()) {
+      // Materialize-fate census: can this draw observe each target's old
+      // content? Pixel kill and alpha test leave pixels unwritten, so they
+      // count as reads of every target.
+      const bool kills =
+          (pixel_shader && pixel_shader->kills_pixels()) ||
+          regs.Get<reg::RB_COLORCONTROL>().alpha_test_enable;
+      uint32_t color_read_mask = 0;
+      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+        if (!((normalized_color_mask >> (i * 4)) & 0xFu)) {
+          continue;
+        }
+        auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+            reg::RB_BLENDCONTROL::rt_register_indices[i]);
+        const bool replace =
+            blend.color_srcblend == xenos::BlendFactor::kOne &&
+            blend.color_destblend == xenos::BlendFactor::kZero &&
+            blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+            blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+            blend.alpha_destblend == xenos::BlendFactor::kZero &&
+            blend.alpha_comb_fcn == xenos::BlendOp::kAdd;
+        if (kills || !replace) {
+          color_read_mask |= 1u << i;
+        }
+      }
+      const bool depth_read =
+          kills || norm_depth.stencil_enable ||
+          (norm_depth.z_enable &&
+           norm_depth.zfunc != xenos::CompareFunction::kAlways);
+      render_target_cache_->NoteMaterializeFirstUse(
+          normalized_color_mask, color_read_mask,
+          norm_depth.z_write_enable || norm_depth.stencil_enable, depth_read,
+          draw_full_width,
+          prim_type == xenos::PrimitiveType::kRectangleList ||
+              index_count <= 6,
+          draw_host_y0, draw_host_y1);
+    }
     render_target_cache_->MarkCurrentRasterTargetsWritten(
         normalized_color_mask,
         norm_depth.z_write_enable || norm_depth.stencil_enable, draw_host_y0,
@@ -11590,8 +12013,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:tess_table_buffer
                    usage:MTLResourceUsageRead
                   stages:stages];
-    DrawIndexedNoRetain(
-        encoder, MTLPrimitiveTypeTriangle, tess_host_index_count,
+    ir_draw_indexed( MTLPrimitiveTypeTriangle, tess_host_index_count,
         MTLIndexTypeUInt32, tess_indices_buffer, tess_host_indices_alloc.offset,
         /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
     mark_raster_targets_written();
@@ -11746,7 +12168,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     __unsafe_unretained id<MTLBuffer> fan_ib = (__bridge id<MTLBuffer>)fan_alloc.buffer;
     [encoder useResource:fan_ib usage:MTLResourceUsageRead stages:stages];
-    DrawIndexedNoRetain(encoder, MTLPrimitiveTypeTriangle,
+    ir_draw_indexed( MTLPrimitiveTypeTriangle,
                                    host_index_count, MTLIndexTypeUInt32, fan_ib,
                                    fan_alloc.offset, /*instanceCount=*/1,
                                    /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11776,8 +12198,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (direct_index) {
       __unsafe_unretained id<MTLBuffer> index_buffer =
           (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
-      DrawIndexedNoRetain(
-          encoder, pp_prim, host_count,
+      ir_draw_indexed(
+          pp_prim, host_count,
           pp_result.host_index_format == xenos::IndexFormat::kInt32
               ? MTLIndexTypeUInt32
               : MTLIndexTypeUInt16,
@@ -11801,14 +12223,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
       MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-      DrawIndexedNoRetain(encoder, pp_prim, host_count, index_type, index_buffer,
+      ir_draw_indexed( pp_prim, host_count, index_type, index_buffer,
                                      index_alloc.offset,
                                      /*instanceCount=*/1, /*baseVertex=*/0,
                                      /*baseInstance=*/0);
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
       // PP1 auto pass-through or PP3-auto line loop: no host index byte stream.
-      DrawNoRetain(encoder, pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
+      ir_draw( pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto) {
       // PP2-auto triangle fan: the shared built-in 16-bit fan table expands the
@@ -11839,7 +12261,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-      DrawIndexedNoRetain(encoder, pp_prim, host_count,
+      ir_draw_indexed( pp_prim, host_count,
                                      MTLIndexTypeUInt16, index_buffer,
                                      index_alloc.offset, /*instanceCount=*/1,
                                      /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11993,7 +12415,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
     MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32
                                               : MTLIndexTypeUInt16;
-    DrawIndexedNoRetain(encoder, mtl_prim, host_index_count,
+    ir_draw_indexed( mtl_prim, host_index_count,
                                    index_type, index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
@@ -12024,13 +12446,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     __unsafe_unretained id<MTLBuffer> index_buffer =
         (__bridge id<MTLBuffer>)index_alloc.buffer;
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-    DrawIndexedNoRetain(encoder, MTLPrimitiveTypeTriangleStrip,
+    ir_draw_indexed( MTLPrimitiveTypeTriangleStrip,
                                    host_index_count, MTLIndexTypeUInt32,
                                    index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
   } else {
-    DrawNoRetain(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
+    ir_draw( mtl_prim, /*vertexStart=*/uint64_t(0),
                             uint64_t(index_count));
   }
 
@@ -14583,9 +15005,29 @@ void* MetalCommandProcessor::GetRamFrontbufferTexture(uint32_t base,
 // predicates (and the signed corridor, applied by the callers); every other
 // table format routes both signs on the shared shape rules.
 bool MetalCommandProcessor::SharedRouteEligible(
-    const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed,
+    const xenos::xe_gpu_texture_fetch_t& fetch_in, bool is_signed,
     uint32_t width, uint32_t height, uint32_t pitch_texels,
     bool* corridor_required_out) {
+  // A raw minimum level above the maximum (Banjo's 512x512 k_8 fetches: min 1,
+  // max 0) is one level by GetSubresourcesFromFetchConstant: the base when the
+  // fetch has no mip page, else mip `min` alone. The cache key and the sampler
+  // already take those levels; the predicates below read the raw fields and
+  // refused both shapes, leaving each such draw on the CPU-wait path (M1 Max:
+  // 11k blocked fetches, Banjo 20 fps; routed, 0 and 30 fps).
+  // XE_METAL_TEX_ROUTE_INVERTED_MIPS=0 restores the refusal.
+  static const bool s_inverted_mips = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_INVERTED_MIPS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  xenos::xe_gpu_texture_fetch_t fetch = fetch_in;
+  if (s_inverted_mips && fetch.mip_min_level > fetch.mip_max_level) {
+    uint32_t min_level = 0, max_level = 0;
+    texture_util::GetSubresourcesFromFetchConstant(
+        fetch_in, nullptr, nullptr, nullptr, nullptr, nullptr, &min_level,
+        &max_level);
+    fetch.mip_min_level = min_level;
+    fetch.mip_max_level = max_level;
+  }
   const bool rgba8_class =
       fetch.format == xenos::TextureFormat::k_8_8_8_8 ||
       fetch.format == xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16;
@@ -14977,7 +15419,16 @@ bool MetalCommandProcessor::EncoderDedupeEnabled() {
   return s_enabled;
 }
 
+bool MetalCommandProcessor::StateDedupeEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_STATE_DEDUPE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 void MetalCommandProcessor::ResetEncoderDedupe() {
+  encoder_fixed_state_ = EncoderFixedState{};
   encoder_declared_resources_.Clear();
   encoder_heaps_declared_ = 0;
   encoder_heap_stages_ = 0;
