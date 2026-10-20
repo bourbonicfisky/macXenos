@@ -10146,23 +10146,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       uint32_t render_width = UINT32_MAX;
       uint32_t render_height = UINT32_MAX;
       bool have_render_extent = false;
-      auto intersect_render_extent = [&](void* texture_ptr) {
-        if (!texture_ptr) {
-          return;
-        }
-        __unsafe_unretained id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;
-        render_width = std::min(render_width, uint32_t(texture.width));
-        render_height = std::min(render_height, uint32_t(texture.height));
-        have_render_extent = true;
-      };
+      void* extent_key[5] = {};
       if (have_color) {
         for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-          intersect_render_extent(
-              render_target_cache_->current_color_texture(i, nullptr));
+          extent_key[i] = render_target_cache_->current_color_texture(i, nullptr);
         }
       }
       if (depth_bound) {
-        intersect_render_extent(render_target_cache_->current_depth_texture());
+        extent_key[4] = render_target_cache_->current_depth_texture();
+      }
+      EncoderFixedState& efs = encoder_fixed_state_;
+      if (state_dedupe && efs.extent_valid &&
+          !std::memcmp(efs.extent_key, extent_key, sizeof(extent_key))) {
+        render_width = efs.extent_width;
+        render_height = efs.extent_height;
+        have_render_extent = true;
+      } else {
+        for (void* texture_ptr : extent_key) {
+          if (!texture_ptr) {
+            continue;
+          }
+          __unsafe_unretained id<MTLTexture> texture =
+              (__bridge id<MTLTexture>)texture_ptr;
+          render_width = std::min(render_width, uint32_t(texture.width));
+          render_height = std::min(render_height, uint32_t(texture.height));
+          have_render_extent = true;
+        }
+        if (have_render_extent) {
+          std::memcpy(efs.extent_key, extent_key, sizeof(extent_key));
+          efs.extent_width = render_width;
+          efs.extent_height = render_height;
+          efs.extent_valid = true;
+        }
       }
       if (!have_render_extent) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,

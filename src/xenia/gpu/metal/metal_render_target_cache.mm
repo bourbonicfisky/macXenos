@@ -619,6 +619,7 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
 
 RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
+  ++render_target_epoch_;
   id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLPixelFormat pixel_format =
       key.is_depth ? (MTLPixelFormat)kDepthFormat
@@ -695,6 +696,23 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   RenderTarget* const* used = last_update_used_render_targets();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  static const bool s_memo_enabled =
+      IsMetalEnvironmentFlagEnabled("XE_METAL_MSAA_COMPANION_MEMO", true);
+  constexpr size_t kSlots = xenos::kMaxColorRenderTargets + 1;
+  MsaaCompanionMemo& memo = msaa_companion_memo_;
+  if (s_memo_enabled && memo.valid && memo.epoch == render_target_epoch_ &&
+      !std::memcmp(memo.used, used, sizeof(memo.used)) &&
+      !std::memcmp(memo.accumulated, accumulated, sizeof(memo.accumulated)) &&
+      !std::memcmp(memo.lengths, lengths, sizeof(memo.lengths))) {
+    return true;
+  }
+  auto remember_satisfied = [&]() {
+    memo.valid = true;
+    memo.epoch = render_target_epoch_;
+    std::memcpy(memo.used, used, kSlots * sizeof(RenderTarget*));
+    std::memcpy(memo.accumulated, accumulated, kSlots * sizeof(RenderTarget*));
+    std::memcpy(memo.lengths, lengths, kSlots * sizeof(uint32_t));
+  };
   uint32_t requested_height = 0;
   uint32_t current_height = 0;
   uint32_t full_height = 0;
@@ -731,6 +749,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
             draw_resolution_scale_y()));
   }
   if (!sample_count || !requested_height || !full_height) {
+    remember_satisfied();
     return true;
   }
 
@@ -760,6 +779,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     }
   }
   if (!allocation_needed) {
+    remember_satisfied();
     return true;
   }
 

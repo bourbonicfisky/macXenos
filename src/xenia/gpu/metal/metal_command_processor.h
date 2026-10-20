@@ -635,6 +635,11 @@ class MetalCommandProcessor : public CommandProcessor {
     int32_t depth_clip = -1, cull = -1, winding = -1, fill = -1;
     // IssueDraw's IR draw-parameter binding (XE_METAL_DRAW_PARAMS).
     int32_t draw_params = -1;
+    // Scissor clamp extent of the bound attachments (the encoder retains
+    // them, so the pointers cannot be recycled while it is open).
+    bool extent_valid = false;
+    void* extent_key[5] = {};
+    uint32_t extent_width = 0, extent_height = 0;
     double viewport[6] = {};
     uint64_t scissor[4] = {};
     float depth_bias[2] = {};

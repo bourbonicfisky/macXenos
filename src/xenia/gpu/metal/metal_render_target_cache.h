@@ -588,6 +588,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // dimensions required by Metal resolve attachments. Replacement first makes
   // canonical EDRAM authoritative, then retires old views by submission.
   bool EnsureCurrentMsaaCompanions();
+  // Last binding EnsureCurrentMsaaCompanions found already satisfied. Only
+  // that function changes companion heights, and render_target_epoch_ (bumped
+  // per CreateRenderTarget) rules out a recycled target address.
+  // XE_METAL_MSAA_COMPANION_MEMO=0 disables.
+  struct MsaaCompanionMemo {
+    bool valid = false;
+    uint64_t epoch = 0;
+    RenderTarget* used[xenos::kMaxColorRenderTargets + 1] = {};
+    RenderTarget* accumulated[xenos::kMaxColorRenderTargets + 1] = {};
+    uint32_t lengths[xenos::kMaxColorRenderTargets + 1] = {};
+  };
+  MsaaCompanionMemo msaa_companion_memo_;
+  uint64_t render_target_epoch_ = 0;
 
   // Executes the base class's requested ownership transfers for the current
   // accumulated render targets: same-host-format spans as per-tile blits,
