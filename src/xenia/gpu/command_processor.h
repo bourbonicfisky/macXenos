@@ -315,6 +315,10 @@ class CommandProcessor {
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,
                         uint32_t register_count, bool execute_callbacks);
+  // Called after RestoreRegisters stores values without WriteRegister, so a
+  // backend can drop state it derives from register writes.
+  virtual void OnRegistersRestoredRaw(uint32_t first_register,
+                                      uint32_t register_count) {}
   void RestoreGammaRamp(
       const reg::DC_LUT_30_COLOR* new_gamma_ramp_256_entry_table,
       const reg::DC_LUT_PWL_DATA* new_gamma_ramp_pwl_rgb,

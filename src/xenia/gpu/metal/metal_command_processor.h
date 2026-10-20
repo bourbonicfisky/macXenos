@@ -530,6 +530,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // Per pixel shader (ucode hash): the fetch constants its bindings sample.
   std::unordered_map<uint64_t, uint32_t> pixel_shader_fetch_masks_;
   void WriteRegister(uint32_t index, uint32_t value) override;
+  void OnRegistersRestoredRaw(uint32_t first_register,
+                              uint32_t register_count) override;
   void CommitSideCommandBuffer(uint64_t submission, uint64_t submit_epoch);
 
   // The attachment set (from MetalRenderTargetCache::current_attachment_key)

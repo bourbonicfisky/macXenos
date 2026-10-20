@@ -1869,6 +1869,24 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   CommandProcessor::WriteRegister(index, value);
 }
 
+void MetalCommandProcessor::OnRegistersRestoredRaw(uint32_t first_register,
+                                                   uint32_t register_count) {
+  // Trace playback restores register snapshots without WriteRegister: every
+  // fetch constant in the range is dirty and its cached sign/plain state stale.
+  constexpr uint32_t kFetchBase = 0x4800u;
+  constexpr uint32_t kFetchEnd = kFetchBase + 32u * 6u;
+  const uint32_t first = std::max(first_register, kFetchBase);
+  const uint32_t end = std::min(first_register + register_count, kFetchEnd);
+  if (first >= end) {
+    return;
+  }
+  for (uint32_t slot = (first - kFetchBase) / 6u;
+       slot <= (end - 1u - kFetchBase) / 6u; ++slot) {
+    fetch_constant_dirty_mask_ |= 1u << slot;
+    fetch_plain_known_mask_ &= ~(1u << slot);
+  }
+}
+
 void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
   // No pass boundary: the side buffer is committed ahead of the frame one
   // (CommitSideCommandBuffer), so a load encoded here executes before every
@@ -6706,7 +6724,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         (color_bound ? regs[reg::RB_COLOR_INFO::rt_register_indices[0]] : 0) ^
         (depth_bound ? (uint64_t(rb_depth_info.value) | (1ull << 32)) : 0);
     static std::unordered_set<uint64_t> s_seen_rt_configs;
-    if (s_seen_rt_configs.insert(cfg_key).second) {
+    // Consecutive draws nearly always repeat the configuration: test the
+    // previous key before the set insert.
+    static uint64_t s_last_rt_config = ~uint64_t(0);
+    if (cfg_key != s_last_rt_config &&
+        (s_last_rt_config = cfg_key, s_seen_rt_configs.insert(cfg_key).second)) {
       XELOGI(
           "MetalRTConfig: color={} (base={} fmt={} mask={:X} expbias={}) "
           "depth={} (base={} fmt={}) ncm={:04X}",
@@ -7123,9 +7145,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       logc(255);
     }
   }
+  // DIAGNOSTICS (JC2 lighting investigation, closed): the producer and
+  // consumer logs below did hash-set and resolve-snapshot lookups on every
+  // draw to log once per shader (about 1% of the Burnout command-processor
+  // thread, 2026-10-20). XE_METAL_RT_CONSUMER_LOG=1 (or
+  // XE_METAL_RT_CONSUMER_ALL) arms them.
+  static const bool s_rt_consumer_log =
+      std::getenv("XE_METAL_RT_CONSUMER_LOG") != nullptr ||
+      std::getenv("XE_METAL_RT_CONSUMER_ALL") != nullptr;
   // DIAGNOSTIC: the quarter-res lighting producer — log draws into small-pitch
   // color RTs (the inferred-lighting buffer) with everything they sample.
-  if (color_bound && pixel_shader &&
+  if (s_rt_consumer_log && color_bound && pixel_shader &&
       regs.Get<reg::RB_SURFACE_INFO>().surface_pitch <= 400) {
     static std::unordered_set<uint64_t> s_seen_light_producer;
     if (s_seen_light_producer.insert(pixel_shader->ucode_data_hash()).second &&
@@ -7156,7 +7186,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // every draw whose PS samples a RESOLVED SNAPSHOT (the RT-consuming passes —
   // deferred lighting, composite, post) with what it samples and where it
   // writes, so the black lighting can be traced through the pass graph.
-  if (color_bound && pixel_shader && render_target_cache_) {
+  if (s_rt_consumer_log && color_bound && pixel_shader &&
+      render_target_cache_) {
     bool samples_snapshot = false;
     for (const auto& binding :
          pixel_shader->GetTextureBindingsAfterTranslation()) {
@@ -9769,7 +9800,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         uint32_t fc = binding.fetch_constant;
         auto fetch = regs.GetTextureFetch(fc);
-        uint32_t signs = texture_util::SwizzleSigns(fetch);
+        // fetch_static_info_ holds the signs and scale bits of every constant
+        // whose known bit survives (cleared by WriteRegister on a changed
+        // dword); recomputing them per binding per draw was ~1.5% of the
+        // Burnout command-processor thread. XE_METAL_FETCH_SIGNS_MEMO=0
+        // recomputes.
+        static const bool s_signs_memo = [] {
+          const char* v = std::getenv("XE_METAL_FETCH_SIGNS_MEMO");
+          return !(v && v[0] == '0' && !v[1]);
+        }();
+        const bool signs_known =
+            s_signs_memo && fc < 32 && (fetch_plain_known_mask_ & (1u << fc));
+        uint32_t signs = signs_known ? fetch_static_info_[fc].swizzled_signs
+                                     : texture_util::SwizzleSigns(fetch);
         system_constants.texture_swizzled_signs[fc >> 2] |=
             signs << ((fc & 3) * 8);
         // Integer num_format on a fixed-point format needs the guest's
@@ -9791,9 +9834,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // component as that lane's sign. They are consumed together, in the
         // same shader, one immediately after the other.
         if (integer_texture_scaling_enabled) {
-          PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
-                                  system_constants.texture_integer_scale_bits,
-                                  kMetalIntegerScaleSlotCount);
+          if (signs_known) {
+            if (fc < kMetalIntegerScaleSlotCount) {
+              system_constants.texture_integer_scale_bits[fc] =
+                  fetch_static_info_[fc].integer_scale_bits;
+            }
+          } else {
+            PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
+                                    system_constants.texture_integer_scale_bits,
+                                    kMetalIntegerScaleSlotCount);
+          }
         }
         // Draw resolution scaling: a fetch served from a resolve snapshot reads
         // the scaled snapshot, so the shader applies the scaled texel-offset
@@ -10254,7 +10304,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                       (uint64_t(viewport_info.z_max * 1000) << 10) ^
                       (render_target_cache_->current_attachment_key() << 20);
       static std::unordered_set<uint64_t> s_seen_zcfg;
-      if (s_seen_zcfg.insert(zcfg).second && s_seen_zcfg.size() <= 24) {
+      static uint64_t s_last_zcfg = ~uint64_t(0);
+      if (zcfg != s_last_zcfg &&
+          (s_last_zcfg = zcfg, s_seen_zcfg.insert(zcfg).second) &&
+          s_seen_zcfg.size() <= 24) {
         XELOGI(
             "MetalZCfg: z=({},{}) zfunc={} zwrite={} ext=({},{}) color={} "
             "clear={:08X}",

@@ -945,6 +945,7 @@ void CommandProcessor::RestoreRegisters(uint32_t first_register,
   } else {
     std::memcpy(register_file_->values + first_register, register_values,
                 sizeof(uint32_t) * register_count);
+    OnRegistersRestoredRaw(first_register, register_count);
   }
 }
 
