@@ -1295,6 +1295,7 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
     if (s0 >= s1 || pending_over(s0, s1)) {
       continue;
     }
+    shared_memory_->EnsureCpuCurrent(uint32_t(s0), uint32_t(s1 - s0));
     uint8_t* ram = memory_->TranslatePhysical<uint8_t*>(uint32_t(s0));
     if (!ram) {
       continue;
@@ -1897,6 +1898,21 @@ void MetalCommandProcessor::EncodeDiscreteMirrorUpload(uint32_t offset,
   discrete_upload_bytes_ += length;
 }
 
+void MetalCommandProcessor::NoteDiscreteProducedResolve(uint32_t start,
+                                                        uint32_t length) {
+  if (!discrete_mirror_ || !length) {
+    return;
+  }
+  if (MetalSharedMemory::OnDemandReadbackEnabled() && LazyPublishEnabled() &&
+      !shared_memory_->IsVramHot(start)) {
+    shared_memory_->MarkVramNewer(start, length, CurrentEncodingSubmission(),
+                                  /*eager=*/false);
+    ++discrete_deferred_ranges_;
+    return;
+  }
+  discrete_produced_ranges_.emplace_back(start, length);
+}
+
 void MetalCommandProcessor::EncodeDiscreteMirrorReadback(void* command_buffer,
                                                          uint64_t submission) {
   if (discrete_produced_ranges_.empty()) {
@@ -1945,6 +1961,8 @@ void MetalCommandProcessor::EncodeDiscreteMirrorReadback(void* command_buffer,
     // memcpy into the CPU mirror the blit is about to overwrite: as a
     // consumed range of this submission it takes the staged-blit path.
     shared_memory_->NoteGpuWriteInFlight(offset, length, submission);
+    // An on-demand fetch overlapping it waits for this submission first.
+    shared_memory_->MarkVramNewer(offset, length, submission, /*eager=*/true);
     ++discrete_readback_blits_;
     discrete_readback_bytes_ += length;
   }
@@ -2340,6 +2358,12 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetCpuWriteCallback(
       [this](uint32_t offset, uint32_t length) {
         EncodeDiscreteMirrorUpload(offset, length);
+      });
+  shared_memory_->SetVramFetchHooks(
+      [this]() { return CurrentEncodingSubmission(); },
+      [this]() { return completed_submission_.load(std::memory_order_acquire); },
+      [this](uint64_t submission) {
+        return WaitForSubmission(submission, 4000, nullptr);
       });
   shared_memory_->SetCompletedSubmissionProvider([this]() {
     return completed_submission_.load(std::memory_order_acquire);
@@ -3684,6 +3708,17 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   if (!contents) {
     return;
   }
+  // Discrete mirror: bring the faulting pages' VRAM-only bytes into the CPU
+  // mirror first (OnAccess copies owner coverage from it, page by page).
+  if (discrete_mirror_) {
+    const uint32_t page_mask = metal::MetalLazyPublication::kPageSize - 1;
+    const uint32_t page_start = physical_address_start & ~page_mask;
+    const uint64_t page_end =
+        (uint64_t(physical_address_start) + length + page_mask) &
+        ~uint64_t(page_mask);
+    shared_memory_->EnsureCpuCurrent(page_start,
+                                     uint32_t(page_end - page_start));
+  }
   // A record still inside the open command buffer cannot be waited for from
   // the faulting thread (committing is the GPU thread's job); the read then
   // observes prior contents and the watch is re-armed at the next commit.
@@ -3808,7 +3843,7 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
     playback_gpu_written_.emplace_back(base, extent_bytes);
   }
   pending_writebacks_.back().gpu_current = 1u;
-  NoteDiscreteProducedRange(base, extent_bytes);
+  NoteDiscreteProducedResolve(base, extent_bytes);
   // Mark the destination GPU-written so the shared-memory
   // validity model does not upload guest RAM over the freshly
   // scattered bytes. LEAN marking (validity bits only), NOT the
@@ -13866,6 +13901,8 @@ bool MetalCommandProcessor::IssueCopy() {
     if (FILE* f = fopen(path.c_str(), "wb")) {
       // The shared buffer, not guest RAM: GPU-resident publication leaves
       // resolved bytes only in the buffer.
+      shared_memory_->EnsureCpuCurrent(resolve_info.copy_dest_extent_start,
+                                       resolve_info.copy_dest_extent_length);
       id<MTLBuffer> shared_buffer =
           (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       fwrite(static_cast<const uint8_t*>([shared_buffer contents]) +
@@ -15146,6 +15183,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         }
         continue;
       }
+      if (shared_memory_) {
+        shared_memory_->EnsureCpuCurrent(me.base_address, me.size_bytes);
+      }
       bool me_log = false;
       uint32_t old_hash = 0, new_hash = 0;
       // The store-landing oracle below compares guest RAM against the shared
@@ -15435,6 +15475,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       id<MTLBuffer> shared_buffer =
           shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer()
                          : nil;
+      if (shared_memory_) {
+        shared_memory_->EnsureCpuCurrent(wb.guest_addr, wb.range_bytes());
+      }
       const uint8_t* shared_contents =
           static_cast<const uint8_t*>(shared_buffer.contents);
       if (!dest || !shared_contents) {
@@ -16149,8 +16192,8 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         const uint8_t* ram =
             memory_->TranslatePhysical<const uint8_t*>(g0);
         if (ram) {
-          std::memcpy(reassert_buffer_contents + g0, ram, g1 - g0);
           shared_memory_->NoteCpuWrite(g0, g1 - g0);
+          std::memcpy(reassert_buffer_contents + g0, ram, g1 - g0);
         }
       };
       for (const auto& span : owned) {
@@ -17517,6 +17560,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             double(discrete_readback_bytes_) / 128.0 / 1024.0);
         discrete_upload_blits_ = discrete_upload_bytes_ = 0;
         discrete_readback_blits_ = discrete_readback_bytes_ = 0;
+        if (MetalSharedMemory::OnDemandReadbackEnabled()) {
+          MetalSharedMemory::VramFetchStats fs =
+              shared_memory_->ConsumeVramFetchStats();
+          XELOGI("MetalDiscreteFetch swap#{}: deferred {:.1f}/frame, fetches "
+                 "{} ({:.1f} KB, {:.2f} ms), vram-newer {} ranges, hot {}",
+                 count, double(discrete_deferred_ranges_) / 128.0, fs.fetches,
+                 double(fs.bytes) / 1024.0, double(fs.ns) / 1e6, fs.entries,
+                 fs.hot);
+          discrete_deferred_ranges_ = 0;
+        }
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;

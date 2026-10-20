@@ -414,6 +414,10 @@ class MetalCommandProcessor : public CommandProcessor {
       discrete_produced_ranges_.emplace_back(start, length);
     }
   }
+  // A lazily published resolve: the CPU rarely reads it, so it stays in VRAM
+  // and is fetched on demand (MetalSharedMemory::EnsureCpuCurrent) unless an
+  // earlier fetch made its base hot.
+  void NoteDiscreteProducedResolve(uint32_t start, uint32_t length);
 
   // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
   // texture (as depth2d) and writes its value into the R32Float snapshot
@@ -532,6 +536,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::vector<std::pair<uint32_t, uint32_t>> discrete_produced_ranges_;
   uint64_t discrete_upload_blits_ = 0, discrete_upload_bytes_ = 0;
   uint64_t discrete_readback_blits_ = 0, discrete_readback_bytes_ = 0;
+  uint64_t discrete_deferred_ranges_ = 0;
   // Fetch constants written since the shared texture cache last parsed
   // them (bit = fetch constant index). Set by WriteRegister, consumed by the
   // draw prep: a draw whose fetch constants did not change since the previous

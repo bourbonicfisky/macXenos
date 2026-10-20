@@ -15,6 +15,8 @@
 #include <deque>
 #include <unordered_map>
 #include <functional>
+#include <mutex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -105,11 +107,44 @@ class MetalSharedMemory : public SharedMemory {
       std::function<void(uint32_t offset, uint32_t length)> callback) {
     cpu_write_callback_ = std::move(callback);
   }
-  void NoteCpuWrite(uint32_t offset, uint32_t length) {
-    if (gpu_buffer_ && length && cpu_write_callback_) {
-      cpu_write_callback_(offset, length);
-    }
+  // Call BEFORE the memcpy into the CPU mirror: it also drops the range from
+  // the VRAM-newer table, under the lock an on-demand fetch copies under, so
+  // a fetch can never land older VRAM bytes over the CPU's newer ones.
+  void NoteCpuWrite(uint32_t offset, uint32_t length);
+
+  // On-demand readback (discrete mirror). GPU-produced ranges the CPU rarely
+  // reads (lazily published resolves) are not blitted back every frame; they
+  // are recorded here as "VRAM newer than the CPU mirror" with their
+  // producing submission. A CPU reader of the mirror calls EnsureCpuCurrent
+  // first: it waits for the newest committed producer overlapping the range,
+  // blits just those bytes to a staging buffer on a separate queue (so it
+  // does not wait behind the frames queued on the main one), and copies the
+  // still-VRAM-newer bytes into the mirror. A range fetched once is "hot":
+  // the command processor reads its later productions back with the frame.
+  // `eager` entries are frame readbacks, kept only so a fetch also waits for
+  // them; they leave when their submission completes. Any thread.
+  static bool OnDemandReadbackEnabled();
+  void SetVramFetchHooks(std::function<uint64_t()> encoding_submission,
+                         std::function<uint64_t()> completed_submission,
+                         std::function<bool(uint64_t)> wait_for_submission) {
+    vram_encoding_submission_ = std::move(encoding_submission);
+    vram_completed_submission_ = std::move(completed_submission);
+    vram_wait_ = std::move(wait_for_submission);
   }
+  void MarkVramNewer(uint32_t start, uint32_t length, uint64_t submission,
+                     bool eager);
+  bool IsVramHot(uint32_t origin) const;
+  // False only when a producer could not be waited for or the fetch failed;
+  // the mirror then still holds what it held.
+  bool EnsureCpuCurrent(uint32_t start, uint32_t length);
+  struct VramFetchStats {
+    uint64_t fetches = 0;
+    uint64_t bytes = 0;
+    uint64_t ns = 0;
+    size_t entries = 0;
+    size_t hot = 0;
+  };
+  VramFetchStats ConsumeVramFetchStats();
   void NoteGpuWriteInFlight(uint32_t start, uint32_t length,
                             uint64_t submission);
 
@@ -397,6 +432,27 @@ class MetalSharedMemory : public SharedMemory {
   void* buffer_ = nullptr;              // id<MTLBuffer>, retained.
   void* gpu_buffer_ = nullptr;  // id<MTLBuffer> Private, retained (discrete).
   std::function<void(uint32_t, uint32_t)> cpu_write_callback_;
+  struct VramNewer {
+    uint32_t start;
+    uint32_t end;
+    uint64_t submission;
+    uint32_t origin;  // start of the produced range (the hot key)
+    bool eager;
+  };
+  // Removes [start, end) from every entry `pred` accepts. vram_mutex_ held.
+  template <typename Pred>
+  void SubtractVramNewerLocked(uint32_t start, uint64_t end, Pred pred);
+  void PruneVramNewerLocked();
+  mutable std::mutex vram_mutex_;
+  std::vector<VramNewer> vram_newer_;
+  size_t vram_prune_at_ = 64;
+  bool vram_overflowed_ = false;
+  std::unordered_set<uint32_t> vram_hot_;
+  void* fetch_queue_ = nullptr;  // id<MTLCommandQueue>, retained (discrete).
+  std::function<uint64_t()> vram_encoding_submission_;
+  std::function<uint64_t()> vram_completed_submission_;
+  std::function<bool(uint64_t)> vram_wait_;
+  VramFetchStats vram_stats_;
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
   bool is_zero_copy_ = false;
   ZeroCopyObservation zero_copy_observation_;
