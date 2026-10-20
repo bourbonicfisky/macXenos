@@ -6168,17 +6168,40 @@ void* MetalRenderTargetCache::EnsureSnapshotTexture(uint64_t snap_key,
 
 void MetalRenderTargetCache::DrainDeferredReleases(
     uint64_t completed_submission) {
+  // UINT64_MAX is the quiesced teardown/clear drain: nothing is in flight and
+  // the texture cache's bridges are retired by those paths themselves.
+  bool guarded = deferred_release_guard_ && completed_submission != UINT64_MAX;
+  std::vector<void*> held;
   auto it = std::remove_if(
       deferred_texture_releases_.begin(), deferred_texture_releases_.end(),
       [&](const std::pair<uint64_t, void*>& entry) {
         if (entry.first > completed_submission) {
           return false;
         }
+        if (guarded && deferred_release_guard_(entry.second)) {
+          held.push_back(entry.second);
+          return true;
+        }
         id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)entry.second;
         (void)released;
         return true;
       });
   deferred_texture_releases_.erase(it, deferred_texture_releases_.end());
+  if (!held.empty()) {
+    uint64_t submission = MetalCommandProcessor::S7TagsOff()
+                              ? 0
+                              : command_processor_.CurrentEncodingSubmission();
+    static uint32_t s_held_logs = 0;
+    if (s_held_logs++ < 8) {
+      XELOGW("MetalRenderTargetCache: {} replaced snapshot(s) still named by a "
+             "texture cache bridge at release; bridge retired, release held "
+             "to submission {}",
+             held.size(), submission);
+    }
+    for (void* texture : held) {
+      deferred_texture_releases_.emplace_back(submission, texture);
+    }
+  }
 }
 
 uint32_t MetalRenderTargetCache::ReleaseResolveSnapshotsForBases(

@@ -298,6 +298,12 @@ class MetalTextureCache {
   // boundary (MetalCommandProcessor::ResetDerivedReplayState), followed by
   // ClearCache() to drain what this retires.
   void RetireAllResolvedTargets();
+  // Retires every bridge (resolved target or scaled assembly) still naming
+  // `texture`, a snapshot its owner is about to free. A replaced snapshot
+  // whose replacing resolve never re-registered the base would otherwise
+  // leave the bridge (and its bindless slot) naming freed memory. Returns
+  // whether any bridge named it.
+  bool RetireResolvedTargetsNaming(void* texture);
   // Post-clear consistency evidence (a clear must return these toward their
   // post-initialization baseline, and leave nothing queued).
   uint32_t cached_texture_count() const { return uint32_t(cache_.size()); }

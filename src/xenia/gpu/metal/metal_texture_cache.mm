@@ -480,6 +480,32 @@ void MetalTextureCache::RetireAllResolvedTargets() {
   scaled_assemblies_.clear();
 }
 
+bool MetalTextureCache::RetireResolvedTargetsNaming(void* texture) {
+  if (!texture) {
+    return false;
+  }
+  bool named = false;
+  for (auto it = resolved_targets_.begin(); it != resolved_targets_.end();) {
+    if (it->second.texture == texture) {
+      RetireResolvedTarget(it->second);
+      it = resolved_targets_.erase(it);
+      named = true;
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = scaled_assemblies_.begin(); it != scaled_assemblies_.end();) {
+    if (it->second.texture == texture) {
+      RetireScaledAssembly(it->second);
+      it = scaled_assemblies_.erase(it);
+      named = true;
+    } else {
+      ++it;
+    }
+  }
+  return named;
+}
+
 void MetalTextureCache::ClearCache() {
   // Ordinary cached textures are pure derived content: every one of them is
   // reconstructible from guest RAM on the next fetch, which is what makes a

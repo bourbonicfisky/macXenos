@@ -2480,6 +2480,12 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       device_ptr, memory_, shared_memory_.get(), view_bindless_heap_,
       kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
+  if (render_target_cache_) {
+    render_target_cache_->SetDeferredReleaseGuard([this](void* texture) {
+      return texture_cache_ &&
+             texture_cache_->RetireResolvedTargetsNaming(texture);
+    });
+  }
   texture_cache_->SetDrawResolutionScale(draw_resolution_scale_x_,
                                          draw_resolution_scale_y_);
   {

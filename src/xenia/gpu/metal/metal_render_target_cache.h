@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -333,6 +334,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // early GPU-page-faults when those draws execute. The command processor calls
   // this only after the frame command buffer has completed (commit + wait).
   void DrainDeferredReleases(uint64_t completed_submission);
+  // Consulted before a deferred texture is freed: returns true when a texture
+  // cache bridge still named it (and was retired just now). The texture is
+  // then held until the CURRENT encoding submission completes, since draws
+  // encoded after the replacement may have sampled it through that bridge.
+  void SetDeferredReleaseGuard(std::function<bool(void*)> guard) {
+    deferred_release_guard_ = std::move(guard);
+  }
 
   // Cache-clear release (implement-metal-cache-clearing step 5).
   //
@@ -1041,6 +1049,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // by DrainDeferredReleases() once the submissions encoded against them
   // complete (tagged with the last submission that may reference them).
   std::vector<std::pair<uint64_t, void*>> deferred_texture_releases_;
+  std::function<bool(void*)> deferred_release_guard_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;
