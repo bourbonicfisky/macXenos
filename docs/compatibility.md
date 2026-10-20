@@ -2,7 +2,7 @@
 
 These are the games macXenos is tested with regularly. Each one is started
 automatically, played to the point shown with a scripted controller, and
-measured for a minute. Results below are from the runs on October 19, 2026,
+measured for a minute. Results below are from the runs on October 19-20, 2026,
 on a base M4 Mac mini and on an M1 Max MacBook Pro, at the original
 resolution (1x), using the Metal renderer.
 
@@ -24,7 +24,7 @@ smoother.
 | Assassin's Creed II | Story mode opening | 30 | 30 |  |
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 |  |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
-| Burnout Paradise | Driving in Paradise City | 50 | 30 | Its target is 60; below full speed on both |
+| Burnout Paradise | Driving in Paradise City | 53 | 30 | Its target is 60; below full speed on both |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
