@@ -538,6 +538,11 @@ class MetalCommandProcessor : public CommandProcessor {
   uint64_t discrete_readback_blits_ = 0, discrete_readback_bytes_ = 0;
   uint64_t discrete_deferred_ranges_ = 0;
   uint64_t direct_index_draws_ = 0;  // guest indices swapped by the VS
+  // Texture heaps: heaps declared on the open encoder and for which stages.
+  uint32_t encoder_heaps_declared_ = 0;
+  uint32_t encoder_heap_stages_ = 0;
+  uint64_t heap_declarations_ = 0, heap_skipped_declarations_ = 0;
+  uint64_t texture_declarations_ = 0;
   // Fetch constants written since the shared texture cache last parsed
   // them (bit = fetch constant index). Set by WriteRegister, consumed by the
   // draw prep: a draw whose fetch constants did not change since the previous

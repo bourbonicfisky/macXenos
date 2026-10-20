@@ -338,6 +338,12 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // cache bridge still named it (and was retired just now). The texture is
   // then held until the CURRENT encoding submission completes, since draws
   // encoded after the replacement may have sampled it through that bridge.
+  // Optional Private-texture allocator for resolve snapshots (texture heaps
+  // on discrete AMD GPUs): returns a retained id<MTLTexture> or nullptr.
+  // Snapshot releases already wait for their submission (deferred list).
+  void SetSnapshotTextureAllocator(std::function<void*(void*)> allocator) {
+    snapshot_texture_allocator_ = std::move(allocator);
+  }
   void SetDeferredReleaseGuard(std::function<bool(void*)> guard) {
     deferred_release_guard_ = std::move(guard);
   }
@@ -1050,6 +1056,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // complete (tagged with the last submission that may reference them).
   std::vector<std::pair<uint64_t, void*>> deferred_texture_releases_;
   std::function<bool(void*)> deferred_release_guard_;
+  std::function<void*(void*)> snapshot_texture_allocator_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;

@@ -395,7 +395,17 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
     // establishes that this usage bit is part of that contract.
     desc.usage |= MTLTextureUsagePixelFormatView;
   }
-  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  // Discrete AMD GPUs: from the legacy cache's texture heaps (one useHeaps
+  // per pass instead of a per-draw declaration). Release is through the
+  // legacy retire pool (~MetalTexture), which waits for the submissions.
+  id<MTLTexture> texture = nil;
+  if (legacy_ && legacy_->texture_heaps_enabled()) {
+    texture = (__bridge_transfer id<MTLTexture>)legacy_->NewHeapTexture(
+        (__bridge void*)desc);
+  }
+  if (!texture) {
+    texture = [device newTextureWithDescriptor:desc];
+  }
   if (!texture) {
     return nullptr;
   }

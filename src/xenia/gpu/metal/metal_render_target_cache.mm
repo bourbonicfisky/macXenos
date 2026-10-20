@@ -6154,7 +6154,14 @@ void* MetalRenderTargetCache::EnsureSnapshotTexture(uint64_t snap_key,
     desc.usage |= MTLTextureUsageShaderWrite;
   }
   desc.storageMode = MTLStorageModePrivate;
-  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  id<MTLTexture> texture = nil;
+  if (snapshot_texture_allocator_) {
+    texture = (__bridge_transfer id<MTLTexture>)snapshot_texture_allocator_(
+        (__bridge void*)desc);
+  }
+  if (!texture) {
+    texture = [device newTextureWithDescriptor:desc];
+  }
   if (!texture) {
     XELOGE("MetalRenderTargetCache: failed to create {}x{} resolve snapshot",
            width, height);

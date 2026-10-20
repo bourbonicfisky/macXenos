@@ -1060,6 +1060,56 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   }
 }
 
+// The shader-converter runtime's draw helpers, inlined without ARC traffic:
+// its out-of-line versions (ir_runtime_impl.mm, ARC) retained and released
+// the encoder and index buffer on every draw -- 2-4% of the command-processor
+// thread on the Mac Pro. Same Metal calls, same draw-parameter bytes.
+inline void DrawIndexedNoRetain(
+    __unsafe_unretained id<MTLRenderCommandEncoder> enc,
+    MTLPrimitiveType primitive_type, uint64_t index_count,
+    MTLIndexType index_type, __unsafe_unretained id<MTLBuffer> index_buffer,
+    uint64_t index_buffer_offset, uint64_t instance_count, int64_t base_vertex,
+    uint64_t base_instance) {
+  IRRuntimeDrawIndexedArgument da = (IRRuntimeDrawIndexedArgument){
+      .indexCountPerInstance = (uint32_t)index_count,
+      .instanceCount = (uint32_t)instance_count,
+      .startIndexLocation = (uint32_t)index_buffer_offset,
+      .baseVertexLocation = (int32_t)base_vertex,
+      .startInstanceLocation = (uint32_t)base_instance};
+  IRRuntimeDrawParams dp = {.drawIndexed = da};
+  const uint16_t ir_index_type = uint16_t(index_type + 1);
+  [enc setVertexBytes:&dp
+               length:sizeof(IRRuntimeDrawParams)
+              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+  [enc setVertexBytes:&ir_index_type
+               length:sizeof(uint16_t)
+              atIndex:kIRArgumentBufferUniformsBindPoint];
+  [enc drawIndexedPrimitives:primitive_type
+                  indexCount:index_count
+                   indexType:index_type
+                 indexBuffer:index_buffer
+           indexBufferOffset:index_buffer_offset
+               instanceCount:instance_count
+                  baseVertex:base_vertex
+                baseInstance:base_instance];
+}
+
+inline void DrawNoRetain(__unsafe_unretained id<MTLRenderCommandEncoder> enc,
+                         MTLPrimitiveType primitive_type, uint64_t vertex_start,
+                         uint64_t vertex_count) {
+  IRRuntimeDrawArgument da = {(uint32_t)vertex_count, 1u,
+                              (uint32_t)vertex_start, 0u};
+  IRRuntimeDrawParams dp = {.draw = da};
+  [enc setVertexBytes:&dp
+               length:sizeof(IRRuntimeDrawParams)
+              atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+  [enc drawPrimitives:primitive_type
+          vertexStart:vertex_start
+          vertexCount:vertex_count
+        instanceCount:1
+         baseInstance:0];
+}
+
 // SwapIndicesInto (guest index byte-swap into the host arena) and IsPp1Routable
 // (the routing predicate) are the shared production contracts, defined once in
 // metal_primitive_processor.h so the device-free conformance test exercises the
@@ -2643,6 +2693,12 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
     render_target_cache_->SetDeferredReleaseGuard([this](void* texture) {
       return texture_cache_ &&
              texture_cache_->RetireResolvedTargetsNaming(texture);
+    });
+  }
+  texture_cache_->EnableTextureHeaps();
+  if (render_target_cache_ && texture_cache_->texture_heaps_enabled()) {
+    render_target_cache_->SetSnapshotTextureAllocator([this](void* desc) {
+      return texture_cache_ ? texture_cache_->NewHeapTexture(desc) : nullptr;
     });
   }
   texture_cache_->SetDrawResolutionScale(draw_resolution_scale_x_,
@@ -11291,7 +11347,52 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   use_resource(system_view, MTLResourceUsageRead);
   use_resource(null_buffer, MTLResourceUsageRead);
   use_resource(null_texture, MTLResourceUsageRead);
+  // Texture heaps (discrete AMD): every heap is resident for the stages
+  // declared so far on this encoder; a new heap, or a draw needing more
+  // stages, re-declares. Textures allocated from a heap then skip the
+  // per-texture declaration (tagged in the dedupe table on first sight).
+  const bool heaps_active = encoder_dedupe && texture_cache_->texture_heaps_enabled();
+  if (heaps_active) {
+    const uint32_t heap_count = texture_cache_->texture_heap_count();
+    const uint32_t stage_bits = uint32_t(stages);
+    const bool new_stages = (stage_bits & ~encoder_heap_stages_) != 0;
+    if (heap_count && (new_stages || heap_count > encoder_heaps_declared_)) {
+      const uint32_t first = new_stages ? 0 : encoder_heaps_declared_;
+      encoder_heap_stages_ |= stage_bits;
+      __unsafe_unretained id<MTLHeap> heaps[64];
+      uint32_t n = 0;
+      for (uint32_t h = first; h < heap_count && n < 64; ++h) {
+        heaps[n++] = (__bridge id<MTLHeap>)texture_cache_->texture_heap(h);
+      }
+      [encoder useHeaps:heaps
+                  count:n
+                 stages:MTLRenderStages(encoder_heap_stages_)];
+      encoder_heaps_declared_ = heap_count;
+      ++heap_declarations_;
+    }
+  }
+  constexpr uint32_t kHeapBackedBit = 0x80000000u;
   for (void* tex : texture_cache_->active_textures()) {
+    if (heaps_active) {
+      if (uint32_t* declared = encoder_declared_resources_.Find(tex)) {
+        if (!*declared) {
+          __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
+          // A view's memory is its root texture's.
+          for (uint32_t depth = 0; t && depth < 4; ++depth) {
+            if (t.heap) {
+              *declared = kHeapBackedBit;
+              break;
+            }
+            t = t.parentTexture;
+          }
+        }
+        if (*declared & kHeapBackedBit) {
+          ++heap_skipped_declarations_;
+          continue;
+        }
+      }
+      ++texture_declarations_;
+    }
     use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead);
   }
 
@@ -11390,7 +11491,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:tess_table_buffer
                    usage:MTLResourceUsageRead
                   stages:stages];
-    IRRuntimeDrawIndexedPrimitives(
+    DrawIndexedNoRetain(
         encoder, MTLPrimitiveTypeTriangle, tess_host_index_count,
         MTLIndexTypeUInt32, tess_indices_buffer, tess_host_indices_alloc.offset,
         /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11546,7 +11647,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     __unsafe_unretained id<MTLBuffer> fan_ib = (__bridge id<MTLBuffer>)fan_alloc.buffer;
     [encoder useResource:fan_ib usage:MTLResourceUsageRead stages:stages];
-    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangle,
+    DrawIndexedNoRetain(encoder, MTLPrimitiveTypeTriangle,
                                    host_index_count, MTLIndexTypeUInt32, fan_ib,
                                    fan_alloc.offset, /*instanceCount=*/1,
                                    /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11576,7 +11677,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (direct_index) {
       __unsafe_unretained id<MTLBuffer> index_buffer =
           (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
-      IRRuntimeDrawIndexedPrimitives(
+      DrawIndexedNoRetain(
           encoder, pp_prim, host_count,
           pp_result.host_index_format == xenos::IndexFormat::kInt32
               ? MTLIndexTypeUInt32
@@ -11601,14 +11702,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
       MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-      IRRuntimeDrawIndexedPrimitives(encoder, pp_prim, host_count, index_type, index_buffer,
+      DrawIndexedNoRetain(encoder, pp_prim, host_count, index_type, index_buffer,
                                      index_alloc.offset,
                                      /*instanceCount=*/1, /*baseVertex=*/0,
                                      /*baseInstance=*/0);
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
       // PP1 auto pass-through or PP3-auto line loop: no host index byte stream.
-      IRRuntimeDrawPrimitives(encoder, pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
+      DrawNoRetain(encoder, pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
     } else if (pp_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto) {
       // PP2-auto triangle fan: the shared built-in 16-bit fan table expands the
@@ -11639,7 +11740,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-      IRRuntimeDrawIndexedPrimitives(encoder, pp_prim, host_count,
+      DrawIndexedNoRetain(encoder, pp_prim, host_count,
                                      MTLIndexTypeUInt16, index_buffer,
                                      index_alloc.offset, /*instanceCount=*/1,
                                      /*baseVertex=*/0, /*baseInstance=*/0);
@@ -11793,7 +11894,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
     MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32
                                               : MTLIndexTypeUInt16;
-    IRRuntimeDrawIndexedPrimitives(encoder, mtl_prim, host_index_count,
+    DrawIndexedNoRetain(encoder, mtl_prim, host_index_count,
                                    index_type, index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
@@ -11824,13 +11925,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     __unsafe_unretained id<MTLBuffer> index_buffer =
         (__bridge id<MTLBuffer>)index_alloc.buffer;
     [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
-    IRRuntimeDrawIndexedPrimitives(encoder, MTLPrimitiveTypeTriangleStrip,
+    DrawIndexedNoRetain(encoder, MTLPrimitiveTypeTriangleStrip,
                                    host_index_count, MTLIndexTypeUInt32,
                                    index_buffer, index_alloc.offset,
                                    /*instanceCount=*/1, /*baseVertex=*/0,
                                    /*baseInstance=*/0);
   } else {
-    IRRuntimeDrawPrimitives(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
+    DrawNoRetain(encoder, mtl_prim, /*vertexStart=*/uint64_t(0),
                             uint64_t(index_count));
   }
 
@@ -14779,6 +14880,8 @@ bool MetalCommandProcessor::EncoderDedupeEnabled() {
 
 void MetalCommandProcessor::ResetEncoderDedupe() {
   encoder_declared_resources_.Clear();
+  encoder_heaps_declared_ = 0;
+  encoder_heap_stages_ = 0;
   for (auto& stage : encoder_buffer_binds_) {
     for (EncoderBufferBind& bind : stage) {
       bind = EncoderBufferBind{};
@@ -17646,6 +17749,18 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         XELOGI("MetalDiscreteIndex swap#{}: gpu-swapped {:.1f}/frame",
                count, double(direct_index_draws_) / 128.0);
         direct_index_draws_ = 0;
+        if (texture_cache_ && texture_cache_->texture_heaps_enabled()) {
+          XELOGI("MetalTextureHeaps swap#{}: {} heaps {} MiB, {} textures; "
+                 "per frame: useHeaps {:.1f}, skipped {:.1f}, declared {:.1f}",
+                 count, texture_cache_->texture_heap_count(),
+                 texture_cache_->heap_bytes() >> 20,
+                 texture_cache_->heap_texture_count(),
+                 double(heap_declarations_) / 128.0,
+                 double(heap_skipped_declarations_) / 128.0,
+                 double(texture_declarations_) / 128.0);
+          heap_declarations_ = heap_skipped_declarations_ = 0;
+          texture_declarations_ = 0;
+        }
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;

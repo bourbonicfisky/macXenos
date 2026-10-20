@@ -361,6 +361,89 @@ MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
                              : "unavailable (5:6:5 expanded on the CPU)");
 }
 
+void MetalTextureCache::EnableTextureHeaps() {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!device) {
+    return;
+  }
+  // Default: dedicated GPUs only (no unified memory, not an Apple GPU).
+  bool enabled = !device.hasUnifiedMemory &&
+                 ![device supportsFamily:MTLGPUFamilyApple7];
+  if (const char* v = std::getenv("XE_METAL_TEXTURE_HEAPS")) {
+    enabled = v[0] == '1';
+  }
+  if (!enabled) {
+    return;
+  }
+  // Half the working set, at most 8 GiB; past it textures come from the
+  // device and are declared per draw as before.
+  heap_budget_ = std::min<uint64_t>(device.recommendedMaxWorkingSetSize / 2,
+                                    uint64_t(8) << 30);
+  heaps_enabled_ = true;
+  XELOGI("MetalTextureHeaps: enabled, budget {} MiB", heap_budget_ >> 20);
+}
+
+void* MetalTextureCache::NewHeapTexture(void* descriptor) {
+  if (!heaps_enabled_ || !descriptor) {
+    return nullptr;
+  }
+  MTLTextureDescriptor* desc = (__bridge MTLTextureDescriptor*)descriptor;
+  if (desc.storageMode != MTLStorageModePrivate) {
+    return nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  std::lock_guard<std::mutex> lock(heap_mutex_);
+  const MTLSizeAndAlign size_align =
+      [device heapTextureSizeAndAlignWithDescriptor:desc];
+  const uint32_t count = heap_count_.load(std::memory_order_relaxed);
+  // Newest heap first: older heaps are mostly full.
+  for (uint32_t i = count; i-- > 0;) {
+    id<MTLHeap> heap = (__bridge id<MTLHeap>)heaps_[i];
+    if ([heap maxAvailableSizeWithAlignment:size_align.align] <
+        size_align.size) {
+      continue;
+    }
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:desc];
+    if (texture) {
+      ++heap_textures_;
+      return (__bridge_retained void*)texture;
+    }
+  }
+  if (count >= kMaxTextureHeaps) {
+    return nullptr;
+  }
+  constexpr uint64_t kHeapBytes = uint64_t(256) << 20;
+  constexpr uint64_t kMiB = uint64_t(1) << 20;
+  const uint64_t heap_size = std::max<uint64_t>(
+      kHeapBytes, (uint64_t(size_align.size) + kMiB - 1) & ~(kMiB - 1));
+  if (heap_bytes_ + heap_size > heap_budget_) {
+    return nullptr;
+  }
+  MTLHeapDescriptor* heap_desc = [[MTLHeapDescriptor alloc] init];
+  heap_desc.type = MTLHeapTypeAutomatic;
+  heap_desc.storageMode = MTLStorageModePrivate;
+  heap_desc.hazardTrackingMode = MTLHazardTrackingModeTracked;
+  heap_desc.size = heap_size;
+  id<MTLHeap> heap = [device newHeapWithDescriptor:heap_desc];
+  if (!heap) {
+    XELOGW("MetalTextureHeaps: heap of {} MiB failed; device allocation",
+           heap_size >> 20);
+    return nullptr;
+  }
+  heap.label = [NSString stringWithFormat:@"xenia textures %u", count];
+  heaps_[count] = (__bridge_retained void*)heap;
+  heap_bytes_ += heap_size;
+  heap_count_.store(count + 1, std::memory_order_release);
+  XELOGI("MetalTextureHeaps: heap {} ({} MiB, {} MiB total)", count,
+         heap_size >> 20, heap_bytes_ >> 20);
+  id<MTLTexture> texture = [heap newTextureWithDescriptor:desc];
+  if (!texture) {
+    return nullptr;
+  }
+  ++heap_textures_;
+  return (__bridge_retained void*)texture;
+}
+
 MetalTextureCache::~MetalTextureCache() {
   if (shared_memory_watch_) {
     shared_memory_->UnregisterGlobalWatch(shared_memory_watch_);
@@ -427,6 +510,13 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   scaled_assemblies_.clear();
+  // Heap textures retain their heap; these are the cache's own references.
+  for (uint32_t h = 0; h < heap_count_.load(); ++h) {
+    id<MTLHeap> released = (__bridge_transfer id<MTLHeap>)heaps_[h];
+    (void)released;
+    heaps_[h] = nullptr;
+  }
+  heap_count_.store(0);
 }
 
 void MetalTextureCache::ReleaseDerivedResolveBridges(

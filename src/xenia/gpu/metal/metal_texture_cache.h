@@ -397,7 +397,36 @@ class MetalTextureCache {
     active_textures_.push_back(texture_bridge);
   }
 
+  // Texture heaps (discrete AMD GPUs, which have no MTLResidencySet): Private
+  // textures are placed in a few large tracked MTLHeaps so a render encoder
+  // makes them all resident with one useHeaps call instead of one
+  // useResource per texture per pass (amdMtl_HwCmdBufAddIndirectRsrc was
+  // 2.6-4.7% of the command-processor thread). Every release of a heap
+  // texture must wait for the submissions that reference it (the retire pool
+  // and the snapshot deferred list both do), because useHeaps keeps the heap
+  // resident, not the texture alive. XE_METAL_TEXTURE_HEAPS=0/1 overrides.
+  void EnableTextureHeaps();
+  bool texture_heaps_enabled() const { return heaps_enabled_; }
+  // A retained (+1) id<MTLTexture> from a heap, or nullptr when the
+  // descriptor is not Private or the heap budget is spent (the caller then
+  // allocates from the device as before).
+  void* NewHeapTexture(void* descriptor);
+  uint32_t texture_heap_count() const {
+    return heap_count_.load(std::memory_order_acquire);
+  }
+  void* texture_heap(uint32_t i) const { return heaps_[i]; }
+  uint64_t heap_texture_count() const { return heap_textures_; }
+  uint64_t heap_bytes() const { return heap_bytes_; }
+
  private:
+  static constexpr uint32_t kMaxTextureHeaps = 64;
+  bool heaps_enabled_ = false;
+  void* heaps_[kMaxTextureHeaps] = {};
+  std::atomic<uint32_t> heap_count_{0};
+  std::mutex heap_mutex_;
+  uint64_t heap_budget_ = 0;
+  uint64_t heap_bytes_ = 0;
+  uint64_t heap_textures_ = 0;
   static void SharedMemoryGlobalWatchCallback(
       const global_unique_lock_type& global_lock, void* context,
       uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
