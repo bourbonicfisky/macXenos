@@ -794,6 +794,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
 
   bool matched = false;
   uint32_t wait_iterations = 0;
+  // Poll interval of a wait that has to sleep. The packet's own interval is
+  // whole milliseconds (wait / 0x100), and macOS wakes ~0.1-0.3 ms after it,
+  // so a guest write landing just after the CP fell asleep cost up to ~1.3 ms
+  // of command-processor time per wait -- Burnout waits once a frame with ~1
+  // ms of slack. XE_CP_WAIT_POLL_US (default 100; 0 = the packet's interval)
+  // polls in shorter sleeps; the requested interval only bounds them.
+  static const uint32_t s_wait_poll_us = [] {
+    const char* v = std::getenv("XE_CP_WAIT_POLL_US");
+    return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 100u;
+  }();
+  uint64_t slept_us = 0;
+  bool stuck_logged = false;
 
   // XE_CP_WAIT_CENSUS=1 (diagnostic, default off): per-window counts of
   // WAIT_REG_MEM packets, the ones that had to sleep, the sleeps, the
@@ -826,7 +838,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
       // Freeze forensics: a wait that has spun for ~5 seconds is almost
       // certainly a lost signal (whoever should write the value never did) —
       // log WHAT is being waited on, once per stuck wait.
-      if (++wait_iterations == 500) {
+      ++wait_iterations;
+      if (!stuck_logged && slept_us >= 5000000) {
+        stuck_logged = true;
         XELOGW(
             "WAIT_REG_MEM stuck ~5s: {} {:08X} value={:08X} mask={:08X} "
             "ref={:08X} cond={:X} wait={}",
@@ -840,8 +854,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
           // User wants it fast and dangerous.
           // do nothing
         } else {
-          xe::threading::Sleep(std::chrono::milliseconds(wait / 0x100));
-          census_requested_us += uint64_t(wait / 0x100) * 1000;
+          const uint64_t interval_us = uint64_t(wait / 0x100) * 1000;
+          const uint64_t sleep_us =
+              s_wait_poll_us ? std::min<uint64_t>(interval_us, s_wait_poll_us)
+                             : interval_us;
+          xe::threading::Sleep(std::chrono::microseconds(sleep_us));
+          slept_us += sleep_us;
+          census_requested_us += sleep_us;
           ReturnFromWait();
         }
 

@@ -64,7 +64,14 @@ constexpr uint32_t kProducerSpins = 1 << 14;
 // Publication batch: each publish is a store the spinning consumer's core
 // owns the line of, so per-draw publication (~140 B) paid a cross-core miss
 // every draw. ~2 KB is ~15 draws, which keeps a Drain's replay tail short.
-constexpr uint64_t kPublishBytes = 2048;
+// XE_METAL_ENCODE_PUBLISH_BYTES overrides it (0 = every draw).
+uint64_t PublishBytes() {
+  static const uint64_t s_bytes = [] {
+    const char* v = std::getenv("XE_METAL_ENCODE_PUBLISH_BYTES");
+    return v ? uint64_t(strtoull(v, nullptr, 10)) : uint64_t(2048);
+  }();
+  return s_bytes;
+}
 // Park timeout: bounds the delay of a wake lost to the batched publish's
 // relaxed waiting check.
 constexpr uint32_t kParkTimeoutUs = 1000;
@@ -262,7 +269,7 @@ void MetalEncodeStream::Publish(bool force) {
     }
     return;
   }
-  if (!force && write_pos_ - published_local_ < kPublishBytes) {
+  if (!force && write_pos_ - published_local_ < PublishBytes()) {
     return;
   }
   published_local_ = write_pos_;
