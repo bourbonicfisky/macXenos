@@ -1346,6 +1346,31 @@ bool Emulator::ExceptionCallback(Exception* ex) {
       crash_msg.append(
           fmt::format("Faulting instr: 0x{:08X}\n", uint32_t(*instr_be)));
     }
+#if XE_ARCH_ARM64
+    // The translated code that faulted: host PC, its offset in the guest
+    // function's machine code, the host instruction words around it and the
+    // host registers. The guest PC above is only the nearest source-map entry;
+    // these name the exact host access (decode with capstone ARM64).
+    if (const HostThreadContext* host = ex->thread_context()) {
+      crash_msg.append(fmt::format(
+          "Host PC: 0x{:016X} (+0x{:X} in guest fn {:08X}) SP: 0x{:016X}\n",
+          host->pc,
+          host->pc - reinterpret_cast<uint64_t>(guest_function->machine_code()),
+          guest_function->address(), host->sp));
+      crash_msg.append("Host code (pc-32..pc+28):");
+      for (int i = -8; i < 8; ++i) {
+        crash_msg.append(fmt::format(
+            " {}{:08X}", i == 0 ? ">" : "",
+            *reinterpret_cast<const uint32_t*>(host->pc + int64_t(i) * 4)));
+      }
+      crash_msg.append("\n");
+      for (int i = 0; i < 31; ++i) {
+        crash_msg.append(fmt::format(" x{:<2} = {:016X}{}", i, host->x[i],
+                                     i % 4 == 3 ? "\n" : ""));
+      }
+      crash_msg.append("\n");
+    }
+#endif  // XE_ARCH_ARM64
   } else {
     // pc == 0 (null/garbage jump) or a code region the cache can't map. The
     // guest PC is unknown, but LR below still names who branched here.

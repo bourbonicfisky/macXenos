@@ -549,6 +549,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // (the caller then materializes WITHOUT reconcile — fail closed).
   bool EncodeLaneRefresh(const void* command_buffer,
                          const MetalTwoSourceRecord& record);
+  // Which render target last wrote the host lane over each EDRAM tile (a
+  // depth pack with lane mode 1, or a lane refresh). A materialize skips the
+  // refresh for a record whose source still owns its whole range: the lane
+  // already holds that source's floats (GTA IV: 7.6 refreshes/frame, 1.5 ms
+  // on the M4, mostly right after the source's own pack). Ownership is only a
+  // shortcut; reconciliation stays pointwise, so a stale entry costs
+  // precision, never correctness. XE_METAL_LANE_REFRESH_ALWAYS=1 restores the
+  // unconditional refresh.
+  std::vector<const void*> lane_owner_;
+  void NoteLaneOwner(const void* owner, uint32_t start_tiles,
+                     uint32_t end_tiles);
+  bool LaneOwnedBy(const void* owner, uint32_t start_tiles,
+                   uint32_t end_tiles) const;
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,

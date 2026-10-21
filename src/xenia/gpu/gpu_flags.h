@@ -23,6 +23,7 @@ DECLARE_bool(vsync);
 DECLARE_bool(force_depth_clamp);
 
 DECLARE_uint64(framerate_limit);
+DECLARE_bool(limit_uncapped_games);
 
 DECLARE_bool(gpu_allow_invalid_fetch_constants);
 

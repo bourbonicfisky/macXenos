@@ -49,6 +49,12 @@ DEFINE_uint64(framerate_limit, 0,
               "GPU");
 UPDATE_from_uint64(framerate_limit, 2024, 8, 31, 20, 60);
 
+DEFINE_bool(limit_uncapped_games, false,
+            "Hold games that present without waiting for vblank (they have no "
+            "frame rate cap of their own, e.g. GTA IV, Mafia II) to one frame "
+            "per vblank, 60 FPS. Games that cap themselves are unaffected.",
+            "GPU");
+
 DEFINE_bool(
     gpu_allow_invalid_fetch_constants, true,
     "Allow texture and vertex fetch constants with invalid type - generally "

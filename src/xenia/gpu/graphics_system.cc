@@ -390,11 +390,26 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
                                         interrupt_callback_data_, source, cpu);
 }
 
+void GraphicsSystem::PaceUncappedSwap() {
+  if (!cvars::limit_uncapped_games) {
+    last_swap_vblank_ = UINT64_MAX;
+    return;
+  }
+  // Bounded so a stopped vblank source (paused, shutting down) can't hold the
+  // guest: the longest legitimate wait is one 60 Hz period.
+  const uint64_t last = last_swap_vblank_;
+  for (int i = 0; i < 200 && vblank_count() == last; ++i) {
+    xe::threading::Sleep(std::chrono::microseconds(250));
+  }
+  last_swap_vblank_ = vblank_count();
+}
+
 void GraphicsSystem::MarkVblank() {
   SCOPE_profile_cpu_f("gpu");
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
+  vblank_count_.fetch_add(1, std::memory_order_release);
   if (FramePacingCensusEnabled()) {
     FramePacingClock& clock = GetFramePacingClock();
     clock.last_vblank_ns.store(FramePacingNowNs(), std::memory_order_relaxed);

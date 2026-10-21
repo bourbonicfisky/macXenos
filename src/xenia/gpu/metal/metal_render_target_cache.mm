@@ -2207,10 +2207,45 @@ static void EncodeTwoSourceLaneDiagnostic(
   }];
 }
 
+void MetalRenderTargetCache::NoteLaneOwner(const void* owner,
+                                           uint32_t start_tiles,
+                                           uint32_t end_tiles) {
+  if (lane_owner_.size() != xenos::kEdramTileCount) {
+    lane_owner_.assign(xenos::kEdramTileCount, nullptr);
+  }
+  end_tiles = std::min(end_tiles, xenos::kEdramTileCount);
+  for (uint32_t t = start_tiles; t < end_tiles; ++t) {
+    lane_owner_[t] = owner;
+  }
+}
+
+bool MetalRenderTargetCache::LaneOwnedBy(const void* owner,
+                                         uint32_t start_tiles,
+                                         uint32_t end_tiles) const {
+  static const bool s_always =
+      std::getenv("XE_METAL_LANE_REFRESH_ALWAYS") != nullptr;
+  if (s_always || !owner || lane_owner_.size() != xenos::kEdramTileCount ||
+      start_tiles >= end_tiles) {
+    return false;
+  }
+  end_tiles = std::min(end_tiles, xenos::kEdramTileCount);
+  for (uint32_t t = start_tiles; t < end_tiles; ++t) {
+    if (lane_owner_[t] != owner) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool MetalRenderTargetCache::EncodeLaneRefresh(
     const void* command_buffer, const MetalTwoSourceRecord& record) {
   if (!command_buffer || !record.host_source) {
     return false;
+  }
+  if (LaneOwnedBy(record.host_source, record.start_tiles,
+                  record.end_tiles)) {
+    // The lane still holds this source's floats over the whole range.
+    return true;
   }
   auto* source = static_cast<MetalRenderTarget*>(
       static_cast<RenderTarget*>(const_cast<void*>(record.host_source)));
@@ -2271,6 +2306,7 @@ bool MetalRenderTargetCache::EncodeLaneRefresh(
                                        ms ? texture.sampleCount : 1)
       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
   [encoder endEncoding];
+  NoteLaneOwner(record.host_source, record.start_tiles, record.end_tiles);
   return true;
 }
 
@@ -2914,6 +2950,9 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start, 1)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
+  if ((HostLaneMode(/*materialize=*/false) & 1u) && depth_format == 2u) {
+    NoteLaneOwner(target, start_tiles, end_tiles);
+  }
   return true;
 }
 
@@ -3145,6 +3184,9 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
                                        texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
+  if ((HostLaneMode(/*materialize=*/false) & 1u) && depth_format == 2u) {
+    NoteLaneOwner(target, start_tiles, end_tiles);
+  }
   return true;
 }
 

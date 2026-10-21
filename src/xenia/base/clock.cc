@@ -9,6 +9,8 @@
 
 #include "xenia/base/clock.h"
 
+#include <atomic>
+
 #include <cstdlib>
 
 #include <mutex>
@@ -53,6 +55,12 @@ uint64_t last_guest_tick_count_ = 0;
 uint64_t guest_tick_remainder_ = 0;
 // Last sampled host tick count.
 uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
+// last_guest_tick_count_ as of the last update, readable without the mutex: a
+// thread that loses the update race returns it instead of blocking on the
+// winner (guest spin loops read the timebase from several threads at once;
+// Burnout's dispatch thread spent ~2% of its time parked on this mutex).
+// XE_CLOCK_BLOCKING_READ=1 restores the blocking read.
+std::atomic<uint64_t> published_guest_tick_count_{0};
 
 using tick_mutex_type = std::mutex;
 
@@ -109,6 +117,8 @@ uint64_t UpdateGuestClock() {
       last_host_tick_count_ = host_tick_count;
       last_guest_tick_count_ +=
           host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
+      published_guest_tick_count_.store(last_guest_tick_count_,
+                                        std::memory_order_release);
       return last_guest_tick_count_;
     }
     if (host_tick_count > last_host_tick_count_) {
@@ -118,9 +128,19 @@ uint64_t UpdateGuestClock() {
       last_guest_tick_count_ += scaled / guest_tick_ratio_.second;
       guest_tick_remainder_ = scaled % guest_tick_ratio_.second;
       last_host_tick_count_ = host_tick_count;
+      published_guest_tick_count_.store(last_guest_tick_count_,
+                                        std::memory_order_release);
     }
     return last_guest_tick_count_;
   } else {
+    static const bool s_blocking_read =
+        std::getenv("XE_CLOCK_BLOCKING_READ") != nullptr;
+    if (!s_blocking_read) {
+      // Another thread is updating the clock to (about) this same instant:
+      // its previous result is at most that update stale, and never older
+      // than anything this thread read before, so reads stay monotonic.
+      return published_guest_tick_count_.load(std::memory_order_acquire);
+    }
     // Wait until another thread has finished updating the clock.
     lock.lock();
     return last_guest_tick_count_;
