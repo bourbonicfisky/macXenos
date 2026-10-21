@@ -68,6 +68,7 @@ export function graphics(state: NativeState): BladeDef {
   const renderer = String(state.cvars.gpu?.value ?? "any") === "vulkan" ? "vulkan" : "metal";
   const vsync = state.cvars.vsync?.value !== false;
   const limit = Number(state.cvars.framerate_limit?.value ?? 0);
+  const limitUncapped = state.cvars.limit_uncapped_games?.value === true;
   const scaleX = Number(state.cvars.draw_resolution_scale_x?.value ?? 1);
   const scaleY = Number(state.cvars.draw_resolution_scale_y?.value ?? 1);
 
@@ -118,6 +119,31 @@ export function graphics(state: NativeState): BladeDef {
             fast as they can, which for most means too fast.
           </Aside>
           <NextLaunchNote names={["vsync", "framerate_limit"]} />
+        </>
+      )
+    },
+    {
+      id: "uncapped",
+      label: t("graphics.uncapped.label"),
+      glyph: "speed",
+      value: (
+        <>
+          {limitUncapped ? t("graphics.uncapped.cap") : t("graphics.uncapped.unlimited")}
+        </>
+      ),
+      heading: t("graphics.uncapped.label"),
+      detail: (
+        <>
+          <p>{t("graphics.uncapped.body")}</p>
+          <Options
+            name="limit_uncapped_games"
+            title={t("graphics.uncapped.label")}
+            options={[
+              { value: false, label: t("graphics.uncapped.unlimited") },
+              { value: true, label: t("graphics.uncapped.cap") }
+            ]}
+            current={limitUncapped}
+          />
         </>
       )
     },

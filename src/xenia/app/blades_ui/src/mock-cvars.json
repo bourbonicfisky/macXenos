@@ -917,6 +917,15 @@
 "description": "Enable VSYNC.",
 "changed": false
 },
+"force_depth_clamp": {
+"name": "force_depth_clamp",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Use host depth clamping instead of near and far plane clipping when guest clipping is enabled. X/Y/W clipping is unaffected. Some titles draw screen-space passes whose Z lands outside 0..W and still expect them rasterized (Rise of the Tomb Raider builds its colour-grading LUT this way; Canary names 494707EE and 41560881). Set per title in its game config; on Vulkan this requires depthClamp support.",
+"changed": false
+},
 "framerate_limit": {
 "name": "framerate_limit",
 "category": "GPU",
@@ -924,6 +933,15 @@
 "value": 0,
 "defaultValue": 0,
 "description": "Maximum frames per second. 0 = Unlimited frames.\nDefaults to 60, when set to 0, and VSYNC is enabled.",
+"changed": false
+},
+"limit_uncapped_games": {
+"name": "limit_uncapped_games",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Hold games that present without waiting for vblank (they have no frame rate cap of their own, e.g. GTA IV, Mafia II) to one frame per vblank, 60 FPS. Games that cap themselves are unaffected.",
 "changed": false
 },
 "gpu_allow_invalid_fetch_constants": {
@@ -1304,6 +1322,33 @@
 "description": "Use approximate compare for alpha values to prevent flickering on NVIDIA graphics cards",
 "changed": false
 },
+"dxbc_assume_unsigned_fetches": {
+"name": "dxbc_assume_unsigned_fetches",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Attribution only (never for play): translate texture fetches as if every component were plain unsigned -- no biased / gamma decode switch per component. Measures what the per-fetch decode epilogue costs in the converted shaders (Far Cry 3 2026-10-16: 66 fetches a pixel at ~10% occupancy on Apple GPUs).",
+"changed": false
+},
+"dxbc_diag_max_fetches": {
+"name": "dxbc_diag_max_fetches",
+"category": "GPU",
+"type": "uint",
+"value": 0,
+"defaultValue": 0,
+"description": "Attribution only (never for play): translate at most this many texture fetch instructions per shader; the rest return 0.5. A ceiling for what repeated taps (manual PCF kernels) cost. 0 = unlimited.",
+"changed": false
+},
+"dxbc_diag_minimal_fetch": {
+"name": "dxbc_diag_minimal_fetch",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Attribution only (never for play): translate every texture fetch as plain unsigned with no signed SRV selection, no biased / gamma decode, no num_format integer scale and no exponent bias. The ceiling of per-fetch-constant specialization.",
+"changed": false
+},
 "dxbc_switch": {
 "name": "dxbc_switch",
 "category": "GPU",
@@ -1349,6 +1394,15 @@
 "description": "Skip re-marking EDRAM tiles a render target already owns on every draw. Performance only (Just Cause 2 +5% on an M4); turn off only to troubleshoot a rendering problem. XE_METAL_RASTER_MARK_SKIP=0/1 overrides this setting.",
 "changed": false
 },
+"metal_mark_draw_rows": {
+"name": "metal_mark_draw_rows",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Mark only the EDRAM tile rows a draw's scissor covers as written by the render target, so a resolve copies those rows back instead of the whole target. Performance only (F.E.A.R. 52 fewer resolve copies a frame); turn off only to troubleshoot a rendering problem. XE_METAL_MARK_DRAW_ROWS=0/1 overrides this setting.",
+"changed": false
+},
 "metal_resolve_span_coalesce": {
 "name": "metal_resolve_span_coalesce",
 "category": "GPU",
@@ -1383,6 +1437,24 @@
 "value": "auto",
 "defaultValue": "auto",
 "description": "Experimental: route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 13% more GPU submissions per frame on Viva Pinata. auto: only for titles that set metal_memexport_raster (their built-in config). on: every title. off: none. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+"changed": false
+},
+"metal_quad_lists_as_triangles": {
+"name": "metal_quad_lists_as_triangles",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Draw quad lists as triangle lists (two triangles per quad) instead of through the Metal object+mesh geometry pipelines. On the M1 Max with macOS 27 the mesh quad pipelines made the GPU abort Red Dead Redemption's command buffers (\"Insufficient Memory\") about a thousand times a session. Turn off only to troubleshoot a rendering problem. XE_METAL_QUAD_CONVERT=0/1 overrides this setting.",
+"changed": false
+},
+"metal_point_sprite_vs_expansion": {
+"name": "metal_point_sprite_vs_expansion",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Draw point sprites by expanding each point into two triangles in the vertex shader instead of through the Metal object+mesh geometry pipelines. On the M1 Max with macOS 27 the mesh pipelines made the GPU abort command buffers (\"Insufficient Memory\") and cost Banjo-Kazooie a third of its frame rate. Turn off only to troubleshoot a rendering problem. XE_METAL_POINT_VS=0/1 overrides this setting.",
 "changed": false
 },
 "metal_msaa_clear_fold": {

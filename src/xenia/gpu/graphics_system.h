@@ -81,6 +81,16 @@ class GraphicsSystem {
   void EndTracing();
 
   bool is_paused() const { return paused_; }
+
+  // Vblanks delivered to the guest so far (limit_uncapped_games paces swaps
+  // by it).
+  uint64_t vblank_count() const {
+    return vblank_count_.load(std::memory_order_acquire);
+  }
+  // With limit_uncapped_games, holds a swap until a vblank has passed since
+  // the previous one: a game that waits for vblank is never held; one that
+  // presents without waiting is held to the vblank rate (60 Hz).
+  void PaceUncappedSwap();
   void Pause();
   void Resume();
 
@@ -121,6 +131,8 @@ class GraphicsSystem {
   uint32_t interrupt_callback_data_ = 0;
 
   std::atomic<bool> frame_limiter_worker_running_;
+  std::atomic<uint64_t> vblank_count_{0};
+  uint64_t last_swap_vblank_ = UINT64_MAX;
   kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
 
   RegisterFile* register_file_;

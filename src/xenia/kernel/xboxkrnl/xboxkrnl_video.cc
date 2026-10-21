@@ -482,6 +482,11 @@ void VdSwap_entry(
 
   namespace xenos = xe::gpu::xenos;
 
+  // Present pacing for games without a frame rate cap (limit_uncapped_games):
+  // D3D's Present lands here on the guest's render thread, so holding it
+  // holds the game's frame loop.
+  kernel_state()->emulator()->graphics_system()->PaceUncappedSwap();
+
   xenos::xe_gpu_texture_fetch_t gpu_fetch;
   xe::copy_and_swap_32_unaligned(
       &gpu_fetch, reinterpret_cast<uint32_t*>(fetch_ptr.host_address()), 6);
