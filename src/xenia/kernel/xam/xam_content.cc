@@ -501,6 +501,8 @@ dword_result_t XamContentGetCreator_entry(
   if (!is_creator_ptr) {
     return X_ERROR_INVALID_PARAMETER;
   }
+  // xam clears it before anything can fail.
+  *is_creator_ptr = 0;
 
   const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
 
@@ -532,7 +534,6 @@ dword_result_t XamContentGetCreator_entry(
           }
         }
       } else {
-        *is_creator_ptr = 0;
         if (creator_xuid_ptr) {
           *creator_xuid_ptr = 0;
         }
