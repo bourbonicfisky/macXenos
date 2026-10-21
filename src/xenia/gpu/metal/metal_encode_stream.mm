@@ -59,7 +59,26 @@ inline void SpinPause() { __asm__ __volatile__("isb sy" ::: "memory"); }
 
 // Spins before parking: the producer records a draw every ~2 us, so a short
 // spin keeps the consumer hot inside a pass and parks it between frames.
-constexpr uint32_t kConsumerSpins = 4096;
+// XE_METAL_ENCODE_SPINS: polls before the consumer parks (default 4096).
+uint32_t ConsumerSpins() {
+  static const uint32_t s_spins = [] {
+    const char* v = std::getenv("XE_METAL_ENCODE_SPINS");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 4096u;
+  }();
+  return s_spins;
+}
+// XE_METAL_ENCODE_LAZY_WAKE_US=<n> (default 0 = off): a batched publish never
+// wakes a parked consumer; it parks for at most n us and picks the batch up
+// then. Drains and a full ring still wake it at once. Trades replay lag
+// inside a pass (absorbed by the next drain) for not spinning a core between
+// batches, with no wake syscall on the command processor.
+uint32_t LazyWakeUs() {
+  static const uint32_t s_us = [] {
+    const char* v = std::getenv("XE_METAL_ENCODE_LAZY_WAKE_US");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  return s_us;
+}
 constexpr uint32_t kProducerSpins = 1 << 14;
 // Publication batch: each publish is a store the spinning consumer's core
 // owns the line of, so per-draw publication (~140 B) paid a cross-core miss
@@ -284,7 +303,7 @@ void MetalEncodeStream::Publish(bool force) {
     return;
   }
   published_.store(write_pos_, std::memory_order_release);
-  if (consumer_waiting_.load(std::memory_order_relaxed)) {
+  if (!LazyWakeUs() && consumer_waiting_.load(std::memory_order_relaxed)) {
     Wake();
   }
 }
@@ -358,7 +377,8 @@ void MetalEncodeStream::ConsumerMain() {
     uint64_t end = published_.load(std::memory_order_acquire);
     if (end == pos) {
       uint32_t spins = 0;
-      while (end == pos && ++spins < kConsumerSpins) {
+      const uint32_t max_spins = ConsumerSpins();
+      while (end == pos && ++spins < max_spins) {
         SpinPause();
         end = published_.load(std::memory_order_acquire);
       }
@@ -371,7 +391,7 @@ void MetalEncodeStream::ConsumerMain() {
           os_sync_wait_on_address_with_timeout(
               &wake_word_, uint64_t(wake), sizeof(uint32_t),
               OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME,
-              uint64_t(kParkTimeoutUs) * 1000);
+              uint64_t(LazyWakeUs() ? LazyWakeUs() : kParkTimeoutUs) * 1000);
           end = published_.load(std::memory_order_acquire);
         }
         consumer_waiting_.store(0, std::memory_order_relaxed);
