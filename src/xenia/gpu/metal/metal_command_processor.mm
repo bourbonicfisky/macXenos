@@ -4459,17 +4459,29 @@ bool MetalCommandProcessor::ArenaAllocate(uint32_t size, uint32_t alignment,
   if (upload_arena_->Allocate(size, alignment, out)) {
     return true;
   }
-  // Ring full: space is owned by in-flight submissions. Wait for the oldest
-  // one, reclaim, retry once. (Waiting for ALL would serialize; the oldest
-  // frees the ring tail.)
-  uint64_t completed = completed_submission_.load(std::memory_order_acquire);
-  if (completed < submission_counter_) {
-    if (SeamTimedDirectWait(metal::SeamDirectWait::kArenaReclaim,
-                            completed + 1)) {
-      upload_arena_->Reclaim(
-          completed_submission_.load(std::memory_order_acquire));
-      PumpCompletedActions();
-      return upload_arena_->Allocate(size, alignment, out);
+  // Ring full. Reclaim first runs only at completion pumps, so through a long
+  // run of draws the regions of submissions the GPU already finished still
+  // count as live: reclaim them now (pure bookkeeping, safe mid-draw).
+  upload_arena_->Reclaim(completed_submission_.load(std::memory_order_acquire));
+  if (upload_arena_->Allocate(size, alignment, out)) {
+    return true;
+  }
+  // Then wait for committed submissions, oldest first, until the space is
+  // free. Before this, every caller skipped its draw on a full ring: GTA IV
+  // dropped up to 900k draws a run once the GPU thread ran far enough ahead.
+  // The open submission is never waited for (submission_counter_ is the last
+  // committed one); if it alone fills the ring the draw still fails.
+  while (completed_submission_.load(std::memory_order_acquire) <
+         submission_counter_) {
+    const uint64_t next =
+        completed_submission_.load(std::memory_order_acquire) + 1;
+    if (!SeamTimedDirectWait(metal::SeamDirectWait::kArenaReclaim, next)) {
+      break;
+    }
+    upload_arena_->Reclaim(
+        completed_submission_.load(std::memory_order_acquire));
+    if (upload_arena_->Allocate(size, alignment, out)) {
+      return true;
     }
   }
   return false;
@@ -10369,7 +10381,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           system_constants.flags, ps_translation != nullptr, depth_bound);
     }
   }
-  if (!upload_arena_->Allocate(sizeof(system_constants), 256, &system_alloc)) {
+  if (!ArenaAllocate(sizeof(system_constants), 256, &system_alloc)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "sysconst-alloc");
     return true;
   }
@@ -10402,7 +10414,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                             MetalUploadAllocation* out) -> bool {
     uint32_t count = GetMetalPackedFloatConstantCount(map);
     uint32_t bytes = sizeof(float) * 4 * std::max(count, 1u);
-    if (!upload_arena_->Allocate(bytes, 256, out)) {
+    if (!ArenaAllocate(bytes, 256, out)) {
       return false;
     }
     const bool force_here =
@@ -10529,7 +10541,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Bool/loop (b2), fetch (b3) — verbatim register blocks.
   auto marshal_block = [&](uint32_t reg_base, uint32_t bytes,
                            MetalUploadAllocation* out) -> bool {
-    if (!upload_arena_->Allocate(bytes, 256, out)) return false;
+    if (!ArenaAllocate(bytes, 256, out)) return false;
     std::memcpy(out->cpu_ptr, &regs[reg_base], bytes);
     // Diagnostic (XE_METAL_FORCE_BOOL=<index>:<0|1>): override one guest
     // boolean constant in the uploaded block, to attribute a defect to a
@@ -10632,7 +10644,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     const uint32_t count = plan.count;
-    if (!upload_arena_->Allocate(count * sizeof(uint32_t), 256, out)) {
+    if (!ArenaAllocate(count * sizeof(uint32_t), 256, out)) {
       return false;
     }
     auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
@@ -11047,7 +11059,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t null_gpu = fixed_gpu_addresses_[3];
 
   MetalUploadAllocation ab_alloc{};
-  if (!upload_arena_->Allocate(kMetalBindingSlotCount * sizeof(uint64_t), 256, &ab_alloc)) {
+  if (!ArenaAllocate(kMetalBindingSlotCount * sizeof(uint64_t), 256, &ab_alloc)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "argbuffer-alloc");
     return true;
   }
@@ -11164,12 +11176,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      "tess-host-degenerate");
       return true;
     }
-    if (!upload_arena_->Allocate(
+    if (!ArenaAllocate(
             tess_counts.vertex_count * metal::kXeTessellationVertexSizeBytes,
             16, &tess_host_records_alloc) ||
-        !upload_arena_->Allocate(tess_counts.index_count * sizeof(uint32_t),
+        !ArenaAllocate(tess_counts.index_count * sizeof(uint32_t),
                                  16, &tess_host_indices_alloc) ||
-        !upload_arena_->Allocate(2 * sizeof(IRDescriptorTableEntry), 256,
+        !ArenaAllocate(2 * sizeof(IRDescriptorTableEntry), 256,
                                  &tess_host_table_alloc)) {
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                      "tess-record-alloc");
@@ -11671,7 +11683,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const void* guest_indices =
           memory_->TranslatePhysical(index_buffer_info->guest_base);
       MetalUploadAllocation index_alloc{};
-      if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
+      if (!guest_indices || !ArenaAllocate(total, 16, &index_alloc)) {
         RecordDrawSkip(!guest_indices
                            ? MetalDrawSkipReason::kInvalidGuestState
                            : MetalDrawSkipReason::kResourceFailure,
@@ -11735,7 +11747,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     uint32_t host_index_count = (index_count - 2) * 3;
     MetalUploadAllocation fan_alloc{};
-    if (!upload_arena_->Allocate(host_index_count * sizeof(uint32_t), 16,
+    if (!ArenaAllocate(host_index_count * sizeof(uint32_t), 16,
                                  &fan_alloc)) {
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "fan-index-alloc");
       return true;
@@ -11808,7 +11820,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       uint32_t total = host_count * index_size;
       const void* guest_indices = memory_->TranslatePhysical(pp_result.guest_index_base);
       MetalUploadAllocation index_alloc{};
-      if (!guest_indices || !upload_arena_->Allocate(total, 16, &index_alloc)) {
+      if (!guest_indices || !ArenaAllocate(total, 16, &index_alloc)) {
         RecordDrawSkip(!guest_indices
                            ? MetalDrawSkipReason::kInvalidGuestState
                            : MetalDrawSkipReason::kResourceFailure,
@@ -11844,7 +11856,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       uint32_t total = host_count * uint32_t(sizeof(uint16_t));
       MetalUploadAllocation index_alloc{};
-      if (!upload_arena_->Allocate(total, 16, &index_alloc)) {
+      if (!ArenaAllocate(total, 16, &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "pp2-index-alloc");
         return true;
@@ -11900,7 +11912,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       host_index_count = index_count * 5;
-      if (!upload_arena_->Allocate(host_index_count * 4, 16, &index_alloc)) {
+      if (!ArenaAllocate(host_index_count * 4, 16, &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "point-index-alloc");
         return true;
@@ -11943,7 +11955,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                        "quad-degenerate");
         return true;
       }
-      if (!upload_arena_->Allocate(host_index_count * index_size, 16,
+      if (!ArenaAllocate(host_index_count * index_size, 16,
                                    &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "quad-index-alloc");
@@ -11984,7 +11996,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       host_index_count = index_count + 1;
-      if (!upload_arena_->Allocate(host_index_count * index_size, 16,
+      if (!ArenaAllocate(host_index_count * index_size, 16,
                                    &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "line-loop-index-alloc");
@@ -11999,7 +12011,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                       index_buffer_info->endianness);
       mtl_prim = MTLPrimitiveTypeLineStrip;
     } else {
-      if (!upload_arena_->Allocate(index_count * index_size, 16,
+      if (!ArenaAllocate(index_count * index_size, 16,
                                    &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                        "dma-index-alloc");
@@ -12027,7 +12039,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     const uint32_t host_index_count = index_count * 5;
     MetalUploadAllocation index_alloc{};
-    if (!upload_arena_->Allocate(host_index_count * 4, 16, &index_alloc)) {
+    if (!ArenaAllocate(host_index_count * 4, 16, &index_alloc)) {
       RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                      "point-index-alloc");
       return true;
