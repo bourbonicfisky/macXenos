@@ -1232,9 +1232,42 @@ class MetalCommandProcessor : public CommandProcessor {
     size_t writebacks = ~size_t(0);
     size_t memexports = ~size_t(0);
     bool trace_open = false;
-    // hash -> exact key (shader pointers, bound mask, bound fetch words).
-    std::unordered_map<uint64_t, std::vector<uint32_t>> entries;
+    // hash -> exact key (shader pointers, bound mask, bound fetch words):
+    // index maps the hash to a span of key_pool. Flat so clearing keeps the
+    // storage (the node-per-insert map was ~1% of the Mac Pro CP thread).
+    struct KeySpan {
+      uint32_t offset;
+      uint32_t length;
+    };
+    MetalFlatIndexMap index;
+    std::vector<KeySpan> spans;
+    std::vector<uint32_t> key_pool;
     std::vector<uint32_t> key_scratch;
+    bool Empty() const { return spans.empty(); }
+    void Clear() {
+      index.Clear();
+      spans.clear();
+      key_pool.clear();
+    }
+    bool Contains(uint64_t hash, const std::vector<uint32_t>& key) {
+      const uint32_t* i = index.Find(hash);
+      if (!i) {
+        return false;
+      }
+      const KeySpan& span = spans[*i];
+      return span.length == key.size() &&
+             std::equal(key.begin(), key.end(),
+                        key_pool.begin() + span.offset);
+    }
+    void Insert(uint64_t hash, const std::vector<uint32_t>& key) {
+      // Overwritten keys stay in the pool until the next clear; bound it.
+      if (key_pool.size() + key.size() > (size_t(1) << 20)) {
+        Clear();
+      }
+      spans.push_back({uint32_t(key_pool.size()), uint32_t(key.size())});
+      key_pool.insert(key_pool.end(), key.begin(), key.end());
+      index.Insert(hash, uint32_t(spans.size() - 1), true);
+    }
     uint64_t hits = 0, misses = 0, inserts = 0, clears = 0;
     uint64_t verify_checked = 0, verify_mismatches = 0;
   };

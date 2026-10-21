@@ -8755,8 +8755,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         memo.writebacks != pending_writebacks_.size() ||
         memo.memexports != pending_memexports_.size() ||
         memo.trace_open != trace_open) {
-      if (!memo.entries.empty()) {
-        memo.entries.clear();
+      if (!memo.Empty()) {
+        memo.Clear();
         ++memo.clears;
       }
       memo.sequence = memory_authority_sequence_;
@@ -8798,8 +8798,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       hash = (hash ^ v) * 0x100000001b3ull;
     }
     tex_dep_memo_hash = hash;
-    auto it = memo.entries.find(hash);
-    tex_dep_memo_hit = it != memo.entries.end() && it->second == key;
+    tex_dep_memo_hit = memo.Contains(hash, key);
     if (tex_dep_memo_hit) {
       ++memo.hits;
     } else {
@@ -9399,7 +9398,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               authority_decision.selected.size());
         }
       } else if (no_dependency) {
-        memo.entries[tex_dep_memo_hash] = memo.key_scratch;
+        memo.Insert(tex_dep_memo_hash, memo.key_scratch);
         ++memo.inserts;
       }
     }
