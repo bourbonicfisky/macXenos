@@ -4,7 +4,8 @@ These are the games macXenos is tested with regularly. Each one is started
 automatically, played to the point shown with a scripted controller, and
 measured for a minute. Results below are from the runs on October 19-21, 2026,
 on a base M4 Mac mini and on an M1 Max MacBook Pro, at the original
-resolution (1x), using the Metal renderer.
+resolution (1x), using the Metal renderer. The M1 Max column is from the full
+run of every game on October 21.
 
 **"Reaches" is how far the test goes, not how far the game works.**
 
@@ -26,35 +27,35 @@ smoother.
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 |  |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
 | Batman: Arkham Origins | Blackgate rooftop | 30 | 30 |  |
-| Burnout Paradise | Driving in Paradise City | 60 | 58 | Its target is 60 |
+| Burnout Paradise | Driving in Paradise City | 60 | 60 | Its target is 60 |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |
-| Dead to Rights: Retribution | Prologue | 30 | 28 | 28-30 across repeated runs on the M1 Max |
+| Dead to Rights: Retribution | Prologue | 30 | 30 |  |
 | Dead Space | Opening cutscene, the Kellion's cockpit | 30 | 30 |  |
 | Devil May Cry 4 | Prologue | 30 | 30 |  |
 | Dishonored | New game opening | 30 | 30 |  |
 | F.E.A.R. | Instant Action, Distribution | 30 | 30 |  |
 | Fable II | Childhood, Bowerstone at night | 30 | 30 |  |
-| Far Cry 3 | Opening (the cage) | 30 | 28 | Below full speed on the M1 Max |
+| Far Cry 3 | Opening (the cage) | 30 | 30 |  |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
 | Gears of War: Judgment | Survival, Estate | 30 | 30 |  |
-| Grand Theft Auto IV | Opening drive | 48 | 50 | The game does not cap its own frame rate |
+| Grand Theft Auto IV | Opening drive | 48 | 55 | The game does not cap its own frame rate (see below) |
 | Halo 3 | Campaign, Arrival | 30 | 30 |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | Only the main menu is tested |
 | Halo: Reach | Campaign, Winter Contingency | 30 | 30 |  |
 | Just Cause 2 | Open world | 27 | 30 |  |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 | 60 |  |
-| Mafia II | Story opening | 81 | 83 | The game does not cap its own frame rate |
+| Mafia II | Story opening | 81 | 82 | The game does not cap its own frame rate (see below) |
 | Mass Effect | First conversation | 30 | 30 | Its built-in settings fix the one-frame colour glitches and characters vanishing for a frame (October 14) |
 | Mirror's Edge | Story, first chapter | 30 | 30 |  |
 | Portal 2 | Relaxation Vault | 30 | 30 |  |
-| Prince of Persia: The Forgotten Sands | Opening | 30 | 30 | Sometimes stalls at the loading screen (a known intermittent hang); both test runs loaded |
+| Prince of Persia: The Forgotten Sands | Opening | 30 | 30 | Sometimes stalls at the loading screen (a known intermittent hang); on October 21 the M1 Max stalled once and loaded on the retry |
 | Rage | Campaign opening | 60 | 60 |  |
 | Rayman Legends | Teensies in Trouble | 60 | 60 |  |
 | Red Dead Redemption | Opening cutscene | 30 | 30 | Disc 1 of the Game of the Year Edition |
@@ -67,6 +68,10 @@ smoother.
 | Viva Piñata | Garden | 30 | 30 |  |
 
 None of the games hit a GPU error on either Mac in these runs.
+
+Grand Theft Auto IV and Mafia II don't limit their own frame rate, so they run
+as fast as the Mac allows. The table measures them that way. To hold them at
+60, set **Uncapped games** to **60 FPS** in the Graphics settings.
 
 ## Other games
 
