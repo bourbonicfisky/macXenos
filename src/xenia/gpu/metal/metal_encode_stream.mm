@@ -659,7 +659,7 @@ void MetalEncodeStream::SetScissorRect(const MTLScissorRect& rect) {
 }
 
 void MetalEncodeStream::SetRenderPipelineState(
-    id<MTLRenderPipelineState> state) {
+    __unsafe_unretained id<MTLRenderPipelineState> state) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ setRenderPipelineState:state];
     return;
@@ -679,7 +679,7 @@ void MetalEncodeStream::SetBlendColor(float r, float g, float b, float a) {
   c[3] = a;
 }
 
-void MetalEncodeStream::SetDepthStencilState(id<MTLDepthStencilState> state) {
+void MetalEncodeStream::SetDepthStencilState(__unsafe_unretained id<MTLDepthStencilState> state) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ setDepthStencilState:state];
     return;
@@ -710,7 +710,7 @@ void MetalEncodeStream::SetVisibilityResultMode(MTLVisibilityResultMode mode,
   p->offset = uint64_t(offset);
 }
 
-void MetalEncodeStream::SetBuffer(uint32_t stage, id<MTLBuffer> buffer,
+void MetalEncodeStream::SetBuffer(uint32_t stage, __unsafe_unretained id<MTLBuffer> buffer,
                                   NSUInteger offset, NSUInteger index) {
   if (mode_ == Mode::kDirect) {
     switch (stage) {
@@ -788,7 +788,7 @@ void MetalEncodeStream::SetBytes(uint32_t stage, const void* bytes,
   std::memcpy(p + 1, bytes, length);
 }
 
-void MetalEncodeStream::UseResource(id<MTLResource> resource,
+void MetalEncodeStream::UseResource(__unsafe_unretained id<MTLResource> resource,
                                     MTLResourceUsage usage,
                                     MTLRenderStages stages, bool retain) {
   if (mode_ == Mode::kDirect) {
@@ -841,7 +841,7 @@ void MetalEncodeStream::DrawPrimitives(MTLPrimitiveType type,
 
 void MetalEncodeStream::DrawIndexedPrimitives(
     MTLPrimitiveType type, uint64_t index_count, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
+    __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
     int64_t base_vertex, uint64_t base_instance) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ drawIndexedPrimitives:type
@@ -880,7 +880,7 @@ void MetalEncodeStream::IRDrawPrimitives(MTLPrimitiveType type,
 
 void MetalEncodeStream::IRDrawIndexedPrimitives(
     MTLPrimitiveType type, uint64_t index_count, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
+    __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
     int64_t base_vertex, uint64_t base_instance) {
   if (mode_ == Mode::kDirect) {
     IRRuntimeDrawIndexedPrimitives(direct_encoder_, type, index_count,
@@ -901,7 +901,7 @@ void MetalEncodeStream::IRDrawIndexedPrimitives(
 
 void MetalEncodeStream::IRDrawIndexedGeometryEmulation(
     IRRuntimePrimitiveType type, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
+    __unsafe_unretained id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
     uint32_t instance_count, uint32_t index_count, uint32_t start_index,
     int base_vertex, uint32_t base_instance) {
   if (mode_ == Mode::kDirect) {

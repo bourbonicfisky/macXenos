@@ -78,17 +78,17 @@ class MetalEncodeStream {
   void SetTriangleFillMode(MTLTriangleFillMode mode);
   void SetDepthBias(float constant, float slope, float clamp);
   void SetScissorRect(const MTLScissorRect& rect);
-  void SetRenderPipelineState(id<MTLRenderPipelineState> state);
+  void SetRenderPipelineState(__unsafe_unretained id<MTLRenderPipelineState> state);
   void SetBlendColor(float r, float g, float b, float a);
-  void SetDepthStencilState(id<MTLDepthStencilState> state);
+  void SetDepthStencilState(__unsafe_unretained id<MTLDepthStencilState> state);
   void SetStencilReferenceValues(uint32_t front, uint32_t back);
   void SetVisibilityResultMode(MTLVisibilityResultMode mode, NSUInteger offset);
-  void SetBuffer(uint32_t stage, id<MTLBuffer> buffer, NSUInteger offset,
+  void SetBuffer(uint32_t stage, __unsafe_unretained id<MTLBuffer> buffer, NSUInteger offset,
                  NSUInteger index);
   void SetBufferOffset(uint32_t stage, NSUInteger offset, NSUInteger index);
   void SetBytes(uint32_t stage, const void* bytes, NSUInteger length,
                 NSUInteger index);
-  void UseResource(id<MTLResource> resource, MTLResourceUsage usage,
+  void UseResource(__unsafe_unretained id<MTLResource> resource, MTLResourceUsage usage,
                    MTLRenderStages stages, bool retain);
   // Texture heaps (discrete AMD), at most kMaxUseHeaps per call.
   static constexpr uint32_t kMaxUseHeaps = 64;
@@ -98,7 +98,7 @@ class MetalEncodeStream {
                       uint64_t vertex_count);
   void DrawIndexedPrimitives(MTLPrimitiveType type, uint64_t index_count,
                              MTLIndexType index_type,
-                             id<MTLBuffer> index_buffer, uint64_t index_offset,
+                             __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset,
                              uint64_t instance_count, int64_t base_vertex,
                              uint64_t base_instance);
   // IRRuntime draw helpers (they bind draw parameters, then draw).
@@ -106,12 +106,12 @@ class MetalEncodeStream {
                         uint64_t vertex_count);
   void IRDrawIndexedPrimitives(MTLPrimitiveType type, uint64_t index_count,
                                MTLIndexType index_type,
-                               id<MTLBuffer> index_buffer,
+                               __unsafe_unretained id<MTLBuffer> index_buffer,
                                uint64_t index_offset, uint64_t instance_count,
                                int64_t base_vertex, uint64_t base_instance);
   void IRDrawIndexedGeometryEmulation(
       IRRuntimePrimitiveType type, MTLIndexType index_type,
-      id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
+      __unsafe_unretained id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
       uint32_t instance_count, uint32_t index_count, uint32_t start_index,
       int base_vertex, uint32_t base_instance);
   void IRDrawGeometryEmulation(IRRuntimePrimitiveType type,
