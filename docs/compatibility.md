@@ -2,7 +2,7 @@
 
 These are the games macXenos is tested with regularly. Each one is started
 automatically, played to the point shown with a scripted controller, and
-measured for a minute. Results below are from the runs on October 19-20, 2026,
+measured for a minute. Results below are from the runs on October 19-21, 2026,
 on a base M4 Mac mini and on an M1 Max MacBook Pro, at the original
 resolution (1x), using the Metal renderer.
 
@@ -22,8 +22,10 @@ smoother.
 | Game | Reaches | M4 mini | M1 Max | Notes |
 | --- | --- | ---: | ---: | --- |
 | Assassin's Creed II | Story mode opening | 30 | 30 |  |
+| Assassin's Creed III | Opening, Desmond at the cave entrance | 60 | 60 | This scene runs at 60 |
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 |  |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
+| Batman: Arkham Origins | Blackgate rooftop | 30 | 30 |  |
 | Burnout Paradise | Driving in Paradise City | 60 | 58 | Its target is 60 |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
@@ -31,11 +33,12 @@ smoother.
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |
 | Dead to Rights: Retribution | Prologue | 30 | 28 | 28-30 across repeated runs on the M1 Max |
+| Dead Space | Opening cutscene, the Kellion's cockpit | 30 | 30 |  |
 | Devil May Cry 4 | Prologue | 30 | 30 |  |
 | Dishonored | New game opening | 30 | 30 |  |
 | F.E.A.R. | Instant Action, Distribution | 30 | 30 |  |
 | Fable II | Childhood, Bowerstone at night | 30 | 30 |  |
-| Far Cry 3 | Opening (the cage) | 29 | 28 | Below full speed on the M1 Max |
+| Far Cry 3 | Opening (the cage) | 30 | 28 | Below full speed on the M1 Max |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
@@ -47,7 +50,7 @@ smoother.
 | Halo: Reach | Campaign, Winter Contingency | 30 | 30 |  |
 | Just Cause 2 | Open world | 27 | 30 |  |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 | 60 |  |
-| Mafia II | Story opening | 82 | 83 | The game does not cap its own frame rate |
+| Mafia II | Story opening | 81 | 83 | The game does not cap its own frame rate |
 | Mass Effect | First conversation | 30 | 30 | Its built-in settings fix the one-frame colour glitches and characters vanishing for a frame (October 14) |
 | Mirror's Edge | Story, first chapter | 30 | 30 |  |
 | Portal 2 | Relaxation Vault | 30 | 30 |  |
@@ -56,6 +59,7 @@ smoother.
 | Rayman Legends | Teensies in Trouble | 60 | 60 |  |
 | Red Dead Redemption | Opening cutscene | 30 | 30 | Disc 1 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 29 | 30 |  |
+| Ridge Racer Unbounded | Domination race | 30 | 30 |  |
 | Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
