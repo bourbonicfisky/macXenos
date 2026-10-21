@@ -48,6 +48,7 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+class MetalEncodeStream;
 class MetalPipelineCache;
 class MetalPrimitiveProcessor;
 class MetalRenderTargetCache;
@@ -526,6 +527,14 @@ class MetalCommandProcessor : public CommandProcessor {
   // 4 MiB GPU-zeroed buffer for heap fitted-snapshot views (retained).
   void* snapshot_zero_buffer_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
+  // Hot-path render-encoder calls (direct, or recorded and replayed on the
+  // encoder thread; XE_METAL_ENCODE_THREAD). Drained before the command
+  // processor ends or otherwise touches frame_render_encoder_ directly.
+  std::unique_ptr<MetalEncodeStream> encode_stream_;
+  // gpuAddress of the view/sampler heaps, system view tables and null buffer,
+  // keyed by their pointers (IssueDraw's argument buffer).
+  void* fixed_gpu_address_ptrs_[4] = {};
+  uint64_t fixed_gpu_addresses_[4] = {};
   // Side command buffer of the open submission: first loads of CPU-sourced
   // textures by the shared texture cache, encoded without ending the render
   // pass and committed just ahead of the frame command buffer (resources are

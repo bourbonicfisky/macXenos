@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/metal/metal_xenos_sample_positions.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_encode_stream.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/metal/metal_gamma_ramp_shader.h"
 #include "xenia/gpu/metal/metal_pwl_gamma.h"
@@ -2246,6 +2247,8 @@ bool TessDrawRangeAllows(uint32_t draw_index) {
 }  // namespace
 
 bool MetalCommandProcessor::SetupContext() {
+  encode_stream_ = std::make_unique<MetalEncodeStream>();
+  encode_stream_->Start(MetalEncodeStream::ModeFromEnvironment());
   // Effective submission/lifetime mode banner: config sessions were getting
   // misidentified from fps profiles alone — the log states the truth.
   XELOGI(
@@ -3060,6 +3063,11 @@ void MetalCommandProcessor::ReportZeroCopyRuntimeCost(
 }
 
 void MetalCommandProcessor::ShutdownContext() {
+  if (encode_stream_) {
+    // Replays what is recorded and stops the encoder thread; later shutdown
+    // paths that end an encoder then run direct.
+    encode_stream_->Shutdown();
+  }
   if (lazy_read_callback_handle_ && memory_) {
     memory_->UnregisterPhysicalMemoryReadCallback(lazy_read_callback_handle_);
     lazy_read_callback_handle_ = nullptr;
@@ -3640,6 +3648,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   }
   frame_render_encoder_ = (__bridge_retained void*)encoder;
   frame_open_ = true;
+  encode_stream_->SetEncoder(encoder);
   encoder_attachment_key_ = want_key;
   {
     // The Load + Store set this pass binds (scratch DontCare attachments of
@@ -5314,10 +5323,9 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
   if (!zpd_visibility_pool_.Acquire(index, generation, offset)) {
     return QueryOpenResult::kFailed;
   }
-  id<MTLRenderCommandEncoder> encoder =
-      (__bridge id<MTLRenderCommandEncoder>)frame_render_encoder_;
-  [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting
-                            offset:offset];
+  // Through the stream: the draws before it may still be recording.
+  encode_stream_->SetVisibilityResultMode(MTLVisibilityResultModeCounting,
+                                          offset);
   zpd_active_index_ = index;
   zpd_active_generation_ = generation;
   zpd_query_open_ = true;
@@ -5340,9 +5348,7 @@ bool MetalCommandProcessor::RetireActiveZPDQuery(ReportHandle report_handle,
   // nothing to disable -- but the slot still has a pending GPU write, so it
   // must be queued either way.
   if (frame_open_ && frame_render_encoder_ && encoder_has_zpd_visibility_) {
-    id<MTLRenderCommandEncoder> encoder =
-        (__bridge id<MTLRenderCommandEncoder>)frame_render_encoder_;
-    [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+    encode_stream_->SetVisibilityResultMode(MTLVisibilityResultModeDisabled, 0);
   }
 
   MetalZPDResolve resolve;
@@ -5567,6 +5573,11 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   }
   if (RcCensusEnabled()) {
     ++RcCensus().pass_ends;
+  }
+  if (encode_stream_) {
+    // Every recorded op of this encoder is replayed before it ends.
+    encode_stream_->SetEncoder(nil);
+    encode_stream_->Drain();
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
@@ -9941,6 +9952,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    "encoder-unavailable");
     return true;
   }
+  // Every encoder call below goes through the stream; whatever path returns,
+  // the draw's ops are published (or replayed inline) on the way out.
+  MetalEncodeStream& es = *encode_stream_;
+  struct StreamCommit {
+    MetalEncodeStream& stream;
+    ~StreamCommit() { stream.Commit(); }
+  } stream_commit{es};
   draw_trace_milestone("after-encoder");
   if (PassCensusEnabled() && !memexport_draw) {
     pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
@@ -10434,7 +10452,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                    vp.height,  vp.znear,   vp.zfar};
       if (!state_dedupe || !fs.viewport_valid ||
           std::memcmp(fs.viewport, vp_values, sizeof(vp_values))) {
-        [encoder setViewport:vp];
+        es.SetViewport(vp);
         std::memcpy(fs.viewport, vp_values, sizeof(vp_values));
         fs.viewport_valid = true;
       }
@@ -10466,7 +10484,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               ? MTLDepthClipModeClamp
               : MTLDepthClipModeClip;
       if (!state_dedupe || fs.depth_clip != int32_t(metal_clip)) {
-        [encoder setDepthClipMode:metal_clip];
+        es.SetDepthClipMode(metal_clip);
         fs.depth_clip = int32_t(metal_clip);
       }
       MetalCullFrontFaceState face_state = GetMetalCullFrontFaceState(
@@ -10488,14 +10506,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         cull_mode = MTLCullModeNone;
       }
       if (!state_dedupe || fs.cull != int32_t(cull_mode)) {
-        [encoder setCullMode:cull_mode];
+        es.SetCullMode(cull_mode);
         fs.cull = int32_t(cull_mode);
       }
       const MTLWinding winding = face_state.front_face_clockwise
                                      ? MTLWindingClockwise
                                      : MTLWindingCounterClockwise;
       if (!state_dedupe || fs.winding != int32_t(winding)) {
-        [encoder setFrontFacingWinding:winding];
+        es.SetFrontFacingWinding(winding);
         fs.winding = int32_t(winding);
       }
 
@@ -10516,16 +10534,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               ? MTLTriangleFillModeLines
               : MTLTriangleFillModeFill;
       if (!state_dedupe || fs.fill != int32_t(fill_mode)) {
-        [encoder setTriangleFillMode:fill_mode];
+        es.SetTriangleFillMode(fill_mode);
         fs.fill = int32_t(fill_mode);
       }
       const float depth_bias[2] = {fill_bias.depth_bias_constant,
                                    fill_bias.depth_bias_slope};
       if (!state_dedupe || !fs.depth_bias_valid ||
           std::memcmp(fs.depth_bias, depth_bias, sizeof(depth_bias))) {
-        [encoder setDepthBias:fill_bias.depth_bias_constant
-                   slopeScale:fill_bias.depth_bias_slope
-                        clamp:0.0f];
+        es.SetDepthBias(fill_bias.depth_bias_constant,
+                        fill_bias.depth_bias_slope, 0.0f);
         std::memcpy(fs.depth_bias, depth_bias, sizeof(depth_bias));
         fs.depth_bias_valid = true;
       }
@@ -10601,7 +10618,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint64_t(scissor_rect.width), uint64_t(scissor_rect.height)};
       if (!state_dedupe || !fs.scissor_valid ||
           std::memcmp(fs.scissor, scissor_values, sizeof(scissor_values))) {
-        [encoder setScissorRect:scissor_rect];
+        es.SetScissorRect(scissor_rect);
         std::memcpy(fs.scissor, scissor_values, sizeof(scissor_values));
         fs.scissor_valid = true;
       }
@@ -11338,10 +11355,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   __unsafe_unretained id<MTLBuffer> sampler_heap = (__bridge id<MTLBuffer>)sampler_bindless_heap_;
   __unsafe_unretained id<MTLBuffer> system_view = (__bridge id<MTLBuffer>)system_view_tables_;
   __unsafe_unretained id<MTLBuffer> null_buffer = (__bridge id<MTLBuffer>)null_buffer_;
-  uint64_t view_heap_gpu = [view_heap gpuAddress];
-  uint64_t sampler_heap_gpu = [sampler_heap gpuAddress];
-  uint64_t system_view_gpu = [system_view gpuAddress];
-  uint64_t null_gpu = [null_buffer gpuAddress];
+  // gpuAddress is an Objective-C call into the driver; these buffers are
+  // long-lived, so their addresses are re-read only when a pointer changes.
+  {
+    void* const ptrs[4] = {view_bindless_heap_, sampler_bindless_heap_,
+                           system_view_tables_, null_buffer_};
+    if (std::memcmp(fixed_gpu_address_ptrs_, ptrs, sizeof(ptrs))) {
+      std::memcpy(fixed_gpu_address_ptrs_, ptrs, sizeof(ptrs));
+      fixed_gpu_addresses_[0] = [view_heap gpuAddress];
+      fixed_gpu_addresses_[1] = [sampler_heap gpuAddress];
+      fixed_gpu_addresses_[2] = [system_view gpuAddress];
+      fixed_gpu_addresses_[3] = [null_buffer gpuAddress];
+    }
+  }
+  uint64_t view_heap_gpu = fixed_gpu_addresses_[0];
+  uint64_t sampler_heap_gpu = fixed_gpu_addresses_[1];
+  uint64_t system_view_gpu = fixed_gpu_addresses_[2];
+  uint64_t null_gpu = fixed_gpu_addresses_[3];
 
   MetalUploadAllocation ab_alloc{};
   if (!upload_arena_->Allocate(kMetalBindingSlotCount * sizeof(uint64_t), 256, &ab_alloc)) {
@@ -11553,8 +11583,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   if (!state_dedupe || encoder_fixed_state_.pipeline != pipeline) {
-    [encoder
-        setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
+    es.SetRenderPipelineState((__bridge id<MTLRenderPipelineState>)pipeline);
     encoder_fixed_state_.pipeline = pipeline;
   }
 
@@ -11582,10 +11611,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         blend_stencil.blend_color_blue, blend_stencil.blend_color_alpha};
     if (!state_dedupe || !fs.blend_color_valid ||
         std::memcmp(fs.blend_color, blend_color, sizeof(blend_color))) {
-      [encoder setBlendColorRed:blend_stencil.blend_color_red
-                          green:blend_stencil.blend_color_green
-                           blue:blend_stencil.blend_color_blue
-                          alpha:blend_stencil.blend_color_alpha];
+      es.SetBlendColor(blend_stencil.blend_color_red,
+                       blend_stencil.blend_color_green,
+                       blend_stencil.blend_color_blue,
+                       blend_stencil.blend_color_alpha);
       std::memcpy(fs.blend_color, blend_color, sizeof(blend_color));
       fs.blend_color_valid = true;
     }
@@ -11602,18 +11631,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // Encoder state persists across draws; skip re-setting what the open
       // encoder already carries.
       if (depth_state != encoder_depth_stencil_state_) {
-        [encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)
-                                          depth_state];
+        es.SetDepthStencilState(
+            (__bridge id<MTLDepthStencilState>)depth_state);
         encoder_depth_stencil_state_ = depth_state;
       }
       if (blend_stencil.stencil_enabled &&
           (blend_stencil.stencil_reference_front != encoder_stencil_ref_front_ ||
            blend_stencil.stencil_reference_back != encoder_stencil_ref_back_)) {
-        [encoder
-            setStencilFrontReferenceValue:
-                blend_stencil.stencil_reference_front
-                      backReferenceValue:
-                          blend_stencil.stencil_reference_back];
+        es.SetStencilReferenceValues(blend_stencil.stencil_reference_front,
+                                     blend_stencil.stencil_reference_back);
         encoder_stencil_ref_front_ = blend_stencil.stencil_reference_front;
         encoder_stencil_ref_back_ = blend_stencil.stencil_reference_back;
       }
@@ -11628,7 +11654,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     float debug_color[4] = {0.2f + 0.8f * ((h & 0xFF) / 255.0f),
                             0.2f + 0.8f * (((h >> 8) & 0xFF) / 255.0f),
                             0.2f + 0.8f * (((h >> 16) & 0xFF) / 255.0f), 1.0f};
-    [encoder setFragmentBytes:debug_color length:sizeof(debug_color) atIndex:8];
+    es.SetBytes(MetalEncodeStream::kStageFragment, debug_color,
+                sizeof(debug_color), 8);
   }
   __unsafe_unretained id<MTLBuffer> ab_buffer = (__bridge id<MTLBuffer>)ab_alloc.buffer;
   // Geometry emulation runs mesh-path pipelines (object + mesh stages), so
@@ -11649,39 +11676,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           return;
         }
         b.offset = off;
-        switch (kind) {
-          case 0:
-            [encoder setVertexBufferOffset:off atIndex:idx];
-            break;
-          case 1:
-            [encoder setFragmentBufferOffset:off atIndex:idx];
-            break;
-          case 2:
-            [encoder setObjectBufferOffset:off atIndex:idx];
-            break;
-          default:
-            [encoder setMeshBufferOffset:off atIndex:idx];
-            break;
-        }
+        es.SetBufferOffset(kind, off, idx);
         return;
       }
       b.buffer = raw;
       b.offset = off;
     }
-    switch (kind) {
-      case 0:
-        [encoder setVertexBuffer:buf offset:off atIndex:idx];
-        break;
-      case 1:
-        [encoder setFragmentBuffer:buf offset:off atIndex:idx];
-        break;
-      case 2:
-        [encoder setObjectBuffer:buf offset:off atIndex:idx];
-        break;
-      default:
-        [encoder setMeshBuffer:buf offset:off atIndex:idx];
-        break;
-    }
+    es.SetBuffer(kind, buf, off, idx);
   };
   auto bind_arg_buffer = [&](__unsafe_unretained id<MTLBuffer> buf, NSUInteger off, NSUInteger idx) {
     const uint32_t slot = idx == kIRArgumentBufferBindPoint   ? 0u
@@ -11705,9 +11706,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // (zero stage-in inputs), so a zeroed table satisfies the binding without
     // supplying any real vertex streams.
     IRRuntimeVertexBuffers vertex_buffers = {};
-    [encoder setObjectBytes:vertex_buffers
-                     length:sizeof(vertex_buffers)
-                    atIndex:kIRVertexBufferBindPoint];
+    es.SetBytes(MetalEncodeStream::kStageObject, &vertex_buffers,
+                sizeof(vertex_buffers), kIRVertexBufferBindPoint);
   }
   // Residency for everything the shaders reach through gpuAddresses.
   __unsafe_unretained id<MTLBuffer> shared_buffer =
@@ -11735,7 +11735,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // declares no UAV; see metal_memexport_raster_flags.h's D2 note).
   // A declaration already made on this encoder with a superset of the usage
   // and stages covers this draw too (useResource applies to the whole pass).
-  auto use_resource = [&](__unsafe_unretained id<MTLResource> resource, MTLResourceUsage usage) {
+  // retain: a cache-owned texture a later draw's decision can evict while the
+  // op still waits for replay.
+  auto use_resource = [&](__unsafe_unretained id<MTLResource> resource,
+                          MTLResourceUsage usage, bool retain = false) {
     if (encoder_dedupe) {
       const uint32_t bits = uint32_t(usage) | (uint32_t(stages) << 8);
       void* raw = (__bridge void*)resource;
@@ -11746,7 +11749,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         *declared |= bits;
       }
     }
-    [encoder useResource:resource usage:usage stages:stages];
+    es.UseResource(resource, usage, stages, retain);
   };
   use_resource(shared_buffer, memexport_uav_bound ? (MTLResourceUsageRead | MTLResourceUsageWrite)
                                                   : MTLResourceUsageRead);
@@ -11773,9 +11776,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       for (uint32_t h = first; h < heap_count && n < 64; ++h) {
         heaps[n++] = (__bridge id<MTLHeap>)texture_cache_->texture_heap(h);
       }
-      [encoder useHeaps:heaps
-                  count:n
-                 stages:MTLRenderStages(encoder_heap_stages_)];
+      es.UseHeaps(heaps, n, MTLRenderStages(encoder_heap_stages_));
       encoder_heaps_declared_ = heap_count;
       ++heap_declarations_;
     }
@@ -11805,7 +11806,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       ++texture_declarations_;
     }
-    use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead);
+    use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead, true);
   }
 
   draw_trace_milestone("after-use-resources");
@@ -11837,13 +11838,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       dp.draw.vertexCountPerInstance = junk;
       dp.draw.instanceCount = 1;
     }
-    [encoder setVertexBytes:&dp
-                     length:sizeof(dp)
-                    atIndex:kIRArgumentBufferDrawArgumentsBindPoint];
+    es.SetBytes(MetalEncodeStream::kStageVertex, &dp, sizeof(dp),
+                kIRArgumentBufferDrawArgumentsBindPoint);
     const uint16_t uniform = indexed ? ir_index_type : kIRNonIndexedDraw;
-    [encoder setVertexBytes:&uniform
-                     length:sizeof(uniform)
-                    atIndex:kIRArgumentBufferUniformsBindPoint];
+    es.SetBytes(MetalEncodeStream::kStageVertex, &uniform, sizeof(uniform),
+                kIRArgumentBufferUniformsBindPoint);
     encoder_fixed_state_.draw_params = key;
   };
   auto ir_draw_indexed = [&](MTLPrimitiveType prim, uint64_t index_count_host,
@@ -11852,33 +11851,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                              uint64_t index_offset, uint64_t instance_count,
                              int64_t base_vertex, uint64_t base_instance) {
     if (!s_draw_params_mode) {
-      IRRuntimeDrawIndexedPrimitives(encoder, prim, index_count_host,
-                                     index_type, index_buffer, index_offset,
-                                     instance_count, base_vertex,
-                                     base_instance);
+      es.IRDrawIndexedPrimitives(prim, index_count_host, index_type,
+                                 index_buffer, index_offset, instance_count,
+                                 base_vertex, base_instance);
       return;
     }
     // IRMetalIndexToIRIndex (implementation-only in the runtime header).
     bind_draw_params(true, uint16_t(uint16_t(index_type) + 1u));
-    [encoder drawIndexedPrimitives:prim
-                        indexCount:index_count_host
-                         indexType:index_type
-                       indexBuffer:index_buffer
-                 indexBufferOffset:index_offset
-                     instanceCount:instance_count
-                        baseVertex:base_vertex
-                      baseInstance:base_instance];
+    es.DrawIndexedPrimitives(prim, index_count_host, index_type, index_buffer,
+                             index_offset, instance_count, base_vertex,
+                             base_instance);
   };
   auto ir_draw = [&](MTLPrimitiveType prim, uint64_t vertex_start,
                      uint64_t vertex_count) {
     if (!s_draw_params_mode) {
-      IRRuntimeDrawPrimitives(encoder, prim, vertex_start, vertex_count);
+      es.IRDrawPrimitives(prim, vertex_start, vertex_count);
       return;
     }
     bind_draw_params(false, 0);
-    [encoder drawPrimitives:prim
-                vertexStart:vertex_start
-                vertexCount:vertex_count];
+    es.DrawPrimitives(prim, vertex_start, vertex_count);
   };
   auto mark_raster_targets_written = [&] {
     if (PassCensusEnabled()) {
@@ -12003,15 +11994,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         (__bridge id<MTLBuffer>)tess_host_indices_alloc.buffer;
     __unsafe_unretained id<MTLBuffer> tess_table_buffer =
         (__bridge id<MTLBuffer>)tess_host_table_alloc.buffer;
-    [encoder useResource:tess_records_buffer
-                   usage:MTLResourceUsageRead
-                  stages:stages];
-    [encoder useResource:tess_indices_buffer
-                   usage:MTLResourceUsageRead
-                  stages:stages];
-    [encoder useResource:tess_table_buffer
-                   usage:MTLResourceUsageRead
-                  stages:stages];
+    use_resource(tess_records_buffer, MTLResourceUsageRead);
+    use_resource(tess_indices_buffer, MTLResourceUsageRead);
+    use_resource(tess_table_buffer, MTLResourceUsageRead);
     ir_draw_indexed( MTLPrimitiveTypeTriangle, tess_host_index_count,
         MTLIndexTypeUInt32, tess_indices_buffer, tess_host_indices_alloc.offset,
         /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
@@ -12071,7 +12056,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, index_count,
                       index_buffer_info->format, index_buffer_info->endianness);
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
-      [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+      use_resource(index_buffer, MTLResourceUsageRead);
       MTLIndexType index_type =
           index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
       // The runtime reads the index buffer by gpuAddress; our data lives at the
@@ -12083,10 +12068,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       NoteGeometryEmulationDraw(uint32_t(geometry_type), index_count, chunk);
       for (uint32_t first = 0; first < index_count; first += chunk) {
         const uint32_t count = std::min(chunk, index_count - first);
-        IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
-            encoder, geometry_primitive, index_type, index_buffer,
-            geometry_config, /*instanceCount=*/1, count, start_index + first,
-            /*baseVertex=*/0, /*baseInstance=*/0);
+        es.IRDrawIndexedGeometryEmulation(
+            geometry_primitive, index_type, index_buffer, geometry_config,
+            /*instance_count=*/1, count, start_index + first,
+            /*base_vertex=*/0, /*base_instance=*/0);
       }
     } else {
       const uint32_t chunk = GeometryEmulationChunkVertices(
@@ -12095,10 +12080,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       NoteGeometryEmulationDraw(uint32_t(geometry_type), index_count, chunk);
       for (uint32_t first = 0; first < index_count; first += chunk) {
         const uint32_t count = std::min(chunk, index_count - first);
-        IRRuntimeDrawPrimitivesGeometryEmulation(
-            encoder, geometry_primitive, geometry_config,
-            /*instanceCount=*/1, count, /*baseVertex=*/first,
-            /*baseInstance=*/0);
+        es.IRDrawGeometryEmulation(geometry_primitive, geometry_config,
+                                   /*instance_count=*/1, count,
+                                   /*base_vertex=*/first, /*base_instance=*/0);
       }
     }
     mark_raster_targets_written();
@@ -12166,7 +12150,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       host_idx[o++] = src[i + 1];
     }
     __unsafe_unretained id<MTLBuffer> fan_ib = (__bridge id<MTLBuffer>)fan_alloc.buffer;
-    [encoder useResource:fan_ib usage:MTLResourceUsageRead stages:stages];
+    use_resource(fan_ib, MTLResourceUsageRead);
     ir_draw_indexed( MTLPrimitiveTypeTriangle,
                                    host_index_count, MTLIndexTypeUInt32, fan_ib,
                                    fan_alloc.offset, /*instanceCount=*/1,
@@ -12220,7 +12204,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       SwapIndicesInto(index_alloc.cpu_ptr, guest_indices, host_count, pp_result.host_index_format,
                       pp_result.host_shader_index_endian);
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
-      [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+      use_resource(index_buffer, MTLResourceUsageRead);
       MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
       ir_draw_indexed( pp_prim, host_count, index_type, index_buffer,
                                      index_alloc.offset,
@@ -12259,7 +12243,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
-      [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+      use_resource(index_buffer, MTLResourceUsageRead);
       ir_draw_indexed( pp_prim, host_count,
                                      MTLIndexTypeUInt16, index_buffer,
                                      index_alloc.offset, /*instanceCount=*/1,
@@ -12411,7 +12395,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                       index_buffer_info->endianness);
     }
     __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
-    [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+    use_resource(index_buffer, MTLResourceUsageRead);
     MTLIndexType index_type = index_size == 4 ? MTLIndexTypeUInt32
                                               : MTLIndexTypeUInt16;
     ir_draw_indexed( mtl_prim, host_index_count,
@@ -12444,7 +12428,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     __unsafe_unretained id<MTLBuffer> index_buffer =
         (__bridge id<MTLBuffer>)index_alloc.buffer;
-    [encoder useResource:index_buffer usage:MTLResourceUsageRead stages:stages];
+    use_resource(index_buffer, MTLResourceUsageRead);
     ir_draw_indexed( MTLPrimitiveTypeTriangleStrip,
                                    host_index_count, MTLIndexTypeUInt32,
                                    index_buffer, index_alloc.offset,
@@ -18310,6 +18294,18 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           heap_declarations_ = heap_skipped_declarations_ = 0;
           texture_declarations_ = 0;
         }
+      }
+      if (encode_stream_ && encode_stream_->deferred()) {
+        MetalEncodeStream::Stats es = encode_stream_->TakeStats();
+        XELOGI(
+            "MetalEncodeStream swap#{}: {:.0f} commits/frame, {:.1f} KB/frame, "
+            "{:.1f} drains/frame ({:.1f} waited, {:.3f} ms/frame), "
+            "{} ring-full waits, {} encoder sleeps",
+            count, double(es.commits) / 128.0,
+            double(es.bytes) / 1024.0 / 128.0, double(es.drains) / 128.0,
+            double(es.drain_waits) / 128.0,
+            double(es.drain_wait_ns) / 1.0e6 / 128.0, es.full_waits,
+            es.consumer_sleeps);
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
