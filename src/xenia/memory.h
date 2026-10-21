@@ -300,7 +300,8 @@ class PhysicalHeap : public BaseHeap {
                         bool is_write, bool unwatch_exact_range,
                         bool unprotect = true,
                         bool invalidate_unwatched = false,
-                        bool contents_discarded = false);
+                        bool contents_discarded = false,
+                        bool read_callbacks_may_wait = true);
 
   // Read-watch fault path (optimize-metal-gpu-resident-resolve-coherence,
   // stage 2; mirrors xenia-edge 77f2cca80): if the host page holding
@@ -541,11 +542,16 @@ class Memory {
   // kRead: the CPU is about to read the range and needs it current. kWrite:
   // the CPU is about to write part of the range, so the rest must be current
   // first. kDiscard: the old contents are irrelevant (fresh allocation,
-  // release, or the host already wrote over the whole range).
+  // release, or the host already wrote over the whole range). kReadNoWait: a
+  // read fault's second, global-lock-held pass; the first pass already
+  // provided the page without the lock, so this one publishes only what needs
+  // no wait (anything newer is re-armed) instead of blocking every other
+  // global-lock user on the GPU.
   enum class PhysicalAccess {
     kRead,
     kWrite,
     kDiscard,
+    kReadNoWait,
   };
   typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
                                              uint32_t physical_address_start,

@@ -752,8 +752,13 @@ bool Memory::AccessViolationCallback(
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
   physical_heap->ProvideReadWatchedPage(global_lock_locked_once,
                                         virtual_address, is_write);
+  // The provide above waited for the page's GPU writers without the global
+  // lock; the read callbacks this pass repeats under the lock must not wait
+  // again, or every other global-lock user (the GPU thread's per-draw range
+  // requests) stalls behind the GPU (GTA IV: ~3 ms/frame on the M4).
   return physical_heap->TriggerCallbacks(std::move(global_lock_locked_once),
-                                         virtual_address, 1, is_write, false);
+                                         virtual_address, 1, is_write, false,
+                                         true, false, false, false);
 }
 
 bool Memory::AccessViolationCallbackThunk(
@@ -2583,7 +2588,8 @@ void PhysicalHeap::RestoreUnwatchedSystemPage(uint32_t system_page,
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect,
-    bool invalidate_unwatched, bool contents_discarded) {
+    bool invalidate_unwatched, bool contents_discarded,
+    bool read_callbacks_may_wait) {
 
   if (virtual_address < heap_base_) {
     if (heap_base_ - virtual_address >= length) {
@@ -2656,7 +2662,10 @@ bool PhysicalHeap::TriggerCallbacks(
         heap_size_ - (physical_address_start - physical_address_offset));
     for (auto read_callback : memory_->physical_memory_read_callbacks_) {
       read_callback->first(read_callback->second, physical_address_start,
-                           physical_length, Memory::PhysicalAccess::kRead);
+                           physical_length,
+                           read_callbacks_may_wait
+                               ? Memory::PhysicalAccess::kRead
+                               : Memory::PhysicalAccess::kReadNoWait);
     }
     // Downgrade each read-watched page so the access proceeds: read-only if
     // it also carries a write watch, otherwise the guest protection.

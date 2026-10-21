@@ -3541,6 +3541,19 @@ void MetalCommandProcessor::LazyReadCallbackThunk(
 void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
                                        uint32_t length,
                                        Memory::PhysicalAccess access) {
+  // A read fault's global-lock-held pass (kReadNoWait) publishes only records
+  // whose submission has completed; the unlocked pass before it already waited
+  // for the page. A record committed in between is re-armed below like one in
+  // the open command buffer (fence writes follow a commit, which re-arms it).
+  // XE_METAL_LAZY_LOCKED_WAIT=1 restores waiting under the lock (exact
+  // rollback).
+  static const bool s_locked_wait =
+      std::getenv("XE_METAL_LAZY_LOCKED_WAIT") != nullptr;
+  const bool may_wait =
+      access != Memory::PhysicalAccess::kReadNoWait || s_locked_wait;
+  if (access == Memory::PhysicalAccess::kReadNoWait) {
+    access = Memory::PhysicalAccess::kRead;
+  }
   // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a CPU write or a release
   // over bytes a pending record still owns leaves that record's upload skip
   // span describing bytes that are no longer the newest.
@@ -3576,9 +3589,13 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   const uint64_t committed = submission_counter_;
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
-      [this, committed](uint64_t submission) {
+      [this, committed, may_wait](uint64_t submission) {
         if (submission > committed) {
           return false;
+        }
+        if (!may_wait) {
+          return completed_submission_.load(std::memory_order_acquire) >=
+                 submission;
         }
         return WaitForSubmission(submission, 4000, nullptr);
       },
