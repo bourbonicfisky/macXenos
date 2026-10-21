@@ -246,6 +246,18 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       } else if (is_instruction_abort || !thread_context.pc) {
         access_violation_operation =
             Exception::AccessViolationOperation::kUnknown;
+      } else if ((mac_esr >> 26) == 0b010101) {
+        // The last exception this thread took was a syscall (SVC), not an
+        // abort: the signal was pending, not raised by the instruction at pc
+        // (a fault inside a handler while the signal was blocked, or one sent
+        // by another thread). Log it; there is no access to decode.
+        XELOGE(
+            "ExceptionHandler: signal {} si_code={:#x} with no abort (esr={:#x} "
+            "far={:#x} pc={:#x})",
+            signal_number, signal_info->si_code, mac_esr, mac_fault_address,
+            uint64_t(thread_context.pc));
+        access_violation_operation =
+            Exception::AccessViolationOperation::kUnknown;
       } else {
         bool instruction_is_store;
         uint32_t instruction = 0;
@@ -494,7 +506,14 @@ void ExceptionHandler::Install(Handler fn, void* data) {
 
     std::memset(&signal_handler, 0, sizeof(signal_handler));
     signal_handler.sa_sigaction = ExceptionHandlerCallback;
-    signal_handler.sa_flags = SA_SIGINFO;
+    // SA_NODEFER: handlers must nest, as Windows vectored handlers do. An MMIO
+    // callback runs inside this handler and may write guest memory a write
+    // watch protects (XMA Clear stores a context on a watched page); without
+    // nesting that fault's SIGBUS is blocked, stays pending and lands after
+    // sigreturn on the next guest instruction with no fault address, which
+    // reads as a guest crash (Forza Horizon 1 and 2 at their brightness
+    // screen, every run).
+    signal_handler.sa_flags = SA_SIGINFO | SA_NODEFER;
 
     if (sigaction(SIGILL, &signal_handler, &original_sigill_handler_) != 0) {
       assert_always("Failed to install new SIGILL handler");
