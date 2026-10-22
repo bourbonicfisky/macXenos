@@ -2,11 +2,10 @@
 
 These are the games macXenos is tested with regularly. Each one is started
 automatically, played to the point shown with a scripted controller, and
-measured for a minute. Results below are from the full runs of every game on
-October 21-22, 2026, on a base M4 Mac mini and on an M1 Max MacBook Pro, at the
-original resolution (1x), using the Metal renderer. The M4 mini column is from
-the October 22 run, which includes the early depth testing turned on that day;
-the M1 Max column is from October 21, before it.
+measured for a minute. Results below are from the runs on October 19-21, 2026,
+on a base M4 Mac mini and on an M1 Max MacBook Pro, at the original
+resolution (1x), using the Metal renderer. The M1 Max column is from the full
+run of every game on October 21.
 
 **"Reaches" is how far the test goes, not how far the game works.**
 
@@ -45,14 +44,14 @@ smoother.
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
 | Gears of War: Judgment | Survival, Estate | 30 | 30 |  |
-| Grand Theft Auto IV | Opening drive | 53 | 55 | The game does not cap its own frame rate (see below) |
+| Grand Theft Auto IV | Opening drive | 48 | 55 | The game does not cap its own frame rate (see below) |
 | Halo 3 | Campaign, Arrival | 30 | 30 |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | Only the main menu is tested |
 | Halo: Reach | Campaign, Winter Contingency | 30 | 30 |  |
 | Just Cause 2 | Open world | 27 | 30 |  |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 | 60 |  |
-| Mafia II | Story opening | 103 | 82 | The game does not cap its own frame rate (see below) |
+| Mafia II | Story opening | 81 | 82 | The game does not cap its own frame rate (see below) |
 | Mass Effect | First conversation | 30 | 30 | Its built-in settings fix the one-frame colour glitches and characters vanishing for a frame (October 14) |
 | Mirror's Edge | Story, first chapter | 30 | 30 |  |
 | Portal 2 | Relaxation Vault | 30 | 30 |  |
