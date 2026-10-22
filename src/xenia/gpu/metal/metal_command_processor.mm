@@ -101,7 +101,6 @@ extern "C" void objc_autoreleasePoolPop(void*);
 
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
-DECLARE_bool(dxbc_implicit_lod);
 
 DEFINE_bool(
     metal_present_format_convert, true,

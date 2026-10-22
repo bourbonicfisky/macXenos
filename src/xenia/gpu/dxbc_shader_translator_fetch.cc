@@ -22,7 +22,6 @@
 DECLARE_bool(dxbc_assume_unsigned_fetches);
 DECLARE_uint32(dxbc_diag_max_fetches);
 DECLARE_bool(dxbc_diag_minimal_fetch);
-DECLARE_bool(dxbc_implicit_lod);
 
 namespace xe {
 namespace gpu {
@@ -817,7 +816,8 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
   }
 
   // Texel center snap instead of the epsilon, see CanSnapToTexelCenter.
-  bool point_snap = instr.CanSnapToTexelCenter(use_computed_lod);
+  bool point_snap =
+      cvars::texture_point_snap && instr.CanSnapToTexelCenter(use_computed_lod);
 
   // Get offsets applied to the coordinates before sampling.
   // `offsets` is used for float4 literal construction,

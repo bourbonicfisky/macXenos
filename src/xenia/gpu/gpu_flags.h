@@ -100,6 +100,8 @@ DECLARE_double(ps_debug_export_scale);
 DECLARE_int32(ps_debug_export_component);
 
 DECLARE_bool(mulsc_round_toward_zero);
+DECLARE_bool(texture_point_snap);
+DECLARE_bool(dxbc_implicit_lod);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 

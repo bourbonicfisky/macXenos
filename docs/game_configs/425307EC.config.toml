@@ -5,5 +5,9 @@
 # wait for the real result and the flashing stops, still at 60 fps.
 # (xenia-mac-evidence rage-dropout-20261022: M1 Max 3 s shots in the room,
 # fast 4 dropouts, strict and fake 0)
+# Its virtual-texture page tables need point sampled fetches snapped to texel
+# centres, or the pages show seams (texture_point_snap is off by default since
+# it breaks other titles, Canary b709f6655).
 [GPU]
 occlusion_query = "strict"
+texture_point_snap = true

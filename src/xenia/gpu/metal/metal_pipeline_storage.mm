@@ -36,8 +36,6 @@
 #include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_dxil_store.h"
 
-DECLARE_bool(dxbc_implicit_lod);
-
 // 3.6b — size-based bounds, configurable. Not age-based: a large title touched
 // rarely is the thing worth evicting, and its age says nothing about its cost.
 // One exact rollback switch per mechanism, so a regression bisects to one
@@ -268,7 +266,9 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
     // --dxbc_implicit_lod changes the emitted texture sampling (3 = the
     // snap-aware form keyed on mip count).
     uint32_t implicit_lod : 2;
-    uint32_t reserved : 7;
+    // --texture_point_snap changes the emitted texture coordinates.
+    uint32_t texture_point_snap : 1;
+    uint32_t reserved : 6;
   } schema = {};
   schema.vendor_apple = 1;
   schema.bindless_resources_used = MetalTranslatorConfig::kBindlessResourcesUsed;
@@ -307,6 +307,7 @@ MetalPipelineStorageIdentity ComputeMetalPipelineStorageIdentity(
   schema.mulsc_round_toward_zero = cvars::mulsc_round_toward_zero ? 1 : 0;
   schema.deferred_kill = MetalDeferredKillEnabled() ? 1 : 0;
   schema.implicit_lod = cvars::dxbc_implicit_lod ? 3 : 0;
+  schema.texture_point_snap = cvars::texture_point_snap ? 1 : 0;
   schema.draw_resolution_scale_x_minus_1 =
       std::max(draw_resolution_scale_x, uint32_t(1)) - 1;
   schema.draw_resolution_scale_y_minus_1 =

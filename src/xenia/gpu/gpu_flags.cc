@@ -421,3 +421,18 @@ DEFINE_bool(
     "This rounding behavior hasn't been confirmed on real hardware, so it's "
     "disabled by default.",
     "GPU");
+
+DEFINE_bool(texture_point_snap, false,
+            "Snap normalized point sampled 2D texture coordinates to texel "
+            "centers. Fixes texture seams in titles that use virtual textures, "
+            "e.g. idTech 5, but may cause rendering issues in other titles.",
+            "GPU");
+
+DEFINE_bool(dxbc_implicit_lod, false,
+            "Experimental: sample computed-LOD 1D, 2D and cube texture fetches "
+            "with the hardware's implicit LOD plus the LOD bias (sample_b) "
+            "instead of explicit coarse gradients scaled by 2^bias "
+            "(sample_d). The LOD is the same up to derivative precision. "
+            "Fetches snapped to texel centers (texture_point_snap) from "
+            "mipmapped textures keep sample_d.",
+            "GPU");
