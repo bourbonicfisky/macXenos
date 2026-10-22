@@ -155,9 +155,11 @@ dword_result_t XamUserGetName_entry(dword_t user_index, dword_t buffer,
   // never exceed that limit.
   const auto& user_name = user_profile->name();
 
-  // buffer_len includes null-terminator. user_name does not.
-  const uint32_t bytes_to_copy = std::min(
-      buffer_len.value(), static_cast<uint32_t>(user_name.length()) + 1);
+  // buffer_len counts the null terminator that user_name lacks.
+  // A buffer_len of 0 takes the whole name.
+  const uint32_t name_bytes = static_cast<uint32_t>(user_name.length()) + 1;
+  const uint32_t bytes_to_copy =
+      buffer_len ? std::min(buffer_len.value(), name_bytes) : name_bytes;
 
   char* str_buffer = kernel_memory()->TranslateVirtual<char*>(buffer);
   xe::string_util::copy_truncating(str_buffer, user_name, bytes_to_copy);
