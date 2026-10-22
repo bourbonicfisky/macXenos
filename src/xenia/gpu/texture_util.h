@@ -355,6 +355,10 @@ constexpr uint32_t kIntegerScaleWidthMask = 0xF;
 constexpr uint32_t kIntegerScaleSignShift = 4;
 constexpr uint32_t kIntegerScaleNormalizedBit = UINT32_C(1) << 24;
 constexpr uint32_t kIntegerScalePointSampledBit = UINT32_C(1) << 26;
+// Not set by IntegerScaleBits: the Metal backend adds it, with
+// --dxbc_implicit_lod, to point sampled constants with more than one usable
+// mip level, the only snapped fetches whose LOD needs explicit gradients.
+constexpr uint32_t kIntegerScaleSnapMipsBit = UINT32_C(1) << 27;
 
 // Returns the packed conversion the translator applies to normalized host
 // samples of fixed formats, after signs/gamma and before exp_adjust. Zero means

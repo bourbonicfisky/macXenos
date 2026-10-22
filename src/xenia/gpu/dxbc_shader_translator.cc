@@ -40,6 +40,14 @@ DEFINE_bool(dxbc_diag_minimal_fetch, false,
             "decode, no num_format integer scale and no exponent bias. The "
             "ceiling of per-fetch-constant specialization.",
             "GPU");
+DEFINE_bool(dxbc_implicit_lod, false,
+            "Experimental: sample computed-LOD 1D, 2D and cube texture fetches "
+            "with the hardware's implicit LOD plus the LOD bias (sample_b) "
+            "instead of explicit coarse gradients scaled by 2^bias "
+            "(sample_d). The LOD is the same up to derivative precision. "
+            "Fetches whose fetch constant snaps to texel centers keep "
+            "sample_d.",
+            "GPU");
 DEFINE_bool(dxbc_switch, true,
             "Use switch rather than if for flow control. Turning this off or "
             "on may improve stability, though this heavily depends on the "

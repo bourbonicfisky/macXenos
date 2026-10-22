@@ -101,6 +101,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
+DECLARE_bool(dxbc_implicit_lod);
 
 DEFINE_bool(
     metal_present_format_convert, true,
@@ -8157,6 +8158,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         info.swizzled_signs = texture_util::SwizzleSigns(f);
         info.integer_scale_bits =
             texture_util::IntegerScaleBits(f, info.swizzled_signs);
+        if (cvars::dxbc_implicit_lod) {
+          info.integer_scale_bits |= SnapMipsBit(f, info.integer_scale_bits);
+        }
         info.exp_adjust = int8_t(f.exp_adjust);
         bool plain = true;
         for (uint32_t c = 0; c < 4; ++c) {
@@ -9937,7 +9941,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           } else {
             PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
                                     system_constants.texture_integer_scale_bits,
-                                    kMetalIntegerScaleSlotCount);
+                                    kMetalIntegerScaleSlotCount,
+                                    cvars::dxbc_implicit_lod);
           }
         }
         // Draw resolution scaling: a fetch served from a resolve snapshot reads

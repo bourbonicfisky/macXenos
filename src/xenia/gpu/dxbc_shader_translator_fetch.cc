@@ -22,6 +22,7 @@
 DECLARE_bool(dxbc_assume_unsigned_fetches);
 DECLARE_uint32(dxbc_diag_max_fetches);
 DECLARE_bool(dxbc_diag_minimal_fetch);
+DECLARE_bool(dxbc_implicit_lod);
 
 namespace xe {
 namespace gpu {
@@ -1662,6 +1663,21 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
       // Will be allocated for computed LOD only, and if not using basemap mip
       // filter.
       uint32_t grad_v_temp = UINT32_MAX;
+      // Implicit LOD with the bias in lod_src (sample_b) rather than explicit
+      // gradients. Stacked textures need the layer gradient for the lerp
+      // between layers, and register gradients are not the coordinates'.
+      bool implicit_lod_bias =
+          cvars::dxbc_implicit_lod && use_computed_lod &&
+          !instr.attributes.use_register_gradients &&
+          instr.dimension != xenos::FetchOpDimension::k3DOrStacked &&
+          instr.attributes.mip_filter != xenos::TextureFilter::kBaseMap;
+      // A fetch constant that snaps to the texel center (bit 26 of the
+      // integer scale bits) makes the coordinates step once per texel, and
+      // implicit derivatives of those pick the wrong mip. When the texture
+      // also has more than one usable mip (bit 27, set by the host), take
+      // explicit gradients of the unsnapped coordinates instead (the bit is
+      // per draw, so the branch is uniform). grad_v_temp.w holds the bit.
+      bool implicit_lod_snap = implicit_lod_bias && point_snap;
       if (instr.attributes.mip_filter != xenos::TextureFilter::kBaseMap) {
         grad_h_lod_temp = PushSystemTemp();
         lod_src = dxbc::Src::R(grad_h_lod_temp, dxbc::Src::kWWWW);
@@ -1691,8 +1707,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
             a_.OpMul(lod_dest, lod_src, dxbc::Src::LF(1.0f / 32.0f));
           }
         }
-        if (use_computed_lod) {
+        if (use_computed_lod && (!implicit_lod_bias || implicit_lod_snap)) {
           grad_v_temp = PushSystemTemp();
+          if (implicit_lod_snap) {
+            a_.OpAnd(dxbc::Dest::R(grad_v_temp, 0b1000),
+                     LoadSystemConstant(
+                         SystemConstants::Index::kTextureIntegerScaleBits,
+                         offsetof(SystemConstants, texture_integer_scale_bits) +
+                             sizeof(uint32_t) * tfetch_index,
+                         dxbc::Src::kXXXX),
+                     dxbc::Src::LU(UINT32_C(1) << 27));
+            a_.OpIf(true, dxbc::Src::R(grad_v_temp, dxbc::Src::kWWWW));
+          }
           switch (instr.dimension) {
             case xenos::FetchOpDimension::k1D:
               grad_component_count = 1;
@@ -1794,6 +1820,9 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                      dxbc::Src::LF(0.0f));
             a_.OpMov(dxbc::Dest::R(grad_v_temp, 0b0010), dxbc::Src::LF(0.0f));
             grad_component_count = 2;
+          }
+          if (implicit_lod_snap) {
+            a_.OpEndIf();
           }
         }
       }
@@ -2191,13 +2220,31 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                                 texture_bindless_descriptor_index >> 2)
                       .Select(texture_bindless_descriptor_index & 3));
             }
-            if (grad_v_temp != UINT32_MAX) {
+            if (implicit_lod_snap) {
+              a_.OpIf(true, dxbc::Src::R(grad_v_temp, dxbc::Src::kWWWW));
+              a_.OpSampleD(dxbc::Dest::R(layer_value_temp,
+                                         used_result_nonzero_components),
+                           dxbc::Src::R(coord_and_sampler_temp), 3,
+                           srv_unsigned, sampler, dxbc::Src::R(grad_h_lod_temp),
+                           dxbc::Src::R(grad_v_temp), srv_grad_component_count);
+              a_.OpElse();
+              a_.OpSampleB(dxbc::Dest::R(layer_value_temp,
+                                         used_result_nonzero_components),
+                           dxbc::Src::R(coord_and_sampler_temp), 3,
+                           srv_unsigned, sampler, lod_src);
+              a_.OpEndIf();
+            } else if (grad_v_temp != UINT32_MAX) {
               assert_not_zero(grad_component_count);
               a_.OpSampleD(dxbc::Dest::R(layer_value_temp,
                                          used_result_nonzero_components),
                            dxbc::Src::R(coord_and_sampler_temp), 3,
                            srv_unsigned, sampler, dxbc::Src::R(grad_h_lod_temp),
                            dxbc::Src::R(grad_v_temp), srv_grad_component_count);
+            } else if (implicit_lod_bias) {
+              a_.OpSampleB(dxbc::Dest::R(layer_value_temp,
+                                         used_result_nonzero_components),
+                           dxbc::Src::R(coord_and_sampler_temp), 3,
+                           srv_unsigned, sampler, lod_src);
             } else {
               a_.OpSampleL(dxbc::Dest::R(layer_value_temp,
                                          used_result_nonzero_components),
@@ -2226,13 +2273,31 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                                 texture_bindless_descriptor_index >> 2)
                       .Select(texture_bindless_descriptor_index & 3));
             }
-            if (grad_v_temp != UINT32_MAX) {
+            if (implicit_lod_snap) {
+              a_.OpIf(true, dxbc::Src::R(grad_v_temp, dxbc::Src::kWWWW));
+              a_.OpSampleD(
+                  dxbc::Dest::R(signed_temp, used_result_nonzero_components),
+                  dxbc::Src::R(coord_and_sampler_temp), 3, srv_signed, sampler,
+                  dxbc::Src::R(grad_h_lod_temp), dxbc::Src::R(grad_v_temp),
+                  srv_grad_component_count);
+              a_.OpElse();
+              a_.OpSampleB(
+                  dxbc::Dest::R(signed_temp, used_result_nonzero_components),
+                  dxbc::Src::R(coord_and_sampler_temp), 3, srv_signed, sampler,
+                  lod_src);
+              a_.OpEndIf();
+            } else if (grad_v_temp != UINT32_MAX) {
               assert_not_zero(grad_component_count);
               a_.OpSampleD(
                   dxbc::Dest::R(signed_temp, used_result_nonzero_components),
                   dxbc::Src::R(coord_and_sampler_temp), 3, srv_signed, sampler,
                   dxbc::Src::R(grad_h_lod_temp), dxbc::Src::R(grad_v_temp),
                   srv_grad_component_count);
+            } else if (implicit_lod_bias) {
+              a_.OpSampleB(
+                  dxbc::Dest::R(signed_temp, used_result_nonzero_components),
+                  dxbc::Src::R(coord_and_sampler_temp), 3, srv_signed, sampler,
+                  lod_src);
             } else {
               a_.OpSampleL(
                   dxbc::Dest::R(signed_temp, used_result_nonzero_components),

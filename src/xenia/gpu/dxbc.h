@@ -1455,6 +1455,7 @@ enum class Opcode : uint32_t {
   kRSq = 68,
   kSampleL = 72,
   kSampleD = 73,
+  kSampleB = 74,
   kSqRt = 75,
   kSwitch = 76,
   kSinCos = 77,
@@ -1933,6 +1934,25 @@ class Assembler {
     lod.Write(code_, false, 0b0000);
     ++stat_.instruction_count;
     ++stat_.texture_normal_instructions;
+  }
+  void OpSampleB(const Dest& dest, const Src& address,
+                 uint32_t address_components, const Src& resource,
+                 const Src& sampler, const Src& lod_bias) {
+    uint32_t dest_write_mask = dest.GetMask();
+    uint32_t address_mask = (1 << address_components) - 1;
+    uint32_t operands_length =
+        dest.GetLength() + address.GetLength(address_mask) +
+        resource.GetLength(dest_write_mask, true) + sampler.GetLength(0b0000) +
+        lod_bias.GetLength(0b0000);
+    code_.reserve(code_.size() + 1 + operands_length);
+    code_.push_back(OpcodeToken(Opcode::kSampleB, operands_length));
+    dest.Write(code_);
+    address.Write(code_, false, address_mask);
+    resource.Write(code_, false, dest_write_mask, true);
+    sampler.Write(code_, false, 0b0000);
+    lod_bias.Write(code_, false, 0b0000);
+    ++stat_.instruction_count;
+    ++stat_.texture_bias_instructions;
   }
   void OpSampleD(const Dest& dest, const Src& address,
                  uint32_t address_components, const Src& resource,
