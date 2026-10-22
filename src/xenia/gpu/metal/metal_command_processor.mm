@@ -8283,7 +8283,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // truncating form is measured, not assumed (task 2.4).
     static const bool s_early_hint = [] {
       const char* value = std::getenv("XE_METAL_EARLY_HINT");
-      return value && std::strcmp(value, "1") == 0;
+      return !value || std::strcmp(value, "0") != 0;
     }();
     static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
@@ -8327,11 +8327,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // translator drops the dynamic alpha test and alpha-to-coverage code
       // (a static discard and an SV_Coverage write in every colour-writing
       // shader otherwise, which keeps Apple's hidden-surface removal and
-      // early depth off for the whole draw). Opt-in (XE_METAL_EARLY_HINT=1):
-      // it moves 4x-MSAA blend results by +-1 LSB on silhouettes (RDR 8111
-      // draw 104: blended 8888 samples round differently once the function
-      // stops writing [[sample_mask]]), and RDR gameplay showed no frame-rate
-      // gain from it on the M4 (2026-10-06).
+      // early depth off for the whole draw). Default on; XE_METAL_EARLY_HINT=0
+      // disables it. It moves 4x-MSAA blend results by +-1 LSB on silhouettes
+      // (RDR 8111 draw 104: blended 8888 samples round differently once the
+      // function stops writing [[sample_mask]]). M4 2026-10-22: Mafia II
+      // 80.8 -> 102.7 fps, GTA IV 50.5 -> 52.9, 47-title sweep unchanged
+      // otherwise.
       ps_mod_decoded.pixel.depth_stencil_mode =
           DxbcShaderTranslator::Modification::DepthStencilMode::kEarlyHint;
     }
