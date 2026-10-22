@@ -6493,8 +6493,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Classes (the value): 1 = every such shader; 2 = only shaders with dynamic
   // register addressing; 3 = only shaders with >= 6 texture bindings; 4 =
   // only shaders of >= 512 ucode dwords; 5 = only shaders whose static
-  // register bound is >= 32. The complement of a class's gain is what the
-  // rest costs.
+  // register bound is >= 32; 6 = the hash buckets or hashes below. The
+  // complement of a class's gain is what the rest costs.
   static const uint32_t s_diag_ps_null = [] {
     const char* v = std::getenv("XE_METAL_DIAG_PS_NULL");
     return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
@@ -6515,6 +6515,37 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         break;
       case 5:
         in_class = pixel_shader->register_static_address_bound() >= 32;
+        break;
+      case 6:
+        // Hash buckets for bisecting: XE_METAL_DIAG_PS_NULL_BUCKET=k/n drops
+        // the shaders whose ucode hash is k mod n; XE_METAL_DIAG_PS_NULL_HASH
+        // (comma-separated hex) drops exactly those.
+        {
+          static const std::pair<uint64_t, uint64_t> s_bucket = [] {
+            const char* v = std::getenv("XE_METAL_DIAG_PS_NULL_BUCKET");
+            uint64_t k = 0, n = 0;
+            if (v) {
+              char* end = nullptr;
+              k = strtoull(v, &end, 10);
+              if (end && *end == '/') n = strtoull(end + 1, nullptr, 10);
+            }
+            return std::make_pair(k, n);
+          }();
+          static const std::unordered_set<uint64_t> s_hashes = [] {
+            std::unordered_set<uint64_t> hashes;
+            const char* v = std::getenv("XE_METAL_DIAG_PS_NULL_HASH");
+            while (v && *v) {
+              char* end = nullptr;
+              hashes.insert(strtoull(v, &end, 16));
+              v = (end && *end == ',') ? end + 1 : nullptr;
+            }
+            return hashes;
+          }();
+          uint64_t hash = pixel_shader->ucode_data_hash();
+          in_class = (s_bucket.second &&
+                      hash % s_bucket.second == s_bucket.first) ||
+                     s_hashes.count(hash) != 0;
+        }
         break;
       default:
         break;
@@ -6541,6 +6572,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              pixel_shader->kills_pixels() ? 1 : 0,
              pixel_shader->writes_depth() ? 1 : 0,
              pixel_shader->memexport_eM_written() ? 1 : 0);
+    }
+    // Draw counts per shader, the top 24 logged every 2^20 draws.
+    static std::unordered_map<uint64_t, uint64_t> s_draws;
+    static uint64_t s_total = 0;
+    ++s_draws[pixel_shader->ucode_data_hash()];
+    if ((++s_total & ((1u << 20) - 1)) == 0) {
+      std::vector<std::pair<uint64_t, uint64_t>> top(s_draws.begin(),
+                                                     s_draws.end());
+      std::sort(top.begin(), top.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+      top.resize(std::min<size_t>(top.size(), 24));
+      std::string line;
+      for (const auto& [hash, count] : top) {
+        line += fmt::format(" {:016X}:{:.2f}", hash, double(count) / s_total);
+      }
+      XELOGI("MetalPsDraws total={}{}", s_total, line);
     }
   }
   // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
