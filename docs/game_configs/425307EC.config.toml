@@ -1,0 +1,9 @@
+# macXenos built-in per-title config: Rage (425307EC).
+# The title culls meshes on occlusion query results. With the default fast
+# queries (a guessed result until the GPU's arrives) whole walls and floors of
+# the campaign-opening room drop to black for single frames; strict queries
+# wait for the real result and the flashing stops, still at 60 fps.
+# (xenia-mac-evidence rage-dropout-20261022: M1 Max 3 s shots in the room,
+# fast 4 dropouts, strict and fake 0)
+[GPU]
+occlusion_query = "strict"
