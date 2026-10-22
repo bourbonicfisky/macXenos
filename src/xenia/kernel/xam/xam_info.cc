@@ -21,6 +21,7 @@
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/xam.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_error.h"
@@ -269,9 +270,10 @@ DECLARE_XAM_EXPORT1(XamGetExecutionId, kNone, kImplemented);
 dword_result_t XamLoaderSetLaunchData_entry(lpvoid_t data, dword_t size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
-  loader_data.launch_data_present = size ? true : false;
-  loader_data.launch_data.resize(size);
-  std::memcpy(loader_data.launch_data.data(), data, size);
+  const uint32_t copy_size = std::min(size.value(), MAX_LAUNCH_DATA_SIZE);
+  loader_data.launch_data_present = copy_size ? true : false;
+  loader_data.launch_data.resize(copy_size);
+  std::memcpy(loader_data.launch_data.data(), data, copy_size);
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamLoaderSetLaunchData, kNone, kSketchy);
