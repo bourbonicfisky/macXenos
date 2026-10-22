@@ -302,8 +302,10 @@ class KernelState {
   util::NativeList* dpc_list() { return &dpc_list_; }
 
   void CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result);
+  // The completion routine runs on thread_handle, the requester's thread.
   void CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
-                            uint32_t extended_error, uint32_t length);
+                            uint32_t extended_error, uint32_t length,
+                            X_HANDLE thread_handle);
 
   void CompleteOverlappedImmediate(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
