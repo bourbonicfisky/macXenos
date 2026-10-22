@@ -1140,8 +1140,7 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
   if (cvars::delay_poll_diag) {
     DelayPollDiagProbe(context);
   }
-  return KeDelayExecutionThread(processor_mode, alertable,
-                                interval_ptr ? &interval : nullptr, context);
+  return KeDelayExecutionThread(processor_mode, alertable, &interval, context);
 }
 DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
