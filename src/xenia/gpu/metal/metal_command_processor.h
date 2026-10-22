@@ -381,6 +381,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // the open pass's attachments.
   void EndRenderEncoder(metal::MetalPassEndReason reason, uint32_t detail = 0,
                         bool resolve_touches_pass = false);
+  // Render passes begin and end on the encoder thread (see
+  // MetalEncodeStream::BeginRenderPass).
+  bool DeferredPassLifecycle() const;
+  // Waits for an undrained deferred pass end (pass_end_undrained_).
+  void DrainUndrainedPassEnd();
   // XE_METAL_PASS_CENSUS=1 (exact-1, default OFF): observational draw-pass
   // census (reduce-metal-draw-pass-traffic task 0.1).
   static bool PassCensusEnabled();
@@ -527,6 +532,15 @@ class MetalCommandProcessor : public CommandProcessor {
   // 4 MiB GPU-zeroed buffer for heap fitted-snapshot views (retained).
   void* snapshot_zero_buffer_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
+  // The open pass was begun on the encoder thread (MetalEncodeStream::
+  // BeginRenderPass): frame_render_encoder_ is then a token, not an encoder.
+  bool frame_encoder_deferred_ = false;
+  // A deferred pass was ended without a Drain (the next pass begins on the
+  // encoder thread too); the frame command buffer must not be used directly
+  // until DrainUndrainedPassEnd().
+  bool pass_end_undrained_ = false;
+  // Set while BeginFrameEncoder ends the open pass to begin the next one.
+  bool ending_for_next_pass_ = false;
   // Hot-path render-encoder calls (direct, or recorded and replayed on the
   // encoder thread; XE_METAL_ENCODE_THREAD). Drained before the command
   // processor ends or otherwise touches frame_render_encoder_ directly.

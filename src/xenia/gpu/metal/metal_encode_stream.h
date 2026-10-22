@@ -71,6 +71,18 @@ class MetalEncodeStream {
   // The encoder subsequent ops go to (nil detaches). Unretained.
   void SetEncoder(id<MTLRenderCommandEncoder> encoder);
 
+  // Render pass lifecycle on the replaying thread (deferred modes only): the
+  // replay creates the encoder from `command_buffer` with `descriptor` (and
+  // `label`, may be nil), and later ends it. The command processor then holds
+  // no encoder object, and a render pass that follows another ends and begins
+  // without a Drain. Metal allows one active encoder per command buffer, so
+  // the command processor must Drain() after EndRenderPass() before it uses
+  // `command_buffer` itself (another encoder, a commit, an event).
+  void BeginRenderPass(__unsafe_unretained id<MTLCommandBuffer> command_buffer,
+                       __unsafe_unretained MTLRenderPassDescriptor* descriptor,
+                       __unsafe_unretained NSString* label);
+  void EndRenderPass();
+
   void SetViewport(const MTLViewport& viewport);
   void SetDepthClipMode(MTLDepthClipMode mode);
   void SetCullMode(MTLCullMode mode);
@@ -132,6 +144,7 @@ class MetalEncodeStream {
     uint64_t full_waits = 0;       // ring full
     uint64_t bytes = 0;
     uint64_t consumer_sleeps = 0;
+    uint64_t passes = 0;           // render passes begun on the replay thread
   };
   Stats TakeStats();
 
@@ -162,6 +175,8 @@ class MetalEncodeStream {
   // replaying thread then).
   __unsafe_unretained id<MTLRenderCommandEncoder> direct_encoder_ = nil;
   __unsafe_unretained id<MTLRenderCommandEncoder> replay_encoder_ = nil;
+  // The encoder BeginRenderPass created; replaying thread only.
+  id<MTLRenderCommandEncoder> owned_encoder_ = nil;
 
   static constexpr uint64_t kCapacity = uint64_t(8) << 20;
   uint8_t* ring_ = nullptr;

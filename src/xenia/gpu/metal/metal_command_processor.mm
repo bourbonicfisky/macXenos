@@ -3261,15 +3261,23 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
     // Pool unavailable: keep the encoder rather than rebuilding it forever.
   }
+  // A render-to-render pass end below skips its Drain; any return before the
+  // next pass is recorded must still wait for it.
+  struct UndrainedPassEndGuard {
+    MetalCommandProcessor* cp;
+    ~UndrainedPassEndGuard() { cp->DrainUndrainedPassEnd(); }
+  } undrained_pass_end_guard{this};
   if (frame_open_) {
     if (reuse_encoder) {
       return frame_render_encoder_;
     }
+    ending_for_next_pass_ = true;
     EndRenderEncoder(
         zpd_rebuild ? metal::MetalPassEndReason::kZpdRebuild
         : (encoder_attachment_key_ == want_key && !attachments_covered)
             ? metal::MetalPassEndReason::kAttachmentNeeded
             : metal::MetalPassEndReason::kAttachmentKey);
+    ending_for_next_pass_ = false;
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -3353,6 +3361,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
     const bool depth_both_planes =
         depth != nullptr && bind_depth_plane && bind_stencil_plane;
+    if (pass_end_undrained_ &&
+        render_target_cache_->HasPendingClearLoadsOutside(bound_color_mask,
+                                                          depth_both_planes)) {
+      DrainUndrainedPassEnd();
+    }
     if (!render_target_cache_->FlushPendingClearLoads(
             (__bridge const void*)command_buffer, bound_color_mask,
             depth_both_planes)) {
@@ -3577,8 +3590,16 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
   }
 
+  const bool deferred_pass = DeferredPassLifecycle();
+  MTLRenderPassDescriptor* final_pass =
+      metal::MetalApplyXenosSamplePositions(pass);
+  // Deferred: the encoder thread creates (and later ends) the encoder; the
+  // command processor records into the stream only.
   id<MTLRenderCommandEncoder> encoder =
-      [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
+      deferred_pass
+          ? nil
+          : [command_buffer renderCommandEncoderWithDescriptor:final_pass];
+  NSString* encoder_label = nil;
   // Fault attribution: names this encoder in per-encoder execution status.
   // Formatting an NSString per pass was ~2% of RDR's command-processor
   // thread (CFString formatting, ~100 passes a frame); the label is only
@@ -3590,12 +3611,18 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
            std::getenv("MTL_CAPTURE_ENABLED") != nullptr;
   }();
   if (s_encoder_labels) {
-    encoder.label = [NSString
+    encoder_label = [NSString
         stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
                          (unsigned long long)want_key,
                          memexport_pass_
                              ? 1u
                              : render_target_cache_->current_msaa_samples()];
+    encoder.label = encoder_label;
+  }
+  if (deferred_pass) {
+    encode_stream_->BeginRenderPass(command_buffer, final_pass, encoder_label);
+    // The previous pass's end and this begin are ordered in the stream.
+    pass_end_undrained_ = false;
   }
   // The label's rt= value is a one-way rolling hash of the accumulated
   // attachment set (current_attachment_key), so a recurring hash in fault
@@ -3610,7 +3637,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
              render_target_cache_->DescribeCurrentAttachments());
     }
   }
-  [encoder setCullMode:MTLCullModeNone];
+  if (deferred_pass) {
+    encode_stream_->SetCullMode(MTLCullModeNone);
+  } else {
+    [encoder setCullMode:MTLCullModeNone];
+  }
   // Residency sweep: make EVERY texture any live bindless slot can reach
   // resident on this encoder in one batched call. The per-draw useResource
   // loop covers only that draw's own fetches; a shader indexing any OTHER
@@ -3626,7 +3657,8 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       residency_set_dirty_ = false;
       ++residency_commits_;
     }
-  } else if (texture_cache_ && ResidentSweepEnabled(encoder.device)) {
+  } else if (!deferred_pass && texture_cache_ &&
+             ResidentSweepEnabled(encoder.device)) {
     resident_sweep_scratch_.clear();
     texture_cache_->AppendAllTextures(resident_sweep_scratch_);
     if (shared_texture_cache_) {
@@ -3646,9 +3678,16 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
                      stages:sweep_stages];
     }
   }
-  frame_render_encoder_ = (__bridge_retained void*)encoder;
+  if (deferred_pass) {
+    // A non-null token: callers only test the returned encoder for null.
+    static char s_deferred_encoder_token;
+    frame_render_encoder_ = &s_deferred_encoder_token;
+  } else {
+    frame_render_encoder_ = (__bridge_retained void*)encoder;
+    encode_stream_->SetEncoder(encoder);
+  }
+  frame_encoder_deferred_ = deferred_pass;
   frame_open_ = true;
-  encode_stream_->SetEncoder(encoder);
   encoder_attachment_key_ = want_key;
   {
     // The Load + Store set this pass binds (scratch DontCare attachments of
@@ -5588,6 +5627,8 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
                                              uint32_t detail,
                                              bool resolve_touches_pass) {
   if (!frame_open_) {
+    // Whoever ends a pass is about to use the frame command buffer.
+    DrainUndrainedPassEnd();
     return;
   }
   if (PassCensusEnabled()) {
@@ -5603,6 +5644,23 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   if (RcCensusEnabled()) {
     ++RcCensus().pass_ends;
   }
+  if (frame_encoder_deferred_) {
+    encode_stream_->EndRenderPass();
+    frame_render_encoder_ = nullptr;
+    frame_encoder_deferred_ = false;
+    frame_open_ = false;
+    encoder_has_zpd_visibility_ = false;
+    // BeginFrameEncoder ending the pass for the next one: that pass's begin
+    // is recorded behind this end, so no wait (its guard drains if it is not).
+    // Every other end hands the command buffer to the command processor.
+    if (ending_for_next_pass_) {
+      encode_stream_->Commit();
+      pass_end_undrained_ = true;
+    } else {
+      encode_stream_->Drain();
+    }
+    return;
+  }
   if (encode_stream_) {
     // Every recorded op of this encoder is replayed before it ends.
     encode_stream_->SetEncoder(nil);
@@ -5614,6 +5672,35 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   frame_open_ = false;
   encoder_has_zpd_visibility_ = false;
   [encoder endEncoding];
+}
+
+bool MetalCommandProcessor::DeferredPassLifecycle() const {
+  // XE_METAL_ENCODE_PASSES=0 keeps render pass begin/end on the command
+  // processor. Needs the encoder thread, and no per-encoder residency sweep
+  // (it runs on the encoder object at creation): Apple GPUs use the residency
+  // set instead, AMD (no residency set) never sweeps.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_ENCODE_PASSES");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled || !encode_stream_ || !encode_stream_->deferred()) {
+    return false;
+  }
+  if (residency_set_) {
+    return true;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  return provider && !ResidentSweepEnabled(
+                         (__bridge id<MTLDevice>)provider->device());
+}
+
+void MetalCommandProcessor::DrainUndrainedPassEnd() {
+  if (!pass_end_undrained_) {
+    return;
+  }
+  pass_end_undrained_ = false;
+  encode_stream_->Drain();
 }
 
 bool MetalCommandProcessor::SeamTimingEnabled() {
@@ -18329,12 +18416,13 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         XELOGI(
             "MetalEncodeStream swap#{}: {:.0f} commits/frame, {:.1f} KB/frame, "
             "{:.1f} drains/frame ({:.1f} waited, {:.3f} ms/frame), "
-            "{} ring-full waits, {} encoder sleeps",
+            "{} ring-full waits, {} encoder sleeps, {:.1f} passes/frame on "
+            "the encoder thread",
             count, double(es.commits) / 128.0,
             double(es.bytes) / 1024.0 / 128.0, double(es.drains) / 128.0,
             double(es.drain_waits) / 128.0,
             double(es.drain_wait_ns) / 1.0e6 / 128.0, es.full_waits,
-            es.consumer_sleeps);
+            es.consumer_sleeps, double(es.passes) / 128.0);
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;

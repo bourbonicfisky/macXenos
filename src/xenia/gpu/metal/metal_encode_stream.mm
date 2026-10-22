@@ -52,6 +52,8 @@ enum class MetalEncodeStream::Op : uint16_t {
   kIRDrawIndexed,
   kIRDrawIndexedGeometry,
   kIRDrawGeometry,
+  kBeginPass,
+  kEndPass,
 };
 
 namespace {
@@ -104,6 +106,12 @@ constexpr uint32_t kParkTimeoutUs = 1000;
 
 struct PtrOp {
   void* object;
+};
+// Retained references (CFBridgingRetain); the replay releases them.
+struct BeginPassOp {
+  void* command_buffer;
+  void* descriptor;
+  void* label;  // may be null
 };
 struct U32Op {
   uint32_t value;
@@ -449,6 +457,32 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
         enc = (__bridge id<MTLRenderCommandEncoder>)(
             static_cast<const PtrOp*>(payload)->object);
         break;
+      case Op::kBeginPass: {
+        const auto* p = static_cast<const BeginPassOp*>(payload);
+        id<MTLCommandBuffer> command_buffer =
+            (__bridge_transfer id<MTLCommandBuffer>)p->command_buffer;
+        MTLRenderPassDescriptor* descriptor =
+            (__bridge_transfer MTLRenderPassDescriptor*)p->descriptor;
+        NSString* label = (__bridge_transfer NSString*)p->label;
+        owned_encoder_ =
+            [command_buffer renderCommandEncoderWithDescriptor:descriptor];
+        if (!owned_encoder_) {
+          static bool s_logged = false;
+          if (!s_logged) {
+            s_logged = true;
+            XELOGE("MetalEncodeStream: render encoder creation failed; the "
+                   "pass's draws are dropped");
+          }
+        } else if (label) {
+          owned_encoder_.label = label;
+        }
+        enc = owned_encoder_;
+      } break;
+      case Op::kEndPass:
+        [enc endEncoding];
+        owned_encoder_ = nil;
+        enc = nil;
+        break;
       case Op::kViewport:
         [enc setViewport:static_cast<const ViewportOp*>(payload)->viewport];
         break;
@@ -624,6 +658,23 @@ void MetalEncodeStream::SetEncoder(id<MTLRenderCommandEncoder> encoder) {
     return;
   }
   Emit<PtrOp>(Op::kSetEncoder)->object = (__bridge void*)encoder;
+}
+
+void MetalEncodeStream::BeginRenderPass(
+    __unsafe_unretained id<MTLCommandBuffer> command_buffer,
+    __unsafe_unretained MTLRenderPassDescriptor* descriptor,
+    __unsafe_unretained NSString* label) {
+  assert_true(mode_ != Mode::kDirect);
+  ++stats_.passes;
+  auto* op = Emit<BeginPassOp>(Op::kBeginPass);
+  op->command_buffer = (__bridge_retained void*)command_buffer;
+  op->descriptor = (__bridge_retained void*)descriptor;
+  op->label = label ? (__bridge_retained void*)label : nullptr;
+}
+
+void MetalEncodeStream::EndRenderPass() {
+  assert_true(mode_ != Mode::kDirect);
+  Emit<U32Op>(Op::kEndPass);
 }
 
 void MetalEncodeStream::SetViewport(const MTLViewport& viewport) {

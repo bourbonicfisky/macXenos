@@ -128,6 +128,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // `depth_bound` (both planes).
   bool FlushPendingClearLoads(const void* command_buffer,
                               uint32_t bound_color_mask, bool depth_bound);
+  // Whether FlushPendingClearLoads with these arguments would encode anything.
+  bool HasPendingClearLoadsOutside(uint32_t bound_color_mask,
+                                   bool depth_bound) const {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (pending_clear_load_[i + 1u].valid &&
+          !(bound_color_mask & (1u << i))) {
+        return true;
+      }
+    }
+    return pending_clear_load_[0].valid && !depth_bound;
+  }
   // Pass census: does any tile of the resolve span [edram_base, rows x
   // row_length_used at pitch_tiles) belong to a render target in the
   // accumulated (currently bound) attachment set? Ownership-truth query, no
