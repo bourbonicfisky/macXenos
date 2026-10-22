@@ -110,11 +110,13 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   }
 
   if (kernel_state()->xam_state()->IsUIActive()) {
-    // 58410A24
+    // 58410A24: report the connection state, not the input. A snapshot,
+    // because a real read advances the scripted driver (its timeline starts
+    // on the first read, so a read during boot-time UI shifted every route).
     X_INPUT_STATE discarded_state = {};
     auto input_system = kernel_state()->emulator()->input_system();
     auto lock = input_system->lock();
-    return input_system->GetState(
+    return input_system->GetStateSnapshot(
         user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
         &discarded_state);
   }
