@@ -9989,14 +9989,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Sonic black-sky task 3.2 (diagnostic, replay-scale): one line per
     // texture binding per draw, so a captured frame's sampled-source
     // inventory can be walked offline. Bounded hard for live safety.
-    static const bool s_draw_tex_log =
-        std::getenv("XE_METAL_DRAW_TEX_LOG") != nullptr;
+    // The value is the line budget (any non-number = 8192).
+    static const uint32_t s_draw_tex_log = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_TEX_LOG");
+      if (!v) return 0u;
+      uint32_t lines = uint32_t(strtoul(v, nullptr, 10));
+      return lines > 1 ? lines : 8192u;
+    }();
     if (s_draw_tex_log) {
       static uint32_t s_draw_tex_lines = 0;
       auto log_bindings = [&](MetalShader* shader, const char* stage) {
         if (!shader) return;
         for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
-          if (s_draw_tex_lines >= 8192) return;
+          if (s_draw_tex_lines >= s_draw_tex_log) return;
           ++s_draw_tex_lines;
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
           XELOGI(
