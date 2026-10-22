@@ -150,11 +150,20 @@ static void* OpenVulkanLoaderMac() {
       icd_candidates.push_back(std::string(sdk) +
                                "/share/vulkan/icd.d/MoltenVK_icd.json");
     }
-    icd_candidates.push_back("/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json");
-    icd_candidates.push_back("/usr/local/share/vulkan/icd.d/MoltenVK_icd.json");
-    icd_candidates.push_back("/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json");
-    icd_candidates.push_back(
-        "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json");
+    // The native Homebrew prefix first: a Mac migrated from Intel can keep
+    // an x86_64-only MoltenVK under /usr/local, which an arm64 process
+    // cannot load.
+#if defined(__aarch64__)
+    const char* const kBrewPrefixes[] = {"/opt/homebrew", "/usr/local"};
+#else
+    const char* const kBrewPrefixes[] = {"/usr/local", "/opt/homebrew"};
+#endif
+    for (const char* prefix : kBrewPrefixes) {
+      icd_candidates.push_back(std::string(prefix) +
+                               "/etc/vulkan/icd.d/MoltenVK_icd.json");
+      icd_candidates.push_back(std::string(prefix) +
+                               "/share/vulkan/icd.d/MoltenVK_icd.json");
+    }
     for (const std::string& icd : icd_candidates) {
       if (access(icd.c_str(), R_OK) == 0) {
         setenv("VK_ICD_FILENAMES", icd.c_str(), 1);

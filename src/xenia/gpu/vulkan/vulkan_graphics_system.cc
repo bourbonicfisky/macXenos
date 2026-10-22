@@ -35,6 +35,11 @@ X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
                                      ui::WindowedAppContext* app_context,
                                      bool with_presentation) {
   provider_ = xe::ui::vulkan::VulkanProvider::Create(true, with_presentation);
+  if (!provider_) {
+    // The command processor reads the device from the provider.
+    XELOGE("Unable to create the Vulkan provider");
+    return X_STATUS_UNSUCCESSFUL;
+  }
   return GraphicsSystem::Setup(processor, kernel_state, app_context,
                                with_presentation);
 }
