@@ -237,10 +237,21 @@ uint64_t MetallibCacheKey(const MetalShader::MetalTranslation& translation) {
     uint64_t modification;
     uint32_t shader_type;
     uint32_t pad;
+    uint64_t fetch_pattern;
   } key_bytes = {};
   key_bytes.ucode_hash = translation.shader().ucode_data_hash();
   key_bytes.modification = translation.modification();
   key_bytes.shader_type = uint32_t(translation.shader().type());
+  // The pixel fetch pattern index is session-local; key on its content.
+  if (translation.shader().type() == xenos::ShaderType::kPixel) {
+    DxbcShaderTranslator::Modification modification(
+        translation.modification());
+    key_bytes.fetch_pattern =
+        static_cast<const MetalShader&>(translation.shader())
+            .FetchPatternContentHash(modification.pixel.fetch_plain_pattern);
+    modification.pixel.fetch_plain_pattern = 0;
+    key_bytes.modification = modification.value;
+  }
   return XXH3_64bits(&key_bytes, sizeof(key_bytes));
 }
 
