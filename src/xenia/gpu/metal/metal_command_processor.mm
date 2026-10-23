@@ -2034,6 +2034,7 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     const uint32_t slot = (index - kFetchBase) / 6u;
     fetch_constant_dirty_mask_ |= 1u << slot;
     fetch_plain_known_mask_ &= ~(1u << slot);
+    bind_memo_fetch_written_ |= 1u << slot;
   }
   CommandProcessor::WriteRegister(index, value);
 }
@@ -2053,6 +2054,7 @@ void MetalCommandProcessor::OnRegistersRestoredRaw(uint32_t first_register,
        slot <= (end - 1u - kFetchBase) / 6u; ++slot) {
     fetch_constant_dirty_mask_ |= 1u << slot;
     fetch_plain_known_mask_ &= ~(1u << slot);
+    bind_memo_fetch_written_ |= 1u << slot;
   }
 }
 
@@ -11030,6 +11032,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // sampler bindings share one bindless index space (disjoint indices).
   texture_cache_->ResetActive();
   texture_cache_->lineage_draw_ = trace_draw_index_;  // lineage-probe clock
+  uint32_t marshal_bytes = 0;
+  uint32_t marshal_stage = 0;
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
     // The cbuffer must cover every FLAT INDEX the translated shader reads:
@@ -11075,10 +11079,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     const uint32_t count = plan.count;
+    marshal_bytes = count * uint32_t(sizeof(uint32_t));
     if (!ArenaAllocate(count * sizeof(uint32_t), 256, out)) {
       return false;
     }
-    auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
+    // Built in cached memory and copied out once: the arena is
+    // write-combined, so reading it back (the binding memo stores these) is
+    // uncached -- that readback alone was 11% of GTA IV's command processor.
+    std::vector<uint32_t>& scratch = bind_index_scratch_[marshal_stage];
+    scratch.resize(count);
+    uint32_t* indices = scratch.data();
     if (!InitializeMetalDescriptorIndices(plan, indices, count * sizeof(uint32_t))) {
       return false;
     }
@@ -11455,15 +11465,144 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         indices[sb.bindless_descriptor_index] = sampler_slot;
       }
     }
+    if (count) {
+      std::memcpy(out->cpu_ptr, indices, count * sizeof(uint32_t));
+    }
     return true;
   };
   MetalUploadAllocation desc_idx_vertex_alloc{};
   MetalUploadAllocation desc_idx_pixel_alloc{};
   draw_trace_milestone("before-marshal");
-  if (!marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc) ||
-      !marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc)) {
-    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
-    return true;
+  // Binding memo: a draw whose texture inputs repeat the previous draw's, with
+  // nothing in either texture cache or the producer state changed since,
+  // resolves every binding to the same slots, so the previous index arrays
+  // and residency list are reused (~70% of Burnout's draws: command
+  // processor 29-31 -> 27-28 ms/frame on the Mac Pro; Mafia II, GTA IV and
+  // Apple neutral). The key holds the inputs and the state AFTER the
+  // previous draw's own resolution. Verify mode found 0 mismatches in 16
+  // titles (quick tier + Mafia II).
+  // XE_METAL_BIND_MEMO=0 off, 2 = verify (resolve anyway and compare).
+  static const uint32_t s_bind_memo = [] {
+    const char* v = std::getenv("XE_METAL_BIND_MEMO");
+    if (v) {
+      return uint32_t(std::strtoul(v, nullptr, 10));
+    }
+    // The memo skips the per-binding diagnostics.
+    if (std::getenv("XE_METAL_TEX_PROBE") || std::getenv("XE_GPU_DELTA_CENSUS")) {
+      return 0u;
+    }
+    return 1u;
+  }();
+  const bool bind_memo_on = s_bind_memo && !xe_lineage_base();
+  // The key: fixed state compared as one block, plus "no fetch constant the
+  // shaders read was written since the memo was stored" (WriteRegister marks
+  // written slots in bind_memo_fetch_written_; storing clears it).
+  auto build_bind_memo_key = [&](BindMemo::Key& key) {
+    std::memset(&key, 0, sizeof(key));
+    key.vertex_shader = vertex_shader;
+    key.pixel_shader = pixel_shader;
+    key.route_mask = draw_shared_route_mask_;
+    key.flags = uint32_t(draw_gpu_ordering_active_) |
+                (uint32_t(trace_writer_.is_open()) << 1);
+    key.scale = draw_resolution_scale_x_ | (draw_resolution_scale_y_ << 16);
+    key.pending_writebacks = uint32_t(pending_writebacks_.size());
+    key.pending_memexports = uint32_t(pending_memexports_.size());
+    key.submission = CurrentEncodingSubmission();
+    key.binding_generation = texture_cache_->binding_generation();
+    key.registry_epoch = texture_cache_->registry_epoch();
+    key.serve_generation =
+        shared_texture_cache_ ? shared_texture_cache_->serve_generation() : 0;
+    key.authority_sequence = memory_authority_sequence_;
+  };
+  auto bind_memo_fetch_mask = [&]() {
+    uint32_t mask = 0;
+    for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+      if (!shader) {
+        continue;
+      }
+      for (const auto& b : shader->GetTextureBindingsAfterTranslation()) {
+        mask |= 1u << (b.fetch_constant & 31);
+      }
+      for (const auto& b : shader->GetSamplerBindingsAfterTranslation()) {
+        mask |= 1u << (b.fetch_constant & 31);
+      }
+    }
+    return mask;
+  };
+  BindMemo& memo = bind_memo_;
+  bool memo_hit = false;
+  if (bind_memo_on && memo.valid &&
+      !(bind_memo_fetch_written_ & memo.fetch_mask) &&
+      !texture_cache_->HasPendingInvalidations()) {
+    BindMemo::Key key;
+    build_bind_memo_key(key);
+    memo_hit = !std::memcmp(&key, &memo.key, sizeof(key));
+  }
+  if (memo_hit && s_bind_memo == 1) {
+    ++memo.hits;
+    for (uint32_t i = 0; i < 2; ++i) {
+      MetalUploadAllocation* out = i ? &desc_idx_pixel_alloc : &desc_idx_vertex_alloc;
+      const std::vector<uint32_t>& indices = memo.indices[i];
+      if (!ArenaAllocate(uint32_t(indices.size() * sizeof(uint32_t)), 256, out)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
+        return true;
+      }
+      std::memcpy(out->cpu_ptr, indices.data(), indices.size() * sizeof(uint32_t));
+    }
+    for (void* texture : memo.active) {
+      texture_cache_->AddActiveTexture(texture);
+    }
+  } else {
+    uint32_t desc_idx_bytes[2] = {};
+    marshal_stage = 0;
+    bool resolved = marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc);
+    desc_idx_bytes[0] = marshal_bytes;
+    marshal_stage = 1;
+    resolved = resolved &&
+               marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc);
+    if (!resolved) {
+      memo.valid = false;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
+      return true;
+    }
+    desc_idx_bytes[1] = marshal_bytes;
+    if (bind_memo_on) {
+      const auto& active = texture_cache_->active_textures();
+      if (memo_hit) {
+        // Verify mode: the memo would have served this draw.
+        bool same = memo.active == active;
+        for (uint32_t i = 0; i < 2 && same; ++i) {
+          same = memo.indices[i].size() * sizeof(uint32_t) == desc_idx_bytes[i] &&
+                 (!desc_idx_bytes[i] ||
+                  !std::memcmp(memo.indices[i].data(),
+                               bind_index_scratch_[i].data(), desc_idx_bytes[i]));
+        }
+        ++memo.verified;
+        if (!same && memo.mismatches++ < 20) {
+          XELOGW("MetalBindMemo MISMATCH swap#{} draw={} vs={:016X} ps={:016X}",
+                 swap_count_, trace_draw_index_,
+                 vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+                 pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+        }
+      } else {
+        ++memo.misses;
+      }
+      for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t* p = bind_index_scratch_[i].data();
+        memo.indices[i].assign(p, p + desc_idx_bytes[i] / sizeof(uint32_t));
+      }
+      memo.active.assign(active.begin(), active.end());
+      // The state as this draw's resolution left it.
+      build_bind_memo_key(memo.key);
+      if (memo.key.vertex_shader != memo.mask_vertex_shader ||
+          memo.key.pixel_shader != memo.mask_pixel_shader) {
+        memo.mask_vertex_shader = vertex_shader;
+        memo.mask_pixel_shader = pixel_shader;
+        memo.fetch_mask = bind_memo_fetch_mask();
+      }
+      bind_memo_fetch_written_ = 0;
+      memo.valid = true;
+    }
   }
 
   // --- Build the top-level argument buffer from the root-layout authority. ---
@@ -18252,7 +18391,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           1e-6;
       s_pacing.ring_idle_ms_sum += ring_idle_ms;
       static uint32_t s_slow_logs = 0;
-      if (active_ms > 32.0 && count >= 12000 && s_slow_logs < 400) {
+      // XE_FRAME_PACING_SLOW_AFTER=<swap>: first swap that may log (default
+      // 12000, past boot); a frame also logs when its wall time passes
+      // XE_FRAME_PACING_SLOW_WALL_MS (default 0 = off), to catch hitches
+      // whose time is not command-processor work.
+      static const uint32_t s_slow_after = [] {
+        const char* v = std::getenv("XE_FRAME_PACING_SLOW_AFTER");
+        return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 12000u;
+      }();
+      static const double s_slow_wall_ms = [] {
+        const char* v = std::getenv("XE_FRAME_PACING_SLOW_WALL_MS");
+        return v ? std::strtod(v, nullptr) : 0.0;
+      }();
+      if ((active_ms > 32.0 || (s_slow_wall_ms > 0.0 && wall_ms > s_slow_wall_ms)) &&
+          count >= s_slow_after && s_slow_logs < 400) {
         ++s_slow_logs;
         XELOGI("FramePacingSlow swap#{}: cp active {:.2f} ms (ring idle {:.2f}, gpu wait {:.2f}: "
                "cap {:.2f} sync {:.2f} drain {:.2f}/{:.2f} ring {:.2f} seam "
@@ -18423,6 +18575,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             double(es.drain_waits) / 128.0,
             double(es.drain_wait_ns) / 1.0e6 / 128.0, es.full_waits,
             es.consumer_sleeps, double(es.passes) / 128.0);
+      }
+      if (bind_memo_.hits + bind_memo_.misses + bind_memo_.verified) {
+        auto& m = bind_memo_;
+        XELOGI("MetalBindMemo swap#{}: {:.1f} hits/frame, {:.1f} misses/frame, "
+               "{} verified, {} mismatches",
+               count, double(m.hits) / 128.0, double(m.misses) / 128.0,
+               m.verified, m.mismatches);
+        m.hits = m.misses = m.verified = 0;
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;

@@ -164,6 +164,14 @@ class MetalTextureCache {
   // tip views, coverage, RAM-backed marking, retirement, invalidation). The
   // per-draw texture-dependency memo keys on it.
   uint64_t registry_epoch() const { return registry_epoch_; }
+  // Bumped whenever a fetch could resolve to a different slot or texture:
+  // a descriptor written, a slot retired, a cache entry erased. With
+  // registry_epoch() and no pending invalidations, the same fetch constant
+  // resolves to the same slot (the command processor's binding memo).
+  uint64_t binding_generation() const { return binding_generation_; }
+  bool HasPendingInvalidations() const {
+    return pending_invalidations_nonempty_.load(std::memory_order_acquire);
+  }
   void ResetActive() {
     active_textures_.clear();
     binding_allocation_failed_ = false;
@@ -396,7 +404,7 @@ class MetalTextureCache {
   // Points `slot` at a retained id<MTLTexture> the caller keeps alive.
   void BindExternalSlot(uint32_t slot, void* texture_bridge);
   void RetireExternalSlot(uint32_t slot) {
-    stale_slots_.emplace_back(RetireSubmission(), slot);
+    RetireSlot(RetireSubmission(), slot);
   }
   // Takes ownership of a retained id<MTLTexture> (+1); released once the
   // submissions that may reference it complete (same pool as evictions).
@@ -730,6 +738,11 @@ class MetalTextureCache {
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
   uint64_t registry_epoch_ = 0;
+  uint64_t binding_generation_ = 0;
+  void RetireSlot(uint64_t submission, uint32_t slot) {
+    ++binding_generation_;
+    stale_slots_.emplace_back(submission, slot);
+  }
   static void CacheSnapshotProperties(ResolvedTarget& rt);
   void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
                           uint32_t* height_out) const;

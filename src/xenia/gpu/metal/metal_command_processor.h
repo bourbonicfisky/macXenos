@@ -541,6 +541,29 @@ class MetalCommandProcessor : public CommandProcessor {
   bool pass_end_undrained_ = false;
   // Set while BeginFrameEncoder ends the open pass to begin the next one.
   bool ending_for_next_pass_ = false;
+  // IssueDraw's texture binding memo (XE_METAL_BIND_MEMO).
+  struct BindMemo {
+    struct Key {
+      const void* vertex_shader;
+      const void* pixel_shader;
+      uint32_t route_mask, flags, scale, pending_writebacks, pending_memexports,
+          pad;
+      uint64_t submission, binding_generation, registry_epoch,
+          serve_generation, authority_sequence;
+    };
+    bool valid = false;
+    Key key{};
+    // Fetch constants the memo's shaders read (cached per shader pair).
+    const void* mask_vertex_shader = nullptr;
+    const void* mask_pixel_shader = nullptr;
+    uint32_t fetch_mask = 0;
+    std::vector<uint32_t> indices[2];  // vertex, pixel descriptor indices
+    std::vector<void*> active;         // the residency list they declared
+    uint64_t hits = 0, misses = 0, verified = 0, mismatches = 0;
+  } bind_memo_;
+  uint32_t bind_memo_fetch_written_ = 0;
+  // marshal_desc_indices builds each stage's indices here (vertex, pixel).
+  std::vector<uint32_t> bind_index_scratch_[2];
   // Hot-path render-encoder calls (direct, or recorded and replayed on the
   // encoder thread; XE_METAL_ENCODE_THREAD). Drained before the command
   // processor ends or otherwise touches frame_render_encoder_ directly.

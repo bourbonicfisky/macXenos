@@ -435,6 +435,7 @@ void NoteDecline(const char* reason, const Key& key) {
 
 bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     Texture& texture, bool load_base, bool load_mips) {
+  ++serve_generation_;
   MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
   TextureKey key = texture.key();
   bool mipped = key.mip_max_level != 0;
@@ -980,6 +981,7 @@ bool MetalSharedTextureCache::RevalidateRegions(
 
 void MetalSharedTextureCache::CompletedSubmissionUpdated(
     uint64_t completed_submission_index) {
+  ++serve_generation_;
   TextureCache::CompletedSubmissionUpdated(completed_submission_index);
   if (!legacy_) {
     return;
@@ -1457,6 +1459,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
 
 void MetalSharedTextureCache::UpdateTextureBindingsImpl(
     uint32_t fetch_constant_mask) {
+  ++serve_generation_;
   uint32_t bits = fetch_constant_mask;
   uint32_t index;
   while (xe::bit_scan_forward(bits, &index)) {
@@ -1498,6 +1501,7 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
                                           uint32_t host_swizzle,
                                           bool is_signed, void** view_out,
                                           uint32_t* slot_out) {
+  ++serve_generation_;
   const bool cached = RouteViewCacheEnabled();
   if (cached) {
     for (const MetalTexture::CachedView& view : texture.views) {
@@ -1564,6 +1568,7 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
 }
 
 void MetalSharedTextureCache::ForgetTextureBindings(const Texture* texture) {
+  ++serve_generation_;
   for (BindingSlot& binding_slot : binding_slots_) {
     if (binding_slot.texture == texture) {
       ReleaseBindingSlot(binding_slot);
@@ -1572,6 +1577,7 @@ void MetalSharedTextureCache::ForgetTextureBindings(const Texture* texture) {
 }
 
 void MetalSharedTextureCache::ClearCache() {
+  ++serve_generation_;
   // Release the descriptor state FIRST, while the textures it names are still
   // alive. The base clear below resets the bindings, and this cache's
   // UpdateTextureBindingsImpl deliberately parks a texture-less binding
@@ -1587,6 +1593,7 @@ void MetalSharedTextureCache::ClearCache() {
 }
 
 void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
+  ++serve_generation_;
   if (!binding_slot.slot && !binding_slot.sampled_view) {
     binding_slot = BindingSlot{};
     return;
@@ -1639,6 +1646,7 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
   }
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
   if (submission > last_begun_submission_) {
+    ++serve_generation_;
     last_begun_submission_ = submission;
     BeginSubmission(submission);
   }
@@ -1646,6 +1654,9 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
   // command processor's WriteRegister keeps the dirty mask); an unchanged
   // binding keeps its texture, as in the D3D12 cache.
   uint32_t bits = eligible_mask & dirty_mask;
+  if (bits) {
+    ++serve_generation_;
+  }
   uint32_t index;
   while (xe::bit_scan_forward(bits, &index)) {
     bits = xe::clear_lowest_bit(bits);
@@ -1660,9 +1671,14 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
     bits = xe::clear_lowest_bit(bits);
     const TextureBinding* binding = GetValidTextureBinding(index);
     const Texture* texture = binding ? binding->texture : nullptr;
-    binding_slots_[index].prep_current =
-        texture && !texture->base_outdated_lockless() &&
-        !texture->mips_outdated_lockless();
+    const bool prep_current = texture && !texture->base_outdated_lockless() &&
+                              !texture->mips_outdated_lockless();
+    binding_slots_[index].prep_current = prep_current;
+    if (!prep_current) {
+      // An outdated binding's serve depends on later state (the stale-serve
+      // rule), so no draw after this prep may reuse an earlier serve.
+      ++serve_generation_;
+    }
   }
 }
 
@@ -1796,6 +1812,7 @@ const char* MetalSharedTextureCache::UnservedReason(
 
 void MetalSharedTextureCache::OnSubmissionsFaulted(
     const std::vector<uint64_t>& submissions) {
+  ++serve_generation_;
   if (submissions.empty()) {
     return;
   }

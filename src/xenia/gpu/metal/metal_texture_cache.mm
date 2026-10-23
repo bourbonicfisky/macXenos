@@ -478,6 +478,7 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   cache_.clear();
+  ++binding_generation_;
   ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
@@ -651,6 +652,7 @@ void MetalTextureCache::ClearCache() {
     }
   }
   cache_.clear();
+  ++binding_generation_;
   ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
@@ -1145,13 +1147,13 @@ bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
 void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
   uint64_t retire_submission = RetireSubmission();
   if (fitted.slot) {
-    stale_slots_.emplace_back(retire_submission, fitted.slot);
+    RetireSlot(retire_submission, fitted.slot);
   }
   if (fitted.texture) {
     retired_textures_.emplace_back(retire_submission, fitted.texture);
   }
   for (auto& sv : fitted.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, sv.second.slot);
+    RetireSlot(retire_submission, sv.second.slot);
     retired_textures_.emplace_back(retire_submission, sv.second.view);
   }
   fitted = ResolvedTarget::FittedView{};
@@ -2983,14 +2985,14 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       // Every per-swizzle exact-cover view aliases the old snapshot texture.
       // Retire it through the same in-flight-safe pools as the base slot.
       for (auto& sv : it->second.swizzle_views) {
-        stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+        RetireSlot(RetireSubmission(), sv.second.slot);
         retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
       }
       it->second.swizzle_views.clear();
       if (!s_fault_inject) {
         // Never repoint a descriptor used by an in-flight draw. The new
         // generation gets a fresh slot while the old slot drains.
-        stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
+        RetireSlot(RetireSubmission(), it->second.slot);
       }
       WriteSlotDescriptor(new_slot, texture);
       it->second.texture = texture;
@@ -3092,13 +3094,13 @@ void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
   if (it->second.tip_slot) {
     // Same page-fault rule as RegisterResolvedTarget: in-flight draws hold the
     // old texture by gpuAddress — retire the slot, never repoint in place.
-    stale_slots_.emplace_back(RetireSubmission(), it->second.tip_slot);
+    RetireSlot(RetireSubmission(), it->second.tip_slot);
   }
   // Per-tip swizzled views alias the OLD tip texture — retire them (slot +
   // retained view) through the same in-flight-safe pool so in-flight draws keep
   // sampling them until their submissions drain.
   for (auto& sv : it->second.tip_swizzle_views) {
-    stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+    RetireSlot(RetireSubmission(), sv.second.slot);
     retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
   }
   it->second.tip_swizzle_views.clear();
@@ -3280,6 +3282,7 @@ uint32_t MetalTextureCache::AllocateSlot() {
 
 void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
                                             void* texture_bridge) {
+  ++binding_generation_;
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   if (!entries || !slot || slot >= view_heap_slots_) {
     return;
@@ -3333,10 +3336,10 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
 void MetalTextureCache::RetireScaledAssembly(ScaledAssembly& assembly) {
   uint64_t retire_submission = RetireSubmission();
   if (assembly.slot) {
-    stale_slots_.emplace_back(retire_submission, assembly.slot);
+    RetireSlot(retire_submission, assembly.slot);
   }
   for (auto& swizzle_view : assembly.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
@@ -3392,19 +3395,19 @@ void MetalTextureCache::RegisterScaledAssembly(
 void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
   uint64_t retire_submission = RetireSubmission();
   if (target.slot) {
-    stale_slots_.emplace_back(retire_submission, target.slot);
+    RetireSlot(retire_submission, target.slot);
   }
   if (target.tip_slot) {
-    stale_slots_.emplace_back(retire_submission, target.tip_slot);
+    RetireSlot(retire_submission, target.tip_slot);
   }
   for (auto& swizzle_view : target.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
   target.swizzle_views.clear();
   for (auto& swizzle_view : target.tip_swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
@@ -3446,9 +3449,10 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
     } else {
       retired_textures_.emplace_back(RetireSubmission(), e.texture);
     }
-    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    RetireSlot(RetireSubmission(), e.slot);
     UnindexEntry(it->first, e);
     ++evicted;
+    ++binding_generation_;
     return cache_.erase(it);
   };
   if (InvalidationIndexEnabled()) {
@@ -3670,9 +3674,10 @@ void MetalTextureCache::EnforceSlotHeadroom() {
     } else {
       retired_textures_.emplace_back(RetireSubmission(), e.texture);
     }
-    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    RetireSlot(RetireSubmission(), e.slot);
     UnindexEntry(it->first, e);
     cache_.erase(it);
+    ++binding_generation_;
     ++lru_evictions_;
   }
   static uint32_t s_lru_logs = 0;
