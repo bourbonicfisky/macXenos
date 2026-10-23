@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -135,20 +136,62 @@ uint64_t HashString(const std::string& value) {
 
 // 3.3c — hash the ACTUAL translator binary, not a version string it advertises.
 // Both translators are dylibs (libdxilconv.dylib, libmetalirconverter.dylib),
-// so the loaded image list names them directly. Size plus mtime distinguishes a
-// locally patched build from a released one, which is the case that actually
+// so the loaded image list names them directly. The image's Mach-O LC_UUID
+// identifies the build itself: the linker gives every link a new one, so a
+// locally patched build differs from a released one (the case that actually
 // applies: third_party/DirectXShaderCompiler carries an uncommitted local
-// patch, so no released version string could tell the two apart.
+// patch, so no released version string could tell the two apart).
+//
+// The identity used to be path + size + mtime, which discarded every title's
+// cache whenever the app moved or was copied (a new install location, an
+// update shipping the same dylibs, each test kit): the first session after
+// that re-translated every shader inside live frames -- RDR on the Mac Pro
+// 7.4 s of stalls, single freezes of 2-3 s, against 0.25 s with the cache.
+// Path + size + mtime remains the fallback for an image without LC_UUID.
 //
 // Returns 0 when the image is not found, and 0 participates in equality — an
 // entry written while a translator was unresolvable is not served once it
 // becomes resolvable.
+bool LoadedImageUuid(uint32_t image_index, uint8_t uuid_out[16]) {
+  const mach_header* header = _dyld_get_image_header(image_index);
+  if (!header) {
+    return false;
+  }
+  const uint8_t* cursor = reinterpret_cast<const uint8_t*>(header);
+  uint32_t ncmds = header->ncmds;
+  if (header->magic == MH_MAGIC_64) {
+    cursor += sizeof(mach_header_64);
+  } else if (header->magic == MH_MAGIC) {
+    cursor += sizeof(mach_header);
+  } else {
+    return false;
+  }
+  for (uint32_t i = 0; i < ncmds; ++i) {
+    const auto* command = reinterpret_cast<const load_command*>(cursor);
+    if (command->cmd == LC_UUID) {
+      std::memcpy(uuid_out, reinterpret_cast<const uuid_command*>(command)->uuid,
+                  16);
+      return true;
+    }
+    if (!command->cmdsize) {
+      return false;
+    }
+    cursor += command->cmdsize;
+  }
+  return false;
+}
+
 uint64_t HashLoadedDylib(const char* name_fragment) {
   const uint32_t image_count = _dyld_image_count();
   for (uint32_t i = 0; i < image_count; ++i) {
     const char* image_name = _dyld_get_image_name(i);
     if (!image_name || !std::strstr(image_name, name_fragment)) {
       continue;
+    }
+    uint8_t uuid[16];
+    if (LoadedImageUuid(i, uuid)) {
+      // Salted so a UUID hash never equals a path-based one by accident.
+      return XXH3_64bits(uuid, sizeof(uuid)) ^ 0x55554944ull;
     }
     struct stat st = {};
     if (stat(image_name, &st) != 0) {
