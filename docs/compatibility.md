@@ -42,6 +42,8 @@ smoother.
 | F.E.A.R. | Instant Action, Distribution | 30 | 30 |  |
 | Fable II | Childhood, Bowerstone at night | 30 | 30 |  |
 | Far Cry 3 | Opening (the cage) | 30 | 30 |  |
+| Forza Horizon | Opening drive | 30 | 30 | The sky rendered as red and yellow bands before October 22 |
+| Forza Horizon 2 | Drive to the Festival | 30 | 30 | The sky rendered black with a red stripe before October 22 |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
