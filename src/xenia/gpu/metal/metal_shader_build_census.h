@@ -201,8 +201,16 @@ class MetalShaderBuildCensus {
 
   // Every build event routes through here so frame attribution cannot drift
   // from the per-stage totals.
+  // Build work on a background translation thread is never a frame stall.
+  static void SetBackgroundThread() { background_thread_ = true; }
+  std::atomic<uint64_t> background_build_ns{0};
+
   void RecordBuild(Stage& stage, uint64_t elapsed_ns, uint64_t bytes = 0) {
     stage.Add(elapsed_ns, bytes);
+    if (background_thread_) {
+      background_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+      return;
+    }
     if (swaps.load(std::memory_order_relaxed) == 0) {
       startup_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
       return;
@@ -256,7 +264,8 @@ class MetalShaderBuildCensus {
         "|dxil_load_ms={:.1f}|dxil_store_ms={:.1f}"
         "|msc_req={}|msc_distinct={}|msc_dup={}|msc_dup_ms={:.1f}"
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
-        "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}",
+        "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}"
+        "|background_build_ms={:.1f}",
         phase, swaps.load(std::memory_order_relaxed),
         double(first_swap_ns.load(std::memory_order_relaxed)) / 1e6,
         dxbc.count.load(std::memory_order_relaxed), dxbc.total_ms(),
@@ -289,7 +298,8 @@ class MetalShaderBuildCensus {
         double(worst_frame_ns.load(std::memory_order_relaxed)) / 1e6,
         frames_over_8ms.load(std::memory_order_relaxed),
         frames_over_16ms.load(std::memory_order_relaxed),
-        frames_over_33ms.load(std::memory_order_relaxed));
+        frames_over_33ms.load(std::memory_order_relaxed),
+        double(background_build_ns.load(std::memory_order_relaxed)) / 1e6);
   }
 
   uint64_t stage_requests_snapshot() const {
@@ -310,6 +320,7 @@ class MetalShaderBuildCensus {
   }
 
  private:
+  static inline thread_local bool background_thread_ = false;
   std::chrono::steady_clock::time_point origin_;
   std::atomic<uint64_t> frame_build_ns_{0};
   mutable std::mutex stage_request_mutex_;
