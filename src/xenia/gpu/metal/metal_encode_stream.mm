@@ -55,7 +55,13 @@ enum class MetalEncodeStream::Op : uint16_t {
 
 namespace {
 
-inline void SpinPause() { __asm__ __volatile__("isb sy" ::: "memory"); }
+inline void SpinPause() {
+#if defined(__aarch64__)
+  __asm__ __volatile__("isb sy" ::: "memory");
+#elif defined(__x86_64__)
+  __asm__ __volatile__("pause" ::: "memory");
+#endif
+}
 
 // Spins before parking: the producer records a draw every ~2 us, so a short
 // spin keeps the consumer hot inside a pass and parks it between frames.
