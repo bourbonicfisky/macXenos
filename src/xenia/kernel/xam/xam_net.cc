@@ -437,8 +437,9 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
   X_STATUS result = 0;
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
-        num_events, events, wait_all, 1, alertable,
-        timeout != -1 ? &timeout_wait : nullptr);
+        num_events, events,
+        wait_all ? X_KWAIT_REASON::WaitAll : X_KWAIT_REASON::WaitAny, 1,
+        alertable, timeout != -1 ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
   if (XFAILED(result)) {
@@ -446,13 +447,14 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     XThread::SetLastError(error);
     return ~0u;
   }
-  return 0;
+  // The signaled event's index, WSA_WAIT_TIMEOUT or WSA_WAIT_IO_COMPLETION.
+  return result;
 }
 DECLARE_XAM_EXPORT2(NetDll_WSAWaitForMultipleEvents, kNetworking, kImplemented,
                     kBlocking);
 
 dword_result_t NetDll_WSACreateEvent_entry() {
-  XEvent* ev = new XEvent(kernel_state());
+  auto ev = object_ref<XEvent>(new XEvent(kernel_state()));
   ev->Initialize(true, false);
   return ev->handle();
 }
@@ -557,12 +559,20 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToMachineId, kNetworking, kStub);
 
-void NetDll_XNetInAddrToString_entry(dword_t caller, dword_t in_addr,
-                                     lpstring_t string_out,
-                                     dword_t string_size) {
-  strncpy(string_out, "666.666.666.666", string_size);
+dword_result_t NetDll_XNetInAddrToString_entry(dword_t caller, dword_t in_addr,
+                                               lpstring_t string_out,
+                                               dword_t string_size) {
+  const std::string text =
+      fmt::format("{}.{}.{}.{}", in_addr >> 24, (in_addr >> 16) & 0xFF,
+                  (in_addr >> 8) & 0xFF, in_addr & 0xFF);
+  if (string_out && string_size) {
+    const size_t count = std::min<size_t>(text.size(), string_size - 1);
+    std::memcpy(string_out, text.data(), count);
+    string_out[count] = '\0';
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kImplemented);
 
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
 // subsequent socket calls (like a handle to a XNet address)
@@ -739,6 +749,13 @@ dword_result_t NetDll_XHttpStartup_entry(dword_t caller, dword_t reserved,
   return 1;
 }
 DECLARE_XAM_EXPORT1(NetDll_XHttpStartup, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpShutdown_entry(dword_t caller) {
+  // NetDll_XHttpStartup creates nothing to release.
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return 1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpShutdown, kNetworking, kStub);
 
 dword_result_t NetDll_XHttpOpen_entry(dword_t caller, lpstring_t user_agent,
                                       dword_t access_type,

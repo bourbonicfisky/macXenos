@@ -992,6 +992,19 @@ bool MetalRenderTargetCache::EncodeCanonicalAuthorityOperation(
       operation.kind ==
       MetalEdramAuthorityTracker::SyncKind::kMaterializeFromCanonical;
   const RenderTargetKey& key = render_target->key();
+  // Diagnostic (XE_METAL_CANONICAL_SYNC_LOG=1): every pack into and
+  // materialize out of canonical EDRAM, to find who reads tiles that a direct
+  // colour resolve left stale (interleave with --replay_draw_log).
+  static const bool s_sync_log =
+      std::getenv("XE_METAL_CANONICAL_SYNC_LOG") != nullptr;
+  if (s_sync_log) {
+    XELOGW("MetalCanonicalSync {} req={} depth={} fmt={} msaa={} base={} "
+           "pitch={} tiles=[{},{})",
+           materialize ? "materialize" : "pack", uint32_t(sync_requester_),
+           key.is_depth, key.resource_format, uint32_t(key.msaa_samples),
+           key.base_tiles, key.GetPitchTiles(), operation.start_tiles,
+           operation.end_tiles);
+  }
   if (!materialize) {
     // A pack rewrites canonical: no longer an untouched clear.
     SetTileClear(operation.start_tiles, operation.end_tiles, false, 0, 0);
@@ -5804,7 +5817,11 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
 void MetalRenderTargetCache::PerformResolveClear(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, bool is_depth, uint32_t clear_value) {
-  if (!command_buffer) {
+  // A zero-sized resolve still carries the clear bits (Forza Horizon issues
+  // several 0x0 copies a frame). It clears nothing, so it must not take the
+  // authority reset below: forgetting every tile's owner there made the next
+  // render target materialize stale canonical EDRAM (Forza's banded sky).
+  if (!command_buffer || !row_length_used || !rows) {
     return;
   }
   // In canonical mode this function is only the degraded fallback. The legacy
@@ -6273,6 +6290,13 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
   direct_color_texture_ = (__bridge void*)texture;
   direct_color_ms_ = ms;
   direct_color_rt_format_ = uint32_t(render_target->key().GetColorFormat());
+  if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
+    XELOGW("MetalCanonicalSync direct-resolve fmt={} msaa={} base={} pitch={} "
+           "span=[{},+{}x{} step {}] src=({},{}) {}x{} (canonical not packed)",
+           direct_color_rt_format_, msaa_samples, base_tiles, pitch_tiles,
+           span_base, span_row_length, span_rows, span_pitch, source_x,
+           source_y, width, height);
+  }
   note(0);
   return true;
 }

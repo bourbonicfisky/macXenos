@@ -144,12 +144,14 @@ TEST_CASE("texture_util: level-0 packed tail serves its mips from the base",
     REQUIRE(mip_max == 0);
   }
 
-  SECTION("explicit mip_address is kept") {
+  SECTION("level 0 packed: the whole tail is at base_address") {
+    // Real hardware reads the mips from the base tail even when mip_address
+    // is nonzero (Canary 344fca758).
     auto fetch = MakeFetch2D(16, 16, 0x1234, 0x2000, 4, true);
     texture_util::GetSubresourcesFromFetchConstant(
         fetch, nullptr, nullptr, nullptr, &base_page, &mip_page, &mip_min,
         &mip_max);
-    REQUIRE(mip_page == 0x2000);
+    REQUIRE(mip_page == 0x1234);
     REQUIRE(mip_max == 4);
   }
 }

@@ -61,8 +61,8 @@ namespace {
 inline void SpinPause() {
 #if defined(__aarch64__)
   __asm__ __volatile__("isb sy" ::: "memory");
-#else
-  __builtin_ia32_pause();
+#elif defined(__x86_64__)
+  __asm__ __volatile__("pause" ::: "memory");
 #endif
 }
 

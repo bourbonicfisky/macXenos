@@ -53,6 +53,21 @@ inline void ResetIntegerScaleBits(uint32_t* scale_bits, size_t count) {
   }
 }
 
+// kIntegerScaleSnapMipsBit for a point sampled constant (bit 26 set in
+// scale) whose texture has more than one usable mip level, else 0.
+inline uint32_t SnapMipsBit(const xenos::xe_gpu_texture_fetch_t& fetch,
+                            uint32_t scale) {
+  if (!(scale & texture_util::kIntegerScalePointSampledBit)) {
+    return 0;
+  }
+  uint32_t mip_min_level, mip_max_level;
+  texture_util::GetSubresourcesFromFetchConstant(
+      fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &mip_min_level,
+      &mip_max_level);
+  return mip_max_level > mip_min_level ? texture_util::kIntegerScaleSnapMipsBit
+                                       : 0;
+}
+
 // Publishes one bound texture's packed fixed conversion
 // (texture_util::IntegerScaleBits) at its own fetch-constant index.
 //
@@ -61,11 +76,15 @@ inline void ResetIntegerScaleBits(uint32_t* scale_bits, size_t count) {
 // real scale onto an unrelated slot, which is worse than dropping it.
 inline uint32_t PublishIntegerScaleBits(
     uint32_t fetch_constant, const xenos::xe_gpu_texture_fetch_t& fetch,
-    uint8_t swizzled_signs, uint32_t* scale_bits, size_t count) {
+    uint8_t swizzled_signs, uint32_t* scale_bits, size_t count,
+    bool snap_mips = false) {
   if (fetch_constant >= count) {
     return 0;
   }
   uint32_t scale = texture_util::IntegerScaleBits(fetch, swizzled_signs);
+  if (snap_mips) {
+    scale |= SnapMipsBit(fetch, scale);
+  }
   scale_bits[fetch_constant] = scale;
   return scale;
 }

@@ -16,8 +16,16 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+// XPARTY_USER_LIST: a count padded to 8 bytes and 32 XPARTY_USER_INFO of
+// 0x78 bytes.
+constexpr size_t kPartyUserListSize = 0xF08;
+
 dword_result_t XamPartyGetUserList_entry(dword_t player_count,
-                                         lpdword_t party_list) {
+                                         lpvoid_t party_list) {
+  // Titles read the count without checking the result.
+  if (party_list) {
+    party_list.Zero(kPartyUserListSize);
+  }
   // 5345085D wants specifically this code to skip loading party data.
   // This code is not documented in NT_STATUS code list
   return 0x807D0003;

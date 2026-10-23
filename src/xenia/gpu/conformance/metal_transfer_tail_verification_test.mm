@@ -83,7 +83,7 @@ float MyUNorm24(uint32_t n24) {
 
 // fixed16 (guest snorm carrying -32..32) decode to host value.
 float MyFixed16(uint16_t half_bits) {
-  return float(int16_t(half_bits)) * (32.0f / 32767.0f);
+  return float(int16_t(half_bits)) * (1.0f / 1024.0f);
 }
 
 id<MTLLibrary> Lib(id<MTLDevice> device, const char* source) {

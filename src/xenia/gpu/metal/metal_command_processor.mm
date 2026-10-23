@@ -6860,8 +6860,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Classes (the value): 1 = every such shader; 2 = only shaders with dynamic
   // register addressing; 3 = only shaders with >= 6 texture bindings; 4 =
   // only shaders of >= 512 ucode dwords; 5 = only shaders whose static
-  // register bound is >= 32. The complement of a class's gain is what the
-  // rest costs.
+  // register bound is >= 32; 6 = the hash buckets or hashes below. The
+  // complement of a class's gain is what the rest costs.
   static const uint32_t s_diag_ps_null = [] {
     const char* v = std::getenv("XE_METAL_DIAG_PS_NULL");
     return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
@@ -6882,6 +6882,37 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         break;
       case 5:
         in_class = pixel_shader->register_static_address_bound() >= 32;
+        break;
+      case 6:
+        // Hash buckets for bisecting: XE_METAL_DIAG_PS_NULL_BUCKET=k/n drops
+        // the shaders whose ucode hash is k mod n; XE_METAL_DIAG_PS_NULL_HASH
+        // (comma-separated hex) drops exactly those.
+        {
+          static const std::pair<uint64_t, uint64_t> s_bucket = [] {
+            const char* v = std::getenv("XE_METAL_DIAG_PS_NULL_BUCKET");
+            uint64_t k = 0, n = 0;
+            if (v) {
+              char* end = nullptr;
+              k = strtoull(v, &end, 10);
+              if (end && *end == '/') n = strtoull(end + 1, nullptr, 10);
+            }
+            return std::make_pair(k, n);
+          }();
+          static const std::unordered_set<uint64_t> s_hashes = [] {
+            std::unordered_set<uint64_t> hashes;
+            const char* v = std::getenv("XE_METAL_DIAG_PS_NULL_HASH");
+            while (v && *v) {
+              char* end = nullptr;
+              hashes.insert(strtoull(v, &end, 16));
+              v = (end && *end == ',') ? end + 1 : nullptr;
+            }
+            return hashes;
+          }();
+          uint64_t hash = pixel_shader->ucode_data_hash();
+          in_class = (s_bucket.second &&
+                      hash % s_bucket.second == s_bucket.first) ||
+                     s_hashes.count(hash) != 0;
+        }
         break;
       default:
         break;
@@ -6908,6 +6939,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              pixel_shader->kills_pixels() ? 1 : 0,
              pixel_shader->writes_depth() ? 1 : 0,
              pixel_shader->memexport_eM_written() ? 1 : 0);
+    }
+    // Draw counts per shader, the top 24 logged every 2^20 draws.
+    static std::unordered_map<uint64_t, uint64_t> s_draws;
+    static uint64_t s_total = 0;
+    ++s_draws[pixel_shader->ucode_data_hash()];
+    if ((++s_total & ((1u << 20) - 1)) == 0) {
+      std::vector<std::pair<uint64_t, uint64_t>> top(s_draws.begin(),
+                                                     s_draws.end());
+      std::sort(top.begin(), top.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+      top.resize(std::min<size_t>(top.size(), 24));
+      std::string line;
+      for (const auto& [hash, count] : top) {
+        line += fmt::format(" {:016X}:{:.2f}", hash, double(count) / s_total);
+      }
+      XELOGI("MetalPsDraws total={}{}", s_total, line);
     }
   }
   // Diagnostic: XE_METAL_DUMP_PS=<hex ucode hash> writes that pixel shader's
@@ -8481,6 +8528,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         info.swizzled_signs = texture_util::SwizzleSigns(f);
         info.integer_scale_bits =
             texture_util::IntegerScaleBits(f, info.swizzled_signs);
+        if (cvars::dxbc_implicit_lod) {
+          info.integer_scale_bits |= SnapMipsBit(f, info.integer_scale_bits);
+        }
         info.exp_adjust = int8_t(f.exp_adjust);
         bool plain = true;
         for (uint32_t c = 0; c < 4; ++c) {
@@ -8607,7 +8657,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // truncating form is measured, not assumed (task 2.4).
     static const bool s_early_hint = [] {
       const char* value = std::getenv("XE_METAL_EARLY_HINT");
-      return value && std::strcmp(value, "1") == 0;
+      return !value || std::strcmp(value, "0") != 0;
     }();
     static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
@@ -8651,11 +8701,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // translator drops the dynamic alpha test and alpha-to-coverage code
       // (a static discard and an SV_Coverage write in every colour-writing
       // shader otherwise, which keeps Apple's hidden-surface removal and
-      // early depth off for the whole draw). Opt-in (XE_METAL_EARLY_HINT=1):
-      // it moves 4x-MSAA blend results by +-1 LSB on silhouettes (RDR 8111
-      // draw 104: blended 8888 samples round differently once the function
-      // stops writing [[sample_mask]]), and RDR gameplay showed no frame-rate
-      // gain from it on the M4 (2026-10-06).
+      // early depth off for the whole draw). Default on; XE_METAL_EARLY_HINT=0
+      // disables it. It moves 4x-MSAA blend results by +-1 LSB on silhouettes
+      // (RDR 8111 draw 104: blended 8888 samples round differently once the
+      // function stops writing [[sample_mask]]). M4 2026-10-22: Mafia II
+      // 80.8 -> 102.7 fps, GTA IV 50.5 -> 52.9, 47-title sweep unchanged
+      // otherwise.
       ps_mod_decoded.pixel.depth_stencil_mode =
           DxbcShaderTranslator::Modification::DepthStencilMode::kEarlyHint;
     }
@@ -10328,7 +10379,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           } else {
             PublishIntegerScaleBits(fc, fetch, uint8_t(signs),
                                     system_constants.texture_integer_scale_bits,
-                                    kMetalIntegerScaleSlotCount);
+                                    kMetalIntegerScaleSlotCount,
+                                    cvars::dxbc_implicit_lod);
           }
         }
         // Draw resolution scaling: a fetch served from a resolve snapshot reads
@@ -10381,14 +10433,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Sonic black-sky task 3.2 (diagnostic, replay-scale): one line per
     // texture binding per draw, so a captured frame's sampled-source
     // inventory can be walked offline. Bounded hard for live safety.
-    static const bool s_draw_tex_log =
-        std::getenv("XE_METAL_DRAW_TEX_LOG") != nullptr;
+    // The value is the line budget (any non-number = 8192).
+    static const uint32_t s_draw_tex_log = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_TEX_LOG");
+      if (!v) return 0u;
+      uint32_t lines = uint32_t(strtoul(v, nullptr, 10));
+      return lines > 1 ? lines : 8192u;
+    }();
     if (s_draw_tex_log) {
       static uint32_t s_draw_tex_lines = 0;
       auto log_bindings = [&](MetalShader* shader, const char* stage) {
         if (!shader) return;
         for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
-          if (s_draw_tex_lines >= 8192) return;
+          if (s_draw_tex_lines >= s_draw_tex_log) return;
           ++s_draw_tex_lines;
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
           XELOGI(
@@ -14034,6 +14091,121 @@ bool MetalCommandProcessor::IssueCopy() {
           if (!s_null_cb_legacy) {
             PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
           }
+          // Diagnostic (XE_METAL_DIRECT_COLOR_VERIFY=1, never for play): for
+          // a resolve that took the direct colour path, also resolve it the
+          // pack-first way, both into linear staging buffers, and log the
+          // resolves whose guest bytes differ when the frame completes.
+          static const bool s_direct_verify =
+              std::getenv("XE_METAL_DIRECT_COLOR_VERIFY") != nullptr;
+          if (s_direct_verify && canonical_packed && frame_command_buffer_ &&
+              render_target_cache_->IsDirectColorResolveActive()) {
+            const size_t verify_bytes = size_t(rw) * rh * wb_bpp;
+            id<MTLBuffer> verify_direct =
+                [wb_device newBufferWithLength:verify_bytes
+                                       options:MTLResourceStorageModeShared];
+            id<MTLBuffer> verify_packed =
+                [wb_device newBufferWithLength:verify_bytes
+                                       options:MTLResourceStorageModeShared];
+            const uint32_t verify_number =
+                ResolveNumberFormatEnabled()
+                    ? uint32_t(resolve_info.copy_dest_info.copy_dest_number)
+                    : 0u;
+            auto verify_encode = [&](id<MTLBuffer> destination) {
+              return render_target_cache_->ResolveCanonicalColorToBuffer(
+                  frame_command_buffer_,
+                  resolve_info.color_edram_info.base_tiles,
+                  resolve_info.color_edram_info.pitch_tiles,
+                  uint32_t(resolve_info.color_edram_info.msaa_samples),
+                  resolve_info.color_edram_info.format,
+                  resolve_info.color_edram_info.format_is_64bpp != 0,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                      << 3,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                      << 3,
+                  uint32_t(
+                      resolve_info.copy_dest_coordinate_info.copy_sample_select),
+                  resolve_info.copy_dest_info.copy_dest_swap != 0,
+                  exp_bias_scale, dest_format, wb_bpp_log2,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                  canonical_raw_copy, (__bridge void*)destination, rw, rh,
+                  nullptr, verify_number);
+            };
+            const bool direct_ok = verify_direct && verify_encode(verify_direct);
+            void* direct_source =
+                render_target_cache_->SuspendDirectColorResolve();
+            const bool packed_ok =
+                verify_packed &&
+                render_target_cache_->PrepareCanonicalEdramForResolve(
+                    span_base, span_row_length, span_rows, span_pitch) &&
+                verify_encode(verify_packed);
+            render_target_cache_->ResumeDirectColorResolve(direct_source);
+            if (direct_ok && packed_ok) {
+              const uint32_t v_draw = trace_draw_index_;
+              const uint32_t v_base = resolve_info.copy_dest_base;
+              const uint32_t v_rt_format =
+                  uint32_t(resolve_info.color_edram_info.format);
+              const uint32_t v_msaa =
+                  uint32_t(resolve_info.color_edram_info.msaa_samples);
+              const uint32_t v_edram_base =
+                  resolve_info.color_edram_info.base_tiles;
+              const uint32_t v_pitch = resolve_info.color_edram_info.pitch_tiles;
+              const uint32_t v_ox =
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                  << 3;
+              const uint32_t v_oy =
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                  << 3;
+              const uint32_t v_sample = uint32_t(
+                  resolve_info.copy_dest_coordinate_info.copy_sample_select);
+              const uint32_t v_dest_format = uint32_t(dest_format);
+              const uint32_t v_bpp = uint32_t(wb_bpp);
+              const uint32_t v_w = rw, v_h = rh;
+              const float v_exp = exp_bias_scale;
+              const bool v_raw = canonical_raw_copy;
+              [(__bridge id<MTLCommandBuffer>)frame_command_buffer_
+                  addCompletedHandler:^(id<MTLCommandBuffer>) {
+                    static std::atomic<uint64_t> s_checked{0}, s_differ{0};
+                    const uint8_t* a =
+                        static_cast<const uint8_t*>(verify_direct.contents);
+                    const uint8_t* b =
+                        static_cast<const uint8_t*>(verify_packed.contents);
+                    uint64_t pixels = uint64_t(v_w) * v_h, bad = 0;
+                    uint64_t first = UINT64_MAX;
+                    for (uint64_t i = 0; i < pixels; ++i) {
+                      if (std::memcmp(a + i * v_bpp, b + i * v_bpp, v_bpp)) {
+                        if (first == UINT64_MAX) first = i;
+                        ++bad;
+                      }
+                    }
+                    const uint64_t checked = ++s_checked;
+                    if (bad) {
+                      const uint64_t differ = ++s_differ;
+                      if (differ <= 64) {
+                        uint32_t wa = 0, wb = 0;
+                        std::memcpy(&wa, a + first * v_bpp,
+                                    std::min<uint32_t>(v_bpp, 4));
+                        std::memcpy(&wb, b + first * v_bpp,
+                                    std::min<uint32_t>(v_bpp, 4));
+                        XELOGW(
+                            "MetalDirectColorVerify DIFF draw={} dest={:08X} "
+                            "{}x{} rt_fmt={} msaa={} edram_base={} pitch={} "
+                            "off=({},{}) sample={} dest_fmt={} bpp={} exp={} "
+                            "raw={} bad_px={}/{} first=({},{}) direct={:08X} "
+                            "packed={:08X}",
+                            v_draw, v_base, v_w, v_h, v_rt_format, v_msaa,
+                            v_edram_base, v_pitch, v_ox, v_oy, v_sample,
+                            v_dest_format, v_bpp, v_exp, v_raw, bad, pixels,
+                            first % v_w, first / v_w, wa, wb);
+                      }
+                    }
+                    if ((checked & (checked - 1)) == 0) {
+                      XELOGI("MetalDirectColorVerify: {} resolves checked, {} "
+                             "differ",
+                             checked, s_differ.load());
+                    }
+                  }];
+            }
+          }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {
@@ -14768,6 +14940,18 @@ bool MetalCommandProcessor::IssueCopy() {
                          clear_source_x, clear_source_y, clear_width,
                          clear_height, color_clear_lo, color_clear_hi));
       if (!cleared) {
+        if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
+          XELOGW("MetalCanonicalSync colour-clear FALLBACK draw={} canonical={} "
+                 "base={} pitch={} msaa={} 64bpp={} span=[{},+{}x{}] "
+                 "rect=({},{} {}x{})",
+                 trace_draw_index_, canonical_clear,
+                 resolve_info.color_edram_info.base_tiles,
+                 resolve_info.color_edram_info.pitch_tiles,
+                 uint32_t(resolve_info.color_edram_info.msaa_samples),
+                 resolve_info.color_edram_info.format_is_64bpp, cbase, crowlen,
+                 crows, clear_source_x, clear_source_y, clear_width,
+                 clear_height);
+        }
         render_target_cache_->PerformResolveClear(
             frame_command_buffer_, cbase, crowlen, crows,
             resolve_info.color_edram_info.pitch_tiles, /*is_depth=*/false,

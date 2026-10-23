@@ -162,7 +162,7 @@ inline float4 xe_unpack_color32(uint word, uint format) {
     case 4u: {
       int2 fixed = int2(as_type<int>(word << 16u) >> 16,
                         as_type<int>(word) >> 16);
-      return float4(float2(fixed) * (32.0 / 32767.0), 0.0, 1.0);
+      return float4(float2(fixed) * (1.0 / 1024.0), 0.0, 1.0);
     }
     case 6u:
       return float4(float2(as_type<half2>(word)), 0.0, 0.0);
@@ -171,13 +171,11 @@ inline float4 xe_unpack_color32(uint word, uint format) {
   }
 }
 inline int xe_f32_to_fixed16(float value) {
-  // -32768 decodes slightly below -32. Preserve that otherwise-unreachable raw
-  // code during materialize->pack, while guest draw output at exactly -32 uses
-  // the normal Xenos signed rounding and becomes -32767.
-  if (value < -32.0) return -32768;
-  value = clamp(value, -32.0, 32.0);
-  float scaled = value * (32767.0 / 32.0);
-  return int(scaled + (scaled >= 0.0 ? 0.5 : -0.5));
+  // Signed 16-bit EDRAM components have 10 fractional bits (Canary 42c2b880e,
+  // matched to real hardware): the value scaled by 1024 rounds half up, also
+  // for negatives, clamped to [-32, 32767/1024]; -32 packs to 0x8000.
+  value = clamp(value, -32.0, 32767.0 / 1024.0);
+  return int(floor(value * 1024.0 + 0.5));
 }
 inline uint xe_pack_color32(float4 color, uint format) {
   switch (format) {
@@ -262,7 +260,7 @@ inline float4 xe_unpack_color64(uint2 words, uint format) {
                         as_type<int>(words.x) >> 16,
                         as_type<int>(words.y << 16u) >> 16,
                         as_type<int>(words.y) >> 16);
-      return float4(fixed) * (32.0 / 32767.0);
+      return float4(fixed) * (1.0 / 1024.0);
     }
     case 7u:
       return float4(as_type<half4>(words));

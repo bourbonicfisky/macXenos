@@ -15,6 +15,7 @@
 #include <cstring>
 #include <vector>
 
+#include "third_party/xxhash/xxhash.h"
 #include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/xenos.h"
 
@@ -87,8 +88,35 @@ class MetalShader : public DxbcShader {
     if (fetch_patterns_.size() >= 15) {
       return 0;
     }
+    // Never reallocates: translations read entries from other threads.
+    fetch_patterns_.reserve(15);
     fetch_patterns_.push_back(pattern);
     return uint32_t(fetch_patterns_.size());
+  }
+  // Content hash of a pattern (0 for none). The index is session-local
+  // (discovery order), so the durable metallib key carries this instead:
+  // keyed on the index, a warm cache served shaders compiled with another
+  // session's sign / scale / bias literals.
+  uint64_t FetchPatternContentHash(uint32_t pattern_index) const {
+    if (!pattern_index || pattern_index > fetch_patterns_.size()) {
+      return 0;
+    }
+    const FetchPattern& p = fetch_patterns_[pattern_index - 1];
+    struct Entry {
+      uint32_t slot;
+      uint32_t integer_scale_bits;
+      uint32_t swizzled_signs;
+      int32_t exp_adjust;
+    };
+    Entry entries[32];
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (p.fetch_mask & (1u << i)) {
+        entries[count++] = {i, p.info[i].integer_scale_bits,
+                            p.info[i].swizzled_signs, p.info[i].exp_adjust};
+      }
+    }
+    return XXH3_64bits(entries, sizeof(Entry) * count) | 1;
   }
   uint32_t GetFetchPlainPattern(uint32_t pattern_index) const override {
     if (!pattern_index || pattern_index > fetch_patterns_.size()) {

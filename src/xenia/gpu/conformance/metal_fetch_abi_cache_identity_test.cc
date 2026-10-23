@@ -173,8 +173,11 @@ TEST_CASE("The production fetch ABI revision is the current one",
   // 8 = texture_integer_scale_bits takes Canary's packed fixed conversion
   //     (d11950528..c3cd8617b): new fetch DXBC and a new meaning for the
   //     same system-constant bytes.
+  // 9 = the metallib key carries the pixel fetch pattern's content instead
+  //     of its session-local index, so index-keyed revision-8 entries (which
+  //     can hold another session's sign / scale / bias literals) are dropped.
   // Each boundary is pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 8);
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 9);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
@@ -360,6 +363,33 @@ TEST_CASE("A cache written under the previous fetch ABI is not served",
     storage.Close();
   }
 
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("The revision-8 to revision-9 boundary discards index-keyed metallibs",
+          "[cache_identity]") {
+  // Revision 8 keyed pixel metallibs on the fetch pattern's session-local
+  // index, so an entry could hold another session's static fetch literals.
+  std::filesystem::path root = MakeScratchRoot("pattern_index_keyed");
+  {
+    MetalPipelineStorage storage;
+    REQUIRE(storage.Open(root, kTitleId, IdentityWithFetchAbi(8)));
+    REQUIRE(storage.StoreMetallib(kMetallibKey, SampleMetallib()));
+    storage.Close();
+    MetalPipelineStorage warm;
+    REQUIRE(warm.Open(root, kTitleId, IdentityWithFetchAbi(8)));
+    std::vector<uint8_t> served;
+    REQUIRE(warm.LoadMetallib(kMetallibKey, &served));
+    warm.Close();
+  }
+  {
+    MetalPipelineStorage storage;
+    REQUIRE(storage.Open(root, kTitleId, IdentityWithFetchAbi(9)));
+    std::vector<uint8_t> served;
+    CHECK_FALSE(storage.LoadMetallib(kMetallibKey, &served));
+    storage.Close();
+  }
   std::error_code ec;
   std::filesystem::remove_all(root, ec);
 }

@@ -91,7 +91,7 @@ struct X_XAMACCOUNTINFO {
   }
 
   bool IsParentalControlled() const {
-    return static_cast<bool>((cached_user_flags & kLanguageMask) >> 24);
+    return static_cast<bool>(cached_user_flags & kParentalControlEnabled);
   }
 
   XLanguage GetLanguage() const {
@@ -364,14 +364,7 @@ struct XMP_USER_PLAYLIST_INFO {
 };
 static_assert_size(XMP_USER_PLAYLIST_INFO, 0x334);
 
-constexpr uint8_t kStatsMaxAmount = 64;
-
-struct X_STATS_DETAILS {
-  xe::be<uint32_t> id;
-  xe::be<uint32_t> stats_amount;
-  xe::be<uint16_t> stats[kStatsMaxAmount];
-};
-static_assert_size(X_STATS_DETAILS, 8 + kStatsMaxAmount * 2);
+constexpr uint32_t MAX_LAUNCH_DATA_SIZE = 0x3FC;
 
 enum LoaderLaunchFlags : uint32_t {
   GetSystemVersion = 0x00000040,  // XamUpdateGetCurrentSystemVersion

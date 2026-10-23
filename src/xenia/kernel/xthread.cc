@@ -42,27 +42,29 @@ DEFINE_bool(ignore_thread_affinities, true,
 // parks the emulator's busiest guest thread on efficiency cores (measured: the
 // JC2 critical thread ran ~0% on P-cores) because Xenia sets no QoS class. These
 // cvars let selected guest CPU threads self-tag an Apple QoS class so the
-// scheduler keeps them on performance cores. Default is off; a policy only
-// becomes a default after a before/after FPS win with no guard-title regression
-// (see the apply-macos-guest-thread-qos change).
+// scheduler keeps them on performance cores. Default 'all' since 2026-10-23:
+// every sweep and published number was measured with it (the test machines'
+// configs had it set), and a fresh M4 Pro with 'off' ran Mafia II at 35.6 fps
+// vs 150.6 and GTA IV at 39.8 vs 60.0. Titles that measure better with 'off'
+// get it from their built-in game config.
 DEFINE_string(
-    guest_thread_qos, "off",
+    guest_thread_qos, "all",
     "macOS only: Apple QoS scheduling policy for guest CPU threads. "
-    "'off' (default, no QoS calls) | 'all' (every guest XThread) | 'main' "
+    "'off' (no QoS calls) | 'all' (default, every guest XThread) | 'main' "
     "(entry-point thread only) | 'priority' (guest priority >= "
     "guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved "
     "but not yet implemented.",
     "CPU");
 // The class default is the one every A/B measured (2026-10-15: Mafia II 25 ->
-// 56 fps on the M1 Max, 34 -> 57 on the M4 with priority/all); it has no
-// effect while the policy is off, which stays the default: on 4-P-core Macs
-// every policy costs Just Cause 2 and Resident Evil 5 1-2 fps, so the user
-// picks per title (Graphics and CPU preferences).
+// 56 fps on the M1 Max, 34 -> 57 on the M4 with priority/all). On 4-P-core
+// Macs every policy cost Just Cause 2 and Resident Evil 5 1-2 fps then; such
+// titles set guest_thread_qos = "off" in their game config.
 DEFINE_string(guest_thread_qos_class, "user_interactive",
               "macOS only: QoS class applied when guest_thread_qos selects a "
               "thread: 'user_initiated' | 'user_interactive' (default).",
               "CPU");
 UPDATE_from_string(guest_thread_qos_class, 2026, 10, 16, 0, "user_initiated");
+UPDATE_from_string(guest_thread_qos, 2026, 10, 23, 8, "off");
 DEFINE_int32(guest_thread_qos_priority_threshold, 1,
              "macOS only: with guest_thread_qos=priority, tag guest threads "
              "whose guest priority is >= this value.",

@@ -125,7 +125,11 @@ struct MetalTranslatorConfig {
   //       Q16 rounding, point-sampled narrow reconstruction and texel-center
   //       snap. Identical ucode emits different DXBC, and the system constant
   //       means something else for the same bytes.
-  static constexpr uint32_t kFetchAbiRevision = 8;
+  //   9 - the metallib key carries the pixel fetch pattern's content, not
+  //       its session-local index (10822b13b / 3b586b9c5 bake per-pattern
+  //       sign / scale / bias literals); entries keyed on the index can hold
+  //       another session's literals.
+  static constexpr uint32_t kFetchAbiRevision = 9;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is
