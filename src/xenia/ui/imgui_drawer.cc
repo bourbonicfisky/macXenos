@@ -733,7 +733,14 @@ ImGuiIO& ImGuiDrawer::GetIO() {
   return ImGui::GetIO();
 }
 
-void ImGuiDrawer::OnKeyDown(KeyEvent& e) { OnKey(e, true); }
+void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
+  OnKey(e, true);
+  // Text typed into a field stays away from the game's keyboard input.
+  // Releases still pass since the key may have gone down before the field.
+  if (GetIO().WantTextInput) {
+    e.set_handled(true);
+  }
+}
 
 void ImGuiDrawer::OnKeyUp(KeyEvent& e) { OnKey(e, false); }
 
