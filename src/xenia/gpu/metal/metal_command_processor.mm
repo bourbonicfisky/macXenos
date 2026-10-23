@@ -14302,6 +14302,18 @@ bool MetalCommandProcessor::IssueCopy() {
                          clear_source_x, clear_source_y, clear_width,
                          clear_height, color_clear_lo, color_clear_hi));
       if (!cleared) {
+        if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
+          XELOGW("MetalCanonicalSync colour-clear FALLBACK draw={} canonical={} "
+                 "base={} pitch={} msaa={} 64bpp={} span=[{},+{}x{}] "
+                 "rect=({},{} {}x{})",
+                 trace_draw_index_, canonical_clear,
+                 resolve_info.color_edram_info.base_tiles,
+                 resolve_info.color_edram_info.pitch_tiles,
+                 uint32_t(resolve_info.color_edram_info.msaa_samples),
+                 resolve_info.color_edram_info.format_is_64bpp, cbase, crowlen,
+                 crows, clear_source_x, clear_source_y, clear_width,
+                 clear_height);
+        }
         render_target_cache_->PerformResolveClear(
             frame_command_buffer_, cbase, crowlen, crows,
             resolve_info.color_edram_info.pitch_tiles, /*is_depth=*/false,
