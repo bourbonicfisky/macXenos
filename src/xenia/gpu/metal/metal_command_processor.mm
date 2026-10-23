@@ -13453,6 +13453,121 @@ bool MetalCommandProcessor::IssueCopy() {
           if (!s_null_cb_legacy) {
             PrepareTransferCommandBuffer(uint32_t(metal::MetalTransferSite::kResolve));
           }
+          // Diagnostic (XE_METAL_DIRECT_COLOR_VERIFY=1, never for play): for
+          // a resolve that took the direct colour path, also resolve it the
+          // pack-first way, both into linear staging buffers, and log the
+          // resolves whose guest bytes differ when the frame completes.
+          static const bool s_direct_verify =
+              std::getenv("XE_METAL_DIRECT_COLOR_VERIFY") != nullptr;
+          if (s_direct_verify && canonical_packed && frame_command_buffer_ &&
+              render_target_cache_->IsDirectColorResolveActive()) {
+            const size_t verify_bytes = size_t(rw) * rh * wb_bpp;
+            id<MTLBuffer> verify_direct =
+                [wb_device newBufferWithLength:verify_bytes
+                                       options:MTLResourceStorageModeShared];
+            id<MTLBuffer> verify_packed =
+                [wb_device newBufferWithLength:verify_bytes
+                                       options:MTLResourceStorageModeShared];
+            const uint32_t verify_number =
+                ResolveNumberFormatEnabled()
+                    ? uint32_t(resolve_info.copy_dest_info.copy_dest_number)
+                    : 0u;
+            auto verify_encode = [&](id<MTLBuffer> destination) {
+              return render_target_cache_->ResolveCanonicalColorToBuffer(
+                  frame_command_buffer_,
+                  resolve_info.color_edram_info.base_tiles,
+                  resolve_info.color_edram_info.pitch_tiles,
+                  uint32_t(resolve_info.color_edram_info.msaa_samples),
+                  resolve_info.color_edram_info.format,
+                  resolve_info.color_edram_info.format_is_64bpp != 0,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                      << 3,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                      << 3,
+                  uint32_t(
+                      resolve_info.copy_dest_coordinate_info.copy_sample_select),
+                  resolve_info.copy_dest_info.copy_dest_swap != 0,
+                  exp_bias_scale, dest_format, wb_bpp_log2,
+                  uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                  canonical_raw_copy, (__bridge void*)destination, rw, rh,
+                  nullptr, verify_number);
+            };
+            const bool direct_ok = verify_direct && verify_encode(verify_direct);
+            void* direct_source =
+                render_target_cache_->SuspendDirectColorResolve();
+            const bool packed_ok =
+                verify_packed &&
+                render_target_cache_->PrepareCanonicalEdramForResolve(
+                    span_base, span_row_length, span_rows, span_pitch) &&
+                verify_encode(verify_packed);
+            render_target_cache_->ResumeDirectColorResolve(direct_source);
+            if (direct_ok && packed_ok) {
+              const uint32_t v_draw = trace_draw_index_;
+              const uint32_t v_base = resolve_info.copy_dest_base;
+              const uint32_t v_rt_format =
+                  uint32_t(resolve_info.color_edram_info.format);
+              const uint32_t v_msaa =
+                  uint32_t(resolve_info.color_edram_info.msaa_samples);
+              const uint32_t v_edram_base =
+                  resolve_info.color_edram_info.base_tiles;
+              const uint32_t v_pitch = resolve_info.color_edram_info.pitch_tiles;
+              const uint32_t v_ox =
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                  << 3;
+              const uint32_t v_oy =
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                  << 3;
+              const uint32_t v_sample = uint32_t(
+                  resolve_info.copy_dest_coordinate_info.copy_sample_select);
+              const uint32_t v_dest_format = uint32_t(dest_format);
+              const uint32_t v_bpp = uint32_t(wb_bpp);
+              const uint32_t v_w = rw, v_h = rh;
+              const float v_exp = exp_bias_scale;
+              const bool v_raw = canonical_raw_copy;
+              [(__bridge id<MTLCommandBuffer>)frame_command_buffer_
+                  addCompletedHandler:^(id<MTLCommandBuffer>) {
+                    static std::atomic<uint64_t> s_checked{0}, s_differ{0};
+                    const uint8_t* a =
+                        static_cast<const uint8_t*>(verify_direct.contents);
+                    const uint8_t* b =
+                        static_cast<const uint8_t*>(verify_packed.contents);
+                    uint64_t pixels = uint64_t(v_w) * v_h, bad = 0;
+                    uint64_t first = UINT64_MAX;
+                    for (uint64_t i = 0; i < pixels; ++i) {
+                      if (std::memcmp(a + i * v_bpp, b + i * v_bpp, v_bpp)) {
+                        if (first == UINT64_MAX) first = i;
+                        ++bad;
+                      }
+                    }
+                    const uint64_t checked = ++s_checked;
+                    if (bad) {
+                      const uint64_t differ = ++s_differ;
+                      if (differ <= 64) {
+                        uint32_t wa = 0, wb = 0;
+                        std::memcpy(&wa, a + first * v_bpp,
+                                    std::min<uint32_t>(v_bpp, 4));
+                        std::memcpy(&wb, b + first * v_bpp,
+                                    std::min<uint32_t>(v_bpp, 4));
+                        XELOGW(
+                            "MetalDirectColorVerify DIFF draw={} dest={:08X} "
+                            "{}x{} rt_fmt={} msaa={} edram_base={} pitch={} "
+                            "off=({},{}) sample={} dest_fmt={} bpp={} exp={} "
+                            "raw={} bad_px={}/{} first=({},{}) direct={:08X} "
+                            "packed={:08X}",
+                            v_draw, v_base, v_w, v_h, v_rt_format, v_msaa,
+                            v_edram_base, v_pitch, v_ox, v_oy, v_sample,
+                            v_dest_format, v_bpp, v_exp, v_raw, bad, pixels,
+                            first % v_w, first / v_w, wa, wb);
+                      }
+                    }
+                    if ((checked & (checked - 1)) == 0) {
+                      XELOGI("MetalDirectColorVerify: {} resolves checked, {} "
+                             "differ",
+                             checked, s_differ.load());
+                    }
+                  }];
+            }
+          }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {

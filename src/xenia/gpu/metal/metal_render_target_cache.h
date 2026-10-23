@@ -252,6 +252,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                uint32_t height, uint32_t sample_select,
                                const void* snapshot);
   void EndDirectColorResolve() { direct_color_source_ = nullptr; }
+  // XE_METAL_DIRECT_COLOR_VERIFY: run the pack-first resolve of the same
+  // request with the direct source set aside, then put it back.
+  bool IsDirectColorResolveActive() const {
+    return direct_color_source_ != nullptr;
+  }
+  void* SuspendDirectColorResolve() {
+    void* source = direct_color_source_;
+    direct_color_source_ = nullptr;
+    return source;
+  }
+  void ResumeDirectColorResolve(void* source) { direct_color_source_ = source; }
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
