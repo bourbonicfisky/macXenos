@@ -704,7 +704,7 @@ dword_result_t XamUserCreateTitlesPlayedEnumerator_entry(
 
   const auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
   if (!user) {
-    return X_ERROR_INVALID_PARAMETER;
+    return X_ERROR_FUNCTION_FAILED;
   }
 
   auto e = object_ref<XTitleEnumerator>(
