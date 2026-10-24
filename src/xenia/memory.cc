@@ -58,6 +58,13 @@ DEFINE_int32(scribble_heap_value, 0,
              "Value used to fill all allocated heap memory. 0 - Random value. "
              "Valid range: [1-255]",
              "Memory");
+DEFINE_bool(exact_write_fault_invalidation, true,
+            "Invalidate only the faulting page on a guest write to watched "
+            "memory instead of the surrounding 256 KB block, so per-frame "
+            "dynamic writes stop invalidating neighbouring static textures "
+            "and vertex data (GTA IV: ~230 needless texture revalidations "
+            "per frame).",
+            "Memory");
 
 namespace xe {
 uint32_t get_page_count(uint32_t value, uint32_t page_size) {
@@ -756,9 +763,9 @@ bool Memory::AccessViolationCallback(
   // lock; the read callbacks this pass repeats under the lock must not wait
   // again, or every other global-lock user (the GPU thread's per-draw range
   // requests) stalls behind the GPU (GTA IV: ~3 ms/frame on the M4).
-  return physical_heap->TriggerCallbacks(std::move(global_lock_locked_once),
-                                         virtual_address, 1, is_write, false,
-                                         true, false, false, false);
+  return physical_heap->TriggerCallbacks(
+      std::move(global_lock_locked_once), virtual_address, 1, is_write,
+      cvars::exact_write_fault_invalidation, true, false, false, false);
 }
 
 bool Memory::AccessViolationCallbackThunk(
