@@ -521,6 +521,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // same submission id.
   void* side_command_buffer_ = nullptr;
   void* PrepareSideTransferCommandBuffer();
+  uint64_t direct_index_draws_ = 0;  // guest indices swapped by the VS
   // Fetch constants written since the shared texture cache last parsed
   // them (bit = fetch constant index). Set by WriteRegister, consumed by the
   // draw prep: a draw whose fetch constants did not change since the previous
