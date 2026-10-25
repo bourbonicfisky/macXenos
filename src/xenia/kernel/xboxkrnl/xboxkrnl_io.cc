@@ -1172,6 +1172,25 @@ dword_result_t NtDeviceIoControlFile_entry(
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kStub);
+
+// cache: is a host folder mounted for every title, so no STFS volume is made
+// over a cache partition and the caller's device object stays as it was.
+dword_result_t StfsCreateDevice_entry(lpvoid_t params, dword_t params_size) {
+  if (params_size != 0x58) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsCreateDevice, kFileSystem, kStub);
+
+dword_result_t StfsControlDevice_entry(lpvoid_t device, dword_t control_code,
+                                       lpvoid_t buffer) {
+  if (control_code > 4) {
+    return X_STATUS_INVALID_DEVICE_REQUEST;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsControlDevice, kFileSystem, kStub);
 // device_extension_size = additional bytes of data (aligned up to 8 byte
 // granularity) that will be allocated at the tail of the resulting device
 // object. although it is allocated at the tail, it is accessed through a
