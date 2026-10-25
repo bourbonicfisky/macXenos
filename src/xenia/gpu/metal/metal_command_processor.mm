@@ -6407,6 +6407,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                uint32_t(f.num_format), uint32_t(f.sign_x),
                int32_t(f.exp_adjust));
       }
+      // Pixel-shader vertex fetches (vfetch in a PS: per-pixel indexed
+      // buffer reads through the fetch constants, RotTR's dynamic-weight
+      // skinning pass).
+      for (const auto& vb : pixel_shader->vertex_bindings()) {
+        xenos::xe_gpu_vertex_fetch_t vf =
+            register_file_->GetVertexFetch(vb.fetch_constant);
+        XELOGW("MetalDrawTrace   ps vfetch fc={} addr={:08X} size_dw={} "
+               "endian={} stride_dw={} type={}",
+               vb.fetch_constant, vf.address << 2, vf.size,
+               uint32_t(vf.endian), vb.stride_words, uint32_t(vf.type));
+      }
     }
   }
   // XE_METAL_DISABLE_GEO_TYPES=<mask> (diagnostic): bit 1 point lists, bit 2
@@ -7361,8 +7372,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   vertex_fetch_dependencies.clear();
   vertex_dependency_ranges.Clear();
   draw_vfetch_renames_.clear();
+  // A pixel shader can vfetch too (Rise of the Tomb Raider's dynamic-weight
+  // skinning pass reads the cloth vertex positions per pixel through fetch
+  // constant 95). Those ranges are guest-RAM consumers exactly like the
+  // vertex shader's: they must be uploaded, hazard-ordered and joined with a
+  // pending memexport producer. Before 2026-10-25 only the vertex shader's
+  // bitmap was walked, so the pixel pass read whatever bytes the shared
+  // buffer happened to hold for that page (live: a stale or never-uploaded
+  // CPU write; the weight sum then collapses and the vertices fly off as a
+  // stretched sheet).
+  const Shader::ConstantRegisterMap* ps_map =
+      pixel_shader ? &pixel_shader->constant_register_map() : nullptr;
+  static uint32_t s_ps_vfetch_logged = 0;
   for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
-    uint32_t bits = vs_map.vertex_fetch_bitmap[i];
+    const uint32_t ps_bits = ps_map ? ps_map->vertex_fetch_bitmap[i] : 0u;
+    uint32_t bits = vs_map.vertex_fetch_bitmap[i] | ps_bits;
     uint32_t j;
     while (xe::bit_scan_forward(bits, &j)) {
       bits = xe::clear_lowest_bit(bits);
@@ -7379,6 +7403,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint64_t(fetch_base) + uint64_t(fetch.size) * sizeof(uint32_t));
       if (!range) {
         continue;
+      }
+      if ((ps_bits & (1u << j)) && s_ps_vfetch_logged < 8) {
+        ++s_ps_vfetch_logged;
+        XELOGI("MetalPsVfetch: draw {} ps={:016X} fc={} base={:08X} size={}",
+               trace_draw_index_, pixel_shader->ucode_data_hash(),
+               fetch_constant, fetch_base, uint32_t(fetch.size) * 4);
       }
       vertex_fetch_dependencies.push_back(
           {fetch_constant, fetch, *range});
