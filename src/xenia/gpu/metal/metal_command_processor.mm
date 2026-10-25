@@ -2230,6 +2230,15 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetCompletedSubmissionProvider([this]() {
     return completed_submission_.load(std::memory_order_acquire);
   });
+  // Frame-trace fidelity: an upload's source range is recorded only after
+  // the pending producers over it have converged to RAM (the same host-read
+  // preparation the RAM frontbuffer present uses).
+  shared_memory_->SetTracePublishCallback([this](uint32_t start,
+                                                 uint32_t length) {
+    if (trace_writer_.is_open()) {
+      PrepareGuestMemoryForHostRead(start, length);
+    }
+  });
   // Straddler fix: uploads copy around pending GPU-current spans (the
   // pending lists live on this thread, the same one that uploads).
   shared_memory_->SetGpuCurrentSpanProvider(
@@ -3602,6 +3611,22 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
       contents, [this](uint32_t address) {
         return memory_->TranslatePhysical<uint8_t*>(address);
       });
+  if (xe_lineage_base() && xe_lineage_base() >= physical_address_start &&
+      xe_lineage_base() < physical_address_start + length) {
+    // Lineage probe: a CPU access to the watched base's page. The buffer word
+    // is what the GPU route reads; RAM is not read here (the page faulted).
+    char lineage_thread[64] = {};
+    pthread_getname_np(pthread_self(), lineage_thread, sizeof(lineage_thread));
+    uint32_t buf_word = 0;
+    std::memcpy(&buf_word, contents + xe_lineage_base(), sizeof(buf_word));
+    XELOGW(
+        "MetalLineage FAULT base={:08X} swap#{} thread='{}' {} {:08X}+{:X} "
+        "remaining={} committed={} completed={} buf={:08X}",
+        xe_lineage_base(), swap_count_, lineage_thread,
+        access == Memory::PhysicalAccess::kRead ? "read" : "write",
+        physical_address_start, length, remaining, committed,
+        completed_submission_.load(std::memory_order_acquire), buf_word);
+  }
   if (remaining) {
     // XE_METAL_LAZY_STALE_LOG=1: name the reader and the owners of every
     // stale page (first 200, then every 1024th).
@@ -10775,12 +10800,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // XE_METAL_TEX_PROBE=<draw>: log every texture binding's fetch fields +
       // resolved bindless slot at that trace draw (slot 0 = null texture ->
       // the shader samples zero; the light-draw zero-output suspect).
-      static const int64_t s_tex_probe = [] {
+      // XE_METAL_TEX_PROBE=A-B probes every draw in that inclusive range.
+      static const std::pair<int64_t, int64_t> s_tex_probe_range = [] {
         const char* v = std::getenv("XE_METAL_TEX_PROBE");
-        return v ? strtoll(v, nullptr, 10) : -1;
+        if (!v) {
+          return std::pair<int64_t, int64_t>{-1, -1};
+        }
+        char* end = nullptr;
+        int64_t a = strtoll(v, &end, 10);
+        int64_t b = (end && *end == '-') ? strtoll(end + 1, nullptr, 10) : a;
+        return std::pair<int64_t, int64_t>{a, b};
       }();
-      bool probe = s_tex_probe >= 0 &&
-                   int64_t(trace_draw_index_) - 1 == s_tex_probe;
+      const int64_t probe_draw = int64_t(trace_draw_index_) - 1;
+      bool probe = s_tex_probe_range.first >= 0 &&
+                   probe_draw >= s_tex_probe_range.first &&
+                   probe_draw <= s_tex_probe_range.second;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         if (binding.bindless_descriptor_index < count) {
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
@@ -10837,7 +10871,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
           uint32_t texture_slot = routed_slot;
           if (probe && routed_slot) {
-            XELOGI("MetalTexProbe draw={} routed slot fc={} -> {}", s_tex_probe,
+            XELOGI("MetalTexProbe draw={} routed slot fc={} -> {}", probe_draw,
                    binding.fetch_constant, routed_slot);
           }
           if (!texture_slot) {
@@ -10848,7 +10882,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
             if (probe) {
               XELOGI("MetalTexProbe draw={} legacy GetTextureSlot fc={} signed={} -> {}",
-                     s_tex_probe, binding.fetch_constant, binding.is_signed,
+                     probe_draw, binding.fetch_constant, binding.is_signed,
                      texture_slot);
             }
             if (texture_cache_->binding_allocation_failed()) {
@@ -10857,18 +10891,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               return false;
             }
           }
-          if (xe_lineage_base() &&
-              (fetch.base_address << 12) == xe_lineage_base()) {
+          // XE_METAL_LINEAGE2=<base hex>: a second watched base for the BIND
+          // log only (a ping-pong pair's other half).
+          static const uint32_t s_lineage2 = [] {
+            const char* v = std::getenv("XE_METAL_LINEAGE2");
+            return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+          }();
+          if ((xe_lineage_base() &&
+               (fetch.base_address << 12) == xe_lineage_base()) ||
+              (s_lineage2 && (fetch.base_address << 12) == s_lineage2)) {
+            // The first two 32-bit words at the base in the shared buffer:
+            // what a routed load of texel (0,0) reads (raw guest byte order).
+            uint32_t buf_words[2] = {0, 0};
+            if (shared_memory_) {
+              id<MTLBuffer> lineage_buffer =
+                  (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+              if (lineage_buffer && lineage_buffer.contents) {
+                std::memcpy(buf_words,
+                            static_cast<const uint8_t*>(
+                                lineage_buffer.contents) +
+                                (fetch.base_address << 12),
+                            sizeof(buf_words));
+              }
+            }
             XELOGW(
                 "MetalLineage BIND swap#{} draw={} base={:08X} fc={} {}x{} "
-                "fmt={} signed={} routed={} slot={} svc={}",
+                "fmt={} signed={} routed={} slot={} svc={} buf={:08X},{:08X}",
                 swap_count_, trace_draw_index_, fetch.base_address << 12,
                 binding.fetch_constant, fetch.size_2d.width + 1,
                 fetch.size_2d.height + 1, uint32_t(fetch.format),
                 binding.is_signed, routed_slot != 0, texture_slot,
                 texture_cache_ ? uint32_t(texture_cache_->ClassifyFetchService(
                                      fetch, binding.is_signed))
-                               : 99u);
+                               : 99u,
+                buf_words[0], buf_words[1]);
           }
           indices[binding.bindless_descriptor_index] = texture_slot;
           // The audit's ENCODED side: this is the slot the shader will index,
@@ -10882,7 +10938,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 "stacked={} packedmips={} miplevels={}-{} mipaddr={:08X} "
                 "lodbias={} filters=mag{}/min{}/mip{} aniso={} clamp=({},{},{}) "
                 "swz={:03X} raw={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
-                s_tex_probe, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
+                probe_draw, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
                 binding.fetch_constant, binding.bindless_descriptor_index,
                 indices[binding.bindless_descriptor_index],
                 uint32_t(fetch.dimension), uint32_t(fetch.format),
@@ -16240,6 +16296,18 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             wb.guest_addr, wb.width, wb.height, published_bytes,
             aliased ? ", aliased self-copy" : "");
       }
+      if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
+        uint32_t ram_word = 0, buf_word = 0;
+        std::memcpy(&ram_word, dest, sizeof(ram_word));
+        std::memcpy(&buf_word, src_base, sizeof(buf_word));
+        XELOGW(
+            "MetalLineage PUBLISH base={:08X} swap#{} published={} "
+            "owned_ranges={} lazy_armed={} seq={} sub={} ram_after={:08X} "
+            "buf={:08X}",
+            wb.guest_addr, swap_count_, published_bytes, owned.size(),
+            uint32_t(wb.lazy_armed), wb.authority_sequence, wb.submission,
+            ram_word, buf_word);
+      }
       if (clipped_texels) {
         static uint32_t s_clip_logs = 0;
         if (s_clip_logs++ < 8) {
@@ -19237,6 +19305,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // at this quiesced boundary (encoder ended, submissions waited, publication
   // complete, presenter committed+waited), one comparable sweep per swap /
   // replay loop. Default off: one static branch per swap.
+  // XE_METAL_CLEAR_CACHES_EVERY=N (diagnostic): request the deferred cache
+  // clear every N swaps live, to test whether a defect is carried by warm
+  // host state (render-target cache, snapshots, texture caches) that a cold
+  // single-frame replay recomputes.
+  static const uint32_t s_clear_caches_every = [] {
+    const char* v = std::getenv("XE_METAL_CLEAR_CACHES_EVERY");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_clear_caches_every && swap_count_ &&
+      (swap_count_ % s_clear_caches_every) == 0) {
+    XELOGW("MetalCommandProcessor: periodic cache clear requested at swap#{}",
+           swap_count_);
+    ClearCaches();
+  }
   static const bool s_snaphash_enabled = [] {
     const char* value = std::getenv("XE_METAL_SNAPHASH");
     return value && value[0] && value[0] != '0';

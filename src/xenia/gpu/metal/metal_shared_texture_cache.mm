@@ -1830,26 +1830,30 @@ void MetalSharedTextureCache::OnSubmissionsFaulted(
 
 void MetalSharedTextureCache::WriteAllCachedTexturesToTrace(
     TraceWriter& trace_writer) {
-  // Pre-WriteTraceInitialState only (the caller guarantees the order): a
-  // texture up-to-date HERE is exactly a texture the legacy cache would
-  // still hold a warm entry for, and the record value matches the legacy
-  // warm-entry sweep's. Outdated textures have no legacy analog (the
-  // immediate drain-time InvalidateRange evicted the entry) and reload
-  // during the captured frame through the legacy path instead.
+  // Pre-WriteTraceInitialState only (the caller guarantees the order).
+  // Every cached texture is recorded, outdated or not: guest RAM has been
+  // converged for a host read just before this sweep, and a texture whose
+  // pages are flagged GPU-written is neither invalidated for re-upload by
+  // WriteTraceInitialState nor reloaded from RAM during the frame, so an
+  // outdated-only sweep left it out of the trace entirely (Rise of the Tomb
+  // Raider's CPU-written 256x2 tone curve at 1CC1D000 shares such a page;
+  // replays built the colour LUT from zeros). The base extent is the full
+  // guest layout (3D/stacked textures: every slice), never the 2D pitch*height.
   ForEachTexture([&](Texture& texture) {
     TextureKey key = texture.key();
-    if (!texture.base_outdated_lockless()) {
-      uint32_t base = key.base_page << 12;
-      trace_writer.WriteMemoryRead(
-          base, ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
-                                        key.GetHeight(), 4, base,
-                                        SharedMemory::kBufferSize));
+    uint32_t base = key.base_page << 12;
+    uint32_t base_bytes =
+        std::max(ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
+                                         key.GetHeight(), 4, base,
+                                         SharedMemory::kBufferSize),
+                 texture.GetGuestBaseSize());
+    if (base_bytes > SharedMemory::kBufferSize - base) {
+      base_bytes = uint32_t(SharedMemory::kBufferSize - base);
     }
-    // 6.1: the mip chain is a SEPARATE up-to-date region at its own guest
-    // pointer, so a warm mipped texture must record those bytes too or a
-    // replay would restore a texture whose levels were never captured.
-    if (key.mip_max_level && key.mip_page &&
-        !texture.mips_outdated_lockless()) {
+    if (base_bytes) {
+      trace_writer.WriteMemoryRead(base, base_bytes);
+    }
+    if (key.mip_max_level && key.mip_page) {
       trace_writer.WriteMemoryRead(uint32_t(key.mip_page) << 12,
                                    texture.GetGuestMipsSize());
     }

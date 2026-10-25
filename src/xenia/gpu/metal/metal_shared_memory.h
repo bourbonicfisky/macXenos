@@ -173,6 +173,14 @@ class MetalSharedMemory : public SharedMemory {
   void SetGpuCurrentSpanProvider(GpuCurrentSpanProvider provider) {
     gpu_current_span_provider_ = std::move(provider);
   }
+  // Frame-trace recording: called with every upload's source range before it
+  // is written into the open trace, so the owner can first publish pending
+  // GPU-current bytes to guest RAM. Without it a trace records RAM that is
+  // stale behind an unpublished resolve (Rise of the Tomb Raider's colour
+  // LUT slices), and a replay restores those stale bytes over the GPU's.
+  void SetTracePublishCallback(std::function<void(uint32_t, uint32_t)> cb) {
+    trace_publish_callback_ = std::move(cb);
+  }
 
   // RequestRange plus recording [start, start+length) as consumed by the
   // current frame for the hazard detection above.
@@ -432,6 +440,7 @@ class MetalSharedMemory : public SharedMemory {
   std::function<void()> hazard_commit_callback_;
   std::function<uint64_t(uint32_t, uint32_t)> staged_upload_callback_;
   GpuCurrentSpanProvider gpu_current_span_provider_;
+  std::function<void(uint32_t, uint32_t)> trace_publish_callback_;
   uint64_t upload_bytes_skipped_gpu_current_ = 0;
   uint64_t staged_uploads_ = 0;
   uint64_t staged_upload_bytes_ = 0;
