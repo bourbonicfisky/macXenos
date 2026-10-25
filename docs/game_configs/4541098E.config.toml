@@ -1,0 +1,12 @@
+# macXenos built-in per-title config: Crysis 3 (4541098E).
+# Some of the title's draws export data to memory from vertex shaders that
+# also rasterize, and later draws read it back as vertex data. With those
+# exports dropped (the default, for their cost elsewhere) the first mission's
+# geometry explodes into streaks fanning out from one point; with them routed
+# the weapon, hands and level render solid at the same 31 fps. Canary needs
+# readback_memexport for the same "vertex explosions".
+# The first mission still renders washed out (over-exposed) on Metal with
+# this setting; that is a separate, open defect.
+# (xenia-mac-evidence crysis3-washout-20261024)
+[GPU]
+metal_memexport_raster = true
