@@ -6,5 +6,14 @@
 # 32 slices and the frame is graded through whatever the LUT memory held
 # (green / magenta casts, 2026-10-17). Depth clamping keeps the quad and
 # changes nothing else that was measured in this title.
+#
+# metal_max_in_flight = 1: with more than one submission in flight the
+# title's transient ring (CPU scratch interleaved with memexport and resolve
+# destinations, reused as soon as its fence says the GPU is done) produces a
+# whole-frame colour-grading flash in ~8% of gameplay seconds. One in flight
+# costs nothing visible at the title's 30 fps cap and removed every flash in
+# the 2026-10-25 census (xenia-mac-evidence tombraider-stretch-20261025);
+# the fence-timing root cause stays open.
 [GPU]
 force_depth_clamp = true
+metal_max_in_flight = 1

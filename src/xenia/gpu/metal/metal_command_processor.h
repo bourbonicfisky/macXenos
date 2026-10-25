@@ -935,6 +935,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_set<uint64_t> faulted_submissions_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
+  void ServiceLazyCommitRequest();
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
   // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
@@ -1348,6 +1349,11 @@ class MetalCommandProcessor : public CommandProcessor {
   metal::MetalLazyPublication lazy_publication_;
   void* lazy_read_callback_handle_ = nullptr;
   std::atomic<bool> lazy_rearm_needed_{false};
+  // A guest thread that WRITES over bytes a pending GPU producer still owns
+  // while that producer sits in the OPEN (uncommitted) command buffer asks
+  // the GPU thread to commit it (the submission id it needs committed); the
+  // GPU thread services the request at its next draw/copy boundary.
+  std::atomic<uint64_t> lazy_commit_request_{0};
   // Stale-read attribution: the last guest-visible signal since the open
   // command buffer began (0 = none, else GuestSignalKind + 1; 5 = completion
   // exposure), and stale fault reads counted by that signal.

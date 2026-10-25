@@ -145,6 +145,14 @@ DEFINE_string(
     "(their built-in config). on: every title. off: none. "
     "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
     "GPU");
+DEFINE_uint32(
+    metal_max_in_flight, 0,
+    "Metal: cap on command-buffer submissions in flight (0 = default 16). "
+    "The XE_METAL_MAX_IN_FLIGHT environment variable overrides it. A "
+    "per-title config can pin 1 for titles whose guest reuses GPU-destination "
+    "memory as soon as their fence returns (Rise of the Tomb Raider).",
+    "GPU");
+
 DEFINE_transient_bool(
     metal_memexport_raster, false,
     "Per-title hint for metal_memexport_raster_mode = auto, set by the "
@@ -3596,11 +3604,53 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // the faulting thread (committing is the GPU thread's job); the read then
   // observes prior contents and the watch is re-armed at the next commit.
   const uint64_t committed = submission_counter_;
+  // Lever (XE_METAL_LAZY_WRITE_COMMIT=1, default OFF): guest WRITES over a
+  // producer still in the open command buffer ask the GPU thread to commit
+  // and wait for completion before the write lands. 2026-10-25 RotTR: ~8k
+  // requests per 4-minute run at no fps cost, but the colour flash stayed
+  // (6-9 per run on three machines), so it is not that title's answer. On
+  // hardware the
+  // export/resolve has executed by the time the guest reuses its memory
+  // (Rise of the Tomb Raider's XenonFlush thread rewrites memexport
+  // destinations ~1.3x per frame right after issuing them); here the
+  // producer may not even be committed. Ask the GPU thread to commit, wait
+  // (bounded) for the commit, then wait for completion so the record
+  // publishes before the write lands. Reads keep the old no-wait rule.
+  static const bool s_write_commit = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_LAZY_WRITE_COMMIT"), false);
+  const bool is_write = access == Memory::PhysicalAccess::kWrite;
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
-      [this, committed, may_wait](uint64_t submission) {
+      [this, committed, may_wait, is_write](uint64_t submission) {
         if (submission > committed) {
-          return false;
+          if (!(s_write_commit && is_write && may_wait)) {
+            return false;
+          }
+          // Request the commit and give the GPU thread up to 50 ms.
+          lazy_commit_request_.store(submission, std::memory_order_release);
+          static std::atomic<uint64_t> s_requests{0}, s_timeouts{0};
+          const uint64_t n = ++s_requests;
+          bool committed_now = false;
+          for (uint32_t spin = 0; spin < 500; ++spin) {
+            if (submission_counter_ >= submission) {
+              committed_now = true;
+              break;
+            }
+            xe::threading::Sleep(std::chrono::microseconds(100));
+          }
+          if (!committed_now) {
+            lazy_commit_request_.store(0, std::memory_order_release);
+            const uint64_t t = ++s_timeouts;
+            if (t <= 8 || (t & 1023) == 0) {
+              XELOGW("MetalLazyWriteCommit: timeout #{} of {} requests "
+                     "(submission {} still open)", t, n, submission);
+            }
+            return false;
+          }
+          if (n <= 4 || (n & 4095) == 0) {
+            XELOGI("MetalLazyWriteCommit: request #{} committed submission {}",
+                   n, submission);
+          }
         }
         if (!may_wait) {
           return completed_submission_.load(std::memory_order_acquire) >=
@@ -3788,7 +3838,23 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
         // geometry cannot prove superseded.
         static const bool s_retire_census =
             std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
-        if (s_retire_census) {
+        // Strict covered retire (XE_METAL_LAZY_RETIRE_STRICT=1, default OFF:
+        // 2026-10-25 RotTR A/B made the flash MORE frequent, 56/409 vs
+        // 7/135, so retention is not the answer there; kept as a lever):
+        // a byte-range nesting is only a retirement when the newer rectangle
+        // provably rewrites every texel of the older one. Otherwise the older
+        // record stays pending: its bytes are still the GPU's newest for the
+        // texels the newer resolve did not touch, uploads must keep skipping
+        // its span and lazy publication must still own it. Rise of the Tomb
+        // Raider 2026-10-25: its transient ring interleaves CPU scratch with
+        // 32x32 colour-LUT slab resolves; an 8x8 resolve landing on a slab's
+        // base retired the slab "covered", the slab was never published, and
+        // the page's next CPU upload copied stale RAM over the slab while the
+        // frame's LUT load (and the previous frame's, in flight) still read
+        // it: one psychedelic frame (~8% of gameplay seconds).
+        static const bool s_retire_strict = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_LAZY_RETIRE_STRICT"), false);
+        if (s_retire_census || s_retire_strict) {
           const PendingWriteback& nw = pending_writebacks_.back();
           auto pitch = [](const PendingWriteback& w) {
             return w.dest_pitch_aligned ? w.dest_pitch_aligned
@@ -3823,6 +3889,21 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
           }
           static uint64_t s_retires = 0, s_unproven = 0;
           ++s_retires;
+          if (!contained && s_retire_strict) {
+            ++s_unproven;
+            if (s_retire_census && s_unproven <= 100) {
+              XELOGW(
+                  "MetalLazyRetireCensus #{} swap#{}: KEPT {:08X} {}x{} "
+                  "off=({},{}) bpp={} pitch={} under {:08X} {}x{} off=({},{}) "
+                  "bpp={} pitch={} (not provably superseded)",
+                  s_unproven, swap_count_, it->guest_addr, it->width,
+                  it->height, it->dest_offset_x, it->dest_offset_y, it->bpp,
+                  pitch(*it), nw.guest_addr, nw.width, nw.height,
+                  nw.dest_offset_x, nw.dest_offset_y, nw.bpp, pitch(nw));
+            }
+            ++it;
+            continue;
+          }
           if (!contained) {
             ++s_unproven;
             if (s_unproven <= 100) {
@@ -5596,9 +5677,20 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     // WaitForSubmission while the GPU still had slack: 8 -> 16 measured
     // 24.2 -> 26.7 fps (32: 26.8, +100 MB footprint). USF4 2026-10-04 also
     // showed 10 ms/frame of depth-cap wait at a cap of 8.
+    // metal_max_in_flight (cvar, per-title config) sets the cap when the
+    // environment does not; 0 keeps the default. Rise of the Tomb Raider's
+    // built-in config pins 1: with more than one submission in flight its
+    // transient ring (CPU scratch interleaved with memexport and resolve
+    // destinations, reused as soon as the guest's fence says the GPU is
+    // done) produces a whole-frame colour-grading flash in ~8% of gameplay
+    // seconds (xenia-mac-evidence tombraider-stretch-20261025 knob census:
+    // every serializing arm 0, every non-serializing arm unchanged).
     static const uint64_t kMaxInFlightSubmissions = [] {
       const char* v = std::getenv("XE_METAL_MAX_IN_FLIGHT");
       uint64_t n = v ? strtoull(v, nullptr, 10) : 0;
+      if (!n) {
+        n = cvars::metal_max_in_flight;
+      }
       return n ? n : uint64_t(16);
     }();
     if (submission > kMaxInFlightSubmissions) {
@@ -5936,10 +6028,27 @@ void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
   }
 }
 
+// A write fault over a GPU-owned range whose producer is still in the open
+// command buffer (see OnLazyRead) needs that buffer committed before the
+// faulting thread can wait for the producer. Serviced from the GPU thread
+// only, at draw/copy boundaries, so the commit is an ordinary pass end.
+void MetalCommandProcessor::ServiceLazyCommitRequest() {
+  const uint64_t requested =
+      lazy_commit_request_.load(std::memory_order_acquire);
+  if (!requested) {
+    return;
+  }
+  if (requested > submission_counter_ && frame_open_) {
+    EndFrameEncoder(metal::SeamBoundaryReason::kHazardFlush);
+  }
+  lazy_commit_request_.store(0, std::memory_order_release);
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  ServiceLazyCommitRequest();
   const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.
@@ -6379,12 +6488,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  register_file_->Get<reg::SQ_PROGRAM_CNTL>(),
                  register_file_->Get<reg::SQ_CONTEXT_MISC>(), pgp);
            }() : 0u);
-    for (uint32_t c : {0u, 23u, 255u}) {
+    for (uint32_t c : {0u, 23u, 132u, 254u, 255u}) {
       uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
       XELOGW("MetalDrawTrace   ps c{} = ({}, {}, {}, {})", c,
              register_file_->Get<float>(r), register_file_->Get<float>(r + 1),
              register_file_->Get<float>(r + 2),
              register_file_->Get<float>(r + 3));
+    }
+    // Every float constant the pixel shader actually reads (bounded).
+    if (pixel_shader) {
+      const auto& pmap = pixel_shader->constant_register_map();
+      uint32_t printed = 0;
+      for (uint32_t i = 0; i < xe::countof(pmap.float_bitmap) && printed < 48;
+           ++i) {
+        uint64_t bits = pmap.float_bitmap[i];
+        while (bits && printed < 48) {
+          uint32_t j = uint32_t(xe::tzcnt(bits));
+          bits &= bits - 1;
+          uint32_t c = i * 64 + j;
+          uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
+          XELOGW("MetalDrawTrace   ps uses c{} = ({}, {}, {}, {}) [{:08X} {:08X} {:08X} {:08X}]",
+                 c, register_file_->Get<float>(r),
+                 register_file_->Get<float>(r + 1),
+                 register_file_->Get<float>(r + 2),
+                 register_file_->Get<float>(r + 3), (*register_file_)[r],
+                 (*register_file_)[r + 1], (*register_file_)[r + 2],
+                 (*register_file_)[r + 3]);
+          ++printed;
+        }
+      }
     }
     if (pixel_shader) {
       for (const auto& binding :
