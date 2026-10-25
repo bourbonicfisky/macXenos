@@ -2444,14 +2444,27 @@ xe::memory::PageAccess PhysicalHeap::SystemPageGuestAccess(
     uint32_t physical_first = GetPhysicalAddress(heap_base_) + relative_address;
     uint32_t physical_last =
         physical_first + (system_last - offset + 1 - relative_address) - 1;
-    xe::memory::PageAccess parent_access =
-        parent_heap_->QueryRangeAccess(physical_first, physical_last);
-    if (parent_access == xe::memory::PageAccess::kReadWrite) {
-      return xe::memory::PageAccess::kReadWrite;
-    }
-    if (parent_access == xe::memory::PageAccess::kReadOnly &&
-        access == xe::memory::PageAccess::kNoAccess) {
-      access = parent_access;
+    // Most permissive parent page, as for this view's own pages above: every
+    // window aliases the same physical memory, so a host page is reachable if
+    // any physical page it covers is. The strictest page (QueryRangeAccess
+    // over the whole host page) made a 16 KB host page in the 0xC0000000
+    // window no-access when only one of its four 4 KB physical pages was
+    // allocated (through 0xE0000000), and Gears of War: Judgment's read of
+    // that page through 0xC0000000 crashed its game thread.
+    const uint32_t parent_page_size = parent_heap_->page_size();
+    for (uint32_t physical_page = physical_first & ~(parent_page_size - 1);
+         physical_page <= physical_last; physical_page += parent_page_size) {
+      xe::memory::PageAccess parent_access = parent_heap_->QueryRangeAccess(
+          physical_page, physical_page + (parent_page_size - 1));
+      if (parent_access == xe::memory::PageAccess::kReadWrite) {
+        return xe::memory::PageAccess::kReadWrite;
+      }
+      if (parent_access == xe::memory::PageAccess::kReadOnly) {
+        access = parent_access;
+      }
+      if (physical_page + parent_page_size < physical_page) {
+        break;
+      }
     }
   }
   return access;

@@ -1415,6 +1415,36 @@ bool Emulator::ExceptionCallback(Exception* ex) {
           gva, heap ? int(heap->heap_type()) : -1,
           heap ? heap->page_size() : 0u, qp, recorded, qh,
           static_cast<int>(haccess)));
+      // A fault in one physical window: report the same physical page in the
+      // parent physical heap and in every window, so a read through a window
+      // other than the allocating one is told apart from a read of freed or
+      // never-allocated physical memory.
+      if (gva >= 0xA0000000u) {
+        uint32_t phys = gva >= 0xE0000000u ? gva - 0xE0000000u + 0x1000u
+                                           : gva & 0x1FFFFFFFu;
+        auto describe = [&](const char* name, BaseHeap* h, uint32_t address) {
+          HeapAllocationInfo info = {};
+          if (!h || !h->QueryRegionInfo(address, &info)) {
+            crash_msg.append(fmt::format("  [diag] {} 0x{:08X}: no heap\n",
+                                         name, address));
+            return;
+          }
+          crash_msg.append(fmt::format(
+              "  [diag] {} 0x{:08X}: state=0x{:X} protect=0x{:X} "
+              "alloc_base=0x{:08X} alloc_size=0x{:X} region=0x{:08X}+0x{:X}\n",
+              name, address, info.state, info.protect, info.allocation_base,
+              info.allocation_size, info.base_address, info.region_size));
+        };
+        describe("parent", memory()->GetPhysicalHeap(), phys);
+        describe("A-window", memory()->LookupHeap(0xA0000000u + phys),
+                 0xA0000000u + phys);
+        describe("C-window", memory()->LookupHeap(0xC0000000u + phys),
+                 0xC0000000u + phys);
+        if (phys >= 0x1000u) {
+          describe("E-window", memory()->LookupHeap(0xE0000000u + phys - 0x1000u),
+                   0xE0000000u + phys - 0x1000u);
+        }
+      }
     }
   } else if (ex->code() == Exception::Code::kIllegalInstruction) {
     crash_msg.append("Illegal Instruction\n");
