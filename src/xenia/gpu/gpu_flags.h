@@ -51,8 +51,6 @@ DECLARE_bool(async_shader_compilation);
 
 DECLARE_bool(gpu_3d_to_2d_texture);
 
-DECLARE_bool(ac6_ground_fix);
-
 DECLARE_bool(depth_float24_sample_z_varying);
 
 DECLARE_bool(depth_float24_sample_z_from_derivatives);

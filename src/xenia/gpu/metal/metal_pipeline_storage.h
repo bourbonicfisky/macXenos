@@ -129,7 +129,14 @@ struct MetalTranslatorConfig {
   //       its session-local index (10822b13b / 3b586b9c5 bake per-pattern
   //       sign / scale / bias literals); entries keyed on the index can hold
   //       another session's literals.
-  static constexpr uint32_t kFetchAbiRevision = 9;
+  //  10 - Canary translator semantics ported (2026-10-26): per-axis gradient
+  //       exponent biases scale the computed-LOD gradients (0f2980de4),
+  //       scalar EXP/LOG/LOGC/RCP*/RSQ*/SQRT round to 21 mantissa bits with
+  //       RCP/RSQ built from DIV/SQRT (3a44f20c7), and the scalar `b`
+  //       component of a single-source two-component scalar op co-issued with
+  //       a three-source vector op is Z instead of X (92ada8ebc). Identical
+  //       ucode emits different DXBC.
+  static constexpr uint32_t kFetchAbiRevision = 10;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is

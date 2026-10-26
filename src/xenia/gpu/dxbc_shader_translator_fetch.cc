@@ -89,14 +89,7 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
           a_.OpAdd(address_dest, index_operand, dxbc::Src::LF(0.5f));
           a_.OpRoundNI(address_dest, address_src);
         } else {
-          // UGLY HACK. Remove ASAP.
-          // Proper fix requires accurate RCP implementation.
-          if (cvars::ac6_ground_fix) {
-            a_.OpAdd(address_dest, index_operand, dxbc::Src::LF(0.00025f));
-            a_.OpRoundNI(address_dest, address_src);
-          } else {
-            a_.OpRoundNI(address_dest, index_operand);
-          }
+          a_.OpRoundNI(address_dest, index_operand);
         }
         if (index_operand_temp_pushed) {
           PopSystemTemp();
@@ -1733,39 +1726,36 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           }
           assert_not_zero(grad_component_count);
           uint32_t grad_mask = (1 << grad_component_count) - 1;
-          // Convert the bias to a gradient scale.
+          // Convert the bias to a gradient scale, and merge the per-axis
+          // gradient exponent biases into it (Canary 0f2980de4). Zero (common
+          // case) is a no-op. getCompTexLOD keeps returning the raw queried
+          // LOD, treating the adjustment like the fetch constant LOD bias,
+          // which is also not folded into it. W of grad_h_lod_temp becomes the
+          // horizontal scale; the vertical one lives in a short-lived temp
+          // because W of grad_v_temp carries the --dxbc_implicit_lod snap flag
+          // that the sample sites re-test.
+          uint32_t grad_v_scale_temp = PushSystemTemp();
+          dxbc::Src grad_v_scale_src(
+              dxbc::Src::R(grad_v_scale_temp, dxbc::Src::kXXXX));
           a_.OpExp(lod_dest, lod_src);
-          // FIXME(Triang3l): Gradient exponent adjustment is currently not done
-          // in getCompTexLOD, so don't do it here too.
-#if 0
-          // Extract gradient exponent biases from the fetch constant and merge
-          // them with the LOD bias.
           a_.OpIBFE(dxbc::Dest::R(grad_h_lod_temp, 0b0011), dxbc::Src::LU(5),
                     dxbc::Src::LU(22, 27, 0, 0),
                     RequestTextureFetchConstantWord(tfetch_index, 4));
           a_.OpIMAd(dxbc::Dest::R(grad_h_lod_temp, 0b0011),
                     dxbc::Src::R(grad_h_lod_temp),
                     dxbc::Src::LI(int32_t(1) << 23), dxbc::Src::LF(1.0f));
-          a_.OpMul(dxbc::Dest::R(grad_v_temp, 0b1000), lod_src,
+          a_.OpMul(dxbc::Dest::R(grad_v_scale_temp, 0b0001), lod_src,
                    dxbc::Src::R(grad_h_lod_temp, dxbc::Src::kYYYY));
           a_.OpMul(lod_dest, lod_src,
                    dxbc::Src::R(grad_h_lod_temp, dxbc::Src::kXXXX));
-#endif
           // Obtain the gradients and apply biases to them.
           if (instr.attributes.use_register_gradients) {
             // Register gradients are already in the cube space for cube maps.
             a_.OpMul(dxbc::Dest::R(grad_h_lod_temp, grad_mask),
                      dxbc::Src::R(system_temp_grad_h_lod_), lod_src);
-            // FIXME(Triang3l): Gradient exponent adjustment is currently not
-            // done in getCompTexLOD, so don't do it here too.
-#if 0
             a_.OpMul(dxbc::Dest::R(grad_v_temp, grad_mask),
                      dxbc::Src::R(system_temp_grad_v_vfetch_address_),
-                     dxbc::Src::R(grad_v_temp, dxbc::Src::kWWWW));
-#else
-            a_.OpMul(dxbc::Dest::R(grad_v_temp, grad_mask),
-                     dxbc::Src::R(system_temp_grad_v_vfetch_address_), lod_src);
-#endif
+                     grad_v_scale_src);
             // TODO(Triang3l): Are cube map register gradients unnormalized if
             // the coordinates themselves are unnormalized?
             if (instr.attributes.unnormalized_coordinates &&
@@ -1802,17 +1792,11 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                      dxbc::Src::R(grad_h_lod_temp), lod_src);
             a_.OpDerivRTYCoarse(dxbc::Dest::R(grad_v_temp, grad_mask),
                                 dxbc::Src::R(coord_and_sampler_temp));
-            // FIXME(Triang3l): Gradient exponent adjustment is currently not
-            // done in getCompTexLOD, so don't do it here too.
-#if 0
             a_.OpMul(dxbc::Dest::R(grad_v_temp, grad_mask),
-                     dxbc::Src::R(grad_v_temp),
-                     dxbc::Src::R(grad_v_temp, dxbc::Src::kWWWW));
-#else
-            a_.OpMul(dxbc::Dest::R(grad_v_temp, grad_mask),
-                     dxbc::Src::R(grad_v_temp), lod_src);
-#endif
+                     dxbc::Src::R(grad_v_temp), grad_v_scale_src);
           }
+          // Release grad_v_scale_temp.
+          PopSystemTemp();
           if (instr.dimension == xenos::FetchOpDimension::k1D) {
             // Pad the gradients to 2D because 1D textures are fetched as 2D
             // arrays.

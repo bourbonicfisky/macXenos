@@ -116,6 +116,15 @@
 "description": "Value used to fill all allocated heap memory. 0 - Random value. Valid range: [1-255]",
 "changed": false
 },
+"exact_write_fault_invalidation": {
+"name": "exact_write_fault_invalidation",
+"category": "Memory",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Invalidate only the faulting page on a guest write to watched memory instead of the surrounding 256 KB block, so per-frame dynamic writes stop invalidating neighbouring static textures and vertex data (GTA IV: ~230 needless texture revalidations per frame).",
+"changed": false
+},
 "defaults_date": {
 "name": "defaults_date",
 "category": "Config",
@@ -1052,15 +1061,6 @@
 "description": "Compile shaders and create pipelines asynchronously in background threads. Eliminates shader compilation stutter but may cause brief rendering artifacts while pipelines are being created. When disabled, pipelines are created synchronously which causes stutter but no visual artifacts.",
 "changed": false
 },
-"ac6_ground_fix": {
-"name": "ac6_ground_fix",
-"category": "HACKS",
-"type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "This fixes(hide) issues with black ground in AC6. Use only in AC6. Might cause issues in other titles.",
-"changed": false
-},
 "depth_float24_sample_z_varying": {
 "name": "depth_float24_sample_z_varying",
 "category": "GPU",
@@ -1295,6 +1295,24 @@
 "description": "Round mulsc products toward zero instead of to nearest even. This fixes bad geometry in several Volition Engine titles and possibly others. This rounding behavior hasn't been confirmed on real hardware, so it's disabled by default.",
 "changed": false
 },
+"texture_point_snap": {
+"name": "texture_point_snap",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Snap normalized point sampled 2D texture coordinates to texel centers. Fixes texture seams in titles that use virtual textures, e.g. idTech 5, but may cause rendering issues in other titles.",
+"changed": false
+},
+"dxbc_implicit_lod": {
+"name": "dxbc_implicit_lod",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Experimental: sample computed-LOD 1D, 2D and cube texture fetches with the hardware's implicit LOD plus the LOD bias (sample_b) instead of explicit coarse gradients scaled by 2^bias (sample_d). The LOD is the same up to derivative precision. Fetches snapped to texel centers (texture_point_snap) from mipmapped textures keep sample_d.",
+"changed": false
+},
 "point_sampling_extra_offset": {
 "name": "point_sampling_extra_offset",
 "category": "GPU",
@@ -1437,6 +1455,15 @@
 "value": "auto",
 "defaultValue": "auto",
 "description": "Experimental: route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 13% more GPU submissions per frame on Viva Pinata. auto: only for titles that set metal_memexport_raster (their built-in config). on: every title. off: none. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
+"changed": false
+},
+"metal_max_in_flight": {
+"name": "metal_max_in_flight",
+"category": "GPU",
+"type": "uint",
+"value": 0,
+"defaultValue": 0,
+"description": "Metal: cap on command-buffer submissions in flight (0 = default 16). The XE_METAL_MAX_IN_FLIGHT environment variable overrides it. A per-title config can pin 1 for titles whose guest reuses GPU-destination memory as soon as their fence returns (Rise of the Tomb Raider).",
 "changed": false
 },
 "metal_quad_lists_as_triangles": {
@@ -2739,9 +2766,9 @@
 "name": "guest_thread_qos",
 "category": "CPU",
 "type": "string",
-"value": "off",
-"defaultValue": "off",
-"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (default, no QoS calls) | 'all' (every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
+"value": "all",
+"defaultValue": "all",
+"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (no QoS calls) | 'all' (default, every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
 "changed": false
 },
 "guest_thread_qos_class": {
