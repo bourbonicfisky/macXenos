@@ -193,7 +193,7 @@ kernel void k_7e3(device const uint* in [[buffer(0)]],
     exponent = 1u - lz;                    // wraps like the CPU cast
     mantissa = (mantissa << lz) & 0x7Fu;
   }
-  out[i] = ((exponent + 124u) << 23) | (mantissa << 3);
+  out[i] = ((exponent + 124u) << 23) | (mantissa << 16);
 }
 
 kernel void k_metal_sample_to_guest(device const uint* in [[buffer(0)]],

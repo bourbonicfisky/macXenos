@@ -212,6 +212,13 @@ TEST_CASE("unorm24 encode saturates at the far plane", "[l0][unorm24]") {
 // --- 7e3 guest color float (Float7e3To32) ------------------------------------
 TEST_CASE("7e3 color endpoints and monotonicity", "[l0][float7e3]") {
   REQUIRE(xenos::Float7e3To32(0u) == 0.0f);
+  // The 7-bit mantissa is the top of the float mantissa (Canary f3e42609a):
+  // 0x3FF is the 7e3 maximum 31.875, 0x380 (exponent 7, mantissa 0) is 16,
+  // 0x3C0 adds half: 24, and the smallest denormal 0x001 is 2^-2 / 128.
+  REQUIRE(xenos::Float7e3To32(0x3FFu) == 31.875f);
+  REQUIRE(xenos::Float7e3To32(0x380u) == 16.0f);
+  REQUIRE(xenos::Float7e3To32(0x3C0u) == 24.0f);
+  REQUIRE(xenos::Float7e3To32(0x001u) == 1.0f / 512.0f);
   float prev = -1.0f;
   for (uint32_t code = 0; code < (1u << 10); ++code) {
     float f = xenos::Float7e3To32(code);
