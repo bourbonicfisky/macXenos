@@ -9,7 +9,10 @@
 
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 
+#include <algorithm>
 #include <cstring>
+
+#include "xenia/base/math.h"
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
@@ -36,11 +39,12 @@ bool MetalPrimitiveProcessor::Initialize(bool convert_quad_lists) {
   //     None of the routed classes depend on these flags, and the routing
   //     predicates keep expanded classes on the MSC path. PP2-auto's fan table
   //     is the only built-in allocation; line-loop conversion adds none.
-  //   host_primitive_reset_always_enabled = false
-  //     The 16->32 restart-index widening and the moltenvk_draw_diagnostics
-  //     classifier are gated on this being true; keeping it false makes both
-  //     statically unreachable, so the routed set is byte-neutral with the
-  //     current inline path (which does no widening).
+  //   host_primitive_reset_always_enabled = true (2026-10-26)
+  //     Metal cannot disable primitive restart: a real 0xFFFF index in a
+  //     reset-disabled 16-bit buffer drops its primitive. The shared processor
+  //     widens such buffers to 32-bit (kHostConverted, 0x0000FFFF), which the
+  //     command processor now consumes. Buffers without 0xFFFF are untouched
+  //     (kGuestDMA, byte-identical to before).
   // PP2-auto: triangle_fans_supported = false enables shared fan-to-list
   // conversion. Only auto-indexed fans are routed into Process by the command
   // processor (kHostBuiltinForAuto); DMA/reset fans stay on the inline path.
@@ -54,7 +58,7 @@ bool MetalPrimitiveProcessor::Initialize(bool convert_quad_lists) {
       /*quad_lists_supported=*/!convert_quad_lists,
       /*point_sprites_supported_without_vs_expansion=*/true,
       /*rectangle_lists_supported_without_vs_expansion=*/true,
-      /*host_primitive_reset_always_enabled=*/false,
+      /*host_primitive_reset_always_enabled=*/true,
       /*convert_triangle_fans_first_provoking=*/true);
 }
 
@@ -85,22 +89,49 @@ bool MetalPrimitiveProcessor::CopyBuiltinIndexData(size_t handle,
 void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
     xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
     uint32_t coalignment_original_address, size_t& backend_handle_out) {
-  (void)format;
-  (void)index_count;
-  (void)coalign_for_simd;
-  (void)coalignment_original_address;
-  (void)backend_handle_out;
-  // Invariant guard: PP1 routes only pass-through classes, PP2 routes only auto
-  // fans, and PP3 routes only auto line loops. None requests a host-converted
-  // buffer. Reaching here means an out-of-scope draw was routed (a predicate
-  // bug) or a later capability slice landed without adding its converted-buffer
-  // owner. Fail loudly rather than silently mis-render.
-  XELOGE(
-      "MetalPrimitiveProcessor: RequestHostConvertedIndexBufferForCurrentFrame "
-      "called, but the active Metal routes own no host-converted class. "
-      "Routing predicate bug.");
-  assert_always();
-  return nullptr;
+  const size_t index_size = format == xenos::IndexFormat::kInt16
+                                ? sizeof(uint16_t)
+                                : sizeof(uint32_t);
+  // A zero-count conversion (degenerate fan/loop) still needs a non-null
+  // mapping, exactly like a device upload pool returns one; reserve a slot.
+  const size_t bytes = std::max(
+      size_t(1),
+      index_size * size_t(index_count) +
+          (coalign_for_simd ? size_t(XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE)
+                            : 0));
+  // Every allocation starts 16-byte aligned within the pool so the shared
+  // SIMD conversions see the alignment they would from a device mapping.
+  const size_t base = xe::align(converted_index_data_.size(), size_t(16));
+  if (bytes > SIZE_MAX - base) {
+    return nullptr;
+  }
+  converted_index_data_.resize(base + bytes);
+  uint8_t* mapping = converted_index_data_.data() + base;
+  size_t handle = base;
+  if (coalign_for_simd) {
+    ptrdiff_t coalignment_offset =
+        GetSimdCoalignmentOffset(mapping, coalignment_original_address);
+    mapping += coalignment_offset;
+    handle += size_t(coalignment_offset);
+  }
+  backend_handle_out = handle;
+  return mapping;
+}
+
+bool MetalPrimitiveProcessor::CopyConvertedIndexData(size_t handle,
+                                                     size_t byte_count,
+                                                     void* dst) const {
+  if (handle > converted_index_data_.size() ||
+      byte_count > converted_index_data_.size() - handle) {
+    return false;
+  }
+  std::memcpy(dst, converted_index_data_.data() + handle, byte_count);
+  return true;
+}
+
+void MetalPrimitiveProcessor::EndFrame() {
+  ClearPerFrameCache();
+  converted_index_data_.clear();
 }
 
 }  // namespace metal

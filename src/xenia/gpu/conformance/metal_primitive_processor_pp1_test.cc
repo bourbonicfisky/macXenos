@@ -24,9 +24,10 @@
 //      byte-for-byte equivalence the slice must preserve. Also asserts the
 //      RequestGuestIndexSharedMemoryRange no-op override performs ZERO
 //      shared-memory uploads (a call counter on the test SharedMemory).
-//      Includes the 0xFFFF / reset-disabled 16-bit edge (Gate 4): it must stay
-//      a 16-bit kGuestDMA passthrough (no widening), matching the current
-//      inline path.
+//      Includes the 0xFFFF / reset-disabled 16-bit edge (Gate 4): since
+//      2026-10-26 it is widened to a 32-bit kHostConverted stream (Metal
+//      cannot disable primitive restart); buffers without 0xFFFF stay a
+//      16-bit kGuestDMA passthrough.
 //
 // No Metal device is required: the routed set never uploads, converts, reads
 // guest index memory, or touches a builtin/host-converted buffer.
@@ -462,26 +463,28 @@ TEST_CASE("PP1 normalize: routed auto draws are field-equivalent (no bytes)",
 }
 
 TEST_CASE(
-    "PP1 normalize: 0xFFFF in a reset-disabled 16-bit strip is NOT widened "
-    "(Gate 4)",
+    "PP1 normalize: 0xFFFF in a reset-disabled 16-bit strip IS widened to a "
+    "32-bit host-converted stream (reset-disabled maximum protection)",
     "[pp1][normalize][gate4]") {
   Pp1Harness h;
   REQUIRE(h.ok);
-  // A real 0xFFFF vertex index in a reset-disabled 16-bit strip. The widening
-  // safeguard is gated off (host_primitive_reset_always_enabled == false), so
-  // Process must keep this a 16-bit kGuestDMA passthrough — byte-identical to
-  // the current inline path (which passes 0xFFFF straight to Metal). If this
-  // ever returns kHostConverted / kInt32, PP1 stopped being behavior-neutral.
+  // A real 0xFFFF vertex index in a reset-disabled 16-bit strip. Metal cannot
+  // disable primitive restart, so an unprotected 0xFFFF drops its primitive.
+  // Since 2026-10-26 the Metal processor runs with
+  // host_primitive_reset_always_enabled, so Process widens the buffer to a
+  // kHostConverted 32-bit stream (0xFFFF -> 0x0000FFFF, never the 32-bit
+  // sentinel), value-preserving for every index. The same buffer without a
+  // 0xFFFF stays a 16-bit kGuestDMA passthrough (checked below).
   const uint32_t count = 6;
-  std::vector<uint8_t> guest;
-  for (uint16_t v : {0x0001, 0xFFFF, 0x0002, 0x0003, 0xFFFF, 0x0004}) {
-    guest.push_back(uint8_t(v & 0xFF));
-    guest.push_back(uint8_t(v >> 8));
-  }
+  const uint16_t values[] = {0x0001, 0xFFFF, 0x0002, 0x0003, 0xFFFF, 0x0004};
+  const uint32_t base = 0x3000;
+  uint16_t* guest = h.memory->TranslatePhysical<uint16_t*>(base);
+  REQUIRE(guest != nullptr);
+  std::memcpy(guest, values, sizeof(values));
   for (xenos::PrimitiveType strip : {xenos::PrimitiveType::kLineStrip,
                                      xenos::PrimitiveType::kTriangleStrip}) {
     SetDraw(h.regs, strip, xenos::SourceSelect::kDMA,
-            xenos::IndexFormat::kInt16, xenos::Endian::kNone, count, 0x3000,
+            xenos::IndexFormat::kInt16, xenos::Endian::kNone, count, base,
             /*multi_prim_ib=*/false,
             /*tess=*/false);
     REQUIRE(metal::IsPp1Routable(h.regs, strip));
@@ -489,14 +492,40 @@ TEST_CASE(
     REQUIRE(h.pp->Process(r));
     INFO("reset-disabled strip with 0xFFFF, prim " << uint32_t(strip));
     CHECK(r.index_buffer_type ==
-          PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA);
-    CHECK(r.host_index_format == xenos::IndexFormat::kInt16);
+          PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted);
+    CHECK(r.host_index_format == xenos::IndexFormat::kInt32);
     CHECK(r.host_primitive_reset_enabled == false);
-    // Bytes pass through unchanged (endian kNone, 16-bit).
-    std::vector<uint8_t> pp_bytes = SwapBytes(
-        guest, r.host_index_format, r.host_shader_index_endian, count);
-    CHECK(pp_bytes == guest);
+    CHECK(r.host_draw_vertex_count == count);
+    CHECK(r.host_primitive_type == strip);
+    std::vector<uint32_t> widened(count);
+    REQUIRE(h.pp->CopyConvertedIndexData(r.host_index_buffer_handle,
+                                         count * sizeof(uint32_t),
+                                         widened.data()));
+    for (uint32_t i = 0; i < count; ++i) {
+      CHECK(widened[i] == uint32_t(values[i]));
+    }
+    // The arena swap of the converted stream (endian kNone) is the identity.
+    std::vector<uint32_t> swapped(count);
+    metal::SwapConvertedIndicesInto(swapped.data(), widened.data(), count,
+                                    r.host_index_format,
+                                    r.host_shader_index_endian);
+    CHECK(swapped == widened);
   }
+  // Control: no 0xFFFF -> untouched 16-bit kGuestDMA (byte-identical to the
+  // pre-widening path).
+  const uint16_t plain[] = {0x0001, 0x0005, 0x0002, 0x0003, 0x0006, 0x0004};
+  std::memcpy(guest, plain, sizeof(plain));
+  h.pp->EndFrame();
+  SetDraw(h.regs, xenos::PrimitiveType::kTriangleStrip,
+          xenos::SourceSelect::kDMA, xenos::IndexFormat::kInt16,
+          xenos::Endian::kNone, count, base, /*multi_prim_ib=*/false,
+          /*tess=*/false);
+  PrimitiveProcessor::ProcessingResult r{};
+  REQUIRE(h.pp->Process(r));
+  CHECK(r.index_buffer_type ==
+        PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA);
+  CHECK(r.host_index_format == xenos::IndexFormat::kInt16);
+  h.pp->EndFrame();
 }
 
 // ---- PP4 fixed-sentinel DMA strips -----------------------------------------

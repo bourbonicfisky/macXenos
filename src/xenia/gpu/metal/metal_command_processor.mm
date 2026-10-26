@@ -80,6 +80,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_sampler_contract.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -1106,7 +1107,10 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
        !metal::MetalScaledAnisotropyEnabled())
           ? 0u
           : uint32_t((key >> 15) & 7);
-  const uint32_t border = uint32_t((key >> 18) & 3);
+  const uint32_t border =
+      uint32_t((key >> metal::kMetalSamplerKeyBorderShift) & 3);
+  const bool force_bc_w_to_max =
+      ((key >> metal::kMetalSamplerKeyForceBcWShift) & 1) != 0;
   const uint32_t mip_min_level = uint32_t((key >> 20) & 15);
   const bool base_map = ((key >> 24) & 1) != 0;
   const bool legacy = ((key >> 25) & 1) != 0;
@@ -1153,16 +1157,35 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
   } else if (!legacy && mip_max_level) {
     d.lodMaxClamp = float(mip_max_level);
   }
-  switch (xenos::BorderColor(border)) {
-    case xenos::BorderColor::k_ABGR_White:
-      d.borderColor = MTLSamplerBorderColorOpaqueWhite;
-      break;
-    default:
-      // k_ABGR_Black is (0,0,0,0) in the shared contract; the YCbCr borders
-      // (0.5,0,0.5,0)/(0,0.5,0.5,0) have no Metal border color -- they fall to
-      // transparent black (unengaged in the census).
-      d.borderColor = MTLSamplerBorderColorTransparentBlack;
-      break;
+  // Border colour per the shared contract (metal_sampler_contract.h):
+  // ABGR black/white and the force_bc_w_to_max alpha forcing are exact;
+  // the YCbCr blacks decay to black luma with the contract's alpha (Metal
+  // has no custom border colours) and are counted as approximated.
+  {
+    const metal::MetalSamplerBorderDecision decision =
+        metal::DecideMetalSamplerBorder(xenos::BorderColor(border),
+                                        force_bc_w_to_max);
+    switch (decision.border) {
+      case metal::MetalSamplerBorder::kOpaqueWhite:
+        d.borderColor = MTLSamplerBorderColorOpaqueWhite;
+        break;
+      case metal::MetalSamplerBorder::kOpaqueBlack:
+        d.borderColor = MTLSamplerBorderColorOpaqueBlack;
+        break;
+      case metal::MetalSamplerBorder::kTransparentBlack:
+      default:
+        d.borderColor = MTLSamplerBorderColorTransparentBlack;
+        break;
+    }
+    if (decision.approximated) {
+      static uint32_t s_approximated_logs = 0;
+      if (s_approximated_logs++ < 8) {
+        XELOGW(
+            "MetalSamplerBorderApprox: YCbCr border colour {} has no Metal "
+            "border colour; using {} black (alpha {}) for sampler key {:016X}",
+            border, "luma", force_bc_w_to_max ? 1 : 0, key);
+      }
+    }
   }
   auto addr = [](uint32_t c) {
     switch (xenos::ClampMode(c)) {
@@ -1208,12 +1231,13 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
   if (s_sampler_census_log) {
     XELOGI(
         "MetalSamplerCreate key={:016X} mag={} min={} mip={} aniso={} "
-        "addr=({},{},{}) border={} lod=[{},{}] base_map={}",
+        "addr=({},{},{}) border={} force_bc_w={} lod=[{},{}] base_map={}",
         key, uint32_t(d.magFilter), uint32_t(d.minFilter),
         uint32_t(d.mipFilter), uint32_t(d.maxAnisotropy),
         uint32_t(d.sAddressMode), uint32_t(d.tAddressMode),
-        uint32_t(d.rAddressMode), uint32_t(d.borderColor), d.lodMinClamp,
-        d.lodMaxClamp, base_map ? 1 : 0);
+        uint32_t(d.rAddressMode), uint32_t(d.borderColor),
+        force_bc_w_to_max ? 1 : 0, d.lodMinClamp, d.lodMaxClamp,
+        base_map ? 1 : 0);
   }
   uint32_t slot = next_sampler_slot_++;
   auto* entries = static_cast<IRDescriptorTableEntry*>(
@@ -6550,6 +6574,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool dma_line_loop_route =
       index_buffer_info && index_buffer_info->guest_base &&
       IsDmaLineLoopRoutable(*register_file_, prim_type);
+  // Converted classes (2026-10-26): guest-DMA fans/loops (any reset), DMA
+  // quads on converting devices, and reset-enabled strips with a custom or
+  // 32-bit reset index all normalize through the shared PrimitiveProcessor's
+  // host-converted index buffer; the inline expansions above are now only
+  // the fallback when the route does not engage.
+  const bool converted_class_route =
+      primitive_processor_ && index_buffer_info &&
+      index_buffer_info->guest_base &&
+      IsConvertedClassRoutable(*register_file_, prim_type,
+                               convert_auto_quads_);
   // Point sprites expanded in the vertex shader (two-triangle strips, 4 host
   // vertices per point) instead of the object+mesh geometry emulation.
   const bool point_strip_route =
@@ -6811,7 +6845,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
-      !dma_line_loop_route && !MapPrimitiveType(prim_type, &mtl_prim)) {
+      !dma_line_loop_route && !converted_class_route &&
+      !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "prim-unmappable");
@@ -6820,8 +6855,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   ++prim_census_[uint32_t(prim_type) & 31]
                 [use_tessellation_emulation ? 5
                  : use_geometry_emulation   ? 4
-                 : auto_line_loop_route ||
-                           dma_line_loop_route
+                 : auto_line_loop_route || dma_line_loop_route ||
+                           (converted_class_route &&
+                            prim_type == xenos::PrimitiveType::kLineLoop)
                                             ? 3
                  : dma_quad_route           ? 2
                  : auto_quad_route          ? 1
@@ -9911,7 +9947,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation && !point_strip_route &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
-       auto_quad_route || auto_line_loop_route || fixed_reset_strip_route) &&
+       auto_quad_route || auto_line_loop_route || fixed_reset_strip_route ||
+       converted_class_route) &&
       IsPp1DrawViewConsistent(
           regs, index_count, index_buffer_info != nullptr,
           index_buffer_info ? index_buffer_info->guest_base : 0,
@@ -9919,142 +9956,76 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone,
           index_buffer_info ? index_buffer_info->count : 0)) {
     if (primitive_processor_->Process(pp_result)) {
-      if (fixed_reset_strip_route) {
-        // Accept only the non-converting fixed-sentinel result proven by the
-        // PP4 L0 matrix and live census. Any future shared result-shape change
-        // fails closed; converted buffers are not owned by this slice.
-        bool fixed_reset_shape =
-            pp_result.host_primitive_type == prim_type &&
-            pp_result.host_vertex_shader_type ==
-                Shader::HostVertexShaderType::kVertex &&
-            pp_result.host_draw_vertex_count == index_count &&
-            pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
-            pp_result.host_index_format == xenos::IndexFormat::kInt16;
-        if (fixed_reset_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE(
-              "MetalPrimitiveProcessor: routed fixed-reset strip did not "
-              "produce the kGuestDMA/fixed-16 shape (guest_prim {} host_prim "
-              "{} vs_type {} count {}/{} reset {} ibt {} format {}); "
-              "skipping.",
-              uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
-              uint32_t(pp_result.host_vertex_shader_type),
-              pp_result.host_draw_vertex_count, index_count,
-              pp_result.host_primitive_reset_enabled,
-              uint32_t(pp_result.index_buffer_type),
-              uint32_t(pp_result.host_index_format));
-          assert_always();
-        }
-      } else if (auto_line_loop_route) {
-        // Accept exactly the auto-loop shared shape. count <= 1 deliberately
-        // produces a zero-count no-draw result with closing index 0.
-        uint32_t expected_count = PrimitiveProcessor::GetLineLoopStripIndexCount(index_count);
-        uint32_t expected_closing_index = expected_count ? expected_count - 1 : 0;
-        bool auto_loop_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kLineStrip &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kNone &&
-            pp_result.host_draw_vertex_count == expected_count &&
-            pp_result.line_loop_closing_index == expected_closing_index;
-        if (auto_loop_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto line loop did not produce "
-                 "the kNone/kLineStrip shape (host_prim {} vs_type {} count {}/{} "
-                 "closing {}/{} reset {} ibt {}); skipping.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type), pp_result.host_draw_vertex_count,
-                 expected_count, pp_result.line_loop_closing_index, expected_closing_index,
-                 pp_result.host_primitive_reset_enabled, uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
-      } else if (auto_quad_route) {
-        // The shared built-in quad table: (0,1,2),(0,2,3) per quad, 16-bit,
-        // 6 indices per 4 vertices (0 for fewer than 4 -> no-draw below).
-        bool builtin_quad_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kTriangleList &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto &&
-            pp_result.host_draw_vertex_count ==
-                (index_count / 4) * 6;
-        if (builtin_quad_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto quad list did not "
-                 "produce the kHostBuiltinForAuto shape (host_prim {} vs_type "
-                 "{} count {}/{} reset {} ibt {}); skipping.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count,
-                 (index_count / 4) * 6,
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
-      } else if (auto_fan_route) {
-        // Accept exactly the auto-fan built-in shape: a triangle list, plain
-        // vertex shader, no reset, kHostBuiltinForAuto, with the expected
-        // expanded count (0 for count<3 -> a no-draw success below).
-        bool builtin_fan_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kTriangleList &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto &&
-            pp_result.host_draw_vertex_count ==
-                PrimitiveProcessor::GetTriangleFanListIndexCount(index_count);
-        if (builtin_fan_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto fan did not produce the "
-                 "kHostBuiltinForAuto shape (host_prim {} vs_type {} count {}/{} "
-                 "reset {} ibt {}); staying inline.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count,
-                 PrimitiveProcessor::GetTriangleFanListIndexCount(index_count),
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
+      // The shared processor is the normalization authority for every routed
+      // class. Accept any result the emission below can bind: a plain vertex
+      // host VS type, a host topology Metal maps (the native list/strip set,
+      // kTriangleList for converted fans/quads, kLineStrip for converted
+      // loops) and one of the five index-buffer types. Anything else means
+      // the routing predicates and Process disagree about the draw; fail
+      // closed to the inline path (or the skip below for classes without
+      // one) rather than bind a shape the emission never audited.
+      MTLPrimitiveType mapped_host_prim = MTLPrimitiveTypeTriangle;
+      const bool host_type_ok =
+          pp_result.host_vertex_shader_type ==
+              Shader::HostVertexShaderType::kVertex &&
+          MapPrimitiveType(pp_result.host_primitive_type, &mapped_host_prim) &&
+          pp_result.host_primitive_type != xenos::PrimitiveType::kTriangleFan;
+      bool index_type_ok;
+      switch (pp_result.index_buffer_type) {
+        case PrimitiveProcessor::ProcessedIndexBufferType::kNone:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
+          index_type_ok = true;
+          break;
+        default:
+          index_type_ok = false;
+          break;
+      }
+      // Auto-indexed classes never produce a guest-DMA-backed stream, and the
+      // PP1/PP4 pass-through classes never change topology: both are
+      // invariants of the shared code, pinned here so a shared-side change
+      // cannot silently reach the emission.
+      const bool auto_source =
+          regs.Get<reg::VGT_DRAW_INITIATOR>().source_select ==
+          xenos::SourceSelect::kAutoIndex;
+      const bool source_ok =
+          !auto_source ||
+          (pp_result.index_buffer_type !=
+               PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+           pp_result.index_buffer_type !=
+               PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA);
+      const bool topology_ok =
+          (prim_type != xenos::PrimitiveType::kLineList &&
+           prim_type != xenos::PrimitiveType::kLineStrip &&
+           prim_type != xenos::PrimitiveType::kTriangleList &&
+           prim_type != xenos::PrimitiveType::kTriangleStrip) ||
+          pp_result.host_primitive_type == prim_type;
+      if (host_type_ok && index_type_ok && source_ok && topology_ok) {
+        pp_routed = true;
       } else {
-        // Fail-closed: only accept the exact PP1 pass-through shape. Anything
-        // else (a conversion, tessellation, reset, count/topology change, or an
-        // unexpected index-buffer type) means the routed set assumptions were
-        // violated; leave pp_routed false so the inline path stays authoritative.
-        PrimitiveProcessor::ProcessedIndexBufferType expected_ibt =
-            index_buffer_info ? PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA
-                              : PrimitiveProcessor::ProcessedIndexBufferType::kNone;
-        bool pass_through_shape =
-            pp_result.host_primitive_type == prim_type &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            pp_result.host_draw_vertex_count == index_count &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type == expected_ibt;
-        if (pass_through_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed draw did not produce the PP1 "
-                 "pass-through shape (guest_prim {} host_prim {} vs_type {} "
-                 "count {}/{} reset {} ibt {}); staying inline.",
-                 uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count, index_count,
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
+        XELOGE(
+            "MetalPrimitiveProcessor: routed draw produced a shape the "
+            "emission cannot bind (guest_prim {} host_prim {} vs_type {} "
+            "count {}/{} reset {} ibt {} format {}); staying inline.",
+            uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
+            uint32_t(pp_result.host_vertex_shader_type),
+            pp_result.host_draw_vertex_count, index_count,
+            pp_result.host_primitive_reset_enabled,
+            uint32_t(pp_result.index_buffer_type),
+            uint32_t(pp_result.host_index_format));
+        assert_always();
       }
     }
   }
 
   draw_trace_milestone("after-primitive-processor");
+  if (pp_routed &&
+      pp_result.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+    ++prim_census_[uint32_t(prim_type) & 31][7];
+  }
 
   // Auto line loops have no valid inline Metal fallback: the guest topology is
   // intentionally unmapped. If view consistency, Process, or the exact shape
@@ -10067,6 +10038,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Likewise a quad list taken off geometry emulation has no inline path.
   if (auto_quad_route && !pp_routed) {
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability, "quad-route");
+    return true;
+  }
+  // A guest-DMA line loop with primitive reset has no inline path either
+  // (the inline loop route only closes reset-disabled loops).
+  if (converted_class_route && !pp_routed &&
+      prim_type == xenos::PrimitiveType::kLineLoop && !dma_line_loop_route) {
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                   "line-loop-route");
+    return true;
+  }
+  // A converted or built-in stream with nothing to draw (fan/quad with fewer
+  // than 3/4 indices, a loop with one) is a successful no-draw; skip before
+  // opening an encoder, matching the inline expansions' degenerate skips.
+  if (pp_routed && pp_result.host_draw_vertex_count == 0 &&
+      (pp_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted ||
+       pp_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA)) {
+    RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "pp-degenerate");
     return true;
   }
   // A degenerate loop is a successful no-draw. Skip before opening an encoder
@@ -11537,6 +11527,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                  xenos::ClampModeUsesBorder(ncy) ||
                                  xenos::ClampModeUsesBorder(ncz);
         const uint32_t border = border_used ? uint32_t(f.border_color) : 0u;
+        // force_bc_w_to_max: border alpha forced to 1 (shared contract); like
+        // the colour it only matters when a clamp uses the border.
+        const uint32_t force_bc_w =
+            border_used ? uint32_t(f.force_bc_w_to_max) : 0u;
         const uint32_t base_map = mip == uint32_t(xenos::TextureFilter::kBaseMap)
                                       ? 1u
                                       : 0u;
@@ -11556,9 +11550,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
                  ((uint32_t(ncx) & 7) << 6) | ((uint32_t(ncy) & 7) << 9) |
                  ((uint32_t(ncz) & 7) << 12) | ((an & 7) << 15) |
-                 (uint64_t(border & 3) << 18) |
+                 (uint64_t(border & 3) << metal::kMetalSamplerKeyBorderShift) |
                  (uint64_t(nmin_level & 15) << 20) |
                  (uint64_t(base_map) << 24) |
+                 (uint64_t(force_bc_w & 1)
+                  << metal::kMetalSamplerKeyForceBcWShift) |
                  (metal::SharedRouteMinMipEnabled()
                       ? (uint64_t(nmax_level & 15) << 26)
                       : 0ull);
@@ -11593,14 +11589,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                xenos::ClampModeUsesBorder(ncz);
             XELOGI(
                 "MetalSamplerCensus new key={:016X} dim={} clamp=({},{},{}) "
-                "norm=({},{},{}) border_used={} border_color={} lod_bias={} "
+                "norm=({},{},{}) border_used={} border_color={} force_bc_w={} "
+                "lod_bias={} "
                 "tri_clamp={} mag={} min={} mip={} aniso={} mip_range={}-{} "
                 "vol=({},{}) shader_ovr=(mag={} min={} mip={} aniso={}) "
                 "fmt={} {}x{} fc={} draw={}",
                 ckey, uint32_t(f.dimension), uint32_t(f.clamp_x),
                 uint32_t(f.clamp_y), uint32_t(f.clamp_z), uint32_t(ncx),
                 uint32_t(ncy), uint32_t(ncz), border_used ? 1 : 0,
-                uint32_t(f.border_color), int32_t(f.lod_bias),
+                uint32_t(f.border_color), uint32_t(f.force_bc_w_to_max),
+                int32_t(f.lod_bias),
                 uint32_t(f.tri_clamp), mag, mn, mip, an, nmin, nmax,
                 uint32_t(f.vol_mag_filter), uint32_t(f.vol_min_filter),
                 sb.mag_filter != xenos::TextureFilter::kUseFetchConst ? 1 : 0,
@@ -12449,19 +12447,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // PP1 auto pass-through or PP3-auto line loop: no host index byte stream.
       ir_draw( pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
     } else if (pp_result.index_buffer_type ==
-               PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto) {
-      // PP2-auto triangle fan: the shared built-in 16-bit fan table expands the
-      // auto-indexed fan to a triangle list in center-first order (byte- and
-      // order-identical to the retired inline auto-fan expansion). Materialize
-      // the needed slice into the transient upload arena (same lifetime as the
-      // inline path) and draw UInt16. count<3 -> host_count 0 -> no-draw skip,
-      // matching the inline path exactly.
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForAuto ||
+               pp_result.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForDMA) {
+      // Built-in tables: the auto-indexed fan / quad tables (16-bit) and the
+      // two-triangle-strip table for DMA point/rect expansion (32-bit; only
+      // produced when the host VS expands those lists, which Metal's point
+      // strip route and MSC geometry emulation do not request today).
+      // Materialize the needed slice into the transient upload arena (same
+      // lifetime as the inline path) and draw with the table's index width.
+      // count<3 -> host_count 0 -> no-draw skip, matching the inline path.
       if (host_count == 0) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
                        "pp2-degenerate");
         return true;
       }
-      uint32_t total = host_count * uint32_t(sizeof(uint16_t));
+      const uint32_t builtin_index_size =
+          pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4u : 2u;
+      uint32_t total = host_count * builtin_index_size;
       MetalUploadAllocation index_alloc{};
       if (!ArenaAllocate(total, 16, &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
@@ -12478,15 +12483,53 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       use_resource(index_buffer, MTLResourceUsageRead);
-      ir_draw_indexed( pp_prim, host_count,
-                                     MTLIndexTypeUInt16, index_buffer,
-                                     index_alloc.offset, /*instanceCount=*/1,
-                                     /*baseVertex=*/0, /*baseInstance=*/0);
+      ir_draw_indexed(pp_prim, host_count,
+                      builtin_index_size == 4 ? MTLIndexTypeUInt32
+                                              : MTLIndexTypeUInt16,
+                      index_buffer, index_alloc.offset, /*instanceCount=*/1,
+                      /*baseVertex=*/0, /*baseInstance=*/0);
+    } else if (pp_result.index_buffer_type ==
+               PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+      // Host-converted stream (DMA fan -> list, loop -> strip, quad -> list,
+      // custom / 32-bit reset replacement, 16-bit reset-disabled widening):
+      // the shared processor wrote it into the per-frame CPU pool in the
+      // endianness it reports; swap it per element into the transient arena
+      // (vertex_index_endian stays kNone, the one index convention of this
+      // backend) and draw with the converted width. A zero count was skipped
+      // before the encoder opened.
+      const uint32_t converted_index_size =
+          pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4u : 2u;
+      const uint32_t total = host_count * converted_index_size;
+      const void* converted = primitive_processor_->GetConvertedIndexData(
+          pp_result.host_index_buffer_handle, total);
+      if (!converted) {
+        // The handle is this frame's pool offset; an out-of-bounds range means
+        // the pool was cleared under a live result (frame-boundary bug).
+        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                       "pp-converted-range");
+        return true;
+      }
+      MetalUploadAllocation index_alloc{};
+      if (!ArenaAllocate(total, 16, &index_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "pp-converted-alloc");
+        return true;
+      }
+      SwapConvertedIndicesInto(index_alloc.cpu_ptr, converted, host_count,
+                               pp_result.host_index_format,
+                               pp_result.host_shader_index_endian);
+      __unsafe_unretained id<MTLBuffer> index_buffer =
+          (__bridge id<MTLBuffer>)index_alloc.buffer;
+      use_resource(index_buffer, MTLResourceUsageRead);
+      ir_draw_indexed(pp_prim, host_count,
+                      converted_index_size == 4 ? MTLIndexTypeUInt32
+                                                : MTLIndexTypeUInt16,
+                      index_buffer, index_alloc.offset, /*instanceCount=*/1,
+                      /*baseVertex=*/0, /*baseInstance=*/0);
     } else {
-      // Unreachable: the pre-encoder shape guards only set pp_routed for
-      // kGuestDMA / kNone (PP1/PP3/PP4) or kHostBuiltinForAuto (PP2-auto).
-      // Never
-      // silently fall into an auto draw for an unexpected index-buffer type.
+      // Unreachable: the pre-encoder validator accepts only the five shared
+      // index-buffer types, all bound above. Never silently fall into an auto
+      // draw for an unexpected index-buffer type.
       XELOGE("MetalPrimitiveProcessor: routed draw reached emission with "
              "unexpected index_buffer_type {}; skipping.",
              uint32_t(pp_result.index_buffer_type));
@@ -18191,6 +18234,13 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       }
     }
   }
+  // Frame boundary for the shared primitive processor's conversion cache and
+  // this backend's converted index pool: every routed draw of the frame has
+  // already copied its slice into the upload arena, so nothing references the
+  // pool past this point.
+  if (primitive_processor_) {
+    primitive_processor_->EndFrame();
+  }
   last_frontbuffer_base_ = frontbuffer_ptr;
   last_frontbuffer_bytes_ =
       ((frontbuffer_width ? frontbuffer_width : 1280) + 31u & ~31u) *
@@ -19130,11 +19180,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
     {
-      static const char* const kPath[] = {"native", "quad",  "dmaquad", "loop",
-                                          "geo",    "tess",  "skip"};
+      // "conv" counts routed draws that bound a host-converted index stream
+      // (DMA fans/loops/quads, custom/32-bit reset, 16-bit widening); it is
+      // an additional column, the draw is also counted in its path column.
+      static const char* const kPath[] = {"native", "quad", "dmaquad", "loop",
+                                          "geo",    "tess", "skip",    "conv"};
       std::string prims;
       for (uint32_t p = 0; p < 32; ++p) {
-        for (uint32_t k = 0; k < 7; ++k) {
+        for (uint32_t k = 0; k < 8; ++k) {
           if (prim_census_[p][k]) {
             prims += fmt::format(" p{}:{}={}", p, kPath[k], prim_census_[p][k]);
           }
