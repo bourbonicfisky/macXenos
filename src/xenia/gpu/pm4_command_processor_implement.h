@@ -1330,6 +1330,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
     XELOGE("{}: Packet too small, can't read VGT_DRAW_INITIATOR", opcode_name);
     return false;
   }
+  // Ceiling probe for predicated VIZ_QUERY execution (diagnostic, default
+  // off, WRONG by design): XE_GPU_VIZ_DROP_CONDITIONAL=1 skips every draw whose
+  // token makes it conditional on a VIZ ID, as if every survey had found its
+  // object hidden. The fps difference bounds what real predication (Canary
+  // 692cd59cf) could gain; the image is not meant to be correct.
+  static const bool s_viz_drop_conditional = [] {
+    const char* v = std::getenv("XE_GPU_VIZ_DROP_CONDITIONAL");
+    return v && v[0] == '1' && !v[1];
+  }();
+  if (s_viz_drop_conditional && (viz_query_condition & 0x100)) {
+    reader_.AdvanceRead(count_remaining * sizeof(uint32_t));
+    return true;
+  }
   reg::VGT_DRAW_INITIATOR vgt_draw_initiator;
   vgt_draw_initiator.value = reader_.ReadAndSwap<uint32_t>();
   --count_remaining;
