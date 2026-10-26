@@ -467,6 +467,15 @@
 "description": "If execute_unclipped_draw_vs_on_cpu is enabled, execute the vertex shader for unclipped draws on the CPU even when using the pixel shader interlock (rasterizer-ordered view) implementation of the render backend on the host, for which no expensive copying between host render targets is needed when the ownership of a EDRAM range is changed.\nIf this is enabled, excessive barriers may be eliminated when switching between different render targets in separate EDRAM locations.",
 "changed": false
 },
+"aliased_depth_read_only": {
+"name": "aliased_depth_read_only",
+"category": "GPU.Debug",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Matches interlock behavior by handling disjoint color and depth aliases for host render targets, keeping read-only depth bound when color writes only the unused stencil bits. May slightly increase overhead from keeping both host targets live and bound.",
+"changed": false
+},
 "custom_internal_display_resolution_x": {
 "name": "custom_internal_display_resolution_x",
 "category": "Video",
