@@ -696,6 +696,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   RenderTarget* const* used = last_update_used_render_targets();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   static const bool s_memo_enabled =
       IsMetalEnvironmentFlagEnabled("XE_METAL_MSAA_COMPANION_MEMO", true);
   constexpr size_t kSlots = xenos::kMaxColorRenderTargets + 1;
@@ -745,7 +746,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
         requested_height,
         ComputeCanonicalRangeTextureHeight(
             key.base_tiles, key.GetPitchTiles(), y_shift,
-            key.base_tiles + lengths[slot], full_height,
+            key.base_tiles + starts[slot] + lengths[slot], full_height,
             draw_resolution_scale_y()));
   }
   if (!sample_count || !requested_height || !full_height) {
@@ -867,10 +868,12 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
 bool MetalRenderTargetCache::Update(bool is_rasterization_done,
                                     reg::RB_DEPTHCONTROL normalized_depth_control,
                                     uint32_t normalized_color_mask,
-                                    const Shader& vertex_shader) {
+                                    const Shader& vertex_shader,
+                                    int32_t window_offset_tiles) {
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
-                                 normalized_color_mask, vertex_shader)) {
+                                 normalized_color_mask, vertex_shader,
+                                 window_offset_tiles)) {
     return false;
   }
   if (!EnsureCurrentMsaaCompanions()) {
@@ -888,6 +891,14 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
     }
   }
   return true;
+}
+
+bool MetalRenderTargetCache::IsWindowOffsetInEdramSupported() const {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_WINDOW_OFFSET_IN_EDRAM");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return s_enabled;
 }
 
 void* MetalRenderTargetCache::current_depth_texture() const {
@@ -1085,13 +1096,17 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
   }
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   id<MTLCommandBuffer> command_buffer = nil;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     RenderTarget* render_target = used[slot];
     if (!render_target || !lengths[slot]) {
       continue;
     }
-    const uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    const uint32_t start_tiles = rt_base_tiles + starts[slot];
     const uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
     static const bool s_sync_skip =
@@ -1394,6 +1409,7 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
   }
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   const bool census = MetalCommandProcessor::PassCensusEnabled();
   ++pack_census_.mark_calls;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
@@ -1404,7 +1420,10 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     if (!written || !render_target || !lengths[slot]) {
       continue;
     }
-    uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    uint32_t start_tiles = rt_base_tiles + starts[slot];
     uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
     // Tile rows covered by the draw's host scissor rows (whole rows). The
@@ -1419,11 +1438,11 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
          uint32_t(render_target->key().msaa_samples >=
                   xenos::MsaaSamples::k2X)) *
         draw_resolution_scale_y();
-    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d0 = rt_base_tiles + (host_y0 / rows_per_tile) * pitch;
     uint32_t d1 = host_y1 == UINT32_MAX
                       ? end_tiles
-                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
-                                       rows_per_tile) * pitch;
+                      : rt_base_tiles + ((host_y1 + rows_per_tile - 1) /
+                                         rows_per_tile) * pitch;
     d0 = std::max(d0, start_tiles);
     d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
     // Draw-row marking (2026-10-04 introduced for USF4, DEFAULT ON
@@ -1602,6 +1621,7 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
     uint32_t host_y1) {
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     MaterializeFate& fate = materialize_fate_[slot];
     RenderTarget* render_target = used[slot];
@@ -1621,7 +1641,10 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
         !reads && full_width && (slot == 0 || nibble == 0xFu);
     // The tile rows the draw's scissor covers, as in
     // MarkCurrentRasterTargetsWritten.
-    const uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    const uint32_t start_tiles = rt_base_tiles + starts[slot];
     const uint32_t end_tiles = start_tiles + lengths[slot];
     const uint32_t pitch = render_target->key().GetPitchTiles();
     const uint32_t rows_per_tile =
@@ -1629,11 +1652,11 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
          uint32_t(render_target->key().msaa_samples >=
                   xenos::MsaaSamples::k2X)) *
         draw_resolution_scale_y();
-    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d0 = rt_base_tiles + (host_y0 / rows_per_tile) * pitch;
     uint32_t d1 = host_y1 == UINT32_MAX
                       ? end_tiles
-                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
-                                       rows_per_tile) * pitch;
+                      : rt_base_tiles + ((host_y1 + rows_per_tile - 1) /
+                                         rows_per_tile) * pitch;
     // A partly covered first or last tile row counts as read.
     const uint32_t partial_first =
         host_y0 % rows_per_tile ? start_tiles + (host_y0 / rows_per_tile) * pitch

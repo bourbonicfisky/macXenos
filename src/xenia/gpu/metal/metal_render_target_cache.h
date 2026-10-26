@@ -75,6 +75,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   bool Initialize();
   void Shutdown();
 
+  // The canonical EDRAM pack/materialize/resolve kernels address a render
+  // target's rows from its base within one addressing period.
+  bool AreNextPeriodRenderTargetsSupported() const override { return false; }
+  // Not yet: Metal sizes host render targets to the used EDRAM range from
+  // their base, so a tile drawn at its natural rows into a base-shifted target
+  // lands outside the texture (LEGO Star Wars II's three predicated tiles all
+  // showed the top tile, 2026-10-26, xenia-mac-evidence/window-offset-20261026).
+  // XE_METAL_WINDOW_OFFSET_IN_EDRAM=1 enables the experimental path.
+  bool IsWindowOffsetInEdramSupported() const override;
   Path GetPath() const override {
     return Path::kHostRenderTargets;
   }
@@ -86,8 +95,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
 
   bool Update(bool is_rasterization_done,
               reg::RB_DEPTHCONTROL normalized_depth_control,
-              uint32_t normalized_color_mask,
-              const Shader& vertex_shader) override;
+              uint32_t normalized_color_mask, const Shader& vertex_shader,
+              int32_t window_offset_tiles) override;
 
   // --- Metal accessors for the command processor (valid after Update) ---
   // id<MTLTexture> of the bound depth / color-0 target, or nullptr.

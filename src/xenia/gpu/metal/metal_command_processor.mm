@@ -8291,9 +8291,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the ownership transfers this draw needs (stage 2 of the render chain).
   // Memexport-only draws touch no EDRAM: skip the update (the next normal
   // draw re-runs it) and the attachment checks below.
+  // Predicated tiling (Canary e1f4a0d00): a whole-tile negative
+  // PA_SC_WINDOW_OFFSET moves into the EDRAM bases so every tile rasterizes
+  // at the same position as the full-surface depth prepass. The viewport,
+  // scissor and PsParamGen then use window offset 0 (the shader adds the
+  // offset back to PsParamGen). --window_offset_in_edram=false rolls back.
+  const int32_t window_offset_tiles =
+      memexport_draw ? 0
+                     : render_target_cache_->GetWindowOffsetTiles(
+                           regs, norm_depth, normalized_color_mask,
+                           guest_swap_count());
   if (!memexport_draw &&
       !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
-                                    normalized_color_mask, *vertex_shader)) {
+                                    normalized_color_mask, *vertex_shader,
+                                    window_offset_tiles)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "rt-cache-update");
     return true;
   }
@@ -8306,7 +8317,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     norm_depth.value = 0;
     depth_bound = false;
     if (!render_target_cache_->Update(color_bound, norm_depth,
-                                      normalized_color_mask, *vertex_shader)) {
+                                      normalized_color_mask, *vertex_shader,
+                                      window_offset_tiles)) {
       RecordDrawSkip(MetalDrawSkipReason::kDiagnosticRollback,
                      "rt-cache-update-nosmalldepth");
       return true;
@@ -10205,11 +10217,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
         msaa_fold_scale_x * draw_resolution_scale_x_,
         msaa_fold_scale_y * draw_resolution_scale_y_, draw_resolution_scale_x_,
-        draw_resolution_scale_y_);
+        draw_resolution_scale_y_, window_offset_tiles != 0);
     draw_util::GetHostViewportInfo(&vp_args, viewport_info);
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
+    }
+    // Window offset carried in the EDRAM bases: PsParamGen adds it back.
+    {
+      auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      system_constants.param_gen_window_offset[0] =
+          window_offset_tiles ? float(pa_sc_window_offset.window_x_offset)
+                              : 0.0f;
+      system_constants.param_gen_window_offset[1] =
+          window_offset_tiles ? float(pa_sc_window_offset.window_y_offset)
+                              : 0.0f;
+      system_constants.param_gen_window_offset_padding[0] = 0;
+      system_constants.param_gen_window_offset_padding[1] = 0;
     }
     // Exact representative pixel at an even draw resolution scale
     // (metal_draw_resolution_scale.h): shift geometry half a host pixel right
@@ -10821,7 +10845,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       draw_util::Scissor guest_scissor;
-      draw_util::GetScissor(regs, guest_scissor);
+      draw_util::GetScissor(regs, guest_scissor, true,
+                            window_offset_tiles != 0);
       // Scale the guest scissor by the same factor as the viewport: the draw
       // resolution scale, times the fold scale of an MSAA clear folded into
       // the 1x view (identity at 1x otherwise).

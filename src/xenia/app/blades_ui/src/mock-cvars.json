@@ -1340,6 +1340,15 @@
 "description": "When using resolution scaling, apply the hack that stretches the first surely covered host pixel in the left and top sides of render target resolve areas to eliminate the gap caused by the half-pixel offset (this is necessary for certain games to display the scene graphics).",
 "changed": false
 },
+"window_offset_in_edram": {
+"name": "window_offset_in_edram",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Renders every tile of a predicated tiling frame at the same position as the depth prepass by applying the window offset in EDRAM rather than the viewport.\nFixes depth artifacts in the bottom tile of the screen. Disable this if tiles start shifting or banding.\nWorks on every render target path. ROV and FSI apply it to every tile since their pixel shaders directly address EDRAM and can offset sideways or past the end of EDRAM, RTV and FBO keep sideways offsets, and tiles that would run past the target, in the viewport.",
+"changed": false
+},
 "use_fuzzy_alpha_epsilon": {
 "name": "use_fuzzy_alpha_epsilon",
 "category": "GPU",

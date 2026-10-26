@@ -2688,7 +2688,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    : 0;
   if (!render_target_cache_->Update(is_rasterization_done,
                                     normalized_depth_control,
-                                    normalized_color_mask, *vertex_shader)) {
+                                    normalized_color_mask, *vertex_shader,
+                                    0)) {
     return false;
   }
 
@@ -2811,7 +2812,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                     render_target_cache_->depth_float24_convert_in_pixel_shader(),
                 host_render_targets_used,
                 pixel_shader && pixel_shader->writes_depth());
-  gviargs.SetupRegisterValues(regs);
+  gviargs.SetupRegisterValues(regs, false);
 
   draw_util::GetHostViewportInfo(&gviargs, viewport_info);
   // Update dynamic graphics pipeline state.

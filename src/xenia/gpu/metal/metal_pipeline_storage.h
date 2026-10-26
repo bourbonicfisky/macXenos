@@ -136,7 +136,10 @@ struct MetalTranslatorConfig {
   //       component of a single-source two-component scalar op co-issued with
   //       a three-source vector op is Z instead of X (92ada8ebc). Identical
   //       ucode emits different DXBC.
-  static constexpr uint32_t kFetchAbiRevision = 10;
+  //  11 - PsParamGen adds xe_param_gen_window_offset (Canary e1f4a0d00:
+  //       predicated-tiling window offsets carried in the EDRAM bases), a new
+  //       system constant at offset 592 read by every PsParamGen pixel shader.
+  static constexpr uint32_t kFetchAbiRevision = 11;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is
