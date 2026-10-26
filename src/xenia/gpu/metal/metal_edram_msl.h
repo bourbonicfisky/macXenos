@@ -146,6 +146,33 @@ inline uint xe_f32_to_7e3(float value) {
   }
   return (uint(exponent) << 7u) | mantissa;
 }
+// Xenos float16 (16_16_FLOAT / 16_16_16_16_FLOAT render targets, 16-bit float
+// texture formats on the resolve path) has no Inf or NaN: exponent 31 holds
+// finite values up to +-131008 (Canary 3ff230d23; CPU oracle
+// xenos::Float16ExtendedRangeTo32 / Float32ToFloat16ExtendedRange, pinned by
+// the L0/L1 conformance ladder). The host attachments keep the raw bits
+// through their Uint sync views; these conversions serve resolves, clears and
+// the float working views, so an exponent-31 code survives a resolve instead
+// of collapsing to 0x7C00.
+inline float xe_f16_ext_to_f32(uint h) {
+  h &= 0xFFFFu;
+  if ((h & 0x7C00u) == 0x7C00u) {
+    return 2.0 * float(as_type<half>(ushort(h - 0x0400u)));
+  }
+  return float(as_type<half>(ushort(h)));
+}
+inline uint xe_f32_to_f16_ext(float v) {
+  // Integer NaN test: fast-math may fold isnan().
+  if ((as_type<uint>(v) & 0x7FFFFFFFu) > 0x7F800000u) {
+    return 0u;
+  }
+  uint h = uint(as_type<ushort>(half(v)));
+  if ((h & 0x7C00u) == 0x7C00u) {
+    float c = clamp(v, -131008.0, 131008.0) * 0.5;
+    h = uint(as_type<ushort>(half(c))) + 0x0400u;
+  }
+  return h;
+}
 inline float4 xe_unpack_color32(uint word, uint format) {
   switch (format) {
     default:
@@ -165,7 +192,8 @@ inline float4 xe_unpack_color32(uint word, uint format) {
       return float4(float2(fixed) * (1.0 / 1024.0), 0.0, 1.0);
     }
     case 6u:
-      return float4(float2(as_type<half2>(word)), 0.0, 0.0);
+      return float4(xe_f16_ext_to_f32(word), xe_f16_ext_to_f32(word >> 16u),
+                    0.0, 0.0);
     case 14u:
       return float4(as_type<float>(word), 0.0, 0.0, 0.0);
   }
@@ -196,6 +224,8 @@ inline uint xe_pack_color32(float4 color, uint format) {
                         xe_f32_to_fixed16(color.g));
       return (uint(fixed.x) & 0xFFFFu) | (uint(fixed.y) << 16u);
     }
+    case 6u:
+      return xe_f32_to_f16_ext(color.r) | (xe_f32_to_f16_ext(color.g) << 16u);
     case 14u:
       return as_type<uint>(color.r);
   }
@@ -263,7 +293,9 @@ inline float4 xe_unpack_color64(uint2 words, uint format) {
       return float4(fixed) * (1.0 / 1024.0);
     }
     case 7u:
-      return float4(as_type<half4>(words));
+      return float4(xe_f16_ext_to_f32(words.x), xe_f16_ext_to_f32(words.x >> 16u),
+                    xe_f16_ext_to_f32(words.y),
+                    xe_f16_ext_to_f32(words.y >> 16u));
     case 15u:
       return float4(as_type<float>(words.x), as_type<float>(words.y), 0.0,
                     0.0);
@@ -283,7 +315,9 @@ inline uint2 xe_pack_color64(float4 color, uint format) {
                        (uint(fixed.w) << 16u));
     }
     case 7u:
-      return as_type<uint2>(half4(color));
+      return uint2(
+          xe_f32_to_f16_ext(color.r) | (xe_f32_to_f16_ext(color.g) << 16u),
+          xe_f32_to_f16_ext(color.b) | (xe_f32_to_f16_ext(color.a) << 16u));
     case 15u:
       return uint2(as_type<uint>(color.r), as_type<uint>(color.g));
   }
@@ -1387,7 +1421,7 @@ inline ushort xe_resolve_pack_16bpp(float4 v, uint format, uint num_format) {
                     (xe_resolve_pack_fixed(v.g, 8u, num_format) << 8u));
     case 15u: return ushort(xe_resolve_pack_4444(v, num_format));
     case 24u: return ushort(xe_resolve_pack_16(v.r, num_format));
-    default: return as_type<ushort>(half(v.r));
+    default: return ushort(xe_f32_to_f16_ext(v.r));
   }
 }
 inline uint xe_resolve_pack_32bpp(float4 v, uint format, uint num_format) {
@@ -1403,7 +1437,8 @@ inline uint xe_resolve_pack_32bpp(float4 v, uint format, uint num_format) {
     case 56u: return xe_resolve_pack_101111(v.rgb, num_format);
     case 13u:
     case 25u: return xe_resolve_pack_16_16(v.rg, num_format);
-    case 31u: return as_type<uint>(half2(v.rg));
+    case 31u:
+      return xe_f32_to_f16_ext(v.r) | (xe_f32_to_f16_ext(v.g) << 16u);
     default: return as_type<uint>(v.r);
   }
 }
@@ -1411,7 +1446,9 @@ inline uint2 xe_resolve_pack_64bpp(float4 v, uint format, uint num_format) {
   switch (format) {
     case 21u:
     case 26u: return xe_resolve_pack_16_16_16_16(v, num_format);
-    case 32u: return as_type<uint2>(half4(v));
+    case 32u:
+      return uint2(xe_f32_to_f16_ext(v.r) | (xe_f32_to_f16_ext(v.g) << 16u),
+                   xe_f32_to_f16_ext(v.b) | (xe_f32_to_f16_ext(v.a) << 16u));
     default: return as_type<uint2>(v.rg);
   }
 }

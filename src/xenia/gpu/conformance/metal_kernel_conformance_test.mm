@@ -129,6 +129,16 @@ kernel void k_resolve_color_value(
 // Stage B (implement-metal-depth-semantics 3.3): pin the RNE f20e4 encoder
 // and the host-depth reconcile against their CPU oracles. Reconcile consumes
 // interleaved pairs (word, host-bits) so the unary harness carries it.
+kernel void k_f16ext_unpack(device const uint* in [[buffer(0)]],
+                            device uint* out [[buffer(1)]],
+                            uint i [[thread_position_in_grid]]) {
+  out[i] = as_type<uint>(xe_f16_ext_to_f32(in[i]));
+}
+kernel void k_f16ext_pack(device const uint* in [[buffer(0)]],
+                          device uint* out [[buffer(1)]],
+                          uint i [[thread_position_in_grid]]) {
+  out[i] = xe_f32_to_f16_ext(as_type<float>(in[i]));
+}
 kernel void k_f20e4_rne(device const uint* in [[buffer(0)]],
                         device uint* out [[buffer(1)]],
                         uint i [[thread_position_in_grid]]) {
@@ -1980,6 +1990,63 @@ TEST_CASE("Metal unorm24 decode matches CPU oracle bit-for-bit", "[l1][metal][un
   }
   auto gpu = mc.Run("k_unorm24", codes);
   REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal extended-range float16 decode matches CPU oracle bit-for-bit",
+          "[l1][metal][float16ext]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  std::vector<uint32_t> codes;
+  for (uint32_t c = 0; c < (1u << 16); ++c) codes.push_back(c);
+  std::vector<uint32_t> cpu(codes.size());
+  for (size_t i = 0; i < codes.size(); ++i) {
+    float f = xenos::Float16ExtendedRangeTo32(codes[i]);
+    std::memcpy(&cpu[i], &f, 4);
+  }
+  auto gpu = mc.Run("k_f16ext_unpack", codes);
+  REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal extended-range float16 encode matches CPU oracle bit-for-bit",
+          "[l1][metal][float16ext]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Every decoded code (fixed points), the midpoints between adjacent codes
+  // (rounding ties, including the 65504/65520 hand-off into exponent 31),
+  // values beyond the guest range, Inf and NaN.
+  std::vector<uint32_t> inputs;
+  auto push_f = [&](float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    inputs.push_back(u);
+  };
+  for (uint32_t c = 0; c < 0x8000u; ++c) {
+    float lo = xenos::Float16ExtendedRangeTo32(c);
+    float hi = xenos::Float16ExtendedRangeTo32(c + 1);
+    push_f(lo);
+    push_f(-lo);
+    push_f(lo + (hi - lo) * 0.5f);
+    push_f(lo + (hi - lo) * 0.75f);
+  }
+  push_f(65519.0f);
+  push_f(65520.0f);
+  push_f(131008.0f);
+  push_f(131009.0f);
+  push_f(1.0e9f);
+  push_f(-1.0e9f);
+  push_f(INFINITY);
+  push_f(-INFINITY);
+  push_f(NAN);
+  push_f(-0.0f);
+  push_f(1.0e-9f);
+  std::vector<uint32_t> cpu(inputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    float f;
+    std::memcpy(&f, &inputs[i], 4);
+    cpu[i] = xenos::Float32ToFloat16ExtendedRange(f);
+  }
+  auto gpu = mc.Run("k_f16ext_pack", inputs);
+  REQUIRE(CountMismatches(inputs, gpu, cpu) == 0u);
 }
 
 TEST_CASE("Metal RNE 20e4 encode matches CPU oracle bit-for-bit",

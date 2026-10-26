@@ -16,6 +16,7 @@
 // addressers), NOT the monolithic xenia-gpu lib, so this suite stays a
 // second-scale isolated contract check. See the metal-conformance-ladder plan.
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -215,6 +216,49 @@ TEST_CASE("7e3 color endpoints and monotonicity", "[l0][float7e3]") {
   for (uint32_t code = 0; code < (1u << 10); ++code) {
     float f = xenos::Float7e3To32(code);
     REQUIRE(f >= prev);
+    prev = f;
+  }
+}
+
+// --- Xenos extended-range float16 (Float16ExtendedRangeTo32 / Float32To...) --
+// Exponent 31 is finite on the guest (up to +-131008), there is no NaN, and
+// the two conversions are a bijection over every 16-bit code.
+TEST_CASE("Extended-range float16 endpoints", "[l0][float16ext]") {
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x0000u) == 0.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x3C00u) == 1.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x7BFFu) == 65504.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x7C00u) == 65536.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x7FFFu) == 131008.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0xFFFFu) == -131008.0f);
+  REQUIRE(xenos::Float16ExtendedRangeTo32(0x0001u) ==
+          1.0f / float(1u << 24));  // smallest subnormal
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(1.0f) == 0x3C00u);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(65504.0f) == 0x7BFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(65536.0f) == 0x7C00u);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(131008.0f) == 0x7FFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(1.0e9f) == 0x7FFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(-1.0e9f) == 0xFFFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(INFINITY) == 0x7FFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(-INFINITY) == 0xFFFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(NAN) == 0u);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(-0.0f) == 0x8000u);
+  // The host conversion rounds 65519 to 65504 and 65520 up (to Inf on the
+  // host): the extended encoding takes over exactly there.
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(65519.0f) == 0x7BFFu);
+  REQUIRE(xenos::Float32ToFloat16ExtendedRange(65520.0f) == 0x7C00u);
+}
+
+TEST_CASE("Extended-range float16 round-trips every code", "[l0][float16ext]") {
+  for (uint32_t code = 0; code < (1u << 16); ++code) {
+    float f = xenos::Float16ExtendedRangeTo32(code);
+    REQUIRE(std::isfinite(f));
+    REQUIRE(xenos::Float32ToFloat16ExtendedRange(f) == code);
+  }
+  // Monotonic over the positive half (exponent 31 continues the ramp).
+  float prev = -1.0f;
+  for (uint32_t code = 0; code < 0x8000u; ++code) {
+    float f = xenos::Float16ExtendedRangeTo32(code);
+    REQUIRE(f > prev);
     prev = f;
   }
 }

@@ -415,6 +415,15 @@ float LinearToPWLGamma(float linear);
 // Converts Xenos floating-point 7e3 color value in bits 0:9 (not clamping) to
 // an IEEE-754 32-bit floating-point number.
 float Float7e3To32(uint32_t f10);
+// Xenos float16 (16_16_FLOAT / 16_16_16_16_FLOAT render targets and textures)
+// has no Inf or NaN: exponent 31 holds finite values up to +-131008. Converts
+// the low 16 bits to the exact IEEE-754 32-bit value (Canary 3ff230d23).
+float Float16ExtendedRangeTo32(uint32_t f16);
+// Converts an IEEE-754 32-bit floating-point number to Xenos extended-range
+// float16: round to nearest even up to 65504 as the host does, magnitudes the
+// host would overflow to Inf encode into exponent 31 (clamped to +-131008),
+// NaN maps to 0. Bijective with Float16ExtendedRangeTo32 over every code.
+uint32_t Float32ToFloat16ExtendedRange(float f32);
 // Converts 24-bit unorm depth in the value (not clamping) to an IEEE-754 32-bit
 // floating-point number.
 // Converts an IEEE-754 32-bit floating-point number to Xenos floating-point
