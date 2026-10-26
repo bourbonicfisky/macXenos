@@ -610,6 +610,63 @@ class PrimitiveProcessor {
     }
   }
 
+  // Triangle strips as triangle lists (tessellated strips only, Canary
+  // 3eab2b8b3). A strip with N vertices produces N - 2 triangles, alternating
+  // the order of the first two vertices of every odd triangle so all
+  // triangles keep the winding of the first: (v0, v1, v2), (v2, v1, v3),
+  // (v2, v3, v4), (v4, v3, v5), ...
+  static constexpr uint32_t GetTriangleStripListIndexCount(
+      uint32_t strip_index_count) {
+    return strip_index_count > 2 ? (strip_index_count - 2) * 3 : 0;
+  }
+  template <typename Index, typename IndexTransform>
+  static void TriangleStripToList(Index* dest, const Index* source,
+                                  uint32_t source_index_count,
+                                  const IndexTransform& index_transform) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      Index index_2 = index_transform(source[i - 2]);
+      Index index_1 = index_transform(source[i - 1]);
+      if (i & 1) {
+        *(dest++) = index_1;
+        *(dest++) = index_2;
+      } else {
+        *(dest++) = index_2;
+        *(dest++) = index_1;
+      }
+      *(dest++) = index_transform(source[i]);
+    }
+  }
+  // Auto-indexed (vertex i is index i) runtime conversions for backends that
+  // don't provision the built-in tables, written as 16-bit host indices.
+  static void AutoTriangleStripToList(uint16_t* dest,
+                                      uint32_t source_index_count) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      if (i & 1) {
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i - 2);
+      } else {
+        *(dest++) = uint16_t(i - 2);
+        *(dest++) = uint16_t(i - 1);
+      }
+      *(dest++) = uint16_t(i);
+    }
+  }
+  static void AutoTriangleFanToList(uint16_t* dest,
+                                    uint32_t source_index_count,
+                                    bool first_provoking = false) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      if (first_provoking) {
+        *(dest++) = 0;
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i);
+      } else {
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i);
+        *(dest++) = 0;
+      }
+    }
+  }
+
   // Public so backend fail-closed shape guards and device-free conformance use
   // the shared line-loop count oracle rather than replicating it.
   static constexpr uint32_t GetLineLoopStripIndexCount(
@@ -731,6 +788,17 @@ class PrimitiveProcessor {
           QuadListToTriangleList(dest_write_ptr,
                                  source + range_it->guest_offset,
                                  range_it->guest_index_count, index_transform);
+          dest_write_ptr += range_it->host_index_count;
+        }
+        break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        // Tessellated strips; each reset-separated strip restarts the winding
+        // parity at its own first vertex.
+        for (PrimitiveRangeIterator range_it = ranges_beginning;
+             range_it != ranges_end; ++range_it) {
+          TriangleStripToList(dest_write_ptr,
+                              source + range_it->guest_offset,
+                              range_it->guest_index_count, index_transform);
           dest_write_ptr += range_it->host_index_count;
         }
         break;

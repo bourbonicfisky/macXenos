@@ -332,17 +332,21 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
   Shader::HostVertexShaderType host_vertex_shader_type;
   if (tessellation_enabled) {
-    // Currently only supporting tessellation in known cases for safety, and not
-    // yet converting patch strips / fans to patch lists until games using them
-    // are found for easier debugging when it actually happens.
-    // TODO(Triang3l): Conversion of patch strips / fans if found.
+    // Currently only supporting tessellation in known cases for safety.
     host_vertex_shader_type = Shader::HostVertexShaderType(-1);
     switch (guest_primitive_type) {
       case xenos::PrimitiveType::kTriangleList:
+      case xenos::PrimitiveType::kTriangleFan:
+      case xenos::PrimitiveType::kTriangleStrip:
         // Also supported by triangle strips and fans according to:
         // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-        // Would need to convert those to triangle lists, but haven't seen any
-        // games using tessellated strips / fans so far.
+        // Convert strips and fans to triangle lists for tessellation (Canary
+        // 3eab2b8b3). 4D53085B (Halo: Reach) draws tessellated triangle
+        // strips, both auto-indexed and from index buffers with primitive
+        // reset possible.
+        if (guest_primitive_type != xenos::PrimitiveType::kTriangleList) {
+          host_primitive_type = xenos::PrimitiveType::kTriangleList;
+        }
         switch (tessellation_mode) {
           case xenos::TessellationMode::kDiscrete:
             // - 415607E1 - nets above barrels in the beginning of the first
@@ -570,11 +574,54 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                       xenos::PrimitiveType::kTriangleList);
           cacheable.host_draw_vertex_count =
               GetTriangleFanListIndexCount(cacheable.host_draw_vertex_count);
-          cacheable.index_buffer_type =
-              ProcessedIndexBufferType::kHostBuiltinForAuto;
-          assert_true(builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX);
-          cacheable.host_index_buffer_handle =
-              builtin_ib_offset_triangle_fans_to_lists_;
+          if (builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX) {
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostBuiltinForAuto;
+            cacheable.host_index_buffer_handle =
+                builtin_ib_offset_triangle_fans_to_lists_;
+          } else if (cacheable.host_draw_vertex_count) {
+            // The backend didn't request the built-in fan to list conversion
+            // at initialization, so there's no prebuilt index buffer. Only
+            // reached via the tessellation path above, which forces
+            // host_primitive_type to kTriangleList, so build the conversion at
+            // runtime (Canary 3eab2b8b3), in the same vertex order as the
+            // built-in table would use.
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostConverted;
+            auto host_indices = reinterpret_cast<uint16_t*>(
+                RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16,
+                    cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            AutoTriangleFanToList(host_indices, guest_draw_vertex_count,
+                                  convert_triangle_fans_first_provoking_);
+          }
+          break;
+        case xenos::PrimitiveType::kTriangleStrip:
+          // Only reached via the tessellation path above, which forces
+          // host_primitive_type to kTriangleList. There's no prebuilt strip to
+          // list index buffer, so build the conversion at runtime (Canary
+          // 3eab2b8b3).
+          assert_true(host_primitive_type ==
+                      xenos::PrimitiveType::kTriangleList);
+          cacheable.host_draw_vertex_count =
+              GetTriangleStripListIndexCount(cacheable.host_draw_vertex_count);
+          if (cacheable.host_draw_vertex_count) {
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostConverted;
+            auto host_indices = reinterpret_cast<uint16_t*>(
+                RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16,
+                    cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            AutoTriangleStripToList(host_indices, guest_draw_vertex_count);
+          }
           break;
         case xenos::PrimitiveType::kLineLoop:
           // Plus 1 element (if there's anything to draw) in the strip, still
@@ -736,6 +783,11 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             break;
           case xenos::PrimitiveType::kQuadList:
             host_index_count_getter = GetQuadListTriangleListIndexCount;
+            break;
+          case xenos::PrimitiveType::kTriangleStrip:
+            // Tessellated strips only (the tessellation path converts them to
+            // triangle lists; non-tessellated strips keep host == guest).
+            host_index_count_getter = GetTriangleStripListIndexCount;
             break;
           default:
             assert_unhandled_case(guest_primitive_type);

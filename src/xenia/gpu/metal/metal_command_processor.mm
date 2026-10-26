@@ -6505,8 +6505,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       // The four host primitive shapes the patch dispatch supports (XeniOS
-      // :5431-5456); the shared processor never converts tessellated
-      // topologies, so host == guest here.
+      // :5431-5456). Tessellated triangle strips and fans arrive here as
+      // triangle lists (shared processor, Canary 3eab2b8b3); every other
+      // tessellated topology keeps host == guest.
       switch (tess_pp.host_primitive_type) {
         case xenos::PrimitiveType::kTriangleList:
         case xenos::PrimitiveType::kQuadList:
@@ -6518,12 +6519,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                          "tess-shape");
           return true;
       }
-      // Index stream shapes the arena staging serves: none (auto-indexed) or
-      // guest DMA. Converted/builtin types never occur for tessellated draws.
+      // Index stream shapes the arena staging serves: none (auto-indexed),
+      // guest DMA, and -- for tessellated strips and fans converted to
+      // triangle lists -- the host-converted per-frame pool or the built-in
+      // auto fan table.
       if (tess_pp.index_buffer_type !=
               PrimitiveProcessor::ProcessedIndexBufferType::kNone &&
           tess_pp.index_buffer_type !=
-              PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+              PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+          tess_pp.index_buffer_type !=
+              PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted &&
+          tess_pp.index_buffer_type !=
+              PrimitiveProcessor::ProcessedIndexBufferType::
+                  kHostBuiltinForAuto) {
         RecordDrawSkip(MetalDrawSkipReason::kTessellationUnsupportedShape,
                        "tess-shape");
         return true;
@@ -11746,6 +11754,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             trace_draw_index_, tess_pp.guest_index_base, total,
             metal::MetalMemexportJoinHash(guest_indices, total));
       }
+    } else if (tess_pp.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostConverted ||
+               tess_pp.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForAuto) {
+      // Tessellated strip / fan converted to a triangle list (Canary
+      // 3eab2b8b3): the control-point indices come from this frame's
+      // host-converted pool (in the endianness the processor reports, swapped
+      // per element exactly like the non-tessellated converted draw) or from
+      // the built-in auto fan table (host order). Both are staged into the
+      // same scratch the guest-DMA stream uses, so the host tessellator sees
+      // one stream convention.
+      uint32_t index_size = tess_in.stream_32bit ? 4 : 2;
+      uint32_t host_count = tess_pp.host_draw_vertex_count;
+      uint32_t total = host_count * index_size;
+      host_tessellation_stream_scratch_.resize((total + 3) / 4 + 1);
+      if (tess_pp.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+        const void* converted = primitive_processor_->GetConvertedIndexData(
+            tess_pp.host_index_buffer_handle, total);
+        if (!converted) {
+          RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                         "tess-converted-range");
+          return true;
+        }
+        SwapConvertedIndicesInto(host_tessellation_stream_scratch_.data(),
+                                 converted, host_count,
+                                 tess_pp.host_index_format,
+                                 tess_pp.host_shader_index_endian);
+      } else if (!primitive_processor_->CopyBuiltinIndexData(
+                     tess_pp.host_index_buffer_handle, total,
+                     host_tessellation_stream_scratch_.data())) {
+        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                       "tess-builtin-copy");
+        return true;
+      }
+      tess_in.stream = host_tessellation_stream_scratch_.data();
     }
     if (!host_tessellator_) {
       host_tessellator_ = std::make_unique<HostTessellator>();
