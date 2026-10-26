@@ -45,6 +45,7 @@ struct MipLevelPlan {
   uint32_t height = 0;
   uint32_t px = 0;              // packed sub-tile block origin
   uint32_t py = 0;
+  uint32_t pz = 0;              // 3D packed tail: depth origin (slices)
   // CONSERVATIVE ENVELOPE, absolute: min/max over the tiled source offsets,
   // widened to the last group's end. It is what RequestConsumedRange and the
   // planner need -- a surplus consumed range can only cause an extra hazard
@@ -126,6 +127,12 @@ struct MipLevelPlanInputs {
   // per guest block and the block's edge in texels (4 for DXT/CTX1, else 1).
   uint32_t bytes_per_block = 4;
   uint32_t block_dim = 1;
+  // Guest block WIDTH when it differs from block_dim (2 for the 4:2:2 texel
+  // pairs); 0 means block_dim.
+  uint32_t block_width = 0;
+  // 1D texture: one row per level; a zero fetch pitch (legal for 1D, where
+  // the row pitch addresses nothing) takes the width-derived pitch.
+  bool is_1d = false;
   uint32_t guest_buffer_size = 0;
   bool load_base = false;
   bool load_mips = false;
@@ -167,8 +174,9 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
   // made every 8/16bpp consumed range 2-4x too wide.
   const uint32_t bpb = std::max(in.bytes_per_block, 1u);
   const uint32_t block_dim = std::max(in.block_dim, 1u);
+  const uint32_t block_w = in.block_width ? in.block_width : block_dim;
   auto to_scan_w = [&](uint32_t texels) -> uint32_t {
-    uint32_t blocks = (texels + block_dim - 1u) / block_dim;
+    uint32_t blocks = (texels + block_w - 1u) / block_w;
     return bpb >= 4u ? blocks * (bpb / 4u)
                      : std::max((blocks * bpb + 3u) / 4u, 1u);
   };
@@ -184,6 +192,13 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
     p.pitch_blocks = pitch_bytes / 4u;  // 32bpp: block == texel == 4 bytes
     p.width = std::max(in.width >> level, 1u);
     p.height = std::max(in.height >> level, 1u);
+    if (in.is_1d && !p.pitch_blocks) {
+      // One row: the pitch addresses nothing; use the level's own row size
+      // (in 4-byte groups, at least one) so the scan and loader have a width.
+      uint32_t row_bytes =
+          ((p.width + block_w - 1u) / block_w) * bpb;
+      p.pitch_blocks = std::max((row_bytes + 3u) / 4u, 1u);
+    }
     if (is_packed) {
       uint32_t px = 0, py = 0, pz = 0;
       texture_util::GetPackedMipOffset(in.width, in.height, 1,
@@ -227,8 +242,14 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
 
   if (in.is_3d) {
     // Volume levels: whole-level entries, no per-slice scan.
+    // Packed levels (2026-10-26): every level from the tail's first is stored
+    // in the tail's layout entry and placed by its (x, y, z) origin there,
+    // the same rule the 2D path and the D3D12 loader use. Until now the plan
+    // refused packed 3D tails and the legacy cache drops 3D mips, so every
+    // mipped volume served its base level only.
     auto plan_3d = [&](uint32_t level, uint64_t guest_offset,
-                       const texture_util::TextureGuestLayout::Level& lv) {
+                       const texture_util::TextureGuestLayout::Level& lv,
+                       bool is_packed) {
       MipLevelPlan p;
       p.host_level = level;
       p.slice = 0;
@@ -237,6 +258,15 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
       p.height = std::max(in.height >> level, 1u);
       p.depth = std::max(in.array_size >> level, 1u);
       p.z_stride_block_rows = lv.z_slice_stride_block_rows;
+      if (is_packed) {
+        uint32_t px = 0, py = 0, pz = 0;
+        texture_util::GetPackedMipOffset(in.width, in.height, in.array_size,
+                                         xenos::TextureFormat::k_8_8_8_8,
+                                         level, px, py, pz);
+        p.px = px;
+        p.py = py;
+        p.pz = pz;
+      }
       if (!p.pitch_blocks || !p.width || !p.height ||
           guest_offset >= in.guest_buffer_size) {
         return false;
@@ -252,20 +282,24 @@ inline bool BuildMipLevelPlan(const MipLevelPlanInputs& in,
       return true;
     };
     if (in.load_base) {
-      if (!in.base_address || !plan_3d(0, in.base_address, layout.base)) {
+      if (!in.base_address ||
+          !plan_3d(0, in.base_address, layout.base, packed == 0)) {
         return false;
       }
     }
     if (in.load_mips) {
-      if (!in.mip_max_level || !in.mip_address || packed != UINT32_MAX) {
-        return false;  // packed 3D mip tails stay on the legacy cache
+      if (!in.mip_max_level || !in.mip_address) {
+        return false;
       }
       for (uint32_t level = 1; level <= in.mip_max_level; ++level) {
-        if (level >= xe::countof(layout.mips) ||
+        uint32_t store =
+            packed == UINT32_MAX ? level : std::min(level, packed);
+        if (store >= xe::countof(layout.mips) ||
             !plan_3d(level,
                      uint64_t(in.mip_address) +
-                         uint64_t(layout.mip_offsets_bytes[level]),
-                     layout.mips[level])) {
+                         uint64_t(layout.mip_offsets_bytes[store]),
+                     layout.mips[store],
+                     packed != UINT32_MAX && level >= packed)) {
           return false;
         }
       }

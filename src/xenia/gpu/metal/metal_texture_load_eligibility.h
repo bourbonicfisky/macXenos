@@ -265,6 +265,18 @@ inline bool SharedRouteVolumeEnabled() {
   return s_enabled;
 }
 
+// 1D textures load through the family loaders as one linear row per level
+// into a width x 1 2D host texture (2026-10-26). Before, the legacy cache
+// served them base-only from a CPU untile. XE_METAL_TEX_ROUTE_1D=0 keeps
+// them on the legacy cache.
+inline bool SharedRoute1DEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_ROUTE_1D");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 inline bool IsSharedRouteShapeEligible(
     const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t width,
     uint32_t height, uint32_t pitch_texels) {
@@ -272,16 +284,21 @@ inline bool IsSharedRouteShapeEligible(
                     SharedRouteCubeEnabled() && width == height;
   const bool volume = fetch.dimension == xenos::DataDimension::k3D &&
                       SharedRouteVolumeEnabled() && fetch.tiled;
+  const bool one_d = fetch.dimension == xenos::DataDimension::k1D &&
+                     SharedRoute1DEnabled() && !fetch.tiled &&
+                     !fetch.packed_mips &&
+                     width < xenos::kTexture2DCubeMaxWidthHeight;
   if ((!fetch.tiled && !SharedRouteLinearEnabled()) ||
       (fetch.dimension != xenos::DataDimension::k2DOrStacked && !cube &&
-       !volume) ||
+       !volume && !one_d) ||
       (fetch.stacked && !SharedRouteStackedEnabled())) {
     return false;
   }
   if (!fetch.base_address || !width || !height || !pitch_texels) {
     return false;
   }
-  return fetch.pitch != 0;
+  // 1D: the row pitch addresses nothing (one row), so zero is fine.
+  return fetch.pitch != 0 || one_d;
 }
 
 // Single-mip class for any table format.
@@ -350,7 +367,8 @@ inline bool IsSharedRouteMipEligible(const xenos::xe_gpu_texture_fetch_t& fetch,
   if (fetch.mip_min_level != 0 && !SharedRouteMinMipEnabled()) {
     return false;
   }
-  if (!fetch.mip_address || !fetch.pitch) {
+  if (!fetch.mip_address ||
+      (!fetch.pitch && fetch.dimension != xenos::DataDimension::k1D)) {
     return false;
   }
   xenos::xe_gpu_texture_fetch_t as_base = fetch;

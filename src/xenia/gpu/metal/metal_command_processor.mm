@@ -479,12 +479,24 @@ inline bool RouteServiceOk(ResolvedFetchService service,
           !(declaration_site && RouteAllDrainsBase(fetch_base)));
 }
 inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.width + 1
-                                                  : f.size_2d.width + 1;
+  switch (f.dimension) {
+    case xenos::DataDimension::k1D:
+      return f.size_1d.width + 1;
+    case xenos::DataDimension::k3D:
+      return f.size_3d.width + 1;
+    default:
+      return f.size_2d.width + 1;
+  }
 }
 inline uint32_t fetch_height_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.height + 1
-                                                  : f.size_2d.height + 1;
+  switch (f.dimension) {
+    case xenos::DataDimension::k1D:
+      return 1;
+    case xenos::DataDimension::k3D:
+      return f.size_3d.height + 1;
+    default:
+      return f.size_2d.height + 1;
+  }
 }
 inline uint32_t fetch_pitch_serve(const xenos::xe_gpu_texture_fetch_t& f) {
   uint32_t w = fetch_width_serve(f);
@@ -9491,7 +9503,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           texture_cache_->BridgeServes(f.base_address << 12,
                                                        f.size_2d.width + 1,
                                                        f.size_2d.height + 1);
-            uint32_t fw = f.size_2d.width + 1, fh = f.size_2d.height + 1;
+            uint32_t fw = fetch_width_serve(f), fh = fetch_height_serve(f);
             uint32_t fp = f.pitch ? (uint32_t(f.pitch) << 5)
                                   : ((fw + 31u) & ~31u);
             bool strict = SharedRouteEligible(f, false, fw, fh, fp, nullptr);
@@ -9729,8 +9741,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 fetch.type, cvars::gpu_allow_invalid_fetch_constants)) {
           continue;
         }
-        uint32_t fetch_width = fetch.size_2d.width + 1;
-        uint32_t fetch_height = fetch.size_2d.height + 1;
+        // Per-dimension size (1D and 3D pack their sizes differently).
+        uint32_t fetch_width = fetch_width_serve(fetch);
+        uint32_t fetch_height = fetch_height_serve(fetch);
         uint32_t fetch_pitch_texels = fetch.pitch
                                           ? (uint32_t(fetch.pitch) << 5)
                                           : ((fetch_width + 31u) & ~31u);

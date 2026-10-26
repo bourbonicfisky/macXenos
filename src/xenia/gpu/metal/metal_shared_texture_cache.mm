@@ -265,6 +265,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
   in.mip_max_level = key.mip_max_level;
   in.array_size = key.depth_or_array_size_minus_1 + 1;
   in.is_3d = key.dimension == xenos::DataDimension::k3D;
+  in.is_1d = key.dimension == xenos::DataDimension::k1D;
   in.guest_buffer_size = SharedMemory::kBufferSize;
   in.load_base = load_base;
   in.load_mips = load_mips;
@@ -272,6 +273,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
           FindSharedTextureFormat(key.format)) {
     in.bytes_per_block = entry->bytes_per_block;
     in.block_dim = SharedTextureBlockDim(*entry);
+    in.block_width = SharedTextureBlockWidth(*entry);
   }
   // The single planning authority (metal_mip_level_plan.h), shared with
   // conformance so production and tests can never diverge. The memo caches
@@ -285,7 +287,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
     // origin's rows included). Same conservative role: a surplus only adds a
     // flush.
     const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
-    const uint32_t block_dim = entry ? SharedTextureBlockDim(*entry) : 1u;
+    const uint32_t block_dim = entry ? SharedTextureBlockHeight(*entry) : 1u;
     for (MipLevelPlan& p : *out) {
       const uint64_t rows =
           (uint64_t(p.py) + p.height + block_dim - 1u) / block_dim;
@@ -320,10 +322,18 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   const bool volume = key.dimension == xenos::DataDimension::k3D &&
                       SharedRouteVolumeEnabled() && key.tiled &&
                       key.depth_or_array_size_minus_1 + 1 <= 2048;
+  // 1D (XE_METAL_TEX_ROUTE_1D): one linear row per level, created as a
+  // width x 1 2D texture and served through the same 2D-array view as 2D
+  // textures (the translator samples 1D fetches as 2D arrays). The row pitch
+  // addresses nothing for a single row, so a zero fetch pitch is accepted.
+  const bool one_d = key.dimension == xenos::DataDimension::k1D &&
+                     SharedRoute1DEnabled() && !key.tiled &&
+                     !key.packed_mips;
   if ((key.dimension != xenos::DataDimension::k2DOrStacked && !cube &&
-       !volume) ||
+       !volume && !one_d) ||
       (!key.tiled && !SharedRouteLinearEnabled()) ||
-      key.signed_separate || key.scaled_resolve || key.pitch == 0 ||
+      key.signed_separate || key.scaled_resolve ||
+      (key.pitch == 0 && !one_d) ||
       (key.depth_or_array_size_minus_1 != 0 && !SharedRouteStackedEnabled())) {
     return nullptr;
   }
@@ -532,7 +542,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     // The planner's exact range scan is the 32bpp tiled walk; for the other
     // block sizes register the conservative whole tiled extent of each level
     // (32-row aligned) as consumed. A superset can only add a hazard flush.
-    const uint32_t block_dim = SharedTextureBlockDim(*entry);
+    const uint32_t block_dim = SharedTextureBlockHeight(*entry);
     for (const MipLevelPlan& p : plan) {
       if (p.depth > 1) {
         continue;  // 3D: the plan's range is already the whole level
@@ -585,7 +595,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
              !metal_shared_memory.AnyStagedUploadPending(begin, len,
                                                          open_submission);
     };
-    const uint32_t block_dim = SharedTextureBlockDim(*entry);
+    const uint32_t block_dim = SharedTextureBlockHeight(*entry);
     for (const MipLevelPlan& p : plan) {
       if (!eligible) {
         break;
@@ -1205,6 +1215,22 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_depth_float_cs";
         load_shader_index = kLoadShaderIndexDepthFloat;
         break;
+      case SharedLoadFamily::kR5G5B6ToB5G6R5Rbga:
+        wanted = "texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs";
+        load_shader_index = kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle;
+        break;
+      case SharedLoadFamily::kDxt3aAs1111ToAbgr4:
+        wanted = "texture_load_dxt3aas1111_argb4_cs";
+        load_shader_index = kLoadShaderIndexDXT3AAs1111ToARGB4;
+        break;
+      case SharedLoadFamily::kGbgr8ToRgba8:
+        wanted = "texture_load_gbgr8_rgb8_cs";
+        load_shader_index = kLoadShaderIndexGBGR8ToRGB8;
+        break;
+      case SharedLoadFamily::kBgrg8ToRgba8:
+        wanted = "texture_load_bgrg8_rgb8_cs";
+        load_shader_index = kLoadShaderIndexBGRG8ToRGB8;
+        break;
     }
     if (!wanted) {
       return false;
@@ -1234,7 +1260,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   // write one host block / texel per guest block (host_expand 1), so for
   // them the host side is addressed in blocks and the blit converts to
   // texels (Metal takes compressed copy sizes in texels, rows in bytes).
-  const uint32_t block_dim = SharedTextureBlockDim(entry);
+  // Block width and height differ for the 4:2:2 pairs (2x1).
+  const uint32_t block_w = SharedTextureBlockWidth(entry);
+  const uint32_t block_dim = SharedTextureBlockHeight(entry);
   const uint32_t host_expand = SharedTextureHostExpand(entry);
 
   // Plan every level's scratch region before encoding anything (atomic
@@ -1250,6 +1278,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     uint32_t src_x = 0;     // level origin in the scratch region, texels
     uint32_t src_y = 0;
     uint32_t depth = 1;     // 3D: slices in this level's scratch
+    uint32_t src_z = 0;     // 3D packed tail: first slice of the level
   };
   std::vector<LevelDispatch> dispatches;
   dispatches.reserve(plan.size());
@@ -1261,9 +1290,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     // enclosing region and blitting the sub-rectangle out of it.
     // Packed origins come from the planner in texels; block-compressed
     // packed levels sit on whole blocks.
-    const uint32_t px_blocks = p.px / block_dim;
+    const uint32_t px_blocks = p.px / block_w;
     const uint32_t py_blocks = p.py / block_dim;
-    d.region_w = px_blocks + (p.width + block_dim - 1u) / block_dim;
+    d.region_w = px_blocks + (p.width + block_w - 1u) / block_w;
     d.region_h = py_blocks + (p.height + block_dim - 1u) / block_dim;
     // Level origin in host units (texels for the decoders, blocks for BC).
     d.src_x = px_blocks * host_expand;
@@ -1272,7 +1301,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         ((d.region_w + blocks_per_thread - 1u) / blocks_per_thread) *
         blocks_per_thread * host_expand * bpb;
     d.host_pitch = (written_row + 255u) & ~255u;
-    d.depth = std::max(p.depth, 1u);
+    // A packed 3D level sits at a depth origin inside its tail: dispatch the
+    // enclosing slices and blit from the origin slice.
+    d.depth = p.pz + std::max(p.depth, 1u);
+    d.src_z = p.pz;
     uint64_t dest_bytes =
         uint64_t(d.host_pitch) * d.region_h * host_expand * d.depth + 256u;
     static uint32_t s_scratch_logs = 0;
@@ -1369,7 +1401,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   for (size_t i = 0; i < plan.size(); ++i) {
     const MipLevelPlan& p = plan[i];
     const LevelDispatch& d = dispatches[i];
+    const NSUInteger bytes_per_image =
+        NSUInteger(d.host_pitch) * d.region_h * host_expand;
     NSUInteger source_offset = d.scratch_offset +
+                               NSUInteger(d.src_z) * bytes_per_image +
                                NSUInteger(d.src_y) * d.host_pitch +
                                NSUInteger(d.src_x) * bpb;
     // Rows in host units (texel rows, or block rows for BC); the size is in
@@ -1378,8 +1413,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     [blit copyFromBuffer:(__bridge id<MTLBuffer>)d.scratch
                sourceOffset:source_offset
           sourceBytesPerRow:d.host_pitch
-        sourceBytesPerImage:NSUInteger(d.host_pitch) * d.region_h * host_expand
-                 sourceSize:MTLSizeMake(p.width, p.height, d.depth)
+        sourceBytesPerImage:bytes_per_image
+                 sourceSize:MTLSizeMake(p.width, p.height,
+                                        std::max(p.depth, 1u))
                   toTexture:base_texture
            destinationSlice:p.slice
            destinationLevel:p.host_level
