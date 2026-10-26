@@ -1811,19 +1811,24 @@ void MetalSharedTextureCache::OnSubmissionsFaulted(
     }
     // The load rode a lost command buffer: its content is garbage while
     // base state says up-to-date. Invalidate through the ONE authority —
-    // the watch fires, the texture goes outdated, and the next use
-    // revalidates + reloads from intact RAM (also evicts any overlapping
-    // legacy entry via its own global watch).
+    // the watch fires, the texture goes outdated, and the next use reloads
+    // from intact RAM (also evicts any overlapping legacy entry via its own
+    // global watch). The region's content hash is dropped too: RAM did not
+    // change, so RevalidateRegions would otherwise match the hash and skip
+    // the reload, serving the garbage until the guest rewrote the bytes
+    // (conformance "Base and mip provenance ... either fault refuses").
     TextureKey key = texture.key();
     if (base_faulted) {
       shared_memory().MemoryInvalidationCallback(
           key.base_page << 12, texture.GetGuestBaseSize(), true);
       metal_texture.last_load_submission = 0;
+      metal_texture.base_hash = 0;
     }
     if (mip_faulted) {
       shared_memory().MemoryInvalidationCallback(
           key.mip_page << 12, texture.GetGuestMipsSize(), true);
       metal_texture.last_mip_load_submission = 0;
+      metal_texture.mips_hash = 0;
     }
   });
 }
