@@ -13,6 +13,7 @@
 #include "xenia/kernel/info/volume.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_ob.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/device.h"
@@ -234,8 +235,10 @@ dword_result_t NtSetInformationFile_entry(
     case XFileRenameInformation: {
       auto info = info_ptr.as<X_FILE_RENAME_INFORMATION*>();
       // Compute path, possibly attrs relative.
-      std::filesystem::path target_path =
+      auto target_name =
           util::TranslateAnsiPath(kernel_memory(), &info->ansi_string);
+      xeObStripDosDevicesPrefix(target_name);
+      std::filesystem::path target_path = target_name;
 
       // Place IsValidPath in path from where it can be accessed everywhere
       if (!IsValidPath(target_path.string(), false)) {
