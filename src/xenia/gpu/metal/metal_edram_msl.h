@@ -1179,6 +1179,12 @@ struct CanonicalResolveParams {
   // RB_COPY_DEST_INFO copy_dest_number: how fixed-point destination formats
   // are packed (see xe_resolve_pack_fixed).
   uint dest_number;
+  // Integer-number-format destination (copy_dest_number 2/3) resolved into a
+  // FLOAT snapshot texture: the component widths (8 bits each, r g b a) whose
+  // 2^bits-1 divides the biased value, so the snapshot's normalized value is
+  // the RAM texture's bits (the guest's integer fetch rescales by 2^bits-1).
+  // 0 for packed destinations and fraction/float number formats.
+  uint dest_int_bits;
 };
 // The draw resolution scale (host pixels per guest pixel) implied by the tile
 // geometry, and the host pixel a resolve reads for a guest pixel: the
@@ -1218,6 +1224,10 @@ inline float4 xe_resolve_read_color(device const uint* canonical,
 inline float4 xe_resolve_color_finish(float4 value,
                                       constant CanonicalResolveParams& p) {
   value *= p.exp_bias_scale;
+  if (p.dest_int_bits != 0u) {
+    uint4 bits = (uint4(p.dest_int_bits) >> uint4(0u, 8u, 16u, 24u)) & 0xFFu;
+    value /= max(exp2(float4(bits)) - 1.0, 1.0);
+  }
   if (p.dest_swap == 0u) {
     return value;
   }
@@ -1284,34 +1294,6 @@ inline float4 xe_resolve_color_value(device const uint* canonical,
 
 // Guest resolve destination packing. Keep these switches in lockstep with
 // pixel_formats.xesli XePack{16,32,64}bpp* and resolve_full_128bpp.xesli.
-inline uint xe_resolve_pack_5551(float4 v) {
-  uint4 n = uint4(saturate(v) * float4(31.0, 31.0, 31.0, 1.0) + 0.5);
-  return n.r | (n.g << 5u) | (n.b << 10u) | (n.a << 15u);
-}
-inline uint xe_resolve_pack_565(float3 v) {
-  uint3 n = uint3(saturate(v) * float3(31.0, 63.0, 31.0) + 0.5);
-  return n.r | (n.g << 5u) | (n.b << 11u);
-}
-inline uint xe_resolve_pack_556(float3 v) {
-  uint3 n = uint3(saturate(v) * float3(31.0, 31.0, 63.0) + 0.5);
-  return n.r | (n.g << 5u) | (n.b << 10u);
-}
-inline uint xe_resolve_pack_4444(float4 v) {
-  uint4 n = uint4(saturate(v) * 15.0 + 0.5);
-  return n.r | (n.g << 4u) | (n.b << 8u) | (n.a << 12u);
-}
-inline uint xe_resolve_pack_1010102(float4 v) {
-  uint4 n = uint4(saturate(v) * float4(1023.0, 1023.0, 1023.0, 3.0) + 0.5);
-  return n.r | (n.g << 10u) | (n.b << 20u) | (n.a << 30u);
-}
-inline uint xe_resolve_pack_111110(float3 v) {
-  uint3 n = uint3(saturate(v) * float3(2047.0, 2047.0, 1023.0) + 0.5);
-  return n.r | (n.g << 11u) | (n.b << 22u);
-}
-inline uint xe_resolve_pack_101111(float3 v) {
-  uint3 n = uint3(saturate(v) * float3(1023.0, 2047.0, 2047.0) + 0.5);
-  return n.r | (n.g << 10u) | (n.b << 21u);
-}
 // Fixed-point pack by the destination number format (RB_COPY_DEST_INFO
 // copy_dest_number): 0 unsigned fraction, 1 signed fraction, 2 unsigned
 // integer, 3 signed integer; anything else packs as an unsigned fraction.
@@ -1338,6 +1320,50 @@ inline uint xe_resolve_pack_fixed(float v, uint bits, uint num_format) {
   }
   return packed & unsigned_max;
 }
+inline uint xe_resolve_pack_5551(float4 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 5u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 5u, num_format) << 5u) |
+         (xe_resolve_pack_fixed(v.b, 5u, num_format) << 10u) |
+         (xe_resolve_pack_fixed(v.a, 1u, num_format) << 15u);
+}
+inline uint xe_resolve_pack_565(float3 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 5u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 6u, num_format) << 5u) |
+         (xe_resolve_pack_fixed(v.b, 5u, num_format) << 11u);
+}
+inline uint xe_resolve_pack_556(float3 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 5u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 5u, num_format) << 5u) |
+         (xe_resolve_pack_fixed(v.b, 6u, num_format) << 10u);
+}
+inline uint xe_resolve_pack_4444(float4 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 4u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 4u, num_format) << 4u) |
+         (xe_resolve_pack_fixed(v.b, 4u, num_format) << 8u) |
+         (xe_resolve_pack_fixed(v.a, 4u, num_format) << 12u);
+}
+inline uint xe_resolve_pack_8888(float4 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 8u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 8u, num_format) << 8u) |
+         (xe_resolve_pack_fixed(v.b, 8u, num_format) << 16u) |
+         (xe_resolve_pack_fixed(v.a, 8u, num_format) << 24u);
+}
+inline uint xe_resolve_pack_1010102(float4 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 10u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 10u, num_format) << 10u) |
+         (xe_resolve_pack_fixed(v.b, 10u, num_format) << 20u) |
+         (xe_resolve_pack_fixed(v.a, 2u, num_format) << 30u);
+}
+inline uint xe_resolve_pack_111110(float3 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 11u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 11u, num_format) << 11u) |
+         (xe_resolve_pack_fixed(v.b, 10u, num_format) << 22u);
+}
+inline uint xe_resolve_pack_101111(float3 v, uint num_format) {
+  return xe_resolve_pack_fixed(v.r, 10u, num_format) |
+         (xe_resolve_pack_fixed(v.g, 11u, num_format) << 10u) |
+         (xe_resolve_pack_fixed(v.b, 11u, num_format) << 21u);
+}
 inline uint xe_resolve_pack_16(float v, uint num_format) {
   return xe_resolve_pack_fixed(v, 16u, num_format);
 }
@@ -1353,14 +1379,13 @@ inline uint2 xe_resolve_pack_16_16_16_16(float4 v, uint num_format) {
 }
 inline ushort xe_resolve_pack_16bpp(float4 v, uint format, uint num_format) {
   switch (format) {
-    case 3u: return ushort(xe_resolve_pack_5551(v));
-    case 4u: return ushort(xe_resolve_pack_565(v.rgb));
-    case 5u: return ushort(xe_resolve_pack_556(v.rgb));
-    case 10u: {
-      uint2 n = uint2(saturate(v.rg) * 255.0 + 0.5);
-      return ushort(n.x | (n.y << 8u));
-    }
-    case 15u: return ushort(xe_resolve_pack_4444(v));
+    case 3u: return ushort(xe_resolve_pack_5551(v, num_format));
+    case 4u: return ushort(xe_resolve_pack_565(v.rgb, num_format));
+    case 5u: return ushort(xe_resolve_pack_556(v.rgb, num_format));
+    case 10u:
+      return ushort(xe_resolve_pack_fixed(v.r, 8u, num_format) |
+                    (xe_resolve_pack_fixed(v.g, 8u, num_format) << 8u));
+    case 15u: return ushort(xe_resolve_pack_4444(v, num_format));
     case 24u: return ushort(xe_resolve_pack_16(v.r, num_format));
     default: return as_type<ushort>(half(v.r));
   }
@@ -1369,16 +1394,13 @@ inline uint xe_resolve_pack_32bpp(float4 v, uint format, uint num_format) {
   switch (format) {
     case 6u:
     case 14u:
-    case 50u: {
-      uint4 n = uint4(saturate(v) * 255.0 + 0.5);
-      return n.r | (n.g << 8u) | (n.b << 16u) | (n.a << 24u);
-    }
+    case 50u: return xe_resolve_pack_8888(v, num_format);
     case 7u:
-    case 54u: return xe_resolve_pack_1010102(v);
+    case 54u: return xe_resolve_pack_1010102(v, num_format);
     case 16u:
-    case 55u: return xe_resolve_pack_111110(v.rgb);
+    case 55u: return xe_resolve_pack_111110(v.rgb, num_format);
     case 17u:
-    case 56u: return xe_resolve_pack_101111(v.rgb);
+    case 56u: return xe_resolve_pack_101111(v.rgb, num_format);
     case 13u:
     case 25u: return xe_resolve_pack_16_16(v.rg, num_format);
     case 31u: return as_type<uint>(half2(v.rg));
@@ -1496,7 +1518,8 @@ inline void xe_resolve_store_value(device uchar* destination,
                                    constant CanonicalResolveParams& p) {
   switch (p.dest_bpp_log2) {
     case 0u:
-      destination[byte_offset] = uchar(saturate(value.r) * 255.0 + 0.5);
+      destination[byte_offset] =
+          uchar(xe_resolve_pack_fixed(value.r, 8u, p.dest_number));
       break;
     case 1u: {
       ushort packed =

@@ -357,8 +357,13 @@ struct CanonicalResolveParamsHost {
   uint32_t scatter_enable;
   uint32_t dest_base, dest_pitch_aligned;
   uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+  // copy_dest_number (fixed-point pack semantics) and the integer-destination
+  // component widths for float snapshots; both 0 = unsigned fraction, the
+  // pack every case below expects unless it sets dest_number itself.
+  uint32_t dest_number;
+  uint32_t dest_int_bits;
 };
-static_assert(sizeof(CanonicalResolveParamsHost) == 26u * sizeof(uint32_t));
+static_assert(sizeof(CanonicalResolveParamsHost) == 28u * sizeof(uint32_t));
 
 // Host mirror of the shared MSL CanonicalClearParams (metal_edram_msl.h). The
 // clear scatter writes one clear word (two for 64bpp) at each declared
@@ -660,7 +665,8 @@ struct MetalCompute {
       uint32_t color_format, float exp_bias_scale, uint32_t dest_format,
       uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
       const std::array<uint32_t, 4>& sample_words,
-      const std::array<uint32_t, 4>* second_sample_words = nullptr) {
+      const std::array<uint32_t, 4>* second_sample_words = nullptr,
+      uint32_t dest_number = 0u) {
     const size_t canonical_bytes = xenos::kEdramSizeBytes;
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
@@ -686,6 +692,7 @@ struct MetalCompute {
         uint32_t(dest_bpp_log2 == 0u),
         exp_bias_scale, 1u, 1u, dest_format, dest_bpp_log2, dest_endian,
         uint32_t(raw_copy)};
+    params.dest_number = dest_number;
     NSError* error = nil;
     id<MTLComputePipelineState> pipeline = [dev
         newComputePipelineStateWithFunction:
@@ -3311,6 +3318,60 @@ TEST_CASE("Canonical packed color resolve matches guest formats and Endian128",
   CHECK(l8[0] == 0x10u);
 }
 
+
+TEST_CASE("Canonical packed color resolve honors copy_dest_number integer",
+          "[l1][metal][canonical][resolve][packed][number]") {
+  // Crysis 3 resolves its 7e3 HDR scene with exp_bias +6 into an unsigned
+  // INTEGER 11:11:10 destination (RB_COPY_DEST_INFO copy_dest_number 2) and
+  // fetches it back as integer with exp_adjust -6: the stored word is
+  // round(value * 64), not saturate(value * 64) * 2047. The unsigned-fraction
+  // pack saturated the whole scene copy to 0xFFFFFFFF (the washout).
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t word_count =
+      uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t));
+  auto read32 = [](const std::array<uint8_t, 16>& bytes, uint32_t word = 0u) {
+    uint32_t value;
+    std::memcpy(&value, bytes.data() + word * sizeof(uint32_t), sizeof(value));
+    return value;
+  };
+  SurfaceParams rgba_sp{0u, PitchFor(1u, 2u, 0u), 2u, 0u, 0u, word_count};
+  std::array<uint32_t, 4> samples;
+  // 8888 source A=0xFF B=0x33 G=0x22 R=0x11 (word is ABGR little-endian).
+  samples.fill(0xFF332211u);
+  // Unsigned fraction (dest_number 0): every channel * 64 saturates.
+  auto fraction = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 64.0f,
+                                           16u, 2u, 0u, false, samples,
+                                           nullptr, 0u);
+  CHECK(read32(fraction) == 0xFFFFFFFFu);
+  // Unsigned integer (dest_number 2): round(c / 255 * 64) per channel.
+  // R 0x11 -> 4.27 -> 4, G 0x22 -> 8.53 -> 9, B 0x33 -> 12.8 -> 13.
+  auto integer = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 64.0f,
+                                          16u, 2u, 0u, false, samples,
+                                          nullptr, 2u);
+  CHECK(read32(integer) == (4u | (9u << 11u) | (13u << 22u)));
+  // Integer saturates at the component maximum, not at 1.0: * 65536 into
+  // 11:11:10 clamps R to 2047, G to 2047, B to 1023.
+  auto clamped = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 65536.0f,
+                                          16u, 2u, 0u, false, samples,
+                                          nullptr, 2u);
+  CHECK(read32(clamped) == 0xFFFFFFFFu);
+  // 16_16_16_16 integer with bias 2048 (Crysis 3's luminance chain):
+  // R 0x11 -> 136.5 -> 137, G 0x22 -> 273.1 -> 273, B 0x33 -> 409.6 -> 410,
+  // A 0xFF -> 2048.
+  auto wide = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 2048.0f,
+                                       26u, 3u, 0u, false, samples,
+                                       nullptr, 2u);
+  CHECK(read32(wide, 0u) == (137u | (273u << 16u)));
+  CHECK(read32(wide, 1u) == (410u | (2048u << 16u)));
+  // Signed fraction (dest_number 1) packs with the positive endpoint 127.
+  auto snorm = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 1.0f,
+                                        6u, 2u, 0u, false, samples,
+                                        nullptr, 1u);
+  // 0x11/255*127 = 8.47 -> 8, 0x22 -> 16.9 -> 17, 0x33 -> 25.4 -> 25,
+  // 0xFF -> 127.
+  CHECK(read32(snorm) == (8u | (17u << 8u) | (25u << 16u) | (127u << 24u)));
+}
 TEST_CASE("Canonical resolve clear writes only the declared surface samples",
           "[l1][metal][canonical][resolve][clear]") {
   MetalCompute mc;

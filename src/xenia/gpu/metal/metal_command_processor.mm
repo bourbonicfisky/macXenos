@@ -13234,6 +13234,33 @@ bool MetalCommandProcessor::IssueCopy() {
         float exp_bias_scale = std::ldexp(
             1.0f,
             int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias));
+        // Integer-number-format destination (RB_COPY_DEST_INFO
+        // copy_dest_number 2/3): the hardware stores the biased value as an
+        // integer and the guest fetches it back as integer (the fetch's
+        // texture_integer_scale_bits rescales normalized samples by
+        // 2^bits-1). A float snapshot therefore holds value * 2^bias /
+        // (2^bits-1) per channel, the RAM texture's normalized bits. Crysis 3
+        // resolves its 7e3 HDR scene with exp_bias +6 into integer 11:11:10
+        // and fetches it with exp_adjust -6; the fraction pack saturated the
+        // whole scene copy to white.
+        uint32_t dest_int_bits = 0;
+        {
+          const xenos::SurfaceNumberFormat dest_number =
+              resolve_info.copy_dest_info.copy_dest_number;
+          if (dest_number == xenos::SurfaceNumberFormat::kUnsignedInteger ||
+              dest_number == xenos::SurfaceNumberFormat::kSignedInteger) {
+            const FormatInfo* dest_format_info =
+                FormatInfo::Get(xenos::TextureFormat(
+                    resolve_info.copy_dest_info.copy_dest_format));
+            if (dest_format_info && dest_format_info->fixed) {
+              for (uint32_t c = 0; c < 4; ++c) {
+                dest_int_bits |=
+                    uint32_t(dest_format_info->component_bits[c] & 0xFF)
+                    << (c * 8);
+              }
+            }
+          }
+        }
         // Raw-copy eligibility is shared resolve semantics, not a Metal
         // decision: ask draw_util rather than re-deriving the condition here,
         // so shared changes to it cannot silently skip this backend.
@@ -13299,14 +13326,15 @@ bool MetalCommandProcessor::IssueCopy() {
                          resolve_info.copy_dest_info.copy_dest_swap != 0,
                          canonical_raw_copy,
                          snap, dest_pixel_format, rw, rh, strip_y_offset,
-                         exp_bias_scale);
+                         exp_bias_scale, /*dest_x_offset=*/0, dest_int_bits);
           }
         } else if (snap) {
           resolved = render_target_cache_->ResolveColorToSnapshot(
               frame_command_buffer_, span_base, span_row_length, span_rows,
               span_pitch,
               uint32_t(resolve_info.color_edram_info.msaa_samples), snap,
-              dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale);
+              dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale,
+              dest_int_bits);
         }
         // Draw resolution scaling: a column of a destination wider than the
         // resolve (no offset, dest pitch > width, not a vertical strip) also
@@ -13371,7 +13399,8 @@ bool MetalCommandProcessor::IssueCopy() {
                                    .copy_sample_select),
                       resolve_info.copy_dest_info.copy_dest_swap != 0,
                       canonical_raw_copy, assembly_snap, dest_pixel_format, rw,
-                      rh, /*dest_y_offset=*/0, exp_bias_scale, assembly_x)) {
+                      rh, /*dest_y_offset=*/0, exp_bias_scale, assembly_x,
+                      dest_int_bits)) {
                 assembly_snap = nullptr;
               }
             }

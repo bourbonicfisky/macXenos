@@ -222,7 +222,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                               uint32_t span_pitch, uint32_t span_msaa_samples,
                               void* dest_snapshot, uint64_t dest_pixel_format,
                               uint32_t width, uint32_t height,
-                              uint32_t dest_y_offset, float exp_bias_scale);
+                              uint32_t dest_y_offset, float exp_bias_scale,
+                              uint32_t dest_int_bits = 0);
   bool ResolveCanonicalToSnapshot(
       const void* command_buffer, bool is_depth, uint32_t base_tiles,
       uint32_t pitch_tiles, uint32_t msaa_samples, uint32_t format,
@@ -231,7 +232,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       void* dest_snapshot,
       uint64_t dest_pixel_format, uint32_t width, uint32_t height,
       uint32_t dest_y_offset, float exp_bias_scale,
-      uint32_t dest_x_offset = 0);
+      uint32_t dest_x_offset = 0, uint32_t dest_int_bits = 0);
   struct CanonicalScatterDest;
   // Direct colour resolve (reduce-edram-pass-traffic Lever 4, default on;
   // XE_METAL_DIRECT_COLOR_RESOLVE=0 rolls back): between Begin

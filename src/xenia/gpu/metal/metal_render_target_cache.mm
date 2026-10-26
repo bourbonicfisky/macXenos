@@ -4707,7 +4707,8 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, uint32_t span_msaa_samples,
     void* dest_snapshot, uint64_t dest_pixel_format, uint32_t width,
-    uint32_t height, uint32_t dest_y_offset, float exp_bias_scale) {
+    uint32_t height, uint32_t dest_y_offset, float exp_bias_scale,
+    uint32_t dest_int_bits) {
   if (!command_buffer || !dest_snapshot) {
     return false;
   }
@@ -4730,7 +4731,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
       struct Params {
         uint src_base; uint src_pitch; uint span_base; uint span_pitch;
         uint start_tiles; uint end_tiles; uint y_offset; uint shifts;
-        uint tile_w; float exp_bias_scale; uint pad2; uint pad3;
+        uint tile_w; float exp_bias_scale; uint dest_int_bits; uint pad3;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_rcp_vs(uint vid [[vertex_id]]) {
@@ -4764,7 +4765,15 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
         if (sp.x >= src.get_width() || sp.y >= src.get_height()) {
           discard_fragment();
         }
-        return src.read(sp, 0) * p.exp_bias_scale;
+        float4 v = src.read(sp, 0) * p.exp_bias_scale;
+        // Integer-number-format destination in a float snapshot: see
+        // CanonicalResolveParams::dest_int_bits.
+        if (p.dest_int_bits != 0u) {
+          uint4 bits =
+              (uint4(p.dest_int_bits) >> uint4(0u, 8u, 16u, 24u)) & 0xFFu;
+          v /= max(exp2(float4(bits)) - 1.0, 1.0);
+        }
+        return v;
       }
     )METAL";
     NSError* err = nil;
@@ -4855,7 +4864,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
       uint32_t start_tiles, end_tiles, y_offset, shifts;
       uint32_t tile_w;
       float exp_bias_scale;
-      uint32_t pad2, pad3;
+      uint32_t dest_int_bits, pad3;
     } params{owner_base,
              owner_pitch,
              span_base,
@@ -4866,7 +4875,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
              oxs | (oys << 4) | (oxs << 8) | (oys << 12),
              tile_w,
              exp_bias_scale,
-             0,
+             dest_int_bits,
              0};
     MTLRenderPassDescriptor* pass =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -4911,7 +4920,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     void* dest_snapshot,
     uint64_t dest_pixel_format, uint32_t width, uint32_t height,
     uint32_t dest_y_offset, float exp_bias_scale,
-    uint32_t dest_x_offset) {
+    uint32_t dest_x_offset, uint32_t dest_int_bits) {
   xenos::ColorRenderTargetFormat storage_format =
       is_depth
           ? xenos::ColorRenderTargetFormat::k_8_8_8_8
@@ -4992,6 +5001,13 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     float exp_bias_scale;
     uint32_t width, height;
     uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+    // Scatter fields (unused by the snapshot fragment path) and the integer
+    // destination widths; the MSL struct is shared with the packed path.
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            // A destination x offset (an assembled column) shifts the shader's
            // destination->source mapping and bound; the scissor excludes the
@@ -5002,8 +5018,8 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
            uint32_t(!is_depth && raw_copy &&
                     dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
            exp_bias_scale, dest_x_offset + clipped_width, clipped_height, 0u,
-           0u, 0u, 0u};
-  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+           0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, dest_int_bits};
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   static const bool s_canonical_resolve_log =
       std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
   if (s_canonical_resolve_log && width >= 512) {
@@ -5153,6 +5169,7 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            source_x,
            source_y,
@@ -5174,8 +5191,9 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
+           0u,
            0u};
-  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -5256,6 +5274,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            source_x,
            source_y,
@@ -5277,8 +5296,9 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
-           dest_number};
-  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
+           dest_number,
+           0u};
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   const bool direct = direct_color_source_ != nullptr;
