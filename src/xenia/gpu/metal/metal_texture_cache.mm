@@ -113,6 +113,9 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
     // same decode (JC2's temporal composite fetches its history buffer with
     // it).
     case xenos::TextureFormat::k_8_8_8_8_AS_16_16_16_16:
+    // k_8_8_8_8_A: the shared GetBaseFormat maps it to 8888 (D3D12 serves it
+    // through that host format); until 2026-10-26 it had no plan here.
+    case xenos::TextureFormat::k_8_8_8_8_A:
       return {true,  false, 4, 2, 1, MTLPixelFormatRGBA8Unorm,
               false, false, MTLPixelFormatRGBA8Snorm};
     case xenos::TextureFormat::k_8_8:
@@ -123,6 +126,9 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
            MTLPixelFormatRG8Snorm},
           xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG);
     case xenos::TextureFormat::k_8:
+    // k_8_A / k_8_B: GetBaseFormat aliases of k_8 (same bytes, D3D12 R8).
+    case xenos::TextureFormat::k_8_A:
+    case xenos::TextureFormat::k_8_B:
       return ReplicateNarrowHostChannels(
           {true, false, 1, 0, 1, MTLPixelFormatR8Unorm, false, false,
            MTLPixelFormatR8Snorm},
@@ -150,6 +156,12 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
         }
       }
       return {true, false, 16, 4, 1, MTLPixelFormatRGBA32Float};
+    case xenos::TextureFormat::k_32_32_FLOAT:
+      // Two-channel 32-bit float (D3D12 R32G32_FLOAT, RGGG). The shared route
+      // serves it since 2026-10-17; this covers its residual classes.
+      return ReplicateNarrowHostChannels(
+          {true, false, 8, 3, 1, MTLPixelFormatRG32Float},
+          xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG);
     case xenos::TextureFormat::k_16_16_16_16_EXPAND:
     case xenos::TextureFormat::k_16_16_16_16_FLOAT:
       // 64bpp RGBA16F. Sonic's upscale draw reads its 1x1 EXPOSURE and a
@@ -760,6 +772,13 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
   inputs.swizzle = uint32_t(fetch.swizzle & 0xFFF);
   inputs.mip_min_level = mip_min_level;
   inputs.mip_max_level = mip_max_level;
+  // Storage identity the key used to omit (2026-10-26): the raw mip address,
+  // the raw packed-mips flag and the stacked flag. Census found no in-flight
+  // mis-serve from them, but two fetches differing only there describe
+  // different guest bytes, as D3D12's TextureKey (mip_page, packed_mips) does.
+  inputs.mip_address = uint32_t(fetch.mip_address);
+  inputs.packed_mips = fetch.packed_mips ? 1u : 0u;
+  inputs.stacked = fetch.stacked ? 1u : 0u;
   return MakeMetalTextureKey(inputs);
 }
 
