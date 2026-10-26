@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Fable II (4D5307F1).
+# The game draws its glowing breadcrumb trail and parts of the scene through
+# vertex shaders that export to memory while rasterizing. With those exports
+# dropped (the Metal default, for their cost elsewhere) the opening village
+# shows a white smear over the path, a blacked-out area around the hero and
+# no trail; with them routed the frame renders correctly. The M4 mini stays
+# at the 30 fps cap with it (13 -> 54 command-buffer commits a frame).
+# (xenia-mac-evidence raster-ab-20261026)
+[GPU]
+metal_memexport_raster = true
