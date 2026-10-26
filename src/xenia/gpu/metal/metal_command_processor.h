@@ -935,6 +935,7 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_set<uint64_t> faulted_submissions_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
+  void DumpBoundColorRtDiagnostic(const Shader* pixel_shader);
   void ServiceLazyCommitRequest();
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless

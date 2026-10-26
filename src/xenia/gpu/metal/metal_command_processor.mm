@@ -6044,6 +6044,179 @@ void MetalCommandProcessor::ServiceLazyCommitRequest() {
   lazy_commit_request_.store(0, std::memory_order_release);
 }
 
+// Diagnostics XE_METAL_DUMP_RT / XE_METAL_DUMP_RT_PS (see the block): called
+// from every IssueDraw encode path that ends a draw, including the
+// geometry-emulated one that returns before the common tail.
+void MetalCommandProcessor::DumpBoundColorRtDiagnostic(
+    const Shader* pixel_shader) {
+  // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
+  // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
+  // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture
+  // pipeline (splits "content mislaid in the texture" from "the dump/EDRAM
+  // mapping mislays it").
+  static const int64_t s_dump_rt_at = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_RT");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  // Live variant: XE_METAL_DUMP_RT_PS=<pixel shader ucode hash hex>[:<every>]
+  // dumps the bound color-0 RT after every <every>-th draw using that pixel
+  // shader (default every 60th) to /tmp/xe_rtps_<swap>_<n>.ppm, so a live
+  // pass output can be compared with the same pass in a replay.
+  // Several shaders: "hash[:every],hash[:every],...". Each has its own
+  // occurrence counter; the file name carries the swap, the shader's hash
+  // prefix and its occurrence count.
+  struct DumpRtPsEntry {
+    uint64_t hash;
+    uint32_t every;
+    uint32_t seen;
+  };
+  static std::vector<DumpRtPsEntry> s_dump_rt_ps = [] {
+    std::vector<DumpRtPsEntry> entries;
+    const char* v = std::getenv("XE_METAL_DUMP_RT_PS");
+    if (!v) return entries;
+    std::string spec(v);
+    size_t pos = 0;
+    while (pos < spec.size()) {
+      size_t comma = spec.find(',', pos);
+      std::string item = spec.substr(
+          pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      char* end = nullptr;
+      uint64_t hash = strtoull(item.c_str(), &end, 16);
+      uint32_t every = 60u;
+      if (end && *end == ':') {
+        every = !strcmp(end + 1, "trace")
+                    ? 0u
+                    : uint32_t(strtoul(end + 1, nullptr, 10));
+        if (every == 0u && strcmp(end + 1, "trace") != 0) every = 60u;
+      }
+      if (hash) entries.push_back({hash, every, 0u});
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+    return entries;
+  }();
+  bool dump_ps_now = false;
+  uint32_t s_dump_rt_ps_seen = 0;
+  uint64_t dump_ps_hash = 0;
+  if (pixel_shader) {
+    for (DumpRtPsEntry& e : s_dump_rt_ps) {
+      if (e.hash == pixel_shader->ucode_data_hash()) {
+        ++e.seen;
+        if (e.every == 0u ? trace_writer_.is_open() : (e.seen % e.every) == 0) {
+          dump_ps_now = true;
+          s_dump_rt_ps_seen = e.seen;
+          dump_ps_hash = e.hash;
+        }
+        break;
+      }
+    }
+  }
+  // XE_METAL_DUMP_RT_CONSTS=<c,c,...>: with every dump, log those pixel
+  // shader float constants (exposure / curve parameters live vs replay).
+  if (dump_ps_now) {
+    static const std::vector<uint32_t> s_dump_consts = [] {
+      std::vector<uint32_t> out;
+      const char* v = std::getenv("XE_METAL_DUMP_RT_CONSTS");
+      if (!v) return out;
+      std::string spec(v);
+      size_t pos = 0;
+      while (pos < spec.size()) {
+        size_t comma = spec.find(',', pos);
+        out.push_back(uint32_t(strtoul(spec.substr(pos).c_str(), nullptr, 10)));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+      }
+      return out;
+    }();
+    for (uint32_t c : s_dump_consts) {
+      if (c >= 256) continue;
+      uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
+      XELOGW("XE_METAL_DUMP_RT: swap#{} ps c{} = ({}, {}, {}, {})", swap_count_,
+             c, register_file_->Get<float>(r), register_file_->Get<float>(r + 1),
+             register_file_->Get<float>(r + 2), register_file_->Get<float>(r + 3));
+    }
+  }
+  if (dump_ps_now ||
+      (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at)) {
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
+    if (rt_ptr) {
+      __unsafe_unretained id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
+      uint32_t tw = uint32_t(rt_tex.width), th = uint32_t(rt_tex.height);
+      uint32_t bpp = 4;
+      switch (rt_tex.pixelFormat) {
+        case MTLPixelFormatRGBA16Float:
+        case MTLPixelFormatRGBA16Unorm:
+        case MTLPixelFormatRGBA16Snorm:
+        case MTLPixelFormatRGBA16Uint:
+        case MTLPixelFormatRG32Float:
+        case MTLPixelFormatRG32Uint:
+          bpp = 8;
+          break;
+        case MTLPixelFormatRGBA32Float:
+        case MTLPixelFormatRGBA32Uint:
+          bpp = 16;
+          break;
+        default:
+          break;
+      }
+      id<MTLBuffer> rb =
+          [rt_tex.device newBufferWithLength:size_t(tw) * th * bpp
+                                     options:MTLResourceStorageModeShared];
+      __unsafe_unretained id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->command_queue();
+      if (rb && dq) {
+        id<MTLCommandBuffer> dcb = [dq commandBuffer];
+        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+        [dbl copyFromTexture:rt_tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(tw, th, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:tw * bpp
+     destinationBytesPerImage:size_t(tw) * th * bpp];
+        [dbl endEncoding];
+        [dcb commit];
+        [dcb waitUntilCompleted];
+        std::string path =
+            dump_ps_now ? fmt::format("/tmp/xe_rtps_{}_{:08X}_{}.ppm",
+                                      swap_count_, uint32_t(dump_ps_hash >> 32),
+                                      s_dump_rt_ps_seen)
+                        : fmt::format("/tmp/xe_rt_{}.ppm", s_dump_rt_at);
+        if (bpp != 4) {
+          // Raw texels beside the PPM for 64/128-bit targets (half floats);
+          // the PPM shows each texel's first 3 bytes.
+          if (FILE* fr = fopen((path + ".raw").c_str(), "wb")) {
+            fwrite(rb.contents, 1, size_t(tw) * th * bpp, fr);
+            fclose(fr);
+          }
+        }
+        FILE* f = fopen(path.c_str(), "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", tw, th);
+          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
+          uint64_t a_sum = 0;
+          uint8_t a_min = 255, a_max = 0;
+          for (size_t i = 0; i < size_t(tw) * th; ++i) {
+            fwrite(px + i * bpp, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
+            uint8_t a = px[i * bpp + 3];
+            a_sum += a;
+            a_min = std::min(a_min, a);
+            a_max = std::max(a_max, a);
+          }
+          fclose(f);
+          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{} fmt={} bpp={}) alpha min={} max={} mean={:.2f}",
+                 path, tw, th, uint32_t(rt_tex.pixelFormat), bpp, a_min, a_max,
+                 double(a_sum) / (double(tw) * th));
+        }
+      }
+    }
+  }
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -6136,6 +6309,62 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   };
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
   auto* pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
+  // Replay experiment (XE_METAL_PS_CONST_OVERRIDE=<ps hash hex>:<c>=<x,y,z,w>
+  // [;...]): overwrite pixel-shader float constants in the register file
+  // before this draw marshals them. Diagnostic only.
+  {
+    struct PsConstOverride {
+      uint64_t hash;
+      uint32_t c;
+      float v[4];
+    };
+    static const std::vector<PsConstOverride> s_overrides = [] {
+      std::vector<PsConstOverride> out;
+      const char* env = std::getenv("XE_METAL_PS_CONST_OVERRIDE");
+      if (!env) return out;
+      std::string spec(env);
+      size_t pos = 0;
+      while (pos < spec.size()) {
+        size_t semi = spec.find(';', pos);
+        std::string item = spec.substr(
+            pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        PsConstOverride o{};
+        char* end = nullptr;
+        o.hash = strtoull(item.c_str(), &end, 16);
+        if (end && *end == ':') {
+          o.c = uint32_t(strtoul(end + 1, &end, 10));
+          if (end && *end == '=') {
+            const char* p = end + 1;
+            for (int i = 0; i < 4; ++i) {
+              o.v[i] = strtof(p, &end);
+              p = (end && *end == ',') ? end + 1 : end;
+            }
+            if (o.hash && o.c < 256) out.push_back(o);
+          }
+        }
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+      }
+      return out;
+    }();
+    if (!s_overrides.empty() && pixel_shader) {
+      for (const PsConstOverride& o : s_overrides) {
+        if (o.hash != pixel_shader->ucode_data_hash()) continue;
+        uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + o.c * 4;
+        for (int i = 0; i < 4; ++i) {
+          uint32_t bits;
+          std::memcpy(&bits, &o.v[i], 4);
+          // Through WriteRegister so constant dirty tracking and memos see it.
+          WriteRegister(r + i, bits);
+        }
+        static uint32_t s_override_logs = 0;
+        if (s_override_logs++ < 4) {
+          XELOGW("MetalPsConstOverride: ps={:016X} c{} = ({}, {}, {}, {})",
+                 o.hash, o.c, o.v[0], o.v[1], o.v[2], o.v[3]);
+        }
+      }
+    }
+  }
   if (!vertex_shader || !pipeline_cache_ || !upload_arena_) {
     RecordDrawSkip(!vertex_shader ? MetalDrawSkipReason::kInvalidGuestState
                                   : MetalDrawSkipReason::kResourceFailure,
@@ -10257,12 +10486,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
           XELOGI(
               "DrawTex draw={} {} fc={} base={:08X} fmt={} {}x{} pitch={} "
-              "endian={} signed={} type={}",
+              "endian={} signed={} type={} num_format={} exp_adjust={} "
+              "signs={},{},{},{}",
               trace_draw_index_, stage, binding.fetch_constant,
               fetch.base_address << 12, uint32_t(fetch.format),
               fetch.size_2d.width + 1, fetch.size_2d.height + 1,
               uint32_t(fetch.pitch) << 5, uint32_t(fetch.endianness),
-              binding.is_signed ? 1 : 0, uint32_t(fetch.type));
+              binding.is_signed ? 1 : 0, uint32_t(fetch.type),
+              uint32_t(fetch.num_format), int32_t(fetch.exp_adjust),
+              uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
+              uint32_t(fetch.sign_z), uint32_t(fetch.sign_w));
         }
       };
       log_bindings(vertex_shader, "vs");
@@ -12071,6 +12304,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     frame_has_render_ = true;
     ++draw_count_;
     ++geo_draw_count_;
+    DumpBoundColorRtDiagnostic(pixel_shader);
     return true;
   }
 
@@ -12501,64 +12735,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
-  // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
-  // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
-  // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture
-  // pipeline (splits "content mislaid in the texture" from "the dump/EDRAM
-  // mapping mislays it").
-  static const int64_t s_dump_rt_at = [] {
-    const char* v = std::getenv("XE_METAL_DUMP_RT");
-    return v ? strtoll(v, nullptr, 10) : -1ll;
-  }();
-  if (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at) {
-    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
-    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
-    if (rt_ptr) {
-      __unsafe_unretained id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
-      uint32_t tw = uint32_t(rt_tex.width), th = uint32_t(rt_tex.height);
-      id<MTLBuffer> rb =
-          [rt_tex.device newBufferWithLength:size_t(tw) * th * 4
-                                     options:MTLResourceStorageModeShared];
-      __unsafe_unretained id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
-          static_cast<xe::ui::metal::MetalProvider*>(
-              graphics_system_->provider())->command_queue();
-      if (rb && dq) {
-        id<MTLCommandBuffer> dcb = [dq commandBuffer];
-        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
-        [dbl copyFromTexture:rt_tex
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(tw, th, 1)
-                     toBuffer:rb
-            destinationOffset:0
-       destinationBytesPerRow:tw * 4
-     destinationBytesPerImage:size_t(tw) * th * 4];
-        [dbl endEncoding];
-        [dcb commit];
-        [dcb waitUntilCompleted];
-        std::string path = fmt::format("/tmp/xe_rt_{}.ppm", s_dump_rt_at);
-        FILE* f = fopen(path.c_str(), "wb");
-        if (f) {
-          fprintf(f, "P6\n%u %u\n255\n", tw, th);
-          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
-          uint64_t a_sum = 0;
-          uint8_t a_min = 255, a_max = 0;
-          for (size_t i = 0; i < size_t(tw) * th; ++i) {
-            fwrite(px + i * 4, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
-            uint8_t a = px[i * 4 + 3];
-            a_sum += a;
-            a_min = std::min(a_min, a);
-            a_max = std::max(a_max, a);
-          }
-          fclose(f);
-          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{}) alpha min={} max={} mean={:.2f}",
-                 path, tw, th, a_min, a_max,
-                 double(a_sum) / (double(tw) * th));
-        }
-      }
-    }
-  }
+  DumpBoundColorRtDiagnostic(pixel_shader);
   return true;
 }
 
@@ -14700,13 +14877,47 @@ bool MetalCommandProcessor::IssueCopy() {
   // XE_METAL_RESOLVE_DUMP: after each resolve completes, write its destination
   // extent's guest bytes to /tmp/xe_rd_<draw>_<base>.bin, so a 1x and a scaled
   // replay can be compared resolve by resolve.
-  static const bool s_resolve_dump =
-      std::getenv("XE_METAL_RESOLVE_DUMP") != nullptr;
+  // XE_METAL_RESOLVE_DUMP=1 dumps every resolve (replay use);
+  // XE_METAL_RESOLVE_DUMP=<hex dest base>[:<every>] dumps only resolves to
+  // that destination base, every <every>-th one (live use: one pass output
+  // at a comparable cost to a screenshot).
+  struct ResolveDumpSpec {
+    bool enabled;
+    uint32_t base;
+    uint32_t every;
+  };
+  static const ResolveDumpSpec s_resolve_dump_spec = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_DUMP");
+    if (!v) return ResolveDumpSpec{false, 0u, 1u};
+    if (!strcmp(v, "1")) return ResolveDumpSpec{true, 0u, 1u};
+    char* end = nullptr;
+    uint32_t base = uint32_t(strtoul(v, &end, 16));
+    // ":trace" = only while a frame trace is being recorded (every = 0), so
+    // the live bytes and the trace's replay describe the same frame.
+    uint32_t every = 1u;
+    if (end && *end == ':') {
+      every = !strcmp(end + 1, "trace") ? 0u
+                                        : uint32_t(strtoul(end + 1, nullptr, 10));
+      if (every == 0u && strcmp(end + 1, "trace") != 0) every = 1u;
+    }
+    return ResolveDumpSpec{true, base, every};
+  }();
+  static uint32_t s_resolve_dump_seen = 0;
+  const bool s_resolve_dump =
+      s_resolve_dump_spec.enabled &&
+      (!s_resolve_dump_spec.base ||
+       (resolve_info.copy_dest_base == s_resolve_dump_spec.base &&
+        (s_resolve_dump_spec.every == 0u
+             ? (trace_writer_.is_open() && (++s_resolve_dump_seen, true))
+             : (++s_resolve_dump_seen % s_resolve_dump_spec.every) == 0)));
   if (s_resolve_dump && resolve_info.copy_dest_extent_length) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     std::string path =
-        fmt::format("/tmp/xe_rd_{:06}_{:08X}.bin", trace_draw_index_,
-                    resolve_info.copy_dest_base);
+        s_resolve_dump_spec.base
+            ? fmt::format("/tmp/xe_rd_s{}_{:08X}_{}.bin", swap_count_,
+                          resolve_info.copy_dest_base, s_resolve_dump_seen)
+            : fmt::format("/tmp/xe_rd_{:06}_{:08X}.bin", trace_draw_index_,
+                          resolve_info.copy_dest_base);
     if (FILE* f = fopen(path.c_str(), "wb")) {
       // The shared buffer, not guest RAM: GPU-resident publication leaves
       // resolved bytes only in the buffer.
