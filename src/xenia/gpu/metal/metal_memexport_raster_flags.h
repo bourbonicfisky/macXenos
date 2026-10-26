@@ -65,9 +65,9 @@ enum class MetalMemexportRasterRoute : uint32_t {
   // Gate off -- today's behavior exactly (rasterize, drop the exports,
   // reason-coded by the gap report). The exact rollback.
   kUnroutedGateOff,
-  // Pixel-shader export. Permanently out of scope for this change, gate or
-  // not (spec: "Pixel-stage export remains excluded and reason-coded
-  // regardless of the gate").
+  // Pixel-shader export with the pixel-stage gate off (metal_memexport_pixel
+  // = false / XE_METAL_MEMEXPORT_PIXEL=0), or through the five-input decision
+  // below, which never routes the pixel stage.
   kUnroutedPixelStage,
   // The draw is running the gated tessellation route. Tessellated producers
   // stay fail-closed/out of scope; the tessellation route itself skips such a
@@ -107,15 +107,36 @@ inline bool MetalMemexportRasterRouteRoutes(MetalMemexportRasterRoute route) {
 // (pixel stage, tessellated) and the "no ranges" answer are decided BEFORE the
 // gate, so their reason codes are identical in both arms and the gate never
 // launders an out-of-scope producer into a routed one.
-inline MetalMemexportRasterRoute DecideMetalMemexportRasterRoute(
-    bool gate_engaged, bool render_target_bound,
-    bool vertex_export_ranges_present, bool pixel_stage_exports,
+//
+// The full decision, with the pixel stage (2026-10-26): a pixel shader that
+// writes eM# exports through the same writable shared-memory UAV, which the
+// one top-level argument buffer already exposes to the fragment stage, and
+// the residency declaration already spans every stage the draw runs on. The
+// pixel stage has its own gate (default on); a draw whose VERTEX shader also
+// exports still needs the vertex raster gate, because binding the UAV routes
+// both stages' stores together.
+inline MetalMemexportRasterRoute DecideMetalMemexportRoute(
+    bool vertex_gate_engaged, bool pixel_gate_engaged,
+    bool render_target_bound, bool vertex_export_ranges_present,
+    bool pixel_stage_exports, bool pixel_export_ranges_present,
     bool tessellated_draw) {
   if (!render_target_bound) {
     return MetalMemexportRasterRoute::kNotRasterizing;
   }
   if (pixel_stage_exports) {
-    return MetalMemexportRasterRoute::kUnroutedPixelStage;
+    if (!pixel_gate_engaged) {
+      return MetalMemexportRasterRoute::kUnroutedPixelStage;
+    }
+    if (!vertex_export_ranges_present && !pixel_export_ranges_present) {
+      return MetalMemexportRasterRoute::kUnroutedNoRanges;
+    }
+    if (tessellated_draw) {
+      return MetalMemexportRasterRoute::kUnroutedTessellated;
+    }
+    if (vertex_export_ranges_present && !vertex_gate_engaged) {
+      return MetalMemexportRasterRoute::kUnroutedGateOff;
+    }
+    return MetalMemexportRasterRoute::kRouted;
   }
   if (!vertex_export_ranges_present) {
     return MetalMemexportRasterRoute::kUnroutedNoRanges;
@@ -123,10 +144,23 @@ inline MetalMemexportRasterRoute DecideMetalMemexportRasterRoute(
   if (tessellated_draw) {
     return MetalMemexportRasterRoute::kUnroutedTessellated;
   }
-  if (!gate_engaged) {
+  if (!vertex_gate_engaged) {
     return MetalMemexportRasterRoute::kUnroutedGateOff;
   }
   return MetalMemexportRasterRoute::kRouted;
+}
+
+// The vertex-stage decision with the pixel-stage gate off: the original
+// contract, kept so its matrix stays pinned (pixel-stage export never routes
+// here, whatever the vertex gate says).
+inline MetalMemexportRasterRoute DecideMetalMemexportRasterRoute(
+    bool gate_engaged, bool render_target_bound,
+    bool vertex_export_ranges_present, bool pixel_stage_exports,
+    bool tessellated_draw) {
+  return DecideMetalMemexportRoute(
+      gate_engaged, /*pixel_gate_engaged=*/false, render_target_bound,
+      vertex_export_ranges_present, pixel_stage_exports,
+      /*pixel_export_ranges_present=*/false, tessellated_draw);
 }
 
 // The stage mask a routed producer's WRITABLE shared-memory UAV must be
@@ -136,8 +170,9 @@ inline MetalMemexportRasterRoute DecideMetalMemexportRasterRoute(
 // reuses `vertex->translated_binary()` verbatim), while the mesh stage is the
 // GENERATED DXBC geometry shader, which declares no UAV at all. The mesh bit
 // is therefore a harmless superset kept only because this backend binds one
-// top-level argument buffer to both mesh-path stages; the fragment stage never
-// writes exports (pixel-stage export is out of scope).
+// top-level argument buffer to both mesh-path stages. Pixel-stage exports
+// write from the fragment stage, which the same argument buffer and the
+// draw's residency declaration already cover.
 enum MetalMemexportRasterStage : uint32_t {
   kMetalMemexportRasterStageVertex = 1u << 0,
   kMetalMemexportRasterStageObject = 1u << 1,

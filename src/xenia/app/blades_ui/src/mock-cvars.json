@@ -1484,6 +1484,15 @@
 "description": "Metal: cap on command-buffer submissions in flight (0 = default 16). The XE_METAL_MAX_IN_FLIGHT environment variable overrides it. A per-title config can pin 1 for titles whose guest reuses GPU-destination memory as soon as their fence returns (Rise of the Tomb Raider).",
 "changed": false
 },
+"metal_memexport_pixel": {
+"name": "metal_memexport_pixel",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Route memory exports from pixel shaders (Halo: Reach). They write through the same shared-memory buffer as vertex exports and only cost anything on draws whose pixel shader exports. A draw whose vertex shader also exports additionally needs metal_memexport_raster_mode. XE_METAL_MEMEXPORT_PIXEL=0/1 overrides.",
+"changed": false
+},
 "metal_quad_lists_as_triangles": {
 "name": "metal_quad_lists_as_triangles",
 "category": "GPU",

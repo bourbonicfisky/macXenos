@@ -154,6 +154,15 @@ DEFINE_uint32(
     "memory as soon as their fence returns (Rise of the Tomb Raider).",
     "GPU");
 
+DEFINE_bool(
+    metal_memexport_pixel, true,
+    "Route memory exports from pixel shaders (Halo: Reach). They write "
+    "through the same shared-memory buffer as vertex exports and only cost "
+    "anything on draws whose pixel shader exports. A draw whose vertex shader "
+    "also exports additionally needs metal_memexport_raster_mode. "
+    "XE_METAL_MEMEXPORT_PIXEL=0/1 overrides.",
+    "GPU");
+
 DEFINE_transient_bool(
     metal_memexport_raster, false,
     "Per-title hint for metal_memexport_raster_mode = auto, set by the "
@@ -570,6 +579,28 @@ bool MetalMemexportRasterGateOn() {
           value);
     }
     return MetalMemexportRasterGateEngaged(gate);
+  }();
+  return s_gate_on;
+}
+
+// Pixel-stage memexport gate (default on): metal_memexport_pixel, with
+// XE_METAL_MEMEXPORT_PIXEL=0/1 overriding; malformed values keep the option.
+bool MetalMemexportPixelGateOn() {
+  static const bool s_gate_on = [] {
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_PIXEL");
+    bool on = cvars::metal_memexport_pixel;
+    if (value && value[0]) {
+      if ((value[0] == '0' || value[0] == '1') && !value[1]) {
+        on = value[0] == '1';
+      } else {
+        XELOGW(
+            "XE_METAL_MEMEXPORT_PIXEL='{}' is malformed; keeping "
+            "metal_memexport_pixel={} (use 0 or 1)",
+            value, on);
+      }
+    }
+    XELOGI("Metal pixel-stage memexport: {}", on ? "on" : "off");
+    return on;
   }();
   return s_gate_on;
 }
@@ -7297,6 +7328,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
+  // The vertex stage's ranges come first; the pixel stage's follow (as in
+  // the reference backends' AddMemExportRanges for VS then PS), so the gap
+  // report, preparation and publication see both stages' real destinations.
+  const size_t vertex_memexport_range_count = memexport_ranges.size();
+  if (s_memexport_exec && pixel_shader &&
+      pixel_shader->memexport_eM_written()) {
+    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges);
+  }
+  const bool pixel_memexport_ranges_present =
+      memexport_ranges.size() > vertex_memexport_range_count;
   // Destination preparation, shared by BOTH memexport producer routes
   // (task 1.2 reuse audit: the VS-only route's call shape generalizes
   // untouched -- normalized range through DecideMemexportDestinationPreparation
@@ -7430,9 +7471,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // exclusions (pixel-stage export; tessellated producers, which the
   // tessellation route already fail-closed skips upstream at "tess-memexport").
   const metal::MetalMemexportRasterRoute memexport_raster_route =
-      metal::DecideMetalMemexportRasterRoute(
-          MetalMemexportRasterGateOn(), rt_bound_for_export,
-          !memexport_ranges.empty(), ps_writes_eM, use_tessellation_emulation);
+      metal::DecideMetalMemexportRoute(
+          MetalMemexportRasterGateOn(), MetalMemexportPixelGateOn(),
+          rt_bound_for_export, vertex_memexport_range_count != 0,
+          ps_writes_eM, pixel_memexport_ranges_present,
+          use_tessellation_emulation);
   bool memexport_raster_routed =
       metal::MetalMemexportRasterRouteRoutes(memexport_raster_route);
   // Bisect filter (XE_METAL_MEMEXPORT_RASTER_ONLY, empty by default and
@@ -7485,7 +7528,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       };
       if (memexport_ranges.empty()) {
-        // A pixel-stage export whose ranges production never gathers still has
+        // An export whose stream constants produced no valid range still has
         // a class worth reporting once; key it on a zero range.
         report(0u, 0u);
       } else {
@@ -7509,10 +7552,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (s_memexport_log) {
       for (const auto& range : memexport_ranges) {
         XELOGW(
-            "MetalMemexportRasterExec draw={} VS shader={:016X} dest={:08X} "
+            "MetalMemexportRasterExec draw={} VS shader={:016X} PS shader="
+            "{:016X} ps_exports={} dest={:08X} "
             "bytes={} prim={} n={} geometry_emulated={} eM_mask={:02X} "
             "stage_mask={:X} writing_stage={:X}",
             trace_draw_index_, vertex_shader->ucode_data_hash(),
+            pixel_shader ? pixel_shader->ucode_data_hash() : 0ull,
+            ps_writes_eM ? 1 : 0,
             range.base_address_dwords << 2, range.size_bytes,
             uint32_t(prim_type), index_count, use_geometry_emulation ? 1 : 0,
             uint32_t(vertex_shader->memexport_eM_written()),
