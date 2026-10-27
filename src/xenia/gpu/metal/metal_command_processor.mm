@@ -864,16 +864,45 @@ class MetalMemexportConvergenceTarget
     // execution, so the captured pre-image is unsound there — an accepted
     // limitation of two diagnostic-only modes coinciding; production mirror
     // mode captures before the only RAM write, this copy.
-    if (command_processor_) {
-      command_processor_->NotifyGuestRamWrite(base, length);
-    }
-    metal::SharedBufferConvergenceOutcome published =
-        shared_memory_->ConvergeRangeToRam(base, length);
-    *bytes_copied = published.bytes_copied;
-    if (!published.converged) {
-      // Missing backing, missing RAM mapping, or an alias claim the addresses
-      // do not support: publish nothing and let the caller retain the record.
-      return false;
+    if (owned_only_) {
+      // A lazily armed record copies only the pages it still owns: the rest
+      // were published on first touch, discarded by a host overwrite or
+      // superseded, and RAM there may hold newer CPU data. Copying them from
+      // the buffer again clobbered Banjo-Kazooie's command buffers and shader
+      // microcode (ring allocator reusing export scratch) with exports routed.
+      const uint64_t end = uint64_t(base) + length;
+      for (const auto& [owned_start, owned_length] : *owned_only_) {
+        uint64_t sub_start = std::max<uint64_t>(base, owned_start);
+        uint64_t sub_end =
+            std::min<uint64_t>(end, uint64_t(owned_start) + owned_length);
+        if (sub_end <= sub_start) {
+          continue;
+        }
+        uint32_t sub_length = uint32_t(sub_end - sub_start);
+        if (command_processor_) {
+          command_processor_->NotifyGuestRamWrite(uint32_t(sub_start),
+                                                  sub_length);
+        }
+        metal::SharedBufferConvergenceOutcome published =
+            shared_memory_->ConvergeRangeToRam(uint32_t(sub_start), sub_length);
+        *bytes_copied += published.bytes_copied;
+        if (!published.converged) {
+          return false;
+        }
+      }
+    } else {
+      if (command_processor_) {
+        command_processor_->NotifyGuestRamWrite(base, length);
+      }
+      metal::SharedBufferConvergenceOutcome published =
+          shared_memory_->ConvergeRangeToRam(base, length);
+      *bytes_copied = published.bytes_copied;
+      if (!published.converged) {
+        // Missing backing, missing RAM mapping, or an alias claim the addresses
+        // do not support: publish nothing and let the caller retain the
+        // record.
+        return false;
+      }
     }
     if (texture_cache_) {
       // Task 5.3 proved the earlier RangeWrittenByGpu watch is equivalent in
@@ -888,11 +917,18 @@ class MetalMemexportConvergenceTarget
     return true;
   }
 
+  // Restricts the next copies to these guest ranges (a lazily armed record's
+  // still-owned pages); nullptr copies whole records.
+  void SetOwnedOnly(const std::vector<std::pair<uint32_t, uint32_t>>* owned) {
+    owned_only_ = owned;
+  }
+
  private:
   CommandProcessor* command_processor_;
   Memory* memory_;
   MetalSharedMemory* shared_memory_;
   metal::MetalTextureCache* texture_cache_;
+  const std::vector<std::pair<uint32_t, uint32_t>>* owned_only_ = nullptr;
 };
 
 // Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
@@ -16486,6 +16522,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       metal::PendingProducer producer{*range,
                                       metal::TransitState::kPendingMemexport,
                                       me.submission, me.authority_sequence};
+      // XE_METAL_MEMEXPORT_DRAIN_OWNED=0 restores whole-record copies of
+      // armed records (diagnostic rollback).
+      static const bool s_drain_owned_only = [] {
+        const char* v = std::getenv("XE_METAL_MEMEXPORT_DRAIN_OWNED");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      std::vector<std::pair<uint32_t, uint32_t>> me_owned;
+      if (s_drain_owned_only && me.lazy_armed) {
+        lazy_publication_.OwnedRangesOf(me.authority_sequence, &me_owned);
+        convergence_target.SetOwnedOnly(&me_owned);
+      } else {
+        convergence_target.SetOwnedOnly(nullptr);
+      }
       // ONE gate, shared with conformance. A tagged record is decided by its
       // own submission -- the ordinary shape since the async promotion -- while
       // an untagged one (submission 0: the XE_METAL_ASYNC=0 rollback, an S7

@@ -27,7 +27,11 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
         continue;
       } else {
         // Return up a level if we encounter a bad packet.
-        XELOGE("**** INDIRECT RINGBUFFER: Failed to execute packet.");
+        XELOGE(
+            "**** INDIRECT RINGBUFFER: Failed to execute packet (buffer "
+            "{:08X}, {} dwords, failed at dword {}).",
+            ptr, count,
+            count - reader_.read_count() / uint32_t(sizeof(uint32_t)));
         assert_always();
         break;
       }
