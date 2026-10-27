@@ -177,6 +177,7 @@ class MetalPipelineCache {
   void OpenBinaryArchive();
   void CloseBinaryArchive();
   void RebuildBinaryArchiveLookupList();
+  void FinishBinaryArchiveCompaction();
 
   void* device_;  // id<MTLDevice>, not owned.
   uint32_t draw_resolution_scale_x_;
@@ -232,6 +233,18 @@ class MetalPipelineCache {
   // Serial dispatch queue (retained) that serializes finished archives.
   void* binary_archive_queue_ = nullptr;
   std::chrono::steady_clock::time_point binary_archive_last_save_;
+  // Compaction. A session that opens with more than kCompactArchiveSegments
+  // segments adds every pipeline it obtains, archive hits included, to the
+  // fresh archive again (`binary_archive_session_keys_`). At quit it deletes
+  // every old segment if 80% of their pipelines were saved again, otherwise
+  // only the segments whose pipelines all were.
+  struct OldArchiveSegment {
+    std::filesystem::path path;
+    std::vector<uint64_t> keys;
+  };
+  std::vector<OldArchiveSegment> binary_archive_compacting_;
+  std::unordered_set<uint64_t> binary_archive_session_keys_;
+  uint64_t binary_archive_failed_at_open_ = 0;
 
   // Durable DXIL-intermediate store (task 2.2). SEPARATE from storage_ and
   // deliberately so: its identity omits the MSC hash, the device and the OS

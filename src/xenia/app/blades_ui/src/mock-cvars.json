@@ -1578,9 +1578,9 @@
 "name": "metal_pipeline_binary_archive",
 "category": "GPU",
 "type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "Persist host pipeline state in an MTLBinaryArchive (M2). Addresses the 1.7-47.5% the census attributed to newRenderPipelineState. Default off until gated.",
+"value": true,
+"defaultValue": true,
+"description": "Persist host render pipeline state in an MTLBinaryArchive (M2) next to the metallib cache, so a later session does not pay newRenderPipelineState again (the macOS shader cache does not hold it once other titles have run). Set to false for the exact rollback: no archive reads or writes.",
 "changed": false
 },
 "metal_pipeline_cache_title_cap_mib": {

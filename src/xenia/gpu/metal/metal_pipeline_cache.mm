@@ -185,9 +185,20 @@ namespace {
 // once as a new segment and starts another.
 constexpr uint32_t kArchiveKeysMagic = 0x4B415845;  // 'EXAK'
 constexpr uint32_t kArchiveKeysVersion = 1;
-// Segments accumulate one per save that had new pipelines; past this many the
-// lookup list is long enough to start costing, so the directory is rebuilt.
-constexpr size_t kMaxArchiveSegments = 32;
+// Segments accumulate one per save that had new pipelines, which once a title
+// is warm is about one small segment per session. Past the compaction count a
+// session compacts (FinishBinaryArchiveCompaction); kMaxArchiveSegments is the
+// backstop if compaction keeps finding too little reuse, and rebuilds.
+constexpr size_t kCompactArchiveSegments = 16;
+constexpr size_t kMaxArchiveSegments = 64;
+
+size_t CompactArchiveSegments() {
+  static const size_t count = [] {
+    const char* v = std::getenv("XE_METAL_ARCHIVE_COMPACT_SEGMENTS");
+    return v ? size_t(std::strtoull(v, nullptr, 10)) : kCompactArchiveSegments;
+  }();
+  return count;
+}
 
 bool ReadArchiveKeys(const std::filesystem::path& path,
                      std::vector<uint64_t>* keys_out) {
@@ -275,6 +286,7 @@ void MetalPipelineCache::OpenBinaryArchive() {
     segments.clear();
   }
 
+  const bool compact = segments.size() > CompactArchiveSegments();
   std::vector<uint64_t> keys;
   for (const auto& [seq, path] : segments) {
     binary_archive_next_segment_ = seq + 1;
@@ -302,6 +314,9 @@ void MetalPipelineCache::OpenBinaryArchive() {
     }
     binary_archive_segments_.push_back((__bridge_retained void*)segment);
     archived_pipeline_keys_.insert(keys.begin(), keys.end());
+    if (compact) {
+      binary_archive_compacting_.push_back({path, keys});
+    }
   }
 
   id<MTLBinaryArchive> fresh = NewEmptyBinaryArchive(device);
@@ -318,9 +333,13 @@ void MetalPipelineCache::OpenBinaryArchive() {
         "xe.metal.binary_archive_save", DISPATCH_QUEUE_SERIAL);
   }
   binary_archive_last_save_ = std::chrono::steady_clock::now();
+  binary_archive_failed_at_open_ =
+      GetMetalShaderBuildCensus().archive_save_failed.load(
+          std::memory_order_relaxed);
   GetMetalShaderBuildCensus().archive_enabled = true;
-  XELOGI("MetalPipelineCache: binary archive: {} segments, {} pipeline keys",
-         binary_archive_segments_.size(), archived_pipeline_keys_.size());
+  XELOGI("MetalPipelineCache: binary archive: {} segments, {} pipeline keys{}",
+         binary_archive_segments_.size(), archived_pipeline_keys_.size(),
+         binary_archive_compacting_.empty() ? "" : ", compacting");
 }
 
 void MetalPipelineCache::CloseBinaryArchive() {
@@ -347,6 +366,8 @@ void MetalPipelineCache::CloseBinaryArchive() {
   archived_pipeline_keys_.clear();
   binary_archive_pending_keys_.clear();
   binary_archive_next_segment_ = 0;
+  binary_archive_compacting_.clear();
+  binary_archive_session_keys_.clear();
 }
 
 void MetalPipelineCache::SaveBinaryArchive(const char* reason, bool wait) {
@@ -429,7 +450,56 @@ void MetalPipelineCache::SaveBinaryArchive(const char* reason, bool wait) {
   if (wait && binary_archive_queue_) {
     dispatch_sync((__bridge dispatch_queue_t)binary_archive_queue_, ^{
                   });
+    FinishBinaryArchiveCompaction();
   }
+}
+
+void MetalPipelineCache::FinishBinaryArchiveCompaction() {
+  // Only once everything this session added is on disk: a failed save means
+  // some of the keys counted below are in no segment.
+  MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+  if (binary_archive_compacting_.empty() ||
+      !binary_archive_pending_keys_.empty() ||
+      census.archive_save_failed.load(std::memory_order_relaxed) !=
+          binary_archive_failed_at_open_) {
+    return;
+  }
+  // A session rarely touches every archived pipeline, and the few it skips
+  // are spread across the old segments, so requiring full coverage per
+  // segment removes almost nothing (M1 Max Mafia II: 375 of 415 re-saved, 1 of
+  // 5 segments removable). Once 80% are re-saved, all old segments go: the
+  // rest were unused this session and are rebuilt and re-archived if a later
+  // one needs them.
+  std::unordered_set<uint64_t> old_keys;
+  for (const OldArchiveSegment& old : binary_archive_compacting_) {
+    old_keys.insert(old.keys.begin(), old.keys.end());
+  }
+  size_t resaved = 0;
+  for (uint64_t key : old_keys) {
+    resaved += binary_archive_session_keys_.count(key);
+  }
+  const bool remove_all = resaved * 5 >= old_keys.size() * 4;
+  size_t removed = 0;
+  std::error_code ec;
+  for (const OldArchiveSegment& old : binary_archive_compacting_) {
+    if (!remove_all &&
+        !std::all_of(old.keys.begin(), old.keys.end(), [this](uint64_t key) {
+          return binary_archive_session_keys_.count(key) != 0;
+        })) {
+      continue;
+    }
+    // Sidecar first: a segment left without one is an orphan the next open
+    // removes. The loaded archive keeps its mapping until it is released.
+    std::filesystem::path keys_path = old.path;
+    keys_path.replace_extension(".keys");
+    std::filesystem::remove(keys_path, ec);
+    std::filesystem::remove(old.path, ec);
+    ++removed;
+  }
+  XELOGI("MetalPipelineCache: binary archive compacted: {} of {} old segments "
+         "removed ({} of {} old pipelines saved again)",
+         removed, binary_archive_compacting_.size(), resaved, old_keys.size());
+  binary_archive_compacting_.clear();
 }
 
 void MetalPipelineCache::MaybeSaveBinaryArchiveOnSwap() {
@@ -1184,14 +1254,21 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
       timer.Dismiss();
     }
   }
-  if (state && archive && !archived_pipeline_keys_.count(key) &&
-      !storage_.admission_stopped()) {
+  // While compacting, archive hits are added again too (once per session), so
+  // the old segments they came from can be deleted at quit.
+  const bool compacting = !binary_archive_compacting_.empty();
+  if (state && archive && !storage_.admission_stopped() &&
+      (compacting ? !binary_archive_session_keys_.count(key)
+                  : !archived_pipeline_keys_.count(key))) {
     MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().archive_add);
     NSError* add_error = nil;
     if ([archive addRenderPipelineFunctionsWithDescriptor:desc
                                                      error:&add_error]) {
       archived_pipeline_keys_.insert(key);
       binary_archive_pending_keys_.push_back(key);
+      if (compacting) {
+        binary_archive_session_keys_.insert(key);
+      }
     } else {
       timer.Dismiss();
       XELOGW("MetalPipelineCache: binary archive add failed: {}",

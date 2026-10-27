@@ -47,12 +47,17 @@ DEFINE_bool(metal_pipeline_metallib_cache, true,
             "95-96% of measured translation cost on a warm launch. Set to "
             "false for the exact rollback: no durable reads or writes.",
             "GPU");
-DEFINE_bool(metal_pipeline_binary_archive, false,
+DEFINE_bool(metal_pipeline_binary_archive, true,
             "Persist host render pipeline state in an MTLBinaryArchive (M2) "
             "next to the metallib cache, so a later session does not pay "
             "newRenderPipelineState again (the macOS shader cache does not "
-            "reliably hold it across sessions). Default off until gated.",
+            "hold it once other titles have run). Set to false for the exact "
+            "rollback: no archive reads or writes.",
             "GPU");
+// Config migration for the promotion: resets only configs still holding the
+// old default (false). The flag shipped default-off for one day (53b2676f5),
+// so a false in a config is that default, not an opt-out.
+UPDATE_from_bool(metal_pipeline_binary_archive, 2026, 10, 27, 21, false);
 
 DEFINE_uint64(metal_pipeline_cache_title_cap_mib, 512,
               "Maximum durable Metal pipeline-cache size per title, in MiB. "
