@@ -83,6 +83,10 @@ class MetalEncodeStream {
   void SetDepthStencilState(id<MTLDepthStencilState> state);
   void SetStencilReferenceValues(uint32_t front, uint32_t back);
   void SetVisibilityResultMode(MTLVisibilityResultMode mode, NSUInteger offset);
+  // Buffer-scope memory barrier inside the render encoder: buffer writes made
+  // by the `after` stages of earlier draws become visible to the `before`
+  // stages of later ones (hazard tracking only orders whole encoders).
+  void BufferBarrier(MTLRenderStages after, MTLRenderStages before);
   void SetBuffer(uint32_t stage, id<MTLBuffer> buffer, NSUInteger offset,
                  NSUInteger index);
   void SetBufferOffset(uint32_t stage, NSUInteger offset, NSUInteger index);

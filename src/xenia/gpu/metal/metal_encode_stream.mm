@@ -51,6 +51,7 @@ enum class MetalEncodeStream::Op : uint16_t {
   kIRDrawIndexed,
   kIRDrawIndexedGeometry,
   kIRDrawGeometry,
+  kBufferBarrier,
 };
 
 namespace {
@@ -122,6 +123,9 @@ struct BlendColorOp {
 };
 struct StencilRefOp {
   uint32_t front, back;
+};
+struct BufferBarrierOp {
+  uint32_t after, before;
 };
 struct VisibilityOp {
   uint64_t mode;
@@ -485,6 +489,12 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
         const auto* p = static_cast<const StencilRefOp*>(payload);
         [enc setStencilFrontReferenceValue:p->front backReferenceValue:p->back];
       } break;
+      case Op::kBufferBarrier: {
+        const auto* p = static_cast<const BufferBarrierOp*>(payload);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers
+                        afterStages:MTLRenderStages(p->after)
+                       beforeStages:MTLRenderStages(p->before)];
+      } break;
       case Op::kVisibility: {
         const auto* p = static_cast<const VisibilityOp*>(payload);
         [enc setVisibilityResultMode:MTLVisibilityResultMode(p->mode)
@@ -708,6 +718,19 @@ void MetalEncodeStream::SetStencilReferenceValues(uint32_t front,
   auto* p = Emit<StencilRefOp>(Op::kStencilRef);
   p->front = front;
   p->back = back;
+}
+
+void MetalEncodeStream::BufferBarrier(MTLRenderStages after,
+                                      MTLRenderStages before) {
+  if (mode_ == Mode::kDirect) {
+    [direct_encoder_ memoryBarrierWithScope:MTLBarrierScopeBuffers
+                                afterStages:after
+                               beforeStages:before];
+    return;
+  }
+  auto* p = Emit<BufferBarrierOp>(Op::kBufferBarrier);
+  p->after = uint32_t(after);
+  p->before = uint32_t(before);
 }
 
 void MetalEncodeStream::SetVisibilityResultMode(MTLVisibilityResultMode mode,

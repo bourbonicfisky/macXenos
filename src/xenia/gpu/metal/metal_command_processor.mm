@@ -8097,6 +8097,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the OFF arm bit-identical (an unconditional add would also start selecting
   // overlapping pending RESOLVES that the pre-change code never selected).
   bool memexport_raster_consumer_range = false;
+  // Set when this draw's vertex or texture inputs were served by command
+  // order against a pending memexport (kOrderAgainstGpuProducers): a routed
+  // rasterizing producer in the SAME render encoder is not ordered by Metal's
+  // hazard tracking, which works per encoder, so the draw needs an in-encoder
+  // buffer barrier (see the encode below).
+  bool ordered_against_memexport = false;
+  auto note_memexport_ordering = [&](const metal::ConsumerDecision& decision) {
+    if (decision.action !=
+        metal::AuthorityAction::kOrderAgainstGpuProducers) {
+      return;
+    }
+    for (const metal::PendingProducer& p : decision.selected) {
+      if (p.state == metal::TransitState::kPendingMemexport) {
+        ordered_against_memexport = true;
+        return;
+      }
+    }
+  };
   if (MetalMemexportRasterGateOn() && use_tessellation_emulation &&
       tess_pp.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
@@ -8195,6 +8213,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kVertex,
                                          vertex_request);
+    note_memexport_ordering(authority_decision);
     // Consumer-attribution diagnostic (XE_METAL_MEMEXPORT_LOG=1, default off,
     // log only): names the CONSUMING draw for every exported range this
     // vertex/index read depends on -- the evidence task 1.1 needs to decide
@@ -9716,6 +9735,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     draw_gpu_ordering_active_ =
         authority_decision.action ==
         metal::AuthorityAction::kOrderAgainstGpuProducers;
+    note_memexport_ordering(authority_decision);
     // Bounded ordered-execution log (10395 corner artifact): name every draw
     // whose wait was elided and the producer ranges it was ordered against.
     static const bool s_order_log = std::getenv("XE_METAL_ORDER_LOG") != nullptr;
@@ -10267,6 +10287,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ~StreamCommit() { stream.Commit(); }
   } stream_commit{es};
   draw_trace_milestone("after-encoder");
+  // In-encoder ordering for routed rasterizing memexport. Halo: Reach skins
+  // its faces this way: two exporting draws write a 576 KiB scratch range,
+  // the next two draws vertex-fetch it, then the next producer pair
+  // overwrites it, three times a frame, all in one render pass. Metal orders
+  // tracked resources between encoders only, so without a barrier the
+  // consumer's fetch races the producer's vertex-stage stores (faces drew as
+  // spikes) and the next producer races the previous consumer's reads.
+  // XE_METAL_RASTER_EXPORT_BARRIER=0 drops the barriers (diagnostic).
+  {
+    static const bool s_raster_export_barrier = [] {
+      const char* v = std::getenv("XE_METAL_RASTER_EXPORT_BARRIER");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    const uintptr_t encoder_id = uintptr_t((__bridge void*)encoder);
+    const bool encoder_has_raster_export =
+        raster_export_encoder_ != 0 && raster_export_encoder_ == encoder_id;
+    if (s_raster_export_barrier && encoder_has_raster_export &&
+        (memexport_raster_routed || ordered_against_memexport)) {
+      es.BufferBarrier(MTLRenderStageVertex,
+                       MTLRenderStageVertex | MTLRenderStageFragment);
+    }
+    if (memexport_raster_routed) {
+      raster_export_encoder_ = encoder_id;
+    }
+  }
   if (PassCensusEnabled() && !memexport_draw) {
     pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
         norm_depth, normalized_color_mask, blend_controls,

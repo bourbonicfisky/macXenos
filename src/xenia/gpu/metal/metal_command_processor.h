@@ -439,6 +439,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // GPU ordering (kOrderAgainstGpuProducers) instead of a wait+drain; the
   // serve site fails a routed fetch's legacy fallback closed under it.
   bool draw_gpu_ordering_active_ = false;
+  // Render encoder (identity only) that holds a routed rasterizing memexport
+  // producer; draws ordered against a pending export in it take an in-encoder
+  // buffer barrier. Stale identities only cost a redundant barrier.
+  uintptr_t raster_export_encoder_ = 0;
   // Corridor test shared by the route mask and the serve site: does this
   // fetch's guest range overlap a pending GPU-current record? Signed
   // bindings route only in that case (the snorm-view serve carries a

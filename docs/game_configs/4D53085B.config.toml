@@ -1,0 +1,11 @@
+# macXenos built-in per-title config: Halo: Reach (4D53085B).
+# Characters' faces are skinned through vertex shaders that export to memory
+# while rasterizing: two exporting draws fill a 576 KiB scratch range, the
+# next two draws vertex-fetch it, three times a frame. With those exports
+# dropped (the Metal default, for their cost elsewhere) the face meshes
+# collapse and the briefing shows floating eyes, teeth and hair. Routed, with
+# the in-encoder buffer barrier that orders the producers against their
+# same-pass readers, the faces render; the Winter Contingency route stays at
+# its 30 fps cap. (xenia-mac-evidence reach-faces-20261027)
+[GPU]
+metal_memexport_raster = true
