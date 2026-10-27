@@ -111,6 +111,17 @@ class MetalShaderBuildCensus {
   // stored artifact that is wrong, and the two must never share a counter.
   std::atomic<uint64_t> metallib_rejected{0};
 
+  // M2 binary archive. `archive_hits` are pipelines the archive served without
+  // a host compile; `archive_stale` are keys recorded as archived that it no
+  // longer serves (built cold, then re-added). Adds and saves run on the frame
+  // path, so they go through RecordBuild and count as stall time.
+  bool archive_enabled = false;
+  std::atomic<uint64_t> archive_hits{0};
+  std::atomic<uint64_t> archive_stale{0};
+  std::atomic<uint64_t> archive_save_failed{0};
+  Stage archive_add;
+  Stage archive_save;
+
   // DXIL artifact store (task 2.2/2.3). Kept apart from the metallib counters
   // above because the two stores answer different questions: the metallib
   // store is the warm-launch mechanism, the DXIL store only engages on a
@@ -256,7 +267,9 @@ class MetalShaderBuildCensus {
         "|dxil_load_ms={:.1f}|dxil_store_ms={:.1f}"
         "|msc_req={}|msc_distinct={}|msc_dup={}|msc_dup_ms={:.1f}"
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
-        "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}",
+        "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}"
+        "|arch={}|arch_hit={}|arch_stale={}|arch_save_fail={}|arch_add={}/{:.1f}ms"
+        "|arch_save={}/{:.1f}ms/max{:.1f}/{}KiB",
         phase, swaps.load(std::memory_order_relaxed),
         double(first_swap_ns.load(std::memory_order_relaxed)) / 1e6,
         dxbc.count.load(std::memory_order_relaxed), dxbc.total_ms(),
@@ -289,7 +302,16 @@ class MetalShaderBuildCensus {
         double(worst_frame_ns.load(std::memory_order_relaxed)) / 1e6,
         frames_over_8ms.load(std::memory_order_relaxed),
         frames_over_16ms.load(std::memory_order_relaxed),
-        frames_over_33ms.load(std::memory_order_relaxed));
+        frames_over_33ms.load(std::memory_order_relaxed),
+        archive_enabled ? "on" : "off",
+        archive_hits.load(std::memory_order_relaxed),
+        archive_stale.load(std::memory_order_relaxed),
+        archive_save_failed.load(std::memory_order_relaxed),
+        archive_add.count.load(std::memory_order_relaxed),
+        archive_add.total_ms(),
+        archive_save.count.load(std::memory_order_relaxed),
+        archive_save.total_ms(), archive_save.max_ms(),
+        archive_save.bytes.load(std::memory_order_relaxed) / 1024);
   }
 
   uint64_t stage_requests_snapshot() const {

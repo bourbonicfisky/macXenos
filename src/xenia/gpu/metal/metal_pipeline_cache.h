@@ -10,12 +10,14 @@
 #ifndef XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/gpu/dxbc_geometry_shader.h"
@@ -124,6 +126,15 @@ class MetalPipelineCache {
                                 uint32_t title_id);
   void ShutdownDurableStorage();
 
+  // M2 — writes the binary archive if this session added pipelines to it. The
+  // emulator quits through std::quick_exit, so nothing runs at teardown: the
+  // archive is saved from MetalCommandProcessor::SaveShaderStorageToDisk (GPU
+  // paused, just before the exit) and periodically from the swap, which is
+  // what keeps a crash or a SIGKILL from losing a whole session of pipelines.
+  // `wait` blocks until every queued segment is on disk.
+  void SaveBinaryArchive(const char* reason, bool wait);
+  void MaybeSaveBinaryArchiveOnSwap();
+
   const MetalPipelineStorage& durable_storage() const { return storage_; }
 
  private:
@@ -163,6 +174,10 @@ class MetalPipelineCache {
   // Wraps a metallib blob in an id<MTLLibrary> (retained void*); null on failure.
   void* NewLibraryFromBytes(const std::vector<uint8_t>& bytes, const char* label);
 
+  void OpenBinaryArchive();
+  void CloseBinaryArchive();
+  void RebuildBinaryArchiveLookupList();
+
   void* device_;  // id<MTLDevice>, not owned.
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
@@ -196,6 +211,27 @@ class MetalPipelineCache {
   // Durable on-disk storage for M1/M2. Closed means "no durable cache", which
   // is today's behavior and the default.
   MetalPipelineStorage storage_;
+
+  // M2 — the binary archive, null unless metal_pipeline_binary_archive is on
+  // and storage_ opened. Only the thread that creates render pipelines touches
+  // it, plus SaveShaderStorageToDisk with that thread paused. Segments
+  // (id<MTLBinaryArchive>, retained) are loaded or already serialized and are
+  // only read; `binary_archive_` is the fresh archive new pipelines go to, and
+  // `binary_archive_lookup_list_` (NSArray, retained) is the LOADED segments
+  // for MTLRenderPipelineDescriptor.binaryArchives (archives this session
+  // made only hold pipelines already in render_pipeline_states_). `archived_pipeline_keys_` are
+  // the keys in any of them, so a pipeline is added once ever and a lookup can
+  // fail fast on a miss; `binary_archive_pending_keys_` are the ones only in
+  // the fresh archive.
+  std::vector<void*> binary_archive_segments_;
+  void* binary_archive_ = nullptr;
+  void* binary_archive_lookup_list_ = nullptr;
+  std::unordered_set<uint64_t> archived_pipeline_keys_;
+  std::vector<uint64_t> binary_archive_pending_keys_;
+  uint32_t binary_archive_next_segment_ = 0;
+  // Serial dispatch queue (retained) that serializes finished archives.
+  void* binary_archive_queue_ = nullptr;
+  std::chrono::steady_clock::time_point binary_archive_last_save_;
 
   // Durable DXIL-intermediate store (task 2.2). SEPARATE from storage_ and
   // deliberately so: its identity omits the MSC hash, the device and the OS

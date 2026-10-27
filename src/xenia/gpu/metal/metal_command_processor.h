@@ -275,6 +275,7 @@ class MetalCommandProcessor : public CommandProcessor {
                                uint32_t title_id, bool blocking,
                                std::function<void()> completion_callback =
                                    nullptr) override;
+  void SaveShaderStorageToDisk() override;
 
   // Converges completed resolve writebacks and memexports to guest RAM. The
   // promoted selected executor supplies a unique authority sequence, allowing

@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_shader_converter.h"
 
+#include "third_party/fmt/include/fmt/format.h"
+#include "third_party/xxhash/xxhash.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_binding_layout.h"
 #include "xenia/gpu/metal/metal_converter_options.h"
@@ -259,6 +261,17 @@ bool MetalShaderConverter::Convert(Stage stage,
   IRCompilerSetFunctionConstantResourceSpace(
       compiler, kMetalFunctionConstantRegisterSpace);
   IRCompilerSetGlobalRootSignature(compiler, root_signature_);
+  // Content-derived entry-point name. Left alone, MSC names every function
+  // after the DXIL entry ("main"), and the binary-archive packer resolves a
+  // pipeline's stages BY NAME across all the libraries it holds: with hundreds
+  // of "main"s it bound a vertex function where a fragment one was expected
+  // ("expecting 'fragment' stage in pipeline no. N") and the whole serialize
+  // failed. Callers look the function up through the library's own function
+  // list, so nothing else depends on the name.
+  const std::string entry_name =
+      fmt::format("xe_{}_{:016x}", static_cast<uint32_t>(stage),
+                  XXH3_64bits(dxil.data(), dxil.size()));
+  IRCompilerSetEntryPointName(compiler, entry_name.c_str());
 
   IRError* error = nullptr;
   IRObject* metal_object =

@@ -15229,6 +15229,14 @@ void MetalCommandProcessor::InitializeShaderStorage(
   }
 }
 
+void MetalCommandProcessor::SaveShaderStorageToDisk() {
+  // The app quits through std::quick_exit right after this (GPU paused), so it
+  // is the last point at which the session's new pipelines can be persisted.
+  if (pipeline_cache_) {
+    pipeline_cache_->SaveBinaryArchive("exit", true);
+  }
+}
+
 
 
 // The base implementation is preserved by calling through, so guest ramp
@@ -18857,6 +18865,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     if ((count & 127) == 0 && count) {
       XELOGI("{}", build_census.Report("periodic"));
     }
+  }
+  if (pipeline_cache_) {
+    pipeline_cache_->MaybeSaveBinaryArchiveOnSwap();
   }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,

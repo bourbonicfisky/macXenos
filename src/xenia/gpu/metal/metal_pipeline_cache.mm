@@ -12,7 +12,10 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -130,6 +133,7 @@ void MetalPipelineCache::InitializeDurableStorage(
         "continuing with in-memory caches only",
         title_id);
   }
+  OpenBinaryArchive();
 
   // Task 2.2 — the DXIL store, opened independently and with its own identity.
   // Note it is NOT under the title directory and its Open is not conditional on
@@ -160,12 +164,300 @@ void MetalPipelineCache::InitializeDurableStorage(
 }
 
 void MetalPipelineCache::ShutdownDurableStorage() {
+  SaveBinaryArchive("shutdown", true);
+  CloseBinaryArchive();
   storage_.Close();
   dxil_store_.Close();
 }
 
+namespace {
+// M2 storage layout: <title>/archive/NNNNNNNN.metalar segments, each with an
+// NNNNNNNN.keys sidecar listing the pipeline keys it holds. The archive cannot
+// be enumerated, and without the keys every session would re-add every
+// pipeline (one add is a host compile when the macOS cache is cold).
+//
+// WHY SEGMENTS. An MTLBinaryArchive serializes reliably exactly once. Loading
+// one and adding to it, or serializing one a second time after more adds,
+// fails in the packer ("Failed to generate machO ... expecting 'fragment'
+// stage in pipeline no. N", Mafia II on M1 Max, macOS 27) and leaves the
+// in-memory archive empty. So loaded segments are only ever read, new
+// pipelines go to a fresh archive, and every save serializes that fresh archive
+// once as a new segment and starts another.
+constexpr uint32_t kArchiveKeysMagic = 0x4B415845;  // 'EXAK'
+constexpr uint32_t kArchiveKeysVersion = 1;
+// Segments accumulate one per save that had new pipelines; past this many the
+// lookup list is long enough to start costing, so the directory is rebuilt.
+constexpr size_t kMaxArchiveSegments = 32;
+
+bool ReadArchiveKeys(const std::filesystem::path& path,
+                     std::vector<uint64_t>* keys_out) {
+  keys_out->clear();
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) {
+    return false;
+  }
+  uint32_t header[3] = {};
+  bool ok = std::fread(header, sizeof(header), 1, f) == 1 &&
+            header[0] == kArchiveKeysMagic && header[1] == kArchiveKeysVersion;
+  if (ok) {
+    keys_out->resize(header[2]);
+    ok = keys_out->empty() ||
+         std::fread(keys_out->data(), sizeof(uint64_t), keys_out->size(), f) ==
+             keys_out->size();
+  }
+  std::fclose(f);
+  return ok;
+}
+
+id<MTLBinaryArchive> NewEmptyBinaryArchive(id<MTLDevice> device) {
+  MTLBinaryArchiveDescriptor* desc = [[MTLBinaryArchiveDescriptor alloc] init];
+  NSError* error = nil;
+  id<MTLBinaryArchive> archive =
+      [device newBinaryArchiveWithDescriptor:desc error:&error];
+  if (!archive) {
+    XELOGW("MetalPipelineCache: binary archive unavailable: {}",
+           error ? [[error localizedDescription] UTF8String] : "unknown");
+  }
+  return archive;
+}
+}  // namespace
+
+void MetalPipelineCache::RebuildBinaryArchiveLookupList() {
+  NSMutableArray<id<MTLBinaryArchive>>* list = [NSMutableArray array];
+  for (void* segment : binary_archive_segments_) {
+    [list addObject:(__bridge id<MTLBinaryArchive>)segment];
+  }
+  if (binary_archive_lookup_list_) {
+    NSArray* old = (__bridge_transfer NSArray*)binary_archive_lookup_list_;
+    (void)old;
+  }
+  binary_archive_lookup_list_ = (__bridge_retained void*)[list copy];
+}
+
+void MetalPipelineCache::OpenBinaryArchive() {
+  CloseBinaryArchive();
+  GetMetalShaderBuildCensus().archive_enabled = false;
+  if (!cvars::metal_pipeline_binary_archive || !storage_.is_open() ||
+      !device_) {
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  const std::filesystem::path dir = storage_.binary_archive_path();
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  // Segments in sequence order; a segment without readable keys (a crash
+  // between the archive rename and the keys write) is an orphan and removed.
+  std::vector<std::pair<uint32_t, std::filesystem::path>> segments;
+  for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    const std::filesystem::path& path = entry.path();
+    if (path.extension() == ".tmp") {
+      std::filesystem::remove(path, ec);
+      continue;
+    }
+    if (path.extension() != ".metalar") {
+      continue;
+    }
+    char* end = nullptr;
+    const std::string stem = path.stem().string();
+    const unsigned long seq = std::strtoul(stem.c_str(), &end, 10);
+    if (end && *end == '\0') {
+      segments.emplace_back(uint32_t(seq), path);
+    }
+  }
+  std::sort(segments.begin(), segments.end());
+  if (segments.size() > kMaxArchiveSegments) {
+    XELOGI(
+        "MetalPipelineCache: {} binary archive segments exceed {}; rebuilding",
+        segments.size(), kMaxArchiveSegments);
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    segments.clear();
+  }
+
+  std::vector<uint64_t> keys;
+  for (const auto& [seq, path] : segments) {
+    binary_archive_next_segment_ = seq + 1;
+    std::filesystem::path keys_path = path;
+    keys_path.replace_extension(".keys");
+    if (!ReadArchiveKeys(keys_path, &keys)) {
+      std::filesystem::remove(path, ec);
+      std::filesystem::remove(keys_path, ec);
+      continue;
+    }
+    MTLBinaryArchiveDescriptor* desc = [[MTLBinaryArchiveDescriptor alloc] init];
+    desc.url =
+        [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+    NSError* error = nil;
+    id<MTLBinaryArchive> segment =
+        [device newBinaryArchiveWithDescriptor:desc error:&error];
+    if (!segment) {
+      XELOGW("MetalPipelineCache: binary archive segment {} failed to load "
+             "({}); removed",
+             path.filename().string(),
+             error ? [[error localizedDescription] UTF8String] : "unknown");
+      std::filesystem::remove(path, ec);
+      std::filesystem::remove(keys_path, ec);
+      continue;
+    }
+    binary_archive_segments_.push_back((__bridge_retained void*)segment);
+    archived_pipeline_keys_.insert(keys.begin(), keys.end());
+  }
+
+  id<MTLBinaryArchive> fresh = NewEmptyBinaryArchive(device);
+  if (!fresh) {
+    CloseBinaryArchive();
+    return;
+  }
+  binary_archive_ = (__bridge_retained void*)fresh;
+  if (!binary_archive_segments_.empty()) {
+    RebuildBinaryArchiveLookupList();
+  }
+  if (!binary_archive_queue_) {
+    binary_archive_queue_ = (__bridge_retained void*)dispatch_queue_create(
+        "xe.metal.binary_archive_save", DISPATCH_QUEUE_SERIAL);
+  }
+  binary_archive_last_save_ = std::chrono::steady_clock::now();
+  GetMetalShaderBuildCensus().archive_enabled = true;
+  XELOGI("MetalPipelineCache: binary archive: {} segments, {} pipeline keys",
+         binary_archive_segments_.size(), archived_pipeline_keys_.size());
+}
+
+void MetalPipelineCache::CloseBinaryArchive() {
+  if (binary_archive_queue_) {
+    dispatch_sync((__bridge dispatch_queue_t)binary_archive_queue_, ^{
+                  });
+  }
+  for (void* segment : binary_archive_segments_) {
+    id<MTLBinaryArchive> archive = (__bridge_transfer id<MTLBinaryArchive>)segment;
+    (void)archive;
+  }
+  binary_archive_segments_.clear();
+  if (binary_archive_) {
+    id<MTLBinaryArchive> archive =
+        (__bridge_transfer id<MTLBinaryArchive>)binary_archive_;
+    (void)archive;
+    binary_archive_ = nullptr;
+  }
+  if (binary_archive_lookup_list_) {
+    NSArray* list = (__bridge_transfer NSArray*)binary_archive_lookup_list_;
+    (void)list;
+    binary_archive_lookup_list_ = nullptr;
+  }
+  archived_pipeline_keys_.clear();
+  binary_archive_pending_keys_.clear();
+  binary_archive_next_segment_ = 0;
+}
+
+void MetalPipelineCache::SaveBinaryArchive(const char* reason, bool wait) {
+  if (binary_archive_ && !binary_archive_pending_keys_.empty() &&
+      storage_.is_open() && device_ && binary_archive_queue_) {
+    // Hand the fresh archive to the save queue and start another. Nothing on
+    // this thread reads it again: its pipelines are already in
+    // render_pipeline_states_, so no lookup this session can need it, and the
+    // serialize (476 ms for 222 pipelines on the M1 Max) stays off the frame.
+    id<MTLBinaryArchive> archive =
+        (__bridge_transfer id<MTLBinaryArchive>)binary_archive_;
+    binary_archive_ = nullptr;
+    std::vector<uint64_t> keys = std::move(binary_archive_pending_keys_);
+    binary_archive_pending_keys_.clear();
+    const uint32_t segment = binary_archive_next_segment_++;
+    const std::filesystem::path path =
+        storage_.binary_archive_path() / fmt::format("{:08}.metalar", segment);
+    const std::string reason_copy = reason ? reason : "";
+    dispatch_async(
+        (__bridge dispatch_queue_t)binary_archive_queue_, ^{
+          const auto start = std::chrono::steady_clock::now();
+          std::filesystem::path keys_path = path;
+          keys_path.replace_extension(".keys");
+          std::filesystem::path temp_path = path;
+          temp_path += ".tmp";
+          std::error_code ec;
+          std::filesystem::remove(temp_path, ec);
+          NSError* error = nil;
+          NSURL* temp_url = [NSURL
+              fileURLWithPath:[NSString stringWithUTF8String:temp_path.c_str()]];
+          bool saved = [archive serializeToURL:temp_url error:&error];
+          if (saved) {
+            std::filesystem::rename(temp_path, path, ec);
+            saved = !ec;
+          }
+          MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+          if (!saved) {
+            // Those pipelines are simply not on disk; the next session finds
+            // their keys in no sidecar and adds them again.
+            XELOGW("MetalPipelineCache: binary archive save ({}) failed: {}",
+                   reason_copy,
+                   ec ? ec.message()
+                      : (error ? [[error localizedDescription] UTF8String]
+                               : "unknown"));
+            std::filesystem::remove(temp_path, ec);
+            census.archive_save_failed.fetch_add(1, std::memory_order_relaxed);
+            return;
+          }
+          // The sidecar goes after the archive, so keys never claim pipelines
+          // a segment lacks; a segment without one is an orphan at open.
+          std::vector<uint8_t> blob(sizeof(uint32_t) * 3 +
+                                    sizeof(uint64_t) * keys.size());
+          const uint32_t header[3] = {kArchiveKeysMagic, kArchiveKeysVersion,
+                                      uint32_t(keys.size())};
+          std::memcpy(blob.data(), header, sizeof(header));
+          std::memcpy(blob.data() + sizeof(header), keys.data(),
+                      sizeof(uint64_t) * keys.size());
+          MetalPipelineStorage::WriteFileAtomic(keys_path, blob.data(),
+                                                blob.size());
+          const uint64_t bytes = std::filesystem::file_size(path, ec);
+          // Off the frame thread, so Stage::Add rather than RecordBuild: this
+          // is not stall time.
+          census.archive_save.Add(
+              uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count()),
+              ec ? 0 : bytes);
+          XELOGI(
+              "MetalPipelineCache: binary archive saved ({}): segment {} with "
+              "{} pipelines, {} KiB",
+              reason_copy, segment, keys.size(), (ec ? 0 : bytes) / 1024);
+        });
+    id<MTLBinaryArchive> fresh =
+        NewEmptyBinaryArchive((__bridge id<MTLDevice>)device_);
+    if (fresh) {
+      binary_archive_ = (__bridge_retained void*)fresh;
+    }
+    binary_archive_last_save_ = std::chrono::steady_clock::now();
+  }
+  if (wait && binary_archive_queue_) {
+    dispatch_sync((__bridge dispatch_queue_t)binary_archive_queue_, ^{
+                  });
+  }
+}
+
+void MetalPipelineCache::MaybeSaveBinaryArchiveOnSwap() {
+  // Every save is a new segment, so saves are rare: often enough that a crash
+  // loses at most a few minutes of new pipelines, and only once enough have
+  // accumulated to be worth a segment. Quit saves whatever is left.
+  if (!binary_archive_ || binary_archive_pending_keys_.size() < 16) {
+    return;
+  }
+  static const int64_t s_interval_s = [] {
+    const char* v = std::getenv("XE_METAL_ARCHIVE_SAVE_INTERVAL_S");
+    return v ? int64_t(std::strtoll(v, nullptr, 10)) : int64_t(300);
+  }();
+  if (std::chrono::steady_clock::now() - binary_archive_last_save_ <
+      std::chrono::seconds(s_interval_s)) {
+    return;
+  }
+  SaveBinaryArchive("periodic", false);
+}
+
 void MetalPipelineCache::Shutdown() {
   ShutdownDurableStorage();
+  if (binary_archive_queue_) {
+    dispatch_queue_t queue =
+        (__bridge_transfer dispatch_queue_t)binary_archive_queue_;
+    (void)queue;
+    binary_archive_queue_ = nullptr;
+  }
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
       id<MTLRenderPipelineState> state =
@@ -817,8 +1109,8 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   // state in the pipeline key.
   desc.alphaToCoverageEnabled = NO;
   // Guest shader identities in the pipeline label: Instruments' Shader
-  // Timeline attributes GPU samples to the pipeline label (every translated
-  // function is named "main"), which is the only per-shader GPU-time
+  // Timeline attributes GPU samples to the pipeline label (function names are
+  // DXIL hashes, not guest ucode hashes), which is the only per-shader GPU-time
   // attribution on Apple GPUs (no per-draw counter sampling).
   desc.label = [NSString
       stringWithFormat:@"xe vs=%016llX.%llX ps=%016llX.%llX s%u",
@@ -856,7 +1148,32 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
 
   NSError* error = nil;
   id<MTLRenderPipelineState> state = nil;
-  {
+  id<MTLBinaryArchive> archive = (__bridge id<MTLBinaryArchive>)binary_archive_;
+  if (binary_archive_lookup_list_) {
+    desc.binaryArchives = (__bridge NSArray*)binary_archive_lookup_list_;
+  }
+  // M2 — a key already archived is looked up fail-fast, so a hit is provably
+  // served from the archive (not from the macOS shader cache, the confound
+  // that made the first M2 study measure nothing) and a stale entry costs one
+  // lookup before the cold build below.
+  if (binary_archive_lookup_list_ && archived_pipeline_keys_.count(key)) {
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
+    state = [device
+        newRenderPipelineStateWithDescriptor:desc
+                                     options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                  reflection:nil
+                                       error:nil];
+    if (state) {
+      GetMetalShaderBuildCensus().archive_hits.fetch_add(
+          1, std::memory_order_relaxed);
+    } else {
+      timer.Dismiss();
+      GetMetalShaderBuildCensus().archive_stale.fetch_add(
+          1, std::memory_order_relaxed);
+      archived_pipeline_keys_.erase(key);
+    }
+  }
+  if (!state) {
     // Task 1.1 census: host pipeline-state creation, the cost M2 (the binary
     // archive) targets and the one the async stage would move off the frame
     // path. Timed around the API call alone; descriptor assembly above is
@@ -865,6 +1182,21 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
     if (!state) {
       timer.Dismiss();
+    }
+  }
+  if (state && archive && !archived_pipeline_keys_.count(key) &&
+      !storage_.admission_stopped()) {
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().archive_add);
+    NSError* add_error = nil;
+    if ([archive addRenderPipelineFunctionsWithDescriptor:desc
+                                                     error:&add_error]) {
+      archived_pipeline_keys_.insert(key);
+      binary_archive_pending_keys_.push_back(key);
+    } else {
+      timer.Dismiss();
+      XELOGW("MetalPipelineCache: binary archive add failed: {}",
+             add_error ? [[add_error localizedDescription] UTF8String]
+                       : "unknown");
     }
   }
   if (!state) {

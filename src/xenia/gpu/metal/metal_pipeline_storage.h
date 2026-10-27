@@ -162,7 +162,10 @@ struct MetalTranslatorConfig {
 struct MetalPipelineStorageIdentity {
   // 3.3e — bumped when the on-disk layout changes, so a format change
   // invalidates without relying on any other field being right.
-  static constexpr uint32_t kFormatVersion = 1;
+  //   2 - MSC entry points are named per shader content instead of "main", so
+  //       the M2 binary archive can serialize (see MetalShaderConverter::
+  //       Convert); every stored metallib carries the old name.
+  static constexpr uint32_t kFormatVersion = 2;
 
   uint32_t format_version = kFormatVersion;
 
@@ -305,8 +308,8 @@ class MetalPipelineStorage {
 
   bool is_open() const { return is_open_; }
 
-  // 3.6a — M1 libraries, the M2 archive, and the manifest live beneath the
-  // title directory. Empty when not open.
+  // 3.6a — M1 libraries, the M2 archive segments (a directory), and the
+  // manifest live beneath the title directory. Empty when not open.
   const std::filesystem::path& title_root() const { return title_root_; }
   std::filesystem::path metallib_dir() const;
   std::filesystem::path binary_archive_path() const;
