@@ -163,6 +163,11 @@ class RenderTargetCache {
   // resolve and dump code. Backends that don't support them keep such draws'
   // window offset in the viewport.
   virtual bool AreNextPeriodRenderTargetsSupported() const { return true; }
+  // Whether a host render target may wrap the EDRAM ring with a window offset
+  // in its base (the base with the offset before tile 0, or its rows from
+  // there past the last tile). Backends that don't support it keep such draws'
+  // window offset in the viewport.
+  virtual bool AreWrappedWindowOffsetBasesSupported() const { return true; }
   // Whether this backend can carry a predicated-tiling window offset in the
   // EDRAM bases at all (window_offset_in_edram). Backends whose host render
   // targets don't span the rows above the draw's scissor keep every window

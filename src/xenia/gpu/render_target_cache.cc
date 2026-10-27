@@ -667,6 +667,58 @@ int32_t RenderTargetCache::GetWindowOffsetTiles(
       }
     }
   }
+  if (window_offset_tiles && GetPath() == Path::kHostRenderTargets &&
+      !AreWrappedWindowOffsetBasesSupported()) {
+    // A render target whose base with the offset lands before the start of
+    // EDRAM, or whose rows from there reach past its end, would wrap the
+    // EDRAM ring inside one host render target.
+    auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+    uint32_t msaa_samples_x_log2 =
+        uint32_t(rb_surface_info.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t msaa_samples_y_log2 =
+        uint32_t(rb_surface_info.msaa_samples >= xenos::MsaaSamples::k2X);
+    int32_t tile_height_pixels =
+        int32_t(xenos::kEdramTileHeightSamples >> msaa_samples_y_log2);
+    uint32_t pitch_tiles_at_32bpp =
+        ((rb_surface_info.surface_pitch << msaa_samples_x_log2) +
+         (xenos::kEdramTileWidthSamples - 1)) /
+        xenos::kEdramTileWidthSamples;
+    int32_t scissor_bottom =
+        std::min(int32_t(regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>().br_y),
+                 int32_t(regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>().br_y) -
+                     int32_t(regs.Get<reg::PA_SC_WINDOW_OFFSET>()
+                                 .window_y_offset));
+    uint32_t rows_end_tiles_at_32bpp =
+        uint32_t(std::max(scissor_bottom + tile_height_pixels - 1, 0) /
+                 tile_height_pixels) *
+        pitch_tiles_at_32bpp;
+    auto wraps = [&](uint32_t base_tiles, bool is_64bpp) {
+      int32_t shifted_base_tiles =
+          int32_t(base_tiles) + window_offset_tiles * (is_64bpp ? 2 : 1);
+      return shifted_base_tiles < 0 ||
+             uint32_t(shifted_base_tiles) +
+                     (rows_end_tiles_at_32bpp << uint32_t(is_64bpp)) >
+                 xenos::kEdramTileCount;
+    };
+    bool any_wraps = (normalized_depth_control.z_enable ||
+                      normalized_depth_control.stencil_enable) &&
+                     wraps(regs.Get<reg::RB_DEPTH_INFO>().depth_base, false);
+    for (uint32_t i = 0; !any_wraps && i < xenos::kMaxColorRenderTargets;
+         ++i) {
+      if (!(normalized_color_mask & (uint32_t(0b1111) << (4 * i)))) {
+        continue;
+      }
+      auto color_info = regs.Get<reg::RB_COLOR_INFO>(
+          reg::RB_COLOR_INFO::rt_register_indices[i]);
+      any_wraps = wraps(color_info.color_base,
+                        xenos::IsColorRenderTargetFormat64bpp(
+                            color_info.color_format));
+    }
+    if (any_wraps) {
+      window_offset_tiles = 0;
+      kept_in_viewport = true;
+    }
+  }
   if (!window_offset_tiles && !kept_in_viewport) {
     return 0;
   }

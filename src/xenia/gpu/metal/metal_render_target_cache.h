@@ -78,11 +78,16 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // The canonical EDRAM pack/materialize/resolve kernels address a render
   // target's rows from its base within one addressing period.
   bool AreNextPeriodRenderTargetsSupported() const override { return false; }
-  // Not yet: Metal sizes host render targets to the used EDRAM range from
-  // their base, so a tile drawn at its natural rows into a base-shifted target
-  // lands outside the texture (LEGO Star Wars II's three predicated tiles all
-  // showed the top tile, 2026-10-26, xenia-mac-evidence/window-offset-20261026).
-  // XE_METAL_WINDOW_OFFSET_IN_EDRAM=1 enables the experimental path.
+  // The canonical EDRAM authority (marking, packs, ownership, fates) and the
+  // pack/unpack addresser stop at the last EDRAM tile: an attachment whose
+  // base-shifted rows wrap the ring would never publish its wrapped rows.
+  bool AreWrappedWindowOffsetBasesSupported() const override { return false; }
+  // Off: predicated tiles reuse one base, so the base with a tile's offset
+  // lands before tile 0 and the attachment wraps the EDRAM ring, which the
+  // canonical authority cannot publish (LEGO Star Wars II's three tiles all
+  // showed the top tile). With the wrap guard above, XE_METAL_WINDOW_OFFSET_
+  // IN_EDRAM=1 is safe but engages nothing: 0 of 398 corpus window-offset draws
+  // reach the bases (xenia-mac-evidence/window-offset-20261026/).
   bool IsWindowOffsetInEdramSupported() const override;
   Path GetPath() const override {
     return Path::kHostRenderTargets;

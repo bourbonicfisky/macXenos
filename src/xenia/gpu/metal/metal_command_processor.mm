@@ -8403,6 +8403,29 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      : render_target_cache_->GetWindowOffsetTiles(
                            regs, norm_depth, normalized_color_mask,
                            guest_swap_count());
+  {
+    // Census: which window offsets reach the EDRAM bases (in_base=1) and which
+    // stay in the viewport (a wrapping base, an x offset, a 64bpp next-period
+    // target or --window_offset_in_edram off).
+    static const bool s_wo_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    if (s_wo_census && !memexport_draw &&
+        regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable &&
+        (window_offset.window_x_offset || window_offset.window_y_offset)) {
+      uint64_t n = DeltaCensusKeyedCount(
+          4, uint64_t(window_offset.value) |
+                 (uint64_t(window_offset_tiles != 0) << 32));
+      if (DeltaCensusLogCount(n)) {
+        XELOGI(
+            "DeltaCensus window_offset_route draw={} x={} y={} in_base={} "
+            "tiles={} count={}",
+            trace_draw_index_, int32_t(window_offset.window_x_offset),
+            int32_t(window_offset.window_y_offset),
+            window_offset_tiles != 0 ? 1 : 0, window_offset_tiles, n);
+      }
+    }
+  }
   if (!memexport_draw &&
       !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
                                     normalized_color_mask, *vertex_shader,
