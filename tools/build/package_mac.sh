@@ -192,10 +192,17 @@ fi
 log "Bundling Vulkan loader + MoltenVK"
 # Resolve the real (symlink-dereferenced) dylibs the loader dlopens.
 resolve() { local p; for p in "$@"; do [[ -e "$p" ]] && { readlink -f "$p"; return 0; }; done; return 1; }
-VK_LOADER_SRC="$(resolve /usr/local/lib/libvulkan.1.dylib /opt/homebrew/lib/libvulkan.1.dylib)" \
+# Apple Silicon Homebrew first: a Mac migrated from Intel can still hold a
+# stale x86_64-only Homebrew in /usr/local (the M1 Max had MoltenVK 1.2.0
+# from 2022 there, which beat 1.4.2 under /opt/homebrew).
+VK_LOADER_SRC="$(resolve /opt/homebrew/lib/libvulkan.1.dylib /usr/local/lib/libvulkan.1.dylib)" \
   || die "libvulkan.1.dylib not found (install vulkan-loader via Homebrew)"
-MVK_SRC="$(resolve /usr/local/lib/libMoltenVK.dylib /opt/homebrew/lib/libMoltenVK.dylib)" \
+MVK_SRC="$(resolve /opt/homebrew/lib/libMoltenVK.dylib /usr/local/lib/libMoltenVK.dylib)" \
   || die "libMoltenVK.dylib not found (install molten-vk via Homebrew)"
+for src in "${VK_LOADER_SRC}" "${MVK_SRC}"; do
+  lipo -archs "${src}" | grep -qw arm64 \
+    || die "${src} has no arm64 slice (got: $(lipo -archs "${src}")); install the Apple Silicon Homebrew package"
+done
 
 cp "${VK_LOADER_SRC}" "${CONTENTS}/Frameworks/libvulkan.1.dylib"
 cp "${MVK_SRC}"       "${CONTENTS}/Frameworks/libMoltenVK.dylib"
