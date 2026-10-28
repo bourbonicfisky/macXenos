@@ -96,12 +96,13 @@ TEST_CASE("lazy publication: physical read watch fires on the first CPU read",
   CHECK(observed == uint8_t((4096 * 3 + 6) * 3 + 1));
   CHECK(recorder.calls.size() == reads_before);
 
-  // A write to a still-watched host page publishes first (kWrite) and then
-  // proceeds; the byte lands in the alias.
+  // A write to a still-watched host page publishes first (kWriteUnlocked, then
+  // kWriteNoWait under the global lock) and then proceeds; the byte lands in
+  // the alias.
   const uint32_t write_offset = kSize - 4096;  // last host page, unread yet
   view[write_offset] = 0xEE;
   CHECK(alias[write_offset] == 0xEE);
-  CHECK(recorder.Count(Memory::PhysicalAccess::kWrite) >= 1);
+  CHECK(recorder.Count(Memory::PhysicalAccess::kWriteUnlocked) >= 1);
 
   // Releasing the allocation discards whatever a read watch still owed.
   size_t discards_before = recorder.Count(Memory::PhysicalAccess::kDiscard);

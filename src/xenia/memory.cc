@@ -2506,7 +2506,8 @@ void PhysicalHeap::ProvideReadWatchedPage(
           physical_address_offset - physical_address_start,
       heap_size_ - (physical_address_start - physical_address_offset));
   Memory::PhysicalAccess access =
-      is_write ? Memory::PhysicalAccess::kWrite : Memory::PhysicalAccess::kRead;
+      is_write ? Memory::PhysicalAccess::kWriteUnlocked
+               : Memory::PhysicalAccess::kRead;
   global_lock_locked_once.unlock();
   for (size_t i = 0; i < callback_count; ++i) {
     callbacks[i].first(callbacks[i].second, physical_address_start,
@@ -2867,20 +2868,23 @@ bool PhysicalHeap::TriggerCallbacks(
                                access);
         }
       };
+      // The global lock is held here: a write fault's repeat pass must not
+      // wait (its unlocked first pass already did).
+      const Memory::PhysicalAccess write_access =
+          read_callbacks_may_wait ? Memory::PhysicalAccess::kWrite
+                                  : Memory::PhysicalAccess::kWriteNoWait;
       if (discard_first > discard_last || discard_last < dropped_first ||
           discard_first > dropped_last) {
-        notify(dropped_first, dropped_last, Memory::PhysicalAccess::kWrite);
+        notify(dropped_first, dropped_last, write_access);
       } else {
         if (discard_first > dropped_first) {
-          notify(dropped_first, discard_first - 1,
-                 Memory::PhysicalAccess::kWrite);
+          notify(dropped_first, discard_first - 1, write_access);
         }
         notify(std::max(dropped_first, discard_first),
                std::min(dropped_last, discard_last),
                Memory::PhysicalAccess::kDiscard);
         if (discard_last < dropped_last) {
-          notify(discard_last + 1, dropped_last,
-                 Memory::PhysicalAccess::kWrite);
+          notify(discard_last + 1, dropped_last, write_access);
         }
       }
     }

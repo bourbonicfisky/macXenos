@@ -3669,10 +3669,19 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // rollback).
   static const bool s_locked_wait =
       std::getenv("XE_METAL_LAZY_LOCKED_WAIT") != nullptr;
-  const bool may_wait =
-      access != Memory::PhysicalAccess::kReadNoWait || s_locked_wait;
+  const bool may_wait = (access != Memory::PhysicalAccess::kReadNoWait &&
+                         access != Memory::PhysicalAccess::kWriteNoWait) ||
+                        s_locked_wait;
+  // Only a write fault's unlocked first pass may ask the GPU thread for a
+  // commit: every other write path holds the global lock, which the GPU
+  // thread may need before it can commit.
+  const bool write_unlocked =
+      access == Memory::PhysicalAccess::kWriteUnlocked;
   if (access == Memory::PhysicalAccess::kReadNoWait) {
     access = Memory::PhysicalAccess::kRead;
+  } else if (access == Memory::PhysicalAccess::kWriteUnlocked ||
+             access == Memory::PhysicalAccess::kWriteNoWait) {
+    access = Memory::PhysicalAccess::kWrite;
   }
   // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a CPU write or a release
   // over bytes a pending record still owns leaves that record's upload skip
@@ -3724,13 +3733,14 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // publishes before the write lands. Reads keep the old no-wait rule.
   static const bool s_write_commit = metal::ParseMetalEnvironmentFlag(
       std::getenv("XE_METAL_LAZY_WRITE_COMMIT"), true);
-  const bool is_write = access == Memory::PhysicalAccess::kWrite &&
-                        !kernel::XThread::IsInThread(worker_thread_.get());
+  const bool commit_first =
+      s_write_commit && write_unlocked && may_wait &&
+      !kernel::XThread::IsInThread(worker_thread_.get());
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
-      [this, committed, may_wait, is_write](uint64_t submission) {
+      [this, committed, may_wait, commit_first](uint64_t submission) {
         if (submission > committed) {
-          if (!(s_write_commit && is_write && may_wait)) {
+          if (!commit_first) {
             return false;
           }
           // Request the commit and give the GPU thread up to 50 ms.

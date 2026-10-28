@@ -546,12 +546,17 @@ class Memory {
   // read fault's second, global-lock-held pass; the first pass already
   // provided the page without the lock, so this one publishes only what needs
   // no wait (anything newer is re-armed) instead of blocking every other
-  // global-lock user on the GPU.
+  // global-lock user on the GPU. kWriteUnlocked: a write fault's first pass,
+  // without the global lock; the only access that may ask the GPU thread to
+  // commit (it cannot while this thread holds the lock). kWriteNoWait: the
+  // write fault's global-lock-held second pass, the write twin of kReadNoWait.
   enum class PhysicalAccess {
     kRead,
     kWrite,
     kDiscard,
     kReadNoWait,
+    kWriteUnlocked,
+    kWriteNoWait,
   };
   typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
                                              uint32_t physical_address_start,
