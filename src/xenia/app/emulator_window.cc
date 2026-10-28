@@ -10,8 +10,11 @@
 #include "xenia/app/emulator_window.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <span>
 
@@ -1204,13 +1207,55 @@ void EmulatorWindow::AutoScreenshotLoop() {
           "{:06}-swap{}", burst_sequence++,
           command_processor ? command_processor->guest_swap_count() : 0);
     }
-    app_context().CallInUIThread([this, suffix]() {
+    // Only the capture runs on the UI thread, which also paints the game;
+    // the PNG encode and write (tens of ms) happen here. With both on the UI
+    // thread, every shot stopped painting for the whole encode: a hitch
+    // once per shot, like a metronome at 1 s intervals (2026-10-28).
+    struct Capture {
+      std::mutex mutex;
+      std::condition_variable done_cv;
+      bool done = false;
+      bool captured = false;
+      double ui_ms = 0.0;
+      xe::ui::RawImage image;
+    };
+    auto capture = std::make_shared<Capture>();
+    app_context().CallInUIThread([this, capture]() {
+      const auto ui_start = clock::now();
       ui::Presenter* presenter = GetGraphicsSystemPresenter();
       xe::ui::RawImage image;
-      if (presenter && presenter->CaptureGuestOutput(image)) {
-        ExportScreenshot(image, /*notify=*/false, suffix);
-      }
+      const bool captured =
+          presenter && presenter->CaptureGuestOutput(image);
+      std::lock_guard<std::mutex> lock(capture->mutex);
+      capture->captured = captured;
+      capture->image = std::move(image);
+      capture->ui_ms =
+          std::chrono::duration<double, std::milli>(clock::now() - ui_start)
+              .count();
+      capture->done = true;
+      capture->done_cv.notify_one();
     });
+    std::unique_lock<std::mutex> lock(capture->mutex);
+    // Bounded: a UI thread that is busy or shutting down skips the shot.
+    if (!capture->done_cv.wait_for(lock, std::chrono::seconds(2),
+                                   [&]() { return capture->done; }) ||
+        !capture->captured) {
+      continue;
+    }
+    xe::ui::RawImage image = std::move(capture->image);
+    const double ui_ms = capture->ui_ms;
+    lock.unlock();
+    const auto save_start = clock::now();
+    ExportScreenshot(image, /*notify=*/false, suffix);
+    static uint32_t s_timing_logs = 0;
+    if (s_timing_logs++ < 8) {
+      XELOGI("Screenshot timing: {:.1f} ms on the UI thread, {:.1f} ms to "
+             "encode and write",
+             ui_ms,
+             std::chrono::duration<double, std::milli>(clock::now() -
+                                                       save_start)
+                 .count());
+    }
   }
 }
 
