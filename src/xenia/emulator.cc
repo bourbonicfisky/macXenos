@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <ranges>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/emulator.h"
@@ -1324,8 +1325,11 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
       kernel_state_->object_table()->GetObjectsByType<kernel::XThread>();
   std::string msg = fmt::format("GuestThreadStates ({}): {} threads\n", reason,
                                 threads.size());
+  std::unordered_set<const kernel::XThread*> seen;
   for (auto& thread : threads) {
-    if (!thread->is_guest_thread() || !thread->thread_state()) {
+    // The object table lists a thread once per handle to it.
+    if (!thread->is_guest_thread() || !thread->thread_state() ||
+        !seen.insert(thread.get()).second) {
       continue;
     }
     const cpu::ppc::PPCContext* ctx = thread->thread_state()->context();
@@ -1335,19 +1339,34 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
         thread->thread_id(), thread->thread_name_snapshot(), uint32_t(ctx->lr),
         uint32_t(ctx->r[1]), uint32_t(ctx->r[3]), uint32_t(ctx->r[4]),
         uint32_t(ctx->r[5]), uint32_t(ctx->r[6])));
-    for (int reg = 3; reg <= 4; ++reg) {
-      // Handles are 0xF8xxxxxx; small values are counts and flags.
-      const uint32_t handle = uint32_t(ctx->r[reg]);
+    auto readable = [&](uint32_t address, uint32_t length) {
+      BaseHeap* heap = address >= 0x10000 ? memory()->LookupHeap(address)
+                                          : nullptr;
+      uint32_t protect = 0;
+      return heap && heap->QueryProtect(address, &protect) &&
+             (protect & kMemoryProtectRead) &&
+             heap->QueryProtect(address + length - 1, &protect) &&
+             (protect & kMemoryProtectRead);
+    };
+    // A value is a handle (0xF8xxxxxx, Nt* waits) or a pointer to a guest
+    // dispatcher header (Ke* waits): type byte at +0, signal state at +4.
+    auto describe = [&](const char* label, uint32_t value) {
       auto object =
-          handle > 0xFFFF
+          value > 0xFFFF
               ? kernel_state_->object_table()->LookupObject<kernel::XObject>(
-                    handle)
+                    value)
               : nullptr;
       if (!object) {
-        continue;
+        if (value > 0xFFFF && !(value & 3) && readable(value, 8)) {
+          msg.append(fmt::format(
+              " {}={:08X}:header{},signal={}", label, value,
+              *memory()->TranslateVirtual<uint8_t*>(value),
+              int32_t(*memory()->TranslateVirtualBE<uint32_t>(value + 4))));
+        }
+        return;
       }
-      msg.append(fmt::format(" r{}=type{}'{}'", reg, uint32_t(object->type()),
-                             object->name()));
+      msg.append(fmt::format(" {}={:08X}:type{}'{}'", label, value,
+                             uint32_t(object->type()), object->name()));
       if (kernel::XObject::HasDispatcherHeader(object->type()) &&
           object->guest_object()) {
         msg.append(fmt::format(
@@ -1358,6 +1377,18 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
         msg.append(fmt::format(
             ",tid={:08X}",
             static_cast<kernel::XThread*>(object.get())->thread_id()));
+      }
+    };
+    describe("r3", uint32_t(ctx->r[3]));
+    describe("r4", uint32_t(ctx->r[4]));
+    // Wait-multiple calls pass a count in r3 and an array in r4 (handles for
+    // Nt*, dispatcher pointers for Ke*).
+    const uint32_t count = uint32_t(ctx->r[3]);
+    const uint32_t array = uint32_t(ctx->r[4]);
+    if (count && count <= 64 && !(array & 3) && readable(array, count * 4)) {
+      for (uint32_t i = 0; i < count; ++i) {
+        describe("[]",
+                 *memory()->TranslateVirtualBE<uint32_t>(array + i * 4));
       }
     }
     msg.append("\n    stack");
