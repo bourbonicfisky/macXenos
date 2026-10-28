@@ -1142,6 +1142,15 @@ void EmulatorWindow::AutoScreenshotLoop() {
   auto fps_time = clock::now();
   uint64_t fps_count = 0;
   bool fps_started = false;
+  // Hang dump: once per stall, when presenting stops for 30 s
+  // (XE_GUEST_STALL_DUMP_S) after the first swap, log every guest thread's
+  // wait state.
+  const char* stall_env = std::getenv("XE_GUEST_STALL_DUMP_S");
+  const auto stall_limit =
+      std::chrono::seconds(stall_env ? std::atoi(stall_env) : 30);
+  uint64_t stall_count = 0;
+  auto stall_since = clock::now();
+  bool stall_logged = false;
   uint64_t burst_sequence = 0;
   while (!auto_screenshot_stop_.load()) {
     xe::threading::Sleep(poll_interval);
@@ -1152,6 +1161,16 @@ void EmulatorWindow::AutoScreenshotLoop() {
           graphics ? graphics->command_processor() : nullptr;
       if (command_processor) {
         const uint64_t count = command_processor->guest_swap_count();
+        if (count != stall_count) {
+          stall_count = count;
+          stall_since = now;
+          stall_logged = false;
+        } else if (count && !stall_logged &&
+                   now - stall_since >= stall_limit) {
+          stall_logged = true;
+          emulator_->LogGuestThreadStates(fmt::format(
+              "no guest swap for {} s", stall_limit.count()));
+        }
         if (!fps_started) {
           fps_started = true;
           fps_time = now;

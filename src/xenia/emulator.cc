@@ -7,7 +7,10 @@
  ******************************************************************************
  */
 
+#include <algorithm>
 #include <ranges>
+#include <unordered_map>
+#include <vector>
 
 #include "xenia/emulator.h"
 
@@ -1283,6 +1286,91 @@ const std::filesystem::path Emulator::GetNewDiscPath(
   return path;
 }
 
+namespace {
+
+// Return addresses from a guest thread's r1 back chain: each frame's word 0
+// points at the caller's frame, and the Xbox 360 compilers save LR at -8 from
+// the caller's frame before the stwu.
+std::vector<uint32_t> WalkGuestBackChain(Memory* memory, uint32_t r1,
+                                         uint32_t stack_low,
+                                         uint32_t stack_high,
+                                         size_t max_frames) {
+  std::vector<uint32_t> return_addresses;
+  uint32_t frame = r1;
+  while (return_addresses.size() < max_frames && frame >= stack_low &&
+         frame + 4 <= stack_high && !(frame & 3)) {
+    const uint32_t caller = *memory->TranslateVirtualBE<uint32_t>(frame);
+    if (caller <= frame || caller - 8 < stack_low || caller > stack_high) {
+      break;
+    }
+    return_addresses.push_back(
+        *memory->TranslateVirtualBE<uint32_t>(caller - 8));
+    frame = caller;
+  }
+  return return_addresses;
+}
+
+}  // namespace
+
+void Emulator::LogGuestThreadStates(std::string_view reason) {
+  if (!kernel_state_) {
+    return;
+  }
+  // Per guest thread: the call it is blocked in (lr, and r3/r4, which hold
+  // the handles for the Nt*Wait* exports), what those handles are, and the
+  // back chain. Two threads each waiting on the other's handle is a deadlock;
+  // spinning threads show their loop's callers.
+  auto threads =
+      kernel_state_->object_table()->GetObjectsByType<kernel::XThread>();
+  std::string msg = fmt::format("GuestThreadStates ({}): {} threads\n", reason,
+                                threads.size());
+  for (auto& thread : threads) {
+    if (!thread->is_guest_thread() || !thread->thread_state()) {
+      continue;
+    }
+    const cpu::ppc::PPCContext* ctx = thread->thread_state()->context();
+    msg.append(fmt::format(
+        "  {:08X} '{}' lr={:08X} r1={:08X} r3={:08X} r4={:08X} r5={:08X} "
+        "r6={:08X}",
+        thread->thread_id(), thread->thread_name_snapshot(), uint32_t(ctx->lr),
+        uint32_t(ctx->r[1]), uint32_t(ctx->r[3]), uint32_t(ctx->r[4]),
+        uint32_t(ctx->r[5]), uint32_t(ctx->r[6])));
+    for (int reg = 3; reg <= 4; ++reg) {
+      // Handles are 0xF8xxxxxx; small values are counts and flags.
+      const uint32_t handle = uint32_t(ctx->r[reg]);
+      auto object =
+          handle > 0xFFFF
+              ? kernel_state_->object_table()->LookupObject<kernel::XObject>(
+                    handle)
+              : nullptr;
+      if (!object) {
+        continue;
+      }
+      msg.append(fmt::format(" r{}=type{}'{}'", reg, uint32_t(object->type()),
+                             object->name()));
+      if (kernel::XObject::HasDispatcherHeader(object->type()) &&
+          object->guest_object()) {
+        msg.append(fmt::format(
+            ",signal={}", int32_t(*memory()->TranslateVirtualBE<uint32_t>(
+                              object->guest_object() + 4))));
+      }
+      if (object->type() == kernel::XObject::Type::Thread) {
+        msg.append(fmt::format(
+            ",tid={:08X}",
+            static_cast<kernel::XThread*>(object.get())->thread_id()));
+      }
+    }
+    msg.append("\n    stack");
+    for (uint32_t lr : WalkGuestBackChain(memory(), uint32_t(ctx->r[1]),
+                                          thread->stack_limit(),
+                                          thread->stack_base(), 16)) {
+      msg.append(fmt::format(" {:08X}", lr));
+    }
+    msg.append("\n");
+  }
+  XELOGW("{}", msg);
+}
+
 bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
   return reinterpret_cast<Emulator*>(data)->ExceptionCallback(ex);
 }
@@ -1474,6 +1562,43 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     }
   }
 #endif  // XE_PLATFORM_MAC
+  // Guest call stack from the r1 back chain. An exhausted stack (Mafia II's
+  // main thread, 256 KB) shows here as one or two return addresses repeated,
+  // which names the recursion; the counts at the end rank them.
+  if (current_thread->is_guest_thread()) {
+    const uint32_t stack_low = current_thread->stack_limit();
+    const uint32_t stack_high = current_thread->stack_base();
+    crash_msg.append(fmt::format("Guest stack {:08X}-{:08X}, r1={:08X}:\n",
+                                 stack_low, stack_high,
+                                 uint32_t(context->r[1])));
+    const std::vector<uint32_t> return_addresses =
+        WalkGuestBackChain(memory(), uint32_t(context->r[1]), stack_low,
+                           stack_high, 65536);
+    const size_t count = return_addresses.size();
+    for (size_t i = 0; i < count; ++i) {
+      if (i == 32 && count > 48) {
+        crash_msg.append(fmt::format("  ... {} frames ...\n", count - 48));
+        i = count - 16;
+      }
+      crash_msg.append(
+          fmt::format("  #{:<5} LR {:08X}\n", i, return_addresses[i]));
+    }
+    std::unordered_map<uint32_t, uint32_t> lr_counts;
+    for (uint32_t lr : return_addresses) {
+      ++lr_counts[lr];
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> ranked(lr_counts.begin(),
+                                                      lr_counts.end());
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    crash_msg.append(fmt::format("  {} frames; most frequent return addresses:",
+                                 count));
+    for (size_t i = 0; i < ranked.size() && i < 8; ++i) {
+      crash_msg.append(
+          fmt::format(" {:08X}x{}", ranked[i].first, ranked[i].second));
+    }
+    crash_msg.append("\n");
+  }
   crash_msg.append("Registers:\n");
   for (int i = 0; i < 32; i++) {
     crash_msg.append(fmt::format(" r{:<3} = {:016X}\n", i, context->r[i]));

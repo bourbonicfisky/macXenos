@@ -15,6 +15,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "xenia/apu/audio_media_player.h"
@@ -332,6 +333,10 @@ class Emulator {
   void set_on_launch_new_title(LaunchNewTitleCallback callback) {
     on_launch_new_title_ = std::move(callback);
   }
+
+  // Logs every guest thread's blocking call, wait handles and back chain (for
+  // diagnosing guest hangs in unattended runs).
+  void LogGuestThreadStates(std::string_view reason);
 
  private:
   enum : uint64_t { EmulatorFlagDisclaimerAcknowledged = 1ULL << 0 };
