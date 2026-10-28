@@ -865,6 +865,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
           xe::threading::Sleep(std::chrono::microseconds(sleep_us));
           slept_us += sleep_us;
           census_requested_us += sleep_us;
+          OnIdlePoll();
           ReturnFromWait();
         }
 

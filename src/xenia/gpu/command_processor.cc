@@ -1039,6 +1039,7 @@ void CommandProcessor::WorkerThreadMain() {
         } else {
           xe::threading::MaybeYield();
         }
+        OnIdlePoll();
         loop_count++;
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && pending_fns_.empty() &&

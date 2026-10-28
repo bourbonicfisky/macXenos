@@ -3707,12 +3707,15 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // the faulting thread (committing is the GPU thread's job); the read then
   // observes prior contents and the watch is re-armed at the next commit.
   const uint64_t committed = submission_counter_;
-  // Lever (XE_METAL_LAZY_WRITE_COMMIT=1, default OFF): guest WRITES over a
-  // producer still in the open command buffer ask the GPU thread to commit
-  // and wait for completion before the write lands. 2026-10-25 RotTR: ~8k
-  // requests per 4-minute run at no fps cost, but the colour flash stayed
-  // (6-9 per run on three machines), so it is not that title's answer. On
-  // hardware the
+  // Default ON (XE_METAL_LAZY_WRITE_COMMIT=0 is the rollback): guest WRITES
+  // over a producer still in the open command buffer ask the GPU thread to
+  // commit and wait for completion before the write lands; without it the
+  // drain/fault copy of that record later overwrites the CPU's bytes.
+  // 2026-10-25 RotTR: ~8k requests per 4-minute run at no fps cost (the colour
+  // flash stayed, so it is not that title's answer). 2026-10-27 M1, eight
+  // titles: Reach, Crysis 3 and Banjo hit it, no fps change, no timeouts once
+  // the service also commits buffers with no render encoder open. The GPU
+  // thread never waits on itself. On hardware the
   // export/resolve has executed by the time the guest reuses its memory
   // (Rise of the Tomb Raider's XenonFlush thread rewrites memexport
   // destinations ~1.3x per frame right after issuing them); here the
@@ -3720,8 +3723,9 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // (bounded) for the commit, then wait for completion so the record
   // publishes before the write lands. Reads keep the old no-wait rule.
   static const bool s_write_commit = metal::ParseMetalEnvironmentFlag(
-      std::getenv("XE_METAL_LAZY_WRITE_COMMIT"), false);
-  const bool is_write = access == Memory::PhysicalAccess::kWrite;
+      std::getenv("XE_METAL_LAZY_WRITE_COMMIT"), true);
+  const bool is_write = access == Memory::PhysicalAccess::kWrite &&
+                        !kernel::XThread::IsInThread(worker_thread_.get());
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
       [this, committed, may_wait, is_write](uint64_t submission) {
@@ -6134,14 +6138,19 @@ void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
 // A write fault over a GPU-owned range whose producer is still in the open
 // command buffer (see OnLazyRead) needs that buffer committed before the
 // faulting thread can wait for the producer. Serviced from the GPU thread
-// only, at draw/copy boundaries, so the commit is an ordinary pass end.
+// only: at each draw, so the commit is an ordinary pass end, and from the idle
+// and WAIT_REG_MEM loops (OnIdlePoll), where the writing thread is often the
+// one that would have queued the next draw.
 void MetalCommandProcessor::ServiceLazyCommitRequest() {
   const uint64_t requested =
       lazy_commit_request_.load(std::memory_order_acquire);
   if (!requested) {
     return;
   }
-  if (requested > submission_counter_ && frame_open_) {
+  // Not gated on frame_open_: a command buffer recording only compute or blit
+  // work (resolves, uploads) has no render encoder open but still holds the
+  // requested producer. EndFrameEncoder is a no-op without a buffer.
+  if (requested > submission_counter_) {
     EndFrameEncoder(metal::SeamBoundaryReason::kHazardFlush);
   }
   lazy_commit_request_.store(0, std::memory_order_release);

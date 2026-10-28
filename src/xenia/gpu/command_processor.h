@@ -455,6 +455,11 @@ class CommandProcessor {
   virtual void MakeCoherent();
   virtual void PrepareForWait();
   virtual void ReturnFromWait();
+  // Called on every pass of the idle loop (ring empty) and of a WAIT_REG_MEM
+  // sleep, so a backend can act on requests from other threads while no
+  // packet arrives (Metal: a guest write waiting for an open command buffer to
+  // be committed, which would otherwise wait for the next draw).
+  virtual void OnIdlePoll() {}
   // Called once before a WAIT_REG_MEM starts polling a MEMORY location:
   // backends with deferred GPU->guest-memory writebacks must make any
   // pending write covering the polled address observable, or a guest
