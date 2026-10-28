@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -238,6 +239,26 @@ class RenderTargetCache {
   // the host and 1... are whether the same applies to color render targets, and
   // formats (resource formats, but if needed, with gamma taken into account) of
   // each.
+  // Records the render target the last update draws into (the first bound
+  // color one, else depth) as drawn in `frame`, and returns whether it was also
+  // drawn in one of the kDrawTargetRecurringFrames frames before - telling a
+  // pass redrawn every frame from a one-off render to a texture, for async
+  // pipeline stand-ins. True with no render target, as nothing is kept then.
+  // (Xenia Edge de8e60601.)
+  static constexpr uint64_t kDrawTargetRecurringFrames = 4;
+  bool TrackLastUpdateDrawTarget(uint64_t frame);
+  // Whether the last update's render target is at most
+  // kDrawTargetSmallPitchTiles wide (160 pixels without MSAA) - generated data
+  // like impostors or lookup tables, often kept past the frame even when
+  // redrawn every frame (4541094A's tree impostors).
+  static constexpr uint32_t kDrawTargetSmallPitchTiles = 2;
+  bool IsLastUpdateDrawTargetSmall() const {
+    return !last_update_draw_target_.IsEmpty() &&
+           last_update_draw_target_.pitch_tiles_at_32bpp <=
+               kDrawTargetSmallPitchTiles;
+  }
+  std::string GetLastUpdateDrawTargetName() const;
+
   uint32_t GetLastUpdateBoundRenderTargets(
       uint32_t* depth_and_color_formats_out = nullptr) const;
 
@@ -822,6 +843,13 @@ class RenderTargetCache {
   // Only valid for non-pixel-shader-interlock paths.
   RenderTarget*
       last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets];
+  // See TrackLastUpdateDrawTarget.
+  RenderTargetKey last_update_draw_target_;
+  // The latest frame each render target was drawn in, and the one before it,
+  // 0 for never.
+  std::unordered_map<RenderTargetKey, std::pair<uint64_t, uint64_t>,
+                     RenderTargetKey::Hasher>
+      draw_target_last_frames_;
   // Exact ownership span used by the last draw for each slot, in physical
   // EDRAM tiles. Backends with attachment/canonical authority use this instead
   // of conservatively dirtying an entire render-target allocation.

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "third_party/xxhash/xxhash.h"
@@ -36,10 +37,6 @@ class MetalShader : public DxbcShader {
         : DxbcTranslation(shader, modification) {}
     ~MetalTranslation();
 
-    // Background-thread translation claim (mirrors D3D12Translation).
-    bool TryClaimTranslation() {
-      return !translation_claimed_.test_and_set(std::memory_order_acq_rel);
-    }
 
     // id<MTLLibrary> / id<MTLFunction>, retained; set once the metallib has been
     // produced and loaded onto the device.
@@ -53,10 +50,15 @@ class MetalShader : public DxbcShader {
     bool CreateMetalFunction(void* device, const std::vector<uint8_t>& metallib);
 
    private:
-    std::atomic_flag translation_claimed_ = ATOMIC_FLAG_INIT;
     void* metal_library_ = nullptr;   // id<MTLLibrary> (retained)
     void* metal_function_ = nullptr;  // id<MTLFunction> (retained)
   };
+
+  // Held for the whole of MetalPipelineCache::TranslateShader of any of this
+  // shader's translations, so the GPU thread and a background pipeline worker
+  // never translate it at once (the first translation also fills the
+  // shader's texture and sampler bindings).
+  std::mutex& translate_mutex() { return translate_mutex_; }
 
   MetalShader(xenos::ShaderType shader_type, uint64_t ucode_data_hash,
               const uint32_t* ucode_dwords, size_t ucode_dword_count,
@@ -168,6 +170,7 @@ class MetalShader : public DxbcShader {
   Translation* CreateTranslationInstance(uint64_t modification) override;
 
  private:
+  std::mutex translate_mutex_;
   std::vector<FetchPattern> fetch_patterns_;
 };
 

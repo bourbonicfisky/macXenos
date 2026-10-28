@@ -11,7 +11,9 @@
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <functional>
@@ -21,6 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "xenia/base/threading.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
@@ -94,6 +97,28 @@ class MetalPipelineCache {
                                        MetalPipelineRasterKey raster_key,
                                        const uint32_t* blend_controls,
                                        uint32_t color_write_mask);
+
+  // Background pipeline creation (metal_async_pipelines, default off): a
+  // draw whose pipeline is not built yet, and that may use a stand-in, gets
+  // kPending while workers translate its shaders and create the state, so a
+  // first session does not stop for every new pipeline. Other draws wait for
+  // a queued build or build synchronously, as GetOrCreateRenderPipelineState.
+  // `vertex` and `pixel` may be untranslated; `pixel` may be null.
+  static bool AsyncPipelinesEnabled();
+  enum class AsyncPipelineStatus { kReady, kPending, kFailed };
+  // kReady: *pipeline_out is the state, *pixel_out the pixel translation it
+  // uses (null if the pixel shader did not translate, as the synchronous
+  // path does). kFailed: no pipeline (the vertex shader did not translate if
+  // it has no function).
+  AsyncPipelineStatus GetRenderPipelineStateAsync(
+      MetalShader::MetalTranslation* vertex,
+      MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+      uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+      const uint32_t* blend_controls, uint32_t color_write_mask,
+      bool stand_in_allowed, void** pipeline_out,
+      MetalShader::MetalTranslation** pixel_out);
+  // Installs the pipelines the workers finished. GPU thread.
+  void DrainAsyncPipelines();
 
   // Builds (or returns the cached) MESH id<MTLRenderPipelineState> that expands a
   // point/rectangle/quad primitive via MSC geometry emulation: the guest VS runs
@@ -174,14 +199,16 @@ class MetalPipelineCache {
                                     MetalPipelineRasterKey raster_key,
                                     const uint32_t* blend_controls,
                                     uint32_t color_write_mask);
-  // A retained MTLRenderPipelineDescriptor. Any thread.
+  // A retained MTLRenderPipelineDescriptor. Any thread; `lookup_list` is the
+  // binary archive lookup list (NSArray) to search, or null.
   void* NewRenderPipelineDescriptor(MetalShader::MetalTranslation* vertex,
                                     MetalShader::MetalTranslation* pixel,
                                     const uint64_t* color_pixel_formats,
                                     uint64_t depth_pixel_format,
                                     MetalPipelineRasterKey raster_key,
                                     const uint32_t* blend_controls,
-                                    uint32_t color_write_mask) const;
+                                    uint32_t color_write_mask,
+                                    void* lookup_list) const;
   // A retained id<MTLRenderPipelineState>, or null. Any thread, while no
   // other thread changes the archive key set; `archive_stale_out` reports an
   // archived key the archive no longer serves, for the caller to forget.
@@ -223,6 +250,51 @@ class MetalPipelineCache {
                      uint64_t depth_pixel_format, uint32_t sample_count,
                      const uint32_t* blend_controls,
                      uint32_t color_write_mask);
+  struct AsyncPipelineJob {
+    MetalShader::MetalTranslation* vertex;
+    MetalShader::MetalTranslation* pixel;
+    uint64_t color_formats[xenos::kMaxColorRenderTargets];
+    uint64_t depth_format;
+    MetalPipelineRasterKey raster_key;
+    uint32_t blend_controls[xenos::kMaxColorRenderTargets];
+    uint32_t color_write_mask;
+    uint64_t async_key;
+    void* lookup_list;  // retained NSArray or null
+    // Set by the worker.
+    bool done = false;
+    bool vertex_ok = false;
+    uint64_t key = 0;
+    MetalShader::MetalTranslation* pixel_used = nullptr;
+    void* descriptor = nullptr;  // retained
+    void* state = nullptr;       // retained
+  };
+  struct AsyncPipelineResult {
+    uint64_t key;  // 0: failed
+    MetalShader::MetalTranslation* pixel_used;
+  };
+  // Content key of a request, valid before the shaders are translated.
+  static uint64_t AsyncPipelineKey(MetalShader::MetalTranslation* vertex,
+                                   MetalShader::MetalTranslation* pixel,
+                                   const uint64_t* color_pixel_formats,
+                                   uint64_t depth_pixel_format,
+                                   MetalPipelineRasterKey raster_key,
+                                   const uint32_t* blend_controls,
+                                   uint32_t color_write_mask);
+  void StartAsyncPipelineWorkers();
+  void StopAsyncPipelineWorkers();
+  void AsyncPipelineWorker();
+  std::mutex async_mutex_;
+  std::condition_variable async_queue_cv_;
+  std::condition_variable async_done_cv_;
+  std::deque<std::shared_ptr<AsyncPipelineJob>> async_queue_;
+  std::vector<std::shared_ptr<AsyncPipelineJob>> async_done_;
+  bool async_stop_ = false;
+  // GPU thread only.
+  std::unordered_map<uint64_t, std::shared_ptr<AsyncPipelineJob>>
+      async_pending_;
+  std::unordered_map<uint64_t, AsyncPipelineResult> async_results_;
+  std::vector<std::unique_ptr<xe::threading::Thread>> async_workers_;
+
   ShaderStorageWriter<PipelineStoredDescription> shader_storage_;
   bool shader_storage_flush_shaders_ = false;
   bool shader_storage_flush_pipelines_ = false;

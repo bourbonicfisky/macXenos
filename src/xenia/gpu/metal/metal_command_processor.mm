@@ -8753,7 +8753,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
-  if (!pipeline_cache_->TranslateShader(*vs_translation)) {
+  // Background pipelines (metal_async_pipelines): the pipeline step below
+  // translates, on a worker when the draw may use a stand-in. Not for traces,
+  // memexport-only draws or geometry emulation.
+  const bool async_pipelines = MetalPipelineCache::AsyncPipelinesEnabled() &&
+                               !trace_writer_.is_open() &&
+                               !trace_playback_context() && !memexport_draw &&
+                               !use_geometry_emulation && !kDebugSolidFragment;
+  if (!async_pipelines && !pipeline_cache_->TranslateShader(*vs_translation)) {
     RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
     return true;
   }
@@ -8991,7 +8998,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ps_mod_value = ps_mod;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
         pixel_shader->GetOrCreateTranslation(ps_mod));
-    if (!pipeline_cache_->TranslateShader(*ps_translation)) {
+    if (!async_pipelines && !pipeline_cache_->TranslateShader(*ps_translation)) {
       ps_translation = nullptr;
     }
   }
@@ -9153,6 +9160,65 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         blend_controls,
         normalized_color_mask,
         &gs_vertex_size, &gs_max_input_primitives);
+  } else if (async_pipelines) {
+    // A stand-in (skipping the draw until the real pipeline exists) is only
+    // harmless in a pass redrawn every frame: not for a render target drawn
+    // only now (a one-off render to a texture), a small one (generated data)
+    // or a draw with memory exports (Xenia Edge de8e60601).
+    const bool target_recurring =
+        render_target_cache_->TrackLastUpdateDrawTarget(uint64_t(swap_count_) +
+                                                        1);
+    const bool target_small =
+        render_target_cache_->IsLastUpdateDrawTargetSmall();
+    const bool stand_in_allowed =
+        target_recurring && !target_small && memexport_ranges.empty();
+    MetalShader::MetalTranslation* ps_used = nullptr;
+    const auto async_start = std::chrono::steady_clock::now();
+    const MetalPipelineCache::AsyncPipelineStatus status =
+        pipeline_cache_->GetRenderPipelineStateAsync(
+            vs_translation, ps_translation, color_pixel_formats,
+            pipeline_depth_format, pipeline_raster_state.pipeline_key(),
+            blend_controls, normalized_color_mask, stand_in_allowed,
+            &pipeline, &ps_used);
+    if (!stand_in_allowed) {
+      // Why draws waited (attribution, logged every 900 swaps): only waits
+      // over 1 ms count, which is a build or a queued build finishing.
+      const double waited_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - async_start)
+              .count();
+      if (waited_ms > 1.0) {
+        const int why = !memexport_ranges.empty() ? 2
+                        : target_small            ? 1
+                                                  : 0;
+        ++async_wait_counts_[why];
+        async_wait_ms_[why] += waited_ms;
+      }
+    }
+    if (swap_count_ != async_wait_logged_swap_ && swap_count_ % 900 == 0 &&
+        (async_wait_counts_[0] | async_wait_counts_[1] |
+         async_wait_counts_[2])) {
+      async_wait_logged_swap_ = swap_count_;
+      XELOGI(
+          "MetalAsyncPipelines swap#{}: draws that waited: target not "
+          "recurring {} ({:.0f} ms), small target {} ({:.0f} ms), memexport "
+          "{} ({:.0f} ms)",
+          swap_count_, async_wait_counts_[0], async_wait_ms_[0],
+          async_wait_counts_[1], async_wait_ms_[1], async_wait_counts_[2],
+          async_wait_ms_[2]);
+    }
+    if (status == MetalPipelineCache::AsyncPipelineStatus::kPending) {
+      GetMetalShaderBuildCensus().async_skips.fetch_add(
+          1, std::memory_order_relaxed);
+      RecordDrawSkip(MetalDrawSkipReason::kAsyncPipelinePending,
+                     "async-pipeline-pending");
+      return true;
+    }
+    if (!vs_translation->has_metal_function()) {
+      RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
+      return true;
+    }
+    ps_translation = ps_used;
   } else {
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_formats,

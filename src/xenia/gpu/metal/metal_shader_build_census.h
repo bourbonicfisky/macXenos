@@ -196,6 +196,8 @@ class MetalShaderBuildCensus {
   // Frame attribution.
   std::atomic<uint64_t> swaps{0};
   std::atomic<uint64_t> startup_build_ns{0};    // before the first swap
+  std::atomic<uint64_t> async_build_ns{0};      // on background workers
+  std::atomic<uint64_t> async_skips{0};         // draws skipped meanwhile
   std::atomic<uint64_t> stall_build_ns{0};      // after it
   std::atomic<uint64_t> stall_events{0};
   std::atomic<uint64_t> stall_frames{0};        // frames with any build work
@@ -212,8 +214,19 @@ class MetalShaderBuildCensus {
 
   // Every build event routes through here so frame attribution cannot drift
   // from the per-stage totals.
+  // Set on the background pipeline workers (metal_async_pipelines): their
+  // builds do not stall a frame, so they are counted apart.
+  static bool& AsyncBuildThread() {
+    static thread_local bool async_build_thread = false;
+    return async_build_thread;
+  }
+
   void RecordBuild(Stage& stage, uint64_t elapsed_ns, uint64_t bytes = 0) {
     stage.Add(elapsed_ns, bytes);
+    if (AsyncBuildThread()) {
+      async_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+      return;
+    }
     if (swaps.load(std::memory_order_relaxed) == 0) {
       startup_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
       return;
@@ -269,7 +282,8 @@ class MetalShaderBuildCensus {
         "|startup_build_ms={:.1f}|stall_build_ms={:.1f}|stall_events={}"
         "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}"
         "|arch={}|arch_hit={}|arch_stale={}|arch_save_fail={}|arch_add={}/{:.1f}ms"
-        "|arch_save={}/{:.1f}ms/max{:.1f}/{}KiB",
+        "|arch_save={}/{:.1f}ms/max{:.1f}/{}KiB"
+        "|async_build_ms={:.1f}|async_skips={}",
         phase, swaps.load(std::memory_order_relaxed),
         double(first_swap_ns.load(std::memory_order_relaxed)) / 1e6,
         dxbc.count.load(std::memory_order_relaxed), dxbc.total_ms(),
@@ -311,7 +325,9 @@ class MetalShaderBuildCensus {
         archive_add.total_ms(),
         archive_save.count.load(std::memory_order_relaxed),
         archive_save.total_ms(), archive_save.max_ms(),
-        archive_save.bytes.load(std::memory_order_relaxed) / 1024);
+        archive_save.bytes.load(std::memory_order_relaxed) / 1024,
+        double(async_build_ns.load(std::memory_order_relaxed)) / 1e6,
+        async_skips.load(std::memory_order_relaxed));
   }
 
   uint64_t stage_requests_snapshot() const {

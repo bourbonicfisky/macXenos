@@ -49,6 +49,15 @@
 // mechanisms; reported in the effective-state line below.
 DECLARE_bool(store_shaders);
 
+DEFINE_bool(
+    metal_async_pipelines, false,
+    "Metal: create pipelines a game has not used before on background threads. "
+    "Until one is ready, draws into a render target redrawn every frame are "
+    "skipped (an object can be missing for a few frames) instead of the game "
+    "pausing; one-off renders, small render targets and memory exports still "
+    "wait. XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -532,6 +541,7 @@ void MetalPipelineCache::MaybeSaveBinaryArchiveOnSwap() {
 }
 
 void MetalPipelineCache::Shutdown() {
+  StopAsyncPipelineWorkers();
   ShutdownDurableStorage();
   if (binary_archive_queue_) {
     dispatch_queue_t queue =
@@ -764,6 +774,8 @@ bool MetalPipelineCache::TranslateShader(
 bool MetalPipelineCache::TranslateShader(
     MetalShader::MetalTranslation& translation,
     DxbcShaderTranslator& translator, MetalShaderConverter& metal_converter) {
+  std::lock_guard<std::mutex> translate_lock(
+      static_cast<MetalShader&>(translation.shader()).translate_mutex());
   if (translation.is_translated()) {
     return translation.is_valid() && translation.has_metal_function();
   }
@@ -1163,7 +1175,8 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
       (__bridge_transfer MTLRenderPipelineDescriptor*)
           NewRenderPipelineDescriptor(vertex, pixel, color_pixel_formats,
                                       depth_pixel_format, raster_key,
-                                      blend_controls, color_write_mask);
+                                      blend_controls, color_write_mask,
+                                      binary_archive_lookup_list_);
   bool archive_stale = false;
   void* state =
       NewRenderPipelineState((__bridge void*)desc, key, &archive_stale);
@@ -1235,7 +1248,8 @@ void* MetalPipelineCache::NewRenderPipelineDescriptor(
     MetalShader::MetalTranslation* vertex,
     MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
     uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
-    const uint32_t* blend_controls, uint32_t color_write_mask) const {
+    const uint32_t* blend_controls, uint32_t color_write_mask,
+    void* lookup_list) const {
   const MetalShaderKeyIdentity vs = MakeShaderKeyIdentity(vertex);
   const MetalShaderKeyIdentity ps = MakeShaderKeyIdentity(
       pixel && pixel->has_metal_function() ? pixel : nullptr);
@@ -1284,8 +1298,8 @@ void* MetalPipelineCache::NewRenderPipelineDescriptor(
       }
     }
   }
-  if (binary_archive_lookup_list_) {
-    desc.binaryArchives = (__bridge NSArray*)binary_archive_lookup_list_;
+  if (lookup_list) {
+    desc.binaryArchives = (__bridge NSArray*)lookup_list;
   }
   return (__bridge_retained void*)desc;
 }
@@ -1372,6 +1386,317 @@ void* MetalPipelineCache::AddRenderPipelineState(uint64_t key,
   void* state_ptr = (__bridge_retained void*)state;
   render_pipeline_states_.emplace(key, state_ptr);
   return state_ptr;
+}
+
+bool MetalPipelineCache::AsyncPipelinesEnabled() {
+  // XE_METAL_ASYNC_PIPELINES=0/1 overrides the cvar.
+  static const int s_env = [] {
+    const char* v = std::getenv("XE_METAL_ASYNC_PIPELINES");
+    return v && (v[0] == '0' || v[0] == '1') && !v[1] ? v[0] - '0' : -1;
+  }();
+  return s_env >= 0 ? s_env == 1 : cvars::metal_async_pipelines;
+}
+
+uint64_t MetalPipelineCache::AsyncPipelineKey(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask) {
+  struct KeyBytes {
+    MetalShaderKeyIdentity vs;
+    MetalShaderKeyIdentity ps;
+    uint64_t colors[xenos::kMaxColorRenderTargets];
+    uint64_t depth;
+    uint32_t sample_count;
+    uint32_t blends[xenos::kMaxColorRenderTargets];
+    uint32_t write_mask;
+    uint32_t pad;
+  } key_bytes = {};
+  // The pixel translation's identity whether or not it has translated yet:
+  // RenderPipelineKey folds a pixel shader without a function into the
+  // depth-only key, which is only known afterwards.
+  key_bytes.vs = MakeShaderKeyIdentity(vertex);
+  key_bytes.ps = MakeShaderKeyIdentity(pixel);
+  key_bytes.depth = depth_pixel_format;
+  key_bytes.sample_count = raster_key.raster_sample_count;
+  key_bytes.write_mask = color_write_mask;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    key_bytes.colors[i] = color_pixel_formats[i];
+    key_bytes.blends[i] = blend_controls[i];
+  }
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
+
+MetalPipelineCache::AsyncPipelineStatus
+MetalPipelineCache::GetRenderPipelineStateAsync(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask,
+    bool stand_in_allowed, void** pipeline_out,
+    MetalShader::MetalTranslation** pixel_out) {
+  *pipeline_out = nullptr;
+  *pixel_out = nullptr;
+  DrainAsyncPipelines();
+  auto from_key = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
+    auto it = render_pipeline_states_.find(key);
+    if (it == render_pipeline_states_.end() || !it->second) {
+      return AsyncPipelineStatus::kFailed;
+    }
+    *pipeline_out = it->second;
+    *pixel_out = pixel_used;
+    return AsyncPipelineStatus::kReady;
+  };
+  const uint64_t async_key =
+      AsyncPipelineKey(vertex, pixel, color_pixel_formats, depth_pixel_format,
+                       raster_key, blend_controls, color_write_mask);
+  {
+    auto it = async_results_.find(async_key);
+    if (it != async_results_.end()) {
+      return it->second.key ? from_key(it->second.key, it->second.pixel_used)
+                            : AsyncPipelineStatus::kFailed;
+    }
+  }
+  auto pending = async_pending_.find(async_key);
+  if (pending != async_pending_.end()) {
+    if (stand_in_allowed) {
+      return AsyncPipelineStatus::kPending;
+    }
+    // A draw that may not use a stand-in waits for the queued build.
+    std::shared_ptr<AsyncPipelineJob> job = pending->second;
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_done_cv_.wait(lock, [&]() { return job->done; });
+    }
+    DrainAsyncPipelines();
+    auto it = async_results_.find(async_key);
+    return it != async_results_.end() && it->second.key
+               ? from_key(it->second.key, it->second.pixel_used)
+               : AsyncPipelineStatus::kFailed;
+  }
+  const bool translated =
+      vertex->is_translated() && (!pixel || pixel->is_translated());
+  if (!translated || stand_in_allowed) {
+    if (translated) {
+      MetalShader::MetalTranslation* pixel_used =
+          pixel && pixel->has_metal_function() ? pixel : nullptr;
+      if (!vertex->has_metal_function()) {
+        return AsyncPipelineStatus::kFailed;
+      }
+      const uint64_t key =
+          RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                            depth_pixel_format, raster_key, blend_controls,
+                            color_write_mask);
+      if (render_pipeline_states_.count(key)) {
+        return from_key(key, pixel_used);
+      }
+    }
+    if (stand_in_allowed) {
+      auto job = std::make_shared<AsyncPipelineJob>();
+      job->vertex = vertex;
+      job->pixel = pixel;
+      std::memcpy(job->color_formats, color_pixel_formats,
+                  sizeof(job->color_formats));
+      job->depth_format = depth_pixel_format;
+      job->raster_key = raster_key;
+      std::memcpy(job->blend_controls, blend_controls,
+                  sizeof(job->blend_controls));
+      job->color_write_mask = color_write_mask;
+      job->async_key = async_key;
+      // The lookup list is replaced on the GPU thread when the archive is
+      // saved; the worker keeps this one.
+      job->lookup_list =
+          binary_archive_lookup_list_
+              ? (__bridge_retained void*)(__bridge NSArray*)
+                    binary_archive_lookup_list_
+              : nullptr;
+      StartAsyncPipelineWorkers();
+      async_pending_.emplace(async_key, job);
+      {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        async_queue_.push_back(job);
+      }
+      async_queue_cv_.notify_one();
+      return AsyncPipelineStatus::kPending;
+    }
+  }
+  // Synchronous, as GetOrCreateRenderPipelineState's callers did.
+  if (!TranslateShader(*vertex)) {
+    return AsyncPipelineStatus::kFailed;
+  }
+  MetalShader::MetalTranslation* pixel_used =
+      pixel && TranslateShader(*pixel) ? pixel : nullptr;
+  void* state = GetOrCreateRenderPipelineState(
+      vertex, pixel_used, color_pixel_formats, depth_pixel_format, raster_key,
+      blend_controls, color_write_mask);
+  if (!state) {
+    return AsyncPipelineStatus::kFailed;
+  }
+  *pipeline_out = state;
+  *pixel_out = pixel_used;
+  return AsyncPipelineStatus::kReady;
+}
+
+void MetalPipelineCache::DrainAsyncPipelines() {
+  std::vector<std::shared_ptr<AsyncPipelineJob>> done;
+  {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    if (async_done_.empty()) {
+      return;
+    }
+    done.swap(async_done_);
+  }
+  for (const std::shared_ptr<AsyncPipelineJob>& job : done) {
+    MTLRenderPipelineDescriptor* desc =
+        (__bridge_transfer MTLRenderPipelineDescriptor*)job->descriptor;
+    job->descriptor = nullptr;
+    if (job->lookup_list) {
+      NSArray* list = (__bridge_transfer NSArray*)job->lookup_list;
+      (void)list;
+      job->lookup_list = nullptr;
+    }
+    AsyncPipelineResult result = {0, nullptr};
+    if (job->vertex_ok && desc) {
+      if (render_pipeline_states_.count(job->key)) {
+        // Built synchronously meanwhile.
+        if (job->state) {
+          id<MTLRenderPipelineState> state =
+              (__bridge_transfer id<MTLRenderPipelineState>)job->state;
+          (void)state;
+        }
+      } else if (AddRenderPipelineState(job->key, (__bridge void*)desc,
+                                        job->state)) {
+        StorePipeline(job->vertex, job->pixel_used, job->color_formats,
+                      job->depth_format, job->raster_key.raster_sample_count,
+                      job->blend_controls, job->color_write_mask);
+      }
+      job->state = nullptr;
+      result = {job->key, job->pixel_used};
+    }
+    async_results_[job->async_key] = result;
+    async_pending_.erase(job->async_key);
+  }
+}
+
+void MetalPipelineCache::StartAsyncPipelineWorkers() {
+  if (!async_workers_.empty()) {
+    return;
+  }
+  // XE_METAL_ASYNC_PIPELINE_THREADS=<n>. Default a third of the logical
+  // processors (at least 2): the guest keeps running, and a pipeline-state
+  // build mostly waits on the Metal compiler service.
+  static const uint32_t s_count = [] {
+    if (const char* v = std::getenv("XE_METAL_ASYNC_PIPELINE_THREADS")) {
+      const long n = std::strtol(v, nullptr, 10);
+      if (n > 0) {
+        return uint32_t(n);
+      }
+    }
+    return std::max(xe::threading::logical_processor_count() / 3,
+                    uint32_t(2));
+  }();
+  async_stop_ = false;
+  for (uint32_t i = 0; i < s_count; ++i) {
+    xe::threading::Thread::CreationParameters params;
+    params.qos_class = 1;  // user_initiated
+    auto thread =
+        xe::threading::Thread::Create(params, [this]() { AsyncPipelineWorker(); });
+    if (!thread) {
+      break;
+    }
+    thread->set_name("Metal Async Pipelines");
+    async_workers_.push_back(std::move(thread));
+  }
+  XELOGI("MetalPipelineCache: {} background pipeline threads",
+         async_workers_.size());
+}
+
+void MetalPipelineCache::StopAsyncPipelineWorkers() {
+  if (async_workers_.empty()) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    async_stop_ = true;
+  }
+  async_queue_cv_.notify_all();
+  for (auto& thread : async_workers_) {
+    xe::threading::Wait(thread.get(), false);
+  }
+  async_workers_.clear();
+  // Jobs never started: nothing to release but their lookup lists.
+  for (const std::shared_ptr<AsyncPipelineJob>& job : async_queue_) {
+    if (job->lookup_list) {
+      NSArray* list = (__bridge_transfer NSArray*)job->lookup_list;
+      (void)list;
+      job->lookup_list = nullptr;
+    }
+  }
+  async_queue_.clear();
+  DrainAsyncPipelines();
+  async_pending_.clear();
+}
+
+void MetalPipelineCache::AsyncPipelineWorker() {
+  MetalShaderBuildCensus::AsyncBuildThread() = true;
+  std::unique_ptr<DxbcShaderTranslator> translator = CreateShaderTranslator();
+  MetalShaderConverter metal_converter;
+  const bool converter_ok = metal_converter.Initialize(
+      MetalTranslatorConfig::kMscBindlessResourcesUsed);
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  while (true) {
+    std::shared_ptr<AsyncPipelineJob> job;
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_queue_cv_.wait(lock,
+                           [&]() { return async_stop_ || !async_queue_.empty(); });
+      if (async_stop_) {
+        return;
+      }
+      job = async_queue_.front();
+      async_queue_.pop_front();
+    }
+    @autoreleasepool {
+      job->vertex_ok =
+          converter_ok &&
+          TranslateShader(*job->vertex, *translator, metal_converter);
+      if (job->vertex_ok) {
+        job->pixel_used =
+            job->pixel &&
+                    TranslateShader(*job->pixel, *translator, metal_converter)
+                ? job->pixel
+                : nullptr;
+        job->key = RenderPipelineKey(
+            job->vertex, job->pixel_used, job->color_formats,
+            job->depth_format, job->raster_key, job->blend_controls,
+            job->color_write_mask);
+        job->descriptor = NewRenderPipelineDescriptor(
+            job->vertex, job->pixel_used, job->color_formats,
+            job->depth_format, job->raster_key, job->blend_controls,
+            job->color_write_mask, job->lookup_list);
+        MTLRenderPipelineDescriptor* desc =
+            (__bridge MTLRenderPipelineDescriptor*)job->descriptor;
+        MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
+        NSError* error = nil;
+        id<MTLRenderPipelineState> state =
+            [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (state) {
+          job->state = (__bridge_retained void*)state;
+        } else {
+          timer.Dismiss();
+          XELOGE("MetalPipelineCache: background newRenderPipelineState "
+                 "failed: {}",
+                 error ? [[error localizedDescription] UTF8String] : "unknown");
+        }
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      job->done = true;
+      async_done_.push_back(job);
+    }
+    async_done_cv_.notify_all();
+  }
 }
 
 void MetalPipelineCache::StorePipeline(MetalShader::MetalTranslation* vertex,
@@ -1610,7 +1935,8 @@ void MetalPipelineCache::InitializeShaderStorage(
               NewRenderPipelineDescriptor(
                   pipeline.vertex, pipeline.pixel, description.color_formats,
                   description.depth_format, {description.sample_count},
-                  description.blend_controls, description.color_write_mask);
+                  description.blend_controls, description.color_write_mask,
+                  binary_archive_lookup_list_);
           pipeline.state = NewRenderPipelineState(
               (__bridge void*)pipeline.descriptor, pipeline.key,
               &pipeline.archive_stale);

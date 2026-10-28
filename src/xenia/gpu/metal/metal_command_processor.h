@@ -723,6 +723,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // Number of swaps issued; drives the bring-up test pattern color so on-device
   // it's visually obvious that frames are flowing through the guest-output path.
   uint32_t swap_count_ = 0;
+  // metal_async_pipelines attribution: draws that could not use a stand-in
+  // and waited (target not recurring, small target, memexport).
+  uint64_t async_wait_counts_[3] = {};
+  double async_wait_ms_[3] = {};
+  uint32_t async_wait_logged_swap_ = UINT32_MAX;
   // The previous swap's frontbuffer (guest base, bytes): resolve census and
   // the snapshot policy use it to tell frontbuffer resolves apart.
   uint32_t last_frontbuffer_base_ = 0;

@@ -767,6 +767,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                int32_t window_offset_tiles) {
   const RegisterFile& regs = register_file();
   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
+  last_update_draw_target_ = RenderTargetKey();
 
   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
@@ -1217,6 +1218,13 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     }
   }
 
+  uint32_t draw_target_index;
+  if (xe::bit_scan_forward(depth_and_color_rts_used_bits & ~uint32_t(1),
+                           &draw_target_index) ||
+      xe::bit_scan_forward(depth_and_color_rts_used_bits, &draw_target_index)) {
+    last_update_draw_target_ = rt_keys[draw_target_index];
+  }
+
   if (keep_aliased_depth) {
     // The host depth must be current for the color owner's whole range.
     uint32_t alias_start_tiles = 0;
@@ -1372,6 +1380,26 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   }
 
   return true;
+}
+
+bool RenderTargetCache::TrackLastUpdateDrawTarget(uint64_t frame) {
+  if (last_update_draw_target_.IsEmpty()) {
+    return true;
+  }
+  std::pair<uint64_t, uint64_t>& frames =
+      draw_target_last_frames_[last_update_draw_target_];
+  if (frames.first != frame) {
+    frames.second = frames.first;
+    frames.first = frame;
+  }
+  // Frame 0 is never. A pass drawn every frame may still miss one (4E4D083A).
+  return frames.second && frame - frames.second <= kDrawTargetRecurringFrames;
+}
+
+std::string RenderTargetCache::GetLastUpdateDrawTargetName() const {
+  return last_update_draw_target_.IsEmpty()
+             ? std::string("no RT")
+             : last_update_draw_target_.GetDebugName();
 }
 
 uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
