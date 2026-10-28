@@ -1493,6 +1493,15 @@
 "description": "Metal: finish each GPU submission before the next one starts (one in flight). Workaround for whole-frame colour flashes in Rise of the Tomb Raider whose cause is still open; costs frame rate wherever the GPU and CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
 "changed": false
 },
+"metal_completion_wait_exports": {
+"name": "metal_completion_wait_exports",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Metal: before the guest sees a completion signal (interrupt or end-of-pipe event), wait for the GPU when memory exports are still pending in the open submission. Removes Rise of the Tomb Raider's whole-frame colour flashes (cause still open) at a lower cost than metal_serialize_submissions: M4 Macs keep 30 fps, an M1 Max drops from 30 to about 22.",
+"changed": false
+},
 "metal_memexport_pixel": {
 "name": "metal_memexport_pixel",
 "category": "GPU",

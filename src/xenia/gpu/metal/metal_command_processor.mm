@@ -159,6 +159,15 @@ DEFINE_bool(
     "Raider whose cause is still open; costs frame rate wherever the GPU and "
     "CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
     "GPU");
+DEFINE_bool(
+    metal_completion_wait_exports, false,
+    "Metal: before the guest sees a completion signal (interrupt or "
+    "end-of-pipe event), wait for the GPU when memory exports are still "
+    "pending in the open submission. Removes Rise of the Tomb Raider's "
+    "whole-frame colour flashes (cause still open) at a lower cost than "
+    "metal_serialize_submissions: M4 Macs keep 30 fps, an M1 Max drops from "
+    "30 to about 22.",
+    "GPU");
 
 DEFINE_bool(
     metal_memexport_pixel, true,
@@ -18374,7 +18383,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   // the GPU finishes, every frame, and the GPU idles while the CPU encodes.
   // Library-wide it cut Red Dead Redemption 26.8 -> 11.8 fps, Skate 2 30 ->
   // 18.3 and LEGO Star Wars II 60 -> 24.8 on the M1 Max (2026-10-15).
-  CommitOpenFaultableWork(CompletionWaitEnabled());
+  CommitOpenFaultableWork(CompletionWaitEnabled(),
+                          cvars::metal_completion_wait_exports);
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);
@@ -18386,7 +18396,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   return ok;
 }
 
-void MetalCommandProcessor::CommitOpenFaultableWork(bool wait) {
+void MetalCommandProcessor::CommitOpenFaultableWork(bool wait,
+                                                    bool wait_for_exports) {
   if (!LazyPublishEnabled() || !lazy_read_callback_handle_ ||
       trace_writer_.is_open() || trace_playback_context() ||
       !frame_command_buffer_) {
@@ -18404,14 +18415,21 @@ void MetalCommandProcessor::CommitOpenFaultableWork(bool wait) {
       break;
     }
   }
-  if (!open_record && FenceCommitEnabled()) {
+  bool open_export = false;
+  if (FenceCommitEnabled()) {
     for (const PendingMemexport& me : pending_memexports_) {
       if (me.lazy_armed && me.submission == encoding) {
-        open_record = true;
+        open_export = true;
         break;
       }
     }
   }
+  open_record = open_record || open_export;
+  // metal_completion_wait_exports: Rise of the Tomb Raider flashes unless the
+  // GPU has finished the open exports when the guest sees the signal
+  // (2026-10-28, waiting for open resolves alone also removes it, but costs
+  // the M4 mini about 1 fps more).
+  wait = wait || (wait_for_exports && open_export);
   if (open_record) {
     if (wait) {
       EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);

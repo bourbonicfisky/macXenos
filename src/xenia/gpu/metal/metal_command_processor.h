@@ -326,8 +326,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Closes the open command buffer when it holds a GPU-current resolve or
   // memexport record armed for CPU faults, so a fault behind the fence the
   // guest is about to see can wait for committed work. `wait` also waits for
-  // the buffer to complete (completion signals).
-  void CommitOpenFaultableWork(bool wait);
+  // the buffer to complete (completion signals); `wait_for_exports` waits
+  // only when the open buffer holds a memexport record.
+  void CommitOpenFaultableWork(bool wait, bool wait_for_exports = false);
   bool FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   bool ResolveRamConsumerDependencies(

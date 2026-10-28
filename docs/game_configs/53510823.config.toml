@@ -7,9 +7,9 @@
 # (green / magenta casts, 2026-10-17). Depth clamping keeps the quad and
 # changes nothing else that was measured in this title.
 #
-# Occasional whole-frame colour flashes (root cause open) go away with
-# Graphics > Troubleshooting > "Finish each GPU submission first"
-# (metal_serialize_submissions). It is not pinned here: it costs the M1 Max
-# 30 -> 21 fps in this title.
+# Whole-frame colour flashes in gameplay (root cause open) go away with
+# Graphics > Troubleshooting > "Wait for the GPU before signalling the game"
+# (metal_completion_wait_exports). It is not pinned here: it costs the M1 Max
+# 30 -> 22 fps in this title (M4 Macs keep 30).
 [GPU]
 force_depth_clamp = true
