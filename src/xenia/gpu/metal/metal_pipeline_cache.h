@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -152,6 +153,50 @@ class MetalPipelineCache {
   void FlushShaderStorage();
 
  private:
+  // Configured like every translator this cache uses; one per thread that
+  // translates (DxbcShaderTranslator keeps per-translation state).
+  std::unique_ptr<DxbcShaderTranslator> CreateShaderTranslator() const;
+  // TranslateShader on a given translator and Metal Shader Converter, so the
+  // shader storage replay can translate on several threads. Different
+  // translations may be translated concurrently; the shaders must already be
+  // analyzed and their fetch patterns registered.
+  bool TranslateShader(MetalShader::MetalTranslation& translation,
+                       DxbcShaderTranslator& translator,
+                       MetalShaderConverter& metal_converter);
+
+  // GetOrCreateRenderPipelineState in parts, so the shader storage replay can
+  // create states on several threads: Metal state creation is thread-safe,
+  // render_pipeline_states_ and the binary archive here are not.
+  static uint64_t RenderPipelineKey(MetalShader::MetalTranslation* vertex,
+                                    MetalShader::MetalTranslation* pixel,
+                                    const uint64_t* color_pixel_formats,
+                                    uint64_t depth_pixel_format,
+                                    MetalPipelineRasterKey raster_key,
+                                    const uint32_t* blend_controls,
+                                    uint32_t color_write_mask);
+  // A retained MTLRenderPipelineDescriptor. Any thread.
+  void* NewRenderPipelineDescriptor(MetalShader::MetalTranslation* vertex,
+                                    MetalShader::MetalTranslation* pixel,
+                                    const uint64_t* color_pixel_formats,
+                                    uint64_t depth_pixel_format,
+                                    MetalPipelineRasterKey raster_key,
+                                    const uint32_t* blend_controls,
+                                    uint32_t color_write_mask) const;
+  // A retained id<MTLRenderPipelineState>, or null. Any thread, while no
+  // other thread changes the archive key set; `archive_stale_out` reports an
+  // archived key the archive no longer serves, for the caller to forget.
+  void* NewRenderPipelineState(void* descriptor, uint64_t key,
+                               bool* archive_stale_out) const;
+  // Takes the retained `state` (null caches a failure), adds it to the binary
+  // archive and caches it. Returns the cached state.
+  void* AddRenderPipelineState(uint64_t key, void* descriptor, void* state);
+
+  // Runs work(worker, item) for every item in [0, item_count), on the calling
+  // thread (worker 0) and up to worker_count - 1 more, until all are done.
+  static void RunShaderStorageWorkers(
+      size_t item_count, uint32_t worker_count,
+      const std::function<void(uint32_t worker, size_t item)>& work);
+
   XEPACKEDSTRUCT(StoredPipelineDescription, {
     uint64_t vertex_shader_hash;
     uint64_t vertex_shader_modification;
@@ -238,6 +283,10 @@ class MetalPipelineCache {
   // the helper).
   DxbcToDxilConverter dxil_converter_raw_;
   MetalShaderConverter metal_converter_;
+
+  // The metallib store and the DXIL store, written by every thread that
+  // translates.
+  std::mutex durable_store_mutex_;
 
   // Owns the loaded shaders, keyed by ucode hash.
   std::unordered_map<uint64_t, MetalShader*> shaders_;

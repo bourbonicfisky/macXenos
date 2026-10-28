@@ -13,11 +13,13 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,6 +27,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/base/threading.h"
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
 #include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
@@ -72,16 +75,7 @@ bool MetalPipelineCache::Initialize() {
   // (0x5C-range) after gamma encoding + exposure (the "black gameplay" bug).
   // Configuration comes from MetalTranslatorConfig so the durable cache's
   // schema fingerprint (3.3b) cannot drift from what is actually built here.
-  shader_translator_ = std::make_unique<DxbcShaderTranslator>(
-      ui::GraphicsProvider::GpuVendorID::kApple,
-      MetalTranslatorConfig::kBindlessResourcesUsed,
-      MetalTranslatorConfig::kEdramRovUsed,
-      MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
-      /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
-      draw_resolution_scale_y_);
-  shader_translator_->SetExactScaledPixelPosition(
-      MetalExactScaledPixelPositionEnabled());
-  shader_translator_->SetDeferredKill(MetalDeferredKillEnabled());
+  shader_translator_ = CreateShaderTranslator();
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {
@@ -115,6 +109,21 @@ bool MetalPipelineCache::Initialize() {
           ? ""
           : "  <- store_shaders=off DISABLES BOTH regardless of the switches");
   return true;
+}
+
+std::unique_ptr<DxbcShaderTranslator>
+MetalPipelineCache::CreateShaderTranslator() const {
+  auto translator = std::make_unique<DxbcShaderTranslator>(
+      ui::GraphicsProvider::GpuVendorID::kApple,
+      MetalTranslatorConfig::kBindlessResourcesUsed,
+      MetalTranslatorConfig::kEdramRovUsed,
+      MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
+      /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
+      draw_resolution_scale_y_);
+  translator->SetExactScaledPixelPosition(
+      MetalExactScaledPixelPositionEnabled());
+  translator->SetDeferredKill(MetalDeferredKillEnabled());
+  return translator;
 }
 
 void MetalPipelineCache::InitializeDurableStorage(
@@ -653,7 +662,11 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   if (cache_enabled) {
     std::vector<uint8_t> cached;
     const auto load_start = std::chrono::steady_clock::now();
-    const MetalDxilLoadResult result = dxil_store_.Load(key, &cached);
+    MetalDxilLoadResult result;
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      result = dxil_store_.Load(key, &cached);
+    }
     census.dxil_load_ns.fetch_add(
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                      std::chrono::steady_clock::now() - load_start)
@@ -694,7 +707,10 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
           "build produces. Entry dropped and rebuilt.",
           site, MetalArtifactHitVerdictName(verdict), cached.size(),
           fresh.size());
-      dxil_store_.Forget(key);
+      {
+        std::lock_guard<std::mutex> lock(durable_store_mutex_);
+        dxil_store_.Forget(key);
+      }
       if (!converted || fresh.empty()) {
         if (error_out) {
           *error_out = verify_error.empty()
@@ -727,7 +743,10 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   }
   if (cache_enabled) {
     const auto store_start = std::chrono::steady_clock::now();
-    dxil_store_.Store(key, dxil_out);
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      dxil_store_.Store(key, dxil_out);
+    }
     census.dxil_store_ns.fetch_add(
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                      std::chrono::steady_clock::now() - store_start)
@@ -739,6 +758,12 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
 
 bool MetalPipelineCache::TranslateShader(
     MetalShader::MetalTranslation& translation) {
+  return TranslateShader(translation, *shader_translator_, metal_converter_);
+}
+
+bool MetalPipelineCache::TranslateShader(
+    MetalShader::MetalTranslation& translation,
+    DxbcShaderTranslator& translator, MetalShaderConverter& metal_converter) {
   if (translation.is_translated()) {
     return translation.is_valid() && translation.has_metal_function();
   }
@@ -752,7 +777,7 @@ bool MetalPipelineCache::TranslateShader(
   MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
   {
     MetalShaderBuildTimer timer(census.dxbc);
-    if (!shader_translator_->TranslateAnalyzedShader(translation)) {
+    if (!translator.TranslateAnalyzedShader(translation)) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
              shader.ucode_data_hash());
@@ -859,7 +884,7 @@ bool MetalPipelineCache::TranslateShader(
     MetalStageRequestProbe probe(dxil, uint32_t(stage),
                                  uint32_t(MetalShaderConverter::InputTopology::
                                               kUndefined));
-    if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
+    if (!metal_converter.Convert(stage, dxil, metallib, &error)) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
              shader.ucode_data_hash(), error);
@@ -895,7 +920,12 @@ bool MetalPipelineCache::TranslateShader(
   // is never written for a later run to trip over.
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
     const auto store_start = std::chrono::steady_clock::now();
-    if (storage_.StoreMetallib(m1_key, metallib)) {
+    bool stored;
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      stored = storage_.StoreMetallib(m1_key, metallib);
+    }
+    if (stored) {
       census.metallib_stores.fetch_add(1, std::memory_order_relaxed);
       census.metallib_store_bytes.fetch_add(metallib.size(),
                                             std::memory_order_relaxed);
@@ -1122,7 +1152,40 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   if (!vertex || !vertex->has_metal_function()) {
     return nullptr;
   }
+  const uint64_t key =
+      RenderPipelineKey(vertex, pixel, color_pixel_formats, depth_pixel_format,
+                        raster_key, blend_controls, color_write_mask);
+  auto it = render_pipeline_states_.find(key);
+  if (it != render_pipeline_states_.end()) {
+    return it->second;
+  }
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge_transfer MTLRenderPipelineDescriptor*)
+          NewRenderPipelineDescriptor(vertex, pixel, color_pixel_formats,
+                                      depth_pixel_format, raster_key,
+                                      blend_controls, color_write_mask);
+  bool archive_stale = false;
+  void* state =
+      NewRenderPipelineState((__bridge void*)desc, key, &archive_stale);
+  if (archive_stale) {
+    archived_pipeline_keys_.erase(key);
+  }
+  void* state_ptr = AddRenderPipelineState(key, (__bridge void*)desc, state);
+  if (state_ptr) {
+    StorePipeline(vertex,
+                  pixel && pixel->has_metal_function() ? pixel : nullptr,
+                  color_pixel_formats, depth_pixel_format,
+                  raster_key.raster_sample_count, blend_controls,
+                  color_write_mask);
+  }
+  return state_ptr;
+}
 
+uint64_t MetalPipelineCache::RenderPipelineKey(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask) {
   // 3.2 — full pipeline identity, content-derived so it can back a durable
   // entry. Audit of every input that reaches the descriptor below:
   //   shader identities + modifications  -> vs / ps (MakeShaderKeyIdentity)
@@ -1165,13 +1228,17 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     key_bytes.colors[i] = color_pixel_formats[i];
     key_bytes.blends[i] = blend_controls[i];
   }
-  uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
-  auto it = render_pipeline_states_.find(key);
-  if (it != render_pipeline_states_.end()) {
-    return it->second;
-  }
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
 
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+void* MetalPipelineCache::NewRenderPipelineDescriptor(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask) const {
+  const MetalShaderKeyIdentity vs = MakeShaderKeyIdentity(vertex);
+  const MetalShaderKeyIdentity ps = MakeShaderKeyIdentity(
+      pixel && pixel->has_metal_function() ? pixel : nullptr);
   MTLRenderPipelineDescriptor* desc =
       [[MTLRenderPipelineDescriptor alloc] init];
   desc.rasterSampleCount = raster_key.raster_sample_count;
@@ -1186,10 +1253,10 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   // attribution on Apple GPUs (no per-draw counter sampling).
   desc.label = [NSString
       stringWithFormat:@"xe vs=%016llX.%llX ps=%016llX.%llX s%u",
-                       (unsigned long long)key_bytes.vs.ucode_hash,
-                       (unsigned long long)key_bytes.vs.modification,
-                       (unsigned long long)key_bytes.ps.ucode_hash,
-                       (unsigned long long)key_bytes.ps.modification,
+                       (unsigned long long)vs.ucode_hash,
+                       (unsigned long long)vs.modification,
+                       (unsigned long long)ps.ucode_hash,
+                       (unsigned long long)ps.modification,
                        raster_key.raster_sample_count];
   desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
   if (pixel && pixel->has_metal_function()) {
@@ -1217,13 +1284,19 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
       }
     }
   }
-
-  NSError* error = nil;
-  id<MTLRenderPipelineState> state = nil;
-  id<MTLBinaryArchive> archive = (__bridge id<MTLBinaryArchive>)binary_archive_;
   if (binary_archive_lookup_list_) {
     desc.binaryArchives = (__bridge NSArray*)binary_archive_lookup_list_;
   }
+  return (__bridge_retained void*)desc;
+}
+
+void* MetalPipelineCache::NewRenderPipelineState(
+    void* descriptor, uint64_t key, bool* archive_stale_out) const {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge MTLRenderPipelineDescriptor*)descriptor;
+  NSError* error = nil;
+  id<MTLRenderPipelineState> state = nil;
   // M2 — a key already archived is looked up fail-fast, so a hit is provably
   // served from the archive (not from the macOS shader cache, the confound
   // that made the first M2 study measure nothing) and a stale entry costs one
@@ -1242,20 +1315,34 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
       timer.Dismiss();
       GetMetalShaderBuildCensus().archive_stale.fetch_add(
           1, std::memory_order_relaxed);
-      archived_pipeline_keys_.erase(key);
+      *archive_stale_out = true;
     }
   }
   if (!state) {
     // Task 1.1 census: host pipeline-state creation, the cost M2 (the binary
     // archive) targets and the one the async stage would move off the frame
-    // path. Timed around the API call alone; descriptor assembly above is
-    // ours and is not what either mechanism removes.
+    // path. Timed around the API call alone; descriptor assembly is ours and
+    // is not what either mechanism removes.
     MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
     state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
     if (!state) {
       timer.Dismiss();
+      XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
+             error ? [[error localizedDescription] UTF8String] : "unknown");
+      return nullptr;
     }
   }
+  return (__bridge_retained void*)state;
+}
+
+void* MetalPipelineCache::AddRenderPipelineState(uint64_t key,
+                                                 void* descriptor,
+                                                 void* state_retained) {
+  id<MTLRenderPipelineState> state =
+      (__bridge_transfer id<MTLRenderPipelineState>)state_retained;
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge MTLRenderPipelineDescriptor*)descriptor;
+  id<MTLBinaryArchive> archive = (__bridge id<MTLBinaryArchive>)binary_archive_;
   // While compacting, archive hits are added again too (once per session), so
   // the old segments they came from can be deleted at quit.
   const bool compacting = !binary_archive_compacting_.empty();
@@ -1279,17 +1366,11 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     }
   }
   if (!state) {
-    XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
-           error ? [[error localizedDescription] UTF8String] : "unknown");
     render_pipeline_states_.emplace(key, nullptr);
     return nullptr;
   }
   void* state_ptr = (__bridge_retained void*)state;
   render_pipeline_states_.emplace(key, state_ptr);
-  StorePipeline(vertex, pixel && pixel->has_metal_function() ? pixel : nullptr,
-                color_pixel_formats, depth_pixel_format,
-                raster_key.raster_sample_count, blend_controls,
-                color_write_mask);
   return state_ptr;
 }
 
@@ -1378,7 +1459,25 @@ void MetalPipelineCache::InitializeShaderStorage(
   // same cache-aware path a draw takes, so with warm caches this is metallib
   // and binary archive hits; after a translator change it is the compile the
   // session would otherwise do during play.
+  //
+  // That compile is spread over several threads: on one, Mafia II's 1314
+  // pipelines took 39 s of loading on the M1 Max, three quarters of it
+  // pipeline-state creation and the rest DXBC -> DXIL -> metallib. Everything
+  // that changes the shaders, the caches or the binary archive stays on this
+  // thread, before and after each parallel part.
   shader_storage_replaying_ = true;
+  // XE_METAL_SHADER_STORAGE_THREADS=<n>: threads, this one included (1 = this
+  // thread alone). Default 3/4 of the logical processors, as Vulkan does.
+  static const uint32_t s_thread_count = [] {
+    if (const char* value = std::getenv("XE_METAL_SHADER_STORAGE_THREADS")) {
+      const long count = std::strtol(value, nullptr, 10);
+      if (count > 0) {
+        return uint32_t(count);
+      }
+    }
+    return std::max(xe::threading::logical_processor_count() * 3 / 4,
+                    uint32_t(1));
+  }();
   StringBuffer ucode_disasm;
   auto find_shader = [&](uint64_t hash) -> MetalShader* {
     auto it = shaders_.find(hash);
@@ -1390,6 +1489,25 @@ void MetalPipelineCache::InitializeShaderStorage(
       shader->AnalyzeUcode(ucode_disasm);
     }
     return shader;
+  };
+  struct ReplayPipeline {
+    const StoredPipelineDescription* description;
+    MetalShader::MetalTranslation* vertex;
+    MetalShader::MetalTranslation* pixel;
+    uint64_t key = 0;
+    MTLRenderPipelineDescriptor* descriptor = nil;
+    void* state = nullptr;  // Retained until AddRenderPipelineState.
+    bool archive_stale = false;
+  };
+  std::vector<ReplayPipeline> pipelines;
+  pipelines.reserve(stored_descriptions.size());
+  std::vector<MetalShader::MetalTranslation*> translations;
+  std::unordered_set<MetalShader::MetalTranslation*> translations_queued;
+  auto queue_translation = [&](MetalShader::MetalTranslation* translation) {
+    if (!translation->is_translated() &&
+        translations_queued.insert(translation).second) {
+      translations.push_back(translation);
+    }
   };
   size_t built = 0, missing_shader = 0, failed = 0;
   for (const PipelineStoredDescription& stored : stored_descriptions) {
@@ -1406,10 +1524,7 @@ void MetalPipelineCache::InitializeShaderStorage(
     auto* vertex = static_cast<MetalShader::MetalTranslation*>(
         vertex_shader->GetOrCreateTranslation(
             description.vertex_shader_modification));
-    if (!TranslateShader(*vertex)) {
-      ++failed;
-      continue;
-    }
+    queue_translation(vertex);
     MetalShader::MetalTranslation* pixel = nullptr;
     if (pixel_shader) {
       DxbcShaderTranslator::Modification modification(
@@ -1423,15 +1538,97 @@ void MetalPipelineCache::InitializeShaderStorage(
       }
       pixel = static_cast<MetalShader::MetalTranslation*>(
           pixel_shader->GetOrCreateTranslation(modification.value));
-      if (!TranslateShader(*pixel)) {
-        ++failed;
-        continue;
-      }
+      queue_translation(pixel);
     }
-    if (GetOrCreateRenderPipelineState(
-            vertex, pixel, description.color_formats,
-            description.depth_format, {description.sample_count},
-            description.blend_controls, description.color_write_mask)) {
+    ReplayPipeline& pipeline = pipelines.emplace_back();
+    pipeline.description = &description;
+    pipeline.vertex = vertex;
+    pipeline.pixel = pixel;
+  }
+
+  // Translation: a translator and a Metal Shader Converter per thread.
+  struct TranslationWorker {
+    std::unique_ptr<DxbcShaderTranslator> translator;
+    std::unique_ptr<MetalShaderConverter> metal_converter;
+  };
+  std::vector<TranslationWorker> translation_workers(
+      std::min(size_t(s_thread_count), translations.size()));
+  for (size_t i = 1; i < translation_workers.size(); ++i) {
+    TranslationWorker& worker = translation_workers[i];
+    worker.translator = CreateShaderTranslator();
+    worker.metal_converter = std::make_unique<MetalShaderConverter>();
+    if (!worker.metal_converter->Initialize(
+            MetalTranslatorConfig::kMscBindlessResourcesUsed)) {
+      translation_workers.resize(i);
+      break;
+    }
+  }
+  RunShaderStorageWorkers(
+      translations.size(), uint32_t(translation_workers.size()),
+      [&](uint32_t worker_index, size_t item) {
+        @autoreleasepool {
+          TranslationWorker& worker = translation_workers[worker_index];
+          if (worker.translator) {
+            TranslateShader(*translations[item], *worker.translator,
+                            *worker.metal_converter);
+          } else {
+            TranslateShader(*translations[item]);
+          }
+        }
+      });
+
+  // Pipeline states, for the pipelines whose shaders translated and that are
+  // not cached already (two descriptions can make one pipeline).
+  auto translated = [](const MetalShader::MetalTranslation* translation) {
+    return translation->is_translated() && translation->is_valid() &&
+           translation->has_metal_function();
+  };
+  std::vector<size_t> creations;
+  std::unordered_set<uint64_t> keys_queued;
+  for (size_t i = 0; i < pipelines.size(); ++i) {
+    ReplayPipeline& pipeline = pipelines[i];
+    const StoredPipelineDescription& description = *pipeline.description;
+    if (!translated(pipeline.vertex) ||
+        (pipeline.pixel && !translated(pipeline.pixel))) {
+      continue;
+    }
+    pipeline.key = RenderPipelineKey(
+        pipeline.vertex, pipeline.pixel, description.color_formats,
+        description.depth_format, {description.sample_count},
+        description.blend_controls, description.color_write_mask);
+    if (!render_pipeline_states_.count(pipeline.key) &&
+        keys_queued.insert(pipeline.key).second) {
+      creations.push_back(i);
+    }
+  }
+  RunShaderStorageWorkers(
+      creations.size(), s_thread_count, [&](uint32_t, size_t item) {
+        @autoreleasepool {
+          ReplayPipeline& pipeline = pipelines[creations[item]];
+          const StoredPipelineDescription& description = *pipeline.description;
+          pipeline.descriptor = (__bridge_transfer MTLRenderPipelineDescriptor*)
+              NewRenderPipelineDescriptor(
+                  pipeline.vertex, pipeline.pixel, description.color_formats,
+                  description.depth_format, {description.sample_count},
+                  description.blend_controls, description.color_write_mask);
+          pipeline.state = NewRenderPipelineState(
+              (__bridge void*)pipeline.descriptor, pipeline.key,
+              &pipeline.archive_stale);
+        }
+      });
+  for (size_t i : creations) {
+    ReplayPipeline& pipeline = pipelines[i];
+    if (pipeline.archive_stale) {
+      archived_pipeline_keys_.erase(pipeline.key);
+    }
+    AddRenderPipelineState(pipeline.key, (__bridge void*)pipeline.descriptor,
+                           pipeline.state);
+    pipeline.descriptor = nil;
+  }
+  for (const ReplayPipeline& pipeline : pipelines) {
+    auto it = pipeline.key ? render_pipeline_states_.find(pipeline.key)
+                           : render_pipeline_states_.end();
+    if (it != render_pipeline_states_.end() && it->second) {
       ++built;
     } else {
       ++failed;
@@ -1440,12 +1637,44 @@ void MetalPipelineCache::InitializeShaderStorage(
   shader_storage_replaying_ = false;
   XELOGI(
       "MetalPipelineCache: shader storage rebuilt {} of {} pipelines in {} ms "
-      "({} missing a shader, {} failed)",
+      "({} missing a shader, {} failed; {} shaders translated, {} pipeline "
+      "states created, {} threads)",
       built, stored_descriptions.size(),
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start)
           .count(),
-      missing_shader, failed);
+      missing_shader, failed, translations.size(), creations.size(),
+      s_thread_count);
+}
+
+void MetalPipelineCache::RunShaderStorageWorkers(
+    size_t item_count, uint32_t worker_count,
+    const std::function<void(uint32_t worker, size_t item)>& work) {
+  std::atomic<size_t> next_item{0};
+  auto run = [&](uint32_t worker) {
+    for (size_t item; (item = next_item.fetch_add(1)) < item_count;) {
+      work(worker, item);
+    }
+  };
+  std::vector<std::unique_ptr<xe::threading::Thread>> threads;
+  const uint32_t thread_count =
+      uint32_t(std::min(size_t(std::max(worker_count, uint32_t(1))),
+                        std::max(item_count, size_t(1))));
+  for (uint32_t worker = 1; worker < thread_count; ++worker) {
+    xe::threading::Thread::CreationParameters params;
+    params.qos_class = 1;  // user_initiated: the player is waiting on it.
+    auto thread = xe::threading::Thread::Create(
+        params, [&run, worker]() { run(worker); });
+    if (!thread) {
+      break;
+    }
+    thread->set_name("Metal Pipelines");
+    threads.push_back(std::move(thread));
+  }
+  run(0);
+  for (auto& thread : threads) {
+    xe::threading::Wait(thread.get(), false);
+  }
 }
 
 void MetalPipelineCache::ShutdownShaderStorage() {
