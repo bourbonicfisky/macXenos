@@ -1481,7 +1481,16 @@
 "type": "uint",
 "value": 0,
 "defaultValue": 0,
-"description": "Metal: cap on command-buffer submissions in flight (0 = default 16). The XE_METAL_MAX_IN_FLIGHT environment variable overrides it. A per-title config can pin 1 for titles whose guest reuses GPU-destination memory as soon as their fence returns (Rise of the Tomb Raider).",
+"description": "Metal: cap on command-buffer submissions in flight (0 = default 16). The XE_METAL_MAX_IN_FLIGHT environment variable overrides it, and metal_serialize_submissions forces 1.",
+"changed": false
+},
+"metal_serialize_submissions": {
+"name": "metal_serialize_submissions",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Metal: finish each GPU submission before the next one starts (one in flight). Workaround for whole-frame colour flashes in Rise of the Tomb Raider whose cause is still open; costs frame rate wherever the GPU and CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
 "changed": false
 },
 "metal_memexport_pixel": {

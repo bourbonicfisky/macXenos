@@ -66,7 +66,7 @@ smoother.
 | Red Dead Redemption | Opening cutscene | 30 | 30 | Disc 1 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 29 | 30 |  |
 | Ridge Racer Unbounded | Domination race | 30 | 30 |  |
-| Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
+| Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 | Rare whole-screen colour flashes (cause still open). Graphics > Troubleshooting > "Finish each GPU submission first" removes them at a frame-rate cost (M1 Max 30 to 21 fps) |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
 | Ultra Street Fighter IV | Arcade fight | 60 | 60 |  |

@@ -149,9 +149,15 @@ DEFINE_string(
 DEFINE_uint32(
     metal_max_in_flight, 0,
     "Metal: cap on command-buffer submissions in flight (0 = default 16). "
-    "The XE_METAL_MAX_IN_FLIGHT environment variable overrides it. A "
-    "per-title config can pin 1 for titles whose guest reuses GPU-destination "
-    "memory as soon as their fence returns (Rise of the Tomb Raider).",
+    "The XE_METAL_MAX_IN_FLIGHT environment variable overrides it, and "
+    "metal_serialize_submissions forces 1.",
+    "GPU");
+DEFINE_bool(
+    metal_serialize_submissions, false,
+    "Metal: finish each GPU submission before the next one starts (one in "
+    "flight). Workaround for whole-frame colour flashes in Rise of the Tomb "
+    "Raider whose cause is still open; costs frame rate wherever the GPU and "
+    "CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
     "GPU");
 
 DEFINE_bool(
@@ -5794,17 +5800,23 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     // WaitForSubmission while the GPU still had slack: 8 -> 16 measured
     // 24.2 -> 26.7 fps (32: 26.8, +100 MB footprint). USF4 2026-10-04 also
     // showed 10 ms/frame of depth-cap wait at a cap of 8.
-    // metal_max_in_flight (cvar, per-title config) sets the cap when the
-    // environment does not; 0 keeps the default. Rise of the Tomb Raider's
-    // built-in config pins 1: with more than one submission in flight its
-    // transient ring (CPU scratch interleaved with memexport and resolve
-    // destinations, reused as soon as the guest's fence says the GPU is
-    // done) produces a whole-frame colour-grading flash in ~8% of gameplay
-    // seconds (xenia-mac-evidence tombraider-stretch-20261025 knob census:
-    // every serializing arm 0, every non-serializing arm unchanged).
+    // metal_max_in_flight (cvar) sets the cap when the environment does
+    // not; 0 keeps the default. metal_serialize_submissions (user switch,
+    // default off) forces 1: with more than one submission in flight Rise of
+    // the Tomb Raider's transient ring (CPU scratch interleaved with
+    // memexport and resolve destinations, reused as soon as the guest's
+    // fence says the GPU is done) produces a whole-frame colour-grading
+    // flash in ~8% of gameplay seconds (xenia-mac-evidence
+    // tombraider-stretch-20261025 knob census: every serializing arm 0,
+    // every non-serializing arm unchanged; ~1/580 s after the 2026-10-27
+    // write-commit fixes). The title no longer pins it (M1 Max 30 -> 21
+    // fps); remove the switch once the root cause is fixed.
     static const uint64_t kMaxInFlightSubmissions = [] {
       const char* v = std::getenv("XE_METAL_MAX_IN_FLIGHT");
       uint64_t n = v ? strtoull(v, nullptr, 10) : 0;
+      if (!n && cvars::metal_serialize_submissions) {
+        n = 1;
+      }
       if (!n) {
         n = cvars::metal_max_in_flight;
       }

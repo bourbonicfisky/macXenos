@@ -408,6 +408,10 @@ export function graphics(state: NativeState): BladeDef {
               ]}
             />
             <Aside>{t("graphics.experimental.rasterExportsAside")}</Aside>
+            <p className="pref-group">{t("graphics.serialize.heading")}</p>
+            <p className="m-0">{t("graphics.serialize.body")}</p>
+            <Check name="metal_serialize_submissions" label={t("graphics.serialize.label")} />
+            <Aside>{t("graphics.serialize.aside")}</Aside>
           </>
         ) : null}
         {rendererShown(state, "vulkan") ? (
@@ -425,6 +429,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
             "metal_memexport_raster_mode",
+            "metal_serialize_submissions",
             "mvk_config_defaults"
           ]}
         />
@@ -438,6 +443,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
             "metal_memexport_raster_mode",
+            "metal_serialize_submissions",
             "mvk_config_defaults"
           ]}
         />
