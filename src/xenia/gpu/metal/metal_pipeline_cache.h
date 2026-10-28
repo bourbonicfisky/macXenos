@@ -28,6 +28,7 @@
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
+#include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -137,7 +138,52 @@ class MetalPipelineCache {
 
   const MetalPipelineStorage& durable_storage() const { return storage_; }
 
+  // Shader and pipeline storage: the guest shaders (.xsh, the format D3D12 and
+  // Vulkan share) and render pipeline descriptions (.msc.metal.xpso) a title has
+  // used, recorded as they are first built and rebuilt at the next launch.
+  // The metallib cache and binary archive hold only translator output, so a
+  // build that changes the translator discards them; this record is what
+  // lets the next launch compile before gameplay instead of inside it.
+  // XE_METAL_SHADER_STORAGE=0 disables it. GPU thread only.
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id);
+  void ShutdownShaderStorage();
+  // Hands this frame's new records to the writer thread.
+  void FlushShaderStorage();
+
  private:
+  XEPACKEDSTRUCT(StoredPipelineDescription, {
+    uint64_t vertex_shader_hash;
+    uint64_t vertex_shader_modification;
+    // 0 for a depth-only pipeline.
+    uint64_t pixel_shader_hash;
+    // With fetch_plain_pattern cleared: the pattern index is session-local,
+    // so the pattern itself is stored below and re-registered on load.
+    uint64_t pixel_shader_modification;
+    uint64_t color_formats[xenos::kMaxColorRenderTargets];
+    uint64_t depth_format;
+    uint32_t sample_count;
+    uint32_t blend_controls[xenos::kMaxColorRenderTargets];
+    uint32_t color_write_mask;
+    MetalShader::FetchPattern pixel_fetch_pattern;  // fetch_mask 0: none
+    static constexpr uint32_t kVersion = 0x20261027;
+  });
+  XEPACKEDSTRUCT(PipelineStoredDescription, {
+    uint64_t description_hash;
+    StoredPipelineDescription description;
+  });
+  void StorePipeline(MetalShader::MetalTranslation* vertex,
+                     MetalShader::MetalTranslation* pixel,
+                     const uint64_t* color_pixel_formats,
+                     uint64_t depth_pixel_format, uint32_t sample_count,
+                     const uint32_t* blend_controls,
+                     uint32_t color_write_mask);
+  ShaderStorageWriter<PipelineStoredDescription> shader_storage_;
+  bool shader_storage_flush_shaders_ = false;
+  bool shader_storage_flush_pipelines_ = false;
+  // Set while stored pipelines are rebuilt, so they are not written again.
+  bool shader_storage_replaying_ = false;
+
   // A guest VS compiled as an MSC geometry-emulation OBJECT stage, plus its
   // synthesized stage-in. Metal objects held as retained void*.
   struct GeometryVertexStage {

@@ -93,6 +93,13 @@ class MetalShader : public DxbcShader {
     fetch_patterns_.push_back(pattern);
     return uint32_t(fetch_patterns_.size());
   }
+  // The pattern behind a 1-based index, or null.
+  const FetchPattern* GetFetchPattern(uint32_t pattern_index) const {
+    if (!pattern_index || pattern_index > fetch_patterns_.size()) {
+      return nullptr;
+    }
+    return &fetch_patterns_[pattern_index - 1];
+  }
   // Content hash of a pattern (0 for none). The index is session-local
   // (discovery order), so the durable metallib key carries this instead:
   // keyed on the index, a warm cache served shaders compiled with another

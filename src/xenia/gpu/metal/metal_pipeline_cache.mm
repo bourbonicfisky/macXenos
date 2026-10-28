@@ -24,7 +24,9 @@
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/metal/metal_artifact_hit_verify.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -1284,7 +1286,180 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   }
   void* state_ptr = (__bridge_retained void*)state;
   render_pipeline_states_.emplace(key, state_ptr);
+  StorePipeline(vertex, pixel && pixel->has_metal_function() ? pixel : nullptr,
+                color_pixel_formats, depth_pixel_format,
+                raster_key.raster_sample_count, blend_controls,
+                color_write_mask);
   return state_ptr;
+}
+
+void MetalPipelineCache::StorePipeline(MetalShader::MetalTranslation* vertex,
+                                       MetalShader::MetalTranslation* pixel,
+                                       const uint64_t* color_pixel_formats,
+                                       uint64_t depth_pixel_format,
+                                       uint32_t sample_count,
+                                       const uint32_t* blend_controls,
+                                       uint32_t color_write_mask) {
+  if (shader_storage_replaying_ || !shader_storage_.is_active()) {
+    return;
+  }
+  PipelineStoredDescription stored;
+  std::memset(&stored, 0, sizeof(stored));
+  StoredPipelineDescription& description = stored.description;
+  auto& vertex_shader = static_cast<MetalShader&>(vertex->shader());
+  description.vertex_shader_hash = vertex_shader.ucode_data_hash();
+  description.vertex_shader_modification = vertex->modification();
+  MetalShader* pixel_shader = nullptr;
+  if (pixel) {
+    pixel_shader = &static_cast<MetalShader&>(pixel->shader());
+    DxbcShaderTranslator::Modification modification(pixel->modification());
+    if (const MetalShader::FetchPattern* pattern =
+            pixel_shader->GetFetchPattern(
+                modification.pixel.fetch_plain_pattern)) {
+      std::memcpy(&description.pixel_fetch_pattern, pattern,
+                  sizeof(description.pixel_fetch_pattern));
+    }
+    modification.pixel.fetch_plain_pattern = 0;
+    description.pixel_shader_hash = pixel_shader->ucode_data_hash();
+    description.pixel_shader_modification = modification.value;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    description.color_formats[i] = color_pixel_formats[i];
+    description.blend_controls[i] = blend_controls[i];
+  }
+  description.depth_format = depth_pixel_format;
+  description.sample_count = sample_count;
+  description.color_write_mask = color_write_mask;
+  stored.description_hash = XXH3_64bits(&description, sizeof(description));
+  const uint32_t storage_index = shader_storage_.storage_index();
+  for (MetalShader* shader : {&vertex_shader, pixel_shader}) {
+    if (shader && shader->ucode_storage_index() != storage_index) {
+      shader->set_ucode_storage_index(storage_index);
+      shader_storage_.QueueShaderWrite(shader);
+      shader_storage_flush_shaders_ = true;
+    }
+  }
+  shader_storage_.QueuePipelineWrite(stored);
+  shader_storage_flush_pipelines_ = true;
+}
+
+void MetalPipelineCache::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  ShutdownShaderStorage();
+  static const bool s_enabled = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_SHADER_STORAGE"), true);
+  if (!s_enabled) {
+    return;
+  }
+  ShaderStorageWriter<PipelineStoredDescription>::PipelineStorageConfig config;
+  // Not ".metal.xpso": Xenia Edge's Metal backend writes that name in the
+  // same storage root with a different record.
+  config.file_suffix = ".msc.metal.xpso";
+  config.api_magic = 0x4C544D58;  // 'XMTL'
+  config.version = std::max(StoredPipelineDescription::kVersion,
+                            DxbcShaderTranslator::Modification::kVersion);
+  const uint32_t storage_index = shader_storage_.storage_index() + 1;
+  const auto start = std::chrono::steady_clock::now();
+  std::vector<PipelineStoredDescription> stored_descriptions;
+  if (!shader_storage_.InitializeShaderStorage(
+          cache_root, title_id, config,
+          [&](xenos::ShaderType type, const uint32_t* ucode_dwords,
+              uint32_t ucode_dword_count, uint64_t ucode_data_hash) {
+            if (MetalShader* shader =
+                    LoadShader(type, ucode_dwords, ucode_dword_count)) {
+              shader->set_ucode_storage_index(storage_index);
+            }
+            return true;
+          },
+          nullptr, stored_descriptions)) {
+    return;
+  }
+  // Rebuild every stored pipeline. Each shader and pipeline goes through the
+  // same cache-aware path a draw takes, so with warm caches this is metallib
+  // and binary archive hits; after a translator change it is the compile the
+  // session would otherwise do during play.
+  shader_storage_replaying_ = true;
+  StringBuffer ucode_disasm;
+  auto find_shader = [&](uint64_t hash) -> MetalShader* {
+    auto it = shaders_.find(hash);
+    if (it == shaders_.end()) {
+      return nullptr;
+    }
+    MetalShader* shader = it->second;
+    if (!shader->is_ucode_analyzed()) {
+      shader->AnalyzeUcode(ucode_disasm);
+    }
+    return shader;
+  };
+  size_t built = 0, missing_shader = 0, failed = 0;
+  for (const PipelineStoredDescription& stored : stored_descriptions) {
+    const StoredPipelineDescription& description = stored.description;
+    MetalShader* vertex_shader = find_shader(description.vertex_shader_hash);
+    MetalShader* pixel_shader =
+        description.pixel_shader_hash
+            ? find_shader(description.pixel_shader_hash)
+            : nullptr;
+    if (!vertex_shader || (description.pixel_shader_hash && !pixel_shader)) {
+      ++missing_shader;
+      continue;
+    }
+    auto* vertex = static_cast<MetalShader::MetalTranslation*>(
+        vertex_shader->GetOrCreateTranslation(
+            description.vertex_shader_modification));
+    if (!TranslateShader(*vertex)) {
+      ++failed;
+      continue;
+    }
+    MetalShader::MetalTranslation* pixel = nullptr;
+    if (pixel_shader) {
+      DxbcShaderTranslator::Modification modification(
+          description.pixel_shader_modification);
+      if (description.pixel_fetch_pattern.fetch_mask) {
+        // 0 when the shader's pattern table is full: the fully dynamic
+        // translation, as a draw would get.
+        modification.pixel.fetch_plain_pattern =
+            pixel_shader->FindOrAddFetchPattern(
+                description.pixel_fetch_pattern);
+      }
+      pixel = static_cast<MetalShader::MetalTranslation*>(
+          pixel_shader->GetOrCreateTranslation(modification.value));
+      if (!TranslateShader(*pixel)) {
+        ++failed;
+        continue;
+      }
+    }
+    if (GetOrCreateRenderPipelineState(
+            vertex, pixel, description.color_formats,
+            description.depth_format, {description.sample_count},
+            description.blend_controls, description.color_write_mask)) {
+      ++built;
+    } else {
+      ++failed;
+    }
+  }
+  shader_storage_replaying_ = false;
+  XELOGI(
+      "MetalPipelineCache: shader storage rebuilt {} of {} pipelines in {} ms "
+      "({} missing a shader, {} failed)",
+      built, stored_descriptions.size(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count(),
+      missing_shader, failed);
+}
+
+void MetalPipelineCache::ShutdownShaderStorage() {
+  FlushShaderStorage();
+  shader_storage_.ShutdownShaderStorage();
+}
+
+void MetalPipelineCache::FlushShaderStorage() {
+  if (shader_storage_flush_shaders_ || shader_storage_flush_pipelines_) {
+    shader_storage_.RequestFlush(shader_storage_flush_shaders_,
+                                 shader_storage_flush_pipelines_);
+    shader_storage_flush_shaders_ = false;
+    shader_storage_flush_pipelines_ = false;
+  }
 }
 
 void* MetalPipelineCache::NewLibraryFromBytes(const std::vector<uint8_t>& bytes,

@@ -15242,6 +15242,8 @@ void MetalCommandProcessor::InitializeShaderStorage(
   gamma_ramp_dirty_ = true;
   if (pipeline_cache_) {
     pipeline_cache_->InitializeDurableStorage(cache_root, title_id);
+    // After the durable caches open, so rebuilt pipelines hit them.
+    pipeline_cache_->InitializeShaderStorage(cache_root, title_id);
   }
   if (completion_callback) {
     completion_callback();
@@ -15253,6 +15255,7 @@ void MetalCommandProcessor::SaveShaderStorageToDisk() {
   // is the last point at which the session's new pipelines can be persisted.
   if (pipeline_cache_) {
     pipeline_cache_->SaveBinaryArchive("exit", true);
+    pipeline_cache_->ShutdownShaderStorage();
   }
 }
 
@@ -18887,6 +18890,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   }
   if (pipeline_cache_) {
     pipeline_cache_->MaybeSaveBinaryArchiveOnSwap();
+    pipeline_cache_->FlushShaderStorage();
   }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
