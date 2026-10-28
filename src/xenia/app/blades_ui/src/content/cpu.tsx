@@ -15,7 +15,7 @@ const QOS: Option[] = [
   { value: "off", label: "Off", short: "Off" },
   { value: "main", label: "Main thread", short: "Main" },
   { value: "priority", label: "High-priority threads", short: "Priority" },
-  { value: "all", label: "Every thread", short: "All" }
+  { value: "all", label: "Every thread", short: "All", recommended: true }
 ];
 
 const QOS_CLASS: Option[] = [
@@ -94,7 +94,7 @@ export function cpu(_state: NativeState): BladeDef {
           <>
             <p>
               Asks macOS to keep the game&rsquo;s threads on performance cores.
-              Off lets macOS decide, which suits most games.
+              Every thread, the default, suits most games; Off lets macOS decide.
             </p>
             <Options name="guest_thread_qos" title="Thread scheduling" options={QOS} />
             <p className="pref-group">Priority</p>
