@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Assassin's Creed II (5553083B).
+# The title culls meshes on occlusion query results. With the default fast
+# queries (a guessed result until the GPU's arrives) the room seen through the
+# first Abstergo corridor's door washes out to white and loses walls and
+# pillars in most frames; strict queries wait for the real result and every
+# frame is correct, still at the 30 fps cap.
+# (xenia-mac-evidence ac2-corridor-20261029: M1 Max 2 s shots, fast 49 of 77
+# gameplay frames washed out, strict 0 of 80)
+[GPU]
+occlusion_query = "strict"
