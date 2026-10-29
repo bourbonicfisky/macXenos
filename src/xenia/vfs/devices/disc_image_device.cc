@@ -9,6 +9,10 @@
 
 #include "xenia/vfs/devices/disc_image_device.h"
 
+#include <chrono>
+#include <cstring>
+#include <thread>
+
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -27,6 +31,34 @@ DiscImageDevice::DiscImageDevice(const std::string_view mount_path,
 
 DiscImageDevice::~DiscImageDevice() = default;
 
+bool DiscImageDevice::ReadImage(size_t offset, void* buffer, size_t length) {
+  if (!file_) {
+    std::memcpy(buffer, mmap_->data() + offset, length);
+    return true;
+  }
+  constexpr uint32_t kRetries = 5;
+  auto* out = static_cast<uint8_t*>(buffer);
+  uint32_t failures = 0;
+  while (length) {
+    size_t read = 0;
+    if (file_->Read(offset, out, length, &read) && read) {
+      offset += read;
+      out += read;
+      length -= read;
+      continue;
+    }
+    // A short image ends reads early too (read 0): fail rather than spin.
+    if (++failures > kRetries) {
+      XELOGE("Disc image read of {} bytes at {:#x} failed", length, offset);
+      return false;
+    }
+    XELOGW("Disc image read of {} bytes at {:#x} failed, retrying", length,
+           offset);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100 * failures));
+  }
+  return true;
+}
+
 bool DiscImageDevice::Initialize() {
   mmap_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);
   if (!mmap_) {
@@ -34,6 +66,11 @@ bool DiscImageDevice::Initialize() {
     return false;
   } else {
     XELOGFS("DiscImageDevice::Initialize");
+  }
+  file_ = xe::filesystem::FileHandle::OpenExisting(
+      host_path_, xe::filesystem::FileAccess::kGenericRead);
+  if (!file_) {
+    XELOGW("Disc image could not be opened for reading; reading the mapping");
   }
 
   ParseState state = {0};
