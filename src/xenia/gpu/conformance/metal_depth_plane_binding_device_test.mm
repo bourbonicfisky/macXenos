@@ -48,6 +48,18 @@ vertex VertexOutput depth_plane_vs(uint vid [[vertex_id]]) {
   return o;
 }
 fragment float4 depth_plane_fs() { return float4(0.5, 0.25, 0.75, 1.0); }
+// Multisample stencil readback: one uint per sample, row-major, samples
+// innermost.
+kernel void read_stencil_ms(texture2d_ms<uint, access::read> stencil
+                                [[texture(0)]],
+                            device uint* out [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  uint samples = stencil.get_num_samples();
+  for (uint s = 0; s < samples; ++s) {
+    out[(gid.y * stencil.get_width() + gid.x) * samples + s] =
+        stencil.read(gid, s).x;
+  }
+}
 )";
 
 struct Arm {
@@ -188,7 +200,173 @@ bool RunArm(id<MTLDevice> device, id<MTLCommandQueue> queue,
   return true;
 }
 
+// The same question for a multisampled Depth32Float_Stencil8 (titles render
+// 2x/4x MSAA depth), optionally with the depth auto-resolve the live
+// multisample store path attaches: does a pass binding only the depth plane
+// keep every sample of the stencil plane?
+bool RunMsaaStencilArm(id<MTLDevice> device, id<MTLCommandQueue> queue,
+                       id<MTLLibrary> library, uint32_t samples,
+                       bool depth_resolve, uint32_t* stencil_changed) {
+  MTLTextureDescriptor* dd = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                   width:kSize
+                                  height:kSize
+                               mipmapped:NO];
+  dd.textureType = MTLTextureType2DMultisample;
+  dd.sampleCount = samples;
+  dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+             MTLTextureUsagePixelFormatView;
+  dd.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> ds = [device newTextureWithDescriptor:dd];
+  MTLTextureDescriptor* cd = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                   width:kSize
+                                  height:kSize
+                               mipmapped:NO];
+  cd.textureType = MTLTextureType2DMultisample;
+  cd.sampleCount = samples;
+  cd.usage = MTLTextureUsageRenderTarget;
+  cd.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> color = [device newTextureWithDescriptor:cd];
+  MTLTextureDescriptor* rd = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                   width:kSize
+                                  height:kSize
+                               mipmapped:NO];
+  rd.usage = MTLTextureUsageRenderTarget;
+  rd.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> resolve = [device newTextureWithDescriptor:rd];
+  id<MTLTexture> stencil_view =
+      ds ? [ds newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8]
+         : nil;
+  if (!ds || !color || !resolve || !stencil_view) {
+    return false;
+  }
+  MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+  pd.vertexFunction = [library newFunctionWithName:@"depth_plane_vs"];
+  pd.fragmentFunction = [library newFunctionWithName:@"depth_plane_fs"];
+  pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+  pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+  pd.stencilAttachmentPixelFormat = MTLPixelFormatInvalid;
+  pd.rasterSampleCount = samples;
+  NSError* error = nil;
+  id<MTLRenderPipelineState> pipeline =
+      [device newRenderPipelineStateWithDescriptor:pd error:&error];
+  id<MTLComputePipelineState> readback = [device
+      newComputePipelineStateWithFunction:
+          [library newFunctionWithName:@"read_stencil_ms"]
+                                    error:&error];
+  INFO("pipeline error: "
+       << (error ? [[error localizedDescription] UTF8String] : "none"));
+  if (!pipeline || !readback) {
+    return false;
+  }
+  MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+  dsd.depthCompareFunction = MTLCompareFunctionLess;
+  dsd.depthWriteEnabled = YES;
+  id<MTLDepthStencilState> ds_state =
+      [device newDepthStencilStateWithDescriptor:dsd];
+
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  {
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = color;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.depthAttachment.texture = ds;
+    rp.depthAttachment.loadAction = MTLLoadActionClear;
+    rp.depthAttachment.clearDepth = 1.0;
+    rp.depthAttachment.storeAction = MTLStoreActionStore;
+    rp.stencilAttachment.texture = ds;
+    rp.stencilAttachment.loadAction = MTLLoadActionClear;
+    rp.stencilAttachment.clearStencil = 0x5A;
+    rp.stencilAttachment.storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e endEncoding];
+  }
+  {
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = color;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.depthAttachment.texture = ds;
+    rp.depthAttachment.loadAction = MTLLoadActionLoad;
+    if (depth_resolve) {
+      rp.depthAttachment.resolveTexture = resolve;
+      rp.depthAttachment.depthResolveFilter =
+          MTLMultisampleDepthResolveFilterSample0;
+      rp.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    } else {
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+    }
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pipeline];
+    [e setDepthStencilState:ds_state];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+  }
+  id<MTLBuffer> stencil_buf =
+      [device newBufferWithLength:kSize * kSize * samples * 4
+                          options:MTLResourceStorageModeShared];
+  {
+    id<MTLComputeCommandEncoder> c = [cb computeCommandEncoder];
+    [c setComputePipelineState:readback];
+    [c setTexture:stencil_view atIndex:0];
+    [c setBuffer:stencil_buf offset:0 atIndex:0];
+    [c dispatchThreads:MTLSizeMake(kSize, kSize, 1)
+        threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+    [c endEncoding];
+  }
+  [cb commit];
+  [cb waitUntilCompleted];
+  INFO("command buffer error: "
+       << (cb.error ? [[cb.error localizedDescription] UTF8String] : "none"));
+  if (cb.status != MTLCommandBufferStatusCompleted) {
+    return false;
+  }
+  const uint32_t* values = static_cast<const uint32_t*>(stencil_buf.contents);
+  *stencil_changed = 0;
+  for (uint32_t i = 0; i < kSize * kSize * samples; ++i) {
+    *stencil_changed += values[i] != 0x5A;
+  }
+  return true;
+}
+
 }  // namespace
+
+TEST_CASE("Depth-plane-only MSAA pass: stencil preserved",
+          "[metal][pass-traffic][depth-plane][device]") {
+  @autoreleasepool {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device) {
+      WARN("No Metal device is available; skipping the depth-plane probe");
+      return;
+    }
+    INFO("Metal device: " << [[device name] UTF8String]);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    NSError* error = nil;
+    id<MTLLibrary> library =
+        [device newLibraryWithSource:[NSString stringWithUTF8String:kShader]
+                             options:nil
+                               error:&error];
+    INFO("shader error: "
+         << (error ? [[error localizedDescription] UTF8String] : "none"));
+    REQUIRE(library != nil);
+    for (uint32_t samples : {2u, 4u}) {
+      for (bool depth_resolve : {false, true}) {
+        uint32_t stencil_changed = UINT32_MAX;
+        REQUIRE(RunMsaaStencilArm(device, queue, library, samples,
+                                  depth_resolve, &stencil_changed));
+        WARN("MSAA depth-plane probe samples=" << samples << " resolve="
+             << depth_resolve << ": stencil samples changed="
+             << stencil_changed << " of " << kSize * kSize * samples);
+        CAPTURE(samples, depth_resolve, stencil_changed);
+        CHECK(stencil_changed == 0);
+      }
+    }
+  }
+}
 
 TEST_CASE("Depth-plane-only pass: stencil preserved, depth bit-identical",
           "[metal][pass-traffic][depth-plane][device]") {
