@@ -118,6 +118,18 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // canonical per-sample EDRAM before the render pass opens. Returns false if
   // a required scheduled conversion couldn't be encoded.
   bool PrepareCurrentRasterViews();
+  // Materialize overwrite skip: the current draw provably writes every sample
+  // of `slots` (bit 0 depth and stencil, 1 + i colour i) inside the guest
+  // pixel rectangle [rect[0], rect[2]) x [rect[1], rect[3]). A slot whose
+  // whole materialized span lies inside opens on a clear instead of the
+  // materialize (the deferred clear load path). Set before
+  // PrepareCurrentRasterViews, consumed by it.
+  void SetDrawOverwrite(uint32_t slots, const float rect[4]) {
+    draw_overwrite_slots_ = slots;
+    for (uint32_t i = 0; i < 4; ++i) {
+      draw_overwrite_rect_[i] = rect[i];
+    }
+  }
   // Clear load action (XE_METAL_CLEAR_LOAD, default on; =0 rolls back): a
   // colour attachment whose whole tile range would be materialized from a
   // canonical EDRAM region that still holds an untouched, whole-tile resolve
@@ -842,6 +854,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     kCount,
   };
   CanonicalSyncRequester sync_requester_ = CanonicalSyncRequester::kOther;
+  uint32_t draw_overwrite_slots_ = 0;
+  float draw_overwrite_rect_[4] = {};
   std::unordered_map<uint64_t, std::vector<uint8_t>> pack_dirty_tiles_;
   struct PackCensus {
     uint64_t pack_ops[4] = {}, pack_tiles[4] = {}, pack_tiles_redundant[4] = {};
@@ -864,6 +878,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // Clear load actions taken / materialize tiles they replaced / deferred
     // loads flushed back to a materialize (unbound attachment).
     uint64_t clear_loads = 0, clear_load_tiles = 0, clear_load_flushes = 0;
+    uint64_t overwrite_skips = 0, overwrite_skip_tiles = 0;
     // Materialize fate: raster-view tiles materialized from canonical, by
     // what the first draw touching them did. read = it could see the old
     // content (depth/stencil test, blending, partial write mask, pixel

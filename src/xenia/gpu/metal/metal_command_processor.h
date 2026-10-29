@@ -45,6 +45,7 @@
 
 namespace xe {
 namespace gpu {
+class ShaderInterpreter;
 namespace metal {
 
 class MetalEncodeStream;
@@ -385,6 +386,17 @@ class MetalCommandProcessor : public CommandProcessor {
   // XE_METAL_PASS_CENSUS=1 (exact-1, default OFF): observational draw-pass
   // census (reduce-metal-draw-pass-traffic task 0.1).
   static bool PassCensusEnabled();
+  // Materialize overwrite skip (XE_METAL_OVERWRITE_SKIP): for a single guest
+  // rectangle, the render target slots (bit 0 depth and stencil, 1 + i colour
+  // i) whose every sample it writes, and the guest pixel rectangle it covers
+  // (the vertex shader runs on the CPU for its 3 vertices).
+  uint32_t ComputeDrawOverwrite(xenos::PrimitiveType prim_type,
+                                const Shader* vertex_shader,
+                                const Shader* pixel_shader,
+                                uint32_t normalized_color_mask,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+                                float rect_out[4]);
+  std::unique_ptr<ShaderInterpreter> overwrite_interpreter_;
   // reduce-metal-draw-pass-traffic D2: a draw pass binds only the attachments
   // its draws can read or write (metal_pass_attachment_use.h). Config
   // metal_pass_attachments_by_use, XE_METAL_PASS_ATTACHMENTS=0/1 override,

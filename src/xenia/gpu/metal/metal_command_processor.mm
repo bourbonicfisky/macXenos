@@ -53,6 +53,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/shader_interpreter.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -6360,6 +6361,290 @@ void MetalCommandProcessor::DumpBoundColorRtDiagnostic(
   }
 }
 
+namespace {
+// Captures the position and the vertex kill flag of one interpreted vertex.
+class OverwritePositionSink : public ShaderInterpreter::ExportSink {
+ public:
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    if (export_register == ucode::ExportRegister::kVSPosition) {
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (value_mask & (1u << i)) {
+          position[i] = value[i];
+          position_mask |= 1u << i;
+        }
+      }
+    } else if (export_register ==
+                   ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex &&
+               (value_mask & 0b0100)) {
+      killed = (xe::memory::Reinterpret<uint32_t>(value[2]) &
+                ~(UINT32_C(1) << 31)) != 0;
+    }
+  }
+  float position[4] = {};
+  uint32_t position_mask = 0;
+  bool killed = false;
+};
+}  // namespace
+
+uint32_t MetalCommandProcessor::ComputeDrawOverwrite(
+    xenos::PrimitiveType prim_type, const Shader* vertex_shader,
+    const Shader* pixel_shader, uint32_t normalized_color_mask,
+    reg::RB_DEPTHCONTROL depth, float rect_out[4]) {
+  // Default on; XE_METAL_OVERWRITE_SKIP=0 materializes as before.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_OVERWRITE_SKIP");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled || prim_type != xenos::PrimitiveType::kRectangleList ||
+      !vertex_shader || !vertex_shader->is_ucode_analyzed()) {
+    return 0;
+  }
+  // XE_METAL_OVERWRITE_LOG=1: why rectangles are not overwrite candidates.
+  static const bool s_log = std::getenv("XE_METAL_OVERWRITE_LOG") != nullptr;
+  static uint32_t s_logs = 0;
+  auto reject = [&](const char* why, float a = 0, float b = 0, float c = 0,
+                    float d = 0) -> uint32_t {
+    if (s_log && s_logs < 2000) {
+      ++s_logs;
+      XELOGW("MetalOverwrite reject {} ({}, {}, {}, {}) vs={:016X}", why, a,
+             b, c, d, vertex_shader->ucode_data_hash());
+    }
+    return 0;
+  };
+  const RegisterFile& regs = *register_file_;
+  auto initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (initiator.num_indices != 3 ||
+      (initiator.source_select != xenos::SourceSelect::kDMA &&
+       initiator.source_select != xenos::SourceSelect::kAutoIndex)) {
+    return reject("draw-shape");
+  }
+  if (xenos::IsMajorModeExplicit(initiator.major_mode, initiator.prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return reject("tessellation");
+  }
+  const xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth &&
+      edram_mode != xenos::EdramMode::kDepthOnly) {
+    return reject("edram-mode");
+  }
+  auto mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+  auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+  if (mode_cntl.cull_front || mode_cntl.cull_back ||
+      mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
+      (mode_cntl.vtx_window_offset_enable &&
+       (window_offset.window_x_offset || window_offset.window_y_offset))) {
+    return reject("raster-state");
+  }
+  auto clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  auto color_control = regs.Get<reg::RB_COLORCONTROL>();
+  if (clip_cntl.ucp_ena ||
+      (color_control.alpha_test_enable &&
+       color_control.alpha_func != xenos::CompareFunction::kAlways) ||
+      color_control.alpha_to_mask_enable ||
+      (pixel_shader && pixel_shader->kills_pixels())) {
+    return reject("pixel-discard", float(clip_cntl.ucp_ena),
+                  float(color_control.alpha_test_enable),
+                  float(color_control.alpha_to_mask_enable),
+                  float(pixel_shader && pixel_shader->kills_pixels()));
+  }
+  // Slots every covered sample of which the draw writes regardless of the old
+  // content.
+  uint32_t slots = 0;
+  auto stencil_replaces = [](xenos::CompareFunction func, xenos::StencilOp op,
+                             reg::RB_STENCILREFMASK mask) {
+    return func == xenos::CompareFunction::kAlways &&
+           op == xenos::StencilOp::kReplace && mask.stencilwritemask == 0xFF;
+  };
+  if (depth.z_enable && depth.z_write_enable &&
+      depth.zfunc == xenos::CompareFunction::kAlways && depth.stencil_enable &&
+      stencil_replaces(depth.stencilfunc, depth.stencilzpass,
+                       regs.Get<reg::RB_STENCILREFMASK>()) &&
+      (!depth.backface_enable ||
+       stencil_replaces(depth.stencilfunc_bf, depth.stencilzpass_bf,
+                        regs.Get<reg::RB_STENCILREFMASK>(
+                            XE_GPU_REG_RB_STENCILREFMASK_BF)))) {
+    slots |= 1u;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets &&
+                      edram_mode == xenos::EdramMode::kColorDepth;
+       ++i) {
+    if (((normalized_color_mask >> (i * 4)) & 0xFu) != 0xFu || !pixel_shader ||
+        !pixel_shader->writes_color_target(i)) {
+      continue;
+    }
+    auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    if (blend.color_srcblend == xenos::BlendFactor::kOne &&
+        blend.color_destblend == xenos::BlendFactor::kZero &&
+        blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+        blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+        blend.alpha_destblend == xenos::BlendFactor::kZero &&
+        blend.alpha_comb_fcn == xenos::BlendOp::kAdd) {
+      slots |= 1u << (1 + i);
+    }
+  }
+  if (!slots || !ShaderInterpreter::CanInterpretShader(*vertex_shader)) {
+    return reject("no-full-write", float(slots), float(depth.value & 0xFFFF),
+                  float(depth.value >> 16), float(normalized_color_mask));
+  }
+  // The window position as DrawExtentEstimator derives it: xy divided by w
+  // unless pre-transformed, then the enabled viewport scale and offset.
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  const bool viewport_enabled = vte.vport_x_scale_ena &&
+                                vte.vport_x_offset_ena &&
+                                vte.vport_y_scale_ena && vte.vport_y_offset_ena;
+  // vtx_w0_fmt (set by Direct3D 9 for everything) describes the VTE's W
+  // output, not the divide, which DrawExtentEstimator applies regardless.
+  if (!clip_cntl.clip_disable &&
+      (!viewport_enabled || vte.vtx_xy_fmt || vte.vtx_z_fmt)) {
+    // Clipping in a space this check does not model.
+    return reject("clip-space", float(vte.value), float(viewport_enabled));
+  }
+  const float x_scale =
+      vte.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE)
+                            : 1.0f;
+  const float x_offset =
+      vte.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET)
+                             : 0.0f;
+  const float y_scale =
+      vte.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE)
+                            : 1.0f;
+  const float y_offset =
+      vte.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET)
+                             : 0.0f;
+  const float center =
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero
+          ? 0.5f
+          : 0.0f;
+
+  // Vertex indices as the primitive processor and DrawExtentEstimator read
+  // them.
+  uint32_t indices[3];
+  auto dma_size = regs.Get<reg::VGT_DMA_SIZE>();
+  if (initiator.source_select == xenos::SourceSelect::kDMA) {
+    if (dma_size.num_words < 3) {
+      return reject("dma-short");
+    }
+    xenos::Endian endian = dma_size.swap_mode;
+    uint32_t base = regs[XE_GPU_REG_VGT_DMA_BASE];
+    if (initiator.index_size == xenos::IndexFormat::kInt16) {
+      if (endian == xenos::Endian::k8in32) {
+        endian = xenos::Endian::k8in16;
+      } else if (endian == xenos::Endian::k16in32) {
+        endian = xenos::Endian::kNone;
+      }
+      auto source = memory_->TranslatePhysical<const uint16_t*>(
+          base & ~uint32_t(sizeof(uint16_t) - 1));
+      for (uint32_t i = 0; i < 3; ++i) {
+        indices[i] = xenos::GpuSwap(uint32_t(source[i]), endian) & 0xFFFFFF;
+      }
+    } else {
+      auto source = memory_->TranslatePhysical<const uint32_t*>(
+          base & ~uint32_t(sizeof(uint32_t) - 1));
+      for (uint32_t i = 0; i < 3; ++i) {
+        indices[i] = xenos::GpuSwap(source[i], endian) & 0xFFFFFF;
+      }
+    }
+    if (mode_cntl.multi_prim_ib_ena) {
+      const uint32_t reset =
+          regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
+      for (uint32_t i = 0; i < 3; ++i) {
+        if (indices[i] == reset) {
+          return reject("reset-index");
+        }
+      }
+    }
+  } else {
+    for (uint32_t i = 0; i < 3; ++i) {
+      indices[i] = i;
+    }
+  }
+  const uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+  const uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+  const uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+
+  if (!overwrite_interpreter_) {
+    overwrite_interpreter_ =
+        std::make_unique<ShaderInterpreter>(regs, *memory_);
+  }
+  ShaderInterpreter& interpreter = *overwrite_interpreter_;
+  interpreter.SetShader(*vertex_shader);
+  OverwritePositionSink sink;
+  interpreter.SetExportSink(&sink);
+  float x[3], y[3];
+  bool ok = true;
+  for (uint32_t i = 0; i < 3 && ok; ++i) {
+    sink = OverwritePositionSink();
+    interpreter.temp_registers()[0] = float(std::min(
+        max_index, std::max(min_index, (indices[i] + index_offset) & 0xFFFFFF)));
+    interpreter.Execute();
+    const float* p = sink.position;
+    const uint32_t needed_mask = vte.vtx_xy_fmt ? 0b0011u : 0b1011u;
+    if (sink.killed || (sink.position_mask & needed_mask) != needed_mask ||
+        (!vte.vtx_xy_fmt && !(p[3] > 0.0f)) || !std::isfinite(p[0]) ||
+        !std::isfinite(p[1])) {
+      ok = false;
+      break;
+    }
+    if (!clip_cntl.clip_disable) {
+      // The whole rectangle must lie inside the depth clip range.
+      const float z_min = clip_cntl.dx_clip_space_def ? 0.0f : -p[3];
+      if (!(sink.position_mask & 0b0100) || !std::isfinite(p[2]) ||
+          p[2] < z_min || p[2] > p[3]) {
+        ok = false;
+        break;
+      }
+    }
+    const float inv_w = vte.vtx_xy_fmt ? 1.0f : 1.0f / p[3];
+    x[i] = p[0] * inv_w * x_scale + x_offset + center;
+    y[i] = p[1] * inv_w * y_scale + y_offset + center;
+  }
+  interpreter.SetExportSink(nullptr);
+  if (!ok) {
+    return reject("vertex");
+  }
+  // Three corners of an axis-aligned rectangle: two distinct values on each
+  // axis (the fourth corner is then that rectangle's).
+  auto two_values = [](const float v[3], float& lo, float& hi) {
+    lo = std::min(v[0], std::min(v[1], v[2]));
+    hi = std::max(v[0], std::max(v[1], v[2]));
+    for (uint32_t i = 0; i < 3; ++i) {
+      if (v[i] != lo && v[i] != hi) {
+        return false;
+      }
+    }
+    return lo < hi;
+  };
+  float x0, x1, y0, y1;
+  if (!two_values(x, x0, x1) || !two_values(y, y0, y1)) {
+    return reject("not-axis-aligned");
+  }
+  // The viewport bounds the host's coverage even with guest clipping off.
+  if (viewport_enabled) {
+    const float ax = std::abs(x_scale), ay = std::abs(y_scale);
+    x0 = std::max(x0, x_offset - ax + center);
+    x1 = std::min(x1, x_offset + ax + center);
+    y0 = std::max(y0, y_offset - ay + center);
+    y1 = std::min(y1, y_offset + ay + center);
+  }
+  draw_util::Scissor scissor;
+  draw_util::GetScissor(regs, scissor, true, false);
+  x0 = std::max(x0, float(scissor.offset[0]));
+  y0 = std::max(y0, float(scissor.offset[1]));
+  x1 = std::min(x1, float(scissor.offset[0] + scissor.extent[0]));
+  y1 = std::min(y1, float(scissor.offset[1] + scissor.extent[1]));
+  if (!(x0 < x1) || !(y0 < y1)) {
+    return reject("empty");
+  }
+  rect_out[0] = x0;
+  rect_out[1] = y0;
+  rect_out[2] = x1;
+  rect_out[3] = y1;
+  return slots;
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -10430,6 +10715,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     prepare_fits(vertex_shader);
   }
   draw_trace_milestone("after-snapshot-fit");
+  {
+    // Set for every draw: a stale mask must never reach another draw.
+    float overwrite_rect[4] = {};
+    const uint32_t overwrite_slots =
+        memexport_draw ? 0u
+                       : ComputeDrawOverwrite(prim_type, vertex_shader,
+                                              pixel_shader,
+                                              normalized_color_mask,
+                                              norm_depth, overwrite_rect);
+    render_target_cache_->SetDrawOverwrite(overwrite_slots, overwrite_rect);
+  }
   __unsafe_unretained id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {

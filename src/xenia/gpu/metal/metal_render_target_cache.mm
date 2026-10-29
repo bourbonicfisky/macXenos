@@ -1176,8 +1176,47 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         !clear_load_format) {
       clear_load_decline("format", 0, 0);
     }
+    // Overwrite skip: this draw writes every sample of the whole span, so the
+    // materialized content is never observed (any format: the clear value is
+    // arbitrary).
+    bool overwrite = false;
+    if (((draw_overwrite_slots_ >> slot) & 1) &&
+        materialize_first < operations.size() && end_tiles > start_tiles &&
+        end_tiles <= xenos::kEdramTileCount) {
+      const RenderTargetKey& rt_key = render_target->key();
+      const uint32_t pitch = rt_key.GetPitchTiles();
+      const uint32_t tile_width =
+          xenos::kEdramTileWidthSamples >>
+          uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X);
+      const uint32_t tile_height =
+          xenos::kEdramTileHeightSamples >>
+          uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k2X);
+      if (pitch && start_tiles >= rt_base_tiles) {
+        const float y0 =
+            float((start_tiles - rt_base_tiles) / pitch * tile_height);
+        const float y1 = float(
+            (end_tiles - rt_base_tiles + pitch - 1) / pitch * tile_height);
+        overwrite = draw_overwrite_rect_[0] <= 0.0f &&
+                    draw_overwrite_rect_[2] >= float(pitch * tile_width) &&
+                    draw_overwrite_rect_[1] <= y0 &&
+                    draw_overwrite_rect_[3] >= y1;
+        static const bool s_ow_log =
+            std::getenv("XE_METAL_OVERWRITE_LOG") != nullptr;
+        static uint32_t s_ow_logs[1 + xenos::kMaxColorRenderTargets] = {};
+        if (s_ow_log && s_ow_logs[slot] < 100) {
+          ++s_ow_logs[slot];
+          XELOGW("MetalOverwrite slot={} {} rect=[{},{})x[{},{}) region "
+                 "w={} rows=[{},{}) msaa={} ops={} first_mat={}",
+                 slot, overwrite ? "COVERED" : "short", draw_overwrite_rect_[0],
+                 draw_overwrite_rect_[2], draw_overwrite_rect_[1],
+                 draw_overwrite_rect_[3], pitch * tile_width, y0, y1,
+                 uint32_t(rt_key.msaa_samples), operations.size(),
+                 materialize_first);
+        }
+      }
+    }
     PendingClearLoad defer_value;
-    if (ClearLoadEnabled() && clear_load_format &&
+    if (((ClearLoadEnabled() && clear_load_format) || overwrite) &&
         materialize_first < operations.size() && end_tiles > start_tiles &&
         end_tiles <= xenos::kEdramTileCount) {
       // Encode the packs (they precede the materializes), then judge.
@@ -1212,7 +1251,14 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         clear_load_decline("coverage", cursor,
                            uint32_t(operations.size() - materialize_first));
       }
-      if (covered) {
+      if (covered && overwrite) {
+        defer_value = PendingClearLoad{};
+        defer_clear = true;
+        ++pack_census_.overwrite_skips;
+        pack_census_.overwrite_skip_tiles += end_tiles - start_tiles;
+      } else if (covered && !(ClearLoadEnabled() && clear_load_format)) {
+        // Overwrite-only candidate whose materializes are not one clean run.
+      } else if (covered) {
         const TileClear& first = tile_clear_[start_tiles];
         bool uniform = first.uniform != 0;
         uint32_t first_bad = start_tiles;
@@ -1273,6 +1319,16 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         NoteMaterializeFate(slot, attachment, operation.start_tiles,
                             operation.end_tiles);
       }
+      // Attribution probe (frame output is wrong):
+      // XE_METAL_PROBE_SKIP_MATERIALIZE=1 drops raster-view materializes to
+      // size their GPU cost (GTA IV M4 mini 55.5 -> 60 fps cap, 2026-10-29).
+      static const bool s_skip_materialize =
+          std::getenv("XE_METAL_PROBE_SKIP_MATERIALIZE") != nullptr;
+      if (s_skip_materialize &&
+          operation.kind == MetalEdramAuthorityTracker::SyncKind::
+                                kMaterializeFromCanonical) {
+        continue;
+      }
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
             command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
@@ -1295,6 +1351,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
             true};
   }
+  draw_overwrite_slots_ = 0;
   return true;
 }
 
@@ -1727,6 +1784,9 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
                      double(c.clear_loads) / frames,
                      double(c.clear_load_tiles) / frames,
                      double(c.clear_load_flushes) / frames);
+  out += fmt::format(" | overwrite-skip: {:.2f}/frame ({:.0f} tiles/frame)",
+                     double(c.overwrite_skips) / frames,
+                     double(c.overwrite_skip_tiles) / frames);
   if (c.fate_tiles) {
     out += fmt::format(
         " | materialize fate: tiles/frame {:.0f} read {:.1f}% overwritten "
