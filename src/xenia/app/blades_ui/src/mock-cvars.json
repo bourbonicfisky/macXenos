@@ -1646,6 +1646,15 @@
 "description": "Maximum durable DXIL artifact-store size in MiB. On reaching it no NEW artifacts are admitted for the session; existing ones keep being served.",
 "changed": false
 },
+"metal_async_pipelines": {
+"name": "metal_async_pipelines",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Metal: create pipelines a game has not used before on background threads. Until one is ready, draws into a render target redrawn every frame are skipped (an object can be missing for a few frames) instead of the game pausing; one-off renders, small render targets and memory exports still wait. Off: every new pipeline is built during the frame that needs it. XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
+"changed": false
+},
 "texture_host_dump": {
 "name": "texture_host_dump",
 "category": "GPU",

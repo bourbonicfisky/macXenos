@@ -50,12 +50,13 @@
 DECLARE_bool(store_shaders);
 
 DEFINE_bool(
-    metal_async_pipelines, false,
+    metal_async_pipelines, true,
     "Metal: create pipelines a game has not used before on background threads. "
     "Until one is ready, draws into a render target redrawn every frame are "
     "skipped (an object can be missing for a few frames) instead of the game "
     "pausing; one-off renders, small render targets and memory exports still "
-    "wait. XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
+    "wait. Off: every new pipeline is built during the frame that needs it. "
+    "XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
     "GPU");
 
 namespace xe {
