@@ -6405,8 +6405,8 @@ uint32_t MetalCommandProcessor::ComputeDrawOverwrite(
   static uint32_t s_logs = 0;
   auto reject = [&](const char* why, float a = 0, float b = 0, float c = 0,
                     float d = 0) -> uint32_t {
-    if (s_log && s_logs < 2000) {
-      ++s_logs;
+    // The first 300, then one in 32 (gameplay past the menus).
+    if (s_log && (s_logs++ < 300 || (s_logs & 31u) == 0)) {
       XELOGW("MetalOverwrite reject {} ({}, {}, {}, {}) vs={:016X}", why, a,
              b, c, d, vertex_shader->ucode_data_hash());
     }
@@ -6435,19 +6435,26 @@ uint32_t MetalCommandProcessor::ComputeDrawOverwrite(
       mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
       (mode_cntl.vtx_window_offset_enable &&
        (window_offset.window_x_offset || window_offset.window_y_offset))) {
-    return reject("raster-state");
+    return reject("raster-state",
+                  float(mode_cntl.cull_front | (mode_cntl.cull_back << 1)),
+                  float(uint32_t(mode_cntl.poly_mode)),
+                  float(window_offset.window_x_offset),
+                  float(window_offset.window_y_offset));
   }
   auto clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   auto color_control = regs.Get<reg::RB_COLORCONTROL>();
-  if (clip_cntl.ucp_ena ||
-      (color_control.alpha_test_enable &&
-       color_control.alpha_func != xenos::CompareFunction::kAlways) ||
-      color_control.alpha_to_mask_enable ||
+  if (clip_cntl.ucp_ena || color_control.alpha_to_mask_enable ||
       (pixel_shader && pixel_shader->kills_pixels())) {
     return reject("pixel-discard", float(clip_cntl.ucp_ena),
-                  float(color_control.alpha_test_enable),
                   float(color_control.alpha_to_mask_enable),
                   float(pixel_shader && pixel_shader->kills_pixels()));
+  }
+  // GTA IV's alpha-tested clear rectangles test alpha != 0 with alpha 0: they
+  // write nothing, so they are not overwrites.
+  if (color_control.alpha_test_enable &&
+      color_control.alpha_func != xenos::CompareFunction::kAlways) {
+    return reject("alpha-test", float(color_control.alpha_func),
+                  regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF));
   }
   // Slots every covered sample of which the draw writes regardless of the old
   // content.
