@@ -11,12 +11,14 @@
 #define XENIA_GPU_PRIMITIVE_PROCESSOR_H_
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -806,6 +808,31 @@ class PrimitiveProcessor {
         assert_unhandled_case(source_primitive_type);
     }
   }
+
+  // Hosts that cannot disable primitive restart scan every reset-disabled
+  // 16-bit index buffer for 0xFFFF on every draw (3-5% of the Metal command
+  // processor in GTA IV and Mafia II). Ranges found clean are remembered across
+  // frames while their pages stay uploaded, not GPU-written and not written by
+  // the guest since the scan (per-page sequence numbers bumped by the
+  // invalidation callback). Command processor thread only, except the
+  // sequence numbers.
+  struct WidenScanMemoEntry {
+    uint32_t base;
+    uint32_t count;
+    uint64_t stamp;
+  };
+  static constexpr uint32_t kWidenScanMemoSizeLog2 = 14;
+  static constexpr uint32_t kWidenScanPageSizeLog2 = 12;
+  bool WidenScanMemoEnabled() const;
+  bool WidenScanMemoFind(uint32_t base, uint32_t count) const;
+  void WidenScanMemoStore(uint32_t base, uint32_t count, uint64_t stamp);
+  void WidenScanMemoInvalidate(uint32_t start, uint32_t end);
+  std::unique_ptr<WidenScanMemoEntry[]> widen_scan_memo_;
+  std::unique_ptr<std::atomic<uint64_t>[]> widen_scan_page_seq_;
+  std::atomic<uint64_t> widen_scan_seq_{1};
+  // XE_WIDEN_SCAN_VERIFY census, logged every 600 frames.
+  uint64_t widen_census_scans_ = 0, widen_census_positive_ = 0,
+           widen_census_memo_hits_ = 0, widen_census_frames_ = 0;
 
   const RegisterFile& register_file_;
   Memory& memory_;

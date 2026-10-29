@@ -24,6 +24,8 @@
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
 
+DECLARE_bool(exact_write_fault_invalidation);
+
 // All these overrides are always safe to use as all backends are expected to
 // support triangle lists and line strips.
 DEFINE_bool(
@@ -294,6 +296,17 @@ void PrimitiveProcessor::ShutdownCommon() {
 }
 
 void PrimitiveProcessor::ClearPerFrameCache() {
+  static const bool s_widen_census =
+      std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
+  if (++widen_census_frames_ >= 600) {
+    if (s_widen_census && (widen_census_scans_ || widen_census_memo_hits_)) {
+      XELOGI("WidenScanCensus 600 frames: scans {} positive {} memo hits {}",
+             widen_census_scans_, widen_census_positive_,
+             widen_census_memo_hits_);
+    }
+    widen_census_frames_ = widen_census_scans_ = widen_census_positive_ =
+        widen_census_memo_hits_ = 0;
+  }
   if (!memory_invalidation_callback_handle_) {
     // Only do clearing if cache has ever been used.
     return;
@@ -1074,7 +1087,36 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
         } else {
           auto guest_indices =
               memory_.TranslatePhysical<const uint16_t*>(guest_index_base);
-          if (IsResetUsed(guest_indices, guest_draw_vertex_count, UINT16_MAX)) {
+          const bool memo = WidenScanMemoEnabled();
+          // Taken before the scan reads the indices: a guest write during the
+          // scan gets a later sequence number and voids the entry.
+          const uint64_t memo_stamp =
+              memo ? widen_scan_seq_.load(std::memory_order_seq_cst) : 0;
+          // XE_WIDEN_SCAN_VERIFY=1: rescan memo hits, log stale ones, and
+          // log scan / memo counts every 600 frames.
+          static const bool s_verify =
+              std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
+          bool memo_hit = memo && WidenScanMemoFind(guest_index_base,
+                                                    guest_draw_vertex_count);
+          if (memo_hit) {
+            ++widen_census_memo_hits_;
+          } else {
+            ++widen_census_scans_;
+          }
+          if (memo_hit && s_verify &&
+              IsResetUsed(guest_indices, guest_draw_vertex_count, UINT16_MAX)) {
+            static uint32_t s_stale = 0;
+            if (s_stale++ < 32) {
+              XELOGW("WidenScanMemo STALE base={:08X} count={}",
+                     guest_index_base, guest_draw_vertex_count);
+            }
+            memo_hit = false;
+          }
+          if (memo_hit) {
+            // Known clean: keep the guest buffer.
+          } else if (IsResetUsed(guest_indices, guest_draw_vertex_count,
+                                 UINT16_MAX)) {
+            ++widen_census_positive_;
             cacheable.index_buffer_type =
                 ProcessedIndexBufferType::kHostConverted;
             cacheable.host_index_format = xenos::IndexFormat::kInt32;
@@ -1097,6 +1139,9 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                   "the primitive-restart drop mechanism IS present in this "
                   "title.");
             }
+          } else if (memo) {
+            WidenScanMemoStore(guest_index_base, guest_draw_vertex_count,
+                               memo_stamp);
           }
           cache_transaction.SetNewResult(cacheable);
         }
@@ -1792,6 +1837,89 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
   }
 }
 
+bool PrimitiveProcessor::WidenScanMemoEnabled() const {
+  // XE_WIDEN_SCAN_MEMO=0 rescans every draw. Needs exact fault invalidation:
+  // the memo trusts the callback to name every page a guest write unwatches.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_WIDEN_SCAN_MEMO");
+    return !(v && v[0] == '0' && !v[1]) &&
+           cvars::exact_write_fault_invalidation;
+  }();
+  return s_enabled;
+}
+
+bool PrimitiveProcessor::WidenScanMemoFind(uint32_t base,
+                                           uint32_t count) const {
+  if (!widen_scan_memo_ || !count) {
+    return false;
+  }
+  const uint32_t slot =
+      uint32_t((uint64_t(base) * 0x9E3779B1u ^ count) &
+               ((1u << kWidenScanMemoSizeLog2) - 1));
+  const WidenScanMemoEntry& entry = widen_scan_memo_[slot];
+  if (!entry.stamp || entry.base != base || entry.count != count) {
+    return false;
+  }
+  const uint32_t end = base + count * sizeof(uint16_t);
+  for (uint32_t page = base >> kWidenScanPageSizeLog2,
+                page_last = (end - 1) >> kWidenScanPageSizeLog2;
+       page <= page_last; ++page) {
+    if (widen_scan_page_seq_[page].load(std::memory_order_seq_cst) >
+        entry.stamp) {
+      return false;
+    }
+  }
+  // Uploaded and watched by shared memory (a guest write faults and reaches
+  // the invalidation callback), and not replaced by GPU output since.
+  return shared_memory_.IsRangeValidAndNotGpuWritten(base, end);
+}
+
+void PrimitiveProcessor::WidenScanMemoStore(uint32_t base, uint32_t count,
+                                            uint64_t stamp) {
+  if (!count || base >= SharedMemory::kBufferSize ||
+      count * sizeof(uint16_t) > SharedMemory::kBufferSize - base) {
+    return;
+  }
+  if (!shared_memory_.IsRangeValidAndNotGpuWritten(
+          base, base + count * uint32_t(sizeof(uint16_t)))) {
+    // Not watched: a later guest write would not be seen.
+    return;
+  }
+  if (!widen_scan_memo_) {
+    // The invalidation callback runs under the global lock on guest threads.
+    auto global_lock = global_critical_region_.Acquire();
+    widen_scan_page_seq_.reset(new std::atomic<uint64_t>[
+        SharedMemory::kBufferSize >> kWidenScanPageSizeLog2]());
+    widen_scan_memo_.reset(
+        new WidenScanMemoEntry[size_t(1) << kWidenScanMemoSizeLog2]());
+    if (!memory_invalidation_callback_handle_) {
+      memory_invalidation_callback_handle_ =
+          memory_.RegisterPhysicalMemoryInvalidationCallback(
+              MemoryInvalidationCallbackThunk, this);
+    }
+    // Writes before the callback existed were not counted.
+    return;
+  }
+  const uint32_t slot =
+      uint32_t((uint64_t(base) * 0x9E3779B1u ^ count) &
+               ((1u << kWidenScanMemoSizeLog2) - 1));
+  widen_scan_memo_[slot] = {base, count, stamp};
+}
+
+void PrimitiveProcessor::WidenScanMemoInvalidate(uint32_t start,
+                                                 uint32_t end) {
+  if (end <= start) {
+    return;
+  }
+  const uint64_t seq =
+      widen_scan_seq_.fetch_add(1, std::memory_order_seq_cst) + 1;
+  for (uint32_t page = start >> kWidenScanPageSizeLog2,
+                page_last = (end - 1) >> kWidenScanPageSizeLog2;
+       page <= page_last; ++page) {
+    widen_scan_page_seq_[page].store(seq, std::memory_order_seq_cst);
+  }
+}
+
 std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
   if (length == 0 || physical_address_start >= SharedMemory::kBufferSize) {
@@ -1799,6 +1927,19 @@ std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
   }
   length = std::min(length, SharedMemory::kBufferSize - physical_address_start);
   uint32_t physical_address_end = physical_address_start + length;
+  if (widen_scan_page_seq_) {
+    if (exact_range) {
+      WidenScanMemoInvalidate(physical_address_start, physical_address_end);
+    } else {
+      // Memory may unwatch up to the surrounding 4 MB without telling this
+      // callback which pages; void them all.
+      constexpr uint32_t kMaxUnwatchExcess = 4 * 1024 * 1024;
+      WidenScanMemoInvalidate(
+          physical_address_start & ~(kMaxUnwatchExcess - 1),
+          std::min(xe::align(physical_address_end, kMaxUnwatchExcess),
+                   SharedMemory::kBufferSize));
+    }
+  }
   if (!exact_range) {
     // Invalidate entire buckets if this is an access callback rather than
     // something like a file read to disable access violation handling for a

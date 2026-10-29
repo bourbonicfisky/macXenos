@@ -142,6 +142,18 @@ class SharedMemory {
             (page & 63)) &
            1;
   }
+  // Every page of [start, end) is uploaded (so watched for guest writes) and
+  // holds guest-written rather than GPU-written data. Same threading as above.
+  bool IsRangeValidAndNotGpuWritten(uint32_t start, uint32_t end) const {
+    for (uint32_t page = start >> page_size_log2_,
+                  page_last = (end - 1) >> page_size_log2_;
+         page <= page_last; ++page) {
+      if (!IsPageValid(page) || IsPageGpuWritten(page)) {
+        return false;
+      }
+    }
+    return true;
+  }
 
  protected:
   SharedMemory(Memory& memory);
