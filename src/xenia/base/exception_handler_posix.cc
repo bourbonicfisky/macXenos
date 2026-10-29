@@ -16,7 +16,9 @@
 // _XOPEN_SOURCE dance that <ucontext.h> requires.
 #include <sys/ucontext.h>
 #endif
+#include <atomic>
 #include <cstdint>
+#include <ctime>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/host_thread_context.h"
@@ -469,11 +471,39 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   }
 
 #if XE_PLATFORM_MAC
-  // No registered handler resolved this exception. Just returning would
-  // re-execute the faulting instruction and fault again forever (macOS surfaces
-  // guest access violations as SIGBUS), turning a real bug into a silent
-  // livelock. Restore the original disposition and let the process crash with a
-  // proper report at the faulting instruction instead.
+  // No registered handler resolved this exception. Restoring the default
+  // disposition lasts for the rest of the process: every later write-watch
+  // fault, which the handlers above resolve constantly, would then crash. A
+  // fault can be transient, though: a page-in of the memory-mapped disc image
+  // on a network volume failed once with SIGBUS and succeeded when retried
+  // (GTA IV, three Macs booting from the same share), and the next watch fault
+  // 10 s later took the process down. So the first few unclaimed faults of the
+  // process are retried after a pause; a real bug faults again on each retry
+  // and still crashes at its instruction.
+  constexpr uint32_t kUnclaimedFaultRetries = 4;
+  static std::atomic<uint32_t> unclaimed_fault_retries{0};
+  if ((signal_number == SIGBUS || signal_number == SIGSEGV) &&
+      unclaimed_fault_retries.fetch_add(1, std::memory_order_relaxed) <
+          kUnclaimedFaultRetries) {
+    XELOGE(
+        "ExceptionHandler: unhandled signal {} at pc={:#018x} fault_address="
+        "{:#018x}; retrying",
+        signal_number,
+#if XE_ARCH_AMD64
+        uint64_t(thread_context.rip),
+#else
+        uint64_t(thread_context.pc),
+#endif  // XE_ARCH
+        uint64_t(reinterpret_cast<uintptr_t>(signal_info->si_addr)));
+    timespec delay = {0, 100 * 1000 * 1000};
+    nanosleep(&delay, nullptr);
+    return;
+  }
+  // Just returning now would re-execute the faulting instruction and fault
+  // again forever (macOS surfaces guest access violations as SIGBUS), turning
+  // a real bug into a silent livelock. Restore the original disposition and
+  // let the process crash with a proper report at the faulting instruction
+  // instead.
   XELOGE(
       "ExceptionHandler: unhandled signal {} at pc={:#018x} fault_address="
       "{:#018x}; restoring default handler to crash with diagnostics",
