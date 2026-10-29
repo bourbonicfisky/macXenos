@@ -52,6 +52,7 @@ enum class MetalEncodeStream::Op : uint16_t {
   kIRDrawIndexedGeometry,
   kIRDrawGeometry,
   kBufferBarrier,
+  kPipelineDeferred,
 };
 
 namespace {
@@ -117,6 +118,10 @@ struct DepthBiasOp {
 };
 struct ScissorOp {
   MTLScissorRect rect;
+};
+struct DeferredPipelineOp {
+  MetalEncodeStream::PipelineResolver resolve;
+  void* context;
 };
 struct BlendColorOp {
   float rgba[4];
@@ -332,6 +337,7 @@ void MetalEncodeStream::Commit() {
       published_local_ = write_pos_;
       consumed_.store(write_pos_, std::memory_order_relaxed);
     }
+    deferred_owners_.clear();
     return;
   }
   Publish(false);
@@ -345,6 +351,7 @@ void MetalEncodeStream::Drain() {
   Publish(true);
   ++stats_.drains;
   if (consumed_.load(std::memory_order_acquire) == write_pos_) {
+    deferred_owners_.clear();
     return;
   }
   ++stats_.drain_waits;
@@ -370,6 +377,7 @@ void MetalEncodeStream::Drain() {
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - start)
           .count());
+  deferred_owners_.clear();
 }
 
 MetalEncodeStream::Stats MetalEncodeStream::TakeStats() {
@@ -475,7 +483,20 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
         [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                         static_cast<const PtrOp*>(payload)
                                             ->object)];
+        replay_skip_draws_ = false;
         break;
+      case Op::kPipelineDeferred: {
+        const auto* p = static_cast<const DeferredPipelineOp*>(payload);
+        void* state = p->resolve(p->context);
+        replay_skip_draws_ = !state;
+        if (state) {
+          // The encoder retains what it is given (retained-reference command
+          // buffers), so the resolver's reference can go.
+          [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                          state];
+          CFRelease(state);
+        }
+      } break;
       case Op::kBlendColor: {
         const float* c = static_cast<const BlendColorOp*>(payload)->rgba;
         [enc setBlendColorRed:c[0] green:c[1] blue:c[2] alpha:c[3]];
@@ -563,12 +584,18 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
         }
       } break;
       case Op::kDraw: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const DrawOp*>(payload);
         [enc drawPrimitives:MTLPrimitiveType(p->type)
                 vertexStart:p->start
                 vertexCount:p->count];
       } break;
       case Op::kDrawIndexed: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const DrawIndexedOp*>(payload);
         [enc drawIndexedPrimitives:MTLPrimitiveType(p->type)
                         indexCount:p->count
@@ -580,11 +607,17 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
                       baseInstance:p->base_instance];
       } break;
       case Op::kIRDraw: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const DrawOp*>(payload);
         IRRuntimeDrawPrimitives(enc, MTLPrimitiveType(p->type), p->start,
                                 p->count);
       } break;
       case Op::kIRDrawIndexed: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const DrawIndexedOp*>(payload);
         IRRuntimeDrawIndexedPrimitives(
             enc, MTLPrimitiveType(p->type), p->count,
@@ -592,6 +625,9 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
             p->offset, p->instance_count, p->base_vertex, p->base_instance);
       } break;
       case Op::kIRDrawIndexedGeometry: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const IRDrawIndexedGeometryOp*>(payload);
         IRRuntimeDrawIndexedPrimitivesGeometryEmulation(
             enc, IRRuntimePrimitiveType(p->type), MTLIndexType(p->index_type),
@@ -599,6 +635,9 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
             p->index_count, p->start_index, p->base_vertex, p->base_instance);
       } break;
       case Op::kIRDrawGeometry: {
+        if (replay_skip_draws_) {
+          break;
+        }
         const auto* p = static_cast<const IRDrawGeometryOp*>(payload);
         IRRuntimeDrawPrimitivesGeometryEmulation(
             enc, IRRuntimePrimitiveType(p->type), p->config, p->instance_count,
@@ -686,6 +725,24 @@ void MetalEncodeStream::SetRenderPipelineState(
     return;
   }
   Emit<PtrOp>(Op::kPipeline)->object = (__bridge void*)state;
+}
+
+void MetalEncodeStream::SetRenderPipelineStateDeferred(
+    PipelineResolver resolve, void* context, std::shared_ptr<void> owner) {
+  if (mode_ == Mode::kDirect) {
+    // Not used in direct mode (the command processor resolves first).
+    assert_always();
+    if (void* state = resolve(context)) {
+      [direct_encoder_
+          setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)state];
+      CFRelease(state);
+    }
+    return;
+  }
+  auto* p = Emit<DeferredPipelineOp>(Op::kPipelineDeferred);
+  p->resolve = resolve;
+  p->context = context;
+  deferred_owners_.push_back(std::move(owner));
 }
 
 void MetalEncodeStream::SetBlendColor(float r, float g, float b, float a) {

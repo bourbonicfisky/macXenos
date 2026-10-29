@@ -17,7 +17,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <thread>
+#include <vector>
 
 #include "metal_irconverter_runtime.h"
 
@@ -79,6 +81,14 @@ class MetalEncodeStream {
   void SetDepthBias(float constant, float slope, float clamp);
   void SetScissorRect(const MTLScissorRect& rect);
   void SetRenderPipelineState(id<MTLRenderPipelineState> state);
+  // A pipeline another thread is still creating (deferred modes only): the
+  // replay calls resolve(context), which blocks until the state exists and
+  // returns it retained, or null if creation failed, in which case draws are
+  // skipped until the next pipeline. `owner` keeps `context` alive until the
+  // op has been replayed (the next Drain).
+  using PipelineResolver = void* (*)(void* context);
+  void SetRenderPipelineStateDeferred(PipelineResolver resolve, void* context,
+                                      std::shared_ptr<void> owner);
   void SetBlendColor(float r, float g, float b, float a);
   void SetDepthStencilState(id<MTLDepthStencilState> state);
   void SetStencilReferenceValues(uint32_t front, uint32_t back);
@@ -180,6 +190,10 @@ class MetalEncodeStream {
 
   Stats stats_;
   std::atomic<uint64_t> consumer_sleeps_{0};
+  // Producer side: owners of deferred pipeline contexts not yet known to be
+  // replayed. Replay side: the last deferred pipeline failed.
+  std::vector<std::shared_ptr<void>> deferred_owners_;
+  bool replay_skip_draws_ = false;
 };
 
 }  // namespace metal

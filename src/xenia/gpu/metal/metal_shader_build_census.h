@@ -198,6 +198,10 @@ class MetalShaderBuildCensus {
   std::atomic<uint64_t> startup_build_ns{0};    // before the first swap
   std::atomic<uint64_t> async_build_ns{0};      // on background workers
   std::atomic<uint64_t> async_skips{0};         // draws skipped meanwhile
+  // Draws whose pipeline the encoder thread waited for (built on a worker
+  // while the command processor recorded on), and that wait.
+  std::atomic<uint64_t> deferred_pipelines{0};
+  std::atomic<uint64_t> deferred_wait_ns{0};
   std::atomic<uint64_t> stall_build_ns{0};      // after it
   std::atomic<uint64_t> stall_events{0};
   std::atomic<uint64_t> stall_frames{0};        // frames with any build work
@@ -227,6 +231,20 @@ class MetalShaderBuildCensus {
       async_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
       return;
     }
+    if (swaps.load(std::memory_order_relaxed) == 0) {
+      startup_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+      return;
+    }
+    stall_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    stall_events.fetch_add(1, std::memory_order_relaxed);
+    frame_build_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  }
+
+  // The encoder thread waited for a pipeline still being built: that holds
+  // the frame's GPU work like a build on the command processor would, so it
+  // counts as a stall of the frame it lands in.
+  void RecordDeferredWait(uint64_t elapsed_ns) {
+    deferred_wait_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
     if (swaps.load(std::memory_order_relaxed) == 0) {
       startup_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
       return;
@@ -283,7 +301,7 @@ class MetalShaderBuildCensus {
         "|stall_frames={}|worst_frame_ms={:.1f}|f>8ms={}|f>16ms={}|f>33ms={}"
         "|arch={}|arch_hit={}|arch_stale={}|arch_save_fail={}|arch_add={}/{:.1f}ms"
         "|arch_save={}/{:.1f}ms/max{:.1f}/{}KiB"
-        "|async_build_ms={:.1f}|async_skips={}",
+        "|async_build_ms={:.1f}|async_skips={}|deferred={}|deferred_wait_ms={:.1f}",
         phase, swaps.load(std::memory_order_relaxed),
         double(first_swap_ns.load(std::memory_order_relaxed)) / 1e6,
         dxbc.count.load(std::memory_order_relaxed), dxbc.total_ms(),
@@ -327,7 +345,9 @@ class MetalShaderBuildCensus {
         archive_save.total_ms(), archive_save.max_ms(),
         archive_save.bytes.load(std::memory_order_relaxed) / 1024,
         double(async_build_ns.load(std::memory_order_relaxed)) / 1e6,
-        async_skips.load(std::memory_order_relaxed));
+        async_skips.load(std::memory_order_relaxed),
+        deferred_pipelines.load(std::memory_order_relaxed),
+        double(deferred_wait_ns.load(std::memory_order_relaxed)) / 1e6);
   }
 
   uint64_t stage_requests_snapshot() const {

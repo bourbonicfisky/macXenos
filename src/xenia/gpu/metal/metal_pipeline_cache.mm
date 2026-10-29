@@ -1434,10 +1434,12 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
     MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
     uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
     const uint32_t* blend_controls, uint32_t color_write_mask,
-    bool stand_in_allowed, void** pipeline_out,
-    MetalShader::MetalTranslation** pixel_out) {
+    bool stand_in_allowed, bool may_defer, void** pipeline_out,
+    MetalShader::MetalTranslation** pixel_out,
+    std::shared_ptr<void>* deferred_out) {
   *pipeline_out = nullptr;
   *pixel_out = nullptr;
+  deferred_out->reset();
   DrainAsyncPipelines();
   auto from_key = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
     auto it = render_pipeline_states_.find(key);
@@ -1458,10 +1460,41 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
                             : AsyncPipelineStatus::kFailed;
     }
   }
+  auto defer = [&](const std::shared_ptr<AsyncPipelineJob>& job) {
+    *pixel_out = job->pixel_used;
+    *deferred_out = job;
+    GetMetalShaderBuildCensus().deferred_pipelines.fetch_add(
+        1, std::memory_order_relaxed);
+    return AsyncPipelineStatus::kDeferred;
+  };
+  auto new_job = [&]() {
+    auto job = std::make_shared<AsyncPipelineJob>();
+    job->vertex = vertex;
+    job->pixel = pixel;
+    std::memcpy(job->color_formats, color_pixel_formats,
+                sizeof(job->color_formats));
+    job->depth_format = depth_pixel_format;
+    job->raster_key = raster_key;
+    std::memcpy(job->blend_controls, blend_controls,
+                sizeof(job->blend_controls));
+    job->color_write_mask = color_write_mask;
+    job->async_key = async_key;
+    // The lookup list is replaced on the GPU thread when the archive is
+    // saved; the worker keeps this one.
+    job->lookup_list =
+        binary_archive_lookup_list_
+            ? (__bridge_retained void*)(__bridge NSArray*)
+                  binary_archive_lookup_list_
+            : nullptr;
+    return job;
+  };
   auto pending = async_pending_.find(async_key);
   if (pending != async_pending_.end()) {
     if (stand_in_allowed) {
       return AsyncPipelineStatus::kPending;
+    }
+    if (may_defer && pending->second->deferred) {
+      return defer(pending->second);
     }
     // A draw that may not use a stand-in waits for the queued build.
     std::shared_ptr<AsyncPipelineJob> job = pending->second;
@@ -1493,24 +1526,7 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
       }
     }
     if (stand_in_allowed) {
-      auto job = std::make_shared<AsyncPipelineJob>();
-      job->vertex = vertex;
-      job->pixel = pixel;
-      std::memcpy(job->color_formats, color_pixel_formats,
-                  sizeof(job->color_formats));
-      job->depth_format = depth_pixel_format;
-      job->raster_key = raster_key;
-      std::memcpy(job->blend_controls, blend_controls,
-                  sizeof(job->blend_controls));
-      job->color_write_mask = color_write_mask;
-      job->async_key = async_key;
-      // The lookup list is replaced on the GPU thread when the archive is
-      // saved; the worker keeps this one.
-      job->lookup_list =
-          binary_archive_lookup_list_
-              ? (__bridge_retained void*)(__bridge NSArray*)
-                    binary_archive_lookup_list_
-              : nullptr;
+      std::shared_ptr<AsyncPipelineJob> job = new_job();
       StartAsyncPipelineWorkers();
       async_pending_.emplace(async_key, job);
       {
@@ -1521,12 +1537,35 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
       return AsyncPipelineStatus::kPending;
     }
   }
-  // Synchronous, as GetOrCreateRenderPipelineState's callers did.
+  // Synchronous, as GetOrCreateRenderPipelineState's callers did, or with
+  // only the translation synchronous when the state may be deferred.
   if (!TranslateShader(*vertex)) {
     return AsyncPipelineStatus::kFailed;
   }
   MetalShader::MetalTranslation* pixel_used =
       pixel && TranslateShader(*pixel) ? pixel : nullptr;
+  if (may_defer) {
+    const uint64_t key =
+        RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                          depth_pixel_format, raster_key, blend_controls,
+                          color_write_mask);
+    if (render_pipeline_states_.count(key)) {
+      return from_key(key, pixel_used);
+    }
+    std::shared_ptr<AsyncPipelineJob> job = new_job();
+    job->deferred = true;
+    job->cache = this;
+    job->pixel_used = pixel_used;
+    StartAsyncPipelineWorkers();
+    async_pending_.emplace(async_key, job);
+    {
+      // Ahead of stand-in builds: the encoder thread will wait for it.
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      async_queue_.push_front(job);
+    }
+    async_queue_cv_.notify_one();
+    return defer(job);
+  }
   void* state = GetOrCreateRenderPipelineState(
       vertex, pixel_used, color_pixel_formats, depth_pixel_format, raster_key,
       blend_controls, color_write_mask);
@@ -1536,6 +1575,35 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   *pipeline_out = state;
   *pixel_out = pixel_used;
   return AsyncPipelineStatus::kReady;
+}
+
+MetalPipelineCache::AsyncPipelineJob::~AsyncPipelineJob() {
+  if (deferred_state) {
+    CFRelease(deferred_state);
+  }
+}
+
+void* MetalPipelineCache::ResolveDeferredPipeline(void* request) {
+  auto* job = static_cast<AsyncPipelineJob*>(request);
+  MetalPipelineCache& cache = *job->cache;
+  void* state;
+  {
+    std::unique_lock<std::mutex> lock(cache.async_mutex_);
+    if (!job->done && !cache.async_stop_) {
+      const auto start = std::chrono::steady_clock::now();
+      cache.async_done_cv_.wait(
+          lock, [&]() { return job->done || cache.async_stop_; });
+      GetMetalShaderBuildCensus().RecordDeferredWait(uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - start)
+              .count()));
+    }
+    state = job->deferred_state;
+  }
+  if (state) {
+    CFRetain(state);
+  }
+  return state;
 }
 
 void MetalPipelineCache::DrainAsyncPipelines() {
@@ -1621,6 +1689,8 @@ void MetalPipelineCache::StopAsyncPipelineWorkers() {
     async_stop_ = true;
   }
   async_queue_cv_.notify_all();
+  // A deferred request still queued resolves to null (draws skipped).
+  async_done_cv_.notify_all();
   for (auto& thread : async_workers_) {
     xe::threading::Wait(thread.get(), false);
   }
@@ -1661,12 +1731,16 @@ void MetalPipelineCache::AsyncPipelineWorker() {
       job->vertex_ok =
           converter_ok &&
           TranslateShader(*job->vertex, *translator, metal_converter);
-      if (job->vertex_ok) {
+      if (job->vertex_ok && !job->deferred) {
+        // A deferred request's pixel shader is translated already, and the
+        // command processor reads pixel_used.
         job->pixel_used =
             job->pixel &&
                     TranslateShader(*job->pixel, *translator, metal_converter)
                 ? job->pixel
                 : nullptr;
+      }
+      if (job->vertex_ok) {
         job->key = RenderPipelineKey(
             job->vertex, job->pixel_used, job->color_formats,
             job->depth_format, job->raster_key, job->blend_controls,
@@ -1683,6 +1757,9 @@ void MetalPipelineCache::AsyncPipelineWorker() {
             [device newRenderPipelineStateWithDescriptor:desc error:&error];
         if (state) {
           job->state = (__bridge_retained void*)state;
+          if (job->deferred) {
+            job->deferred_state = (__bridge_retained void*)state;
+          }
         } else {
           timer.Dismiss();
           XELOGE("MetalPipelineCache: background newRenderPipelineState "

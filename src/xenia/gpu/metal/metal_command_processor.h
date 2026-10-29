@@ -648,6 +648,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // on the M1 Max, mostly repeats of the previous draw.
   struct EncoderFixedState {
     void* pipeline = nullptr;
+    // A deferred pipeline request `pipeline` points at, kept alive so its
+    // address cannot be recycled while it is the dedupe key.
+    std::shared_ptr<void> pipeline_owner;
     bool viewport_valid = false, scissor_valid = false;
     bool depth_bias_valid = false, blend_color_valid = false;
     int32_t depth_clip = -1, cull = -1, winding = -1, fill = -1;

@@ -9127,6 +9127,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pipeline_depth_format |= MetalPipelineCache::kDepthWithoutStencilBit;
     }
   }
+  // A deferred pipeline request (metal_async_pipelines): `pipeline` points at
+  // it and the encoder thread resolves it.
+  std::shared_ptr<void> deferred_pipeline;
   // Geometry-emulation config (VS output size + GS max input primitives per mesh
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
@@ -9172,14 +9175,27 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         render_target_cache_->IsLastUpdateDrawTargetSmall();
     const bool stand_in_allowed =
         target_recurring && !target_small && memexport_ranges.empty();
+    // A draw that waits hands its pipeline to the encoder thread when that
+    // replays the draws (XE_METAL_DEFERRED_PIPELINES=0: the command processor
+    // waits instead), so the pass's other new pipelines are queued meanwhile.
+    static const bool s_defer = [] {
+      const char* v = std::getenv("XE_METAL_DEFERRED_PIPELINES");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    const bool may_defer =
+        s_defer && !stand_in_allowed &&
+        encode_stream_->mode() == MetalEncodeStream::Mode::kThreaded;
     MetalShader::MetalTranslation* ps_used = nullptr;
     const auto async_start = std::chrono::steady_clock::now();
     const MetalPipelineCache::AsyncPipelineStatus status =
         pipeline_cache_->GetRenderPipelineStateAsync(
             vs_translation, ps_translation, color_pixel_formats,
             pipeline_depth_format, pipeline_raster_state.pipeline_key(),
-            blend_controls, normalized_color_mask, stand_in_allowed,
-            &pipeline, &ps_used);
+            blend_controls, normalized_color_mask, stand_in_allowed, may_defer,
+            &pipeline, &ps_used, &deferred_pipeline);
+    if (status == MetalPipelineCache::AsyncPipelineStatus::kDeferred) {
+      pipeline = deferred_pipeline.get();
+    }
     if (!stand_in_allowed) {
       // Why draws waited (attribution, logged every 900 swaps): only waits
       // over 1 ms count, which is a build or a queued build finishing.
@@ -12177,8 +12193,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   if (!state_dedupe || encoder_fixed_state_.pipeline != pipeline) {
-    es.SetRenderPipelineState((__bridge id<MTLRenderPipelineState>)pipeline);
+    if (deferred_pipeline) {
+      es.SetRenderPipelineStateDeferred(
+          MetalPipelineCache::ResolveDeferredPipeline, pipeline,
+          deferred_pipeline);
+    } else {
+      es.SetRenderPipelineState((__bridge id<MTLRenderPipelineState>)pipeline);
+    }
     encoder_fixed_state_.pipeline = pipeline;
+    encoder_fixed_state_.pipeline_owner = std::move(deferred_pipeline);
   }
 
   // Apply complete blend/stencil dynamic values on every normal draw. Metal

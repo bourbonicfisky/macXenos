@@ -105,18 +105,30 @@ class MetalPipelineCache {
   // a queued build or build synchronously, as GetOrCreateRenderPipelineState.
   // `vertex` and `pixel` may be untranslated; `pixel` may be null.
   static bool AsyncPipelinesEnabled();
-  enum class AsyncPipelineStatus { kReady, kPending, kFailed };
+  enum class AsyncPipelineStatus { kReady, kPending, kFailed, kDeferred };
   // kReady: *pipeline_out is the state, *pixel_out the pixel translation it
   // uses (null if the pixel shader did not translate, as the synchronous
   // path does). kFailed: no pipeline (the vertex shader did not translate if
   // it has no function).
+  // kDeferred (only with `may_defer`, for a draw that may not use a
+  // stand-in): the shaders are translated (*pixel_out as for kReady) and a
+  // worker is creating the state, ahead of stand-in builds. *deferred_out
+  // owns the request; ResolveDeferredPipeline(deferred_out->get()) blocks
+  // until the state exists. The encoder thread resolves it, so the command
+  // processor records the next draws (and queues their pipelines) meanwhile:
+  // a scene's first frame, whose new pipelines all wait, builds them in
+  // parallel instead of one after another.
   AsyncPipelineStatus GetRenderPipelineStateAsync(
       MetalShader::MetalTranslation* vertex,
       MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
       uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
       const uint32_t* blend_controls, uint32_t color_write_mask,
-      bool stand_in_allowed, void** pipeline_out,
-      MetalShader::MetalTranslation** pixel_out);
+      bool stand_in_allowed, bool may_defer, void** pipeline_out,
+      MetalShader::MetalTranslation** pixel_out,
+      std::shared_ptr<void>* deferred_out);
+  // A MetalEncodeStream::PipelineResolver: the retained state of a kDeferred
+  // request, or null if creation failed. Any thread.
+  static void* ResolveDeferredPipeline(void* request);
   // Installs the pipelines the workers finished. GPU thread.
   void DrainAsyncPipelines();
 
@@ -267,6 +279,13 @@ class MetalPipelineCache {
     MetalShader::MetalTranslation* pixel_used = nullptr;
     void* descriptor = nullptr;  // retained
     void* state = nullptr;       // retained
+    // kDeferred requests: translated by the command processor (pixel_used
+    // is set before queueing), resolved by the encoder thread. The worker
+    // keeps a reference to the state here for the resolver.
+    bool deferred = false;
+    MetalPipelineCache* cache = nullptr;
+    void* deferred_state = nullptr;  // retained
+    ~AsyncPipelineJob();
   };
   struct AsyncPipelineResult {
     uint64_t key;  // 0: failed
