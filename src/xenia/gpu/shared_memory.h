@@ -154,6 +154,17 @@ class SharedMemory {
     }
     return true;
   }
+  // Every page of [start, end) is valid (uploaded or GPU-written).
+  bool IsRangeValid(uint32_t start, uint32_t end) const {
+    for (uint32_t page = start >> page_size_log2_,
+                  page_last = (end - 1) >> page_size_log2_;
+         page <= page_last; ++page) {
+      if (!IsPageValid(page)) {
+        return false;
+      }
+    }
+    return true;
+  }
 
  protected:
   SharedMemory(Memory& memory);
@@ -233,6 +244,8 @@ class SharedMemory {
   // (reopen-metal-gpu-visible-resolve-authority): the content-change signal
   // must reach the watching textures even though no drain runs before the
   // consuming draw.
+  // Byte-precise: a texture sharing a host page with the range but none of
+  // its bytes (16 KB pages on Apple hosts) is not invalidated.
   void FireRangeWatchesOnly(uint32_t start, uint32_t length,
                             bool invalidated_by_gpu);
 
@@ -347,6 +360,9 @@ class SharedMemory {
         WatchNode* node_first;
         uint32_t page_first;
         uint32_t page_last;
+        // The watched bytes, inclusive, for FireRangeWatchesOnly.
+        uint32_t address_first;
+        uint32_t address_last;
       };
       WatchRange* next_free;
     };
@@ -389,8 +405,11 @@ class SharedMemory {
 
   // Triggers the watches (global and per-range), removing triggered range
   // watches.
+  // Range watches are fired when they share a page with [page_first,
+  // page_last] and, given exact bytes, a byte of [byte_first, byte_last].
   void FireWatches(uint32_t page_first, uint32_t page_last,
-                   bool invalidated_by_gpu, bool fire_global_watches = true);
+                   bool invalidated_by_gpu, bool fire_global_watches = true,
+                   uint32_t byte_first = 0, uint32_t byte_last = UINT32_MAX);
   // Unlinks and frees the range and its nodes. Call this in the global critical
   // region.
   void UnlinkWatchRange(WatchRange* range);

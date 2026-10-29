@@ -197,6 +197,8 @@ SharedMemory::WatchHandle SharedMemory::WatchMemoryRange(
   range->callback_argument = callback_argument;
   range->page_first = watch_page_first;
   range->page_last = watch_page_last;
+  range->address_first = start;
+  range->address_last = start + length - 1;
 
   // Allocate and link the nodes.
   WatchNode* node_previous = nullptr;
@@ -238,7 +240,8 @@ void SharedMemory::UnwatchMemoryRange(WatchHandle handle) {
 
 void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
                                bool invalidated_by_gpu,
-                               bool fire_global_watches) {
+                               bool fire_global_watches, uint32_t byte_first,
+                               uint32_t byte_last) {
   uint32_t address_first = page_first << page_size_log2_;
   uint32_t address_last =
       (page_last << page_size_log2_) + ((1 << page_size_log2_) - 1);
@@ -272,7 +275,9 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
       if (node) {
         swcache::PrefetchL1(node);
       }
-      if (page_first <= range->page_last && page_last >= range->page_first) {
+      if (page_first <= range->page_last && page_last >= range->page_first &&
+          byte_first <= range->address_last &&
+          byte_last >= range->address_first) {
         range->callback(global_lock, range->callback_context,
                         range->callback_data, range->callback_argument,
                         invalidated_by_gpu);
@@ -319,9 +324,13 @@ void SharedMemory::FireRangeWatchesOnly(uint32_t start, uint32_t length,
   length = std::min(length, kBufferSize - start);
   uint32_t page_first = start >> page_size_log2_;
   uint32_t page_last = (start + length - 1) >> page_size_log2_;
+  // XE_RANGE_WATCHES_BY_PAGE=1: fire every watch sharing a page, as before.
+  static const bool by_page =
+      std::getenv("XE_RANGE_WATCHES_BY_PAGE") != nullptr;
   auto global_lock = global_critical_region_.Acquire();
   FireWatches(page_first, page_last, invalidated_by_gpu,
-              /*fire_global_watches=*/false);
+              /*fire_global_watches=*/false, by_page ? 0 : start,
+              by_page ? UINT32_MAX : start + length - 1);
 }
 
 void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
