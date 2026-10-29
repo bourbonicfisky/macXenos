@@ -14774,6 +14774,36 @@ bool MetalCommandProcessor::IssueCopy() {
                   }];
             }
           }
+          // Resolve forwarding: the scatter also writes the shared texture
+          // cache's texture of this destination, which then needs no reload.
+          MetalSharedTextureCache::ResolveForwardTarget forward_target;
+          MetalRenderTargetCache::ResolveForward forward;
+          const bool forwarding =
+              scatter_eligible && canonical_packed && shared_texture_cache_ &&
+              !trace_writer_.is_open() &&
+              shared_texture_cache_->FindResolveForward(
+                  scatter_dest.dest_base, scatter_dest.dest_pitch_aligned,
+                  wb_bpp_log2, scatter_dest.dest_offset_x,
+                  scatter_dest.dest_offset_y, rw, rh,
+                  scatter_dest.dest_extent_bytes, &forward_target);
+          if (!forwarding && std::getenv("XE_METAL_RESOLVE_FORWARD_LOG")) {
+            static uint32_t s_forward_logs = 0;
+            if (s_forward_logs++ < 300 || (s_forward_logs & 31u) == 0) {
+              XELOGI("MetalResolveForward path dest={:08X} {}x{} scatter={} "
+                     "canonical_packed={} shared_dispatched={}",
+                     resolve_info.copy_dest_base, rw, rh,
+                     scatter_eligible ? 1 : 0, canonical_packed ? 1 : 0,
+                     shared_resolve_dispatched ? 1 : 0);
+            }
+          }
+          if (forwarding) {
+            forward.texture = forward_target.mtl_texture;
+            forward.kind = forward_target.kind;
+            forward.endian = forward_target.endian;
+            forward.width = forward_target.width;
+            forward.height = forward_target.height;
+            forward.origin_y = forward_target.origin_y;
+          }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {
@@ -14811,7 +14841,8 @@ bool MetalCommandProcessor::IssueCopy() {
                       ResolveNumberFormatEnabled()
                           ? uint32_t(
                                 resolve_info.copy_dest_info.copy_dest_number)
-                          : 0u);
+                          : 0u,
+                      forwarding ? &forward : nullptr);
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -14901,6 +14932,9 @@ bool MetalCommandProcessor::IssueCopy() {
                 // The record's bytes are in the shared buffer, not staging.
                 RegisterGpuResidentResolve(resolve_info.copy_dest_base,
                                            scatter_extent_bytes);
+                if (forward.encoded) {
+                  shared_texture_cache_->CompleteResolveForward(forward_target);
+                }
               }
             }
             if (writeback_encoded &&
@@ -15175,6 +15209,9 @@ bool MetalCommandProcessor::IssueCopy() {
           // the same eligibility as color; the record is then GPU-resident and
           // never needs a staging copy or a CPU drain wait.
           bool depth_scatter = false;
+          // Resolve forwarding of the scatter (see the colour path).
+          MetalSharedTextureCache::ResolveForwardTarget depth_forward_target;
+          MetalRenderTargetCache::ResolveForward depth_forward;
           {
             const auto& dc_d = resolve_info.copy_dest_coordinate_info;
             uint32_t depth_extent_bytes = resolve_info.copy_dest_extent_start -
@@ -15221,6 +15258,19 @@ bool MetalCommandProcessor::IssueCopy() {
                       : ((rw + 31u) & ~31u),
                   uint32_t(dc_d.offset_x_div_8) << 3,
                   uint32_t(dc_d.offset_y_div_8) << 3, depth_extent_bytes};
+              if (shared_texture_cache_ && !trace_writer_.is_open() &&
+                  shared_texture_cache_->FindResolveForward(
+                      depth_dest.dest_base, depth_dest.dest_pitch_aligned, 2u,
+                      depth_dest.dest_offset_x, depth_dest.dest_offset_y, rw,
+                      rh, depth_dest.dest_extent_bytes,
+                      &depth_forward_target)) {
+                depth_forward.texture = depth_forward_target.mtl_texture;
+                depth_forward.kind = depth_forward_target.kind;
+                depth_forward.endian = depth_forward_target.endian;
+                depth_forward.width = depth_forward_target.width;
+                depth_forward.height = depth_forward_target.height;
+                depth_forward.origin_y = depth_forward_target.origin_y;
+              }
               writeback_encoded =
                   render_target_cache_->ResolveCanonicalDepthToBuffer(
                       frame_command_buffer_,
@@ -15238,7 +15288,8 @@ bool MetalCommandProcessor::IssueCopy() {
                                    .copy_sample_select),
                       shared_memory_->GetBuffer(), rw, rh,
                       uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      &depth_dest);
+                      &depth_dest,
+                      depth_forward.texture ? &depth_forward : nullptr);
               if (!writeback_encoded) {
                 depth_scatter = false;
               }
@@ -15351,6 +15402,10 @@ bool MetalCommandProcessor::IssueCopy() {
               pending_writebacks_.back().gpu_current = 1u;
               RegisterGpuResidentResolve(resolve_info.copy_dest_base,
                                          extent_bytes);
+              if (depth_forward.encoded) {
+                shared_texture_cache_->CompleteResolveForward(
+                    depth_forward_target);
+              }
             }
           }
         }

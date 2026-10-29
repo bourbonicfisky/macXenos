@@ -1583,6 +1583,73 @@ inline void xe_resolve_store_value(device uchar* destination,
       break;
   }
 }
+// The guest words xe_resolve_store_value / xe_resolve_store_raw write for a
+// 32bpp (.x) or 64bpp (.xy) destination.
+inline uint2 xe_resolve_guest_words(float4 value,
+                                    constant CanonicalResolveParams& p) {
+  if (p.dest_bpp_log2 == 2u) {
+    return uint2(xe_resolve_endian32(
+                     xe_resolve_pack_32bpp(value, p.dest_format, p.dest_number),
+                     p.dest_endian),
+                 0u);
+  }
+  return xe_resolve_endian64(
+      xe_resolve_pack_64bpp(value, p.dest_format, p.dest_number),
+      p.dest_endian);
+}
+inline uint2 xe_resolve_guest_raw_words(uint4 raw,
+                                        constant CanonicalResolveParams& p) {
+  if (p.dest_bpp_log2 == 2u) {
+    return uint2(xe_resolve_endian32(raw.x, p.dest_endian), 0u);
+  }
+  return xe_resolve_endian64(raw.xy, p.dest_endian);
+}
+inline void xe_resolve_store_words(device uchar* destination, uint byte_offset,
+                                   uint2 words,
+                                   constant CanonicalResolveParams& p) {
+  if (p.dest_bpp_log2 == 2u) {
+    *reinterpret_cast<device uint*>(destination + byte_offset) = words.x;
+  } else {
+    *reinterpret_cast<device uint2*>(destination + byte_offset) = words;
+  }
+}
+// Resolve forwarding (XE_METAL_RESOLVE_FORWARD): the *_fwd scatter kernels
+// also write, into the shared texture cache's texture of the destination, the
+// texel that cache's load would make of the guest words, so the texture does
+// not reload from the buffer. The loads apply the fetch endianness to each
+// guest dword (texture_load_32bpb / _64bpb / _32bpb_direct) and store the
+// result's bits: RGBA8 bytes (kind 1), four halves (kind 2), one dword
+// (kind 3). The texture is bound through an unsigned integer view of the same
+// size, so every bit pattern (NaN, denormal) is stored as the load stores it.
+// `texel` is the destination's; the texture's row origin_y is the
+// destination's row 0 (a resolve strip into a taller texture).
+struct XeResolveForward {
+  uint kind;
+  uint endian;
+  uint width;
+  uint height;
+  uint origin_y;
+};
+inline void xe_resolve_forward_store(texture2d<uint, access::write> texture,
+                                     constant XeResolveForward& f,
+                                     uint2 texel, uint2 guest) {
+  texel.y += f.origin_y;
+  if (texel.x >= f.width || texel.y >= f.height) {
+    return;
+  }
+  uint w0 = xe_resolve_endian32(guest.x, f.endian);
+  if (f.kind == 1u) {
+    texture.write(uint4(w0 & 0xFFu, (w0 >> 8u) & 0xFFu, (w0 >> 16u) & 0xFFu,
+                        w0 >> 24u),
+                  texel);
+  } else if (f.kind == 2u) {
+    uint w1 = xe_resolve_endian32(guest.y, f.endian);
+    texture.write(uint4(w0 & 0xFFFFu, w0 >> 16u, w1 & 0xFFFFu, w1 >> 16u),
+                  texel);
+  } else {
+    texture.write(uint4(w0, 0u, 0u, 0u), texel);
+  }
+}
 kernel void resolve_canonical_color_packed(
     device const uint* canonical [[buffer(0)]],
     device uchar* destination [[buffer(1)]],
@@ -1614,6 +1681,32 @@ kernel void resolve_canonical_color_packed(
   }
   xe_resolve_store_value(destination, byte_offset,
                          xe_resolve_color_value(canonical, p, source), p);
+}
+kernel void resolve_canonical_color_packed_fwd(
+    device const uint* canonical [[buffer(0)]],
+    device uchar* destination [[buffer(1)]],
+    constant CanonicalResolveParams& p [[buffer(2)]],
+    constant XeResolveForward& f [[buffer(5)]],
+    texture2d<uint, access::write> forward [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= p.width || gid.y >= p.height) return;
+  uint2 source =
+      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
+  uint2 texel = uint2(p.dest_offset_x + gid.x, p.dest_offset_y + gid.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,
+                               p.dest_bpp_log2);
+  if (p.dest_extent_bytes != 0u &&
+      off + (1u << p.dest_bpp_log2) > p.dest_extent_bytes) {
+    return;
+  }
+  uint2 words =
+      p.raw_copy != 0u
+          ? xe_resolve_guest_raw_words(
+                xe_resolve_read_raw(canonical, p, source), p)
+          : xe_resolve_guest_words(
+                xe_resolve_color_value(canonical, p, source), p);
+  xe_resolve_store_words(destination, p.dest_base + off, words, p);
+  xe_resolve_forward_store(forward, f, texel, words);
 }
 // The snapshot is at the draw resolution scale: each of its host pixels copies
 // the same host pixel of the source block (dest/source/width/height are guest
@@ -1737,6 +1830,33 @@ kernel void resolve_canonical_depth_raw(
     return;
   }
   destination[gid.y * p.width + gid.x] = word;
+}
+kernel void resolve_canonical_depth_raw_fwd(
+    device const uint* canonical [[buffer(0)]],
+    device uint* destination [[buffer(1)]],
+    constant CanonicalResolveParams& p [[buffer(2)]],
+    constant XeResolveForward& f [[buffer(5)]],
+    texture2d<uint, access::write> forward [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= p.width || gid.y >= p.height) {
+    return;
+  }
+  uint2 source =
+      xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));
+  uint idx = xe_edram_offset_bytes(
+                 source.x, source.y, p.surface.base, p.surface.pitch,
+                 p.surface.msaa, p.surface.is_depth, 0u, p.sample_select) >>
+             2u;
+  uint word = canonical[idx % p.surface.words];
+  uint2 texel = uint2(p.dest_offset_x + gid.x, p.dest_offset_y + gid.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);
+  if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {
+    return;
+  }
+  uint guest = xe_resolve_endian32(word, p.dest_endian);
+  device uchar* bytes = reinterpret_cast<device uchar*>(destination);
+  *reinterpret_cast<device uint*>(bytes + p.dest_base + off) = guest;
+  xe_resolve_forward_store(forward, f, texel, uint2(guest, 0u));
 }
 #define XE_COMMA ,
 // Direct colour resolves (XE_METAL_DIRECT_COLOR_RESOLVE): the canonical
@@ -1868,6 +1988,41 @@ inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
         destination, byte_offset,                                              \
         xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, source),  \
         p);                                                                    \
+  }                                                                            \
+  kernel void resolve_direct_color_packed_fwd_##SUFFIX(                        \
+      TEX_T source_texture [[texture(0)]],                                     \
+      device uchar* destination [[buffer(1)]],                                 \
+      constant CanonicalResolveParams& p [[buffer(2)]],                        \
+      constant uint& rt_format [[buffer(3)]],                                  \
+      constant XeResolveForward& f [[buffer(5)]],                              \
+      texture2d<uint, access::write> forward [[texture(2)]],                  \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    if (gid.x >= p.width || gid.y >= p.height) return;                         \
+    uint2 source =                                                             \
+        xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));  \
+    uint2 texel = uint2(p.dest_offset_x + gid.x, p.dest_offset_y + gid.y);     \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,       \
+                                 p.dest_bpp_log2);                             \
+    if (p.dest_extent_bytes != 0u &&                                           \
+        off + (1u << p.dest_bpp_log2) > p.dest_extent_bytes) {                 \
+      return;                                                                  \
+    }                                                                          \
+    uint2 words =                                                              \
+        p.raw_copy != 0u                                                       \
+            ? xe_resolve_guest_raw_words(                                      \
+                  xe_resolve_raw_swap(                                         \
+                      uint4(xe_direct_word_##SUFFIX(source_texture, p,         \
+                                                    rt_format, source,         \
+                                                    min(p.sample_select, 3u)), \
+                            0u, 0u, 0u),                                       \
+                      p),                                                      \
+                  p)                                                           \
+            : xe_resolve_guest_words(                                          \
+                  xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, \
+                                                 source),                      \
+                  p);                                                          \
+    xe_resolve_store_words(destination, p.dest_base + off, words, p);          \
+    xe_resolve_forward_store(forward, f, texel, words);                        \
   }
 XE_DIRECT_COLOR_KERNELS(1x, texture2d<float XE_COMMA access::read>)
 XE_DIRECT_COLOR_KERNELS(ms, texture2d_ms<float XE_COMMA access::read>)

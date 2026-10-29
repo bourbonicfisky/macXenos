@@ -557,6 +557,10 @@ void MetalRenderTargetCache::Shutdown() {
   attachment_clear_pipelines_.clear();
   release_compute_pipeline(canonical_depth_raw_resolve_pipeline_);
   release_compute_pipeline(canonical_color_packed_resolve_pipeline_);
+  release_compute_pipeline(canonical_depth_raw_fwd_pipeline_);
+  release_compute_pipeline(canonical_color_packed_fwd_pipeline_);
+  release_compute_pipeline(direct_color_packed_fwd_pipelines_[0]);
+  release_compute_pipeline(direct_color_packed_fwd_pipelines_[1]);
   release_compute_pipeline(canonical_resolve_clear_pipeline_);
   if (canonical_color_msaa_pack_pipeline_) {
     id<MTLComputePipelineState> released =
@@ -5205,12 +5209,47 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   return true;
 }
 
+bool MetalRenderTargetCache::EnsureResolveForwardPipeline(void*& slot,
+                                                          const char* name) {
+  if (slot) {
+    return true;
+  }
+  id<MTLLibrary> library =
+      (__bridge id<MTLLibrary>)canonical_materialize_library_;
+  id<MTLFunction> function =
+      [library newFunctionWithName:[NSString stringWithUTF8String:name]];
+  NSError* error = nil;
+  id<MTLComputePipelineState> pipeline =
+      function ? [(__bridge id<MTLDevice>)device_
+                     newComputePipelineStateWithFunction:function
+                                                   error:&error]
+               : nil;
+  if (!pipeline) {
+    XELOGE("MetalRenderTargetCache: resolve forward pipeline {} failed: {}",
+           name, error ? error.localizedDescription.UTF8String : "?");
+    return false;
+  }
+  slot = (__bridge_retained void*)pipeline;
+  return true;
+}
+
+void MetalRenderTargetCache::BindResolveForward(void* encoder,
+                                                ResolveForward& forward) {
+  id<MTLComputeCommandEncoder> compute =
+      (__bridge id<MTLComputeCommandEncoder>)encoder;
+  const uint32_t params[5] = {forward.kind, forward.endian, forward.width,
+                              forward.height, forward.origin_y};
+  [compute setTexture:(__bridge id<MTLTexture>)forward.texture atIndex:2];
+  [compute setBytes:params length:sizeof(params) atIndex:5];
+  forward.encoded = true;
+}
+
 bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
     uint32_t msaa_samples, uint32_t format, uint32_t source_x,
     uint32_t source_y, uint32_t sample_select, void* destination_buffer,
     uint32_t width, uint32_t height, uint32_t dest_endian,
-    const CanonicalScatterDest* scatter) {
+    const CanonicalScatterDest* scatter, ResolveForward* forward) {
   if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
       !destination_buffer || !width || !height ||
       !EnsureCanonicalMaterializePipeline()) {
@@ -5285,6 +5324,13 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
   id<MTLComputePipelineState> pipeline =
       (__bridge id<MTLComputePipelineState>)
           canonical_depth_raw_resolve_pipeline_;
+  if (scatter && forward &&
+      EnsureResolveForwardPipeline(canonical_depth_raw_fwd_pipeline_,
+                                   "resolve_canonical_depth_raw_fwd")) {
+    pipeline =
+        (__bridge id<MTLComputePipelineState>)canonical_depth_raw_fwd_pipeline_;
+    BindResolveForward((__bridge void*)encoder, *forward);
+  }
   [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
               offset:0
@@ -5307,7 +5353,8 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     bool dest_swap, float exp_bias_scale, uint32_t dest_format,
     uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
     void* destination_buffer, uint32_t width, uint32_t height,
-    const CanonicalScatterDest* scatter, uint32_t dest_number) {
+    const CanonicalScatterDest* scatter, uint32_t dest_number,
+    ResolveForward* forward) {
   xenos::ColorRenderTargetFormat storage_format =
       xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
   if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
@@ -5392,6 +5439,19 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
       (__bridge id<MTLComputePipelineState>)(
           direct ? direct_color_packed_pipelines_[direct_color_ms_ ? 1 : 0]
                  : canonical_color_packed_resolve_pipeline_);
+  if (scatter && forward && (dest_bpp_log2 == 2u || dest_bpp_log2 == 3u)) {
+    void*& fwd_slot =
+        direct ? direct_color_packed_fwd_pipelines_[direct_color_ms_ ? 1 : 0]
+               : canonical_color_packed_fwd_pipeline_;
+    if (EnsureResolveForwardPipeline(
+            fwd_slot,
+            direct ? (direct_color_ms_ ? "resolve_direct_color_packed_fwd_ms"
+                                       : "resolve_direct_color_packed_fwd_1x")
+                   : "resolve_canonical_color_packed_fwd")) {
+      pipeline = (__bridge id<MTLComputePipelineState>)fwd_slot;
+      BindResolveForward((__bridge void*)encoder, *forward);
+    }
+  }
   [encoder setComputePipelineState:pipeline];
   if (direct) {
     [encoder setTexture:(__bridge id<MTLTexture>)direct_color_texture_

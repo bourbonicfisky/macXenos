@@ -290,12 +290,26 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     return source;
   }
   void ResumeDirectColorResolve(void* source) { direct_color_source_ = source; }
+  // Resolve forwarding: a texture of the shared texture cache that a scatter
+  // resolve also writes (xe_resolve_forward_store), with the load's
+  // conversion (kind 1 RGBA8Unorm, 2 RGBA16Float, 3 R32Float) and the
+  // texture's fetch endianness. `encoded` is set when the dispatch wrote it.
+  struct ResolveForward {
+    void* texture = nullptr;  // id<MTLTexture>
+    uint32_t kind = 0;
+    uint32_t endian = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t origin_y = 0;  // texture row of the destination's row 0
+    bool encoded = false;
+  };
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
       uint32_t source_y, uint32_t sample_select, void* destination_buffer,
       uint32_t width, uint32_t height, uint32_t dest_endian = 0,
-      const CanonicalScatterDest* scatter = nullptr);
+      const CanonicalScatterDest* scatter = nullptr,
+      ResolveForward* forward = nullptr);
   // Stage B (implement-metal-gpu-visible-resolve-authority): when supplied,
   // the packed resolve dispatch writes GUEST-TILED into `destination_buffer`
   // (which must then be the shared-memory buffer, whose offset is the guest
@@ -324,7 +338,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       const CanonicalScatterDest* scatter = nullptr,
       // RB_COPY_DEST_INFO copy_dest_number: fixed-point destinations pack
       // as unsigned/signed fraction or integer accordingly.
-      uint32_t dest_number = 0);
+      uint32_t dest_number = 0, ResolveForward* forward = nullptr);
   bool PerformCanonicalResolveClear(
       const void* command_buffer, uint32_t span_base,
       uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
@@ -1010,12 +1024,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* direct_color_cs_pipelines_[2] = {};
   void* direct_color_packed_pipelines_[2] = {};
   void* canonical_color_packed_resolve_pipeline_ = nullptr;
+  // Resolve forwarding variants of the scatter kernels.
+  void* direct_color_packed_fwd_pipelines_[2] = {};
+  void* canonical_color_packed_fwd_pipeline_ = nullptr;
+  void* canonical_depth_raw_fwd_pipeline_ = nullptr;
   void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_msaa_pack_pipeline_ = nullptr;
   void* canonical_color_raw_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_raw_msaa_pack_pipeline_ = nullptr;
   bool EnsureCanonicalMaterializePipeline();
+  // Resolve forwarding: the *_fwd kernel `name` into `slot`, and its texture
+  // and parameter bindings on a compute encoder.
+  bool EnsureResolveForwardPipeline(void*& slot, const char* name);
+  void BindResolveForward(void* encoder, ResolveForward& forward);
   void* EnsureCanonicalColorMsaaMaterializePipeline(
       MetalRenderTarget* render_target);
   // Full-view single-sample conversion primitives. Task 3.5 supplies dirty
