@@ -1978,6 +1978,26 @@ void PhysicalHeap::Initialize(Memory* memory, uint8_t* membase,
   system_page_flags_.resize((system_page_count_ + 63) / 64);
 }
 
+namespace {
+// A physical range can be uploaded to the GPU and write-watched through one
+// view (0xA0000000 / 0xC0000000 / 0xE0000000) while another view of the same
+// memory has no watch: a page unallocated or read-only in a view when the
+// watch was armed is skipped there (EnableAccessCallbacks). Allocating it in
+// that view, or making it writable there, must then invalidate the range even
+// though this view watches nothing, or the guest's writes through it are never
+// seen. F.E.A.R. frees and reallocates a 4 KB-page (0xE0000000) block between
+// frames while the GPU still reads it; its next texture landed in the block
+// unnoticed and the GPU kept sampling the old one (the gun rendered red).
+// XE_INVALIDATE_UNWATCHED=0 invalidates watched pages only, as before.
+bool InvalidateUnwatchedEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_INVALIDATE_UNWATCHED");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
+}  // namespace
+
 bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
                          uint32_t allocation_type, uint32_t protect,
                          bool top_down, uint32_t* out_address) {
@@ -2029,7 +2049,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   // Fresh allocation: whatever a read watch still owed these pages is
   // irrelevant now (kDiscard); unwatched pages are untouched.
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
@@ -2078,7 +2098,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
     return false;
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   return true;
 }
@@ -2132,7 +2152,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     return false;
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
@@ -2192,9 +2212,12 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   auto global_lock = global_critical_region_.Acquire();
 
   // Only invalidate if making writable again, for simplicity - not when simply
-  // marking some range as immutable, for instance.
+  // marking some range as immutable, for instance. Read-only pages carry no
+  // write watch in this view (EnableAccessCallbacks skips them), so the range
+  // is invalidated even unwatched (see InvalidateUnwatchedEnabled).
   if (protect & kMemoryProtectWrite) {
-    TriggerCallbacks(std::move(global_lock), address, size, true, true, false);
+    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+                     InvalidateUnwatchedEnabled());
   }
 
   if (!parent_heap_->Protect(GetPhysicalAddress(address), size, protect,
