@@ -868,7 +868,7 @@ bool MetalSharedMemory::UploadRanges(
         return v ? strtoull(v, nullptr, 16) : 0ull;
       }();
       if (s_upload_watch &&
-          upload_start < s_upload_watch + 0x40000 &&
+          upload_start < s_upload_watch + SharedMemory::UploadWatchLength() &&
           upload_start + upload_length > s_upload_watch) {
         uint32_t wpage = uint32_t(s_upload_watch) >> page_size_log2();
         XELOGW(

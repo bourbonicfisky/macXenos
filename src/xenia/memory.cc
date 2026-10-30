@@ -849,6 +849,14 @@ global_unique_lock_type Memory::LockPhysicalMemoryInvalidationCallbacks() {
   return global_critical_region_.Acquire();
 }
 
+std::string Memory::DescribePhysicalWatch(uint32_t physical_address) {
+  auto global_lock = global_critical_region_.Acquire();
+  return fmt::format("A0[{}] C0[{}] E0[{}]",
+                     heaps_.vA0000000.DescribeAccessState(physical_address),
+                     heaps_.vC0000000.DescribeAccessState(physical_address),
+                     heaps_.vE0000000.DescribeAccessState(physical_address));
+}
+
 void Memory::EnablePhysicalMemoryAccessCallbacks(
     uint32_t physical_address, uint32_t length,
     bool enable_invalidation_notifications, bool enable_data_providers) {
@@ -2426,6 +2434,37 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
         protect_access);
   }
 }
+
+std::string PhysicalHeap::DescribeAccessState(uint32_t physical_address) const {
+  const uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
+  if (physical_address < physical_address_offset ||
+      physical_address - physical_address_offset >= heap_size_) {
+    return "-";
+  }
+  const uint32_t relative = physical_address - physical_address_offset;
+  const uint32_t system_page =
+      (relative + host_address_offset()) >> system_page_shift_;
+  if (system_page >= system_page_count_) {
+    return "-";
+  }
+  const SystemPageFlagsBlock& flags = system_page_flags_[system_page >> 6];
+  const uint64_t bit = uint64_t(1) << (system_page & 63);
+  void* host =
+      membase_ + heap_base_ + (size_t(system_page) << system_page_shift_);
+  size_t length = system_page_size_;
+  xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
+  const bool queried = xe::memory::QueryProtect(host, length, host_access);
+  const uint32_t guest_page = relative >> page_size_shift_;
+  const PageEntry& entry = page_table_[guest_page];
+  return fmt::format(
+      "inv={} read={} host={} guest_state={:X} guest_protect={:X} "
+      "system_access={}",
+      (flags.notify_on_invalidation & bit) ? 1 : 0,
+      (flags.notify_on_read & bit) ? 1 : 0,
+      queried ? int(host_access) : -1, uint32_t(entry.state),
+      uint32_t(entry.current_protect), int(SystemPageGuestAccess(system_page)));
+}
+
 xe::memory::PageAccess PhysicalHeap::SystemPageGuestAccess(
     uint32_t system_page_number) const {
   uint32_t offset = host_address_offset();

@@ -10,6 +10,10 @@
 #ifndef XENIA_GPU_SHARED_MEMORY_H_
 #define XENIA_GPU_SHARED_MEMORY_H_
 
+#include <cstdlib>
+#include <utility>
+#include <vector>
+
 #include "xenia/gpu/watch_admission.h"
 #include "xenia/memory.h"
 
@@ -154,6 +158,23 @@ class SharedMemory {
     }
     return true;
   }
+  // Clobber hunt window (XE_METAL_UPLOAD_WATCH=<hex base>): its length,
+  // XE_METAL_UPLOAD_WATCH_LEN=<hex>, default 256 KB.
+  static uint64_t UploadWatchLength() {
+    static const uint64_t length = [] {
+      const char* v = std::getenv("XE_METAL_UPLOAD_WATCH_LEN");
+      return v ? strtoull(v, nullptr, 16) : uint64_t(0x40000);
+    }();
+    return length;
+  }
+  // Diagnostic (XE_METAL_STALE_SCAN): the uploaded pages (valid, not
+  // GPU-written, not watch-only) whose bytes in `mirror` (the host GPU copy,
+  // offset = guest physical address) differ from guest RAM, coalesced into
+  // [start, end) ranges. Only meaningful with the GPU idle and no upload in
+  // flight. Returns the number of pages compared.
+  uint32_t FindStaleMirrorRanges(
+      const uint8_t* mirror,
+      std::vector<std::pair<uint32_t, uint32_t>>* ranges);
   // Every page of [start, end) is valid (uploaded or GPU-written).
   bool IsRangeValid(uint32_t start, uint32_t end) const {
     for (uint32_t page = start >> page_size_log2_,

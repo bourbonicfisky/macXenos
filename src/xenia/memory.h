@@ -314,6 +314,9 @@ class PhysicalHeap : public BaseHeap {
   // fault, the pages the range only partly covers, so the write lands over what
   // they are still waiting for.
   void ProvideReadWatchedEdgePages(uint32_t virtual_address, uint32_t length);
+  // Diagnostic: the watch flags, host protection and guest page state of the
+  // host page holding a physical address in this view.
+  std::string DescribeAccessState(uint32_t physical_address) const;
 
   // The most permissive guest access of any guest page inside a host page
   // (host pages are 16 KiB on arm64 macOS, guest pages 4 KiB in the E0 heap).
@@ -585,6 +588,8 @@ class Memory {
   [[nodiscard]] global_unique_lock_type
   LockPhysicalMemoryInvalidationCallbacks();
 
+  // Diagnostic: PhysicalHeap::DescribeAccessState in every physical view.
+  std::string DescribePhysicalWatch(uint32_t physical_address);
   // Enables physical memory access callbacks for the specified memory range,
   // snapped to system page boundaries.
   void EnablePhysicalMemoryAccessCallbacks(

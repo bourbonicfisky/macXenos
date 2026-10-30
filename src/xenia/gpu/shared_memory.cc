@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/shared_memory.h"
 
+#include <cstring>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/bit_range.h"
 #include "xenia/base/logging.h"
@@ -331,6 +333,40 @@ void SharedMemory::FireRangeWatchesOnly(uint32_t start, uint32_t length,
   FireWatches(page_first, page_last, invalidated_by_gpu,
               /*fire_global_watches=*/false, by_page ? 0 : start,
               by_page ? UINT32_MAX : start + length - 1);
+}
+
+uint32_t SharedMemory::FindStaleMirrorRanges(
+    const uint8_t* mirror, std::vector<std::pair<uint32_t, uint32_t>>* ranges) {
+  ranges->clear();
+  if (!mirror) {
+    return 0;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  const uint32_t page_size = uint32_t(1) << page_size_log2_;
+  const uint32_t page_count = kBufferSize >> page_size_log2_;
+  uint32_t compared = 0;
+  for (uint32_t page = 0; page < page_count; ++page) {
+    const uint32_t block = page >> 6;
+    const uint64_t bit = uint64_t(1) << (page & 63);
+    if (!(system_page_flags_valid_[block] & bit) ||
+        (system_page_flags_valid_and_gpu_written_[block] & bit) ||
+        (block < system_page_flags_watch_only_.size() &&
+         (system_page_flags_watch_only_[block] & bit))) {
+      continue;
+    }
+    ++compared;
+    const uint32_t address = page << page_size_log2_;
+    const uint8_t* ram = memory_.TranslatePhysical<const uint8_t*>(address);
+    if (!ram || !std::memcmp(ram, mirror + address, page_size)) {
+      continue;
+    }
+    if (!ranges->empty() && ranges->back().second == address) {
+      ranges->back().second = address + page_size;
+    } else {
+      ranges->emplace_back(address, address + page_size);
+    }
+  }
+  return compared;
 }
 
 void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
@@ -669,7 +705,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
     return v ? strtoull(v, nullptr, 16) : 0ull;
   }();
-  if (s_watch && physical_address_start < s_watch + 0x40000 &&
+  if (s_watch &&
+      physical_address_start < s_watch + SharedMemory::UploadWatchLength() &&
       uint64_t(physical_address_start) + length > s_watch) {
     XELOGW("SharedMemUploadWatch BASE-INVALIDATE {:08X}+{:X} exact={}",
            physical_address_start, length, exact_range);

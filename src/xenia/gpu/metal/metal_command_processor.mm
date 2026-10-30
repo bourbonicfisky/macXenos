@@ -769,7 +769,8 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
       const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
-    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+    if (s_watch && base < s_watch + SharedMemory::UploadWatchLength() &&
+        base + length > s_watch) {
       XELOGW("MetalUploadWatch INVALIDATE {:08X}+{:X} exact={}", base, length,
              exact_range);
     }
@@ -829,7 +830,8 @@ class MetalMemexportPublicationTarget
       const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
-    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+    if (s_watch && base < s_watch + SharedMemory::UploadWatchLength() &&
+        base + length > s_watch) {
       XELOGW("MetalUploadWatch MARK-GPU-WRITTEN {:08X}+{:X}", base, length);
     }
     shared_memory_->RangeWrittenByGpu(base, length);
@@ -18916,6 +18918,48 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // Diagnostic (XE_METAL_STALE_SCAN=<swaps>): every N swaps, with the GPU
+  // idle, compare the shared buffer's uploaded pages against guest RAM and
+  // log the ranges that differ (a guest write the invalidation missed).
+  // XE_METAL_STALE_SCAN_FIX=1 also invalidates them, as a CPU write would.
+  {
+    static const uint32_t s_stale_scan = [] {
+      const char* v = std::getenv("XE_METAL_STALE_SCAN");
+      return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static const bool s_stale_fix =
+        std::getenv("XE_METAL_STALE_SCAN_FIX") != nullptr;
+    static uint32_t s_stale_swaps = 0;
+    if (s_stale_scan && shared_memory_ && !shared_memory_->is_zero_copy() &&
+        ++s_stale_swaps % s_stale_scan == 0) {
+      EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+      std::vector<std::pair<uint32_t, uint32_t>> ranges;
+      id<MTLBuffer> buffer =
+          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      const uint32_t compared = shared_memory_->FindStaleMirrorRanges(
+          static_cast<const uint8_t*>(buffer.contents), &ranges);
+      uint64_t stale_bytes = 0;
+      std::string list;
+      for (const auto& [start, end] : ranges) {
+        stale_bytes += end - start;
+        if (list.size() < 1200) {
+          list += fmt::format(" {:08X}+{:X}", start, end - start);
+        }
+      }
+      XELOGW("MetalStaleScan swap={} pages={} stale_ranges={} stale_KB={}{}",
+             s_stale_swaps, compared, ranges.size(), stale_bytes >> 10, list);
+      for (size_t i = 0; i < ranges.size() && i < 4; ++i) {
+        XELOGW("MetalStaleScan   {:08X}: {}", ranges[i].first,
+               memory_->DescribePhysicalWatch(ranges[i].first));
+      }
+      if (s_stale_fix) {
+        for (const auto& [start, end] : ranges) {
+          shared_memory_->MemoryInvalidationCallback(start, end - start, true,
+                                                     true);
+        }
+      }
+    }
+  }
   // XE_METAL_GPUTRACE=<path.gputrace> [XE_METAL_GPUTRACE_FRAME=N, default
   // 600]: a programmatic Xcode GPU capture of one frame at swap N, written
   // for the Xcode GPU debugger / shader profiler (the only reader of
