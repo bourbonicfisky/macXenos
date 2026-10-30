@@ -495,6 +495,7 @@ void MetalRenderTargetCache::Shutdown() {
     release_compute_pipeline(pipelines.pack);
     release_compute_pipeline(pipelines.pack_cov);
     release_compute_pipeline(pipelines.pack_range);
+    release_compute_pipeline(pipelines.pack_ms_range_px);
     release_render_pipeline(pipelines.mat_depth_range);
     release_render_pipeline(pipelines.mat_sten_range);
     release_compute_pipeline(pipelines.pack_ms_range);
@@ -2700,6 +2701,7 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   id<MTLRenderPipelineState> mat_depth_range = nil;
   id<MTLRenderPipelineState> mat_sten_range = nil;
   id<MTLComputePipelineState> pack_ms_range = nil;
+  id<MTLComputePipelineState> pack_ms_range_px = nil;
   id<MTLRenderPipelineState> mat_depth_ms_range = nil;
   id<MTLRenderPipelineState> mat_sten_ms_range = nil;
   if (!ms) {
@@ -2713,6 +2715,10 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
     pack_ms_range = [device
         newComputePipelineStateWithFunction:
             [lib newFunctionWithName:@"pack_depth_ms_range"]
+                                      error:&err];
+    pack_ms_range_px = [device
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"pack_depth_ms_range_px"]
                                       error:&err];
     rpd.fragmentFunction =
         [lib newFunctionWithName:@"materialize_depth_ms_range_fs"];
@@ -2746,7 +2752,8 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   if (!matd || !mats || !pack ||
       (!ms &&
        (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range)) ||
-      (ms && (!pack_ms_range || !mat_depth_ms_range || !mat_sten_ms_range))) {
+      (ms && (!pack_ms_range || !pack_ms_range_px || !mat_depth_ms_range ||
+              !mat_sten_ms_range))) {
     XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
            err ? err.localizedDescription.UTF8String : "?");
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
@@ -2781,6 +2788,8 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
       mat_sten_range ? (__bridge_retained void*)mat_sten_range : nullptr;
   p.pack_ms_range =
       pack_ms_range ? (__bridge_retained void*)pack_ms_range : nullptr;
+  p.pack_ms_range_px =
+      pack_ms_range_px ? (__bridge_retained void*)pack_ms_range_px : nullptr;
   p.mat_depth_ms_range = mat_depth_ms_range
                              ? (__bridge_retained void*)mat_depth_ms_range
                              : nullptr;
@@ -2816,6 +2825,15 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   }
   auto ins = shadow_pipelines_.emplace(sample_count, p);
   return &ins.first->second;
+}
+
+// 2x/4x packs to canonical EDRAM run one thread per pixel, packing all of its
+// samples (2026-10-29; GTA IV at 2x2 on the M4 mini 19.0 -> 21.3 fps).
+// Default on; XE_METAL_MSAA_PACK_PER_PIXEL=0 packs one thread per sample.
+static bool MsaaPackPerPixel() {
+  static const bool enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_MSAA_PACK_PER_PIXEL"), true);
+  return enabled;
 }
 
 // Depth materialize writes the stencil byte from the fragment shader
@@ -3236,8 +3254,11 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  const bool per_pixel = MsaaPackPerPixel();
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)pipelines->pack_ms_range;
+      (__bridge id<MTLComputePipelineState>)(per_pixel
+                                                 ? pipelines->pack_ms_range_px
+                                                 : pipelines->pack_ms_range);
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
   encoder.label = @"rtcache:canonical-depth-pack-msaa-range";
   [encoder setComputePipelineState:pipeline];
@@ -3275,7 +3296,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   }
   [encoder setBytes:&row_start length:sizeof(row_start) atIndex:5];
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
-                                       texture.sampleCount)
+                                       per_pixel ? 1 : texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   if ((HostLaneMode(/*materialize=*/false) & 1u) && depth_format == 2u) {
@@ -6952,14 +6973,17 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
           : (is_64bpp ? canonical_color64_msaa_pack_pipeline_
                       : canonical_color_msaa_pack_pipeline_);
   if (!pack_pipeline) {
+    NSString* pack_name = raw_view
+                              ? (is_64bpp ? @"pack_color64_raw_ms_range"
+                                          : @"pack_color_raw_ms_range")
+                              : (is_64bpp ? @"pack_color64_ms_range"
+                                          : @"pack_color_ms_range");
+    if (MsaaPackPerPixel()) {
+      pack_name = [pack_name stringByAppendingString:@"_px"];
+    }
     id<MTLComputePipelineState> pack = [device
-        newComputePipelineStateWithFunction:
-            [library newFunctionWithName:
-                         raw_view
-                             ? (is_64bpp ? @"pack_color64_raw_ms_range"
-                                         : @"pack_color_raw_ms_range")
-                             : (is_64bpp ? @"pack_color64_ms_range"
-                                         : @"pack_color_ms_range")]
+        newComputePipelineStateWithFunction:[library
+                                                newFunctionWithName:pack_name]
                                       error:&error];
     if (!pack) {
       XELOGE("MetalRenderTargetCache: canonical color MSAA pack pipeline "
@@ -7272,7 +7296,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       texture.height, draw_resolution_scale_y()));
   [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
-                                       texture.sampleCount)
+                                       MsaaPackPerPixel() ? 1
+                                                          : texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;

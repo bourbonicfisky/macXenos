@@ -752,6 +752,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* mat_depth_range = nullptr; // canonical authority: materialize depth, ranged
     void* mat_sten_range = nullptr;  // canonical authority: materialize stencil, ranged
     void* pack_ms_range = nullptr;   // real-MSAA canonical authority, ranged
+    void* pack_ms_range_px = nullptr;  // the same, one thread per pixel
     void* mat_depth_ms_range = nullptr;
     // Stage B: host-lane provenance refresh from a SELECTED source
     // (lane_store_range for 1x sources, lane_store_ms_range for 2x/4x).

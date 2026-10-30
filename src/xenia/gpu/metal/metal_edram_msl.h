@@ -93,6 +93,17 @@ inline uint xe_edram_offset_bytes(uint px, uint py, uint base, uint pitch,
   return address << 2;
 }
 
+// The word of guest sample `guest_sample` of the pixel whose sample 0 is at
+// word idx0. A pixel's samples are adjacent sample columns / rows of one tile
+// (tiles are an even number of samples wide and tall, and the depth half swap
+// keeps an aligned sample pair together); a tile row is
+// XE_EDRAM_TILE_WIDTH_SAMPLES words at either bpp. The per-pixel pack kernels
+// compute the range test and the address once per pixel with this.
+inline uint xe_pixel_sample_word(uint idx0, uint guest_sample, uint fmt_log2) {
+  return idx0 + (((guest_sample >> 1u) & 1u) << fmt_log2) +
+         (guest_sample & 1u) * XE_EDRAM_TILE_WIDTH_SAMPLES;
+}
+
 // Per-surface constants for pack/unpack (one surface per dispatch). `words` is
 // the canonical buffer size in 32-bit words, so a bounds guard can skip an
 // over-dispatch instead of reading/writing out of range.
@@ -727,6 +738,28 @@ kernel void pack_color_ms_range(
         tex.read(uint2(gid.x, gid.y), gid.z), format);
   }
 }
+// pack_color_ms_range with one thread per pixel (see xe_pixel_sample_word).
+kernel void pack_color_ms_range_px(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    constant uint& row_start [[buffer(7)]],
+    uint2 tid [[thread_position_in_grid]]) {
+  uint2 px = uint2(tid.x, tid.y + row_start);
+  if (px.x >= tex.get_width() || px.y >= tex.get_height() ||
+      !xe_authority_in_range(px.x, px.y, sp, 0u, range)) return;
+  uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch, sp.msaa,
+                                    0u, 0u, 0u) >> 2u;
+  for (uint ms = 0u; ms < tex.get_num_samples(); ++ms) {
+    uint idx = xe_pixel_sample_word(
+        idx0, xe_metal_sample_to_guest(sp.msaa, ms), 0u);
+    if (idx < sp.words) {
+      canonical[idx] = xe_pack_color32_working(tex.read(px, ms), format);
+    }
+  }
+}
 fragment float4 materialize_color64_ms_range_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
@@ -769,6 +802,30 @@ kernel void pack_color64_ms_range(
     canonical[idx + 1u] = words.y;
   }
 }
+// pack_color64_ms_range with one thread per pixel (see xe_pixel_sample_word).
+kernel void pack_color64_ms_range_px(
+    texture2d_ms<float, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    constant uint& row_start [[buffer(7)]],
+    uint2 tid [[thread_position_in_grid]]) {
+  uint2 px = uint2(tid.x, tid.y + row_start);
+  if (px.x >= tex.get_width() || px.y >= tex.get_height() ||
+      !xe_authority_in_range(px.x, px.y, sp, 0u, range)) return;
+  uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch, sp.msaa,
+                                    0u, 1u, 0u) >> 2u;
+  for (uint ms = 0u; ms < tex.get_num_samples(); ++ms) {
+    uint idx = xe_pixel_sample_word(
+        idx0, xe_metal_sample_to_guest(sp.msaa, ms), 1u);
+    if (idx + 1u < sp.words) {
+      uint2 words = xe_pack_color64(tex.read(px, ms), format);
+      canonical[idx] = words.x;
+      canonical[idx + 1u] = words.y;
+    }
+  }
+}
 fragment uint4 materialize_color_raw_ms_range_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
@@ -805,6 +862,28 @@ kernel void pack_color_raw_ms_range(
   if (idx < sp.words) {
     canonical[idx] = xe_pack_color32_raw(
         tex.read(uint2(gid.x, gid.y), gid.z), format);
+  }
+}
+// pack_color_raw_ms_range with one thread per pixel (see xe_pixel_sample_word).
+kernel void pack_color_raw_ms_range_px(
+    texture2d_ms<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    constant uint& row_start [[buffer(7)]],
+    uint2 tid [[thread_position_in_grid]]) {
+  uint2 px = uint2(tid.x, tid.y + row_start);
+  if (px.x >= tex.get_width() || px.y >= tex.get_height() ||
+      !xe_authority_in_range(px.x, px.y, sp, 0u, range)) return;
+  uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch, sp.msaa,
+                                    0u, 0u, 0u) >> 2u;
+  for (uint ms = 0u; ms < tex.get_num_samples(); ++ms) {
+    uint idx = xe_pixel_sample_word(
+        idx0, xe_metal_sample_to_guest(sp.msaa, ms), 0u);
+    if (idx < sp.words) {
+      canonical[idx] = xe_pack_color32_raw(tex.read(px, ms), format);
+    }
   }
 }
 fragment uint4 materialize_color64_raw_ms_range_fs(
@@ -847,6 +926,30 @@ kernel void pack_color64_raw_ms_range(
         tex.read(uint2(gid.x, gid.y), gid.z), format);
     canonical[idx] = words.x;
     canonical[idx + 1u] = words.y;
+  }
+}
+// pack_color64_raw_ms_range with one thread per pixel (see xe_pixel_sample_word).
+kernel void pack_color64_raw_ms_range_px(
+    texture2d_ms<uint, access::read> tex [[texture(0)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant uint& format [[buffer(2)]],
+    constant AuthorityRangeParams& range [[buffer(3)]],
+    constant uint& row_start [[buffer(7)]],
+    uint2 tid [[thread_position_in_grid]]) {
+  uint2 px = uint2(tid.x, tid.y + row_start);
+  if (px.x >= tex.get_width() || px.y >= tex.get_height() ||
+      !xe_authority_in_range(px.x, px.y, sp, 0u, range)) return;
+  uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch, sp.msaa,
+                                    0u, 1u, 0u) >> 2u;
+  for (uint ms = 0u; ms < tex.get_num_samples(); ++ms) {
+    uint idx = xe_pixel_sample_word(
+        idx0, xe_metal_sample_to_guest(sp.msaa, ms), 1u);
+    if (idx + 1u < sp.words) {
+      uint2 words = xe_pack_color64_raw(tex.read(px, ms), format);
+      canonical[idx] = words.x;
+      canonical[idx + 1u] = words.y;
+    }
   }
 }
 
@@ -1154,6 +1257,35 @@ kernel void pack_depth_ms_range(
   // Stage B: preserve the host-precision depth beside the packed word. Only
   // float24 (is_depth==2) carries extra precision worth a lane slot.
   if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
+}
+// pack_depth_ms_range with one thread per pixel packing all of its samples
+// (see xe_pixel_sample_word).
+kernel void pack_depth_ms_range_px(
+    depth2d_ms<float, access::read> tex [[texture(0)]],
+    texture2d_ms<uint, access::read> sten [[texture(1)]],
+    device uint* canonical [[buffer(0)]],
+    constant SurfaceParams& sp [[buffer(1)]],
+    constant AuthorityRangeParams& range [[buffer(2)]],
+    constant HostLaneParams& hl [[buffer(3)]],
+    device float* lane [[buffer(4)]],
+    constant uint& row_start [[buffer(5)]],
+    uint2 tid [[thread_position_in_grid]]) {
+  uint2 px = uint2(tid.x, tid.y + row_start);
+  if (px.x >= tex.get_width() || px.y >= tex.get_height() ||
+      !xe_authority_in_range(px.x, px.y, sp, 0u, range)) return;
+  uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch, sp.msaa,
+                                    sp.is_depth, 0u, 0u) >> 2;
+  uint samples = tex.get_num_samples();
+  for (uint ms = 0u; ms < samples; ++ms) {
+    uint idx = xe_pixel_sample_word(
+        idx0, xe_metal_sample_to_guest(sp.msaa, ms), 0u);
+    if (idx >= sp.words) continue;
+    float d = tex.read(px, ms);
+    uint s = sten.read(px, ms).r & 0xFFu;
+    canonical[idx] =
+        xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);
+    if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;
+  }
 }
 // Stage B provenance refresh: write the SELECTED host source's depth into
 // the lane over the exact two-source intersection, without touching the

@@ -1098,6 +1098,14 @@ struct MetalCompute {
     uint32_t* in_words = static_cast<uint32_t*>(canonical_in.contents);
     uint32_t* out_words = static_cast<uint32_t*>(canonical_out.contents);
     std::fill_n(out_words, canonical_bytes / sizeof(uint32_t), sentinel);
+    // MSAA: the per-pixel pack (the live default) packs the same texture into
+    // a second buffer, which must match the per-sample pack word for word.
+    id<MTLBuffer> canonical_out_px =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    REQUIRE(canonical_out_px != nil);
+    std::fill_n(static_cast<uint32_t*>(canonical_out_px.contents),
+                canonical_bytes / sizeof(uint32_t), sentinel);
     auto word_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
       return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa,
                                         false, sp.format_ints_log2, s) >> 2;
@@ -1238,16 +1246,21 @@ struct MetalCompute {
       id<MTLRenderPipelineState> materialize =
           [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
       REQUIRE(materialize != nil);
+      NSString* pack_name = raw_view
+                                ? (wide ? @"pack_color64_raw_ms_range"
+                                        : @"pack_color_raw_ms_range")
+                                : (wide ? @"pack_color64_ms_range"
+                                        : @"pack_color_ms_range");
       id<MTLComputePipelineState> pack = [dev
-          newComputePipelineStateWithFunction:
-              [lib newFunctionWithName:
-                       raw_view
-                           ? (wide ? @"pack_color64_raw_ms_range"
-                                   : @"pack_color_raw_ms_range")
-                           : (wide ? @"pack_color64_ms_range"
-                                   : @"pack_color_ms_range")]
+          newComputePipelineStateWithFunction:[lib newFunctionWithName:pack_name]
                                         error:&err];
       REQUIRE(pack != nil);
+      id<MTLComputePipelineState> pack_px = [dev
+          newComputePipelineStateWithFunction:
+              [lib newFunctionWithName:[pack_name
+                                           stringByAppendingString:@"_px"]]
+                                        error:&err];
+      REQUIRE(pack_px != nil);
       {
         MTLRenderPassDescriptor* rp =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1284,6 +1297,13 @@ struct MetalCompute {
         [encoder setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
         [encoder dispatchThreads:MTLSizeMake(w, h, num_samples)
             threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
+        [encoder setComputePipelineState:pack_px];
+        [encoder setBuffer:canonical_out_px offset:0 atIndex:0];
+        [encoder dispatchThreads:MTLSizeMake(w, h, 1u)
+            threadsPerThreadgroup:MTLSizeMake(pack_px.threadExecutionWidth,
+                                              pack_px.maxTotalThreadsPerThreadgroup /
+                                                  pack_px.threadExecutionWidth,
+                                              1u)];
         [encoder endEncoding];
       }
     }
@@ -1303,6 +1323,10 @@ struct MetalCompute {
           }
         }
       }
+    }
+    if (num_samples > 1u) {
+      REQUIRE(std::memcmp(canonical_out.contents, canonical_out_px.contents,
+                          canonical_bytes) == 0);
     }
     return result;
   }
@@ -1447,11 +1471,21 @@ struct MetalCompute {
   // re-packed complete words in the same order. Identity <=> every sample's
   // depth AND stencil survive independently (the 4x sample dimension the
   // collapsed host loses).
+  // With `range_kernel` set, canonical is filled with kPackSentinel after the
+  // materialize and that live range kernel (pack_depth_ms_range or
+  // pack_depth_ms_range_px) packs tiles [start_tiles, end_tiles) back with the
+  // host lane on; `lane_out` receives the lane words at the same offsets.
+  static constexpr uint32_t kPackSentinel = 0xEFEFEFEFu;  // byte fill
   std::vector<uint32_t> RoundTripDepthMsaa(uint32_t w, uint32_t h,
                                            uint32_t num_samples,
                                            const SurfaceParams& sp,
                                            const std::vector<uint32_t>& words,
-                                           size_t canonical_bytes) {
+                                           size_t canonical_bytes,
+                                           const char* range_kernel = nullptr,
+                                           uint32_t start_tiles = 0,
+                                           uint32_t end_tiles = 0,
+                                           std::vector<uint32_t>* lane_out =
+                                               nullptr) {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
@@ -1518,10 +1552,19 @@ struct MetalCompute {
       bds.backFaceStencil = bs;
       bit_states[b] = [dev newDepthStencilStateWithDescriptor:bds];
     }
+    const bool per_pixel =
+        range_kernel && std::strcmp(range_kernel, "pack_depth_ms_range_px") == 0;
     id<MTLComputePipelineState> pk = [dev
-        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth_ms"]
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:[NSString stringWithUTF8String:
+                                                   range_kernel ? range_kernel
+                                                                : "pack_depth_ms"]]
                                       error:&err];
     REQUIRE(pk != nil);
+    id<MTLBuffer> lane =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(lane.contents, 0, canonical_bytes);
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     {
       MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1552,6 +1595,12 @@ struct MetalCompute {
       }
       [enc endEncoding];
     }
+    if (range_kernel) {
+      id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+      [blit fillBuffer:canonical range:NSMakeRange(0, canonical_bytes)
+                 value:uint8_t(kPackSentinel & 0xFFu)];
+      [blit endEncoding];
+    }
     {
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
       [enc setComputePipelineState:pk];
@@ -1559,9 +1608,17 @@ struct MetalCompute {
       [enc setTexture:sten_view atIndex:1];
       [enc setBuffer:canonical offset:0 atIndex:0];
       [enc setBuffer:sp_buf offset:0 atIndex:1];
+      if (range_kernel) {
+        const uint32_t range[2] = {start_tiles, end_tiles};
+        const uint32_t hl_mode = 1u, row_start = 0u;
+        [enc setBytes:range length:sizeof(range) atIndex:2];
+        [enc setBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+        [enc setBuffer:lane offset:0 atIndex:4];
+        [enc setBytes:&row_start length:sizeof(row_start) atIndex:5];
+      }
       NSUInteger tw = pk.threadExecutionWidth;
       NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
-      [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
+      [enc dispatchThreads:MTLSizeMake(w, h, per_pixel ? 1 : num_samples)
           threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
       [enc endEncoding];
     }
@@ -1569,10 +1626,19 @@ struct MetalCompute {
     [cb waitUntilCompleted];
     REQUIRE(cb.error == nil);
     std::vector<uint32_t> out(size_t(w) * h * num_samples);
+    const uint32_t* lwords = static_cast<const uint32_t*>(lane.contents);
+    if (lane_out) {
+      lane_out->assign(out.size(), 0u);
+    }
     for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
-        for (uint32_t s = 0; s < num_samples; ++s)
-          out[(y * w + x) * num_samples + s] = cwords[doff(x, y, s)];
+        for (uint32_t s = 0; s < num_samples; ++s) {
+          const size_t i = (size_t(y) * w + x) * num_samples + s;
+          out[i] = cwords[doff(x, y, s)];
+          if (lane_out) {
+            (*lane_out)[i] = lwords[doff(x, y, s)];
+          }
+        }
     return out;
   }
 
@@ -4142,6 +4208,60 @@ TEST_CASE("Canonical 2x/4x per-sample depth+stencil round-trips every sample",
   REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*2x=*/1u) == 0u);
   REQUIRE(MsaaDepthBad(mc, /*float24=*/2u, /*4x=*/2u) == 0u);
   REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*4x=*/2u) == 0u);
+}
+
+TEST_CASE("Per-pixel MSAA depth pack equals the per-sample pack",
+          "[l1][metal][pack][depth][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Multi-tile surface at a nonzero base, packed back over a range that
+  // starts and ends mid-surface: both kernels must write the same words and
+  // lane values, only inside the range.
+  for (uint32_t msaa = 1u; msaa <= 2u; ++msaa) {
+    for (uint32_t fmt = 1u; fmt <= 2u; ++fmt) {
+      const uint32_t w = msaa == 2u ? 120u : 240u;
+      const uint32_t h = 24u;
+      const uint32_t ns = 1u << msaa;
+      const uint32_t pitch = PitchFor(w, msaa, 0u);
+      const uint32_t base = 37u;
+      SurfaceParams sp{base, pitch, msaa, fmt, 0u,
+                       uint32_t(xenos::kEdramSizeBytes / 4u)};
+      std::vector<uint32_t> words(size_t(w) * h * ns);
+      for (uint32_t i = 0; i < words.size(); ++i) {
+        uint32_t d = (i * 2654435761u) & 0xFFFFFFu;
+        uint32_t s = (i * 37u + 1u) & 0xFFu;
+        words[i] = (d << 8) | s;
+      }
+      const uint32_t start = base + 2u, end = base + 2u * pitch + 1u;
+      std::vector<uint32_t> lane_sample, lane_pixel;
+      auto by_sample =
+          mc.RoundTripDepthMsaa(w, h, ns, sp, words, xenos::kEdramSizeBytes,
+                                "pack_depth_ms_range", start, end, &lane_sample);
+      auto by_pixel = mc.RoundTripDepthMsaa(
+          w, h, ns, sp, words, xenos::kEdramSizeBytes, "pack_depth_ms_range_px",
+          start, end, &lane_pixel);
+      uint32_t in_range = 0, bad = 0;
+      for (size_t i = 0; i < words.size(); ++i) {
+        if (by_pixel[i] != by_sample[i] || lane_pixel[i] != lane_sample[i]) {
+          if (bad < 8) {
+            WARN("msaa " << msaa << " fmt " << fmt << " idx " << i
+                         << " sample " << by_sample[i] << " pixel "
+                         << by_pixel[i]);
+          }
+          ++bad;
+        }
+        if (by_sample[i] != MetalCompute::kPackSentinel) {
+          ++in_range;
+          REQUIRE(by_sample[i] == words[i]);
+        }
+      }
+      INFO("msaa " << msaa << " fmt " << fmt);
+      REQUIRE(bad == 0u);
+      // The range is a strict, non-empty part of the surface.
+      REQUIRE(in_range > 0u);
+      REQUIRE(in_range < words.size());
+    }
+  }
 }
 
 TEST_CASE("Cross-MSAA 4x->1x->4x preserves samples and propagates a 1x write",
