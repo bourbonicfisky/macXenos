@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: Halo 4 (4D530919).
+# Cortana's face is skinned the way Halo: Reach skins its characters: vertex
+# shaders that export to memory while rasterizing fill a ~560 KiB scratch
+# range that later draws vertex-fetch. With those exports dropped (the Metal
+# default, for their cost elsewhere) the face mesh collapses, and the "Dawn"
+# cryo-bay cutscene showed only her hair and eyes. Routed, with the in-encoder
+# buffer barrier that orders the producers against their same-pass readers,
+# her face renders (M4 Pro, 2026-10-30).
+[GPU]
+metal_memexport_raster = true
