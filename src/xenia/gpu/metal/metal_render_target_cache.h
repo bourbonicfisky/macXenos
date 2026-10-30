@@ -386,6 +386,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                uint64_t pixel_format);
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
+  // A resolve that FindContainingSnapshot did not place, whose destination
+  // starts exactly where a snapshot of the same width and format ends, is the
+  // next vertical strip of one buffer (Ridge Racer Unbounded renders 1152x720
+  // as 1152x384 + 1152x336 predicated tiles, the second at base + 384 rows).
+  // Remembers the combined height so the parent's next resolve allocates it
+  // and later strips land inside; EnsureResolveSnapshot only assumes the full
+  // 720 rows for 1280-wide scenes.
+  void NoteSnapshotStripContinuation(uint32_t dest_base, uint32_t width,
+                                     uint32_t height, uint64_t pixel_format);
 
   // Frees textures retired mid-frame (a snapshot that had to grow). They cannot
   // be released at retire time because draws already encoded into the open frame
@@ -1126,6 +1135,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // same guest base coexist (JC2 resolves both to one base). Assembly
   // snapshots (draw resolution scaling) also carry kAssemblySnapshotKeyFlag.
   std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
+  // NoteSnapshotStripContinuation: snapshot key -> {width, full height}.
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>>
+      snapshot_strip_heights_;
   static constexpr uint64_t kAssemblySnapshotKeyFlag = uint64_t(1) << 40;
   // The snapshot texture at `snap_key`, created or replaced (exact-size reuse,
   // in-flight-safe retirement) at the draw resolution scale.

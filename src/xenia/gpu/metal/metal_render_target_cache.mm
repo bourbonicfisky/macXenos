@@ -6250,10 +6250,57 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   if (width >= 1280 && height < 720) {
     height = 720;
   }
-  return EnsureSnapshotTexture(
+  const uint64_t key =
       (uint64_t(dest_base) << 1) |
-          (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0),
-      width, height, pixel_format);
+      (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0);
+  // Other widths: the height later strips were seen to continue to.
+  auto strips = snapshot_strip_heights_.find(key);
+  if (strips != snapshot_strip_heights_.end() &&
+      strips->second.first == width && strips->second.second > height) {
+    height = strips->second.second;
+  }
+  return EnsureSnapshotTexture(key, width, height, pixel_format);
+}
+
+void MetalRenderTargetCache::NoteSnapshotStripContinuation(
+    uint32_t dest_base, uint32_t width, uint32_t height,
+    uint64_t pixel_format) {
+  // Default on; XE_METAL_SNAPSHOT_STRIPS=0 keeps every strip its own snapshot.
+  static const bool s_enabled =
+      ParseMetalEnvironmentFlag(std::getenv("XE_METAL_SNAPSHOT_STRIPS"), true);
+  if (!s_enabled) {
+    return;
+  }
+  const uint64_t format_bit =
+      pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0;
+  for (const auto& pair : resolve_snapshots_) {
+    const Snapshot& snap = pair.second;
+    if ((pair.first & kAssemblySnapshotKeyFlag) ||
+        (pair.first & 1) != format_bit || !snap.texture ||
+        snap.pixel_format != pixel_format || snap.width != width) {
+      continue;
+    }
+    // The same 4-byte row layout FindContainingSnapshot assumes.
+    const uint32_t snap_base = uint32_t(pair.first >> 1);
+    if (uint64_t(snap_base) + uint64_t(snap.width) * 4 * snap.height !=
+        dest_base) {
+      continue;
+    }
+    const uint32_t full_height = snap.height + height;
+    if (full_height > 2048) {
+      return;
+    }
+    auto& strips = snapshot_strip_heights_[pair.first];
+    if (strips.first != width || strips.second < full_height) {
+      strips = {width, full_height};
+      XELOGI(
+          "MetalResolve: strip {:08X} {}x{} continues the {}x{} snapshot at "
+          "{:08X}; its next resolve allocates {} rows",
+          dest_base, width, height, snap.width, snap.height, snap_base,
+          full_height);
+    }
+    return;
+  }
 }
 
 void* MetalRenderTargetCache::EnsureAssemblySnapshot(uint32_t base,

@@ -15064,6 +15064,10 @@ bool MetalCommandProcessor::IssueCopy() {
           strip_y_offset = 0;
         }
       }
+      if (!parent_snap) {
+        render_target_cache_->NoteSnapshotStripContinuation(
+            resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
+      }
       void* snap = parent_snap;
       bool is_new_snapshot = false;
       uint32_t strip_x_offset = 0;
