@@ -6274,8 +6274,17 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
   if (!s_enabled) {
     return false;
   }
+  // Draw resolution scaling: the direct kernels read the representative host
+  // pixel of each guest pixel (xe_resolve_host_pixel, and every host pixel of
+  // it for snapshots) exactly as the canonical ones do, so only the bounds
+  // below change. XE_METAL_DIRECT_COLOR_RESOLVE_SCALED=0 keeps scaled resolves
+  // on the pack-first path.
+  static const bool s_scaled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_DIRECT_COLOR_RESOLVE_SCALED"), true);
+  const bool scaled =
+      draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1;
   if (!sample_edram_raster_enabled_ || !canonical_edram_ || is_64bpp ||
-      draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1 ||
+      (scaled && !s_scaled) ||
       !span_row_length || !span_rows || !width || !height ||
       (snapshot && !(((__bridge id<MTLTexture>)snapshot).usage &
                      MTLTextureUsageShaderWrite)) ||
@@ -6382,8 +6391,11 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
       y_extra = std::max(y_extra, sample & 1u);
     }
   }
-  if (uint64_t(source_x) + width + x_extra > texture.width ||
-      uint64_t(source_y) + height + y_extra > texture.height) {
+  // Host pixels: guest pixels times the draw resolution scale.
+  if ((uint64_t(source_x) + width) * draw_resolution_scale_x() + x_extra >
+          texture.width ||
+      (uint64_t(source_y) + height) * draw_resolution_scale_y() + y_extra >
+          texture.height) {
     note(3);
     return false;
   }

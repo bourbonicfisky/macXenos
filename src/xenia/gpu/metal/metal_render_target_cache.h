@@ -266,10 +266,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // ResolveCanonicalColorToBuffer read the open 32bpp colour attachment
   // instead of canonical EDRAM, and the caller skips
   // PrepareCanonicalEdramForResolve. Begin succeeds only when that attachment
-  // (same base, pitch, format and MSAA as the resolve; not a raw-view format;
-  // no draw scale) holds the newest value of every tile of the span and
-  // contains every pixel the resolve's samples read; the tracker is left
-  // untouched.
+  // (same base, pitch, format and MSAA as the resolve; not a raw-view format)
+  // holds the newest value of every tile of the span and contains every host
+  // pixel the resolve's samples read (at the draw resolution scale too); the
+  // tracker is left untouched.
   bool BeginDirectColorResolve(uint32_t base_tiles, uint32_t pitch_tiles,
                                uint32_t msaa_samples, uint32_t format,
                                bool is_64bpp, uint32_t span_base,

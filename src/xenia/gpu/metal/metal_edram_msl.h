@@ -1867,7 +1867,8 @@ kernel void resolve_canonical_depth_raw_fwd(
 // sample's x/y sub-offset), and the guest sample to the host one with
 // xe_metal_sample_to_guest (its own inverse). The caller proves the attachment
 // holds the newest value of every tile, shares the resolve's base and pitch,
-// and contains every pixel read (no ring wrap, no draw scale).
+// and contains every pixel read (no ring wrap). Pixels are host pixels: at a
+// draw resolution scale the representative pixel xe_resolve_host_pixel picks.
 inline uint2 xe_direct_slot(constant CanonicalResolveParams& p, uint2 pixel,
                             uint sample, thread uint& guest_sample) {
   uint2 shifts = xe_edram_msaa_shifts(p.surface.msaa);
