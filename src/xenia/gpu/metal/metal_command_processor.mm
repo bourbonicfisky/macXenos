@@ -4070,27 +4070,24 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
 }
 
 bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
-  // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF, per the house flag
-  // contract (SeamTimingEnabled is the same shape). This is NOT a promotion:
-  // unset stays on the unconditional synchronous consumer boundary, and only
-  // the frozen D5 gate may change that. Malformed fails closed to OFF rather
-  // than to "probably meant on" -- a diagnostic that widened what counts as
-  // enabled would put an unmeasured path into a control arm.
+  // DEFAULT ON since 2026-10-31: a consumer that needs a producer's output
+  // waits for that producer's submission only, instead of committing and
+  // draining the whole open command buffer. Fable II on the M1 Max 19 -> 30
+  // fps (41 tess-factor reads/frame each drained ~410 draws); library sweeps
+  // on the M1 Max and M4 mini unchanged elsewhere, 0 faults/skips. Rollback:
+  // XE_METAL_NEED_BASED_WAITS=0 (exact 0 / malformed = off, the house shape).
   static const bool s_enabled = [] {
     const char* value = std::getenv(metal::kNeedBasedWaitsEnvVar);
-    if (!value || !value[0]) {
-      return false;
-    }
-    if (value[0] == '1' && !value[1]) {
-      return true;
-    }
-    if (!(value[0] == '0' && !value[1])) {
+    if (value && value[0] && !((value[0] == '0' || value[0] == '1') &&
+                               !value[1])) {
       XELOGW(
           "XE_METAL_NEED_BASED_WAITS='{}' is malformed; failing closed to off "
           "(use 0 or 1)",
           value);
     }
-    return false;
+    // Empty counts as unset (harness arms pass VAR= for the default).
+    return metal::ParseMetalEnvironmentFlag(value && value[0] ? value : nullptr,
+                                            true);
   }();
   return s_enabled;
 }
@@ -4380,7 +4377,7 @@ bool MetalCommandProcessor::ServingCensusEnabled() {
 
 bool MetalCommandProcessor::SkipConsumerWaitEnabled() {
   // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF -- the house flag shape
-  // (NeedBasedWaitsEnabled above). The banner is a WARNING and prints exactly
+  // (SeamTimingEnabled). The banner is a WARNING and prints exactly
   // once, from the first consultation: any log containing it names a run whose
   // guest-visible output is untrusted, which is what makes the arm disclosure
   // checkable after the fact.
