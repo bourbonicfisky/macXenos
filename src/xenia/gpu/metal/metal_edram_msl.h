@@ -2186,6 +2186,22 @@ fragment float4 clear_color_attachment_fs(ColorVOut in [[stage_in]],
   return clear.w != 0u ? xe_unpack_color64(uint2(clear.x, clear.y), clear.z)
                        : xe_unpack_color32_working(clear.x, clear.z);
 }
+// The same clear written from compute into a single-sample attachment
+// (ShaderWrite usage): only the rectangle's texels, no render pass load and
+// store of the whole attachment. rect = (x, y, width, height) in host pixels.
+kernel void clear_color_attachment_cs(
+    texture2d<float, access::write> target [[texture(0)]],
+    constant uint4& clear [[buffer(0)]],
+    constant uint4& rect [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= rect.z || gid.y >= rect.w) {
+    return;
+  }
+  float4 value = clear.w != 0u
+                     ? xe_unpack_color64(uint2(clear.x, clear.y), clear.z)
+                     : xe_unpack_color32_working(clear.x, clear.z);
+  target.write(value, rect.xy + gid);
+}
 kernel void resolve_canonical_clear(
     device uint* canonical [[buffer(0)]],
     constant CanonicalClearParams& p [[buffer(1)]],

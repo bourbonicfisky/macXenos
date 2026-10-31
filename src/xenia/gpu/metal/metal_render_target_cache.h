@@ -1021,6 +1021,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   std::unordered_map<uint64_t, void*> canonical_resolve_pipelines_;
   // Lever 2 attachment clear PSOs keyed by host pixel format and samples.
   std::unordered_map<uint64_t, void*> attachment_clear_pipelines_;
+  // Its compute form for single-sample attachments (one generic kernel).
+  void* attachment_clear_cs_pipeline_ = nullptr;
   void* canonical_depth_raw_resolve_pipeline_ = nullptr;
   // XE_METAL_SNAPSHOT_COMPUTE: compute twins of the snapshot resolve passes.
   void* canonical_color_snapshot_cs_pipeline_ = nullptr;

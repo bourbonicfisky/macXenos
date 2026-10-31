@@ -556,6 +556,7 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
   }
   attachment_clear_pipelines_.clear();
+  release_compute_pipeline(attachment_clear_cs_pipeline_);
   release_compute_pipeline(canonical_depth_raw_resolve_pipeline_);
   release_compute_pipeline(canonical_color_packed_resolve_pipeline_);
   release_compute_pipeline(canonical_depth_raw_fwd_pipeline_);
@@ -5927,6 +5928,71 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   if (uint64_t(x0) + w > texture.width || uint64_t(y0) + h > texture.height) {
     return false;
   }
+  const uint32_t clear[4] = {clear_lo, clear_hi, uint32_t(color_format),
+                             uint32_t(is_64bpp)};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  auto mark_cleared = [&]() {
+    if (MetalCommandProcessor::PassCensusEnabled()) {
+      ++pack_census_.attachment_clears;
+    }
+    for (uint32_t row = 0; row < rows; ++row) {
+      const uint32_t start = span_base + row * span_pitch;
+      canonical_authority_.MarkAttachment(attachment, start,
+                                          start + row_length_used,
+                                          ++canonical_authority_order_);
+    }
+    ++s_taken;
+    if ((s_taken & (s_taken - 1)) == 0) {
+      XELOGI("MetalAttachmentClear: taken={} of attempts={} (latest base={} "
+             "pitch={} msaa={} fmt={} {}x{})",
+             s_taken, s_attempts, base_tiles, surface_pitch_tiles,
+             msaa_samples, uint32_t(color_format), width, height);
+    }
+  };
+  // Single-sample attachments: write only the rectangle from compute instead
+  // of opening a render pass that loads and stores the whole (EDRAM-height)
+  // attachment. XE_METAL_ATTACHMENT_CLEAR_CS=0 keeps the render pass.
+  static const bool s_compute = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_ATTACHMENT_CLEAR_CS"), true);
+  if (s_compute && !ms && (texture.usage & MTLTextureUsageShaderWrite)) {
+    if (!attachment_clear_cs_pipeline_) {
+      id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+      id<MTLLibrary> library =
+          (__bridge id<MTLLibrary>)canonical_materialize_library_;
+      id<MTLFunction> function =
+          [library newFunctionWithName:@"clear_color_attachment_cs"];
+      NSError* error = nil;
+      id<MTLComputePipelineState> pipeline =
+          function ? [device newComputePipelineStateWithFunction:function
+                                                           error:&error]
+                   : nil;
+      if (!pipeline) {
+        XELOGE("MetalRenderTargetCache: attachment clear compute pipeline "
+               "failed: {}",
+               error ? error.localizedDescription.UTF8String : "no function");
+        return false;
+      }
+      attachment_clear_cs_pipeline_ = (__bridge_retained void*)pipeline;
+    }
+    id<MTLComputePipelineState> pipeline =
+        (__bridge id<MTLComputePipelineState>)attachment_clear_cs_pipeline_;
+    const uint32_t rect[4] = {x0, y0, w, h};
+    id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+    compute.label = @"rtcache:attachment-resolve-clear-color-cs";
+    [compute setComputePipelineState:pipeline];
+    [compute setTexture:texture atIndex:0];
+    [compute setBytes:clear length:sizeof(clear) atIndex:0];
+    [compute setBytes:rect length:sizeof(rect) atIndex:1];
+    const NSUInteger tw = pipeline.threadExecutionWidth;
+    const NSUInteger th =
+        std::max<NSUInteger>(1, pipeline.maxTotalThreadsPerThreadgroup / tw);
+    [compute dispatchThreads:MTLSizeMake(w, h, 1)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [compute endEncoding];
+    mark_cleared();
+    return true;
+  }
   const uint64_t pipeline_key =
       uint64_t(texture.pixelFormat) | (uint64_t(texture.sampleCount) << 32u);
   void*& pipeline_slot = attachment_clear_pipelines_[pipeline_key];
@@ -5959,8 +6025,6 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   pass.colorAttachments[0].texture = texture;
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  id<MTLCommandBuffer> command =
-      (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLRenderCommandEncoder> encoder = [command
       renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(
                                              pass)];
@@ -5968,27 +6032,10 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   [encoder setScissorRect:MTLScissorRect{x0, y0, w, h}];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipeline_slot];
-  const uint32_t clear[4] = {clear_lo, clear_hi, uint32_t(color_format),
-                             uint32_t(is_64bpp)};
   [encoder setFragmentBytes:clear length:sizeof(clear) atIndex:0];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder endEncoding];
-  if (MetalCommandProcessor::PassCensusEnabled()) {
-    ++pack_census_.attachment_clears;
-  }
-  for (uint32_t row = 0; row < rows; ++row) {
-    const uint32_t start = span_base + row * span_pitch;
-    canonical_authority_.MarkAttachment(attachment, start,
-                                        start + row_length_used,
-                                        ++canonical_authority_order_);
-  }
-  ++s_taken;
-  if ((s_taken & (s_taken - 1)) == 0) {
-    XELOGI("MetalAttachmentClear: taken={} of attempts={} (latest base={} "
-           "pitch={} msaa={} fmt={} {}x{})",
-           s_taken, s_attempts, base_tiles, surface_pitch_tiles, msaa_samples,
-           uint32_t(color_format), width, height);
-  }
+  mark_cleared();
   return true;
 }
 
