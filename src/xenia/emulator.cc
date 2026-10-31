@@ -1391,6 +1391,26 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
                  *memory()->TranslateVirtualBE<uint32_t>(array + i * 4));
       }
     }
+    // Spinning threads keep their loop state in callee-saved registers and
+    // the frame; r31 is usually the object being spun on.
+    msg.append(fmt::format("\n    r28={:08X} r29={:08X} r30={:08X} r31={:08X}",
+                           uint32_t(ctx->r[28]), uint32_t(ctx->r[29]),
+                           uint32_t(ctx->r[30]), uint32_t(ctx->r[31])));
+    auto words = [&](const char* label, uint32_t address) {
+      if (address <= 0xFFFF || (address & 3) || !readable(address, 0x40)) {
+        return;
+      }
+      msg.append(fmt::format(" {}@{:08X}:", label, address));
+      for (uint32_t i = 0; i < 0x40; i += 4) {
+        msg.append(fmt::format(
+            " {:08X}",
+            uint32_t(*memory()->TranslateVirtualBE<uint32_t>(address + i))));
+      }
+    };
+    msg.append("\n   ");
+    words("r31", uint32_t(ctx->r[31]));
+    msg.append("\n   ");
+    words("frame", uint32_t(ctx->r[1]) + 0x40);
     msg.append("\n    stack");
     for (uint32_t lr : WalkGuestBackChain(memory(), uint32_t(ctx->r[1]),
                                           thread->stack_limit(),
