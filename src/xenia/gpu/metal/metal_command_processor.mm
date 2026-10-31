@@ -3097,6 +3097,220 @@ uint64_t MetalCommandProcessor::PassAttachmentKey(bool dummy_depth,
   return key;
 }
 
+// XE_METAL_PASS_TIMING=1: GPU time of every draw render pass from
+// stage-boundary timestamp samples, summed per attachment key and logged
+// with the per-128-swap stats. Instruments cannot attribute most render-pass
+// work on Apple GPUs (its GPU intervals carry encoder id 0 for ~3/4 of
+// fragment time, Far Cry 3 2x 2026-10-31), so this names the passes itself.
+// CP thread: Attach / EndPass / TakeCommitRange. Completion handlers: Resolve.
+namespace {
+struct PassTimingAgg {
+  uint64_t vertex_ticks = 0;
+  uint64_t fragment_ticks = 0;
+  uint64_t passes = 0;
+  uint64_t draws = 0;
+  uint32_t msaa = 0;
+};
+struct PassTimingState {
+  // Four samples per pass; Apple caps a sample buffer at 32 KiB (4096
+  // samples), which holds ~10 frames of passes in flight.
+  static constexpr uint32_t kPasses = 1024;
+  id<MTLCounterSampleBuffer> buffer = nil;
+  bool init_tried = false;
+  struct Slot {
+    uint64_t rt_key;
+    uint32_t draw_start;
+    uint32_t draws;
+    uint32_t msaa;
+  };
+  std::array<Slot, kPasses> slots{};
+  uint64_t next = 0;       // CP thread
+  uint64_t committed = 0;  // CP thread
+  int64_t open = -1;       // CP thread
+  uint64_t overruns = 0;   // CP thread
+  std::atomic<uint64_t> resolved{0};
+  std::mutex mutex;  // guards everything below
+  std::unordered_map<uint64_t, PassTimingAgg> agg;
+  std::unordered_map<uint64_t, std::string> describe;
+  uint64_t invalid = 0;
+  MTLTimestamp cal_gpu = 0;
+  std::chrono::steady_clock::time_point cal_time;
+};
+PassTimingState& PassTiming() {
+  static PassTimingState state;
+  return state;
+}
+bool PassTimingEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_PASS_TIMING");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return enabled;
+}
+void PassTimingAttach(MTLRenderPassDescriptor* pass, id<MTLDevice> device,
+                      uint64_t rt_key, uint32_t msaa, uint32_t draw_start,
+                      const std::function<std::string()>& describe) {
+  PassTimingState& pt = PassTiming();
+  if (!pt.init_tried) {
+    pt.init_tried = true;
+    id<MTLCounterSet> timestamps = nil;
+    for (id<MTLCounterSet> set in device.counterSets) {
+      if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+        timestamps = set;
+      }
+    }
+    if (timestamps &&
+        [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+      MTLCounterSampleBufferDescriptor* desc =
+          [[MTLCounterSampleBufferDescriptor alloc] init];
+      desc.counterSet = timestamps;
+      desc.storageMode = MTLStorageModeShared;
+      desc.sampleCount = PassTimingState::kPasses * 4;
+      desc.label = @"xe pass timing";
+      NSError* error = nil;
+      pt.buffer = [device newCounterSampleBufferWithDescriptor:desc
+                                                        error:&error];
+      if (!pt.buffer) {
+        XELOGW("MetalPassTiming: no sample buffer ({})",
+               error ? [[error localizedDescription] UTF8String] : "nil");
+      }
+    } else {
+      XELOGW("MetalPassTiming: stage-boundary timestamps unsupported");
+    }
+    MTLTimestamp cpu = 0;
+    [device sampleTimestamps:&cpu gpuTimestamp:&pt.cal_gpu];
+    pt.cal_time = std::chrono::steady_clock::now();
+  }
+  // The descriptor may be reused: clear a previous pass's attachment.
+  pass.sampleBufferAttachments[0].sampleBuffer = nil;
+  pt.open = -1;
+  if (!pt.buffer) {
+    return;
+  }
+  if (pt.next - pt.resolved.load(std::memory_order_acquire) >=
+      PassTimingState::kPasses) {
+    ++pt.overruns;
+    return;
+  }
+  const uint32_t slot = uint32_t(pt.next % PassTimingState::kPasses);
+  MTLRenderPassSampleBufferAttachmentDescriptor* a =
+      pass.sampleBufferAttachments[0];
+  a.sampleBuffer = pt.buffer;
+  a.startOfVertexSampleIndex = slot * 4;
+  a.endOfVertexSampleIndex = slot * 4 + 1;
+  a.startOfFragmentSampleIndex = slot * 4 + 2;
+  a.endOfFragmentSampleIndex = slot * 4 + 3;
+  pt.slots[slot] = {rt_key, draw_start, 0, msaa};
+  pt.open = int64_t(pt.next++);
+  std::lock_guard<std::mutex> lock(pt.mutex);
+  if (!pt.describe.count(rt_key)) {
+    pt.describe.emplace(rt_key, describe());
+  }
+}
+void PassTimingEndPass(uint32_t draw_count) {
+  PassTimingState& pt = PassTiming();
+  if (pt.open >= 0) {
+    auto& slot = pt.slots[uint64_t(pt.open) % PassTimingState::kPasses];
+    slot.draws = draw_count - slot.draw_start;
+    pt.open = -1;
+  }
+}
+std::pair<uint64_t, uint64_t> PassTimingTakeCommitRange() {
+  PassTimingState& pt = PassTiming();
+  // A pass still open belongs to the next command buffer's range.
+  const uint64_t end = pt.open >= 0 ? uint64_t(pt.open) : pt.next;
+  std::pair<uint64_t, uint64_t> range{pt.committed, end};
+  pt.committed = end;
+  return range;
+}
+void PassTimingResolve(std::pair<uint64_t, uint64_t> range) {
+  PassTimingState& pt = PassTiming();
+  if (range.second > range.first && pt.buffer) {
+    std::lock_guard<std::mutex> lock(pt.mutex);
+    for (uint64_t i = range.first; i < range.second; ++i) {
+      const uint32_t slot = uint32_t(i % PassTimingState::kPasses);
+      NSData* data =
+          [pt.buffer resolveCounterRange:NSMakeRange(slot * 4, 4)];
+      if (!data || data.length < 4 * sizeof(MTLCounterResultTimestamp)) {
+        ++pt.invalid;
+        continue;
+      }
+      const auto* t =
+          static_cast<const MTLCounterResultTimestamp*>(data.bytes);
+      const auto& s = pt.slots[slot];
+      PassTimingAgg& agg = pt.agg[s.rt_key];
+      agg.msaa = s.msaa;
+      ++agg.passes;
+      agg.draws += s.draws;
+      bool ok = true;
+      for (int k = 0; k < 4; ++k) {
+        ok &= t[k].timestamp != MTLCounterErrorValue && t[k].timestamp != 0;
+      }
+      if (!ok || t[1].timestamp < t[0].timestamp ||
+          t[3].timestamp < t[2].timestamp) {
+        ++pt.invalid;
+        continue;
+      }
+      agg.vertex_ticks += t[1].timestamp - t[0].timestamp;
+      agg.fragment_ticks += t[3].timestamp - t[2].timestamp;
+    }
+  }
+  pt.resolved.store(range.second, std::memory_order_release);
+}
+std::string PassTimingReport(uint32_t swaps, uint64_t count) {
+  PassTimingState& pt = PassTiming();
+  if (!pt.buffer) {
+    return "MetalPassTiming: unavailable";
+  }
+  MTLTimestamp cpu = 0, gpu = 0;
+  [pt.buffer.device sampleTimestamps:&cpu gpuTimestamp:&gpu];
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(pt.mutex);
+  // GPU timestamp ticks are not specified as nanoseconds; calibrate against
+  // the host steady clock over the report interval.
+  const double elapsed_ns =
+      std::chrono::duration<double, std::nano>(now - pt.cal_time).count();
+  const double ns_per_tick =
+      gpu > pt.cal_gpu ? elapsed_ns / double(gpu - pt.cal_gpu) : 1.0;
+  pt.cal_gpu = gpu;
+  pt.cal_time = now;
+  std::vector<std::pair<uint64_t, PassTimingAgg>> rows(pt.agg.begin(),
+                                                       pt.agg.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.vertex_ticks + a.second.fragment_ticks >
+           b.second.vertex_ticks + b.second.fragment_ticks;
+  });
+  double total_v = 0, total_f = 0, total_passes = 0;
+  for (const auto& [key, a] : rows) {
+    total_v += double(a.vertex_ticks);
+    total_f += double(a.fragment_ticks);
+    total_passes += double(a.passes);
+  }
+  const double to_ms = ns_per_tick / 1.0e6 / double(swaps);
+  std::string out = fmt::format(
+      "MetalPassTiming swap#{}: {:.1f} passes/frame vertex {:.2f} fragment "
+      "{:.2f} ms/frame (stage spans; overlap between passes is not "
+      "removed), {} keys, {} invalid, {} overruns, {:.3f} ns/tick",
+      count, total_passes / double(swaps), total_v * to_ms, total_f * to_ms,
+      rows.size(), pt.invalid, pt.overruns, ns_per_tick);
+  for (size_t i = 0; i < rows.size() && i < 12; ++i) {
+    const auto& [key, a] = rows[i];
+    auto d = pt.describe.find(key);
+    out += fmt::format(
+        "\n  rt={:016X} msaa={} {:5.1f} passes/frame {:6.1f} draws/pass "
+        "vertex {:6.2f} fragment {:6.2f} ms/frame  {}",
+        key, a.msaa, double(a.passes) / double(swaps),
+        double(a.draws) / std::max<double>(double(a.passes), 1.0),
+        double(a.vertex_ticks) * to_ms, double(a.fragment_ticks) * to_ms,
+        d != pt.describe.end() ? d->second.substr(0, 160) : "");
+  }
+  pt.agg.clear();
+  pt.invalid = 0;
+  pt.overruns = 0;
+  return out;
+}
+}  // namespace
+
 void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
@@ -3452,6 +3666,13 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
   }
 
+  if (PassTimingEnabled()) {
+    PassTimingAttach(
+        pass, command_buffer.device, want_key,
+        memexport_pass_ ? 1u : render_target_cache_->current_msaa_samples(),
+        draw_count_,
+        [this] { return render_target_cache_->DescribeCurrentAttachments(); });
+  }
   id<MTLRenderCommandEncoder> encoder =
       [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
   // Fault attribution: names this encoder in per-encoder execution status.
@@ -5573,6 +5794,9 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
+  if (PassTimingEnabled()) {
+    PassTimingEndPass(draw_count_);
+  }
   frame_render_encoder_ = nullptr;
   frame_open_ = false;
   encoder_has_zpd_visibility_ = false;
@@ -5733,9 +5957,15 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
       }
     }
   } reservation{&epoch_outstanding_[submit_epoch % kFaultEpochSlots]};
+  const std::pair<uint64_t, uint64_t> pass_timing_range =
+      PassTimingEnabled() ? PassTimingTakeCommitRange()
+                          : std::pair<uint64_t, uint64_t>{0, 0};
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (GpuBusyTimingEnabled()) {
       NoteGpuBusyInterval(cb.GPUStartTime, cb.GPUEndTime);
+    }
+    if (PassTimingEnabled()) {
+      PassTimingResolve(pass_timing_range);
     }
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -19466,6 +19696,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             double(es.drain_waits) / 128.0,
             double(es.drain_wait_ns) / 1.0e6 / 128.0, es.full_waits,
             es.consumer_sleeps);
+      }
+      if (PassTimingEnabled()) {
+        XELOGI("{}", PassTimingReport(128, count));
       }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
