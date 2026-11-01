@@ -1698,6 +1698,14 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
   auto object = XObject::GetNativeObject<XObject>(kernel_state(), object_ptr);
 
   if (!object) {
+    // A thread whose last handle is closed has no object left, but a title
+    // can still hold its KTHREAD and wait for it to finish (Bad Company joins
+    // an exited loader thread). Its header was signalled at exit, which
+    // satisfies the wait on the console.
+    auto header = reinterpret_cast<X_DISPATCH_HEADER*>(object_ptr);
+    if (header->type == 6 && header->signal_state) {
+      return X_STATUS_SUCCESS;
+    }
     // The only kind-of failure code (though this should never happen)
     assert_always();
     return X_STATUS_ABANDONED_WAIT_0;

@@ -83,10 +83,23 @@ Memory* XObject::memory() const { return kernel_state_->memory(); }
 XObject::Type XObject::type() const { return type_; }
 
 void XObject::RetainHandle() {
+  if (handles_.empty()) {
+    XELOGE("XObject::RetainHandle on {} with no handle left", name_);
+    return;
+  }
   kernel_state_->object_table()->RetainHandle(handles_[0]);
 }
 
 bool XObject::ReleaseHandle() {
+  // Once the last handle is removed handles_ is empty, and handles_[0] would
+  // read the stale value: a slot the table may already have given to another
+  // object, whose reference this would drop (Bad Company: a thread's release
+  // freed a critical section's native event, and the slot's next owner, a
+  // thread, was then called as an XEvent).
+  if (handles_.empty()) {
+    XELOGE("XObject::ReleaseHandle on {} with no handle left", name_);
+    return false;
+  }
   // FIXME: Return true when handle is actually released.
   return kernel_state_->object_table()->ReleaseHandle(handles_[0]) ==
          X_STATUS_SUCCESS;
@@ -107,6 +120,9 @@ X_STATUS XObject::Delete() {
   } else {
     if (!name_.empty()) {
       kernel_state_->object_table()->RemoveNameMapping(name_);
+    }
+    if (handles_.empty()) {
+      return X_STATUS_INVALID_HANDLE;
     }
     return kernel_state_->object_table()->RemoveHandle(handles_[0]);
   }
@@ -472,7 +488,7 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     global_critical_region::mutex().lock();
   }
 
-  XObject* result;
+  XObject* result = nullptr;
 
   auto header = reinterpret_cast<X_DISPATCH_HEADER*>(native_ptr);
   if (as_type == -1) {
@@ -481,12 +497,54 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
 
   if (header->wait_list.flink_ptr == kXObjSignature) {
     // Already initialized.
-    // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list.blink_ptr;
     result = kernel_state->object_table()
                  ->LookupObject<XObject>(handle, true)
                  .release();
-  } else {
+    // The stashed handle is only a number: if its object went away the slot
+    // can belong to anything now. Treat a missing or wrong-typed object as an
+    // uninitialized header instead of returning it as the requested type.
+    Type expected = Type::Undefined;
+    switch (as_type) {
+      case 0:
+      case 1:
+        expected = Type::Event;
+        break;
+      case 2:
+        expected = Type::Mutant;
+        break;
+      case 5:
+        expected = Type::Semaphore;
+        break;
+      case 6:
+        expected = Type::Thread;
+        break;
+      case 8:
+      case 9:
+        expected = Type::Timer;
+        break;
+    }
+    if (expected != Type::Undefined &&
+        (!result || result->type() != expected)) {
+      XELOGE(
+          "GetNativeObject: header {:08X} (type {}) holds stale handle {:08X} "
+          "({}); recreating",
+          kernel_state->memory()->HostToGuestVirtual(native_ptr), as_type,
+          handle,
+          result ? fmt::format("now type {}", uint32_t(result->type()))
+                 : std::string("closed"));
+      if (result) {
+        result->Release();
+        result = nullptr;
+      }
+      // Events, mutants and semaphores are rebuilt from the header below;
+      // threads and timers cannot be, and stay unresolved as before.
+      if (expected != Type::Thread && expected != Type::Timer) {
+        header->wait_list.flink_ptr = 0;
+      }
+    }
+  }
+  if (!result && header->wait_list.flink_ptr != kXObjSignature) {
     // First use, create new.
     // https://www.nirsoft.net/kernel_struct/vista/KOBJECTS.html
     XObject* object = nullptr;
