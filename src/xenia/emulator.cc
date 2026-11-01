@@ -1489,8 +1489,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 
   // Emit the crash dump BEFORE pausing: the dump only reads the crashed
   // (current) thread's own context, which does not require other threads to be
-  // suspended, and on macOS Pause() can block indefinitely (AudioSystem::Pause's
-  // worker never acks pause_fence_), which would otherwise swallow the crash
+  // suspended, and Pause() used to block indefinitely (XmaDecoder::Pause never
+  // woke its idle worker to ack pause_fence_), which would swallow the crash
   // dump and make the failure look like an idle stall. Pause (to freeze other
   // threads for the dialog) comes after.
 
@@ -1716,6 +1716,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   // Crash dump is out; now pause the emulator and eat the exception (freezes
   // other guest threads for the dialog below).
   Pause();
+  XELOGE("Emulator paused after the guest crash.");
+  xe::FlushLog();
 
   std::string crash_dlg = fmt::format(
       "The guest has crashed.\n\n"
