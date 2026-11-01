@@ -8472,12 +8472,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
-  bool translation_pending = false;
-  if (!pipeline_cache_->TranslateShader(*vs_translation,
-                                        &translation_pending)) {
-    RecordDrawSkip(translation_pending ? MetalDrawSkipReason::kShaderPending
-                                       : MetalDrawSkipReason::kTranslationFailure,
-                   "vs-translate");
+  if (!pipeline_cache_->TranslateShader(*vs_translation)) {
+    RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
     return true;
   }
   MetalShader::MetalTranslation* ps_translation = nullptr;
@@ -8714,13 +8710,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ps_mod_value = ps_mod;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
         pixel_shader->GetOrCreateTranslation(ps_mod));
-    if (!pipeline_cache_->TranslateShader(*ps_translation,
-                                          &translation_pending)) {
-      if (translation_pending) {
-        // Not a depth-only draw: the colour it would write comes later.
-        RecordDrawSkip(MetalDrawSkipReason::kShaderPending, "ps-translate");
-        return true;
-      }
+    if (!pipeline_cache_->TranslateShader(*ps_translation)) {
       ps_translation = nullptr;
     }
   }

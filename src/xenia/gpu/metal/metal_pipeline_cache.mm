@@ -12,10 +12,6 @@
 
 #import <Metal/Metal.h>
 
-#include <pthread.h>
-
-#include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -44,16 +40,6 @@
 // before any backend is consulted, so it silently disables both durable
 // mechanisms; reported in the effective-state line below.
 DECLARE_bool(store_shaders);
-
-DEFINE_bool(metal_async_shader_translation, false,
-            "Translate shaders the first time they are seen on background "
-            "threads instead of inside the frame. Draws whose shader is still "
-            "translating are skipped for the few frames it takes, so objects "
-            "can appear a moment late the first time a shader is used; the "
-            "alternative is a freeze of up to seconds (cold RDR on the Mac "
-            "Pro: 7 s of in-frame translation). Cached shaders are unaffected. "
-            "XE_METAL_ASYNC_SHADERS=0/1 overrides.",
-            "GPU");
 
 namespace xe {
 namespace gpu {
@@ -179,7 +165,6 @@ void MetalPipelineCache::ShutdownDurableStorage() {
 }
 
 void MetalPipelineCache::Shutdown() {
-  StopAsyncTranslationWorkers();
   ShutdownDurableStorage();
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
@@ -368,8 +353,13 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   // the cold arm's dxil total rose by ~30 ms with the gate on — cache
   // bookkeeping being reported as converter cost, which is exactly the
   // measurement error a cold-regression promotion gate would then act on.
-  if (!ConvertDxbcToDxilCold(dxbc, dxil_out, error_out)) {
-    return false;
+  {
+    MetalShaderBuildTimer timer(census.dxil);
+    if (!dxil_converter_raw_.Convert(dxbc, dxil_out, error_out)) {
+      timer.Dismiss();
+      return false;
+    }
+    timer.set_bytes(dxil_out.size());
   }
   if (cache_enabled) {
     const auto store_start = std::chrono::steady_clock::now();
@@ -383,157 +373,8 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   return true;
 }
 
-bool MetalPipelineCache::ConvertDxbcToDxilCold(
-    const std::vector<uint8_t>& dxbc, std::vector<uint8_t>& dxil_out,
-    std::string* error_out) {
-  MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().dxil);
-  if (!dxil_converter_raw_.Convert(dxbc, dxil_out, error_out)) {
-    timer.Dismiss();
-    return false;
-  }
-  timer.set_bytes(dxil_out.size());
-  return true;
-}
-
-struct MetalPipelineCache::AsyncTranslationJob {
-  uint64_t ucode_hash = 0;
-  MetalShaderConverter::Stage stage = MetalShaderConverter::Stage::kVertex;
-  uint64_t metallib_key = 0;
-  std::vector<uint8_t> dxbc;
-  bool dxil_from_store = false;
-  std::vector<uint8_t> dxil;  // preset when the DXIL store had it
-  std::vector<uint8_t> metallib;
-  std::string error;
-  bool ok = false;
-  std::atomic<bool> done{false};
-};
-
-bool MetalPipelineCache::AsyncTranslationEnabled() {
-  static const bool s_enabled = [] {
-    if (const char* v = std::getenv("XE_METAL_ASYNC_SHADERS")) {
-      return v[0] == '1' && !v[1];
-    }
-    // The translation dump diagnostic needs the synchronous path.
-    if (std::getenv("XE_METAL_DUMP_XLAT")) {
-      return false;
-    }
-    return cvars::metal_async_shader_translation;
-  }();
-  return s_enabled;
-}
-
-void MetalPipelineCache::AsyncTranslationWorkerMain() {
-  pthread_setname_np("Metal Shader Translation");
-  pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-  MetalShaderBuildCensus::SetBackgroundThread();
-  for (;;) {
-    std::shared_ptr<AsyncTranslationJob> job;
-    {
-      std::unique_lock<std::mutex> lock(async_mutex_);
-      async_cv_.wait(lock, [&] { return async_stop_ || !async_queue_.empty(); });
-      if (async_stop_) {
-        return;
-      }
-      job = std::move(async_queue_.front());
-      async_queue_.pop_front();
-    }
-    job->ok = job->dxil_from_store ||
-              ConvertDxbcToDxilCold(job->dxbc, job->dxil, &job->error);
-    if (job->ok) {
-      MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().msc);
-      MetalStageRequestProbe probe(
-          job->dxil, uint32_t(job->stage),
-          uint32_t(MetalShaderConverter::InputTopology::kUndefined));
-      job->ok = metal_converter_.Convert(job->stage, job->dxil, job->metallib,
-                                         &job->error);
-      if (job->ok) {
-        timer.set_bytes(job->metallib.size());
-      } else {
-        timer.Dismiss();
-      }
-    }
-    job->done.store(true, std::memory_order_release);
-  }
-}
-
-void MetalPipelineCache::StopAsyncTranslationWorkers() {
-  {
-    std::lock_guard<std::mutex> lock(async_mutex_);
-    async_stop_ = true;
-    async_queue_.clear();
-  }
-  async_cv_.notify_all();
-  for (std::thread& worker : async_workers_) {
-    worker.join();
-  }
-  async_workers_.clear();
-  async_jobs_.clear();
-}
-
-bool MetalPipelineCache::FinishAsyncTranslation(
-    MetalShader::MetalTranslation& translation, AsyncTranslationJob& job) {
-  if (!job.ok) {
-    XELOGE("MetalPipelineCache: background translation failed for shader "
-           "{:016X}: {}",
-           job.ucode_hash, job.error);
-    return false;
-  }
-  MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
-  if (!job.dxil_from_store && cvars::metal_dxil_cache && dxil_store_.is_open()) {
-    const auto store_start = std::chrono::steady_clock::now();
-    dxil_store_.Store(MetalDxilArtifactKey::ForDxbc(job.dxbc), job.dxil);
-    census.dxil_store_ns.fetch_add(
-        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now() - store_start)
-                     .count()),
-        std::memory_order_relaxed);
-  }
-  {
-    MetalShaderBuildTimer timer(census.function);
-    if (!translation.CreateMetalFunction(device_, job.metallib)) {
-      timer.Dismiss();
-      XELOGE(
-          "MetalPipelineCache: MTLFunction creation failed for shader {:016X}",
-          job.ucode_hash);
-      return false;
-    }
-    timer.set_bytes(job.metallib.size());
-  }
-  if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
-    const auto store_start = std::chrono::steady_clock::now();
-    if (storage_.StoreMetallib(job.metallib_key, job.metallib)) {
-      census.metallib_stores.fetch_add(1, std::memory_order_relaxed);
-      census.metallib_store_bytes.fetch_add(job.metallib.size(),
-                                            std::memory_order_relaxed);
-    }
-    census.metallib_store_ns.fetch_add(
-        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now() - store_start)
-                     .count()),
-        std::memory_order_relaxed);
-  }
-  return true;
-}
-
 bool MetalPipelineCache::TranslateShader(
-    MetalShader::MetalTranslation& translation, bool* pending) {
-  if (pending) {
-    *pending = false;
-  }
-  if (!async_jobs_.empty()) {
-    auto it = async_jobs_.find(&translation);
-    if (it != async_jobs_.end()) {
-      if (!it->second->done.load(std::memory_order_acquire)) {
-        if (pending) {
-          *pending = true;
-        }
-        return false;
-      }
-      std::shared_ptr<AsyncTranslationJob> job = std::move(it->second);
-      async_jobs_.erase(it);
-      return FinishAsyncTranslation(translation, *job);
-    }
-  }
+    MetalShader::MetalTranslation& translation) {
   if (translation.is_translated()) {
     return translation.is_valid() && translation.has_metal_function();
   }
@@ -601,45 +442,6 @@ bool MetalPipelineCache::TranslateShader(
     } else {
       census.metallib_misses.fetch_add(1, std::memory_order_relaxed);
     }
-  }
-
-  // Background translation: stages 2 and 3 go to a worker; the draw that
-  // asked is skipped and a later call publishes the function.
-  if (pending && AsyncTranslationEnabled()) {
-    auto job = std::make_shared<AsyncTranslationJob>();
-    job->ucode_hash = shader.ucode_data_hash();
-    job->stage = shader.type() == xenos::ShaderType::kVertex
-                     ? MetalShaderConverter::Stage::kVertex
-                     : MetalShaderConverter::Stage::kFragment;
-    job->metallib_key = m1_key;
-    job->dxbc = dxbc;
-    if (cvars::metal_dxil_cache && dxil_store_.is_open()) {
-      std::vector<uint8_t> cached;
-      if (dxil_store_.Load(MetalDxilArtifactKey::ForDxbc(dxbc), &cached) ==
-          MetalDxilLoadResult::kHit) {
-        GetMetalShaderBuildCensus().dxil_cache_hits.fetch_add(
-            1, std::memory_order_relaxed);
-        job->dxil = std::move(cached);
-        job->dxil_from_store = true;
-      }
-    }
-    if (async_workers_.empty()) {
-      const uint32_t cores = std::max(1u, std::thread::hardware_concurrency());
-      const uint32_t count = std::min(4u, std::max(1u, cores / 4));
-      for (uint32_t i = 0; i < count; ++i) {
-        async_workers_.emplace_back([this] { AsyncTranslationWorkerMain(); });
-      }
-      XELOGI("MetalPipelineCache: {} background shader translation threads",
-             count);
-    }
-    {
-      std::lock_guard<std::mutex> lock(async_mutex_);
-      async_queue_.push_back(job);
-    }
-    async_cv_.notify_one();
-    async_jobs_.emplace(&translation, std::move(job));
-    *pending = true;
-    return false;
   }
 
   // Stage 2: DXBC -> DXIL, through the ONE cache-aware helper every conversion

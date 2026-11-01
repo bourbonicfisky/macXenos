@@ -153,21 +153,6 @@ TEST_CASE("tessellation reasons are distinct, correctly tiered, and named",
         "tessellation-resource-missing");
 }
 
-TEST_CASE("shader-pending skips are expected, not actionable",
-          "[draw_skip]") {
-  // A draw held back while its shader translates in the background is the
-  // designed behavior of metal_async_shader_translation, so it must never arm
-  // a trace trigger or count as an actionable skip.
-  CHECK(MetalDrawSkipSeverityFor(MetalDrawSkipReason::kShaderPending) ==
-        MetalDrawSkipSeverity::kInfo);
-  CHECK(std::string(MetalDrawSkipReasonName(
-            MetalDrawSkipReason::kShaderPending)) == "shader-pending");
-  MetalDrawSkipAccounting accounting;
-  accounting.Record("vs-translate", MetalDrawSkipReason::kShaderPending, 1, 4,
-                    0xABCD, 0);
-  CHECK(accounting.frame_actionable_count() == 0);
-}
-
 TEST_CASE("tessellation pipeline-failure repeats are quieted per site",
           "[draw_skip][tessellation]") {
   // Task 4.7 repeat-quieting shape: the first negative-cache-suppressed

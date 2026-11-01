@@ -10,13 +10,9 @@
 #ifndef XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
-#include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
 #include <memory>
-#include <mutex>
-#include <thread>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -59,15 +55,7 @@ class MetalPipelineCache {
   // Translates a specific modification of a shader all the way to an
   // MTLFunction (ucode -> DXBC -> DXIL -> metallib -> function). Returns true if
   // the translation produced a usable function. Idempotent per translation.
-  //
-  // With background translation on (metal_async_shader_translation), a cold
-  // translation's DXBC -> DXIL -> metallib runs on a worker thread: the call
-  // returns false with *pending set (only when `pending` is given), and the
-  // caller skips the draw until a later call finds the result.
-  bool TranslateShader(MetalShader::MetalTranslation& translation,
-                       bool* pending = nullptr);
-  // Translations queued or running on the workers (diagnostics).
-  size_t async_translations_in_flight() const { return async_jobs_.size(); }
+  bool TranslateShader(MetalShader::MetalTranslation& translation);
 
   // The single cache-aware DXBC -> DXIL entry point. EVERY production
   // conversion site must use it; calling dxil_converter_raw_.Convert directly
@@ -188,29 +176,6 @@ class MetalPipelineCache {
   // the helper).
   DxbcToDxilConverter dxil_converter_raw_;
   MetalShaderConverter metal_converter_;
-  // The cold DXBC -> DXIL conversion itself (census-timed), shared by
-  // ConvertDxbcToDxilCached and the translation workers. Both converters make
-  // a fresh instance per call, so it is safe on several threads at once.
-  bool ConvertDxbcToDxilCold(const std::vector<uint8_t>& dxbc,
-                             std::vector<uint8_t>& dxil_out,
-                             std::string* error_out);
-
-  // Background translation. Jobs are keyed by translation and touched by the
-  // command processor only; workers see the job's own buffers.
-  struct AsyncTranslationJob;
-  static bool AsyncTranslationEnabled();
-  void AsyncTranslationWorkerMain();
-  void StopAsyncTranslationWorkers();
-  bool FinishAsyncTranslation(MetalShader::MetalTranslation& translation,
-                              AsyncTranslationJob& job);
-  std::unordered_map<MetalShader::MetalTranslation*,
-                     std::shared_ptr<AsyncTranslationJob>>
-      async_jobs_;
-  std::mutex async_mutex_;
-  std::condition_variable async_cv_;
-  std::deque<std::shared_ptr<AsyncTranslationJob>> async_queue_;
-  std::vector<std::thread> async_workers_;
-  bool async_stop_ = false;
 
   // Owns the loaded shaders, keyed by ucode hash.
   std::unordered_map<uint64_t, MetalShader*> shaders_;
