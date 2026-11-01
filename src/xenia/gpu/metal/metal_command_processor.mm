@@ -11326,7 +11326,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           XELOGI(
               "DrawTex draw={} {} fc={} base={:08X} fmt={} {}x{} pitch={} "
               "endian={} signed={} type={} num_format={} exp_adjust={} "
-              "signs={},{},{},{}",
+              "signs={},{},{},{} tiled={} packed_mips={} dim={} mips={}",
               trace_draw_index_, stage, binding.fetch_constant,
               fetch.base_address << 12, uint32_t(fetch.format),
               fetch.size_2d.width + 1, fetch.size_2d.height + 1,
@@ -11334,7 +11334,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               binding.is_signed ? 1 : 0, uint32_t(fetch.type),
               uint32_t(fetch.num_format), int32_t(fetch.exp_adjust),
               uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
-              uint32_t(fetch.sign_z), uint32_t(fetch.sign_w));
+              uint32_t(fetch.sign_z), uint32_t(fetch.sign_w),
+              uint32_t(fetch.tiled), uint32_t(fetch.packed_mips),
+              uint32_t(fetch.dimension), uint32_t(fetch.mip_max_level));
         }
       };
       log_bindings(vertex_shader, "vs");
