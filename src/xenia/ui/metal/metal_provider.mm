@@ -11,13 +11,55 @@
 
 #import <Metal/Metal.h>
 
+#include <string>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/ui/metal/metal_immediate_drawer.h"
 #include "xenia/ui/metal/metal_presenter.h"
 
+DEFINE_string(
+    metal_device, "",
+    "Macs with more than one GPU: the Metal device to render with, given as "
+    "part of its name (for example \"6900\" or \"580\", any case). Empty "
+    "uses the system default. The log lists the devices at startup.",
+    "GPU");
+
 namespace xe {
 namespace ui {
 namespace metal {
+
+void* MetalProvider::SelectedDevice() {
+  static id<MTLDevice> s_device = [] {
+    id<MTLDevice> chosen = MTLCreateSystemDefaultDevice();
+    NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+    const std::string& want = cvars::metal_device;
+    id<MTLDevice> named = nil;
+    for (id<MTLDevice> device in devices) {
+      const char* name = [[device name] UTF8String];
+      XELOGI("MetalProvider: device \"{}\": {} MiB working set, {}, {}",
+             name ? name : "unknown",
+             uint64_t(device.recommendedMaxWorkingSetSize) >> 20,
+             device.hasUnifiedMemory ? "unified memory" : "dedicated VRAM",
+             device.lowPower ? "low power" : "high power");
+      if (!named && !want.empty() && name &&
+          [[device name] rangeOfString:@(want.c_str())
+                               options:NSCaseInsensitiveSearch]
+                  .location != NSNotFound) {
+        named = device;
+      }
+    }
+    if (named) {
+      chosen = named;
+    } else if (!want.empty()) {
+      XELOGW("MetalProvider: no device matches metal_device \"{}\"; using "
+             "the system default",
+             want);
+    }
+    return chosen;
+  }();
+  return (__bridge void*)s_device;
+}
 
 MetalProvider::~MetalProvider() {
   // Balance the __bridge_retained transfers from Initialize(): move ownership
@@ -48,9 +90,9 @@ std::unique_ptr<MetalProvider> MetalProvider::Create() {
 }
 
 bool MetalProvider::Initialize() {
-  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  id<MTLDevice> device = (__bridge id<MTLDevice>)SelectedDevice();
   if (!device) {
-    XELOGE("MetalProvider: no system default Metal device");
+    XELOGE("MetalProvider: no Metal device");
     return false;
   }
   id<MTLCommandQueue> queue = [device newCommandQueue];

@@ -26,9 +26,15 @@ class MetalProvider : public GraphicsProvider {
  public:
   ~MetalProvider() override;
 
-  // Creates the provider using the system default Metal device. Returns null if
-  // no Metal device is available.
+  // Creates the provider on SelectedDevice(). Returns null if no Metal device
+  // is available.
   static std::unique_ptr<MetalProvider> Create();
+
+  // The Metal device the emulator renders with: the system default, or the
+  // device named by metal_device (Macs with more than one GPU, such as a Mac
+  // Pro with two). An unretained id<MTLDevice>, valid for the process
+  // lifetime; null if there is no Metal device.
+  static void* SelectedDevice();
 
   // id<MTLDevice> / id<MTLCommandQueue>.
   void* device() const { return device_; }

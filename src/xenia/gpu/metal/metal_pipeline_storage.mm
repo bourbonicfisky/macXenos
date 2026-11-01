@@ -36,6 +36,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_converter_options.h"
 #include "xenia/gpu/metal/metal_dxil_store.h"
+#include "xenia/ui/metal/metal_provider.h"
 
 // 3.6b — size-based bounds, configurable. Not age-based: a large title touched
 // rarely is the thing worth evicting, and its age says nothing about its cost.
@@ -281,7 +282,8 @@ bool MetalDeferredKillEnabled() {
     if (const char* v = std::getenv("XE_METAL_DEFERRED_KILL")) {
       return v[0] == '1';
     }
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device =
+        (__bridge id<MTLDevice>)xe::ui::metal::MetalProvider::SelectedDevice();
     return device && ![device supportsFamily:MTLGPUFamilyApple7];
   }();
   return s_enabled;
