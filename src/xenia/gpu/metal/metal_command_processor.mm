@@ -16688,6 +16688,38 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
     index.candidate_stamp.assign(index.producers.size(), 0);
     index.selected_stamp.assign(index.producers.size(), 0);
     index.query_stamp = 0;
+    index.closure_ready = 0;
+    index.mask_words = 0;
+    if (ClosureBitsEnabled() && index.producers.size() <= 1024u) {
+      const uint32_t words = uint32_t((index.producers.size() + 63u) / 64u);
+      if (index.page_mask_slot.size() != 8192u) {
+        index.page_mask_slot.assign(8192u, 0);
+      }
+      uint32_t slots = 0;
+      for (uint32_t word = 0; word < 128u; ++word) {
+        uint64_t bits = index.pages[word];
+        while (bits) {
+          index.page_mask_slot[word * 64u + uint32_t(__builtin_ctzll(bits))] =
+              slots++;
+          bits &= bits - 1u;
+        }
+      }
+      index.page_masks.assign(size_t(slots) * words, 0);
+      for (size_t i = 0; i < index.producers.size(); ++i) {
+        const metal::PendingProducer& p = index.producers[i];
+        if (!p.range.length()) {
+          continue;
+        }
+        const uint32_t first = p.range.start() >> 16;
+        const uint32_t last = (p.range.end() - 1u) >> 16;
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          index.page_masks[size_t(index.page_mask_slot[page]) * words +
+                           (i >> 6)] |= uint64_t(1) << (i & 63u);
+        }
+      }
+      index.candidate_bits.resize(words);
+      index.mask_words = words;
+    }
     index.writebacks = pending_writebacks_.size();
     index.memexports = pending_memexports_.size();
     index.sequence = memory_authority_sequence_;
@@ -16725,10 +16757,12 @@ MetalCommandProcessor::IndexedPendingProducers(
   }
   if (SeamTimingEnabled() && (index.queries & 65535) == 0) {
     XELOGI("MetalProducerIndex: queries={} fast-empty={} indexed={} "
-           "memo-hits={} rebuilds={} pending={} verify-mismatches={}",
+           "memo-hits={} rebuilds={} pending={} verify-mismatches={} "
+           "page-entries={} seed-steps={} closure-steps={} selected={}",
            index.queries, index.fast_empty, index.indexed_decisions,
            index.memo_hits, index.rebuilds, index.producers.size(),
-           index.verify_mismatches);
+           index.verify_mismatches, index.page_entries.size(),
+           index.seed_steps, index.closure_steps, index.selected_total);
   }
   *any_page_hit = hit;
   return index.producers;
@@ -16783,6 +16817,14 @@ bool MetalCommandProcessor::LeanDecisionEnabled() {
 // Burnout: ~7,700 draws a frame, consecutive draws asking about the same
 // texture ranges, the per-page producer walk ~4.5% of the command-processor
 // thread (2026-10-18 line profile). XE_METAL_DECISION_MEMO=0 disables.
+bool MetalCommandProcessor::ClosureBitsEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CLOSURE_BITS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
     metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
     uint64_t completed_submission) const {
@@ -16928,11 +16970,31 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
     }
     uint32_t cur_first = 0, cur_last = 0;
     bool have = false;
+    const uint32_t mask_words = index.mask_words;
+    if (mask_words) {
+      std::fill(index.candidate_bits.begin(), index.candidate_bits.end(), 0);
+    }
     auto walk = [&](uint32_t first, uint32_t last) {
+      if (mask_words) {
+        uint64_t* cand = index.candidate_bits.data();
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+            continue;
+          }
+          const uint64_t* mask =
+              index.page_masks.data() +
+              size_t(index.page_mask_slot[page]) * mask_words;
+          for (uint32_t w = 0; w < mask_words; ++w) {
+            cand[w] |= mask[w];
+          }
+        }
+        return;
+      }
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
         if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
           continue;
         }
+        index.seed_steps += index.page_end[page] - index.page_begin[page];
         for (uint32_t k = index.page_begin[page]; k < index.page_end[page]; ++k) {
           const uint32_t i = index.page_entries[k];
           if (index.candidate_stamp[i] == stamp) {
@@ -16962,6 +17024,20 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
     if (have) {
       walk(cur_first, cur_last);
     }
+    // Candidates in index order: the same records, tested once each.
+    for (uint32_t w = 0; w < mask_words; ++w) {
+      uint64_t bits = index.candidate_bits[w];
+      while (bits) {
+        const uint32_t i = w * 64u + uint32_t(__builtin_ctzll(bits));
+        bits &= bits - 1u;
+        ++index.seed_steps;
+        const metal::PendingProducer& producer = producers[i];
+        if (request.ForProducer(producer.state).OverlapsAny(producer.range)) {
+          index.selected_stamp[i] = stamp;
+          frontier.push_back(i);
+        }
+      }
+    }
   } else {
     seed_from(request.resolve_ranges);
     seed_from(request.memexport_ranges);
@@ -16969,24 +17045,114 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
   if (frontier.empty()) {
     return decision;
   }
-  // Closure over older overlapping predecessors (same rule as DecideConsumer;
-  // the candidates for `newer` are the producers sharing its pages).
-  for (size_t f = 0; f < frontier.size(); ++f) {
-    const metal::PendingProducer& newer = producers[frontier[f]];
-    for_each_candidate(newer.range.start(), newer.range.end(), [&](uint32_t i) {
-      if (index.selected_stamp[i] == stamp) {
-        return;
+  // Far Cry 2: ~100 pending records averaging 17 pages each, and a decision
+  // selecting ~63 of them walked ~1,800 page entries for the closure below,
+  // re-walked by the ~20 decisions between two rebuilds (2026-10-31
+  // counters). The closure depends only on the snapshot, so build it once
+  // per rebuild as bitsets and OR the seeds' closures. Index order is
+  // sequence order, so the set bits in ascending order are the sorted
+  // frontier. Up to 1024 records (128 bytes per closure); beyond that the
+  // walk below. XE_METAL_CLOSURE_BITS=0 always walks (and drops the page
+  // masks).
+  if (ClosureBitsEnabled() && producers.size() <= 1024u) {
+    const uint32_t words = uint32_t((producers.size() + 63u) / 64u);
+    if (index.closure_ready == 0) {
+      index.closure_words = words;
+      index.closure_bits.resize(size_t(words) * producers.size());
+      index.selected_bits.resize(words);
+    }
+    uint32_t newest_seed = 0;
+    for (uint32_t i : frontier) {
+      newest_seed = std::max(newest_seed, i);
+    }
+    while (index.closure_ready <= newest_seed) {
+      const uint32_t n = index.closure_ready;
+      uint64_t* own = index.closure_bits.data() + size_t(n) * words;
+      std::fill(own, own + words, 0);
+      own[n >> 6] |= uint64_t(1) << (n & 63u);
+      const metal::PendingProducer& newer = producers[n];
+      auto absorb = [&](uint32_t i) {
+        ++index.closure_steps;
+        // A record already in the closure brought its own closure with it.
+        if (i >= n || (own[i >> 6] >> (i & 63u)) & 1u) {
+          return;
+        }
+        const metal::PendingProducer& older = producers[i];
+        if (older.sequence >= newer.sequence ||
+            !older.range.Overlaps(newer.range)) {
+          return;
+        }
+        const uint64_t* theirs = index.closure_bits.data() + size_t(i) * words;
+        for (uint32_t w = 0; w <= (i >> 6); ++w) {
+          own[w] |= theirs[w];
+        }
+      };
+      if (index.mask_words == words && newer.range.length()) {
+        // Older records sharing a page with `newer`, each tested once,
+        // newest first so later absorbs are mostly already covered.
+        uint64_t* cand = index.candidate_bits.data();
+        std::fill(cand, cand + words, 0);
+        const uint32_t first = newer.range.start() >> 16;
+        const uint32_t last = (newer.range.end() - 1u) >> 16;
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          const uint64_t* mask =
+              index.page_masks.data() +
+              size_t(index.page_mask_slot[page]) * words;
+          for (uint32_t w = 0; w <= (n >> 6); ++w) {
+            cand[w] |= mask[w];
+          }
+        }
+        for (uint32_t w = (n >> 6) + 1; w-- > 0;) {
+          uint64_t bits = cand[w];
+          while (bits) {
+            const uint32_t b = 63u - uint32_t(__builtin_clzll(bits));
+            bits &= ~(uint64_t(1) << b);
+            absorb(w * 64u + b);
+          }
+        }
+      } else {
+        for_each_candidate(newer.range.start(), newer.range.end(), absorb);
       }
-      const metal::PendingProducer& older = producers[i];
-      if (older.sequence >= newer.sequence ||
-          !older.range.Overlaps(newer.range)) {
-        return;
+      ++index.closure_ready;
+    }
+    uint64_t* sel = index.selected_bits.data();
+    std::fill(sel, sel + words, 0);
+    for (uint32_t i : frontier) {
+      const uint64_t* theirs = index.closure_bits.data() + size_t(i) * words;
+      for (uint32_t w = 0; w <= (i >> 6); ++w) {
+        sel[w] |= theirs[w];
       }
-      index.selected_stamp[i] = stamp;
-      frontier.push_back(i);
-    });
+    }
+    frontier.clear();
+    for (uint32_t w = 0; w < words; ++w) {
+      uint64_t bits = sel[w];
+      while (bits) {
+        frontier.push_back(w * 64u + uint32_t(__builtin_ctzll(bits)));
+        bits &= bits - 1u;
+      }
+    }
+  } else {
+    // Closure over older overlapping predecessors (same rule as DecideConsumer;
+    // the candidates for `newer` are the producers sharing its pages).
+    for (size_t f = 0; f < frontier.size(); ++f) {
+      const metal::PendingProducer& newer = producers[frontier[f]];
+      for_each_candidate(newer.range.start(), newer.range.end(), [&](uint32_t i) {
+        ++index.closure_steps;
+        if (index.selected_stamp[i] == stamp) {
+          return;
+        }
+        const metal::PendingProducer& older = producers[i];
+        if (older.sequence >= newer.sequence ||
+            !older.range.Overlaps(newer.range)) {
+          return;
+        }
+        index.selected_stamp[i] = stamp;
+        frontier.push_back(i);
+      });
+    }
+    std::sort(frontier.begin(), frontier.end());  // producers are sequence-sorted
   }
-  std::sort(frontier.begin(), frontier.end());  // producers are sequence-sorted
+  index.selected_total += frontier.size();
   bool all_gpu_current = request.access == metal::ConsumerAccess::kSharedBuffer;
   for (uint32_t i : frontier) {
     if (!all_gpu_current) {

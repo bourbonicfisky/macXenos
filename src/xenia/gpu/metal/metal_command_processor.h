@@ -1348,12 +1348,33 @@ class MetalCommandProcessor : public CommandProcessor {
       metal::ConsumerDecision decision;
     } memo;
     uint64_t memo_hits = 0;
+    // Work per indexed decision (logged with the counters above): page
+    // entries visited by the seed walk and by the predecessor closure, and
+    // the selected records.
+    uint64_t seed_steps = 0, closure_steps = 0, selected_total = 0;
+    // Per-producer predecessor closure as bitsets over producer indices
+    // (XE_METAL_CLOSURE_BITS): closure(i) = {i} and the closures of every
+    // older producer overlapping i. It depends only on the snapshot, so it
+    // is built once per rebuild (lazily, in index order) instead of walked
+    // again by every decision. closure_words bits per producer; the first
+    // closure_ready producers are built.
+    std::vector<uint64_t> closure_bits, selected_bits;
+    uint32_t closure_words = 0, closure_ready = 0;
+    // Per occupied page, the bitset of producers on it (mask_words per page,
+    // at page_mask_slot[page]); 0 mask_words = not built (over 1024 records
+    // or XE_METAL_CLOSURE_BITS=0). A seed or closure step ORs its pages'
+    // masks and tests each candidate once, instead of visiting a record on
+    // every page it spans (Far Cry 2: 17 pages per record).
+    std::vector<uint64_t> page_masks, candidate_bits;
+    std::vector<uint32_t> page_mask_slot;
+    uint32_t mask_words = 0;
   };
   mutable ProducerIndex producer_index_;
   const std::vector<metal::PendingProducer>& IndexedPendingProducers(
       bool* any_page_hit, const metal::ConsumerRequest& request) const;
   // DecideConsumer over the page index: identical result, O(candidates).
   static bool LeanDecisionEnabled();
+  static bool ClosureBitsEnabled();
   metal::ConsumerDecision DecideConsumerIndexedImpl(
       metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
       uint64_t completed_submission) const;
