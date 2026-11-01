@@ -1358,11 +1358,23 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
                     value)
               : nullptr;
       if (!object) {
-        if (value > 0xFFFF && !(value & 3) && readable(value, 8)) {
-          msg.append(fmt::format(
-              " {}={:08X}:header{},signal={}", label, value,
-              *memory()->TranslateVirtual<uint8_t*>(value),
-              int32_t(*memory()->TranslateVirtualBE<uint32_t>(value + 4))));
+        if (value > 0xFFFF && !(value & 3) && readable(value, 16)) {
+          const auto* header =
+              memory()->TranslateVirtual<const kernel::X_DISPATCH_HEADER*>(
+                  value);
+          msg.append(fmt::format(" {}={:08X}:header{},signal={}", label,
+                                 value, header->type,
+                                 int32_t(header->signal_state)));
+          // The host object's handle lives in the wait list once the kernel
+          // has seen the header. The guest signal state is only read when that
+          // object is made, so a header without the signature that a thread
+          // still waits on was re-initialized under it (a lost wakeup).
+          if (header->wait_list.flink_ptr == kernel::kXObjSignature) {
+            msg.append(fmt::format(",host={:08X}",
+                                   uint32_t(header->wait_list.blink_ptr)));
+          } else {
+            msg.append(",host=none");
+          }
         }
         return;
       }
@@ -1421,9 +1433,25 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
     msg.append("\n");
   }
   if (!cvars::guest_probe_pcs.empty()) {
-    msg.append(cpu::ppc::FormatGuestProbes(4096));
+    msg.append(cpu::ppc::FormatGuestProbes(16384));
   }
-  XELOGW("{}", msg);
+  // A log line is capped by the 64 KiB thread format buffer, so emit the dump
+  // in pieces split at line breaks.
+  constexpr size_t kChunk = 48 * 1024;
+  std::string_view rest(msg);
+  while (!rest.empty()) {
+    size_t n = rest.size();
+    if (n > kChunk) {
+      size_t nl = rest.rfind('\n', kChunk);
+      n = (nl == std::string_view::npos || !nl) ? kChunk : nl + 1;
+    }
+    std::string_view piece = rest.substr(0, n);
+    if (piece.back() == '\n') {
+      piece.remove_suffix(1);
+    }
+    XELOGW("{}", piece);
+    rest.remove_prefix(n);
+  }
 }
 
 bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
