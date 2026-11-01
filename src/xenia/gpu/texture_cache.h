@@ -162,6 +162,13 @@ class TextureCache {
   }
 
  protected:
+  // Host texture memory limits in megabytes chosen by the backend for its
+  // device; 0 keeps texture_cache_memory_limit_soft / _hard.
+  void SetHostMemoryLimitsMB(uint32_t soft_mb, uint32_t hard_mb) {
+    host_memory_limit_soft_mb_ = soft_mb;
+    host_memory_limit_hard_mb_ = hard_mb;
+  }
+
   struct TextureKey {
     // Dimensions minus 1 are stored similarly to how they're stored in fetch
     // constants so fewer bits can be used, while the maximum size (8192 for 2D)
@@ -681,6 +688,9 @@ class TextureCache {
       textures_;
 
   uint64_t textures_total_host_memory_usage_ = 0;
+  // SetHostMemoryLimitsMB.
+  uint32_t host_memory_limit_soft_mb_ = 0;
+  uint32_t host_memory_limit_hard_mb_ = 0;
 
   Texture* texture_used_first_ = nullptr;
   Texture* texture_used_last_ = nullptr;

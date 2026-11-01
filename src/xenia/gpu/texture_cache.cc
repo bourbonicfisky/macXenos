@@ -218,10 +218,14 @@ void TextureCache::CompletedSubmissionUpdated(
   uint32_t limit_scaled_resolve_add_mb =
       cvars::texture_cache_memory_limit_render_to_texture *
       (draw_resolution_scale_x() * draw_resolution_scale_y() - 1);
-  uint32_t limit_soft_mb =
-      cvars::texture_cache_memory_limit_soft + limit_scaled_resolve_add_mb;
-  uint32_t limit_hard_mb =
-      cvars::texture_cache_memory_limit_hard + limit_scaled_resolve_add_mb;
+  uint32_t limit_soft_mb = (host_memory_limit_soft_mb_
+                                ? host_memory_limit_soft_mb_
+                                : cvars::texture_cache_memory_limit_soft) +
+                           limit_scaled_resolve_add_mb;
+  uint32_t limit_hard_mb = (host_memory_limit_hard_mb_
+                                ? host_memory_limit_hard_mb_
+                                : cvars::texture_cache_memory_limit_hard) +
+                           limit_scaled_resolve_add_mb;
   uint32_t limit_soft_lifetime =
       cvars::texture_cache_memory_limit_soft_lifetime * 1000;
   bool destroyed_any = false;

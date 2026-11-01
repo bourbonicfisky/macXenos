@@ -45,6 +45,7 @@ static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
@@ -55,6 +56,9 @@ static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
 #include "third_party/xxhash/xxhash.h"
+
+DECLARE_uint32(texture_cache_memory_limit_soft);
+DECLARE_uint32(texture_cache_memory_limit_hard);
 
 namespace xe {
 namespace gpu {
@@ -318,6 +322,7 @@ bool MetalSharedTextureCache::Initialize() {
   SharedTextureBcSupported().store(
       [(__bridge id<MTLDevice>)device_ supportsBCTextureCompression],
       std::memory_order_relaxed);
+  SizeHostMemoryLimitsForDevice();
   direct_pipeline_ = MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(device_);
   if (!direct_pipeline_) {
     return false;
@@ -330,6 +335,42 @@ bool MetalSharedTextureCache::Initialize() {
     }
   }
   return true;
+}
+
+void MetalSharedTextureCache::SizeHostMemoryLimitsForDevice() {
+  // The texture_cache_memory_limit_* defaults (384 / 768 MB) are sized for
+  // the smallest GPUs the D3D12 and Vulkan backends run on. Dedicated-VRAM
+  // Macs have at least 4 GB (the floor is an RX 580 class card), so there
+  // the limits follow the device's working set: an eighth soft and a
+  // quarter hard, never below the defaults, at most 2 / 4 GB. 4 GB card:
+  // 512 / 1024 MB; 8 GB (RX 580, Radeon Pro 580X): 1 / 2 GB; 16 GB (RX 6900
+  // XT): 2 / 4 GB. Settings changed from the defaults are kept, and Apple
+  // GPUs, which share system memory, keep the defaults.
+  // XE_METAL_TEXTURE_LIMITS_DEFAULT=1 keeps the defaults on any GPU.
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!device || device.hasUnifiedMemory ||
+      [device supportsFamily:MTLGPUFamilyApple7] ||
+      std::getenv("XE_METAL_TEXTURE_LIMITS_DEFAULT")) {
+    return;
+  }
+  constexpr uint32_t kDefaultSoftMB = 384, kDefaultHardMB = 768;
+  const uint64_t working_set_mb =
+      uint64_t(device.recommendedMaxWorkingSetSize) >> 20;
+  const uint32_t soft_mb = uint32_t(std::clamp<uint64_t>(
+      working_set_mb / 8, kDefaultSoftMB, 2048));
+  const uint32_t hard_mb = uint32_t(std::clamp<uint64_t>(
+      working_set_mb / 4, kDefaultHardMB, 4096));
+  const bool soft_default =
+      cvars::texture_cache_memory_limit_soft == kDefaultSoftMB;
+  const bool hard_default =
+      cvars::texture_cache_memory_limit_hard == kDefaultHardMB;
+  SetHostMemoryLimitsMB(soft_default ? soft_mb : 0,
+                        hard_default ? hard_mb : 0);
+  XELOGI("MetalSharedTextureCache: dedicated VRAM ({} MiB working set), "
+         "texture memory limits {} / {} MB",
+         working_set_mb,
+         soft_default ? soft_mb : cvars::texture_cache_memory_limit_soft,
+         hard_default ? hard_mb : cvars::texture_cache_memory_limit_hard);
 }
 
 bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,

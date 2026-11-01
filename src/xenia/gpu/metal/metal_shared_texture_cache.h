@@ -262,6 +262,8 @@ class MetalSharedTextureCache : public TextureCache {
   void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) override;
 
  private:
+  // Dedicated-VRAM GPUs: texture memory limits sized from the working set.
+  void SizeHostMemoryLimitsForDevice();
   class MetalTexture;
 
   // Per-fetch-constant slot state mirroring the base texture_bindings_:
