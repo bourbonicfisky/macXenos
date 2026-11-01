@@ -15,6 +15,7 @@
 
 #include "xenia/base/byte_order.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
@@ -26,6 +27,12 @@
 #include "xenia/cpu/backend/a64/a64_tracers.h"
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/ppc/ppc_context.h"
+
+DEFINE_bool(a64_inline_vrsqrtefp, true,
+            "Emit vrsqrtefp inline (branchless, same lookup table as the "
+            "helper, equal on all 2^32 inputs) instead of four guest-to-host "
+            "helper calls per instruction. Off = the helper calls.",
+            "a64");
 
 namespace xe {
 namespace cpu {
@@ -4620,12 +4627,8 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
     e.fmov(i.dest, e.x0);
   }
 };
-// PPC vrsqrtefp per-lane implementation.
-// Uses the same 32-entry lookup table + interpolation as x64's
-// EmitScalarVRsqrteHelper.
-// Called via the guest-to-host thunk (raw_context unused); see PpcFrsqrte.
-static uint32_t PpcVrsqrtefpLane(void* raw_context, uint32_t bits) {
-  static constexpr uint32_t table[32] = {
+// Xenon's vrsqrtefp estimate table: per entry, slope << 16 | base >> 10.
+static constexpr uint32_t kVrsqrtefpTable[32] = {
       0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
       0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
       0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
@@ -4633,6 +4636,13 @@ static uint32_t PpcVrsqrtefpLane(void* raw_context, uint32_t bits) {
       0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
       0x01855D79, 0x01735BF4,
   };
+
+// PPC vrsqrtefp per-lane implementation.
+// Uses the same 32-entry lookup table + interpolation as x64's
+// EmitScalarVRsqrteHelper.
+// Called via the guest-to-host thunk (raw_context unused); see PpcFrsqrte.
+static uint32_t PpcVrsqrtefpLane(void* raw_context, uint32_t bits) {
+  const uint32_t* table = kVrsqrtefpTable;
 
   uint32_t sign = bits >> 31;
   uint32_t biased_exp = (bits >> 23) & 0xFF;
@@ -4714,6 +4724,10 @@ static uint32_t PpcVrsqrtefpLane(void* raw_context, uint32_t bits) {
 
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (cvars::a64_inline_vrsqrtefp) {
+      EmitInline(e, i);
+      return;
+    }
     // Call PpcVrsqrtefpLane per lane via the thunk (preserves live q regs).
     // Save source to stack scratch, accumulate results there, load at end.
     int src_idx = SrcVReg(e, i.src1, 0);
@@ -4732,6 +4746,69 @@ struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
     e.ldr(QReg(i.dest.reg().getIdx()),
           Xbyak_aarch64::ptr(e.sp,
                              static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
+  }
+
+  // PpcVrsqrtefpLane per lane in scalar registers, branchless, no host call.
+  // The four thunk calls (and the FPCR mode switches around them) cost NBA
+  // 2K11's animation thread a third of its time. Results collect in v1 (a
+  // constant source is in v0); x16 holds the table.
+  static void EmitInline(A64Emitter& e, const EmitArgType& i) {
+    const int src = SrcVReg(e, i.src1, 0);
+    e.mov(e.x16, reinterpret_cast<uint64_t>(kVrsqrtefpTable));
+    e.mov(e.w13, 127);
+    e.mov(e.w14, 5);
+    e.mov(e.w15, static_cast<uint64_t>(0x3F800000u));
+    e.mov(e.w12, static_cast<uint64_t>(0x7FC00000u));
+    e.mov(e.w0, static_cast<uint64_t>(0x7F800000u));
+    e.mov(e.w17, static_cast<uint64_t>(0xFF800000u));
+    for (int lane = 0; lane < 4; ++lane) {
+      e.umov(e.w1, VReg(src).s4[lane]);
+      // Normal positive input: table lookup and interpolation.
+      e.ubfx(e.w2, e.w1, 23, 8);  // biased exponent
+      e.ubfx(e.w3, e.w1, 19, 5);  // exponent parity and top 4 mantissa bits
+      e.ldr(e.w4, ptr(e.x16, e.x3, LSL, 2));
+      e.lsr(e.w5, e.w4, 16);  // slope
+      e.lsl(e.w4, e.w4, 10);
+      e.and_(e.w4, e.w4, 0x3FFFC00);  // base
+      e.ubfx(e.w6, e.w1, 9, 10);      // interpolation factor
+      e.msub(e.w4, e.w6, e.w5, e.w4);  // raw = base - interp * slope
+      e.sub(e.w7, e.w13, e.w2);
+      e.asr(e.w7, e.w7, 1);  // result exponent
+      // Normalize: raw < 2^26 always, so clz(raw) - 6 is 0 when bit 25 is
+      // already set.
+      e.and_(e.w8, e.w4, 0x3FFFFFF);
+      e.clz(e.w8, e.w8);
+      e.sub(e.w8, e.w8, 6);
+      e.sub(e.w7, e.w7, e.w8);
+      e.lslv(e.w4, e.w4, e.w8);
+      // Round: raw += 4 if (raw & 2) && (raw & 5).
+      e.and_(e.w9, e.w4, e.w14);
+      e.tst(e.w4, 2);
+      e.ccmp(e.w9, 0, 0b0100, NE);
+      e.add(e.w10, e.w4, 4);
+      e.csel(e.w4, e.w10, e.w4, NE);
+      e.lsl(e.w7, e.w7, 23);
+      e.add(e.w7, e.w7, e.w15);
+      e.ubfx(e.w10, e.w4, 2, 23);
+      e.orr(e.w7, e.w7, e.w10);
+      // Special inputs, later rules overriding earlier ones: negative ->
+      // QNaN; exponent 255 -> +0 for +Inf, QNaN for -Inf, quieted NaN;
+      // exponent 0 (zero, denormal) -> signed infinity.
+      e.tst(e.w1, 0x80000000);
+      e.csel(e.w7, e.w12, e.w7, NE);
+      e.csel(e.w11, e.w12, e.wzr, NE);
+      e.orr(e.w10, e.w1, 0x00400000);
+      e.tst(e.w1, 0x7FFFFF);
+      e.csel(e.w10, e.w10, e.w11, NE);
+      e.cmp(e.w2, 255);
+      e.csel(e.w7, e.w10, e.w7, EQ);
+      e.tst(e.w1, 0x80000000);
+      e.csel(e.w10, e.w17, e.w0, NE);
+      e.cmp(e.w2, 0);
+      e.csel(e.w7, e.w10, e.w7, EQ);
+      e.ins(VReg(1).s4[lane], e.w7);
+    }
+    e.mov(VReg(i.dest.reg().getIdx()).b16, VReg(1).b16);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
